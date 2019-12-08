@@ -1,0 +1,3 @@
+[submodule "libtealet"]
+	path = libtealet
+	url = ssh://git@github.com/kristjanvalur/libtealet.git
