@@ -7,13 +7,16 @@ A greenlet-like library using tealets for cooperative multitasking in Python.
 ```
 pytealet/
 ├── src/
-│   └── tealet/
-│       ├── __init__.py
-│       └── greenlet.py
+│   ├── tealet/              # Pure Python package
+│   │   ├── __init__.py
+│   │   ├── greenlet.py
+│   │   └── tealet.py
+│   └── _tealet/             # C extension module
+│       ├── _tealet.c        # Main extension code
+│       └── libtealet/       # (To be added) libtealet from GitHub
 ├── tests/
 │   ├── test_tealet.py
 │   └── test_greenlet.py
-├── _tealet.c           # C extension source (to be compiled)
 ├── pyproject.toml
 └── README.md
 ```

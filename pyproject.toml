@@ -9,7 +9,7 @@ description = "Tealet - A greenlet-like library using tealets"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-    {name = "Kristjan", email = "your.email@example.com"}
+    {name = "Kristján Valur Jónsson", email = "sweskman@gmail.com"}
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -36,10 +36,13 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 # C extension configuration (to be configured later)
+# The C extension source is located at src/_tealet/_tealet.c
+# with dependencies in src/_tealet/libtealet/
 # [tool.setuptools.ext-modules]
 # [[tool.setuptools.ext-modules]]
 # name = "_tealet"
-# sources = ["_tealet.c"]
+# sources = ["src/_tealet/_tealet.c"]
+# include_dirs = ["src/_tealet/libtealet"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
