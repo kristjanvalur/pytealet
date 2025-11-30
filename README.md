@@ -53,9 +53,16 @@ pytest tests/
 
 ### Building the C Extension
 
-The C extension (`_tealet`) compilation setup will be configured separately. It depends on:
-- **libtealet v0.3.2** - Core stack-slicing library (included in `src/_tealet/libtealet/`)
-- **stackman** - Platform-specific stack operations (bundled with libtealet)
+The C extension (`_tealet`) links against pre-built libtealet libraries. It depends on:
+- **[libtealet](https://github.com/kristjanvalur/libtealet) v0.3.2** - Core stack-slicing library (pre-built binaries in `src/_tealet/libtealet/`)
+- **[stackman](https://github.com/stackless-dev/stackman)** - Platform-specific stack operations (bundled with libtealet)
+
+**Build Requirements:**
+- Python development headers (`python3.10-dev` or similar)
+- C compiler (gcc, clang, or MSVC)
+- Make (for ABI detection)
+
+**Current Status:** The build infrastructure is complete, but `_tealet.c` requires Python 3 compatibility updates.
 
 ## Contributing
 
