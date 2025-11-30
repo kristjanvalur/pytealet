@@ -583,14 +583,14 @@ pytealet_main(tealet_t *t_current, void *arg)
 		/* it is ok to rock the GC boat here, because we will switch to
 		 * main in case of error, and main is always around
 		 */
-		if (!PyTealet_Check(return_to)) {
-			return_to = NULL;
-			PyErr_SetString(PyExc_TypeError, "tealet object expected");
-		} else if (!return_to->state == STATE_RUN) {
-			return_to = NULL;
-			PyErr_SetString(StateError, "must be 'run'");
-		} else if (CheckTarget(return_to, tealet))
-			return_to = NULL;
+	if (!PyTealet_Check(return_to)) {
+		return_to = NULL;
+		PyErr_SetString(PyExc_TypeError, "tealet object expected");
+	} else if (return_to->state != STATE_RUN) {
+		return_to = NULL;
+		PyErr_SetString(StateError, "must be 'run'");
+	} else if (CheckTarget(return_to, tealet))
+		return_to = NULL;
 	}
 	if (!return_to) {
 		Py_CLEAR(result);
