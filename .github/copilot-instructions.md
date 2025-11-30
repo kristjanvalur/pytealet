@@ -20,15 +20,20 @@ pytealet/
 │   │   ├── greenlet.py      # Greenlet-compatible interface
 │   │   └── tealet.py        # Tealet-specific wrapper
 │   └── _tealet/             # C extension module
-│       ├── _tealet.c        # Main C extension (needs Python 3 updates)
+│       ├── pytealet.c       # Main C extension (modernized for Python 3.10+)
 │       ├── libtealet/       # Pre-built libtealet v0.3.2
 │       │   ├── lib/         # Platform-specific pre-built libraries
 │       │   ├── tealet/      # libtealet headers
 │       │   └── stackman/    # Stack manipulation headers
 │       └── README.md        # C extension documentation
-├── tests/                   # Test suite
-│   ├── test_tealet.py      # Tealet-specific tests
+├── tests/                   # Test suite (pytest)
+│   ├── test_tealet.py      # Tealet-specific tests (10/12 passing)
 │   └── test_greenlet.py    # Greenlet compatibility tests
+├── scripts/
+│   └── fast_build.sh       # Rapid C extension rebuild script
+├── docs/
+│   ├── ARCHITECTURE.md     # Design and architecture documentation
+│   └── ISSUES.md           # Current bugs and tracking
 ├── setup.py                # Build configuration with ABI detection
 ├── pyproject.toml          # Modern Python package configuration
 ├── CHANGELOG.md            # Version history
@@ -36,24 +41,75 @@ pytealet/
 └── README.md               # Project documentation
 ```
 
-## Technical Details
+## Development Workflow
 
-### Dependencies
-- **libtealet v0.3.2**: Core stack-slicing library (pre-built binaries included)
-- **stackman**: Platform-specific stack operations (bundled with libtealet)
-- **Python 3.10-3.14**: Supported Python versions
+### Quick Setup
+```bash
+# Create virtual environment with uv
+uv venv --python 3.10
 
-### Build System
-- Uses **uv** for development and dependency management
-- **setuptools** for C extension building
-- Automatic ABI detection via `make -C libtealet abiname`
-- Links against pre-built `libtealet.a` from `lib/<abi>/`
+# Install in development mode
+uv sync --dev
+```
+
+### Building the C Extension
+**Use the fast build script for development:**
+```bash
+./scripts/fast_build.sh          # Optimized build (default)
+./scripts/fast_build.sh debug    # Debug build with -g -O0
+
+# The script automatically:
+# 1. Cleans build artifacts
+# 2. Rebuilds with uv sync --reinstall-package tealet
+# 3. Runs basic smoke tests
+```
+
+**Manual build (if needed):**
+```bash
+# Clean rebuild
+rm -rf build/ src/_tealet*.so
+uv sync --reinstall-package tealet
+```
+
+### Running Tests
+```bash
+# All tests
+uv run pytest tests/
+
+# Specific test file
+uv run pytest tests/test_tealet.py -v
+
+# Specific test class
+uv run pytest tests/test_tealet.py::TestModule -v
+
+# Current status: 10/12 tests passing
+# TestRandom1 and TestRandom2 have segfaults (tracked in ISSUES.md)
+```
 
 ### Current Status
 - ✅ Modern project structure complete
 - ✅ Pre-built libtealet integration
 - ✅ Build infrastructure with ABI detection
-- ⚠️ `_tealet.c` requires Python 3 compatibility updates (currently Python 2.x code from 2013)
+- ✅ Python 3.10+ compatibility complete (modernized from 2013 codebase)
+- ✅ P0 critical bugs fixed (segfault, exit flags)
+- ✅ 10/12 tests passing
+- ⚠️ 2 random stress tests have segfaults (likely missing NULL checks)
+
+## Recent Fixes (November 2025)
+
+### Completed
+1. **File renamed**: `_tealet.c` → `pytealet.c`
+2. **Python 3 API**: Updated PyInt→PyLong, exc_*→curexc_*, PyModuleDef
+3. **libtealet v0.3.2 API**: Updated tealet->data → tealet->extra
+4. **Type safety**: Created tealet_extra_t structure
+5. **Static linking**: Changed from dynamic to static libtealet.a
+6. **Critical bug #1**: Fixed pytealet_get_main() NULL pointer segfault
+7. **Critical bug #2**: Fixed tealet_exit() flags (TEALET_EXIT_DELETE)
+8. **Test modernization**: Converted from unittest to pytest
+9. **Build tooling**: Created scripts/fast_build.sh
+
+### Known Issues
+See `docs/ISSUES.md` for current bug tracking and status.
 
 ## Coding Guidelines
 
@@ -64,12 +120,19 @@ pytealet/
 - Document deviations from greenlet behavior
 
 ### C Extension Code
-When updating `_tealet.c` for Python 3 compatibility:
-- Use Python 3 C API (no `PyInt_*`, use `PyLong_*`)
-- Handle thread state changes (Python 3.7+ removed `exc_type/value/traceback` from thread state)
-- Use `PyModuleDef` instead of `Py_InitModule3`
-- Follow libtealet's coding style (see below)
+The C extension has been modernized for Python 3.10+:
+- Uses Python 3 C API (PyLong_*, not PyInt_*)
+- Uses Python 3.7+ exception handling (curexc_*, not exc_*)
+- Uses PyModuleDef for module initialization
+- Follows libtealet v0.3.2 API (tealet->extra, not tealet->data)
+- Static linking against pre-built libtealet.a
+- Type-safe extra data via tealet_extra_t structure
+
+**When modifying C code:**
 - Test on multiple Python versions (3.10-3.14)
+- Use `./scripts/fast_build.sh` for rapid iteration
+- Run tests after each change: `uv run pytest tests/`
+- Check `docs/ARCHITECTURE.md` for design patterns
 
 ### libtealet Integration
 - Never modify files in `src/_tealet/libtealet/` - treat as vendored dependency
@@ -141,32 +204,29 @@ t.run(worker, "hello")
 
 ## Development Workflow
 
-### Setup
-```bash
-# Create virtual environment
-uv venv --python 3.10
-
-# Install in development mode (when C code is fixed)
-uv sync --dev
-```
-
 ### Testing
 ```bash
-# Run tests (when build works)
-pytest tests/
+# Run all tests with pytest
+uv run pytest tests/
 
 # Run specific test file
-pytest tests/test_tealet.py
+uv run pytest tests/test_tealet.py -v
+
+# Run with coverage
+uv run pytest tests/ --cov=tealet --cov-report=html
 ```
 
 ### Building C Extension
 ```bash
-# Build will auto-detect ABI and link against pre-built libs
-uv sync
+# Fast rebuild (recommended for development)
+./scripts/fast_build.sh
 
-# Clean build
-rm -rf build/ *.egg-info
-uv sync
+# Debug build with symbols
+./scripts/fast_build.sh debug
+
+# Manual clean build
+rm -rf build/ src/_tealet*.so
+uv sync --reinstall-package tealet
 ```
 
 ## Key Differences from greenlet
