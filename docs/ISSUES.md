@@ -276,11 +276,28 @@ def test_thread_isolation():
 - [x] **P0-1:** Fix `pytealet_get_main()` segfault
 - [x] **P0-2:** Fix `tealet_exit()` flags (DEFAULT → DELETE)
 - [ ] **P1-3:** Add NULL checks to other property getters
-- [x] **Test:** Run basic test suite (via fast_build.sh)
+- [x] **Test:** Run basic test suite (via fast_build.sh) - 10/12 tests pass
+- [ ] **Test:** Fix segfault in TestRandom1 and TestRandom2
 - [ ] **Test:** Verify no memory leaks with valgrind
 - [ ] **Test:** Multi-threaded stress test
 - [ ] **P2-4:** (Optional) Migrate to `tealet_create()` API
 - [ ] **P2-5:** (Optional) Migrate away from deprecated PyThread API
+
+**Test Results (after P0 fixes):**
+```
+tests/test_tealet.py::TestModule::test_main PASSED
+tests/test_tealet.py::TestModule::test_main2 PASSED
+tests/test_tealet.py::TestModule::test_main3 PASSED
+tests/test_tealet.py::TestSimple::test_simple PASSED
+tests/test_tealet.py::TestStatus::test_status_run PASSED
+tests/test_tealet.py::TestStatus::test_status_stub PASSED
+tests/test_tealet.py::TestSubclass::test_subclass PASSED
+tests/test_tealet.py::TestSwitch::test_switch PASSED
+tests/test_tealet.py::TestSwitch::test_switch_new PASSED
+tests/test_tealet.py::TestSwitch::test_switch_arg PASSED
+tests/test_tealet.py::TestRandom1::test_random SEGFAULT ❌
+tests/test_tealet.py::TestRandom2::test_random SEGFAULT ❌
+```
 
 ---
 
