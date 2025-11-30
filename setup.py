@@ -66,9 +66,9 @@ lib_dir = os.path.join(LIBTEALET_DIR, "lib", abi_name)
 if not os.path.exists(lib_dir):
     raise RuntimeError(f"Pre-built libraries not found for ABI: {abi_name} at {lib_dir}")
 
-# Source files for the extension (only _tealet.c, link against pre-built libtealet)
+# Source files for the extension (only pytealet.c, link against pre-built libtealet)
 sources = [
-    "src/_tealet/_tealet.c",
+    "src/_tealet/pytealet.c",
 ]
 
 # Include directories
