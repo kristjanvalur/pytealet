@@ -134,10 +134,11 @@ save_tstate(PyTealetObject *current, PyThreadState *tstate)
 	tstate->frame = NULL;
 	tstate->recursion_depth = 0;
 	assert(current->exc_val == NULL && current->exc_type == NULL && current->exc_tb == NULL);
-	current->exc_type = tstate->exc_type;
-	current->exc_val = tstate->exc_value;
-	current->exc_tb = tstate->exc_traceback;
-	tstate->exc_type = tstate->exc_value = tstate->exc_traceback = NULL;
+	/* Python 3.7+ uses curexc_* instead of exc_* for current exception */
+	current->exc_type = tstate->curexc_type;
+	current->exc_val = tstate->curexc_value;
+	current->exc_tb = tstate->curexc_traceback;
+	tstate->curexc_type = tstate->curexc_value = tstate->curexc_traceback = NULL;
 }
 
 /* helper functions to save and restore callstack related data from the python threadstate
@@ -155,12 +156,13 @@ restore_tstate(PyTealetObject *current, PyThreadState *tstate)
 	current->frame = NULL;
 	current->recursion_depth = 0;
 	assert(!PyErr_Occurred());
-	Py_CLEAR(tstate->exc_type); /* there can be cruft here from the last tealet's exit */
-	Py_CLEAR(tstate->exc_value);
-	Py_CLEAR(tstate->exc_traceback);
-	tstate->exc_type = current->exc_type;
-	tstate->exc_value = current->exc_val;
-	tstate->exc_traceback = current->exc_tb;
+	/* Python 3.7+ uses curexc_* instead of exc_* for current exception */
+	Py_CLEAR(tstate->curexc_type); /* there can be cruft here from the last tealet's exit */
+	Py_CLEAR(tstate->curexc_value);
+	Py_CLEAR(tstate->curexc_traceback);
+	tstate->curexc_type = current->exc_type;
+	tstate->curexc_value = current->exc_val;
+	tstate->curexc_traceback = current->exc_tb;
 	current->exc_type = current->exc_val = current->exc_tb = NULL;
 }
 
@@ -426,7 +428,7 @@ static PyObject *
 pytealet_get_state(PyObject *_self, void *_closure)
 {
 	PyTealetObject *self = (PyTealetObject *)_self;
-	return PyInt_FromLong(self->state);
+	return PyLong_FromLong(self->state);
 }
 
 static PyObject *
@@ -456,7 +458,7 @@ pytealet_get_tid(PyObject *_self, void *_closure)
 		main_data *mdata = (main_data*)*tealet_main_userpointer(self->tealet);
 		tid = mdata->tid;
 	}
-	return PyInt_FromLong(tid);
+	return PyLong_FromLong(tid);
 }
 
 
@@ -736,13 +738,20 @@ static PyMethodDef module_methods[] = {
 	{"current", (PyCFunction)module_current, METH_NOARGS, ""},
 	{"main", (PyCFunction)module_main, METH_NOARGS, ""},
 	{"hide_frame", (PyCFunction)hide_frame, METH_VARARGS, ""},
- {NULL,                      NULL}            /* Sentinel */
+	{NULL, NULL, 0, NULL}  /* Sentinel */
 };
 
-
+static struct PyModuleDef _tealet_module = {
+	PyModuleDef_HEAD_INIT,
+	"_tealet",   /* name of module */
+	NULL,        /* module documentation, may be NULL */
+	-1,          /* size of per-interpreter state of the module,
+	                or -1 if the module keeps state in global variables. */
+	module_methods
+};
 
 PyMODINIT_FUNC
-init_tealet(void)
+PyInit__tealet(void)
 {
 	PyObject *m;
 	PyTealetObject *main;
@@ -750,31 +759,45 @@ init_tealet(void)
 	tls_key = PyThread_create_key();
 
 	/* init the type */
-	if (PyType_Ready(&PyTealetType))
-		return;
+	if (PyType_Ready(&PyTealetType) < 0)
+		return NULL;
 
 	main = GetMain();
 	if (!main)
-		return;
+		return NULL;
 	
-	m = Py_InitModule3("_tealet", module_methods, "");
-    if (m == NULL)
-        return;
+	m = PyModule_Create(&_tealet_module);
+	if (m == NULL)
+		return NULL;
 
 	/* Todo: Improve error handling */
-	PyModule_AddObject(m, "tealet", (PyObject*)&PyTealetType);
+	Py_INCREF(&PyTealetType);
+	if (PyModule_AddObject(m, "tealet", (PyObject*)&PyTealetType) < 0) {
+		Py_DECREF(&PyTealetType);
+		Py_DECREF(m);
+		return NULL;
+	}
+	
 	TealetError = PyErr_NewException("_tealet.TealetError", NULL, NULL);
+	Py_INCREF(TealetError);
 	PyModule_AddObject(m, "TealetError", TealetError);
+	
 	DefunctError = PyErr_NewException("_tealet.DefunctError", TealetError, NULL);
+	Py_INCREF(DefunctError);
 	PyModule_AddObject(m, "DefunctError", DefunctError);
+	
 	InvalidError = PyErr_NewException("_tealet.InvalidError", TealetError, NULL);
+	Py_INCREF(InvalidError);
 	PyModule_AddObject(m, "InvalidError", InvalidError);
+	
 	StateError = PyErr_NewException("_tealet.StateError", TealetError, NULL);
+	Py_INCREF(StateError);
 	PyModule_AddObject(m, "StateError", StateError);
 
 	PyModule_AddIntMacro(m, STATE_NEW);
 	PyModule_AddIntMacro(m, STATE_STUB);
 	PyModule_AddIntMacro(m, STATE_RUN);
 	PyModule_AddIntMacro(m, STATE_EXIT);
-	return;
+	
+	return m;
 }
