@@ -267,7 +267,7 @@ def test_thread_isolation():
 ## Fix Checklist
 
 - [ ] **P0-1:** Fix `pytealet_get_main()` segfault
-- [ ] **P0-2:** Fix `tealet_exit()` flags (DEFAULT → DELETE)
+- [x] **P0-2:** Fix `tealet_exit()` flags (DEFAULT → DELETE)
 - [ ] **P1-3:** Add NULL checks to other property getters
 - [ ] **Test:** Run basic test suite
 - [ ] **Test:** Verify no memory leaks with valgrind
@@ -284,7 +284,7 @@ def test_thread_isolation():
 | Issue | Status | Assignee | Notes |
 |-------|--------|----------|-------|
 | #1 Segfault in get_main | 🔴 Open | - | Fix ready, needs commit |
-| #2 Wrong exit flags | 🔴 Open | - | Fix ready, needs commit |
+| #2 Wrong exit flags | ✅ Fixed | - | Committed |
 | #3 Other NULL checks | 🔴 Open | - | Needs investigation |
 | #4 tealet_create() | 💡 Enhancement | - | Low priority |
 | #5 PyThread API | 📝 Tracked | - | Low priority |

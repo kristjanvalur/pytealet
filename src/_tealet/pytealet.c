@@ -622,8 +622,8 @@ pytealet_main(tealet_t *t_current, void *arg)
 	dustbin_fill(t_return, func, (PyObject*)tealet, result);
 	
 	Py_INCREF(return_arg);
-	if (tealet_exit(t_return, (void*)return_arg, TEALET_EXIT_DEFAULT))
-		tealet_exit(t_return->main, (void *)return_arg, TEALET_EXIT_DEFAULT);
+	if (tealet_exit(t_return, (void*)return_arg, TEALET_EXIT_DELETE))
+		tealet_exit(t_return->main, (void *)return_arg, TEALET_EXIT_DELETE);
 	/* never reach here */
 	return 0;
 }
