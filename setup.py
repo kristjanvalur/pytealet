@@ -78,13 +78,17 @@ include_dirs = [
     STACKMAN_HEADERS,
 ]
 
-# Library directories and libraries
-library_dirs = [lib_dir]
-libraries = ["tealet"]
+# Static library path (use .a for static linking)
+libtealet_static = os.path.join(lib_dir, "libtealet.a")
+if not os.path.exists(libtealet_static):
+    raise RuntimeError(f"Static library not found: {libtealet_static}")
 
 # Compiler flags
 extra_compile_args = []
 extra_link_args = []
+
+# Link statically against libtealet
+extra_objects = [libtealet_static]
 
 if platform.system() != "Windows":
     # GCC/Clang flags
@@ -98,8 +102,7 @@ _tealet_ext = Extension(
     name="_tealet",
     sources=sources,
     include_dirs=include_dirs,
-    library_dirs=library_dirs,
-    libraries=libraries,
+    extra_objects=extra_objects,
     extra_compile_args=extra_compile_args,
     extra_link_args=extra_link_args,
     language="c",
