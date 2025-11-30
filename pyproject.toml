@@ -35,23 +35,14 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# C extension configuration (to be configured later)
-# The C extension source is located at src/_tealet/_tealet.c
-# with dependencies in src/_tealet/libtealet/
-# [tool.setuptools.ext-modules]
-# [[tool.setuptools.ext-modules]]
-# name = "_tealet"
-# sources = ["src/_tealet/_tealet.c"]
-# include_dirs = ["src/_tealet/libtealet"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]
