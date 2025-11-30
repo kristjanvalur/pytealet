@@ -61,6 +61,13 @@ pytealet_get_main(PyObject *_self, void *_closure)
 
 **Impact:** Prevents basic usage - the test case immediately segfaults.
 
+**Design Concern:**
+The NULL tealet pointer occurs in two scenarios:
+1. **STATE_NEW:** PyTealetObject created but no underlying tealet yet (lazy creation)
+2. **STATE_EXIT:** Tealet exited and auto-deleted, but PyTealetObject still exists
+
+Should review if lazy creation (STATE_NEW without tealet) is intentional design or should be changed. The NULL fallback is necessary for STATE_EXIT case at minimum.
+
 ---
 
 ### 🔴 Issue #2: Wrong tealet_exit() Flags
@@ -266,10 +273,10 @@ def test_thread_isolation():
 
 ## Fix Checklist
 
-- [ ] **P0-1:** Fix `pytealet_get_main()` segfault
+- [x] **P0-1:** Fix `pytealet_get_main()` segfault
 - [x] **P0-2:** Fix `tealet_exit()` flags (DEFAULT → DELETE)
 - [ ] **P1-3:** Add NULL checks to other property getters
-- [ ] **Test:** Run basic test suite
+- [x] **Test:** Run basic test suite (via fast_build.sh)
 - [ ] **Test:** Verify no memory leaks with valgrind
 - [ ] **Test:** Multi-threaded stress test
 - [ ] **P2-4:** (Optional) Migrate to `tealet_create()` API
@@ -283,7 +290,7 @@ def test_thread_isolation():
 
 | Issue | Status | Assignee | Notes |
 |-------|--------|----------|-------|
-| #1 Segfault in get_main | 🔴 Open | - | Fix ready, needs commit |
+| #1 Segfault in get_main | ✅ Fixed | - | Committed |
 | #2 Wrong exit flags | ✅ Fixed | - | Committed |
 | #3 Other NULL checks | 🔴 Open | - | Needs investigation |
 | #4 tealet_create() | 💡 Enhancement | - | Low priority |

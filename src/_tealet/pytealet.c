@@ -435,7 +435,20 @@ static PyObject *
 pytealet_get_main(PyObject *_self, void *_closure)
 {
 	PyTealetObject *self = (PyTealetObject *)_self;
-	PyTealetObject *main = TEALET_PYOBJECT(self->tealet->main);
+	PyTealetObject *main;
+	
+	if (!self->tealet) {
+		/* New tealet not yet initialized (STATE_NEW) or
+		 * tealet has exited and been auto-deleted (STATE_EXIT).
+		 * Return the thread's main tealet.
+		 * TODO: Review if STATE_NEW should exist without tealet (lazy creation)
+		 */
+		main = GetMain();
+		if (!main)
+			return NULL;
+	} else {
+		main = TEALET_PYOBJECT(self->tealet->main);
+	}
 	Py_INCREF(main);
 	return (PyObject*)main;
 }
