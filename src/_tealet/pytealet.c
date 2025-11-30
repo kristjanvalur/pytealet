@@ -229,7 +229,7 @@ pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
 				Py_DECREF(result);
 				return PyErr_NoMemory();
 			}
-			result->tealet->data = (void*)result;
+			result->tealet->extra = (void*)result;
 		}
 		result->state = src->state;
 	}
@@ -276,7 +276,7 @@ pytealet_stub(PyObject *self)
 		return PyErr_NoMemory();
 	pytealet->tealet = tresult;
 	pytealet->state = STATE_STUB;
-	tresult->data = (void*)pytealet;
+	tresult->extra = (void*)pytealet;
 	Py_INCREF(self);
 	return self;
 }
@@ -419,7 +419,7 @@ static PyObject *
 pytealet_get_main(PyObject *_self, void *_closure)
 {
 	PyTealetObject *self = (PyTealetObject *)_self;
-	PyTealetObject *main = (PyTealetObject *)(self->tealet->main->data);
+	PyTealetObject *main = (PyTealetObject *)(self->tealet->main->extra);
 	Py_INCREF(main);
 	return (PyObject*)main;
 }
@@ -529,12 +529,12 @@ pytealet_main(tealet_t *t_current, void *arg)
 	if (targ->stub) {
 		assert(tealet->state == STATE_STUB);
 		assert(t_current == tealet->tealet);
-		assert(t_current->data == (void*)tealet);
+		assert(t_current->extra == (void*)tealet);
 		PyObject_Free(arg); /* heap allocated */
 	} else {
 		/* set up the pointer in the tealet */
 		tealet->tealet = t_current;
-		t_current->data = (void*)tealet;
+		t_current->extra = (void*)tealet;
 	}
 
 	/* We only have borrowed references from the calling tealet.
@@ -599,7 +599,7 @@ pytealet_main(tealet_t *t_current, void *arg)
 	/* clear the old tealet */
 	tealet->state = STATE_EXIT;
 	tealet->tealet = NULL; /* will be auto-deleted on return */
-	t_current->data = NULL;
+	t_current->extra = NULL;
 	t_return = return_to->tealet;
 	
 	/* decref the objects after the switch */
@@ -649,7 +649,7 @@ static PyTealetObject *GetMain()
 		}
 		t_main->tealet = tmain;
 		t_main->state = STATE_RUN;
-		tmain->data = (void*)t_main; /* back link */
+		tmain->extra = (void*)t_main; /* back link */
 		PyThread_set_key_value(tls_key, (void*)t_main);
 	}
 	assert(t_main->tealet);
@@ -666,7 +666,7 @@ GetCurrent(PyTealetObject *main)
 		main = GetMain();
 	if (!main)
 		return NULL;
-	return (PyTealetObject*) (tealet_current(main->tealet)->data);
+	return (PyTealetObject*) (tealet_current(main->tealet)->extra);
 }
 
 /* check if a target tealet is valid */
