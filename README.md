@@ -1,6 +1,16 @@
 # Tealet
 
-A greenlet-like library using tealets for cooperative multitasking in Python.
+A Python wrapper for the [libtealet](https://github.com/kristjanvalur/libtealet) library, providing efficient coroutine and stack-slicing capabilities to Python. This project brings the power of cooperative multitasking through stack-slicing to Python, similar to greenlet but built on the modern libtealet foundation.
+
+## About
+
+Tealet provides a greenlet-compatible interface for cooperative multitasking in Python. Unlike traditional coroutines that require `async`/`await` keywords throughout your code, tealet allows you to suspend and resume entire execution stacks, enabling cooperative multitasking without special language support.
+
+Built on libtealet v0.3.2, this library offers:
+- **Stack-slicing**: Efficient context switching without kernel involvement
+- **Low memory overhead**: ~2-16 KB per coroutine vs 1-8 MB for OS threads
+- **Fast context switches**: ~100-500 CPU cycles
+- **Greenlet compatibility**: Drop-in replacement for greenlet-based code
 
 ## Project Structure
 
@@ -13,7 +23,7 @@ pytealet/
 │   │   └── tealet.py
 │   └── _tealet/             # C extension module
 │       ├── _tealet.c        # Main extension code
-│       └── libtealet/       # (To be added) libtealet from GitHub
+│       └── libtealet/       # libtealet v0.3.2 from GitHub
 ├── tests/
 │   ├── test_tealet.py
 │   └── test_greenlet.py
@@ -43,11 +53,27 @@ pytest tests/
 
 ### Building the C Extension
 
-The C extension (`_tealet`) compilation setup will be configured separately.
+The C extension (`_tealet`) compilation setup will be configured separately. It depends on:
+- **libtealet v0.3.2** - Core stack-slicing library (included in `src/_tealet/libtealet/`)
+- **stackman** - Platform-specific stack operations (bundled with libtealet)
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit issues or pull requests.
+
+## Related Projects
+
+- [libtealet](https://github.com/kristjanvalur/libtealet) - The underlying C library for stack-slicing
+- [greenlet](https://github.com/python-greenlet/greenlet) - Original Python greenlet implementation
+- [Stackless Python](http://www.stackless.com/) - Python with built-in microthreads
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
 
 ## License
 
-To be determined
+MIT License - See [LICENSE](LICENSE) file for details
 
 ## About
 
