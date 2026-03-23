@@ -842,15 +842,53 @@ void tealet_free(tealet_t *tealet, void *p)
  */
 tealet_t *tealet_new(tealet_t *tealet, tealet_run_t run, void **parg)
 {
+    return tealet_new_with_far(tealet, run, parg, NULL);
+}
+
+/* create a tealet by saving the current stack and starting
+ * immediate execution of a new one, with optional boundary hint
+ */
+tealet_t *tealet_new_with_far(tealet_t *tealet, tealet_run_t run, void **parg, void *boundary_hint)
+{
     tealet_sub_t *result; /* store this until we return */
     int fail;
     void *arg = NULL;
     tealet_main_t *g_main = TEALET_GET_MAIN(tealet);
+    char *default_far;
+    char *chosen_far;
     assert(!g_main->g_target);
     result = tealet_alloc(g_main);
     if (result == NULL)
         return NULL; /* Could not allocate */
-    fail = tealet_initialstub(g_main, result, result, run, (parg!=NULL ? parg : &arg), (void*)&result);
+
+    default_far = (char *)&result;
+    chosen_far = default_far;
+    if (boundary_hint) {
+        ptrdiff_t d_hint_vs_default = STACKMAN_SP_DIFF((char *)boundary_hint, (char *)default_far);
+        if (d_hint_vs_default > 0)
+            chosen_far = (char *)boundary_hint;
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[NEW_FAR] main=%p result=%p default_far=%p boundary_hint=%p d_hint_vs_default=%td chosen_far=%p\n",
+                (void *)g_main,
+                (void *)result,
+                (void *)default_far,
+                boundary_hint,
+                d_hint_vs_default,
+                (void *)chosen_far);
+#endif
+    } else {
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[NEW_FAR] main=%p result=%p default_far=%p boundary_hint=NULL chosen_far=%p\n",
+                (void *)g_main,
+                (void *)result,
+                (void *)default_far,
+                (void *)chosen_far);
+#endif
+    }
+
+    fail = tealet_initialstub(g_main, result, result, run, (parg!=NULL ? parg : &arg), (void*)chosen_far);
     if (fail) {
         /* could not save stack */
         tealet_delete((tealet_t*)result);

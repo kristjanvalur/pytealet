@@ -196,6 +196,18 @@ int tealet_exit(tealet_t *target, void *arg, int flags);
 TEALET_API
 tealet_t *tealet_new(tealet_t *tealet, tealet_run_t run, void **parg);
 
+/* Allocate and switch to a new tealet, with an explicit far-boundary hint.
+ * The runtime picks the farther (stack-outer) of:
+ *  - the traditional internal boundary captured by tealet_new(), and
+ *  - the caller-supplied boundary_hint.
+ *
+ * Pass NULL for boundary_hint to get the same behavior as tealet_new().
+ */
+TEALET_API
+tealet_t *tealet_new_with_far(tealet_t *tealet, tealet_run_t run, void **parg, void *boundary_hint);
+
+#define TEALET_HAS_NEW_WITH_FAR 1
+
 /* Duplicate a tealet. The active tealet is duplicated
  * along with its stack contents.
  * This can be used, for example, to create "stubs" that can be duplicated
