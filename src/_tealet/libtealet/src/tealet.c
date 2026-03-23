@@ -5,6 +5,10 @@
  *     http://codespeak.net/svn/greenlet/trunk/c/_greenlet.c
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "tealet.h"
 #include <stackman.h>
 
@@ -14,7 +18,54 @@
 #endif
 #include <assert.h>
 #include <string.h>
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <signal.h>
+#include <ucontext.h>
+#endif
 
+/*
+ * PYTEALET_LOCAL_CHANGE toggles
+ *
+ * These macros isolate pytealet-specific instrumentation/heuristics from
+ * upstream libtealet behavior so we can quickly bisect and revert local
+ * debugging changes at compile time.
+ */
+#ifndef TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+#define TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS 0
+#endif
+
+#ifndef TEALET_PYTEALET_ENABLE_MAGIC_COOKIES
+#define TEALET_PYTEALET_ENABLE_MAGIC_COOKIES 0
+#endif
+
+/* 0 means disabled (upstream-like behavior). */
+#ifndef TEALET_PYTEALET_MIN_INITIAL_SAVE
+#define TEALET_PYTEALET_MIN_INITIAL_SAVE 0
+#endif
+
+#ifndef TEALET_PYTEALET_VALIDATE_PRE_RESTORE
+#define TEALET_PYTEALET_VALIDATE_PRE_RESTORE 0
+#endif
+
+#ifndef TEALET_PYTEALET_ENABLE_PAGE_GUARD
+#define TEALET_PYTEALET_ENABLE_PAGE_GUARD 1
+#endif
+
+#if TEALET_PYTEALET_ENABLE_MAGIC_COOKIES
+#define TEALET_MAGIC_ALIVE  0xDEADBEEFUL
+#define TEALET_MAGIC_FREED  0xFEEDF00DUL
+#endif
+
+/* DEBUG: Force full stack saves instead of incremental saves - NO LONGER NEEDED
+ * The bug in tealet_stack_grow_list has been fixed (early return prevented
+ * growing stacks after the target in g_prev list). Keeping this flag for
+ * future debugging if needed. */
+#ifndef TEALET_FORCE_FULL_SAVE
+#define TEALET_FORCE_FULL_SAVE 0
+#endif
 
 /* enable collection of tealet stats - default enabled, define TEALET_WITH_STATS=0 to disable */
 #ifndef TEALET_WITH_STATS
@@ -104,6 +155,15 @@ typedef struct tealet_main_t {
   int           g_flags;     /* default flags when tealet exits */
   int g_tealets;            /* number of active tealets excluding main */
   int g_counter;            /* total number of tealets */
+#if TEALET_PYTEALET_ENABLE_PAGE_GUARD
+    int g_page_guard_enabled; /* runtime debug mode enabled */
+    int g_page_guard_active;  /* mprotect currently active */
+    size_t g_page_size;       /* host page size */
+    char *g_stack_lo;         /* thread stack low address */
+    char *g_stack_hi;         /* thread stack high address */
+    char *g_guard_lo;         /* currently protected range low */
+    char *g_guard_hi;         /* currently protected range high */
+#endif
 #if TEALET_WITH_STATS
   /* Extended memory statistics */
   size_t g_bytes_allocated;       /* Current heap allocation */
@@ -118,6 +178,343 @@ typedef struct tealet_main_t {
   size_t       g_extrasize; /* amount of extra memory in tealets */
   double _extra[1];         /* start of any extra data */
 } tealet_main_t;
+
+#if TEALET_PYTEALET_ENABLE_PAGE_GUARD
+#if defined(__linux__)
+static volatile sig_atomic_t tealet_guard_signal_installed = 0;
+static volatile sig_atomic_t tealet_guard_signal_in_handler = 0;
+static struct sigaction tealet_guard_prev_sigsegv;
+static struct sigaction tealet_guard_prev_sigbus;
+static volatile uintptr_t tealet_guard_range_lo = 0;
+static volatile uintptr_t tealet_guard_range_hi = 0;
+static volatile uintptr_t tealet_guard_boundary = 0;
+static volatile uintptr_t tealet_guard_current = 0;
+
+static size_t tealet_signal_append_str(char *buffer, size_t pos, size_t cap, const char *text)
+{
+    while (text && *text && pos < cap) {
+        buffer[pos++] = *text++;
+    }
+    return pos;
+}
+
+static size_t tealet_signal_append_hex(char *buffer, size_t pos, size_t cap, uintptr_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    int shift;
+    int started = 0;
+
+    if (pos + 2 > cap)
+        return pos;
+    buffer[pos++] = '0';
+    buffer[pos++] = 'x';
+
+    for (shift = (int)(sizeof(uintptr_t) * 8) - 4; shift >= 0; shift -= 4) {
+        unsigned nibble = (unsigned)((value >> (unsigned)shift) & 0xFU);
+        if (!started && nibble == 0U && shift > 0)
+            continue;
+        started = 1;
+        if (pos >= cap)
+            break;
+        buffer[pos++] = digits[nibble];
+    }
+
+    if (!started && pos < cap)
+        buffer[pos++] = '0';
+    return pos;
+}
+
+static void tealet_page_guard_signal_handler(int signo, siginfo_t *info, void *ucontext)
+{
+    uintptr_t fault_addr = info ? (uintptr_t)info->si_addr : 0U;
+    uintptr_t guard_lo = tealet_guard_range_lo;
+    uintptr_t guard_hi = tealet_guard_range_hi;
+    uintptr_t boundary = tealet_guard_boundary;
+    uintptr_t current = tealet_guard_current;
+    uintptr_t ip = 0U;
+    int in_guard = (guard_lo < guard_hi && fault_addr >= guard_lo && fault_addr < guard_hi) ? 1 : 0;
+    char buffer[512];
+    size_t pos = 0;
+
+#if defined(__x86_64__) && defined(REG_RIP)
+    if (ucontext) {
+        ucontext_t *uc = (ucontext_t *)ucontext;
+        ip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    }
+#elif defined(__aarch64__)
+    if (ucontext) {
+        ucontext_t *uc = (ucontext_t *)ucontext;
+        ip = (uintptr_t)uc->uc_mcontext.pc;
+    }
+#else
+    (void)ucontext;
+#endif
+
+    if (tealet_guard_signal_in_handler) {
+        _exit(128 + signo);
+    }
+    tealet_guard_signal_in_handler = 1;
+
+    pos = tealet_signal_append_str(buffer, pos, sizeof(buffer), "[PAGE_GUARD_FAULT] signal=");
+    pos = tealet_signal_append_hex(buffer, pos, sizeof(buffer), (uintptr_t)signo);
+    pos = tealet_signal_append_str(buffer, pos, sizeof(buffer), " fault=");
+    pos = tealet_signal_append_hex(buffer, pos, sizeof(buffer), fault_addr);
+    pos = tealet_signal_append_str(buffer, pos, sizeof(buffer), " ip=");
+    pos = tealet_signal_append_hex(buffer, pos, sizeof(buffer), ip);
+    pos = tealet_signal_append_str(buffer, pos, sizeof(buffer), " in_guard=");
+    pos = tealet_signal_append_str(buffer, pos, sizeof(buffer), in_guard ? "1" : "0");
+    pos = tealet_signal_append_str(buffer, pos, sizeof(buffer), " guard=[");
+    pos = tealet_signal_append_hex(buffer, pos, sizeof(buffer), guard_lo);
+    pos = tealet_signal_append_str(buffer, pos, sizeof(buffer), ",");
+    pos = tealet_signal_append_hex(buffer, pos, sizeof(buffer), guard_hi);
+    pos = tealet_signal_append_str(buffer, pos, sizeof(buffer), ") boundary=");
+    pos = tealet_signal_append_hex(buffer, pos, sizeof(buffer), boundary);
+    pos = tealet_signal_append_str(buffer, pos, sizeof(buffer), " current=");
+    pos = tealet_signal_append_hex(buffer, pos, sizeof(buffer), current);
+    if (pos < sizeof(buffer))
+        buffer[pos++] = '\n';
+    write(STDERR_FILENO, buffer, pos);
+
+    if (signo == SIGSEGV) {
+        sigaction(SIGSEGV, &tealet_guard_prev_sigsegv, NULL);
+    } else if (signo == SIGBUS) {
+        sigaction(SIGBUS, &tealet_guard_prev_sigbus, NULL);
+    }
+    raise(signo);
+}
+
+static void tealet_page_guard_install_signals(void)
+{
+    struct sigaction sa;
+
+    if (tealet_guard_signal_installed)
+        return;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = tealet_page_guard_signal_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+
+    if (sigaction(SIGSEGV, &sa, &tealet_guard_prev_sigsegv) == 0) {
+        tealet_guard_signal_installed = 1;
+    }
+#ifdef SIGBUS
+    sigaction(SIGBUS, &sa, &tealet_guard_prev_sigbus);
+#endif
+}
+
+static char *tealet_align_down(char *addr, size_t pagesize)
+{
+    uintptr_t value = (uintptr_t)addr;
+    value &= ~((uintptr_t)pagesize - 1U);
+    return (char *)value;
+}
+
+static char *tealet_align_up(char *addr, size_t pagesize)
+{
+    uintptr_t value = (uintptr_t)addr;
+    value = (value + (uintptr_t)pagesize - 1U) & ~((uintptr_t)pagesize - 1U);
+    return (char *)value;
+}
+
+static void tealet_page_guard_disable(tealet_main_t *g_main, const char *phase)
+{
+    size_t len;
+    tealet_sub_t *current = g_main->g_current;
+    if (!g_main->g_page_guard_enabled || !g_main->g_page_guard_active)
+        return;
+    if (!g_main->g_guard_lo || !g_main->g_guard_hi)
+        return;
+    if (g_main->g_guard_hi <= g_main->g_guard_lo)
+        return;
+    len = (size_t)(g_main->g_guard_hi - g_main->g_guard_lo);
+    if (mprotect((void *)g_main->g_guard_lo, len, PROT_READ | PROT_WRITE) == 0) {
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[PAGE_GUARD] phase=%s action=disable ok=1 range=[%p,%p) len=%zu\n",
+                phase,
+                (void *)g_main->g_guard_lo,
+                (void *)g_main->g_guard_hi,
+                len);
+#endif
+    } else {
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[PAGE_GUARD] phase=%s action=disable ok=0 range=[%p,%p) len=%zu\n",
+                phase,
+                (void *)g_main->g_guard_lo,
+                (void *)g_main->g_guard_hi,
+                len);
+#endif
+    }
+    g_main->g_page_guard_active = 0;
+    tealet_guard_range_lo = 0U;
+    tealet_guard_range_hi = 0U;
+    tealet_guard_boundary = current ? (uintptr_t)current->stack_far : 0U;
+    tealet_guard_current = (uintptr_t)current;
+    g_main->g_guard_lo = NULL;
+    g_main->g_guard_hi = NULL;
+}
+
+static void tealet_page_guard_apply_for_current(tealet_main_t *g_main, const char *phase)
+{
+    tealet_sub_t *current;
+    char *boundary;
+    char *protect_lo;
+    char *protect_hi;
+    size_t len;
+
+    if (!g_main->g_page_guard_enabled)
+        return;
+
+    if (!g_main->g_stack_lo || !g_main->g_stack_hi || g_main->g_page_size == 0) {
+        long pagesize;
+        pthread_attr_t attr;
+        void *stackaddr;
+        size_t stacksize;
+
+        pagesize = sysconf(_SC_PAGESIZE);
+        if (pagesize <= 0)
+            return;
+        if (pthread_getattr_np(pthread_self(), &attr) != 0)
+            return;
+        if (pthread_attr_getstack(&attr, &stackaddr, &stacksize) != 0) {
+            pthread_attr_destroy(&attr);
+            return;
+        }
+        pthread_attr_destroy(&attr);
+        if (!stackaddr || stacksize == 0)
+            return;
+        g_main->g_page_size = (size_t)pagesize;
+        g_main->g_stack_lo = (char *)stackaddr;
+        g_main->g_stack_hi = (char *)stackaddr + stacksize;
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[PAGE_GUARD] phase=discover ok=1 stack=[%p,%p) pagesize=%zu\n",
+                (void *)g_main->g_stack_lo,
+                (void *)g_main->g_stack_hi,
+                g_main->g_page_size);
+#endif
+    }
+
+    current = g_main->g_current;
+    if (!current)
+        return;
+
+    if (TEALET_IS_MAIN((tealet_t *)current) ||
+        current->stack_far == NULL ||
+        current->stack_far == STACKMAN_SP_FURTHEST) {
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[PAGE_GUARD] phase=%s action=skip reason=main_or_unbounded current=%p stack_far=%p\n",
+                phase,
+                (void *)current,
+                (void *)current->stack_far);
+#endif
+        return;
+    }
+
+    boundary = current->stack_far;
+    if (boundary < g_main->g_stack_lo || boundary >= g_main->g_stack_hi) {
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[PAGE_GUARD] phase=%s action=skip reason=boundary_outside_thread_stack boundary=%p stack=[%p,%p)\n",
+                phase,
+                (void *)boundary,
+                (void *)g_main->g_stack_lo,
+                (void *)g_main->g_stack_hi);
+#endif
+        return;
+    }
+
+#if STACK_DIRECTION == 0
+    protect_lo = tealet_align_up(boundary + 1, g_main->g_page_size);
+    protect_hi = tealet_align_down(g_main->g_stack_hi, g_main->g_page_size);
+#else
+    protect_lo = tealet_align_up(g_main->g_stack_lo, g_main->g_page_size);
+    protect_hi = tealet_align_down(boundary, g_main->g_page_size);
+#endif
+
+    if (!protect_lo || !protect_hi || protect_hi <= protect_lo) {
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[PAGE_GUARD] phase=%s action=skip reason=empty_range boundary=%p computed=[%p,%p)\n",
+                phase,
+                (void *)boundary,
+                (void *)protect_lo,
+                (void *)protect_hi);
+#endif
+        return;
+    }
+
+    len = (size_t)(protect_hi - protect_lo);
+    if (mprotect((void *)protect_lo, len, PROT_NONE) == 0) {
+        g_main->g_page_guard_active = 1;
+        g_main->g_guard_lo = protect_lo;
+        g_main->g_guard_hi = protect_hi;
+        tealet_guard_range_lo = (uintptr_t)protect_lo;
+        tealet_guard_range_hi = (uintptr_t)protect_hi;
+        tealet_guard_boundary = (uintptr_t)boundary;
+        tealet_guard_current = (uintptr_t)current;
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[PAGE_GUARD] phase=%s action=enable ok=1 current=%p boundary=%p range=[%p,%p) len=%zu\n",
+                phase,
+                (void *)current,
+                (void *)boundary,
+                (void *)protect_lo,
+                (void *)protect_hi,
+                len);
+#endif
+    } else {
+        g_main->g_page_guard_active = 0;
+        tealet_guard_range_lo = 0U;
+        tealet_guard_range_hi = 0U;
+        tealet_guard_boundary = (uintptr_t)boundary;
+        tealet_guard_current = (uintptr_t)current;
+        g_main->g_guard_lo = NULL;
+        g_main->g_guard_hi = NULL;
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+        fprintf(stderr,
+                "[PAGE_GUARD] phase=%s action=enable ok=0 current=%p boundary=%p range=[%p,%p) len=%zu\n",
+                phase,
+                (void *)current,
+                (void *)boundary,
+                (void *)protect_lo,
+                (void *)protect_hi,
+                len);
+#endif
+    }
+}
+
+static void tealet_page_guard_init(tealet_main_t *g_main)
+{
+    g_main->g_page_guard_enabled = 0;
+    g_main->g_page_guard_active = 0;
+    g_main->g_page_size = 0;
+    g_main->g_stack_lo = NULL;
+    g_main->g_stack_hi = NULL;
+    g_main->g_guard_lo = NULL;
+    g_main->g_guard_hi = NULL;
+}
+#else
+static void tealet_page_guard_init(tealet_main_t *g_main)
+{
+    (void)g_main;
+}
+
+static void tealet_page_guard_disable(tealet_main_t *g_main, const char *phase)
+{
+    (void)g_main;
+    (void)phase;
+}
+
+static void tealet_page_guard_apply_for_current(tealet_main_t *g_main, const char *phase)
+{
+    (void)g_main;
+    (void)phase;
+}
+#endif
+#endif
 
 /* Check if a tealet has an unbounded stack (FURTHEST sentinel).
  * Only one tealet can have an unbounded stack at a time (the active one on the C stack).
@@ -624,6 +1021,10 @@ static int tealet_switchstack(tealet_main_t *g_main, tealet_sub_t *target, void 
     g_main->g_target = target;
     g_main->g_arg = in_arg;
 
+#if TEALET_PYTEALET_ENABLE_PAGE_GUARD
+    tealet_page_guard_disable(g_main, "before-switch");
+#endif
+
     /* stackman switch is an external function so an optizer
      * cannot assume that any pointers reachable by
      * g_main stay unchanged across the switch
@@ -636,12 +1037,18 @@ static int tealet_switchstack(tealet_main_t *g_main, tealet_sub_t *target, void 
         g_main->g_previous = old_previous;
         g_main->g_target = NULL;
         g_main->g_arg = NULL;
+#if TEALET_PYTEALET_ENABLE_PAGE_GUARD
+        tealet_page_guard_apply_for_current(g_main, "after-switch-error");
+#endif
         return TEALET_ERR_MEM;
     }
     g_main->g_target = NULL;
     if (out_arg)
         *out_arg = g_main->g_arg;
     g_main->g_arg = NULL;
+#if TEALET_PYTEALET_ENABLE_PAGE_GUARD
+    tealet_page_guard_apply_for_current(g_main, "after-switch");
+#endif
     return g_main->g_sw == SW_RESTORE ? 0 : 1;
 }
 
@@ -799,6 +1206,9 @@ tealet_t *tealet_initialize(tealet_alloc_t *alloc, size_t extrasize)
     g_main->g_extrasize = extrasize;
     g_main->g_sw = SW_NOP;
     g_main->g_flags = 0;
+#if TEALET_PYTEALET_ENABLE_PAGE_GUARD
+    tealet_page_guard_init(g_main);
+#endif
 #if TEALET_WITH_STATS
     /* Initialize circular list - main tealet points to itself */
     g->next_tealet = g;
@@ -822,6 +1232,9 @@ void tealet_finalize(tealet_t *tealet)
     tealet_main_t *g_main = TEALET_GET_MAIN(tealet);
     assert(TEALET_IS_MAIN(tealet));
     assert(g_main->g_current == (tealet_sub_t *)g_main);
+#if TEALET_PYTEALET_ENABLE_PAGE_GUARD
+    tealet_page_guard_disable(g_main, "finalize");
+#endif
     tealet_int_free(g_main, g_main);
 }
 
@@ -1184,6 +1597,38 @@ int tealet_set_far(tealet_t *_tealet, void *far_boundary)
     /* Set the far boundary */
     tealet->stack_far = (char *)far_boundary;
     return 0;
+}
+
+int tealet_set_page_guard(tealet_t *_tealet, int enabled)
+{
+#if TEALET_PYTEALET_ENABLE_PAGE_GUARD
+    tealet_sub_t *tealet = (tealet_sub_t *)_tealet;
+    tealet_main_t *g_main = TEALET_GET_MAIN(tealet);
+
+    if (!TEALET_IS_MAIN(_tealet))
+        return -1;
+    if (g_main->g_current != tealet)
+        return -1;
+
+    if (!enabled)
+        tealet_page_guard_disable(g_main, "set-disabled");
+    g_main->g_page_guard_enabled = enabled ? 1 : 0;
+    if (g_main->g_page_guard_enabled)
+        tealet_page_guard_install_signals();
+    tealet_guard_boundary = (uintptr_t)tealet->stack_far;
+    tealet_guard_current = (uintptr_t)tealet;
+
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+    fprintf(stderr,
+            "[PAGE_GUARD] phase=set enabled=%d\n",
+            g_main->g_page_guard_enabled);
+#endif
+    return 0;
+#else
+    (void)_tealet;
+    (void)enabled;
+    return -1;
+#endif
 }
 
 int tealet_fork(tealet_t *_tealet, tealet_t **pother, void **parg, int flags)

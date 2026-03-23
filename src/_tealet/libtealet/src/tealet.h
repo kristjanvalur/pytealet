@@ -329,6 +329,14 @@ void *tealet_get_far(tealet_t *tealet);
 TEALET_API
 int tealet_set_far(tealet_t *tealet, void *far_boundary);
 
+/* Enable/disable debug page-guard mode on the main tealet.
+ * When enabled, non-main active tealets protect the stack region beyond
+ * their far boundary with PROT_NONE around switch boundaries (Linux only).
+ * Returns 0 on success, -1 on invalid target or unsupported build/platform.
+ */
+TEALET_API
+int tealet_set_page_guard(tealet_t *tealet, int enabled);
+
 /**
  * Fork the current active tealet, creating a copy that can run independently.
  *
