@@ -1432,6 +1432,24 @@ static void PyTealetTstate_DecRef(PyTealetTstate *saved)
 	saved->own_refs = 0;
 }
 
+/* get the far pointer that we need at least ot store any stack based data currently
+ * in the python tstate.  this varies by python version
+ */
+
+static void * PyTealet_GetStackFar(const PyThreadState *py_tstate)
+{
+#if PY_VERSION_HEX < 0x030D0000
+	/* python 3.10 has cframe on stack.  make sure we save our stacks to include
+	 * this whole structure
+	 */
+	if (py_tstate->cframe)
+		return tealet_stack_further(&py_tstate->cframe[0], &py_tstate->cframe[1]);
+#else
+	(void)py_tstate;
+#endif
+	return NULL;
+}
+
 /* helper functions to save and restore callstack related data from the python threadstate
  * into the tealet object
  */
@@ -1676,136 +1694,6 @@ pytealet_stub(PyObject *self)
 	return self;
 }
 
-#if PY_VERSION_HEX < 0x030D0000
-/* Temporary debug knob: artificially push new-tealet far boundary deeper. */
-#ifndef TEALET_PYTEALET_FAR_PAD_BYTES
-#define TEALET_PYTEALET_FAR_PAD_BYTES 1024
-#endif
-
-static ptrdiff_t
-get_far_pad_bytes_runtime(void)
-{
-	static int initialized = 0;
-	static ptrdiff_t cached = (ptrdiff_t)TEALET_PYTEALET_FAR_PAD_BYTES;
-	const char *env;
-	char *endp;
-	long long parsed;
-
-	if (initialized)
-		return cached;
-	initialized = 1;
-
-	env = getenv("PYTEALET_FAR_PAD_BYTES");
-	if (!env || !*env)
-		return cached;
-
-	parsed = strtoll(env, &endp, 10);
-	if (endp == env || (endp && *endp != '\0'))
-		return cached;
-	if (parsed < 0)
-		parsed = 0;
-	cached = (ptrdiff_t)parsed;
-	return cached;
-}
-
-static void *
-pick_farther_stack_boundary_runtime(void *reference_sp, void *a, void *b)
-{
-	ptrdiff_t da;
-	ptrdiff_t db;
-	if (!reference_sp)
-		return a ? a : b;
-	if (!a)
-		return b;
-	if (!b)
-		return a;
-	da = tealet_stack_diff(a, reference_sp);
-	db = tealet_stack_diff(b, reference_sp);
-	return (db > da) ? b : a;
-}
-
-static void *
-pad_boundary_deeper_runtime(void *reference_sp, void *base, ptrdiff_t bytes)
-{
-	char *plus;
-	char *minus;
-	if (!base || bytes <= 0)
-		return base;
-	plus = ((char *)base) + bytes;
-	minus = ((char *)base) - bytes;
-	return pick_farther_stack_boundary_runtime(reference_sp, (void *)plus, (void *)minus);
-}
-
-static void *
-compute_new_tealet_far_hint_runtime(PyThreadState *tstate, void *incoming_far)
-{
-	void *hint = incoming_far;
-	void *hint_before_pad;
-	void *hint_padded;
-	ptrdiff_t pad_bytes = get_far_pad_bytes_runtime();
-	if (tstate && tstate->cframe) {
-		char *cf_start = (char *)tstate->cframe;
-		char *cf_end = cf_start + sizeof(CFrame);
-		void *cf_far = pick_farther_stack_boundary_runtime(incoming_far, (void *)cf_start, (void *)cf_end);
-		hint = pick_farther_stack_boundary_runtime(incoming_far, hint, cf_far);
-		hint_before_pad = hint;
-		hint_padded = pad_boundary_deeper_runtime(incoming_far, hint_before_pad, pad_bytes);
-		hint = hint_padded;
-#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
-		fprintf(stderr,
-			"[RUN_FAR_HINT] tstate=%p incoming_far=%p cframe=%p cf_start=%p cf_end=%p cf_far=%p hint_before_pad=%p pad_bytes=%td final_hint=%p d_cf_start=%td d_cf_end=%td d_cf_far=%td d_before_pad=%td d_final=%td\n",
-			(void *)tstate,
-			incoming_far,
-			(void *)tstate->cframe,
-			(void *)cf_start,
-			(void *)cf_end,
-			cf_far,
-			hint_before_pad,
-			pad_bytes,
-			hint,
-			tealet_stack_diff(incoming_far, (void *)cf_start),
-			tealet_stack_diff(incoming_far, (void *)cf_end),
-			tealet_stack_diff(incoming_far, cf_far),
-			tealet_stack_diff(incoming_far, hint_before_pad),
-			tealet_stack_diff(incoming_far, hint));
-		fprintf(stderr,
-			"[TSTATE_PTRS] tstate=%p frame=%p exc_info=%p exc_state_addr=%p context=%p curexc_type=%p curexc_value=%p curexc_tb=%p cframe=%p\n",
-			(void *)tstate,
-			(void *)tstate->frame,
-			(void *)tstate->exc_info,
-			(void *)&tstate->exc_state,
-			(void *)tstate->context,
-			(void *)tstate->curexc_type,
-			(void *)tstate->curexc_value,
-			(void *)tstate->curexc_traceback,
-			(void *)tstate->cframe);
-#endif
-	} else {
-#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
-		fprintf(stderr,
-			"[RUN_FAR_HINT] tstate=%p incoming_far=%p cframe=NULL pad_bytes=%td final_hint=%p\n",
-			(void *)tstate,
-			incoming_far,
-			pad_bytes,
-			hint);
-		if (tstate) {
-			fprintf(stderr,
-				"[TSTATE_PTRS] tstate=%p frame=%p exc_info=%p exc_state_addr=%p context=%p curexc_type=%p curexc_value=%p curexc_tb=%p cframe=NULL\n",
-				(void *)tstate,
-				(void *)tstate->frame,
-				(void *)tstate->exc_info,
-				(void *)&tstate->exc_state,
-				(void *)tstate->context,
-				(void *)tstate->curexc_type,
-				(void *)tstate->curexc_value,
-				(void *)tstate->curexc_traceback);
-		}
-#endif
-	}
-	return hint;
-}
-#endif
-
 /* run a tealet and optinonally run */
 static PyObject *
 pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
@@ -1888,11 +1776,8 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 		if (!main)
 			goto err;
 		{
-			void *boundary_hint = NULL;
-			#if TEALET_PYTEALET_FIX_BOUNDARY_HINT
-			boundary_hint = compute_new_tealet_far_hint_runtime(tstate, (void *)&switch_arg);
-			#endif
-			tealet = tealet_new(main->tealet, pytealet_main, &switch_arg, boundary_hint);
+			void *stack_limit = PyTealet_GetStackFar(tstate);
+			tealet = tealet_new(main->tealet, pytealet_main, &switch_arg, stack_limit);
 		}
 		if (!tealet) {
 			PyErr_NoMemory();
