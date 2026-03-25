@@ -11,20 +11,6 @@
 
 #include "tealet.h"
 
-#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
-extern int tealet_validate_stack(tealet_t *tealet);
-static int pytealet_validate_stack(tealet_t *tealet)
-{
-	return tealet_validate_stack(tealet);
-}
-#else
-static int pytealet_validate_stack(tealet_t *tealet)
-{
-	(void)tealet;
-	return 0;
-}
-#endif
-
 /* Debug logging - set to 1 to enable, 0 to disable */
 #define TEALET_DEBUG 0
 
@@ -44,8 +30,6 @@ struct stub_arg
     tealet_run_t run;
     void *runarg;
 };
-
-static void dbg_validate_all_tealets(const char *phase);
 
 static tealet_t *
 stub_main(tealet_t *current, void *arg)
@@ -71,16 +55,8 @@ stub_main(tealet_t *current, void *arg)
         fprintf(stderr, "  When this tealet's stack is saved, local variables will be lost.\n\n");
     }
 
-	dbg_validate_all_tealets("stub-main-before-switch");
-    
     /* the caller is in arg, return right back to him */
     tealet_switch((tealet_t*)arg, &myarg);
-	dbg_validate_all_tealets("stub-main-after-switch");
-    /* DEBUG: Validate previous tealet's stack after switch */
-    {
-        tealet_t *prev = tealet_previous((tealet_t*)arg);
-		if (prev) pytealet_validate_stack(prev);
-    }
     /* now we are back, myarg should contain the arg to the run function.
      * We were possibly duplicated, so can't trust the original function args.
      */
@@ -112,14 +88,7 @@ stub_run(tealet_t *stub, tealet_run_t run, void **parg)
     psarg->run = run;
     psarg->runarg = parg ? *parg : NULL;
     myarg = (void*)psarg;
-	dbg_validate_all_tealets("stub-run-before-switch");
     result = tealet_switch(stub, &myarg);
-	dbg_validate_all_tealets("stub-run-after-switch");
-    /* DEBUG: Validate previous tealet's stack after switch */
-    {
-        tealet_t *prev = tealet_previous(stub);
-		if (prev) pytealet_validate_stack(prev);
-    }
     if (result) {
         /* failure */
         tealet_free(stub, psarg);
@@ -527,8 +496,6 @@ struct PyTealetObject {
 
 static PyTealetObject *dbg_tealet_head = NULL;
 static long dbg_tealet_counter = 0;
-static int dbg_validate_all_enabled = -1;
-static int dbg_validate_abort_enabled = -1;
 static int dbg_cframe_failfast_enabled = -1;
 static int dbg_cframe_failfast_any_enabled = -1;
 static int dbg_main_window_watch_enabled = -1;
@@ -728,92 +695,6 @@ dbg_maybe_capture_anchor(const char *phase, PyTealetObject *owner, PyThreadState
 		owner->dbg_anchor_near,
 		owner->dbg_anchor_far,
 		in_live_obj);
-}
-
-static void
-dbg_validate_all_tealets(const char *phase)
-{
-	PyTealetObject *iter;
-	tealet_t *main_tealet = NULL;
-	tealet_t *current_tealet = NULL;
-	int checked = 0;
-	int failed = 0;
-	int skipped = 0;
-
-	if (dbg_validate_all_enabled < 0) {
-		const char *env = getenv("PYTEALET_VALIDATE_ALL_STACKS");
-		dbg_validate_all_enabled = (env && *env && *env != '0') ? 1 : 0;
-	}
-	if (!dbg_validate_all_enabled)
-		return;
-	if (!phase || strstr(phase, "after-restore") == NULL)
-		return;
-
-	if (dbg_validate_abort_enabled < 0) {
-		const char *env = getenv("PYTEALET_VALIDATE_ABORT");
-		dbg_validate_abort_enabled = (!env || !*env || *env != '0') ? 1 : 0;
-	}
-	dbg_init_main_window_watch_config();
-
-	for (iter = dbg_tealet_head; iter; iter = iter->dbg_next) {
-		if (iter->tealet) {
-			main_tealet = iter->tealet->main;
-			break;
-		}
-	}
-	if (main_tealet)
-		current_tealet = tealet_current(main_tealet);
-	{
-		PyTealetObject *current_owner = dbg_find_tealet_obj(current_tealet);
-		fprintf(stderr,
-			"[STACK_VALIDATE_ALL] phase=%s current=%p current_id=%ld current_is_main=%d main=%p\n",
-			phase ? phase : "unknown",
-			(void *)current_tealet,
-			current_owner ? current_owner->dbg_id : -1L,
-			(current_tealet && TEALET_IS_MAIN(current_tealet)) ? 1 : 0,
-			(void *)main_tealet);
-	}
-
-	for (iter = dbg_tealet_head; iter; iter = iter->dbg_next) {
-		int rc;
-		if (!iter->tealet) {
-			skipped++;
-			continue;
-		}
-		if (TEALET_IS_MAIN(iter->tealet) || iter->tealet == current_tealet || !iter->tstate.has_state) {
-			skipped++;
-			continue;
-		}
-		rc = pytealet_validate_stack(iter->tealet);
-		if (rc == 0) {
-			checked++;
-		} else {
-			failed++;
-			fprintf(stderr,
-				"[STACK_VALIDATE_ALL] phase=%s id=%ld obj=%p tealet=%p state=%d rc=%d current=%p main=%p\n",
-				phase ? phase : "unknown",
-				iter->dbg_id,
-				(void *)iter,
-				(void *)iter->tealet,
-				iter->state,
-				rc,
-				(void *)current_tealet,
-				(void *)main_tealet);
-		}
-	}
-	fprintf(stderr,
-		"[STACK_VALIDATE_ALL] phase=%s checked=%d failed=%d skipped=%d\n",
-		phase ? phase : "unknown",
-		checked,
-		failed,
-		skipped);
-
-	if (failed > 0 && dbg_validate_abort_enabled) {
-		fprintf(stderr,
-			"[STACK_VALIDATE_ALL] phase=%s action=abort reason=validation_failure\n",
-			phase ? phase : "unknown");
-		abort();
-	}
 }
 
 static void
@@ -1961,6 +1842,7 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 		ptarg = &targ; /* can use the stack because of the way tealet_new works */
 		ptarg->stub = 0;
 	} else {
+		assert(0 && "temporarily disabled during development");
 		/* must allocate the argument on the heap because we will switch here */
 		ptarg = (pytealet_main_arg*)PyObject_Malloc(sizeof(*ptarg));
 		if (!ptarg)
@@ -1978,7 +1860,6 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	/* Save caller threadstate; on first run from STATE_NEW, keep an extra owning
 	 * reference set for caller's parked state.
 	 */
-	dbg_validate_all_tealets("py-run-before-save");
 	dbg_failfast_validate_active_cframe("py-run-before-save", current, tstate);
 #if PY_VERSION_HEX < 0x030D0000
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
@@ -1986,7 +1867,6 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 #endif
 #endif
 	save_tstate(current, tstate);
-	dbg_validate_all_tealets("py-run-after-save");
 	dbg_failfast_validate_active_cframe("py-run-after-save", current, tstate);
 
 #if PY_VERSION_HEX < 0x030D0000
@@ -2026,7 +1906,6 @@ err:
 		PyTealetTstate_DecRef(&current->tstate);
 	/* restore frame */
 	restore_tstate(current, tstate);
-	dbg_validate_all_tealets("py-run-after-restore");
 	dbg_failfast_validate_active_cframe("py-run-after-restore", current, tstate);
 
 #if PY_VERSION_HEX < 0x030D0000
@@ -2069,7 +1948,6 @@ pytealet_switch(PyObject *_self, PyObject *args)
 	    current, current->state, self, self->state);
 	if (CheckTarget(self, current))
 		return NULL;
-	dbg_validate_all_tealets("py-switch-before-save");
 	dbg_failfast_validate_active_cframe("py-switch-before-save", current, tstate);
 	
 	Py_INCREF(pyarg);
@@ -2089,11 +1967,6 @@ pytealet_switch(PyObject *_self, PyObject *args)
 	LOG("pytealet_switch: about to call tealet_switch(tealet=%p)\n", self->tealet);
 	fail = tealet_switch(self->tealet, &switch_arg);
 	LOG("pytealet_switch: tealet_switch returned, tealet=%p\n", self->tealet);
-	/* DEBUG: Validate previous tealet's stack after switch */
-	{
-		tealet_t *prev = self->tealet ? tealet_previous(self->tealet) : NULL;
-		if (prev) pytealet_validate_stack(prev);
-	}
 	restore_tstate(current, tstate);
 	dbg_failfast_validate_active_cframe("py-switch-after-restore", current, tstate);
 #if PY_VERSION_HEX < 0x030D0000

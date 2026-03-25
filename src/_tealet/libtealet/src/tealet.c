@@ -100,6 +100,10 @@ typedef struct tealet_stack_t
     struct tealet_stack_t *next;    /* next unsaved stack */
     char *stack_far;                /* the far boundary of this stack (or STACKMAN_SP_FURTHEST for unbounded) */
     size_t saved;                   /* total amount of memory saved in all chunks */
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+    char *initial_copy;             /* debug snapshot of full bounded initial stack */
+    size_t initial_copy_size;       /* snapshot size */
+#endif
     struct tealet_chunk_t chunk;    /* the initial chunk */
 } tealet_stack_t;
 
@@ -620,6 +624,27 @@ static tealet_stack_t *tealet_stack_new(tealet_main_t *main,
 #else
     memcpy(&s->chunk.data[0], stack_near-size, size);
 #endif
+
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+    if (stack_far != STACKMAN_SP_FURTHEST) {
+        size_t full_extent = (size_t)STACKMAN_SP_DIFF(stack_far, stack_near);
+        s->initial_copy = (char*)tealet_int_malloc(main, full_extent);
+        if (s->initial_copy) {
+            s->initial_copy_size = full_extent;
+#if STACK_DIRECTION == 0
+            memcpy(s->initial_copy, stack_near, full_extent);
+#else
+            memcpy(s->initial_copy, stack_near - full_extent, full_extent);
+#endif
+            STATS_ADD_ALLOC(main, full_extent);
+        } else {
+            s->initial_copy_size = 0;
+        }
+    } else {
+        s->initial_copy = NULL;
+        s->initial_copy_size = 0;
+    }
+#endif
     return s;
 }
 
@@ -648,6 +673,16 @@ static int tealet_stack_grow(tealet_main_t *main,
     memcpy(&chunk->data[0], chunk->stack_near - diff, diff);
 #endif
     chunk->size = diff;
+
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+    if (stack->initial_copy && stack->saved <= stack->initial_copy_size) {
+        size_t offset = stack->saved;
+        if (offset + diff <= stack->initial_copy_size) {
+            assert(memcmp(&chunk->data[0], stack->initial_copy + offset, diff) == 0);
+        }
+    }
+#endif
+
     chunk->next = stack->chunk.next;
     stack->chunk.next = chunk;
     stack->saved = size;
@@ -657,6 +692,21 @@ static int tealet_stack_grow(tealet_main_t *main,
 static void tealet_stack_restore(tealet_stack_t *stack)
 {
     tealet_chunk_t *chunk = &stack->chunk;
+
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+    if (stack->initial_copy && stack->saved <= stack->initial_copy_size) {
+        tealet_chunk_t *verify_chunk = &stack->chunk;
+        do {
+            ptrdiff_t offset = STACKMAN_SP_DIFF(verify_chunk->stack_near, stack->chunk.stack_near);
+            if (offset < 0 || (size_t)offset + verify_chunk->size > stack->saved) {
+                assert(0 && "Chunk position invalid");
+            }
+            assert(memcmp(&verify_chunk->data[0], stack->initial_copy + offset, verify_chunk->size) == 0);
+            verify_chunk = verify_chunk->next;
+        } while (verify_chunk);
+    }
+#endif
+
     do {
 #if STACK_DIRECTION == 0
         memcpy(chunk->stack_near, &chunk->data[0], chunk->size);
@@ -709,6 +759,14 @@ static void tealet_stack_decref(tealet_main_t *main, tealet_stack_t *stack)
         tealet_stack_unlink(stack);
 
     chunk = stack->chunk.next;
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+    if (stack->initial_copy) {
+        STATS_SUB_ALLOC(main, stack->initial_copy_size);
+        tealet_int_free(main, stack->initial_copy);
+        stack->initial_copy = NULL;
+        stack->initial_copy_size = 0;
+    }
+#endif
     STATS_SUB_ALLOC(main, offsetof(tealet_stack_t, chunk.data[0]) + stack->chunk.size);
 #if TEALET_WITH_STATS
     main->g_stack_count--;
@@ -754,6 +812,37 @@ static size_t tealet_stack_getsize(tealet_stack_t *stack)
     return 0;
 }
 
+static int tealet_stack_validate_unsaved_snapshot(tealet_stack_t *stack)
+{
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+    if (!stack || !stack->initial_copy)
+        return 0;
+    if (stack->stack_far == STACKMAN_SP_FURTHEST)
+        return 0;
+    if (stack->saved >= stack->initial_copy_size)
+        return 0;
+
+    {
+        size_t unsaved_size = stack->initial_copy_size - stack->saved;
+        char *unsaved_current = STACKMAN_SP_ADD(stack->chunk.stack_near, stack->saved);
+        char *unsaved_original = stack->initial_copy + stack->saved;
+
+#if STACK_DIRECTION != 0
+        unsaved_current -= unsaved_size;
+        unsaved_original -= unsaved_size;
+#endif
+
+        if (memcmp(unsaved_current, unsaved_original, unsaved_size) != 0) {
+            assert(0 && "Unsaved stack snapshot mismatch");
+            return -1;
+        }
+    }
+#else
+    (void)stack;
+#endif
+    return 0;
+}
+
 
 /***************************************************************
  * utility functions for allocating and growing stacks
@@ -764,6 +853,11 @@ static tealet_stack_t *tealet_stack_saveto(tealet_main_t *main,
     char *stack_near, char *stack_far, char *saveto, int *full)
 {
     ptrdiff_t size;
+#if TEALET_PYTEALET_MIN_INITIAL_SAVE > 0
+    int is_unbounded = (stack_far == STACKMAN_SP_FURTHEST);
+    ptrdiff_t bounded_span = 0;
+#endif
+
     if (STACKMAN_SP_LE(stack_far, saveto)) {
         saveto = stack_far;
         *full = 1;
@@ -773,6 +867,30 @@ static tealet_stack_t *tealet_stack_saveto(tealet_main_t *main,
     size = STACKMAN_SP_DIFF(saveto, stack_near);
     if (size < 0)
         size = 0;
+
+#if TEALET_PYTEALET_MIN_INITIAL_SAVE > 0
+    if (!is_unbounded)
+        bounded_span = STACKMAN_SP_DIFF(stack_far, stack_near);
+
+    if (size < TEALET_PYTEALET_MIN_INITIAL_SAVE && !*full) {
+        ptrdiff_t max_size;
+        if (is_unbounded)
+            max_size = 0x7fffffff;
+        else
+            max_size = bounded_span;
+
+        if (max_size > TEALET_PYTEALET_MIN_INITIAL_SAVE)
+            size = TEALET_PYTEALET_MIN_INITIAL_SAVE;
+        else if (max_size > 0)
+            size = max_size;
+    }
+
+    if (!is_unbounded && bounded_span > 0 && size >= bounded_span) {
+        size = bounded_span;
+        *full = 1;
+    }
+#endif
+
     return tealet_stack_new(main, (char*) stack_near, stack_far, size);
 }
 
@@ -837,6 +955,10 @@ static int tealet_stack_grow_list(tealet_main_t *main, tealet_stack_t *list,
     while (list) {
         int fail;
         int full;
+
+        if (tealet_stack_validate_unsaved_snapshot(list) != 0)
+            return TEALET_ERR_DEFUNCT;
+
         if (list == target) {
             /* this is the stack we are switching to.  We should stop here
              * since previous stacks are already fully saved wrt. this.
@@ -946,9 +1068,55 @@ static int tealet_save_state(tealet_main_t *g_main, void *old_stack_pointer)
     return 0;
 }
 
+#if TEALET_PYTEALET_VALIDATE_PRE_RESTORE
+static void tealet_validate_prev_stacks(tealet_main_t *g_main, char *target_boundary)
+{
+    tealet_stack_t *list = g_main->g_prev;
+
+    while (list) {
+        size_t total_chunk_size = 0;
+        char *expected_near = NULL;
+        tealet_chunk_t *chunk = list->chunk.next;
+
+        while (chunk) {
+            char *chunk_start = chunk->stack_near;
+            char *chunk_end = STACKMAN_SP_ADD(chunk->stack_near, chunk->size);
+
+            if (expected_near != NULL)
+                assert(chunk_end == expected_near);
+
+            total_chunk_size += chunk->size;
+            expected_near = chunk_start;
+            chunk = chunk->next;
+        }
+
+        if (expected_near != NULL) {
+            char *initial_end = STACKMAN_SP_ADD(list->chunk.stack_near, list->chunk.size);
+            assert(initial_end == expected_near);
+        }
+
+        total_chunk_size += list->chunk.size;
+        assert(total_chunk_size == list->saved);
+
+        {
+            char *saved_boundary = STACKMAN_SP_ADD(list->chunk.stack_near, list->saved);
+            assert(!STACKMAN_SP_LS(saved_boundary, target_boundary));
+        }
+
+        list = list->next;
+    }
+}
+#endif
+
 static void tealet_restore_state(tealet_main_t *g_main, void *new_stack_pointer)
 {
     tealet_sub_t *g = g_main->g_target;
+    (void)new_stack_pointer;
+
+#if TEALET_PYTEALET_VALIDATE_PRE_RESTORE
+    if (g_main->g_prev != NULL && g->stack_far != STACKMAN_SP_FURTHEST)
+        tealet_validate_prev_stacks(g_main, g->stack_far);
+#endif
 
     /* Restore the heap copy back into the C stack */
     assert(g->stack != NULL);
