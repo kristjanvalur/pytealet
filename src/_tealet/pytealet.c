@@ -1,11 +1,24 @@
 
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
 #include "Python.h"
 #include "structmember.h"
 #include "frameobject.h"
 #include "pythread.h"
 
 #include "tealet.h"
+
+/* Debug logging - set to 1 to enable, 0 to disable */
+#define TEALET_DEBUG 0
+
+#if TEALET_DEBUG
+#define LOG(...) fprintf(stderr, "[TEALET] " __VA_ARGS__)
+#else
+#define LOG(...) do {} while(0)
+#endif
 
 
 /****************************************************************
@@ -17,12 +30,43 @@ struct stub_arg
     tealet_run_t run;
     void *runarg;
 };
+
+static void dbg_validate_all_tealets(const char *phase);
+
 static tealet_t *
 stub_main(tealet_t *current, void *arg)
 {
     void *myarg = 0;
+    void *my_stack_far;
+    ptrdiff_t boundary_check;
+    
+    fprintf(stderr, "[stub_main] ENTERED - current=%p, arg=%p\n", (void*)current, arg);
+    
+    /* DEBUG: Verify that stack_far boundary includes our local variables */
+    my_stack_far = tealet_get_far(current);
+    boundary_check = tealet_stack_diff(my_stack_far, (void*)&myarg);
+    fprintf(stderr, "[stub_main] &myarg=%p, stack_far=%p, diff=%td bytes\n", 
+            (void*)&myarg, my_stack_far, boundary_check);
+    
+    if (boundary_check < 0) {
+        fprintf(stderr, "\n*** STACK_FAR BOUNDARY TOO CLOSE! ***\n");
+        fprintf(stderr, "  stub_main local variable &myarg: %p\n", (void*)&myarg);
+        fprintf(stderr, "  tealet stack_far boundary:       %p\n", my_stack_far);
+        fprintf(stderr, "  Difference (should be positive): %td bytes\n", boundary_check);
+        fprintf(stderr, "  This means stack_far does NOT include stub_main's local variables!\n");
+        fprintf(stderr, "  When this tealet's stack is saved, local variables will be lost.\n\n");
+    }
+
+	dbg_validate_all_tealets("stub-main-before-switch");
+    
     /* the caller is in arg, return right back to him */
     tealet_switch((tealet_t*)arg, &myarg);
+	dbg_validate_all_tealets("stub-main-after-switch");
+    /* DEBUG: Validate previous tealet's stack after switch */
+    {
+        tealet_t *prev = tealet_previous((tealet_t*)arg);
+        if (prev) tealet_validate_stack(prev);
+    }
     /* now we are back, myarg should contain the arg to the run function.
      * We were possibly duplicated, so can't trust the original function args.
      */
@@ -54,7 +98,14 @@ stub_run(tealet_t *stub, tealet_run_t run, void **parg)
     psarg->run = run;
     psarg->runarg = parg ? *parg : NULL;
     myarg = (void*)psarg;
+	dbg_validate_all_tealets("stub-run-before-switch");
     result = tealet_switch(stub, &myarg);
+	dbg_validate_all_tealets("stub-run-after-switch");
+    /* DEBUG: Validate previous tealet's stack after switch */
+    {
+        tealet_t *prev = tealet_previous(stub);
+        if (prev) tealet_validate_stack(prev);
+    }
     if (result) {
         /* failure */
         tealet_free(stub, psarg);
@@ -89,6 +140,11 @@ typedef struct main_data
 /* Forward declaration */
 typedef struct PyTealetObject PyTealetObject;
 
+#if PY_VERSION_HEX < 0x030D0000
+static void dbg_capture_saved_main_window(const char *phase, PyTealetObject *owner);
+static void dbg_compare_saved_main_window(const char *phase, PyTealetObject *owner);
+#endif
+
 /* Extra data stored with each tealet for the Python binding.
  * This structure is stored in tealet->extra and provides type-safe
  * access to the associated PyTealetObject.
@@ -102,20 +158,1199 @@ typedef struct tealet_extra_t {
 #define TEALET_PYOBJECT(t) (TEALET_EXTRA(t)->pytealet)
 #define TEALET_SET_PYOBJECT(t, obj) (TEALET_EXTRA(t)->pytealet = (obj))
 
+
+/* a structure that captures the tstate of a tealet.  The fields stored
+ * and their semantics may change from python version to version.
+ */
+struct PyTealetTstate {
+	PyFrameObject *frame;
+	PyObject *exc_type;
+	PyObject *exc_val;
+	PyObject *exc_tb;
+	_PyErr_StackItem *exc_info;
+	_PyErr_StackItem exc_state;
+	int recursion_depth;
+	int trash_delete_nesting;
+	PyObject *context; /* Python 3.7+ contextvars */
+	int has_state; /* Debug helper: 1 when this struct currently stores a saved tstate */
+	int own_refs; /* has ownership of tstate references been claimed? */
+	void *stack_near_saved; /* Debug: stack-near marker captured with this tstate */
+	void *stack_far_saved;  /* Debug: far boundary captured with this tstate */
+	/* Python 3.10-3.12: cframe tracks C-level call frames (removed in 3.13)
+	 * Stack-slicing preserves the CFrame struct itself; we just save the pointer */
+#if PY_VERSION_HEX < 0x030D0000
+	CFrame* cframe;
+	CFrame* cframe_owned; /* CFrame pointer owned by tealet stack while running */
+#endif
+};
+
+typedef struct PyTealetTstate PyTealetTstate;
+
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+static void
+stack_bounds(void *a, void *b, void **lo, void **hi)
+{
+	if (!a || !b) {
+		*lo = NULL;
+		*hi = NULL;
+		return;
+	}
+	if ((char *)a <= (char *)b) {
+		*lo = a;
+		*hi = b;
+	} else {
+		*lo = b;
+		*hi = a;
+	}
+}
+
+static int
+stack_contains_ptr(void *near_sp, void *far_sp, void *ptr)
+{
+	void *lo;
+	void *hi;
+	if (!near_sp || !far_sp || !ptr)
+		return -1;
+	stack_bounds(near_sp, far_sp, &lo, &hi);
+	return ((char *)ptr >= (char *)lo && (char *)ptr <= (char *)hi) ? 1 : 0;
+}
+
+static int
+stack_contains_obj(void *near_sp, void *far_sp, void *obj, size_t obj_size)
+{
+	void *lo;
+	void *hi;
+	char *obj_lo;
+	char *obj_hi;
+	if (!near_sp || !far_sp || !obj || obj_size == 0)
+		return -1;
+	stack_bounds(near_sp, far_sp, &lo, &hi);
+	obj_lo = (char *)obj;
+	obj_hi = obj_lo + obj_size - 1;
+	return (obj_lo >= (char *)lo && obj_hi <= (char *)hi) ? 1 : 0;
+}
+
+static void *
+diff_to_ptr(ptrdiff_t diff)
+{
+	return (void *)(uintptr_t)diff;
+}
+
+static uint64_t
+fnv1a64_update(uint64_t hash, const void *data, size_t size)
+{
+	const unsigned char *p = (const unsigned char *)data;
+	size_t i;
+	for (i = 0; i < size; i++) {
+		hash ^= (uint64_t)p[i];
+		hash *= 1099511628211ULL;
+	}
+	return hash;
+}
+
+enum {
+	CFRAME_BAD_NONE = 0,
+	CFRAME_BAD_OUT_OF_BOUNDS_OBJ = 1,
+	CFRAME_BAD_NEAR_JUMP = 2,
+	CFRAME_BAD_USE_TRACING = 3,
+	CFRAME_BAD_SELF_LOOP = 4,
+	CFRAME_BAD_MAX_DEPTH = 5,
+	CFRAME_BAD_ANCHOR_NOT_REACHED = 6,
+};
+
+static const char *
+cframe_bad_reason_name(int reason)
+{
+	switch (reason) {
+	case CFRAME_BAD_NONE:
+		return "none";
+	case CFRAME_BAD_OUT_OF_BOUNDS_OBJ:
+		return "out_of_bounds_obj";
+	case CFRAME_BAD_NEAR_JUMP:
+		return "near_jump";
+	case CFRAME_BAD_USE_TRACING:
+		return "bad_use_tracing";
+	case CFRAME_BAD_SELF_LOOP:
+		return "self_loop";
+	case CFRAME_BAD_MAX_DEPTH:
+		return "max_depth";
+	case CFRAME_BAD_ANCHOR_NOT_REACHED:
+		return "anchor_not_reached";
+	default:
+		return "unknown";
+	}
+}
+
+static uint64_t
+cframe_chain_hash(CFrame *head,
+			 void *near_sp,
+			 void *far_sp,
+			 CFrame *stop_at,
+			 CFrame *root_cframe,
+			 int max_depth,
+			 int *out_depth,
+			 int *out_valid,
+			 int *out_reached_stop,
+			 int *out_first_bad_reason,
+			 CFrame **out_first_bad_frame,
+			 CFrame **out_stop)
+{
+	uint64_t hash = 1469598103934665603ULL;
+	int depth = 0;
+	int valid = 1;
+	int reached_stop = 0;
+	int first_bad_reason = CFRAME_BAD_NONE;
+	CFrame *first_bad_frame = NULL;
+	CFrame *frame = head;
+
+	while (frame && depth < max_depth) {
+		if (root_cframe && frame == root_cframe) {
+			hash = fnv1a64_update(hash, frame, sizeof(*frame));
+			depth++;
+			if (stop_at && frame == stop_at)
+				reached_stop = 1;
+			break;
+		}
+		ptrdiff_t d_near = tealet_stack_diff(near_sp, (void *)frame);
+		int in_obj = stack_contains_obj(near_sp, far_sp, (void *)frame, sizeof(*frame));
+		if (in_obj != 1) {
+			valid = 0;
+			first_bad_reason = CFRAME_BAD_OUT_OF_BOUNDS_OBJ;
+			first_bad_frame = frame;
+			break;
+		}
+		if (depth > 0 && (d_near > 65536 || d_near < -(8 * 1024 * 1024))) {
+			valid = 0;
+			first_bad_reason = CFRAME_BAD_NEAR_JUMP;
+			first_bad_frame = frame;
+			break;
+		}
+		if (frame->use_tracing < 0 || frame->use_tracing > 2) {
+			valid = 0;
+			first_bad_reason = CFRAME_BAD_USE_TRACING;
+			first_bad_frame = frame;
+			break;
+		}
+		hash = fnv1a64_update(hash, frame, sizeof(*frame));
+		depth++;
+		if (stop_at && frame == stop_at) {
+			reached_stop = 1;
+			break;
+		}
+		if (frame->previous == NULL)
+			break;
+		if (frame->previous == frame) {
+			valid = 0;
+			first_bad_reason = CFRAME_BAD_SELF_LOOP;
+			first_bad_frame = frame;
+			break;
+		}
+		frame = frame->previous;
+	}
+	if (frame && depth >= max_depth) {
+		valid = 0;
+		first_bad_reason = CFRAME_BAD_MAX_DEPTH;
+		first_bad_frame = frame;
+	}
+	if (stop_at && !reached_stop) {
+		valid = 0;
+		if (first_bad_reason == CFRAME_BAD_NONE) {
+			first_bad_reason = CFRAME_BAD_ANCHOR_NOT_REACHED;
+			first_bad_frame = frame;
+		}
+	}
+	if (out_depth)
+		*out_depth = depth;
+	if (out_valid)
+		*out_valid = valid;
+	if (out_reached_stop)
+		*out_reached_stop = reached_stop;
+	if (out_first_bad_reason)
+		*out_first_bad_reason = first_bad_reason;
+	if (out_first_bad_frame)
+		*out_first_bad_frame = first_bad_frame;
+	if (out_stop)
+		*out_stop = frame;
+	return hash;
+}
+
+static void
+log_cframe_chain(const char *tag, void *owner, void *far_sp, PyThreadState *tstate)
+{
+	int depth = 0;
+	char stack_marker;
+	void *near_sp = (void *)&stack_marker;
+	CFrame *frame = tstate ? tstate->cframe : NULL;
+
+	fprintf(stderr,
+		"[CFRAME] %s owner=%p tstate=%p cframe=%p near=%p far=%p\n",
+		tag,
+		(void *)owner,
+		(void *)tstate,
+		(void *)(tstate ? tstate->cframe : NULL),
+		near_sp,
+		far_sp);
+
+	while (frame && depth < 64) {
+		ptrdiff_t d_near = tealet_stack_diff(near_sp, (void *)frame);
+		ptrdiff_t d_far = far_sp ? tealet_stack_diff(far_sp, (void *)frame) : 0;
+		int in_live = stack_contains_ptr(near_sp, far_sp, (void *)frame);
+		int in_live_obj = stack_contains_obj(near_sp, far_sp, (void *)frame, sizeof(*frame));
+		if (depth > 0 && (d_near > 65536 || d_near < -(8 * 1024 * 1024))) {
+			fprintf(stderr,
+				"[CFRAME]   #%02d frame=%p d_near=%p d_far=%p in_live=%d in_live_obj=%d OUT_OF_RANGE (stop)\n",
+				depth,
+				(void *)frame,
+				diff_to_ptr(d_near),
+				diff_to_ptr(d_far),
+				in_live,
+				in_live_obj);
+			break;
+		}
+		int is_root = (tstate && frame == &tstate->root_cframe);
+		fprintf(stderr,
+			"[CFRAME]   #%02d frame=%p prev=%p use_tracing=%d d_near=%p d_far=%p in_live=%d in_live_obj=%d%s\n",
+			depth,
+			(void *)frame,
+			(void *)frame->previous,
+			frame->use_tracing,
+			diff_to_ptr(d_near),
+			diff_to_ptr(d_far),
+			in_live,
+			in_live_obj,
+			is_root ? " ROOT" : "");
+		if (is_root)
+			break;
+		frame = frame->previous;
+		depth++;
+	}
+	if (frame) {
+		fprintf(stderr,
+			"[CFRAME]   ... truncated after %d links, next=%p\n",
+			depth,
+			(void *)frame);
+	}
+}
+#endif
+#endif
+
+#if PY_VERSION_HEX < 0x030D0000
+#if !TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+static void
+stack_bounds(void *a, void *b, void **lo, void **hi)
+{
+	if (!a || !b) {
+		*lo = NULL;
+		*hi = NULL;
+		return;
+	}
+	if ((char *)a <= (char *)b) {
+		*lo = a;
+		*hi = b;
+	} else {
+		*lo = b;
+		*hi = a;
+	}
+}
+
+static uint64_t
+fnv1a64_update(uint64_t hash, const void *data, size_t size)
+{
+	const unsigned char *p = (const unsigned char *)data;
+	size_t i;
+	for (i = 0; i < size; i++) {
+		hash ^= (uint64_t)p[i];
+		hash *= 1099511628211ULL;
+	}
+	return hash;
+}
+#endif
+#endif
+
+
+
+
+
+
 /* The python tealet object */
 struct PyTealetObject {
     PyObject_HEAD
     int state;
 	tealet_t *tealet;
 	PyObject *weakreflist; /* List of weak references */
-	/* call stack related information from the thread state */
-	PyFrameObject *frame;
-	PyObject *exc_type;
-	PyObject *exc_val;
-	PyObject *exc_tb;
-	int recursion_depth;
-	
+	long dbg_id;
+	struct PyTealetObject *dbg_prev;
+	struct PyTealetObject *dbg_next;
+	void *dbg_last_head;
+	void *dbg_anchor_cframe;
+	void *dbg_anchor_near;
+	void *dbg_anchor_far;
+	int dbg_has_anchor;
+	void *dbg_last_saved_cframe;
+	void *dbg_last_saved_near;
+	void *dbg_last_saved_far;
+	void *dbg_last_live_far;
+	uint64_t dbg_last_chain_hash;
+	int dbg_last_chain_depth;
+	int dbg_last_chain_valid;
+	int dbg_last_state;
+	int dbg_last_has_state;
+	int dbg_last_own_refs;
+	int dbg_has_last_snapshot;
+	int dbg_saved_window_has_snapshot;
+	void *dbg_saved_window_addr;
+	size_t dbg_saved_window_len;
+	uint64_t dbg_saved_window_hash;
+	int dbg_saved_heap_has_snapshot;
+	void *dbg_saved_heap_addr;
+	size_t dbg_saved_heap_len;
+	uint64_t dbg_saved_heap_hash;
+
+	/* thread state information */
+	PyTealetTstate tstate;
 };
+
+static PyTealetObject *dbg_tealet_head = NULL;
+static long dbg_tealet_counter = 0;
+static int dbg_validate_all_enabled = -1;
+static int dbg_validate_abort_enabled = -1;
+static int dbg_cframe_failfast_enabled = -1;
+static int dbg_cframe_failfast_any_enabled = -1;
+static int dbg_main_window_watch_enabled = -1;
+static int dbg_main_window_abort_enabled = -1;
+static ptrdiff_t dbg_main_window_radius = 512;
+static int dbg_saved_heap_watch_enabled = -1;
+static int dbg_saved_heap_abort_enabled = -1;
+
+#define DBG_HEAP_MAGIC_HEAD 0xC0FFEEBAD5EED001ULL
+#define DBG_HEAP_MAGIC_TAIL 0xB16B00B5DEADC0DEULL
+
+typedef struct dbg_heap_block {
+	uint64_t magic_head;
+	size_t payload_size;
+	struct dbg_heap_block *prev;
+	struct dbg_heap_block *next;
+} dbg_heap_block;
+
+static dbg_heap_block *dbg_heap_blocks_head = NULL;
+
+static int
+dbg_heap_range_in_single_block(void *range_lo,
+			       void *range_hi,
+			       void **out_payload_lo,
+			       size_t *out_payload_size)
+{
+	dbg_heap_block *iter;
+	if (!range_lo || !range_hi)
+		return 0;
+	for (iter = dbg_heap_blocks_head; iter; iter = iter->next) {
+		char *payload_lo = (char *)(iter + 1);
+		char *payload_hi = payload_lo + iter->payload_size - 1;
+		if ((char *)range_lo >= payload_lo && (char *)range_hi <= payload_hi) {
+			if (out_payload_lo)
+				*out_payload_lo = (void *)payload_lo;
+			if (out_payload_size)
+				*out_payload_size = iter->payload_size;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void
+dbg_register_tealet(PyTealetObject *obj)
+{
+	if (!obj || obj->dbg_id != 0)
+		return;
+	obj->dbg_id = ++dbg_tealet_counter;
+	obj->dbg_prev = NULL;
+	obj->dbg_next = dbg_tealet_head;
+	obj->dbg_last_head = NULL;
+	obj->dbg_anchor_cframe = NULL;
+	obj->dbg_anchor_near = NULL;
+	obj->dbg_anchor_far = NULL;
+	obj->dbg_has_anchor = 0;
+	obj->dbg_last_saved_cframe = NULL;
+	obj->dbg_last_saved_near = NULL;
+	obj->dbg_last_saved_far = NULL;
+	obj->dbg_last_live_far = NULL;
+	obj->dbg_last_chain_hash = 0;
+	obj->dbg_last_chain_depth = -1;
+	obj->dbg_last_chain_valid = -1;
+	obj->dbg_last_state = -1;
+	obj->dbg_last_has_state = -1;
+	obj->dbg_last_own_refs = -1;
+	obj->dbg_has_last_snapshot = 0;
+	obj->dbg_saved_window_has_snapshot = 0;
+	obj->dbg_saved_window_addr = NULL;
+	obj->dbg_saved_window_len = 0;
+	obj->dbg_saved_window_hash = 0;
+	obj->dbg_saved_heap_has_snapshot = 0;
+	obj->dbg_saved_heap_addr = NULL;
+	obj->dbg_saved_heap_len = 0;
+	obj->dbg_saved_heap_hash = 0;
+	if (dbg_tealet_head)
+		dbg_tealet_head->dbg_prev = obj;
+	dbg_tealet_head = obj;
+}
+
+static void
+dbg_unregister_tealet(PyTealetObject *obj)
+{
+	if (!obj || obj->dbg_id == 0)
+		return;
+	if (obj->dbg_prev)
+		obj->dbg_prev->dbg_next = obj->dbg_next;
+	else if (dbg_tealet_head == obj)
+		dbg_tealet_head = obj->dbg_next;
+	if (obj->dbg_next)
+		obj->dbg_next->dbg_prev = obj->dbg_prev;
+	obj->dbg_prev = obj->dbg_next = NULL;
+	obj->dbg_last_head = NULL;
+	obj->dbg_anchor_cframe = NULL;
+	obj->dbg_anchor_near = NULL;
+	obj->dbg_anchor_far = NULL;
+	obj->dbg_has_anchor = 0;
+	obj->dbg_last_saved_cframe = NULL;
+	obj->dbg_last_saved_near = NULL;
+	obj->dbg_last_saved_far = NULL;
+	obj->dbg_last_live_far = NULL;
+	obj->dbg_last_chain_hash = 0;
+	obj->dbg_last_chain_depth = -1;
+	obj->dbg_last_chain_valid = -1;
+	obj->dbg_last_state = -1;
+	obj->dbg_last_has_state = -1;
+	obj->dbg_last_own_refs = -1;
+	obj->dbg_has_last_snapshot = 0;
+	obj->dbg_saved_window_has_snapshot = 0;
+	obj->dbg_saved_window_addr = NULL;
+	obj->dbg_saved_window_len = 0;
+	obj->dbg_saved_window_hash = 0;
+	obj->dbg_saved_heap_has_snapshot = 0;
+	obj->dbg_saved_heap_addr = NULL;
+	obj->dbg_saved_heap_len = 0;
+	obj->dbg_saved_heap_hash = 0;
+	obj->dbg_id = 0;
+}
+
+static PyTealetObject *
+dbg_find_tealet_obj(tealet_t *tealet)
+{
+	PyTealetObject *iter;
+	if (!tealet)
+		return NULL;
+	for (iter = dbg_tealet_head; iter; iter = iter->dbg_next) {
+		if (iter->tealet == tealet)
+			return iter;
+	}
+	return NULL;
+}
+
+static void
+dbg_init_main_window_watch_config(void)
+{
+	if (dbg_main_window_watch_enabled < 0) {
+		const char *env = getenv("PYTEALET_MAIN_WINDOW_WATCH");
+		dbg_main_window_watch_enabled = (!env || !*env || *env != '0') ? 1 : 0;
+	}
+	if (dbg_main_window_abort_enabled < 0) {
+		const char *env = getenv("PYTEALET_MAIN_WINDOW_ABORT");
+		dbg_main_window_abort_enabled = (!env || !*env || *env != '0') ? 1 : 0;
+	}
+	if (dbg_main_window_radius == 512) {
+		const char *env = getenv("PYTEALET_MAIN_WINDOW_RADIUS");
+		if (env && *env) {
+			char *endp;
+			long long parsed = strtoll(env, &endp, 10);
+			if (endp != env && (!endp || *endp == '\0') && parsed >= 0)
+				dbg_main_window_radius = (ptrdiff_t)parsed;
+		}
+	}
+}
+
+static void
+dbg_init_saved_heap_watch_config(void)
+{
+	if (dbg_saved_heap_watch_enabled < 0) {
+		const char *env = getenv("PYTEALET_HEAP_SAVED_WATCH");
+		dbg_saved_heap_watch_enabled = (!env || !*env || *env != '0') ? 1 : 0;
+	}
+	if (dbg_saved_heap_abort_enabled < 0) {
+		const char *env = getenv("PYTEALET_HEAP_SAVED_ABORT");
+		dbg_saved_heap_abort_enabled = (!env || !*env || *env != '0') ? 1 : 0;
+	}
+}
+
+static void
+dbg_maybe_capture_anchor(const char *phase, PyTealetObject *owner, PyThreadState *tstate)
+{
+	char stack_marker;
+	void *near_sp = (void *)&stack_marker;
+	void *far_sp;
+	int in_live_obj = -1;
+	if (!owner || !tstate || !owner->tealet)
+		return;
+	if (owner->dbg_has_anchor)
+		return;
+	far_sp = tealet_get_far(owner->tealet);
+	owner->dbg_anchor_cframe = (void *)tstate->cframe;
+	owner->dbg_anchor_near = near_sp;
+	owner->dbg_anchor_far = far_sp;
+	owner->dbg_has_anchor = 1;
+	#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	in_live_obj = stack_contains_obj(near_sp,
+					 far_sp,
+					 owner->dbg_anchor_cframe,
+					 sizeof(CFrame));
+	#endif
+	fprintf(stderr,
+		"[TEALET_ANCHOR] phase=%s id=%ld obj=%p tealet=%p anchor=%p near=%p far=%p in_live_obj=%d\n",
+		phase,
+		owner->dbg_id,
+		(void *)owner,
+		(void *)owner->tealet,
+		owner->dbg_anchor_cframe,
+		owner->dbg_anchor_near,
+		owner->dbg_anchor_far,
+		in_live_obj);
+}
+
+static void
+dbg_validate_all_tealets(const char *phase)
+{
+	PyTealetObject *iter;
+	tealet_t *main_tealet = NULL;
+	tealet_t *current_tealet = NULL;
+	int checked = 0;
+	int failed = 0;
+	int skipped = 0;
+
+	if (dbg_validate_all_enabled < 0) {
+		const char *env = getenv("PYTEALET_VALIDATE_ALL_STACKS");
+		dbg_validate_all_enabled = (env && *env && *env != '0') ? 1 : 0;
+	}
+	if (!dbg_validate_all_enabled)
+		return;
+	if (!phase || strstr(phase, "after-restore") == NULL)
+		return;
+
+	if (dbg_validate_abort_enabled < 0) {
+		const char *env = getenv("PYTEALET_VALIDATE_ABORT");
+		dbg_validate_abort_enabled = (!env || !*env || *env != '0') ? 1 : 0;
+	}
+	dbg_init_main_window_watch_config();
+
+	for (iter = dbg_tealet_head; iter; iter = iter->dbg_next) {
+		if (iter->tealet) {
+			main_tealet = iter->tealet->main;
+			break;
+		}
+	}
+	if (main_tealet)
+		current_tealet = tealet_current(main_tealet);
+	{
+		PyTealetObject *current_owner = dbg_find_tealet_obj(current_tealet);
+		fprintf(stderr,
+			"[STACK_VALIDATE_ALL] phase=%s current=%p current_id=%ld current_is_main=%d main=%p\n",
+			phase ? phase : "unknown",
+			(void *)current_tealet,
+			current_owner ? current_owner->dbg_id : -1L,
+			(current_tealet && TEALET_IS_MAIN(current_tealet)) ? 1 : 0,
+			(void *)main_tealet);
+	}
+
+	for (iter = dbg_tealet_head; iter; iter = iter->dbg_next) {
+		int rc;
+		if (!iter->tealet) {
+			skipped++;
+			continue;
+		}
+		if (TEALET_IS_MAIN(iter->tealet) || iter->tealet == current_tealet || !iter->tstate.has_state) {
+			skipped++;
+			continue;
+		}
+		rc = tealet_validate_stack(iter->tealet);
+		if (rc == 0) {
+			checked++;
+		} else {
+			failed++;
+			fprintf(stderr,
+				"[STACK_VALIDATE_ALL] phase=%s id=%ld obj=%p tealet=%p state=%d rc=%d current=%p main=%p\n",
+				phase ? phase : "unknown",
+				iter->dbg_id,
+				(void *)iter,
+				(void *)iter->tealet,
+				iter->state,
+				rc,
+				(void *)current_tealet,
+				(void *)main_tealet);
+		}
+	}
+
+	fprintf(stderr,
+		"[STACK_VALIDATE_ALL] phase=%s checked=%d failed=%d skipped=%d\n",
+		phase ? phase : "unknown",
+		checked,
+		failed,
+		skipped);
+
+	if (failed > 0 && dbg_validate_abort_enabled) {
+		fprintf(stderr,
+			"[STACK_VALIDATE_ALL] phase=%s action=abort reason=validation_failure\n",
+			phase ? phase : "unknown");
+		abort();
+	}
+}
+
+static void
+dbg_failfast_validate_active_cframe(const char *phase, PyTealetObject *owner, PyThreadState *tstate)
+{
+	#if PY_VERSION_HEX < 0x030D0000 && TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	char stack_marker;
+	void *near_sp = (void *)&stack_marker;
+	void *far_sp = (owner && owner->tealet) ? tealet_get_far(owner->tealet) : NULL;
+	CFrame *head;
+	CFrame *anchor;
+	CFrame *chain_first_bad_frame = NULL;
+	CFrame *chain_stop = NULL;
+	int chain_depth = 0;
+	int chain_valid = 1;
+	int chain_reached_anchor = 0;
+	int chain_first_bad_reason = CFRAME_BAD_NONE;
+	uint64_t chain_hash;
+
+	if (!owner || !tstate)
+		return;
+	if (dbg_cframe_failfast_enabled < 0) {
+		const char *env = getenv("PYTEALET_CFRAME_FAILFAST");
+		dbg_cframe_failfast_enabled = (env && *env && *env != '0') ? 1 : 0;
+	}
+	if (!dbg_cframe_failfast_enabled)
+		return;
+	if (!phase || strstr(phase, "after-restore") == NULL)
+		return;
+
+	head = tstate->cframe;
+	if (!head)
+		return;
+	anchor = owner->dbg_has_anchor ? (CFrame *)owner->dbg_anchor_cframe : NULL;
+	chain_hash = cframe_chain_hash(head,
+				       near_sp,
+				       far_sp,
+				       anchor,
+				       &tstate->root_cframe,
+				       64,
+				       &chain_depth,
+				       &chain_valid,
+				       &chain_reached_anchor,
+				       &chain_first_bad_reason,
+				       &chain_first_bad_frame,
+				       &chain_stop);
+
+	if (!chain_valid && chain_first_bad_reason != CFRAME_BAD_ANCHOR_NOT_REACHED && chain_first_bad_reason != CFRAME_BAD_MAX_DEPTH) {
+		fprintf(stderr,
+			"[CFRAME_FAILFAST] phase=%s owner_id=%ld owner=%p tealet=%p is_main=%d state=%d current=%p tstate=%p head=%p near=%p far=%p anchor=%p chain_hash=0x%016llx chain_depth=%d chain_valid=%d chain_reached_anchor=%d bad_reason=%s bad_frame=%p chain_stop=%p action=abort\n",
+			phase ? phase : "unknown",
+			owner->dbg_id,
+			(void *)owner,
+			(void *)owner->tealet,
+			(owner->tealet && TEALET_IS_MAIN(owner->tealet)) ? 1 : 0,
+			owner->state,
+			(void *)(owner->tealet && owner->tealet->main ? tealet_current(owner->tealet->main) : NULL),
+			(void *)tstate,
+			(void *)head,
+			near_sp,
+			far_sp,
+			(void *)anchor,
+			(unsigned long long)chain_hash,
+			chain_depth,
+			chain_valid,
+			chain_reached_anchor,
+			cframe_bad_reason_name(chain_first_bad_reason),
+			(void *)chain_first_bad_frame,
+			(void *)chain_stop);
+		abort();
+	}
+	#else
+	(void)phase;
+	(void)owner;
+	(void)tstate;
+	#endif
+}
+
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+static void
+log_cframe_chain_short(const char *phase,
+			      const char *role,
+			      PyTealetObject *owner,
+			      CFrame *head,
+			      void *near_sp)
+{
+	int depth = 0;
+	int max_depth = 10;
+	CFrame *orig_head = head;
+	void *far_sp = (owner && owner->tealet) ? tealet_get_far(owner->tealet) : NULL;
+	void *live_lo;
+	void *live_hi;
+	void *saved_lo;
+	void *saved_hi;
+	stack_bounds(near_sp, far_sp, &live_lo, &live_hi);
+	stack_bounds(owner ? owner->tstate.stack_near_saved : NULL,
+			 owner ? owner->tstate.stack_far_saved : NULL,
+			 &saved_lo,
+			 &saved_hi);
+	if (strcmp(role, "next-saved") == 0) {
+		fprintf(stderr,
+			"[CFRAME_SW] phase=%s role=%s owner=%p tealet=%p state=%d has_state=%d saved_cframe=%p head=%p near=%p far=%p live_lo=%p live_hi=%p saved_near=%p saved_far=%p saved_lo=%p saved_hi=%p chain_walk=skipped reason=not_active\n",
+			phase,
+			role,
+			(void *)owner,
+			(void *)(owner ? owner->tealet : NULL),
+			owner ? owner->state : -1,
+			owner ? owner->tstate.has_state : -1,
+			(void *)(owner ? owner->tstate.cframe : NULL),
+			(void *)head,
+			near_sp,
+			far_sp,
+			live_lo,
+			live_hi,
+			owner ? owner->tstate.stack_near_saved : NULL,
+			owner ? owner->tstate.stack_far_saved : NULL,
+			saved_lo,
+			saved_hi);
+		return;
+	}
+
+	fprintf(stderr,
+		"[CFRAME_SW] phase=%s role=%s owner=%p tealet=%p state=%d has_state=%d saved_cframe=%p head=%p near=%p far=%p live_lo=%p live_hi=%p saved_near=%p saved_far=%p saved_lo=%p saved_hi=%p\n",
+		phase,
+		role,
+		(void *)owner,
+		(void *)(owner ? owner->tealet : NULL),
+		owner ? owner->state : -1,
+		owner ? owner->tstate.has_state : -1,
+		(void *)(owner ? owner->tstate.cframe : NULL),
+		(void *)head,
+		near_sp,
+		far_sp,
+		live_lo,
+		live_hi,
+		owner ? owner->tstate.stack_near_saved : NULL,
+		owner ? owner->tstate.stack_far_saved : NULL,
+		saved_lo,
+		saved_hi);
+
+	while (head && depth < max_depth) {
+		ptrdiff_t d_near = tealet_stack_diff(near_sp, (void *)head);
+		ptrdiff_t d_far = far_sp ? tealet_stack_diff(far_sp, (void *)head) : 0;
+		ptrdiff_t d_saved_near = (owner && owner->tstate.stack_near_saved)
+			? tealet_stack_diff(owner->tstate.stack_near_saved, (void *)head)
+			: 0;
+		ptrdiff_t d_saved_far = (owner && owner->tstate.stack_far_saved)
+			? tealet_stack_diff(owner->tstate.stack_far_saved, (void *)head)
+			: 0;
+		int in_live = stack_contains_ptr(near_sp, far_sp, (void *)head);
+		int in_live_obj = stack_contains_obj(near_sp, far_sp, (void *)head, sizeof(*head));
+		int in_saved = stack_contains_ptr(owner ? owner->tstate.stack_near_saved : NULL,
+						 owner ? owner->tstate.stack_far_saved : NULL,
+						 (void *)head);
+		int in_saved_obj = stack_contains_obj(owner ? owner->tstate.stack_near_saved : NULL,
+						     owner ? owner->tstate.stack_far_saved : NULL,
+						     (void *)head,
+						     sizeof(*head));
+		int bogus = 0;
+
+		if (depth > 0 && (d_near > 65536 || d_near < -(8 * 1024 * 1024)))
+			bogus = 1;
+		if (head->use_tracing < 0 || head->use_tracing > 2)
+			bogus = 1;
+
+		fprintf(stderr,
+			"[CFRAME_SW]   #%02d frame=%p prev=%p use_tracing=%d d_near=%p d_far=%p d_saved_near=%p d_saved_far=%p in_live=%d in_live_obj=%d in_saved=%d in_saved_obj=%d%s\n",
+			depth,
+			(void *)head,
+			(void *)head->previous,
+			head->use_tracing,
+			diff_to_ptr(d_near),
+			diff_to_ptr(d_far),
+			diff_to_ptr(d_saved_near),
+			diff_to_ptr(d_saved_far),
+			in_live,
+			in_live_obj,
+			in_saved,
+			in_saved_obj,
+			bogus ? " BOGUS" : "");
+
+		if (bogus || head->previous == NULL || head->previous == head)
+			break;
+
+		head = head->previous;
+		depth++;
+	}
+
+	if (head && depth >= max_depth) {
+		fprintf(stderr,
+			"[CFRAME_SW]   ... truncated after %d links, next=%p\n",
+			max_depth,
+			(void *)head);
+	}
+	{
+		int chain_depth = 0;
+		int chain_valid = -1;
+		int chain_reached_anchor = -1;
+		int chain_first_bad_reason = CFRAME_BAD_NONE;
+		CFrame *chain_stop = NULL;
+		CFrame *chain_first_bad_frame = NULL;
+		CFrame *anchor = (owner && owner->dbg_has_anchor)
+			? (CFrame *)owner->dbg_anchor_cframe
+			: NULL;
+		uint64_t chain_hash = cframe_chain_hash(orig_head,
+						      near_sp,
+						      far_sp,
+						      anchor,
+						      NULL,
+						      64,
+						      &chain_depth,
+						      &chain_valid,
+						      &chain_reached_anchor,
+						      &chain_first_bad_reason,
+						      &chain_first_bad_frame,
+						      &chain_stop);
+		fprintf(stderr,
+			"[CFRAME_SW]   chain_hash=0x%016llx chain_depth=%d chain_valid=%d chain_reached_anchor=%d anchor=%p chain_first_bad_frame=%p chain_first_bad_reason=%s chain_stop=%p\n",
+			(unsigned long long)chain_hash,
+			chain_depth,
+			chain_valid,
+			chain_reached_anchor,
+			(void *)anchor,
+			(void *)chain_first_bad_frame,
+			cframe_bad_reason_name(chain_first_bad_reason),
+			(void *)chain_stop);
+	}
+}
+
+static void
+log_switch_cframes(const char *phase,
+		   PyTealetObject *prev_owner,
+		   PyTealetObject *next_owner,
+		   PyThreadState *tstate)
+{
+	char stack_marker;
+	void *near_sp = (void *)&stack_marker;
+	void *saved_lo;
+	void *saved_hi;
+	CFrame *active_head = tstate ? tstate->cframe : NULL;
+	CFrame *next_saved_head = (next_owner && next_owner->tstate.has_state)
+		? next_owner->tstate.cframe
+		: NULL;
+	tealet_t *active_tealet = NULL;
+	PyTealetObject *active_owner = NULL;
+	PyTealetObject *iter;
+
+	dbg_init_saved_heap_watch_config();
+	if (prev_owner && prev_owner->tealet && prev_owner->tealet->main)
+		active_tealet = tealet_current(prev_owner->tealet->main);
+	active_owner = dbg_find_tealet_obj(active_tealet);
+
+	fprintf(stderr,
+		"[TEALET_DUMP] phase=%s total_head=%p prev_owner=%p next_owner=%p active_owner=%p active_tealet=%p active_cframe=%p\n",
+		phase,
+		(void *)dbg_tealet_head,
+		(void *)prev_owner,
+		(void *)next_owner,
+		(void *)active_owner,
+		(void *)active_tealet,
+		(void *)active_head);
+	for (iter = dbg_tealet_head; iter; iter = iter->dbg_next) {
+		void *live_far = iter->tealet ? tealet_get_far(iter->tealet) : NULL;
+		CFrame *chosen_head = NULL;
+		const char *head_source = "none";
+		int is_uninvolved_parked;
+		int has_saved_blob = 0;
+		int saved_blob_is_heap = 0;
+		void *saved_blob_addr = NULL;
+		size_t saved_blob_len = 0;
+		void *saved_payload_lo = NULL;
+		size_t saved_payload_size = 0;
+		uint64_t saved_blob_hash = 0;
+		int saved_blob_mutated = 0;
+		ptrdiff_t d_saved_near = 0;
+		ptrdiff_t d_saved_far = 0;
+		int in_live = -1;
+		int in_live_obj = -1;
+		int in_saved = -1;
+		int in_saved_obj = -1;
+		int chain_depth = -1;
+		int chain_valid = -1;
+		int chain_reached_anchor = -1;
+		int chain_first_bad_reason = CFRAME_BAD_NONE;
+		CFrame *chain_stop = NULL;
+		CFrame *chain_first_bad_frame = NULL;
+		CFrame *anchor = (iter->dbg_has_anchor)
+			? (CFrame *)iter->dbg_anchor_cframe
+			: NULL;
+		uint64_t chain_hash = 0;
+		int likely_bogus = 0;
+
+		if (iter == active_owner && tstate) {
+			chosen_head = tstate->cframe;
+			head_source = "active";
+		} else if (iter->tstate.has_state) {
+			chosen_head = iter->tstate.cframe;
+			head_source = "saved";
+		}
+		if (chosen_head && iter->tstate.stack_near_saved)
+			d_saved_near = tealet_stack_diff(iter->tstate.stack_near_saved, (void *)chosen_head);
+		if (chosen_head && iter->tstate.stack_far_saved)
+			d_saved_far = tealet_stack_diff(iter->tstate.stack_far_saved, (void *)chosen_head);
+		if (chosen_head) {
+			void *hash_near = (iter == active_owner) ? near_sp : iter->tstate.stack_near_saved;
+			void *hash_far = (iter == active_owner) ? live_far : iter->tstate.stack_far_saved;
+			in_live = stack_contains_ptr(near_sp, live_far, (void *)chosen_head);
+			in_live_obj = stack_contains_obj(near_sp, live_far, (void *)chosen_head, sizeof(*chosen_head));
+			in_saved = stack_contains_ptr(iter->tstate.stack_near_saved,
+						 iter->tstate.stack_far_saved,
+						 (void *)chosen_head);
+			in_saved_obj = stack_contains_obj(iter->tstate.stack_near_saved,
+						     iter->tstate.stack_far_saved,
+						     (void *)chosen_head,
+						     sizeof(*chosen_head));
+			if (phase && strstr(phase, "after-restore") != NULL &&
+			    iter == active_owner && in_live_obj == 1 && iter->tstate.has_state == 0) {
+				chain_hash = cframe_chain_hash(chosen_head,
+						      hash_near,
+						      hash_far,
+						      anchor,
+						      tstate ? &tstate->root_cframe : NULL,
+						      64,
+						      &chain_depth,
+						      &chain_valid,
+						      &chain_reached_anchor,
+						      &chain_first_bad_reason,
+						      &chain_first_bad_frame,
+						      &chain_stop);
+				if (dbg_cframe_failfast_any_enabled < 0) {
+					const char *env = getenv("PYTEALET_CFRAME_FAILFAST_ANY");
+					dbg_cframe_failfast_any_enabled = (env && *env && *env != '0') ? 1 : 0;
+				}
+				if (dbg_cframe_failfast_any_enabled &&
+				    chain_valid == 0 &&
+				    chain_first_bad_reason != CFRAME_BAD_ANCHOR_NOT_REACHED &&
+				    chain_first_bad_reason != CFRAME_BAD_MAX_DEPTH) {
+					fprintf(stderr,
+						"[CFRAME_FAILFAST_ANY] phase=%s id=%ld obj=%p tealet=%p state=%d has_state=%d own_refs=%d head=%p head_src=%s anchor=%p chain_hash=0x%016llx chain_depth=%d chain_valid=%d chain_reached_anchor=%d bad_reason=%s bad_frame=%p chain_stop=%p action=abort\n",
+						phase,
+						iter->dbg_id,
+						(void *)iter,
+						(void *)iter->tealet,
+						iter->state,
+						iter->tstate.has_state,
+						iter->tstate.own_refs,
+						(void *)chosen_head,
+						head_source,
+						(void *)anchor,
+						(unsigned long long)chain_hash,
+						chain_depth,
+						chain_valid,
+						chain_reached_anchor,
+						cframe_bad_reason_name(chain_first_bad_reason),
+						(void *)chain_first_bad_frame,
+						(void *)chain_stop);
+					abort();
+				}
+			}
+		}
+		if (chosen_head && (d_saved_near > 65536 || d_saved_near < -(8 * 1024 * 1024)))
+			likely_bogus = 1;
+		if (chosen_head && (chosen_head->use_tracing < 0 || chosen_head->use_tracing > 2))
+			likely_bogus = 1;
+
+		is_uninvolved_parked = (iter != prev_owner && iter != next_owner && iter->tstate.has_state);
+		if (is_uninvolved_parked &&
+		    iter->tstate.has_state &&
+		    iter->tstate.stack_near_saved &&
+		    iter->tstate.stack_far_saved) {
+			stack_bounds(iter->tstate.stack_near_saved,
+				    iter->tstate.stack_far_saved,
+				    &saved_lo,
+				    &saved_hi);
+			if (saved_lo && saved_hi && (char *)saved_hi >= (char *)saved_lo) {
+				saved_blob_is_heap = dbg_heap_range_in_single_block(saved_lo,
+								       saved_hi,
+								       &saved_payload_lo,
+								       &saved_payload_size);
+				if (saved_blob_is_heap) {
+					saved_blob_addr = saved_lo;
+					saved_blob_len = (size_t)((char *)saved_hi - (char *)saved_lo + 1);
+					saved_blob_hash = fnv1a64_update(1469598103934665603ULL,
+								   saved_blob_addr,
+								   saved_blob_len);
+					has_saved_blob = 1;
+				}
+			}
+		}
+
+		if (dbg_saved_heap_watch_enabled &&
+		    is_uninvolved_parked &&
+		    !has_saved_blob &&
+		    iter->tstate.stack_near_saved &&
+		    iter->tstate.stack_far_saved) {
+			fprintf(stderr,
+				"[HEAP_SAVED_WATCH] phase=%s id=%ld obj=%p tealet=%p state=%d has_state=%d own_refs=%d action=skip reason=range_not_heap saved_near=%p saved_far=%p\n",
+				phase,
+				iter->dbg_id,
+				(void *)iter,
+				(void *)iter->tealet,
+				iter->state,
+				iter->tstate.has_state,
+				iter->tstate.own_refs,
+				iter->tstate.stack_near_saved,
+				iter->tstate.stack_far_saved);
+		}
+
+		if (dbg_saved_heap_watch_enabled &&
+		    is_uninvolved_parked &&
+		    has_saved_blob &&
+		    iter->dbg_saved_heap_has_snapshot &&
+		    iter->dbg_saved_heap_addr == saved_blob_addr &&
+		    iter->dbg_saved_heap_len == saved_blob_len &&
+		    iter->dbg_saved_heap_hash != saved_blob_hash) {
+			saved_blob_mutated = 1;
+			fprintf(stderr,
+				"[HEAP_SAVED_WATCH] phase=%s id=%ld obj=%p tealet=%p state=%d has_state=%d own_refs=%d saved_blob=[%p,%p] len=%zu saved_payload=[%p,%p] payload_size=%zu old_hash=0x%016llx new_hash=0x%016llx head=%p head_src=%s chain_hash=0x%016llx chain_depth=%d chain_valid=%d bad_reason=%s action=%s\n",
+				phase,
+				iter->dbg_id,
+				(void *)iter,
+				(void *)iter->tealet,
+				iter->state,
+				iter->tstate.has_state,
+				iter->tstate.own_refs,
+				saved_blob_addr,
+				(void *)((char *)saved_blob_addr + saved_blob_len - 1),
+				saved_blob_len,
+				saved_payload_lo,
+				(void *)((char *)saved_payload_lo + saved_payload_size - 1),
+				saved_payload_size,
+				(unsigned long long)iter->dbg_saved_heap_hash,
+				(unsigned long long)saved_blob_hash,
+				(void *)chosen_head,
+				head_source,
+				(unsigned long long)chain_hash,
+				chain_depth,
+				chain_valid,
+				cframe_bad_reason_name(chain_first_bad_reason),
+				dbg_saved_heap_abort_enabled ? "abort" : "log");
+			if (dbg_saved_heap_abort_enabled)
+				abort();
+		}
+
+		if (!iter->dbg_has_last_snapshot ||
+		    iter->dbg_last_head != (void *)chosen_head ||
+		    iter->dbg_last_saved_cframe != (void *)iter->tstate.cframe ||
+		    iter->dbg_last_saved_near != iter->tstate.stack_near_saved ||
+		    iter->dbg_last_saved_far != iter->tstate.stack_far_saved ||
+		    iter->dbg_last_live_far != live_far ||
+		    iter->dbg_last_chain_hash != chain_hash ||
+		    iter->dbg_last_chain_depth != chain_depth ||
+		    iter->dbg_last_chain_valid != chain_valid ||
+		    iter->dbg_last_state != iter->state ||
+		    iter->dbg_last_has_state != iter->tstate.has_state ||
+		    iter->dbg_last_own_refs != iter->tstate.own_refs) {
+			fprintf(stderr,
+				"[TEALET_DELTA] phase=%s id=%ld obj=%p state:%d->%d has_state:%d->%d own_refs:%d->%d head:%p->%p saved_cframe:%p->%p saved_near:%p->%p saved_far:%p->%p live_far:%p->%p chain_hash:0x%016llx->0x%016llx chain_depth:%d->%d chain_valid:%d->%d\n",
+				phase,
+				iter->dbg_id,
+				(void *)iter,
+				iter->dbg_last_state,
+				iter->state,
+				iter->dbg_last_has_state,
+				iter->tstate.has_state,
+				iter->dbg_last_own_refs,
+				iter->tstate.own_refs,
+				iter->dbg_last_head,
+				(void *)chosen_head,
+				iter->dbg_last_saved_cframe,
+				(void *)iter->tstate.cframe,
+				iter->dbg_last_saved_near,
+				iter->tstate.stack_near_saved,
+				iter->dbg_last_saved_far,
+				iter->tstate.stack_far_saved,
+				iter->dbg_last_live_far,
+				live_far,
+				(unsigned long long)iter->dbg_last_chain_hash,
+				(unsigned long long)chain_hash,
+				iter->dbg_last_chain_depth,
+				chain_depth,
+				iter->dbg_last_chain_valid,
+				chain_valid);
+		}
+
+		fprintf(stderr,
+			"[TEALET_DUMP]   id=%ld obj=%p tealet=%p state=%d flags=%s%s has_state=%d own_refs=%d live_far=%p saved_near=%p saved_far=%p saved_cframe=%p head=%p head_src=%s anchor=%p has_anchor=%d d_saved_near=%p d_saved_far=%p in_live=%d in_live_obj=%d in_saved=%d in_saved_obj=%d chain_hash=0x%016llx chain_depth=%d chain_valid=%d chain_reached_anchor=%d chain_first_bad_frame=%p chain_first_bad_reason=%s chain_stop=%p%s\n",
+			iter->dbg_id,
+			(void *)iter,
+			(void *)iter->tealet,
+			iter->state,
+			(iter == prev_owner) ? "PREV" : "",
+			(iter == next_owner) ? "NEXT" : "",
+			iter->tstate.has_state,
+			iter->tstate.own_refs,
+			live_far,
+			iter->tstate.stack_near_saved,
+			iter->tstate.stack_far_saved,
+			(void *)iter->tstate.cframe,
+			(void *)chosen_head,
+			head_source,
+			iter->dbg_anchor_cframe,
+			iter->dbg_has_anchor,
+			diff_to_ptr(d_saved_near),
+			diff_to_ptr(d_saved_far),
+			in_live,
+			in_live_obj,
+			in_saved,
+			in_saved_obj,
+			(unsigned long long)chain_hash,
+			chain_depth,
+			chain_valid,
+			chain_reached_anchor,
+			(void *)chain_first_bad_frame,
+			cframe_bad_reason_name(chain_first_bad_reason),
+			(void *)chain_stop,
+			likely_bogus ? " BOGUS" : "");
+
+		iter->dbg_last_head = (void *)chosen_head;
+		iter->dbg_last_saved_cframe = (void *)iter->tstate.cframe;
+		iter->dbg_last_saved_near = iter->tstate.stack_near_saved;
+		iter->dbg_last_saved_far = iter->tstate.stack_far_saved;
+		iter->dbg_last_live_far = live_far;
+		iter->dbg_last_chain_hash = chain_hash;
+		iter->dbg_last_chain_depth = chain_depth;
+		iter->dbg_last_chain_valid = chain_valid;
+		iter->dbg_last_state = iter->state;
+		iter->dbg_last_has_state = iter->tstate.has_state;
+		iter->dbg_last_own_refs = iter->tstate.own_refs;
+		iter->dbg_has_last_snapshot = 1;
+
+		if (!has_saved_blob) {
+			iter->dbg_saved_heap_has_snapshot = 0;
+			iter->dbg_saved_heap_addr = NULL;
+			iter->dbg_saved_heap_len = 0;
+			iter->dbg_saved_heap_hash = 0;
+		} else if (!saved_blob_mutated || !dbg_saved_heap_abort_enabled) {
+			iter->dbg_saved_heap_has_snapshot = 1;
+			iter->dbg_saved_heap_addr = saved_blob_addr;
+			iter->dbg_saved_heap_len = saved_blob_len;
+			iter->dbg_saved_heap_hash = saved_blob_hash;
+		}
+	}
+
+	log_cframe_chain_short(phase, "prev-active", active_owner, active_head, near_sp);
+	log_cframe_chain_short(phase, "next-saved", next_owner, next_saved_head, near_sp);
+}
+#endif
+#endif
 
 typedef struct pytealet_main_arg {
 	int stub;
@@ -136,50 +1371,269 @@ static PyObject *InvalidError;
 static PyObject *StateError;
 static PyObject *DefunctError;
 
-/* helper functions to save and restore callstack related data from the python threadstate
- * into the tealet object
- */
-static void
-save_tstate(PyTealetObject *current, PyThreadState *tstate)
+
+static void PyTealetTstate_Init(PyTealetTstate *saved)
 {
-	if (!tstate)
-		tstate = PyThreadState_GET();
-	assert(current->frame == NULL);
-	current->frame = tstate->frame;
-	current->recursion_depth = tstate->recursion_depth;
-	tstate->frame = NULL;
-	tstate->recursion_depth = 0;
-	assert(current->exc_val == NULL && current->exc_type == NULL && current->exc_tb == NULL);
-	/* Python 3.7+ uses curexc_* instead of exc_* for current exception */
-	current->exc_type = tstate->curexc_type;
-	current->exc_val = tstate->curexc_value;
-	current->exc_tb = tstate->curexc_traceback;
-	tstate->curexc_type = tstate->curexc_value = tstate->curexc_traceback = NULL;
+	saved->frame = NULL;
+	saved->exc_type = NULL;
+	saved->exc_val = NULL;
+	saved->exc_tb = NULL;
+	saved->exc_info = NULL;
+	saved->exc_state.exc_value = NULL;
+	saved->recursion_depth = 0;
+	saved->trash_delete_nesting = 0;
+	saved->context = NULL;
+	saved->has_state = 0;
+	saved->own_refs = 0;
+	saved->stack_near_saved = NULL;
+	saved->stack_far_saved = NULL;
+#if PY_VERSION_HEX < 0x030D0000
+	saved->cframe = NULL;
+	saved->cframe_owned = NULL;
+#endif
+}
+
+/* Copy saved tealet state for object cloning (PyTealet(stub)).
+ * This is distinct from switch-time capture/restore move semantics.
+ * If source has no saved state, destination remains initialized/empty.
+ */
+static void PyTealetTstate_CopyForClone(PyTealetTstate *dst, const PyTealetTstate *src)
+{
+	PyTealetTstate_Init(dst);
+	if (!src->has_state)
+		return;
+
+	dst->frame = src->frame;
+	dst->exc_type = src->exc_type;
+	dst->exc_val = src->exc_val;
+	dst->exc_tb = src->exc_tb;
+	dst->exc_state = src->exc_state;
+
+	/* If source exc_info points to its inline exc_state, remap to destination. */
+	if (src->exc_info == &src->exc_state)
+		dst->exc_info = &dst->exc_state;
+	else
+		dst->exc_info = src->exc_info;
+
+	dst->recursion_depth = src->recursion_depth;
+	dst->trash_delete_nesting = src->trash_delete_nesting;
+	dst->context = src->context;
+	dst->stack_near_saved = src->stack_near_saved;
+	dst->stack_far_saved = src->stack_far_saved;
+#if PY_VERSION_HEX < 0x030D0000
+	dst->cframe = src->cframe;
+	dst->cframe_owned = src->cframe;
+#endif
+	dst->has_state = 1;
+	dst->own_refs = 0;
+}
+
+/* Capture (move) thread-state fields into a tealet tstate struct.
+ * Ownership is transferred from PyThreadState to saved.
+ */
+static void PyTealetTstate_Capture(PyTealetTstate *saved, PyThreadState *py_tstate)
+{
+	char stack_marker;
+	if (!py_tstate)
+		py_tstate = PyThreadState_GET();
+
+	assert(saved->has_state == 0);
+	saved->frame = py_tstate->frame;
+	saved->recursion_depth = py_tstate->recursion_depth;
+	py_tstate->frame = NULL;
+	py_tstate->recursion_depth = 0;
+
+	saved->exc_type = py_tstate->curexc_type;
+	saved->exc_val = py_tstate->curexc_value;
+	saved->exc_tb = py_tstate->curexc_traceback;
+	py_tstate->curexc_type = py_tstate->curexc_value = py_tstate->curexc_traceback = NULL;
+
+	/* exc_info is borrowed: save/restore pointer value only. */
+	saved->exc_info = py_tstate->exc_info;
+	saved->exc_state = py_tstate->exc_state;
+	py_tstate->exc_info = &py_tstate->exc_state;
+	py_tstate->exc_state.exc_value = NULL;
+
+	saved->context = py_tstate->context;
+	py_tstate->context = NULL;
+	saved->stack_near_saved = (void *)&stack_marker;
+
+#if PY_VERSION_HEX < 0x030D0000
+	saved->cframe = py_tstate->cframe;
+	saved->cframe_owned = saved->cframe;
+#endif
+	saved->trash_delete_nesting = py_tstate->trash_delete_nesting;
+	py_tstate->trash_delete_nesting = 0;
+
+	saved->has_state = 1;
+}
+
+/* Restore (move) previously saved tealet tstate into PyThreadState. */
+static void PyTealetTstate_Restore(PyTealetTstate *saved, PyThreadState *py_tstate)
+{
+	if (!py_tstate)
+		py_tstate = PyThreadState_GET();
+
+	assert(saved->has_state == 1);
+
+	assert(py_tstate->frame == NULL);
+	assert(py_tstate->recursion_depth == 0);
+	assert(py_tstate->context == NULL);
+
+	py_tstate->frame = saved->frame;
+	py_tstate->recursion_depth = saved->recursion_depth;
+
+	Py_CLEAR(py_tstate->curexc_type);
+	Py_CLEAR(py_tstate->curexc_value);
+	Py_CLEAR(py_tstate->curexc_traceback);
+	py_tstate->curexc_type = saved->exc_type;
+	py_tstate->curexc_value = saved->exc_val;
+	py_tstate->curexc_traceback = saved->exc_tb;
+
+	py_tstate->exc_state = saved->exc_state;
+	py_tstate->exc_info = saved->exc_info ? saved->exc_info : &py_tstate->exc_state;
+
+	py_tstate->context = saved->context;
+	py_tstate->context_ver++;  /* Invalidate contextvars cache */
+
+#if PY_VERSION_HEX < 0x030D0000
+	py_tstate->cframe = saved->cframe;
+	assert(py_tstate->cframe != NULL);
+	saved->cframe_owned = saved->cframe;
+#endif
+	py_tstate->trash_delete_nesting = saved->trash_delete_nesting;
+
+	saved->has_state = 0;
+}
+
+/* Increment and decrement the reference count of the tstate's references.
+ * we need to Increment the references when we create new tealets from an existing
+ * one (or main), and decrement when a tealet terminates.
+ */
+static void PyTealetTstate_IncRef(PyTealetTstate *saved)
+{
+	assert(saved->has_state == 1);
+	assert(saved->own_refs == 0);
+	Py_XINCREF(saved->frame);
+	Py_XINCREF(saved->exc_type);
+	Py_XINCREF(saved->exc_val);
+	Py_XINCREF(saved->exc_tb);
+	Py_XINCREF(saved->exc_state.exc_value);
+	/* exc_info is a pointer to exc_state or a stack item, so we don't own a reference to it */
+	Py_XINCREF(saved->context);
+	saved->own_refs = 1;
+}
+
+static void PyTealetTstate_DecRef(PyTealetTstate *saved)
+{
+	assert(saved->has_state == 1);
+	assert(saved->own_refs == 1);
+	Py_XDECREF(saved->frame);
+	Py_XDECREF(saved->exc_type);
+	Py_XDECREF(saved->exc_val);
+	Py_XDECREF(saved->exc_tb);
+	Py_XDECREF(saved->exc_state.exc_value);
+	/* exc_info is a pointer to exc_state or a stack item, so we don't own a reference to it */
+	Py_XDECREF(saved->context);
+	saved->own_refs = 0;
 }
 
 /* helper functions to save and restore callstack related data from the python threadstate
  * into the tealet object
  */
 static void
-restore_tstate(PyTealetObject *current, PyThreadState *tstate)
+save_tstate(PyTealetObject *current, PyThreadState *tstate)
 {
+	LOG("save_tstate: current=%p, tstate=%p, frame=%p, depth=%d\n",
+	    current, tstate, tstate->frame, tstate->recursion_depth);
 	if (!tstate)
 		tstate = PyThreadState_GET();
-	assert(tstate->frame == NULL);
-	
-	tstate->frame = current->frame;
-	tstate->recursion_depth = current->recursion_depth;
-	current->frame = NULL;
-	current->recursion_depth = 0;
+	if (current && current->tealet)
+		current->tstate.stack_far_saved = tealet_get_far(current->tealet);
+
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	log_cframe_chain("save_tstate BEFORE capture", (void *)current,
+		current && current->tealet ? tealet_get_far(current->tealet) : NULL,
+		tstate);
+#endif
+#endif
+
+	assert(current->tstate.has_state == 0);
+	LOG("save_tstate: tstate->context=%p before save\n", tstate->context);
+	PyTealetTstate_Capture(&current->tstate, tstate);
+
+#if PY_VERSION_HEX < 0x030D0000
+	dbg_capture_saved_main_window("save_tstate-after-capture", current);
+#endif
+
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	log_cframe_chain("save_tstate AFTER capture", (void *)current,
+		current && current->tealet ? tealet_get_far(current->tealet) : NULL,
+		tstate);
+	fprintf(stderr,
+		"[CFRAME] save_tstate SAVED owner=%p saved_cframe=%p\n",
+		(void *)current,
+		(void *)current->tstate.cframe);
+#endif
+#endif
+}
+/* helper functions to save and restore callstack related data from the python threadstate
+ * into the tealet object
+ */
+static void
+restore_tstate(PyTealetObject *current, PyThreadState *tstate)
+{
+	LOG("restore_tstate: current=%p, tstate=%p, restoring frame=%p, depth=%d\n",
+	    current, tstate, current->tstate.frame, current->tstate.recursion_depth);
+	LOG("restore_tstate: current->context=%p, current->exc_val=%p\n",
+	    current->tstate.context, current->tstate.exc_val);
+
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	fprintf(stderr,
+		"[CFRAME] restore_tstate BEFORE restore chain_walk=skipped reason=transient_pre_restore_state owner=%p saved_cframe=%p\n",
+		(void *)current,
+		(void *)current->tstate.cframe);
+#endif
+#endif
+
 	assert(!PyErr_Occurred());
-	/* Python 3.7+ uses curexc_* instead of exc_* for current exception */
-	Py_CLEAR(tstate->curexc_type); /* there can be cruft here from the last tealet's exit */
-	Py_CLEAR(tstate->curexc_value);
-	Py_CLEAR(tstate->curexc_traceback);
-	tstate->curexc_type = current->exc_type;
-	tstate->curexc_value = current->exc_val;
-	tstate->curexc_traceback = current->exc_tb;
-	current->exc_type = current->exc_val = current->exc_tb = NULL;
+
+	PyTealetTstate_Restore(&current->tstate, tstate);
+	current->dbg_saved_window_has_snapshot = 0;
+
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	log_cframe_chain("restore_tstate AFTER restore", (void *)current,
+		current && current->tealet ? tealet_get_far(current->tealet) : NULL,
+		tstate);
+#endif
+#endif
+	
+	/* Comprehensive verification of restored state */
+	/* Frame can be NULL for a new tealet that hasn't executed yet */
+	/* recursion_depth should match whether we have frames */
+	
+	/* Context can be NULL in some Python states */
+	/* No assertion needed for context */
+	
+	/* cframe should always point somewhere valid */
+#if PY_VERSION_HEX < 0x030D0000
+	assert(tstate->cframe != NULL);
+#endif
+	
+	/* Current exceptions should be NULL or valid objects */
+	assert(tstate->curexc_type == NULL || PyType_Check(tstate->curexc_type) || tstate->curexc_type == Py_None);
+	assert(tstate->curexc_value == NULL || PyObject_CheckBuffer(tstate->curexc_value) || 1); /* Any object ok */
+	assert(tstate->curexc_traceback == NULL || PyTraceBack_Check(tstate->curexc_traceback));
+	
+	/* Recursion depth should be non-negative */
+	assert(tstate->recursion_depth >= 0);
+	
+	LOG("restore_tstate COMPLETE: tstate now has frame=%p, depth=%d\n",
+	    tstate->frame, tstate->recursion_depth);
 }
 
 /* Helper functions to fill/empty the dustbin.  We must be careful not to
@@ -234,14 +1688,42 @@ pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
 		return NULL;
 	result->state = STATE_NEW;
 	result->tealet = NULL;
-	result->frame = NULL;
-	result->exc_type = result->exc_val = result->exc_tb = NULL;
-	result->recursion_depth = 0;
+	PyTealetTstate_Init(&result->tstate);
 	result->weakreflist = NULL;
+	result->dbg_id = 0;
+	result->dbg_prev = NULL;
+	result->dbg_next = NULL;
+	result->dbg_last_head = NULL;
+	result->dbg_anchor_cframe = NULL;
+	result->dbg_anchor_near = NULL;
+	result->dbg_anchor_far = NULL;
+	result->dbg_has_anchor = 0;
+	result->dbg_last_saved_cframe = NULL;
+	result->dbg_last_saved_near = NULL;
+	result->dbg_last_saved_far = NULL;
+	result->dbg_last_live_far = NULL;
+	result->dbg_last_state = -1;
+	result->dbg_last_has_state = -1;
+	result->dbg_last_own_refs = -1;
+	result->dbg_has_last_snapshot = 0;
+	result->dbg_saved_window_has_snapshot = 0;
+	result->dbg_saved_window_addr = NULL;
+	result->dbg_saved_window_len = 0;
+	result->dbg_saved_window_hash = 0;
+	result->dbg_saved_heap_has_snapshot = 0;
+	result->dbg_saved_heap_addr = NULL;
+	result->dbg_saved_heap_len = 0;
+	result->dbg_saved_heap_hash = 0;
+	dbg_register_tealet(result);
+
 	if (src) {
+		assert(0 && "clone-from-source path executed unexpectedly; add/adjust tests before enabling this path");
+		PyTealetTstate_CopyForClone(&result->tstate, &src->tstate);
+		PyTealetTstate_IncRef(&result->tstate);
 		if (src->state == STATE_STUB) {
 			result->tealet = tealet_duplicate(src->tealet);
 			if (!result->tealet) {
+				PyTealetTstate_DecRef(&result->tstate);
 				Py_DECREF(result);
 				return PyErr_NoMemory();
 			}
@@ -262,10 +1744,13 @@ pytealet_dealloc(PyObject *obj)
 			PyErr_WriteUnraisable(Py_None);
 		}
 	}
-	/* leave tealet->frame alone, it's a weakref */
-	Py_XDECREF(tealet->exc_type);
-	Py_XDECREF(tealet->exc_val);
-	Py_XDECREF(tealet->exc_tb);
+	dbg_unregister_tealet(tealet);
+	/* Release any owned saved thread-state references */
+	if (tealet->tstate.has_state) {
+		if (tealet->tstate.own_refs)
+			PyTealetTstate_DecRef(&tealet->tstate);
+	}
+	PyTealetTstate_Init(&tealet->tstate);
 	if (tealet->weakreflist != NULL)
         PyObject_ClearWeakRefs(obj);
 	if (tealet->tealet)
@@ -297,6 +1782,136 @@ pytealet_stub(PyObject *self)
 	return self;
 }
 
+#if PY_VERSION_HEX < 0x030D0000
+/* Temporary debug knob: artificially push new-tealet far boundary deeper. */
+#ifndef TEALET_PYTEALET_FAR_PAD_BYTES
+#define TEALET_PYTEALET_FAR_PAD_BYTES 1024
+#endif
+
+static ptrdiff_t
+get_far_pad_bytes_runtime(void)
+{
+	static int initialized = 0;
+	static ptrdiff_t cached = (ptrdiff_t)TEALET_PYTEALET_FAR_PAD_BYTES;
+	const char *env;
+	char *endp;
+	long long parsed;
+
+	if (initialized)
+		return cached;
+	initialized = 1;
+
+	env = getenv("PYTEALET_FAR_PAD_BYTES");
+	if (!env || !*env)
+		return cached;
+
+	parsed = strtoll(env, &endp, 10);
+	if (endp == env || (endp && *endp != '\0'))
+		return cached;
+	if (parsed < 0)
+		parsed = 0;
+	cached = (ptrdiff_t)parsed;
+	return cached;
+}
+
+static void *
+pick_farther_stack_boundary_runtime(void *reference_sp, void *a, void *b)
+{
+	ptrdiff_t da;
+	ptrdiff_t db;
+	if (!reference_sp)
+		return a ? a : b;
+	if (!a)
+		return b;
+	if (!b)
+		return a;
+	da = tealet_stack_diff(a, reference_sp);
+	db = tealet_stack_diff(b, reference_sp);
+	return (db > da) ? b : a;
+}
+
+static void *
+pad_boundary_deeper_runtime(void *reference_sp, void *base, ptrdiff_t bytes)
+{
+	char *plus;
+	char *minus;
+	if (!base || bytes <= 0)
+		return base;
+	plus = ((char *)base) + bytes;
+	minus = ((char *)base) - bytes;
+	return pick_farther_stack_boundary_runtime(reference_sp, (void *)plus, (void *)minus);
+}
+
+static void *
+compute_new_tealet_far_hint_runtime(PyThreadState *tstate, void *incoming_far)
+{
+	void *hint = incoming_far;
+	void *hint_before_pad;
+	void *hint_padded;
+	ptrdiff_t pad_bytes = get_far_pad_bytes_runtime();
+	if (tstate && tstate->cframe) {
+		char *cf_start = (char *)tstate->cframe;
+		char *cf_end = cf_start + sizeof(CFrame);
+		void *cf_far = pick_farther_stack_boundary_runtime(incoming_far, (void *)cf_start, (void *)cf_end);
+		hint = pick_farther_stack_boundary_runtime(incoming_far, hint, cf_far);
+		hint_before_pad = hint;
+		hint_padded = pad_boundary_deeper_runtime(incoming_far, hint_before_pad, pad_bytes);
+		hint = hint_padded;
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+		fprintf(stderr,
+			"[RUN_FAR_HINT] tstate=%p incoming_far=%p cframe=%p cf_start=%p cf_end=%p cf_far=%p hint_before_pad=%p pad_bytes=%td final_hint=%p d_cf_start=%td d_cf_end=%td d_cf_far=%td d_before_pad=%td d_final=%td\n",
+			(void *)tstate,
+			incoming_far,
+			(void *)tstate->cframe,
+			(void *)cf_start,
+			(void *)cf_end,
+			cf_far,
+			hint_before_pad,
+			pad_bytes,
+			hint,
+			tealet_stack_diff(incoming_far, (void *)cf_start),
+			tealet_stack_diff(incoming_far, (void *)cf_end),
+			tealet_stack_diff(incoming_far, cf_far),
+			tealet_stack_diff(incoming_far, hint_before_pad),
+			tealet_stack_diff(incoming_far, hint));
+		fprintf(stderr,
+			"[TSTATE_PTRS] tstate=%p frame=%p exc_info=%p exc_state_addr=%p context=%p curexc_type=%p curexc_value=%p curexc_tb=%p cframe=%p\n",
+			(void *)tstate,
+			(void *)tstate->frame,
+			(void *)tstate->exc_info,
+			(void *)&tstate->exc_state,
+			(void *)tstate->context,
+			(void *)tstate->curexc_type,
+			(void *)tstate->curexc_value,
+			(void *)tstate->curexc_traceback,
+			(void *)tstate->cframe);
+#endif
+	} else {
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+		fprintf(stderr,
+			"[RUN_FAR_HINT] tstate=%p incoming_far=%p cframe=NULL pad_bytes=%td final_hint=%p\n",
+			(void *)tstate,
+			incoming_far,
+			pad_bytes,
+			hint);
+		if (tstate) {
+			fprintf(stderr,
+				"[TSTATE_PTRS] tstate=%p frame=%p exc_info=%p exc_state_addr=%p context=%p curexc_type=%p curexc_value=%p curexc_tb=%p cframe=NULL\n",
+				(void *)tstate,
+				(void *)tstate->frame,
+				(void *)tstate->exc_info,
+				(void *)&tstate->exc_state,
+				(void *)tstate->context,
+				(void *)tstate->curexc_type,
+				(void *)tstate->curexc_value,
+				(void *)tstate->curexc_traceback);
+		}
+#endif
+	}
+	return hint;
+}
+#endif
+
 /* run a tealet and optinonally run */
 static PyObject *
 pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
@@ -312,6 +1927,7 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	PyThreadState *tstate = PyThreadState_GET();
 	PyObject *result = NULL;
 	void *switch_arg;
+	int created_from_new;
 
 	current = GetCurrent(NULL);
 	if (!current)
@@ -326,8 +1942,9 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|O:run", keywords,
 		&func, &farg))
 		return NULL;
+	created_from_new = (target->state == STATE_NEW);
 	
-	if (target->state == STATE_NEW) {
+	if (created_from_new) {
 		ptarg = &targ; /* can use the stack because of the way tealet_new works */
 		ptarg->stub = 0;
 	} else {
@@ -345,7 +1962,27 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	/* pass the argument to the main function */
 	switch_arg = (void*)ptarg;
 
+	/* Save caller threadstate; on first run from STATE_NEW, keep an extra owning
+	 * reference set for caller's parked state.
+	 */
+	dbg_validate_all_tealets("py-run-before-save");
+	dbg_failfast_validate_active_cframe("py-run-before-save", current, tstate);
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	log_switch_cframes("run-before-save", current, target, tstate);
+#endif
+#endif
 	save_tstate(current, tstate);
+	dbg_validate_all_tealets("py-run-after-save");
+	dbg_failfast_validate_active_cframe("py-run-after-save", current, tstate);
+
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	log_switch_cframes("run-after-save-before-transfer", current, target, tstate);
+#endif
+#endif
+	if (created_from_new)
+		PyTealetTstate_IncRef(&current->tstate);
 	if (ptarg->stub) {
 		fail = stub_run(target->tealet, pytealet_main, &switch_arg);
 		if (fail) {
@@ -357,7 +1994,17 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 		PyTealetObject *main = GetMain();
 		if (!main)
 			goto err;
-		tealet = tealet_new(main->tealet, pytealet_main, &switch_arg);
+		{
+#ifdef TEALET_HAS_NEW_WITH_FAR
+			void *boundary_hint = NULL;
+			#if TEALET_PYTEALET_FIX_BOUNDARY_HINT
+			boundary_hint = compute_new_tealet_far_hint_runtime(tstate, (void *)&switch_arg);
+			#endif
+			tealet = tealet_new_with_far(main->tealet, pytealet_main, &switch_arg, boundary_hint);
+#else
+			tealet = tealet_new(main->tealet, pytealet_main, &switch_arg);
+#endif
+		}
 		if (!tealet) {
 			PyErr_NoMemory();
 			goto err;
@@ -366,13 +2013,22 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	/* success */
 	result = (PyObject *)switch_arg;
 err:
+	if (created_from_new)
+		PyTealetTstate_DecRef(&current->tstate);
 	/* restore frame */
 	restore_tstate(current, tstate);
+	dbg_validate_all_tealets("py-run-after-restore");
+	dbg_failfast_validate_active_cframe("py-run-after-restore", current, tstate);
+
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	log_switch_cframes("run-after-restore", current, target, tstate);
+#endif
+#endif
 	/* clear garbage */
 	dustbin_clear(current->tealet);
 	return result;
 }
-
 /* switch to a different tealet */
 static PyObject *
 pytealet_switch(PyObject *_self, PyObject *args)
@@ -383,11 +2039,16 @@ pytealet_switch(PyObject *_self, PyObject *args)
 	PyThreadState *tstate = PyThreadState_GET();
 	PyObject *pyarg = Py_None;
 	void *switch_arg;
+	int stack_marker_before;
+	int stack_marker_after;
+	
+	LOG("pytealet_switch: self=%p (state=%d), stack=%p\n", self, self->state, (void*)&stack_marker_before);
 	
 	if (!PyArg_ParseTuple(args, "|O:switch", &pyarg))
 		return NULL;
 
 	if (self->state != STATE_RUN) {
+		LOG("pytealet_switch ERROR: self=%p is not STATE_RUN (state=%d)\n", self, self->state);
 		PyErr_SetString(StateError, "must be active");
 		return NULL;
 	}
@@ -395,15 +2056,44 @@ pytealet_switch(PyObject *_self, PyObject *args)
 	current = GetCurrent(NULL);
 	if (!current)
 		return NULL;
+	LOG("pytealet_switch: switching from %p (state=%d) to %p (state=%d)\n",
+	    current, current->state, self, self->state);
 	if (CheckTarget(self, current))
 		return NULL;
+	dbg_validate_all_tealets("py-switch-before-save");
+	dbg_failfast_validate_active_cframe("py-switch-before-save", current, tstate);
 	
 	Py_INCREF(pyarg);
 	switch_arg = (void*)pyarg;
 	/* switch */
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	log_switch_cframes("before-save", current, self, tstate);
+#endif
+#endif
 	save_tstate(current, tstate);
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	log_switch_cframes("after-save-before-switch", current, self, tstate);
+#endif
+#endif
+	LOG("pytealet_switch: about to call tealet_switch(tealet=%p)\n", self->tealet);
 	fail = tealet_switch(self->tealet, &switch_arg);
+	LOG("pytealet_switch: tealet_switch returned, tealet=%p\n", self->tealet);
+	/* DEBUG: Validate previous tealet's stack after switch */
+	{
+		tealet_t *prev = self->tealet ? tealet_previous(self->tealet) : NULL;
+		if (prev) tealet_validate_stack(prev);
+	}
 	restore_tstate(current, tstate);
+	dbg_failfast_validate_active_cframe("py-switch-after-restore", current, tstate);
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	log_switch_cframes("after-restore", current, self, tstate);
+#endif
+#endif
+
+	LOG("pytealet_switch: returned from switch, fail=%d, stack=%p\n", fail, (void*)&stack_marker_after);
 
 	/* clear out garbage */
 	dustbin_clear(current->tealet);
@@ -464,7 +2154,7 @@ static PyObject *
 pytealet_get_frame(PyObject *_self, void *_closure)
 {
 	PyTealetObject *self = (PyTealetObject *)_self;
-	PyObject *frame = (PyObject*)self->frame;
+	PyObject *frame = (PyObject*)self->tstate.frame;
 	if (!frame) {
 		/* is it the current tealet of the current thread? */
 		if (self == GetCurrent(NULL)) {
@@ -554,6 +2244,10 @@ pytealet_main(tealet_t *t_current, void *arg)
 	PyObject *result, *return_arg;
 	PyTealetObject *return_to;
 	tealet_t *t_return;
+	#if PY_VERSION_HEX < 0x030D0000
+		PyThreadState *entry_tstate;
+		CFrame tealet_owned_cframe;
+	#endif
 	
 	if (targ->stub) {
 		assert(tealet->state == STATE_STUB);
@@ -565,6 +2259,31 @@ pytealet_main(tealet_t *t_current, void *arg)
 		tealet->tealet = t_current;
 		TEALET_SET_PYOBJECT(t_current, tealet);
 	}
+
+#if PY_VERSION_HEX < 0x030D0000
+	entry_tstate = PyThreadState_GET();
+	#if TEALET_PYTEALET_FIX_LOCAL_CFRAME_COPY
+	if (entry_tstate && entry_tstate->cframe) {
+		memcpy(&tealet_owned_cframe, entry_tstate->cframe, sizeof(tealet_owned_cframe));
+		tealet_owned_cframe.previous = NULL;
+		entry_tstate->cframe = &tealet_owned_cframe;
+		tealet->tstate.cframe = &tealet_owned_cframe;
+		tealet->tstate.cframe_owned = &tealet_owned_cframe;
+	} else {
+		tealet->tstate.cframe_owned = NULL;
+	}
+	#else
+	if (entry_tstate) {
+		tealet->tstate.cframe_owned = NULL;
+	}
+	#endif
+#endif
+
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	dbg_maybe_capture_anchor("run-entry", tealet, PyThreadState_GET());
+#endif
+#endif
 
 	/* We only have borrowed references from the calling tealet.
 	 * the argument to the function will get their own reference, but
@@ -641,6 +2360,61 @@ pytealet_main(tealet_t *t_current, void *arg)
 	return 0;
 }
 
+/* Wrapper functions for system malloc/free to match libtealet's allocator API
+ * Use system malloc for valgrind heap corruption detection */
+static void* tealet_malloc_wrapper(size_t size, void *context)
+{
+	dbg_heap_block *block;
+	uint64_t *tail;
+	(void)context;  /* unused */
+	block = (dbg_heap_block *)malloc(sizeof(*block) + size + sizeof(uint64_t));
+	if (!block)
+		return NULL;
+	block->magic_head = DBG_HEAP_MAGIC_HEAD;
+	block->payload_size = size;
+	block->prev = NULL;
+	block->next = dbg_heap_blocks_head;
+	if (dbg_heap_blocks_head)
+		dbg_heap_blocks_head->prev = block;
+	dbg_heap_blocks_head = block;
+	tail = (uint64_t *)((char *)(block + 1) + size);
+	*tail = DBG_HEAP_MAGIC_TAIL;
+	return (void *)(block + 1);
+}
+
+static void tealet_free_wrapper(void *ptr, void *context)
+{
+	dbg_heap_block *block;
+	uint64_t *tail;
+	(void)context;  /* unused */
+	if (!ptr)
+		return;
+	block = ((dbg_heap_block *)ptr) - 1;
+	if (block->magic_head != DBG_HEAP_MAGIC_HEAD) {
+		fprintf(stderr,
+			"[HEAP_ALLOC_GUARD] action=abort reason=bad_head ptr=%p head=0x%016llx\n",
+			ptr,
+			(unsigned long long)block->magic_head);
+		abort();
+	}
+	tail = (uint64_t *)((char *)ptr + block->payload_size);
+	if (*tail != DBG_HEAP_MAGIC_TAIL) {
+		fprintf(stderr,
+			"[HEAP_ALLOC_GUARD] action=abort reason=bad_tail ptr=%p size=%zu tail=0x%016llx\n",
+			ptr,
+			block->payload_size,
+			(unsigned long long)*tail);
+		abort();
+	}
+	if (block->prev)
+		block->prev->next = block->next;
+	else if (dbg_heap_blocks_head == block)
+		dbg_heap_blocks_head = block->next;
+	if (block->next)
+		block->next->prev = block->prev;
+	block->magic_head = 0;
+	free(block);
+}
 
 /* return a borrowed reference to this thread's main tealet */
 static PyTealetObject *GetMain()
@@ -651,8 +2425,9 @@ static PyTealetObject *GetMain()
 		tealet_alloc_t talloc;
 		tealet_t *tmain;
 		main_data *mdata;
-		talloc.malloc_p = (tealet_malloc_t)&PyMem_Malloc;
-		talloc.free_p = (tealet_free_t)&PyMem_Free;
+		/* Use system malloc/free so valgrind can detect heap corruption */
+		talloc.malloc_p = tealet_malloc_wrapper;
+		talloc.free_p = tealet_free_wrapper;
 		talloc.context = NULL;
 		tmain = tealet_initialize(&talloc, sizeof(tealet_extra_t));
 		if (!tmain) {
@@ -679,7 +2454,18 @@ static PyTealetObject *GetMain()
 		t_main->tealet = tmain;
 		t_main->state = STATE_RUN;
 		TEALET_SET_PYOBJECT(tmain, t_main); /* back link */
+		{
+			const char *page_guard_env = getenv("TEALET_PAGE_GUARD");
+			if (page_guard_env && *page_guard_env && *page_guard_env != '0') {
+				tealet_set_page_guard(tmain, 1);
+			}
+		}
 		PyThread_set_key_value(tls_key, (void*)t_main);
+#if PY_VERSION_HEX < 0x030D0000
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+		dbg_maybe_capture_anchor("main-created", t_main, PyThreadState_GET());
+#endif
+#endif
 	}
 	assert(t_main->tealet);
 	assert(TEALET_IS_MAIN(t_main->tealet));
@@ -830,3 +2616,119 @@ PyInit__tealet(void)
 	
 	return m;
 }
+
+#if PY_VERSION_HEX < 0x030D0000
+static void
+dbg_capture_saved_main_window(const char *phase, PyTealetObject *owner)
+{
+	void *saved_lo;
+	void *saved_hi;
+	char *frame_start;
+	char *window_lo;
+	char *window_hi;
+	size_t window_len;
+	uint64_t window_hash;
+
+	dbg_init_main_window_watch_config();
+	if (!owner || !owner->tealet || !TEALET_IS_MAIN(owner->tealet))
+		return;
+	if (!owner->tstate.has_state || !owner->tstate.cframe || !owner->tstate.stack_near_saved || !owner->tstate.stack_far_saved)
+		return;
+	if (!dbg_main_window_watch_enabled)
+		return;
+
+	stack_bounds(owner->tstate.stack_near_saved,
+		    owner->tstate.stack_far_saved,
+		    &saved_lo,
+		    &saved_hi);
+	frame_start = (char *)owner->tstate.cframe;
+	window_lo = frame_start - dbg_main_window_radius;
+	window_hi = frame_start + (ptrdiff_t)sizeof(CFrame) + dbg_main_window_radius;
+	if (window_lo < (char *)saved_lo)
+		window_lo = (char *)saved_lo;
+	if (window_hi > (char *)saved_hi + 1)
+		window_hi = (char *)saved_hi + 1;
+	if (window_hi <= window_lo) {
+		owner->dbg_saved_window_has_snapshot = 0;
+		return;
+	}
+	window_len = (size_t)(window_hi - window_lo);
+	window_hash = fnv1a64_update(1469598103934665603ULL, window_lo, window_len);
+
+	owner->dbg_saved_window_has_snapshot = 1;
+	owner->dbg_saved_window_addr = (void *)window_lo;
+	owner->dbg_saved_window_len = window_len;
+	owner->dbg_saved_window_hash = window_hash;
+
+	fprintf(stderr,
+		"[MAIN_WINDOW_CAPTURE] phase=%s main_id=%ld main_obj=%p main_tealet=%p cframe=%p window=[%p,%p) len=%zu hash=0x%016llx\n",
+		phase ? phase : "unknown",
+		owner->dbg_id,
+		(void *)owner,
+		(void *)owner->tealet,
+		(void *)owner->tstate.cframe,
+		(void *)window_lo,
+		(void *)window_hi,
+		window_len,
+		(unsigned long long)window_hash);
+}
+
+static void
+dbg_compare_saved_main_window(const char *phase, PyTealetObject *owner)
+{
+	void *saved_lo;
+	void *saved_hi;
+	char *frame_start;
+	char *window_lo;
+	char *window_hi;
+	size_t window_len;
+	uint64_t window_hash;
+
+	dbg_init_main_window_watch_config();
+	if (!owner || !owner->tealet || !TEALET_IS_MAIN(owner->tealet))
+		return;
+	if (!dbg_main_window_watch_enabled)
+		return;
+	if (!owner->dbg_saved_window_has_snapshot)
+		return;
+	if (!owner->tstate.has_state || !owner->tstate.cframe || !owner->tstate.stack_near_saved || !owner->tstate.stack_far_saved)
+		return;
+
+	stack_bounds(owner->tstate.stack_near_saved,
+		    owner->tstate.stack_far_saved,
+		    &saved_lo,
+		    &saved_hi);
+	frame_start = (char *)owner->tstate.cframe;
+	window_lo = frame_start - dbg_main_window_radius;
+	window_hi = frame_start + (ptrdiff_t)sizeof(CFrame) + dbg_main_window_radius;
+	if (window_lo < (char *)saved_lo)
+		window_lo = (char *)saved_lo;
+	if (window_hi > (char *)saved_hi + 1)
+		window_hi = (char *)saved_hi + 1;
+	if (window_hi <= window_lo)
+		return;
+
+	window_len = (size_t)(window_hi - window_lo);
+	window_hash = fnv1a64_update(1469598103934665603ULL, window_lo, window_len);
+
+	if (owner->dbg_saved_window_addr == (void *)window_lo &&
+	    owner->dbg_saved_window_len == window_len &&
+	    owner->dbg_saved_window_hash != window_hash) {
+		fprintf(stderr,
+			"[MAIN_WINDOW_WATCH] phase=%s main_id=%ld main_obj=%p main_tealet=%p cframe=%p window=[%p,%p) len=%zu old_hash=0x%016llx new_hash=0x%016llx action=%s\n",
+			phase ? phase : "unknown",
+			owner->dbg_id,
+			(void *)owner,
+			(void *)owner->tealet,
+			(void *)owner->tstate.cframe,
+			(void *)window_lo,
+			(void *)window_hi,
+			window_len,
+			(unsigned long long)owner->dbg_saved_window_hash,
+			(unsigned long long)window_hash,
+			dbg_main_window_abort_enabled ? "abort" : "log");
+		if (dbg_main_window_abort_enabled)
+			abort();
+	}
+}
+#endif
