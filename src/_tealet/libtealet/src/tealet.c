@@ -1250,58 +1250,35 @@ void tealet_free(tealet_t *tealet, void *p)
     tealet_int_free(g_main, p);
 }
 
-/* create a tealet by saving the current stack and starting
- * immediate execution of a new one
+/* choose initial far boundary for tealet creation.
+ * 'hint' can only extend capture range (be farther), never shrink it.
  */
-tealet_t *tealet_new(tealet_t *tealet, tealet_run_t run, void **parg)
+static void *tealet_pick_initial_far(void *default_far, void *hint)
 {
-    return tealet_new_with_far(tealet, run, parg, NULL);
+    if (hint == NULL)
+        return default_far;
+    return tealet_stack_further(default_far, hint);
 }
 
 /* create a tealet by saving the current stack and starting
- * immediate execution of a new one, with optional boundary hint
+ * immediate execution of a new one
  */
-tealet_t *tealet_new_with_far(tealet_t *tealet, tealet_run_t run, void **parg, void *boundary_hint)
+tealet_t *tealet_new(tealet_t *tealet, tealet_run_t run, void **parg, void *stack_far)
 {
     tealet_sub_t *result; /* store this until we return */
     int fail;
     void *arg = NULL;
+    void *default_far;
+    void *stack_far_used;
     tealet_main_t *g_main = TEALET_GET_MAIN(tealet);
-    char *default_far;
-    char *chosen_far;
     assert(!g_main->g_target);
     result = tealet_alloc(g_main);
     if (result == NULL)
         return NULL; /* Could not allocate */
 
-    default_far = (char *)&result;
-    chosen_far = default_far;
-    if (boundary_hint) {
-        ptrdiff_t d_hint_vs_default = STACKMAN_SP_DIFF((char *)boundary_hint, (char *)default_far);
-        if (d_hint_vs_default > 0)
-            chosen_far = (char *)boundary_hint;
-#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
-        fprintf(stderr,
-                "[NEW_FAR] main=%p result=%p default_far=%p boundary_hint=%p d_hint_vs_default=%td chosen_far=%p\n",
-                (void *)g_main,
-                (void *)result,
-                (void *)default_far,
-                boundary_hint,
-                d_hint_vs_default,
-                (void *)chosen_far);
-#endif
-    } else {
-#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
-        fprintf(stderr,
-                "[NEW_FAR] main=%p result=%p default_far=%p boundary_hint=NULL chosen_far=%p\n",
-                (void *)g_main,
-                (void *)result,
-                (void *)default_far,
-                (void *)chosen_far);
-#endif
-    }
-
-    fail = tealet_initialstub(g_main, result, result, run, (parg!=NULL ? parg : &arg), (void*)chosen_far);
+    default_far = (void*)&result;
+    stack_far_used = tealet_pick_initial_far(default_far, stack_far);
+    fail = tealet_initialstub(g_main, result, result, run, (parg!=NULL ? parg : &arg), stack_far_used);
     if (fail) {
         /* could not save stack */
         tealet_delete((tealet_t*)result);
@@ -1314,10 +1291,12 @@ tealet_t *tealet_new_with_far(tealet_t *tealet, tealet_run_t run, void **parg, v
  * back to the caller, allowing the caller to run the
  * tealet proper later, by switching to it.
  */
-tealet_t *tealet_create(tealet_t *tealet, tealet_run_t run)
+tealet_t *tealet_create(tealet_t *tealet, tealet_run_t run, void *stack_far)
 {
     tealet_sub_t *result; /* store this until we return */
     int fail;
+    void *default_far;
+    void *stack_far_used;
     tealet_main_t *g_main = TEALET_GET_MAIN(tealet);
     tealet_sub_t *previous = g_main->g_previous;
     tealet_sub_t *current = g_main->g_current;
@@ -1329,7 +1308,9 @@ tealet_t *tealet_create(tealet_t *tealet, tealet_run_t run)
      * to save the new tealet's stack at this position
      */
     g_main->g_current = result;
-    fail = tealet_initialstub(g_main, result, current, run, NULL, (void*)&result);
+    default_far = (void*)&result;
+    stack_far_used = tealet_pick_initial_far(default_far, stack_far);
+    fail = tealet_initialstub(g_main, result, current, run, NULL, stack_far_used);
     if (fail) {
         /* could not save stack */
         tealet_delete((tealet_t*)result);
@@ -1575,6 +1556,13 @@ ptrdiff_t tealet_stack_diff(void *a, void *b)
     return STACKMAN_SP_DIFF((ptrdiff_t)a, (ptrdiff_t)(b));
 }
 
+void *tealet_stack_further(void *a, void *b)
+{
+    if (STACKMAN_SP_LE(a, b))
+        return b;
+    return a;
+}
+
 void *tealet_get_far(tealet_t *_tealet)
 {
     tealet_sub_t *tealet = (tealet_sub_t *)_tealet;
@@ -1703,15 +1691,16 @@ int tealet_fork(tealet_t *_tealet, tealet_t **pother, void **parg, int flags)
 #pragma warning(push)
 #pragma warning( disable : 4172 )
 #endif
-void *tealet_new_far(tealet_t *d1, tealet_run_t d2, void **d3)
+void *tealet_new_probe(tealet_t *d1, tealet_run_t d2, void **d3, void *d4)
 {
     tealet_sub_t *result;
+    void *default_far;
     void *r;
     (void)d1;
     (void)d2;
     (void)d3;
-    /* avoid compiler warnings about returning tmp addr */
-    r = (void*)&result;
+    default_far = (void*)&result;
+    r = tealet_pick_initial_far(default_far, d4);
     return r;
 }
 #if __GNUC__ > 4

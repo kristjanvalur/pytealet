@@ -51,6 +51,7 @@ cover/
 # Virtual environments
 .env
 .venv
+.venv*/
 env/
 venv/
 ENV/
@@ -101,3 +102,6 @@ uv.lock
 
 # Build artifacts from libtealet
 src/_tealet/libtealet/stackman/tools/tmp/
+
+# Local scratch/debug output
+tmp/

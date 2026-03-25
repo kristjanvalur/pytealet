@@ -399,7 +399,7 @@ int tealet_fork(tealet_t *current, tealet_t **pother, void **parg, int flags);
  * The arguments must match the real tealet_new() but are dummies.
  */
 TEALET_API
-void *tealet_new_far(tealet_t *dummy1, tealet_run_t dummy2, void **dummy3);
+void *tealet_new_probe(tealet_t *dummy1, tealet_run_t dummy2, void **dummy3, void *dummy4);
 
 /* get the size of the suspended tealet's saved stack */
 TEALET_API

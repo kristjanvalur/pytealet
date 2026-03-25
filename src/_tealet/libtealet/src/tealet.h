@@ -131,7 +131,7 @@ void tealet_free(tealet_t *tealet, void *p);
  * argument is passed.
  */
 TEALET_API
-tealet_t *tealet_create(tealet_t *tealet, tealet_run_t run);
+tealet_t *tealet_create(tealet_t *tealet, tealet_run_t run, void *stack_far);
 
 /* Switch to another tealet.  Execution continues there.  The tealet
  * passed in must not have been freed yet and must descend from
@@ -194,19 +194,7 @@ int tealet_exit(tealet_t *target, void *arg, int flags);
  * returned by the time this function returns.
  */
 TEALET_API
-tealet_t *tealet_new(tealet_t *tealet, tealet_run_t run, void **parg);
-
-/* Allocate and switch to a new tealet, with an explicit far-boundary hint.
- * The runtime picks the farther (stack-outer) of:
- *  - the traditional internal boundary captured by tealet_new(), and
- *  - the caller-supplied boundary_hint.
- *
- * Pass NULL for boundary_hint to get the same behavior as tealet_new().
- */
-TEALET_API
-tealet_t *tealet_new_with_far(tealet_t *tealet, tealet_run_t run, void **parg, void *boundary_hint);
-
-#define TEALET_HAS_NEW_WITH_FAR 1
+tealet_t *tealet_new(tealet_t *tealet, tealet_run_t run, void **parg, void *stack_far);
 
 /* Duplicate a tealet. The active tealet is duplicated
  * along with its stack contents.
@@ -264,6 +252,13 @@ void **tealet_main_userpointer(tealet_t *tealet);
  */
 TEALET_API
 ptrdiff_t tealet_stack_diff(void *a, void *b);
+
+/* Return whichever stack position is farther from the active stack top.
+ * This is direction-aware: on descending stacks this is the larger
+ * address; on ascending stacks it is the smaller address.
+ */
+TEALET_API
+void *tealet_stack_further(void *a, void *b);
 
 /* Get a tealet's "far" position on the stack.  This is an
  * indicator of its creation position on the stack.  The main
@@ -419,7 +414,7 @@ int tealet_fork(tealet_t *current, tealet_t **pother, void **parg, int flags);
  * The arguments must match the real tealet_new() but are dummies.
  */
 TEALET_API
-void *tealet_new_far(tealet_t *dummy1, tealet_run_t dummy2, void **dummy3);
+void *tealet_new_probe(tealet_t *dummy1, tealet_run_t dummy2, void **dummy3, void *dummy4);
 
 /* get the size of the suspended tealet's saved stack */
 TEALET_API

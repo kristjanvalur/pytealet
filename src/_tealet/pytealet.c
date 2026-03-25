@@ -95,7 +95,7 @@ stub_main(tealet_t *current, void *arg)
 static tealet_t *
 stub_new(tealet_t *t) {
     void *arg = (void*)tealet_current(t);
-    return tealet_new(t, stub_main, &arg);
+	return tealet_new(t, stub_main, &arg, NULL);
 }
 
 /* run a stub */
@@ -2008,15 +2008,11 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 		if (!main)
 			goto err;
 		{
-#ifdef TEALET_HAS_NEW_WITH_FAR
 			void *boundary_hint = NULL;
 			#if TEALET_PYTEALET_FIX_BOUNDARY_HINT
 			boundary_hint = compute_new_tealet_far_hint_runtime(tstate, (void *)&switch_arg);
 			#endif
-			tealet = tealet_new_with_far(main->tealet, pytealet_main, &switch_arg, boundary_hint);
-#else
-			tealet = tealet_new(main->tealet, pytealet_main, &switch_arg);
-#endif
+			tealet = tealet_new(main->tealet, pytealet_main, &switch_arg, boundary_hint);
 		}
 		if (!tealet) {
 			PyErr_NoMemory();
