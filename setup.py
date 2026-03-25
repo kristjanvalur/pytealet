@@ -8,8 +8,14 @@ from setuptools import Extension, setup
 
 # Paths to libtealet
 LIBTEALET_DIR = "src/_tealet/libtealet"
-LIBTEALET_HEADERS = os.path.join(LIBTEALET_DIR, "tealet")
+LIBTEALET_BIN_DIR = "src/_tealet/libtealet-bin"  # Pre-built binaries fallback
+LIBTEALET_HEADERS = os.path.join(LIBTEALET_DIR, "src")
 STACKMAN_HEADERS = os.path.join(LIBTEALET_DIR, "stackman")
+PYTEALET_BUILD_CONFIG_HEADER = os.path.abspath("src/_tealet/pytealet_build_config.h")
+
+# Default to source builds, with fallback support for prebuilt binaries.
+BUILD_LIBTEALET_FROM_SOURCE = os.environ.get("BUILD_LIBTEALET_FROM_SOURCE", "1") == "1"
+LIBTEALET_DEBUG = os.environ.get("LIBTEALET_DEBUG", "1") == "1"
 
 def get_abi_name():
     """Determine the ABI name for pre-built libraries using libtealet's abiname utility."""
@@ -57,14 +63,64 @@ def get_abi_name():
     
     raise RuntimeError(f"Unsupported platform: {system} {machine}")
 
-# Get the ABI name
-abi_name = get_abi_name()
-print(f"Building for ABI: {abi_name}", file=sys.stderr)
 
-# Path to pre-built libraries
-lib_dir = os.path.join(LIBTEALET_DIR, "lib", abi_name)
-if not os.path.exists(lib_dir):
-    raise RuntimeError(f"Pre-built libraries not found for ABI: {abi_name} at {lib_dir}")
+def build_libtealet_from_source():
+    """Build libtealet from source with debug-friendly flags."""
+    if not os.path.exists(LIBTEALET_DIR):
+        raise RuntimeError(
+            f"libtealet source not found at {LIBTEALET_DIR}\n"
+            "Clone it with: git clone --depth 1 --branch v0.3.2 "
+            "https://github.com/kristjanvalur/libtealet.git src/_tealet/libtealet"
+        )
+
+    print(f"Building libtealet from source in {LIBTEALET_DIR}...", file=sys.stderr)
+    cflags = "-g -O0 -fPIC" if LIBTEALET_DEBUG else "-g -O2 -fPIC"
+
+    # Force-include centralized build config for libtealet compilation units.
+    if os.path.exists(PYTEALET_BUILD_CONFIG_HEADER):
+        cflags += f" -include {PYTEALET_BUILD_CONFIG_HEADER}"
+
+    subprocess.run(["make", "-C", LIBTEALET_DIR, "clean"], check=True)
+    subprocess.run(
+        ["make", "-C", LIBTEALET_DIR, f"CFLAGS={cflags}", "bin/libtealet.a"],
+        check=True,
+    )
+
+    abi_result = subprocess.run(
+        ["make", "-C", LIBTEALET_DIR, "--no-print-directory", "abiname"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    abi = abi_result.stdout.strip()
+    src_lib = os.path.join(LIBTEALET_DIR, "bin", "libtealet.a")
+    if not os.path.exists(src_lib):
+        raise RuntimeError(f"Built library not found: {src_lib}")
+    return src_lib, abi
+
+
+# Get the ABI name and library path.
+if BUILD_LIBTEALET_FROM_SOURCE:
+    libtealet_static, abi_name = build_libtealet_from_source()
+else:
+    abi_name = get_abi_name()
+    lib_dir = os.path.join(LIBTEALET_BIN_DIR, "lib", abi_name)
+    if not os.path.exists(lib_dir):
+        raise RuntimeError(f"Pre-built libraries not found for ABI: {abi_name} at {lib_dir}")
+
+    libtealet_static = os.path.join(lib_dir, "libtealet.a")
+    if not os.path.exists(libtealet_static):
+        raise RuntimeError(f"Static library not found: {libtealet_static}")
+
+    # Update header paths for pre-built binaries.
+    LIBTEALET_HEADERS = os.path.join(LIBTEALET_BIN_DIR, "tealet")
+    STACKMAN_HEADERS = os.path.join(LIBTEALET_BIN_DIR, "stackman")
+
+print(f"Building for ABI: {abi_name}", file=sys.stderr)
+if BUILD_LIBTEALET_FROM_SOURCE:
+    print(f"Using libtealet built from source: {libtealet_static}", file=sys.stderr)
+else:
+    print(f"Using pre-built libtealet: {libtealet_static}", file=sys.stderr)
 
 # Source files for the extension (only pytealet.c, link against pre-built libtealet)
 sources = [
@@ -77,11 +133,6 @@ include_dirs = [
     LIBTEALET_HEADERS,
     STACKMAN_HEADERS,
 ]
-
-# Static library path (use .a for static linking)
-libtealet_static = os.path.join(lib_dir, "libtealet.a")
-if not os.path.exists(libtealet_static):
-    raise RuntimeError(f"Static library not found: {libtealet_static}")
 
 # Compiler flags
 extra_compile_args = []
@@ -96,6 +147,13 @@ if platform.system() != "Windows":
         "-Wall",
         "-Wno-unused-function",
     ])
+
+    # Force-include centralized build config for extension compilation.
+    if os.path.exists(PYTEALET_BUILD_CONFIG_HEADER):
+        extra_compile_args.extend([
+            "-include",
+            PYTEALET_BUILD_CONFIG_HEADER,
+        ])
 
 # Define the extension
 _tealet_ext = Extension(

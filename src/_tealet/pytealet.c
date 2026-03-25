@@ -11,6 +11,20 @@
 
 #include "tealet.h"
 
+#if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+extern int tealet_validate_stack(tealet_t *tealet);
+static int pytealet_validate_stack(tealet_t *tealet)
+{
+	return tealet_validate_stack(tealet);
+}
+#else
+static int pytealet_validate_stack(tealet_t *tealet)
+{
+	(void)tealet;
+	return 0;
+}
+#endif
+
 /* Debug logging - set to 1 to enable, 0 to disable */
 #define TEALET_DEBUG 0
 
@@ -65,7 +79,7 @@ stub_main(tealet_t *current, void *arg)
     /* DEBUG: Validate previous tealet's stack after switch */
     {
         tealet_t *prev = tealet_previous((tealet_t*)arg);
-        if (prev) tealet_validate_stack(prev);
+		if (prev) pytealet_validate_stack(prev);
     }
     /* now we are back, myarg should contain the arg to the run function.
      * We were possibly duplicated, so can't trust the original function args.
@@ -104,7 +118,7 @@ stub_run(tealet_t *stub, tealet_run_t run, void **parg)
     /* DEBUG: Validate previous tealet's stack after switch */
     {
         tealet_t *prev = tealet_previous(stub);
-        if (prev) tealet_validate_stack(prev);
+		if (prev) pytealet_validate_stack(prev);
     }
     if (result) {
         /* failure */
@@ -770,7 +784,7 @@ dbg_validate_all_tealets(const char *phase)
 			skipped++;
 			continue;
 		}
-		rc = tealet_validate_stack(iter->tealet);
+		rc = pytealet_validate_stack(iter->tealet);
 		if (rc == 0) {
 			checked++;
 		} else {
@@ -787,7 +801,6 @@ dbg_validate_all_tealets(const char *phase)
 				(void *)main_tealet);
 		}
 	}
-
 	fprintf(stderr,
 		"[STACK_VALIDATE_ALL] phase=%s checked=%d failed=%d skipped=%d\n",
 		phase ? phase : "unknown",
@@ -2083,7 +2096,7 @@ pytealet_switch(PyObject *_self, PyObject *args)
 	/* DEBUG: Validate previous tealet's stack after switch */
 	{
 		tealet_t *prev = self->tealet ? tealet_previous(self->tealet) : NULL;
-		if (prev) tealet_validate_stack(prev);
+		if (prev) pytealet_validate_stack(prev);
 	}
 	restore_tstate(current, tstate);
 	dbg_failfast_validate_active_cframe("py-switch-after-restore", current, tstate);
