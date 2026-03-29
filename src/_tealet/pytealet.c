@@ -20,6 +20,35 @@
 #define LOG(...) do {} while(0)
 #endif
 
+/* Python minor-version helpers for readable version-specific conditionals. */
+#if PY_VERSION_HEX >= 0x030A0000 && PY_VERSION_HEX < 0x030B0000
+#define PY310 1
+#endif
+
+#if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030C0000
+#define PY311 1
+#endif
+
+#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+#define PY312 1
+#endif
+
+#if PY_VERSION_HEX >= 0x030D0000 && PY_VERSION_HEX < 0x030E0000
+#define PY313 1
+#endif
+
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+#define PY314 1
+#endif
+
+#if PY_VERSION_HEX >= 0x030F0000 && PY_VERSION_HEX < 0x03100000
+#define PY315 1
+#endif
+
+#if defined(PY310) || defined(PY311) || defined(PY312)
+#define PY_HAS_CFRAME
+#endif
+
 
 /****************************************************************
  *Implement copyable stubs by using a trampoline
@@ -123,7 +152,7 @@ typedef struct main_data
 /* Forward declaration */
 typedef struct PyTealetObject PyTealetObject;
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 static void dbg_capture_saved_main_window(const char *phase, PyTealetObject *owner);
 static void dbg_compare_saved_main_window(const char *phase, PyTealetObject *owner);
 #endif
@@ -161,7 +190,7 @@ struct PyTealetTstate {
 	void *stack_far_saved;  /* Debug: far boundary captured with this tstate */
 	/* Python 3.10-3.12: cframe tracks C-level call frames (removed in 3.13)
 	 * Stack-slicing preserves the CFrame struct itself; we just save the pointer */
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 	CFrame* cframe;
 	CFrame* cframe_owned; /* CFrame pointer owned by tealet stack while running */
 #endif
@@ -169,7 +198,7 @@ struct PyTealetTstate {
 
 typedef struct PyTealetTstate PyTealetTstate;
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 static void
 stack_bounds(void *a, void *b, void **lo, void **hi)
@@ -418,7 +447,7 @@ log_cframe_chain(const char *tag, void *owner, void *far_sp, PyThreadState *tsta
 #endif
 #endif
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if !TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 static void
 stack_bounds(void *a, void *b, void **lo, void **hi)
@@ -700,7 +729,7 @@ dbg_maybe_capture_anchor(const char *phase, PyTealetObject *owner, PyThreadState
 static void
 dbg_failfast_validate_active_cframe(const char *phase, PyTealetObject *owner, PyThreadState *tstate)
 {
-	#if PY_VERSION_HEX < 0x030D0000 && TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
+	#if defined(PY_HAS_CFRAME) && TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	char stack_marker;
 	void *near_sp = (void *)&stack_marker;
 	void *far_sp = (owner && owner->tealet) ? tealet_get_far(owner->tealet) : NULL;
@@ -773,7 +802,7 @@ dbg_failfast_validate_active_cframe(const char *phase, PyTealetObject *owner, Py
 	#endif
 }
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 static void
 log_cframe_chain_short(const char *phase,
@@ -1281,7 +1310,7 @@ static void PyTealetTstate_Init(PyTealetTstate *saved)
 	saved->own_refs = 0;
 	saved->stack_near_saved = NULL;
 	saved->stack_far_saved = NULL;
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 	saved->cframe = NULL;
 	saved->cframe_owned = NULL;
 #endif
@@ -1314,7 +1343,7 @@ static void PyTealetTstate_CopyForClone(PyTealetTstate *dst, const PyTealetTstat
 	dst->context = src->context;
 	dst->stack_near_saved = src->stack_near_saved;
 	dst->stack_far_saved = src->stack_far_saved;
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 	dst->cframe = src->cframe;
 	dst->cframe_owned = src->cframe;
 #endif
@@ -1352,7 +1381,7 @@ static void PyTealetTstate_Capture(PyTealetTstate *saved, PyThreadState *py_tsta
 	py_tstate->context = NULL;
 	saved->stack_near_saved = (void *)&stack_marker;
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 	saved->cframe = py_tstate->cframe;
 	saved->cframe_owned = saved->cframe;
 #endif
@@ -1390,7 +1419,7 @@ static void PyTealetTstate_Restore(PyTealetTstate *saved, PyThreadState *py_tsta
 	py_tstate->context = saved->context;
 	py_tstate->context_ver++;  /* Invalidate contextvars cache */
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 	py_tstate->cframe = saved->cframe;
 	assert(py_tstate->cframe != NULL);
 	saved->cframe_owned = saved->cframe;
@@ -1438,7 +1467,7 @@ static void PyTealetTstate_DecRef(PyTealetTstate *saved)
 
 static void * PyTealet_GetStackFar(const PyThreadState *py_tstate)
 {
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 	/* python 3.10 has cframe on stack.  make sure we save our stacks to include
 	 * this whole structure
 	 */
@@ -1463,7 +1492,7 @@ save_tstate(PyTealetObject *current, PyThreadState *tstate)
 	if (current && current->tealet)
 		current->tstate.stack_far_saved = tealet_get_far(current->tealet);
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	log_cframe_chain("save_tstate BEFORE capture", (void *)current,
 		current && current->tealet ? tealet_get_far(current->tealet) : NULL,
@@ -1475,11 +1504,11 @@ save_tstate(PyTealetObject *current, PyThreadState *tstate)
 	LOG("save_tstate: tstate->context=%p before save\n", tstate->context);
 	PyTealetTstate_Capture(&current->tstate, tstate);
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 	dbg_capture_saved_main_window("save_tstate-after-capture", current);
 #endif
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	log_cframe_chain("save_tstate AFTER capture", (void *)current,
 		current && current->tealet ? tealet_get_far(current->tealet) : NULL,
@@ -1502,7 +1531,7 @@ restore_tstate(PyTealetObject *current, PyThreadState *tstate)
 	LOG("restore_tstate: current->context=%p, current->exc_val=%p\n",
 	    current->tstate.context, current->tstate.exc_val);
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	fprintf(stderr,
 		"[CFRAME] restore_tstate BEFORE restore chain_walk=skipped reason=transient_pre_restore_state owner=%p saved_cframe=%p\n",
@@ -1516,7 +1545,7 @@ restore_tstate(PyTealetObject *current, PyThreadState *tstate)
 	PyTealetTstate_Restore(&current->tstate, tstate);
 	current->dbg_saved_window_has_snapshot = 0;
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	log_cframe_chain("restore_tstate AFTER restore", (void *)current,
 		current && current->tealet ? tealet_get_far(current->tealet) : NULL,
@@ -1532,7 +1561,7 @@ restore_tstate(PyTealetObject *current, PyThreadState *tstate)
 	/* No assertion needed for context */
 	
 	/* cframe should always point somewhere valid */
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 	assert(tstate->cframe != NULL);
 #endif
 	
@@ -1749,7 +1778,7 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	 * reference set for caller's parked state.
 	 */
 	dbg_failfast_validate_active_cframe("py-run-before-save", current, tstate);
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	log_switch_cframes("run-before-save", current, target, tstate);
 #endif
@@ -1757,7 +1786,7 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	save_tstate(current, tstate);
 	dbg_failfast_validate_active_cframe("py-run-after-save", current, tstate);
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	log_switch_cframes("run-after-save-before-transfer", current, target, tstate);
 #endif
@@ -1793,7 +1822,7 @@ err:
 	restore_tstate(current, tstate);
 	dbg_failfast_validate_active_cframe("py-run-after-restore", current, tstate);
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	log_switch_cframes("run-after-restore", current, target, tstate);
 #endif
@@ -1838,13 +1867,13 @@ pytealet_switch(PyObject *_self, PyObject *args)
 	Py_INCREF(pyarg);
 	switch_arg = (void*)pyarg;
 	/* switch */
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	log_switch_cframes("before-save", current, self, tstate);
 #endif
 #endif
 	save_tstate(current, tstate);
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	log_switch_cframes("after-save-before-switch", current, self, tstate);
 #endif
@@ -1854,7 +1883,7 @@ pytealet_switch(PyObject *_self, PyObject *args)
 	LOG("pytealet_switch: tealet_switch returned, tealet=%p\n", self->tealet);
 	restore_tstate(current, tstate);
 	dbg_failfast_validate_active_cframe("py-switch-after-restore", current, tstate);
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	log_switch_cframes("after-restore", current, self, tstate);
 #endif
@@ -2011,7 +2040,7 @@ pytealet_main(tealet_t *t_current, void *arg)
 	PyObject *result, *return_arg;
 	PyTealetObject *return_to;
 	tealet_t *t_return;
-	#if PY_VERSION_HEX < 0x030D0000
+	#if defined(PY_HAS_CFRAME)
 		PyThreadState *entry_tstate;
 		CFrame tealet_owned_cframe;
 	#endif
@@ -2027,7 +2056,7 @@ pytealet_main(tealet_t *t_current, void *arg)
 		TEALET_SET_PYOBJECT(t_current, tealet);
 	}
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 	entry_tstate = PyThreadState_GET();
 	#if TEALET_PYTEALET_FIX_LOCAL_CFRAME_COPY
 	if (entry_tstate && entry_tstate->cframe) {
@@ -2046,7 +2075,7 @@ pytealet_main(tealet_t *t_current, void *arg)
 	#endif
 #endif
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 	dbg_maybe_capture_anchor("run-entry", tealet, PyThreadState_GET());
 #endif
@@ -2228,7 +2257,7 @@ static PyTealetObject *GetMain()
 			}
 		}
 		PyThread_set_key_value(tls_key, (void*)t_main);
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
 		dbg_maybe_capture_anchor("main-created", t_main, PyThreadState_GET());
 #endif
@@ -2384,7 +2413,7 @@ PyInit__tealet(void)
 	return m;
 }
 
-#if PY_VERSION_HEX < 0x030D0000
+#if defined(PY_HAS_CFRAME)
 static void
 dbg_capture_saved_main_window(const char *phase, PyTealetObject *owner)
 {
