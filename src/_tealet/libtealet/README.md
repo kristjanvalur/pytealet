@@ -3,13 +3,16 @@
 
 # libtealet
 
-**Version 0.3.2**
+**Version 0.4.0**
 
 LibTealet is a lightweight co-routine library for C.  It is based on the
 technique of stack-slicing, where the execution stack is saved and restored
 in order to maintain separate execution context.
 It uses the [Stackman library][stackman] library for low
 level stack operations, providing implementation for common modern desktop platforms.
+For ease of integration, this repository bundles Stackman **v1.2.0** in `stackman/`
+including pre-built platform libraries used by the default build.
+The official Stackman repository is: https://github.com/stackless-dev/stackman
 There are no other run-time dependencies, ecxcept for `memcpy()`, and the default
 use of `malloc()` can be replaced with a custom memory allocator, and `assert()` which is
 used by debug builds.
@@ -46,7 +49,7 @@ and a new co-routine is running.  This support is provided by the _Stackman_ lib
 ## Similar work
 Stackless Python and Gevent use a similar mechanism, and this code is based on that work.
 
-For C, there also exist some other approache. For an overview, see [Coroutines for C][coroc]
+For C, there also exist some other approaches. For an overview, see [Coroutines for C][coroc]
 
 ## Stack-chaining Optimization
 
@@ -73,7 +76,7 @@ int main(void) {
     tealet_t *main = tealet_initialize(&alloc, 0);
     
     void *arg = NULL;
-    tealet_t *coro = tealet_new(main, worker, &arg);
+    tealet_t *coro = tealet_new(main, worker, &arg, NULL);
     
     tealet_finalize(main);
     return 0;
@@ -82,13 +85,58 @@ int main(void) {
 
 Compile: `gcc -o example example.c -Isrc -Lbin -ltealet`
 
-# Functionalty
+## Development requirements
+
+For contributor workflows, `clang-format` is required.
+
+- CI runs `make check-format` in `.github/workflows/build-test.yml`.
+- Local formatting commands:
+    - `make check-format` (verify formatting)
+    - `make format` (apply formatting)
+
+Install `clang-format`:
+
+- Linux (Debian/Ubuntu): `sudo apt install clang-format`
+- macOS (Homebrew): `brew install clang-format`
+- Windows:
+    - `winget install LLVM.LLVM`
+    - or `choco install llvm`
+
+After installing on Windows, ensure `clang-format.exe` is on your `PATH`.
+
+# Functionality
 The library provides the basic mechanism to create coroutine and to switch between them.
 It takes care of allocating and saving the stack for dormant coroutines.  A way to pass simple values
 between coroutines is provided but the user must be careful to pass any more complicated data on the
 heap, and not via stack-local variables.
 
 No form of scheduler is implemented.
+
+## Optional stack checks
+
+libtealet includes optional runtime stack-integrity checks that combine page protection and snapshot verification.
+These checks help verify the promise that each tealet does not access stack areas outside its allowed bounds. They are especially useful during application development and integration to catch boundary-violation bugs early.
+They come with runtime overhead and are generally intended for development/testing builds, not production deployments.
+
+- **Stack guard** (`TEALET_CONFIGF_STACK_GUARD`) protects full pages (typically via `mprotect()` where available).
+- **Stack snapshot** (`TEALET_CONFIGF_STACK_SNAPSHOT`) verifies byte-level regions, including sub-page areas guard mode cannot represent exactly.
+- Together they are used to catch out-of-bounds stack access across both page-aligned and non-page-aligned regions.
+
+- Use `tealet_configure_check_stack()` to enable a sensible default check profile (ideally from a program top-level function, since it derives `stack_guard_limit` from its own stack frame).
+- Use `tealet_configure_get()` / `tealet_configure_set()` for explicit control.
+
+By default, the project build enables both backends:
+
+- `TEALET_WITH_STACK_GUARD=1`
+- `TEALET_WITH_STACK_SNAPSHOT=1`
+
+You can compile them out when needed, for example:
+
+```bash
+make TEALET_WITH_STACK_GUARD=0 TEALET_WITH_STACK_SNAPSHOT=0
+```
+
+When compiled out, configuration calls are canonicalized to the supported subset on the current build/platform.
 
 ## Advanced: Fork-like Semantics
 

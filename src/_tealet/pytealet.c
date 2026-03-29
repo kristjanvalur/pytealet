@@ -2230,6 +2230,16 @@ static PyTealetObject *GetMain()
 			PyErr_NoMemory();
 			return NULL;
 		}
+		{
+			const char *check_stack_env = getenv("PYTEALET_CHECK_STACK");
+			if (check_stack_env && *check_stack_env && *check_stack_env != '0') {
+				if (tealet_configure_check_stack(tmain, 0) < 0) {
+					tealet_finalize(tmain);
+					PyErr_SetString(PyExc_RuntimeError, "tealet_configure_check_stack failed");
+					return NULL;
+				}
+			}
+		}
 		mdata = (main_data*)PyMem_Malloc(sizeof(*mdata));
 		if (!mdata) {
 			tealet_finalize(tmain);
@@ -2250,12 +2260,6 @@ static PyTealetObject *GetMain()
 		t_main->tealet = tmain;
 		t_main->state = STATE_RUN;
 		TEALET_SET_PYOBJECT(tmain, t_main); /* back link */
-		{
-			const char *page_guard_env = getenv("TEALET_PAGE_GUARD");
-			if (page_guard_env && *page_guard_env && *page_guard_env != '0') {
-				tealet_set_page_guard(tmain, 1);
-			}
-		}
 		PyThread_set_key_value(tls_key, (void*)t_main);
 #if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS
