@@ -199,7 +199,6 @@ struct PyTealetTstate {
 	 * Stack-slicing preserves the CFrame struct itself; we just save the pointer */
 #if defined(PY_HAS_CFRAME)
 	CFrame* cframe;
-	CFrame* cframe_owned; /* CFrame pointer owned by tealet stack while running */
 #endif
 };
 
@@ -1312,7 +1311,6 @@ static void PyTealetTstate_Init(PyTealetTstate *saved)
 	saved->stack_far_saved = NULL;
 #if defined(PY_HAS_CFRAME)
 	saved->cframe = NULL;
-	saved->cframe_owned = NULL;
 #endif
 }
 
@@ -1345,7 +1343,6 @@ static void PyTealetTstate_CopyForClone(PyTealetTstate *dst, const PyTealetTstat
 	dst->stack_far_saved = src->stack_far_saved;
 #if defined(PY_HAS_CFRAME)
 	dst->cframe = src->cframe;
-	dst->cframe_owned = src->cframe;
 #endif
 	dst->has_state = 1;
 	dst->own_refs = 0;
@@ -1383,7 +1380,6 @@ static void PyTealetTstate_Capture(PyTealetTstate *saved, PyThreadState *py_tsta
 
 #if defined(PY_HAS_CFRAME)
 	saved->cframe = py_tstate->cframe;
-	saved->cframe_owned = saved->cframe;
 #endif
 	saved->trash_delete_nesting = py_tstate->trash_delete_nesting;
 	py_tstate->trash_delete_nesting = 0;
@@ -1422,7 +1418,6 @@ static void PyTealetTstate_Restore(PyTealetTstate *saved, PyThreadState *py_tsta
 #if defined(PY_HAS_CFRAME)
 	py_tstate->cframe = saved->cframe;
 	assert(py_tstate->cframe != NULL);
-	saved->cframe_owned = saved->cframe;
 #endif
 	py_tstate->trash_delete_nesting = saved->trash_delete_nesting;
 
@@ -2031,7 +2026,6 @@ pytealet_main(tealet_t *t_current, void *arg)
 	tealet_t *t_return;
 	#if defined(PY_HAS_CFRAME)
 		PyThreadState *entry_tstate;
-		CFrame tealet_owned_cframe;
 	#endif
 	
 	if (targ->stub) {
@@ -2043,25 +2037,6 @@ pytealet_main(tealet_t *t_current, void *arg)
 		tealet->tealet = t_current;
 		TEALET_SET_PYOBJECT(t_current, tealet);
 	}
-
-#if defined(PY_HAS_CFRAME)
-	entry_tstate = PyThreadState_GET();
-	#if TEALET_PYTEALET_FIX_LOCAL_CFRAME_COPY
-	if (entry_tstate && entry_tstate->cframe) {
-		memcpy(&tealet_owned_cframe, entry_tstate->cframe, sizeof(tealet_owned_cframe));
-		tealet_owned_cframe.previous = NULL;
-		entry_tstate->cframe = &tealet_owned_cframe;
-		tealet->tstate.cframe = &tealet_owned_cframe;
-		tealet->tstate.cframe_owned = &tealet_owned_cframe;
-	} else {
-		tealet->tstate.cframe_owned = NULL;
-	}
-	#else
-	if (entry_tstate) {
-		tealet->tstate.cframe_owned = NULL;
-	}
-	#endif
-#endif
 
 #if defined(PY_HAS_CFRAME)
 #if TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS

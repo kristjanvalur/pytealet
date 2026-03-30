@@ -547,7 +547,7 @@ This branch is the recommended continuation branch for near-term development bec
 
 2x2 matrix results (already generated under `tmp/bughunt/`) still stand:
 
-- either fix alone (`local cframe copy` or `boundary hint`) prevents crashes in tested probes,
+- either individual mitigation prevented crashes in tested probes,
 - disabling both reproduces crashes strongly.
 
 ### G. Practical branch usage
