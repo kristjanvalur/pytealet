@@ -167,7 +167,6 @@ This closes the bookkeeping gap where a full save could be treated as partial.
 
 Added/used toggles:
 
-- `TEALET_PYTEALET_ENABLE_STACK_DIAGNOSTICS`
 - `TEALET_PYTEALET_ENABLE_MAGIC_COOKIES`
 - `TEALET_PYTEALET_VALIDATE_PRE_RESTORE`
 - `TEALET_PYTEALET_MIN_INITIAL_SAVE`
