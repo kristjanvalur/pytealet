@@ -12,53 +12,12 @@
  */
 
 /*
- * Preset profiles for fast switching during debug/bisect work.
+ * Note: historical local instrumentation toggles were removed after
+ * syncing to the current libtealet baseline.
  *
- * TEALET_PYTEALET_PROFILE_UPSTREAM_LIKE:
- *   Keep behavior close to upstream defaults (minimal local diagnostics).
- *
- * TEALET_PYTEALET_PROFILE_DEBUG_HEAVY:
- *   Enable pytealet local diagnostics and validation checks.
+ * Keep this header in place because setup.py force-includes it for both
+ * libtealet and extension builds, but there are currently no active
+ * pytealet-local compile-time switches defined here.
  */
-#define TEALET_PYTEALET_PROFILE_UPSTREAM_LIKE 1
-#define TEALET_PYTEALET_PROFILE_DEBUG_HEAVY   2
-
-#ifndef TEALET_PYTEALET_PROFILE
-#define TEALET_PYTEALET_PROFILE TEALET_PYTEALET_PROFILE_UPSTREAM_LIKE
-#endif
-
-#if TEALET_PYTEALET_PROFILE == TEALET_PYTEALET_PROFILE_UPSTREAM_LIKE
-
-/* Upstream-like defaults */
-#ifndef TEALET_PYTEALET_ENABLE_MAGIC_COOKIES
-#define TEALET_PYTEALET_ENABLE_MAGIC_COOKIES 0
-#endif
-
-#ifndef TEALET_PYTEALET_VALIDATE_PRE_RESTORE
-#define TEALET_PYTEALET_VALIDATE_PRE_RESTORE 0
-#endif
-
-#ifndef TEALET_PYTEALET_MIN_INITIAL_SAVE
-#define TEALET_PYTEALET_MIN_INITIAL_SAVE 0
-#endif
-
-#elif TEALET_PYTEALET_PROFILE == TEALET_PYTEALET_PROFILE_DEBUG_HEAVY
-
-/* Debug-heavy defaults */
-#ifndef TEALET_PYTEALET_ENABLE_MAGIC_COOKIES
-#define TEALET_PYTEALET_ENABLE_MAGIC_COOKIES 1
-#endif
-
-#ifndef TEALET_PYTEALET_VALIDATE_PRE_RESTORE
-#define TEALET_PYTEALET_VALIDATE_PRE_RESTORE 1
-#endif
-
-#ifndef TEALET_PYTEALET_MIN_INITIAL_SAVE
-#define TEALET_PYTEALET_MIN_INITIAL_SAVE 2048
-#endif
-
-#else
-#error "Unknown TEALET_PYTEALET_PROFILE value"
-#endif
 
 #endif /* PYTEALET_BUILD_CONFIG_H */

@@ -165,14 +165,14 @@ This closes the bookkeeping gap where a full save could be treated as partial.
 
 `src/_tealet/libtealet/src/tealet.c` now clearly tags pytealet-specific divergence points as `PYTEALET_LOCAL_CHANGE` and guards them with macros.
 
-Added/used toggles:
+Historical toggles used in that exploratory phase (no longer active in current tree):
 
 - `TEALET_PYTEALET_ENABLE_MAGIC_COOKIES`
 - `TEALET_PYTEALET_VALIDATE_PRE_RESTORE`
 - `TEALET_PYTEALET_MIN_INITIAL_SAVE`
 - existing `TEALET_FORCE_FULL_SAVE`
 
-Default values are set to upstream-like behavior (`0`) unless intentionally enabled.
+At the time, defaults were set to upstream-like behavior (`0`) unless intentionally enabled.
 
 ### D. Centralized compile-time control file
 
