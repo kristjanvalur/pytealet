@@ -12,6 +12,7 @@ LIBTEALET_BIN_DIR = "src/_tealet/libtealet-bin"  # Pre-built binaries fallback
 LIBTEALET_HEADERS = os.path.join(LIBTEALET_DIR, "src")
 STACKMAN_HEADERS = os.path.join(LIBTEALET_DIR, "stackman")
 PYTEALET_BUILD_CONFIG_HEADER = os.path.abspath("src/_tealet/pytealet_build_config.h")
+DEFAULT_C_STD_FLAGS = "-std=c17 -pedantic-errors"
 
 # Default to source builds, with fallback support for prebuilt binaries.
 BUILD_LIBTEALET_FROM_SOURCE = os.environ.get("BUILD_LIBTEALET_FROM_SOURCE", "1") == "1"
@@ -75,7 +76,7 @@ def build_libtealet_from_source():
         )
 
     print(f"Building libtealet from source in {LIBTEALET_DIR}...", file=sys.stderr)
-    cflags = "-g -O0 -fPIC" if LIBTEALET_DEBUG else "-g -O2 -fPIC"
+    cflags = f"{DEFAULT_C_STD_FLAGS} -g -O0 -fPIC" if LIBTEALET_DEBUG else f"{DEFAULT_C_STD_FLAGS} -g -O2 -fPIC"
 
     # Force-include centralized build config for libtealet compilation units.
     if os.path.exists(PYTEALET_BUILD_CONFIG_HEADER):
@@ -145,6 +146,8 @@ extra_objects = [libtealet_static]
 if platform.system() != "Windows":
     # GCC/Clang flags
     extra_compile_args.extend([
+        "-std=c17",
+        "-pedantic-errors",
         "-Wall",
         "-Wno-unused-function",
     ])

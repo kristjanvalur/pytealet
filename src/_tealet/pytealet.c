@@ -10,6 +10,7 @@
 #include "pythread.h"
 
 #include "tealet.h"
+#include "tools.h"
 
 /* Python minor-version helpers for readable version-specific conditionals. */
 #if PY_VERSION_HEX >= 0x030A0000 && PY_VERSION_HEX < 0x030B0000
@@ -141,9 +142,8 @@ typedef struct tealet_extra_t {
 } tealet_extra_t;
 
 /* Helper macros for type-safe access to the tealet extra data */
-#define TEALET_EXTRA(t) ((tealet_extra_t*)(t)->extra)
-#define TEALET_PYOBJECT(t) (TEALET_EXTRA(t)->pytealet)
-#define TEALET_SET_PYOBJECT(t, obj) (TEALET_EXTRA(t)->pytealet = (obj))
+#define TEALET_PYOBJECT(t) (TEALET_EXTRA((t), tealet_extra_t)->pytealet)
+#define TEALET_SET_PYOBJECT(t, obj) (TEALET_EXTRA((t), tealet_extra_t)->pytealet = (obj))
 
 
 /* a structure that captures the tstate of a tealet.  The fields stored
@@ -440,18 +440,16 @@ pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
 
 
 	if (src) {
-		assert(0 && "clone-from-source path executed unexpectedly; add/adjust tests before enabling this path");
-		// fix this path later
-		//PyTealetTstate_CopyForClone(&result->tstate, &src->tstate);
-		//PyTealetTstate_IncRef(&result->tstate);
 		if (src->state == STATE_STUB) {
+			/* duplicate the stub tealet and the tstate */
 			result->tealet = tealet_duplicate(src->tealet);
 			if (!result->tealet) {
-				PyTealetTstate_DecRef(&result->tstate);
 				Py_DECREF(result);
 				return PyErr_NoMemory();
 			}
 			TEALET_SET_PYOBJECT(result->tealet, result);
+			result->tstate = src->tstate;
+			PyTealetTstate_IncRef(&result->tstate);
 		}
 		result->state = src->state;
 	}
@@ -483,6 +481,8 @@ pytealet_stub(PyObject *self)
 {
 	PyTealetObject *main, *pytealet = (PyTealetObject*)self;
 	tealet_t *tresult;
+	PyThreadState *tstate = PyThreadState_GET();
+	void *stack_far;
 	if (pytealet->state != STATE_NEW) {
 		PyErr_SetString(StateError, "must be new");
 		return NULL;
@@ -491,9 +491,12 @@ pytealet_stub(PyObject *self)
 	main = GetMain(1);
 	if (!main)
 		return NULL;
-	tresult = stub_new(main->tealet);
+	stack_far = PyTealet_GetStackFar(PyThreadState_GET());
+	tresult = tealet_stub_new(main->tealet, stack_far);
 	if (!tresult)
 		return PyErr_NoMemory();
+	// capture the tstate of the current thread, which we will restore when the stub runs
+	PyTealetTstate_Copy(&pytealet->tstate, tstate);
 	pytealet->tealet = tresult;
 	pytealet->state = STATE_STUB;
 	TEALET_SET_PYOBJECT(tresult, pytealet);
@@ -539,17 +542,18 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	ptarg = &mdata->new_arg;
 	switch_arg = (void*)ptarg;
 	
-	if (!created_from_new) {
-		assert(0 && "temporarily disabled during development");
-	}
 	ptarg->stub = !created_from_new;
 	ptarg->dest = target;
 	ptarg->func = func;
 	ptarg->arg = farg;
 	
 	if (ptarg->stub) {
-		// will add tstate stuff here later
-		fail = stub_run(target->tealet, pytealet_main, &switch_arg);
+		/* running the stub is like switching to it.  It owns its own
+		 * thread state already and will apply it
+		 */
+		PyTealetTstate_Save(&current->tstate, tstate);
+		fail = tealet_stub_run(target->tealet, pytealet_main, &switch_arg);
+		PyTealetTstate_Restore(&current->tstate, tstate);
 		if (fail) {
 			PyErr_NoMemory();
 			goto err;
@@ -761,7 +765,11 @@ pytealet_main(tealet_t *t_current, void *arg)
 		assert(tealet->state == STATE_STUB);
 		assert(t_current == tealet->tealet);
 		assert(TEALET_PYOBJECT(t_current) == tealet);
+
+		/* set the tstate from our own copy */
+		PyTealetTstate_Restore(&tealet->tstate, tstate);
 	} else {
+		assert(tealet->state == STATE_NEW);
 		/* set up the pointer in the tealet */
 		tealet->tealet = t_current;
 		TEALET_SET_PYOBJECT(t_current, tealet);
@@ -837,9 +845,8 @@ pytealet_main(tealet_t *t_current, void *arg)
 	
 	Py_INCREF(return_arg);
 
-	/* save the thread state and drop it */
+	/* save the thread state; release deferred to pytealet_dealloc */
 	PyTealetTstate_Save(&tealet->tstate, tstate);
-	PyTealetTstate_Drop(&tealet->tstate);
 
 	if (tealet_exit(t_return, (void*)return_arg, TEALET_EXIT_DELETE))
 		tealet_exit(t_return->main, (void *)return_arg, TEALET_EXIT_DELETE);
