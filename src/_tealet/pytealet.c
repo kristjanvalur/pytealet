@@ -473,16 +473,11 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     PyTealetObject *target = (PyTealetObject *)self;
     PyTealetObject *current;
     PyObject *func;
-    PyObject *farg = Py_None;
+    PyObject *farg;
     int fail;
     tealet_t *tealet;
-    char *keywords[] = {"function", "arg", NULL};
     PyThreadState *tstate = PyThreadState_GET();
-    PyObject *tuple_args;
-    PyObject *kwds = NULL;
     PyObject *result;
-    Py_ssize_t i;
-    Py_ssize_t nkw = kwnames ? PyTuple_GET_SIZE(kwnames) : 0;
     int created_from_new;
     PyTealetMainData *mdata;
     PyTealetNewArg *ptarg;
@@ -501,35 +496,54 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
         return NULL;
     }
 
-    tuple_args = PyTuple_New(nargs);
-    if (!tuple_args)
+    func = farg = NULL;
+    if (nargs >= 1)
+        func = args[0];
+    if (nargs >= 2)
+        farg = args[1];
+    if (nargs > 2) {
+        PyErr_Format(PyExc_TypeError, "run() takes at most 2 arguments (%zd given)", nargs);
         return NULL;
-    for (i = 0; i < nargs; i++) {
-        PyObject *item = args[i];
-        Py_INCREF(item);
-        PyTuple_SET_ITEM(tuple_args, i, item);
     }
 
-    if (nkw > 0) {
-        kwds = PyDict_New();
-        if (!kwds) {
-            Py_DECREF(tuple_args);
-            return NULL;
-        }
-        for (i = 0; i < nkw; i++) {
+    if (kwnames && PyTuple_GET_SIZE(kwnames) > 1) {
+        PyErr_SetString(PyExc_TypeError, "run() takes at most 2 keyword arguments");
+        return NULL;
+    }
+    if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
+        Py_ssize_t i;
+        for (i = 0; i < PyTuple_GET_SIZE(kwnames); i++) {
             PyObject *key = PyTuple_GET_ITEM(kwnames, i);
-            if (PyDict_SetItem(kwds, key, args[nargs + i]) < 0) {
-                Py_DECREF(kwds);
-                Py_DECREF(tuple_args);
+            PyObject *val = args[nargs + i];
+            if (!PyUnicode_Check(key)) {
+                PyErr_SetString(PyExc_TypeError, "run() keyword names must be strings");
+                return NULL;
+            }
+            if (PyUnicode_CompareWithASCIIString(key, "function") == 0) {
+                if (func != NULL) {
+                    PyErr_SetString(PyExc_TypeError, "run() got multiple values for argument 'function'");
+                    return NULL;
+                }
+                func = val;
+            } else if (PyUnicode_CompareWithASCIIString(key, "arg") == 0) {
+                if (farg != NULL) {
+                    PyErr_SetString(PyExc_TypeError, "run() got multiple values for argument 'arg'");
+                    return NULL;
+                }
+                farg = val;
+            } else {
+                PyErr_Format(PyExc_TypeError, "run() got an unexpected keyword argument '%U'", key);
                 return NULL;
             }
         }
     }
 
-    if (!PyArg_ParseTupleAndKeywords(tuple_args, kwds, "O|O:run", keywords, &func, &farg)) {
-        result = NULL;
-        goto run_cleanup;
+    if (func == NULL) {
+        PyErr_SetString(PyExc_TypeError, "run() missing required argument 'function' (pos 1)");
+        return NULL;
     }
+    if (farg == NULL)
+        farg = Py_None;
 
     created_from_new = (target->state == STATE_NEW);
     mdata = (PyTealetMainData *)*tealet_main_userpointer(current->tealet);
@@ -566,8 +580,6 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     result = (PyObject *)switch_arg;
 run_cleanup:
     dustbin_clear(current->tealet);
-    Py_XDECREF(kwds);
-    Py_DECREF(tuple_args);
     return result;
 }
 
@@ -581,9 +593,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     PyThreadState *tstate = PyThreadState_GET();
     PyObject *pyarg = Py_None;
     void *switch_arg;
-    PyObject *tuple_args;
     PyObject *result;
-    Py_ssize_t i;
     if (!mstate)
         return NULL;
 
@@ -591,31 +601,21 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
         PyErr_SetString(PyExc_TypeError, "switch() takes no keyword arguments");
         return NULL;
     }
-    tuple_args = PyTuple_New(nargs);
-    if (!tuple_args)
+    if (nargs > 1) {
+        PyErr_Format(PyExc_TypeError, "switch() takes at most 1 argument (%zd given)", nargs);
         return NULL;
-    for (i = 0; i < nargs; i++) {
-        PyObject *item = args[i];
-        Py_INCREF(item);
-        PyTuple_SET_ITEM(tuple_args, i, item);
     }
-
-    if (!PyArg_ParseTuple(tuple_args, "|O:switch", &pyarg)) {
-        result = NULL;
-        goto switch_cleanup;
-    }
+    if (nargs == 1)
+        pyarg = args[0];
 
     if (target->state != STATE_RUN) {
         PyErr_SetString(mstate->state_error, "must be active");
-        result = NULL;
-        goto switch_cleanup;
+        return NULL;
     }
     assert(target->tealet);
     current = GetCurrent(mstate, NULL);
-    if (!current || CheckTarget(mstate, target, current)) {
-        result = NULL;
-        goto switch_cleanup;
-    }
+    if (!current || CheckTarget(mstate, target, current))
+        return NULL;
 
     Py_INCREF(pyarg);
     switch_arg = (void *)pyarg;
@@ -628,17 +628,12 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     if (fail == TEALET_ERR_DEFUNCT) {
         Py_DECREF(pyarg);
         PyErr_SetString(mstate->defunct_error, "target is defunct");
-        result = NULL;
-        goto switch_cleanup;
+        return NULL;
     } else if (fail == TEALET_ERR_MEM) {
         Py_DECREF(pyarg);
-        result = PyErr_NoMemory();
-        goto switch_cleanup;
+        return PyErr_NoMemory();
     }
     result = (PyObject *)switch_arg;
-
-switch_cleanup:
-    Py_DECREF(tuple_args);
     return result;
 }
 
