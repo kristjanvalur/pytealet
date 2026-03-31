@@ -55,19 +55,19 @@ static Py_tss_t tls_key = Py_tss_NEEDS_INIT;
 /* Forward declaration */
 typedef struct PyTealetObject PyTealetObject;
 
-typedef struct tealet_new_arg {
+typedef struct PyTealetNewArg {
 	PyTealetObject *dest;
 	PyObject *func;
 	PyObject *arg;
-} tealet_new_arg;
+} PyTealetNewArg;
 
 /* the structure we associate with the main tealet */
-typedef struct main_data
+typedef struct PyTealetMainData
 {
 	long tid;
-	tealet_new_arg new_arg;
+	PyTealetNewArg new_arg;
 	PyObject *dustbin;
-} main_data;
+} PyTealetMainData;
 
 /* initial number of slots in dustbin, to avoid realloc on push */
 #define DUSTBIN_PREALLOC 10
@@ -77,13 +77,13 @@ typedef struct main_data
  * This structure is stored in tealet->extra and provides type-safe
  * access to the associated PyTealetObject.
  */
-typedef struct tealet_extra_t {
+typedef struct PyTealetExtra {
 	PyTealetObject *pytealet;
-} tealet_extra_t;
+} PyTealetExtra;
 
 /* Helper macros for type-safe access to the tealet extra data */
-#define TEALET_PYOBJECT(t) (TEALET_EXTRA((t), tealet_extra_t)->pytealet)
-#define TEALET_SET_PYOBJECT(t, obj) (TEALET_EXTRA((t), tealet_extra_t)->pytealet = (obj))
+#define TEALET_PYOBJECT(t) (TEALET_EXTRA((t), PyTealetExtra)->pytealet)
+#define TEALET_SET_PYOBJECT(t, obj) (TEALET_EXTRA((t), PyTealetExtra)->pytealet = (obj))
 
 
 /* a structure that captures the tstate of a tealet.  The fields stored
@@ -219,14 +219,14 @@ static void PyTealetTstate_IncRef(PyTealetTstate *saved)
 static void
 dustbin_push(tealet_t *tealet, PyObject *obj)
 {
-	main_data *mdata;
+	PyTealetMainData *mdata;
 	if (!obj)
 		return;
 	if (!tealet) {
 		Py_DECREF(obj);
 		return;
 	}
-	mdata = (main_data*)*tealet_main_userpointer(tealet);
+	mdata = (PyTealetMainData*)*tealet_main_userpointer(tealet);
 	if (!mdata || !mdata->dustbin || !PyList_Check(mdata->dustbin)) {
 		Py_DECREF(obj);
 		return;
@@ -347,7 +347,7 @@ static void * PyTealet_GetStackFar(const PyThreadState *py_tstate)
 static void
 dustbin_clear(tealet_t *tealet)
 {
-	main_data *mdata = (main_data*)*tealet_main_userpointer(tealet);
+	PyTealetMainData *mdata = (PyTealetMainData*)*tealet_main_userpointer(tealet);
 	Py_ssize_t n;
 	n = PyList_GET_SIZE(mdata->dustbin);
 	if (n == 0)
@@ -462,8 +462,8 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	PyThreadState *tstate = PyThreadState_GET();
 	PyObject *result = NULL;
 	int created_from_new;
-	main_data *mdata;
-	tealet_new_arg *ptarg;
+	PyTealetMainData *mdata;
+	PyTealetNewArg *ptarg;
 	void *switch_arg;
 
 	/* target->tealet is null or a stub tealet.  GetCurrent works either way. */
@@ -482,7 +482,7 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	
 	created_from_new = (target->state == STATE_NEW);
-	mdata = (main_data*)*tealet_main_userpointer(current->tealet);
+	mdata = (PyTealetMainData*)*tealet_main_userpointer(current->tealet);
 	ptarg = &mdata->new_arg;
 	switch_arg = (void*)ptarg;
 	
@@ -632,7 +632,7 @@ pytealet_get_tid(PyObject *_self, void *_closure)
 	PyTealetObject *self = (PyTealetObject *)_self;
 	long tid = 0;
 	if (self->tealet) {
-		main_data *mdata = (main_data*)*tealet_main_userpointer(self->tealet);
+		PyTealetMainData *mdata = (PyTealetMainData*)*tealet_main_userpointer(self->tealet);
 		tid = mdata->tid;
 	}
 	return PyLong_FromLong(tid);
@@ -695,7 +695,7 @@ static PyTypeObject PyTealetType = {
 static tealet_t *
 pytealet_main(tealet_t *t_current, void *arg)
 {
-	tealet_new_arg *targ = (tealet_new_arg*)arg;
+	PyTealetNewArg *targ = (PyTealetNewArg*)arg;
 	PyTealetObject *tealet = targ->dest;
 	PyObject *func = targ->func;
 	PyObject *farg = targ->arg;
@@ -828,12 +828,12 @@ static PyTealetObject *GetMain(int create)
 	if (!t_main) {
 		tealet_alloc_t talloc;
 		tealet_t *tmain;
-		main_data *mdata;
+		PyTealetMainData *mdata;
 		/* Use system malloc/free so valgrind can detect heap corruption */
 		talloc.malloc_p = tealet_malloc_wrapper;
 		talloc.free_p = tealet_free_wrapper;
 		talloc.context = NULL;
-		tmain = tealet_initialize(&talloc, sizeof(tealet_extra_t));
+		tmain = tealet_initialize(&talloc, sizeof(PyTealetExtra));
 		if (!tmain) {
 			PyErr_NoMemory();
 			return NULL;
@@ -848,7 +848,7 @@ static PyTealetObject *GetMain(int create)
 				}
 			}
 		}
-		mdata = (main_data*)PyMem_Malloc(sizeof(*mdata));
+		mdata = (PyTealetMainData*)PyMem_Malloc(sizeof(*mdata));
 		if (!mdata) {
 			tealet_finalize(tmain);
 			PyErr_NoMemory();
