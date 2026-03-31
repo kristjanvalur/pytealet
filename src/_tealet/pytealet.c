@@ -1203,6 +1203,10 @@ pytealet_module_free(void *m)
 	PyTealetModuleState *mstate = (PyTealetModuleState*)PyModule_GetState((PyObject*)m);
 	if (!mstate)
 		return;
+	/* TODO: Per-thread teardown for mstate->tls_key is deferred.
+	 * Deleting the TSS key does not decref thread-local PyObject* values.
+	 * Implement per-mstate thread shutdown cleanup in a follow-up change.
+	 */
 	if (PyThread_tss_is_created(&mstate->tls_key))
 		PyThread_tss_delete(&mstate->tls_key);
 }

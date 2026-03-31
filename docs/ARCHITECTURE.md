@@ -447,11 +447,16 @@ tealet_free(sarg.current, myarg);
 
 **Design:**
 ```c
-static int tls_key;  // Thread-local storage
-PyTealetObject *t_main = (PyTealetObject*)PyThread_get_key_value(tls_key);
+typedef struct PyTealetModuleState {
+    Py_tss_t tls_key;
+    ...
+} PyTealetModuleState;
+
+PyTealetObject *t_main = (PyTealetObject*)PyThread_tss_get(&mstate->tls_key);
 ```
 
 **Properties:**
+- Each module instance (and therefore each interpreter) has its own TLS key
 - Each OS thread gets its own tealet hierarchy
 - Prevents cross-thread switching (which would corrupt stacks)
 - Matches libtealet's threading model
@@ -459,6 +464,17 @@ PyTealetObject *t_main = (PyTealetObject*)PyThread_get_key_value(tls_key);
 
 **Thread Safety:**
 Tealets can only switch within the same thread family. Cross-thread switches are detected and raise `InvalidError`.
+
+### Thread Shutdown Considerations (Deferred)
+
+Current direction is **TLS-per-module-state** (`mstate->tls_key`) so main-tealet ownership is scoped per interpreter/module state.
+
+⚠️ **Known deferred work:**
+- We currently do not run full per-thread teardown of the TLS-stored `main` tealet object.
+- `PyThread_tss_delete()` in module free deletes the key, but does not automatically decref Python objects that may still be stored for live/terminated threads.
+- Final design should define explicit ownership and thread-exit cleanup behavior **per mstate** (not globally), including when and where `PyThread_tss_set(&mstate->tls_key, NULL)` and final decref happen.
+
+This is intentionally deferred while we complete mstate-plumbing and interpreter-isolation work.
 
 ---
 
