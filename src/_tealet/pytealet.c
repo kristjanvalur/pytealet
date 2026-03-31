@@ -41,68 +41,6 @@
 #define PY_HAS_CFRAME
 #endif
 
-/****************************************************************
- *Implement copyable stubs by using a trampoline
- */
-struct stub_arg
-{
-    tealet_t *current;
-    tealet_run_t run;
-    void *runarg;
-};
-
-static tealet_t *
-stub_main(tealet_t *current, void *arg)
-{
-    void *myarg = 0;
-
-    /* the caller is in arg, return right back to him */
-    tealet_switch((tealet_t*)arg, &myarg);
-    /* now we are back, myarg should contain the arg to the run function.
-     * We were possibly duplicated, so can't trust the original function args.
-     */
-    {
-        struct stub_arg sarg = *(struct stub_arg*)myarg;
-        tealet_free(sarg.current, myarg);
-        return (sarg.run)(sarg.current, sarg.runarg);
-    }
-}
-
-/* create a stub and return it */
-static tealet_t *
-stub_new(tealet_t *t) {
-    void *arg = (void*)tealet_current(t);
-	return tealet_new(t, stub_main, &arg, NULL);
-}
-
-/* run a stub */
-static int
-stub_run(tealet_t *stub, tealet_run_t run, void **parg)
-{
-    int result;
-    void *myarg;
-    /* we cannot pass arguments to a different tealet on the stack */
-    struct stub_arg *psarg = (struct stub_arg*)tealet_malloc(stub, sizeof(struct stub_arg));
-    if (!psarg)
-        return TEALET_ERR_MEM;
-    psarg->current = stub;
-    psarg->run = run;
-    psarg->runarg = parg ? *parg : NULL;
-    myarg = (void*)psarg;
-    result = tealet_switch(stub, &myarg);
-    if (result) {
-        /* failure */
-        tealet_free(stub, psarg);
-        return result;
-    }
-    /* pass back the arg value from the switch */
-    if (parg)
-        *parg = myarg;
-    return 0;
-}
-/***************************************************************/
-
-
 #define STATE_NEW 0
 #define STATE_STUB 1
 #define STATE_RUN 2
@@ -173,8 +111,6 @@ struct PyTealetTstate {
 	int trash_delete_nesting;
 	PyObject *context; /* Python 3.7+ contextvars */
 	int has_state; /* Debug helper: 1 when this struct currently stores a saved tstate */
-	void *stack_near_saved; /* Debug: stack-near marker captured with this tstate */
-	void *stack_far_saved;  /* Debug: far boundary captured with this tstate */
 	/* Python 3.10-3.12: cframe tracks C-level call frames (removed in 3.13)
 	 * Stack-slicing preserves the CFrame struct itself; we just save the pointer */
 #if defined(PY_HAS_CFRAME)
@@ -211,21 +147,7 @@ static PyObject *DefunctError;
 
 static void PyTealetTstate_Init(PyTealetTstate *saved)
 {
-	saved->frame = NULL;
-	saved->exc_type = NULL;
-	saved->exc_val = NULL;
-	saved->exc_tb = NULL;
-	saved->exc_info = NULL;
-	saved->exc_state.exc_value = NULL;
-	saved->recursion_depth = 0;
-	saved->trash_delete_nesting = 0;
-	saved->context = NULL;
 	saved->has_state = 0;
-	saved->stack_near_saved = NULL;
-	saved->stack_far_saved = NULL;
-#if defined(PY_HAS_CFRAME)
-	saved->cframe = NULL;
-#endif
 }
 
 /* Raw copy the tstate files from PyThreadState to our local structure */
