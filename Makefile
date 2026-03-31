@@ -1,4 +1,7 @@
-.PHONY: cext-clean cext-cc cext-cc-debug cext-cc-warnings cext-cc-ci
+.PHONY: cext-clean cext-cc cext-cc-debug cext-cc-warnings cext-cc-ci format-c format-c-check
+
+CLANG_FORMAT ?= clang-format-14
+C_FORMAT_FILES := src/_tealet/pytealet.c src/_tealet/pytealet_build_config.h
 
 PY_CC := $(shell uv run python -c "import sysconfig; print((sysconfig.get_config_var('CC') or 'cc').split()[0])")
 PY_CFLAGS := $(shell uv run python -c "import sysconfig; print(sysconfig.get_config_var('CFLAGS') or '')")
@@ -29,3 +32,9 @@ cext-cc-warnings: cext-clean
 cext-cc-ci: cext-clean
 	mkdir -p tmp/build
 	$(PY_CC) $(PY_CFLAGS) $(PY_INCLUDE_FLAGS) $(EXT_INCLUDE_FLAGS) $(EXT_BASE_FLAGS) $(EXT_CI_FLAGS) -c $(EXT_SRC) -o $(EXT_OBJ)
+
+format-c:
+	$(CLANG_FORMAT) -i $(C_FORMAT_FILES)
+
+format-c-check:
+	$(CLANG_FORMAT) --dry-run --Werror $(C_FORMAT_FILES)

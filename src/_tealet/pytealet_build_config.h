@@ -8,7 +8,8 @@
  *  1) libtealet static library build (when BUILD_LIBTEALET_FROM_SOURCE=1)
  *  2) _tealet extension compilation
  *
- * Edit values here to run controlled test variants without changing source files.
+ * Edit values here to run controlled test variants without changing source
+ * files.
  */
 
 /*
