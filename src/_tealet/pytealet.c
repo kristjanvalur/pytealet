@@ -56,7 +56,6 @@ static Py_tss_t tls_key = Py_tss_NEEDS_INIT;
 typedef struct PyTealetObject PyTealetObject;
 
 typedef struct tealet_new_arg {
-	int stub;
 	PyTealetObject *dest;
 	PyObject *func;
 	PyObject *arg;
@@ -70,6 +69,7 @@ typedef struct main_data
 	PyObject *dustbin;
 } main_data;
 
+/* initial number of slots in dustbin, to avoid realloc on push */
 #define DUSTBIN_PREALLOC 10
 
 
@@ -486,12 +486,11 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 	ptarg = &mdata->new_arg;
 	switch_arg = (void*)ptarg;
 	
-	ptarg->stub = !created_from_new;
 	ptarg->dest = target;
 	ptarg->func = func;
 	ptarg->arg = farg;
 	
-	if (ptarg->stub) {
+	if (!created_from_new) {
 		/* running the stub is like switching to it.  It owns its own
 		 * thread state already and will apply it
 		 */
@@ -705,8 +704,7 @@ pytealet_main(tealet_t *t_current, void *arg)
 	tealet_t *t_return;
 	PyThreadState *tstate = PyThreadState_GET();
 	
-	if (targ->stub) {
-		assert(tealet->state == STATE_STUB);
+	if (tealet->state == STATE_STUB) {
 		assert(t_current == tealet->tealet);
 		assert(TEALET_PYOBJECT(t_current) == tealet);
 
