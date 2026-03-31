@@ -61,6 +61,7 @@ typedef struct PyTealetModuleState {
 
 typedef struct PyTealetNewArg {
 	PyTealetObject *dest;
+	PyTealetModuleState *mstate;
 	PyObject *func;
 	PyObject *arg;
 } PyTealetNewArg;
@@ -137,44 +138,48 @@ struct PyTealetObject {
 };
 
 /* helpers for getting main and current and checking relationship */
-static PyTealetObject *GetMainWithState(int create, PyTealetModuleState *mstate);
-static PyTealetObject *GetMain(int create);
-static PyTealetObject *GetCurrent(PyTealetObject *main);
-static int CheckTarget(PyTealetObject *target, PyTealetObject *main);
+static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls, int set_error);
+static PyTealetObject *GetMain(PyTealetModuleState *mstate, int create);
+static PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *main);
+static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *main);
 
 static tealet_t * pytealet_main(tealet_t *t_current, void *arg);
 
+/* TODO(py311+): For __init__/tp_init and other paths that only have a type,
+ * prefer PyType_GetModuleByDef(type, &_tealet_module) to resolve this module,
+ * then PyModule_GetState(module). This should replace fallback class-walk logic
+ * once our minimum supported Python version includes that API.
+ */
 static PyTealetModuleState *
-PyTealet_GetModuleState(void)
+GetModuleStateFromClass(PyTypeObject *cls, int set_error)
 {
-	PyObject *module = PyDict_GetItemString(PyImport_GetModuleDict(), "_tealet");
-	if (!module)
-		return NULL;
-	return (PyTealetModuleState*)PyModule_GetState(module);
-}
-
-static PyTealetModuleState *
-PyTealet_GetModuleStateOrError(void)
-{
-	PyTealetModuleState *mstate = PyTealet_GetModuleState();
-	if (!mstate) {
-		PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-		return NULL;
+	PyTypeObject *cur = cls;
+	while (cur) {
+		PyTealetModuleState *mstate = (PyTealetModuleState*)PyType_GetModuleState(cur);
+		if (mstate)
+			return mstate;
+		if (PyErr_Occurred()) {
+			if (PyErr_ExceptionMatches(PyExc_TypeError))
+				PyErr_Clear();
+			else
+				return NULL;
+		}
+		cur = cur->tp_base;
 	}
-	return mstate;
+	if (set_error)
+		PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+	return NULL;
 }
 
 static int
-PyTealet_Check(PyObject *op)
+PyTealet_Check(PyObject *op, PyTealetModuleState *mstate)
 {
-	PyTealetModuleState *mstate = PyTealet_GetModuleState();
 	return mstate && mstate->tealet_type && PyObject_TypeCheck(op, mstate->tealet_type);
 }
 
 static int
-PyTealet_CheckExact(PyObject *op)
+PyTealet_CheckExact(PyObject *op, PyTealetModuleState *mstate)
 {
-	PyTealetModuleState *mstate = PyTealet_GetModuleState();
 	return mstate && mstate->tealet_type && (Py_TYPE(op) == mstate->tealet_type);
 }
 
@@ -397,16 +402,16 @@ pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
 {
 	PyTealetObject *src = NULL;
 	PyTealetObject *result;
+	PyTealetModuleState *mstate = GetModuleStateFromClass(subtype, 1);
+	if (!mstate)
+		return NULL;
 	if (args && PyTuple_GET_SIZE(args)>0) {
 		src = (PyTealetObject*)PyTuple_GET_ITEM(args, 0);
-		if (!PyTealet_Check((PyObject*)src)) {
+		if (!PyTealet_Check((PyObject*)src, mstate)) {
 			PyErr_SetNone(PyExc_TypeError);
 			return NULL;
 		}
 		if (src->state != STATE_NEW && src->state != STATE_STUB) {
-			PyTealetModuleState *mstate = PyTealet_GetModuleStateOrError();
-			if (!mstate)
-				return NULL;
 			PyErr_SetString(mstate->state_error, "state must be new or stub");
 			return NULL;
 		}
@@ -461,22 +466,22 @@ pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *arg
 			 Py_ssize_t nargs, PyObject *kwnames)
 {
 	PyTealetObject *main, *pytealet = (PyTealetObject*)self;
+	PyTealetModuleState *mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
 	tealet_t *tresult;
 	PyThreadState *tstate = PyThreadState_GET();
 	void *stack_far;
+	if (!mstate)
+		return NULL;
 	if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
 		PyErr_SetString(PyExc_TypeError, "stub() takes no arguments");
 		return NULL;
 	}
 	if (pytealet->state != STATE_NEW) {
-		PyTealetModuleState *mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
-		if (!mstate)
-			return NULL;
 		PyErr_SetString(mstate->state_error, "must be new");
 		return NULL;
 	}
 	assert(pytealet->tealet == NULL);
-	main = GetMain(1);
+	main = GetMain(mstate, 1);
 	if (!main)
 		return NULL;
 	stack_far = PyTealet_GetStackFar(PyThreadState_GET());
@@ -496,6 +501,7 @@ static PyObject *
 pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
 			Py_ssize_t nargs, PyObject *kwnames)
 {
+	PyTealetModuleState *mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
 	PyTealetObject *target = (PyTealetObject *)self;
 	PyTealetObject *current;
 	PyObject *func;
@@ -513,17 +519,16 @@ pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args
 	PyTealetMainData *mdata;
 	PyTealetNewArg *ptarg;
 	void *switch_arg;
+	if (!mstate)
+		return NULL;
 
-	current = GetCurrent(target);
+	current = GetCurrent(mstate, target);
 	if (!current)
 		return NULL;
-	if (CheckTarget(target, current))
+	if (CheckTarget(mstate, target, current))
 		return NULL;
 
 	if (target->state != STATE_NEW && target->state != STATE_STUB) {
-		PyTealetModuleState *mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
-		if (!mstate)
-			return NULL;
 		PyErr_SetString(mstate->state_error, "must be new or stub");
 		return NULL;
 	}
@@ -565,6 +570,7 @@ pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args
 	switch_arg = (void*)ptarg;
 
 	ptarg->dest = target;
+	ptarg->mstate = mstate;
 	ptarg->func = func;
 	ptarg->arg = farg;
 
@@ -603,7 +609,7 @@ static PyObject *
 pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
 			   Py_ssize_t nargs, PyObject *kwnames)
 {
-	PyTealetModuleState *mstate = NULL;
+	PyTealetModuleState *mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
 	PyTealetObject *target = (PyTealetObject *)self;
 	PyTealetObject *current;
 	int fail;
@@ -613,6 +619,8 @@ pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *a
 	PyObject *tuple_args;
 	PyObject *result;
 	Py_ssize_t i;
+	if (!mstate)
+		return NULL;
 
 	if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
 		PyErr_SetString(PyExc_TypeError, "switch() takes no keyword arguments");
@@ -633,18 +641,13 @@ pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *a
 	}
 
 	if (target->state != STATE_RUN) {
-		mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
-		if (!mstate) {
-			result = NULL;
-			goto switch_cleanup;
-		}
 		PyErr_SetString(mstate->state_error, "must be active");
 		result = NULL;
 		goto switch_cleanup;
 	}
 	assert(target->tealet);
-	current = GetCurrent(NULL);
-	if (!current || CheckTarget(target, current)) {
+	current = GetCurrent(mstate, NULL);
+	if (!current || CheckTarget(mstate, target, current)) {
 		result = NULL;
 		goto switch_cleanup;
 	}
@@ -658,12 +661,6 @@ pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *a
 	dustbin_clear(current->tealet);
 
 	if (fail == TEALET_ERR_DEFUNCT) {
-		mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
-		if (!mstate) {
-			Py_DECREF(pyarg);
-			result = NULL;
-			goto switch_cleanup;
-		}
 		Py_DECREF(pyarg);
 		PyErr_SetString(mstate->defunct_error, "target is defunct");
 		result = NULL;
@@ -695,6 +692,9 @@ pytealet_get_main(PyObject *_self, void *_closure)
 {
 	PyTealetObject *self = (PyTealetObject *)_self;
 	PyTealetObject *main;
+	PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self), 1);
+	if (!mstate)
+		return NULL;
 	
 	if (!self->tealet) {
 		/* New tealet not yet initialized (STATE_NEW) or
@@ -702,7 +702,7 @@ pytealet_get_main(PyObject *_self, void *_closure)
 		 * Return the thread's main tealet.
 		 * TODO: Review if STATE_NEW should exist without tealet (lazy creation)
 		 */
-		main = GetMain(1);
+		main = GetMain(mstate, 1);
 		if (!main)
 			return NULL;
 	} else {
@@ -723,10 +723,13 @@ static PyObject *
 pytealet_get_frame(PyObject *_self, void *_closure)
 {
 	PyTealetObject *self = (PyTealetObject *)_self;
+	PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self), 1);
+	if (!mstate)
+		return NULL;
 	PyObject *frame = (PyObject*)self->tstate.frame;
 	if (!frame) {
 		/* is it the current tealet of the current thread? */
-		if (self == GetCurrent(NULL)) {
+		if (self == GetCurrent(mstate, NULL)) {
 			PyThreadState *tstate = PyThreadState_GET();
 			frame = (PyObject*)tstate->frame;
 		}
@@ -789,6 +792,7 @@ static tealet_t *
 pytealet_main(tealet_t *t_current, void *arg)
 {
 	PyTealetNewArg *targ = (PyTealetNewArg*)arg;
+	PyTealetModuleState *mstate = targ->mstate;
 	PyTealetObject *tealet = targ->dest;
 	PyObject *func = targ->func;
 	PyObject *farg = targ->arg;
@@ -840,18 +844,13 @@ pytealet_main(tealet_t *t_current, void *arg)
 		/* it is ok to rock the GC boat here, because we will switch to
 		 * main in case of error, and main is always around
 		 */
-	if (!PyTealet_Check((PyObject*)return_to)) {
+	if (!PyTealet_Check((PyObject*)return_to, mstate)) {
 		return_to = NULL;
 		PyErr_SetString(PyExc_TypeError, "tealet object expected");
 	} else if (return_to->state != STATE_RUN) {
-		PyTealetModuleState *mstate = PyTealet_GetModuleStateOrError();
-		if (!mstate) {
-			Py_CLEAR(result);
-			return NULL;
-		}
 		return_to = NULL;
 		PyErr_SetString(mstate->state_error, "must be 'run'");
-	} else if (CheckTarget(return_to, tealet))
+	} else if (CheckTarget(mstate, return_to, tealet))
 		return_to = NULL;
 	}
 	if (!return_to) {
@@ -865,7 +864,7 @@ pytealet_main(tealet_t *t_current, void *arg)
 	if (!return_to) {
 		PyErr_WriteUnraisable(func);
 		/* must switch to main */
-		return_to = GetMain(0);
+		return_to = GetMain(mstate, 0);
 		assert(return_to);
 		result = (PyObject*)return_to;
 		Py_INCREF(result);
@@ -914,21 +913,12 @@ static void tealet_free_wrapper(void *ptr, void *context)
 }
 
 /* return a borrowed reference to this thread's main tealet */
-static PyTealetObject *GetMain(int create)
-{
-	return GetMainWithState(create, NULL);
-}
-
-/* return a borrowed reference to this thread's main tealet */
-static PyTealetObject *GetMainWithState(int create, PyTealetModuleState *mstate)
+static PyTealetObject *GetMain(PyTealetModuleState *mstate, int create)
 {
 	/* Get the thread's main tealet */
 	PyTealetObject *t_main;
-	if (!mstate) {
-		mstate = PyTealet_GetModuleStateOrError();
-		if (!mstate)
-			return NULL;
-	}
+	if (!mstate)
+		return NULL;
 	t_main = (PyTealetObject*)PyThread_tss_get(&mstate->tls_key);
 	if (!t_main && !create) {
 		return NULL;
@@ -1009,12 +999,12 @@ static PyTealetObject *GetMainWithState(int create, PyTealetModuleState *mstate)
 
 /* return a borrowed ref to this threads current tealet */
 static PyTealetObject *
-GetCurrent(PyTealetObject *pytealet)
+GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet)
 {
 	/* if we are being passed no tealet, or it is a new tealet, 
 	 * we must get the current main from the thread-local storage */
 	if (!pytealet || !pytealet->tealet)
-		pytealet = GetMain(1);
+		pytealet = GetMain(mstate, 1);
 	if (!pytealet)
 		return NULL;
 	return TEALET_PYOBJECT(tealet_current(pytealet->tealet));
@@ -1022,18 +1012,15 @@ GetCurrent(PyTealetObject *pytealet)
 
 /* check if a target tealet is valid */
 static int
-CheckTarget(PyTealetObject *target, PyTealetObject *ref)
+CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *ref)
 {
 	if (!ref)
-		ref = GetMain(1);
+		ref = GetMain(mstate, 1);
 	if (!ref)
 		return -1;
 	if (!target->tealet)
 		return 0; /* no tealet yet */
 	if (ref->tealet->main != target->tealet->main) {
-		PyTealetModuleState *mstate = PyTealet_GetModuleStateOrError();
-		if (!mstate)
-			return -1;
 		PyErr_SetString(mstate->invalid_error, "foreign tealet");
 		return -1;
 	}
@@ -1046,17 +1033,29 @@ CheckTarget(PyTealetObject *target, PyTealetObject *ref)
 
 
 static PyObject *
-module_current()
+module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored))
 {
-	PyTealetObject* current = GetCurrent(NULL);
+	PyTealetModuleState *mstate = (PyTealetModuleState*)PyModule_GetState(mod);
+	PyTealetObject *current;
+	if (!mstate) {
+		PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+		return NULL;
+	}
+	current = GetCurrent(mstate, NULL);
 	Py_XINCREF(current);
 	return (PyObject*)current;
 }
 
 static PyObject *
-module_main()
+module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored))
 {
-	PyTealetObject* main = GetMain(1);
+	PyTealetModuleState *mstate = (PyTealetModuleState*)PyModule_GetState(mod);
+	PyTealetObject *main;
+	if (!mstate) {
+		PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+		return NULL;
+	}
+	main = GetMain(mstate, 1);
 	Py_XINCREF(main);
 	return (PyObject*)main;
 }
@@ -1131,7 +1130,7 @@ pytealet_module_exec(PyObject *m)
 	}
 	Py_DECREF(type_obj);
 
-	main = GetMainWithState(1, mstate);
+	main = GetMain(mstate, 1);
 	if (!main)
 		return -1;
 
