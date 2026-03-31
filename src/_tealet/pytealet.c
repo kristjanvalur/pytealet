@@ -112,7 +112,7 @@ static PyTypeObject PyTealetType;
 #define PyTealet_Check(op) PyObject_TypeCheck(op, &PyTealetType)
 #define PyTealet_CheckExact(op) (Py_TYPE(op) == &PyTealetType)
 
-static int tls_key;
+static Py_tss_t tls_key = Py_tss_NEEDS_INIT;
 
 /* Forward declaration */
 typedef struct PyTealetObject PyTealetObject;
@@ -336,14 +336,6 @@ static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_teale
 		Py_XDECREF(saved->exc_state.exc_value);
 		Py_XDECREF(saved->context);
 	}
-	saved->frame = NULL;
-	saved->exc_type = NULL;
-	saved->exc_val = NULL;
-	saved->exc_tb = NULL;
-	saved->exc_state.exc_value = NULL;
-	saved->context = NULL;
-	if (saved->exc_info == &saved->exc_state)
-		saved->exc_info = NULL;
 }
 
 /* helper to clear the python threadstate for hygiene */
@@ -907,7 +899,7 @@ static void tealet_free_wrapper(void *ptr, void *context)
 static PyTealetObject *GetMain(int create)
 {
 	/* Get the thread's main tealet */
-	PyTealetObject *t_main = (PyTealetObject*)PyThread_get_key_value(tls_key);
+	PyTealetObject *t_main = (PyTealetObject*)PyThread_tss_get(&tls_key);
 	if (!t_main && !create) {
 		return NULL;
 	}
@@ -969,7 +961,15 @@ static PyTealetObject *GetMain(int create)
 		t_main->tealet = tmain;
 		t_main->state = STATE_RUN;
 		TEALET_SET_PYOBJECT(tmain, t_main); /* back link */
-		PyThread_set_key_value(tls_key, (void*)t_main);
+		if (PyThread_tss_set(&tls_key, (void*)t_main) != 0) {
+			TEALET_SET_PYOBJECT(tmain, NULL);
+			t_main->tealet = NULL;
+			Py_DECREF(t_main);
+			tealet_finalize(tmain);
+			PyMem_Free(mdata);
+			PyErr_SetString(PyExc_RuntimeError, "failed to set thread-local main tealet");
+			return NULL;
+		}
 	}
 	assert(t_main->tealet);
 	assert(TEALET_IS_MAIN(t_main->tealet));
@@ -1077,7 +1077,10 @@ PyInit__tealet(void)
 	PyObject *m;
 	PyTealetObject *main;
 
-	tls_key = PyThread_create_key();
+	if (PyThread_tss_create(&tls_key) != 0) {
+		PyErr_SetString(PyExc_RuntimeError, "failed to create thread-local key");
+		return NULL;
+	}
 
 	/* init the type */
 	if (PyType_Ready(&PyTealetType) < 0)
