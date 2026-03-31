@@ -46,8 +46,6 @@
 #define STATE_RUN 2
 #define STATE_EXIT 3
 
-static PyTypeObject PyTealetType;
-
 /* Forward declaration */
 typedef struct PyTealetObject PyTealetObject;
 static struct PyModuleDef _tealet_module;
@@ -161,6 +159,22 @@ PyTealet_GetModuleStateOrError(void)
 	PyTealetModuleState *mstate = PyTealet_GetModuleState();
 	if (!mstate) {
 		PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+		return NULL;
+	}
+	return mstate;
+}
+
+static PyTealetModuleState *
+PyTealet_GetModuleStateFromDefiningClass(PyTypeObject *defining_class)
+{
+	PyTealetModuleState *mstate;
+	if (!defining_class) {
+		PyErr_SetString(PyExc_RuntimeError, "defining class unavailable");
+		return NULL;
+	}
+	mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
+	if (!mstate) {
+		PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable from type");
 		return NULL;
 	}
 	return mstate;
@@ -460,16 +474,13 @@ pytealet_dealloc(PyObject *obj)
 
 /* make stub here */
 static PyObject *
-pytealet_stub(PyObject *self)
+pytealet_stub_impl(PyObject *self, PyTealetModuleState *mstate)
 {
 	PyTealetObject *main, *pytealet = (PyTealetObject*)self;
 	tealet_t *tresult;
 	PyThreadState *tstate = PyThreadState_GET();
 	void *stack_far;
 	if (pytealet->state != STATE_NEW) {
-		PyTealetModuleState *mstate = PyTealet_GetModuleStateOrError();
-		if (!mstate)
-			return NULL;
 		PyErr_SetString(mstate->state_error, "must be new");
 		return NULL;
 	}
@@ -490,9 +501,24 @@ pytealet_stub(PyObject *self)
 	return self;
 }
 
+static PyObject *
+pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+			 Py_ssize_t nargs, PyObject *kwnames)
+{
+	PyTealetModuleState *mstate;
+	if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
+		PyErr_SetString(PyExc_TypeError, "stub() takes no arguments");
+		return NULL;
+	}
+	mstate = PyTealet_GetModuleStateFromDefiningClass(defining_class);
+	if (!mstate)
+		return NULL;
+	return pytealet_stub_impl(self, mstate);
+}
+
 /* run a tealet and optinonally run */
 static PyObject *
-pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
+pytealet_run_impl(PyObject *self, PyObject *args, PyObject *kwds, PyTealetModuleState *mstate)
 {
 	PyTealetObject *target = (PyTealetObject *)self;
 	PyTealetObject *current;
@@ -516,9 +542,6 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 		return NULL;
 
 	if (target->state != STATE_NEW && target->state != STATE_STUB) {
-		PyTealetModuleState *mstate = PyTealet_GetModuleStateOrError();
-		if (!mstate)
-			return NULL;
 		PyErr_SetString(mstate->state_error, "must be new or stub");
 		return NULL;
 	}
@@ -566,9 +589,56 @@ err:
 	dustbin_clear(current->tealet);
 	return result;
 }
+
+static PyObject *
+pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+			Py_ssize_t nargs, PyObject *kwnames)
+{
+	PyTealetModuleState *mstate;
+	PyObject *tuple_args;
+	PyObject *kwds = NULL;
+	PyObject *result;
+	Py_ssize_t i;
+	Py_ssize_t nkw = kwnames ? PyTuple_GET_SIZE(kwnames) : 0;
+
+	mstate = PyTealet_GetModuleStateFromDefiningClass(defining_class);
+	if (!mstate)
+		return NULL;
+
+	tuple_args = PyTuple_New(nargs);
+	if (!tuple_args)
+		return NULL;
+	for (i = 0; i < nargs; i++) {
+		PyObject *item = args[i];
+		Py_INCREF(item);
+		PyTuple_SET_ITEM(tuple_args, i, item);
+	}
+
+	if (nkw > 0) {
+		kwds = PyDict_New();
+		if (!kwds) {
+			Py_DECREF(tuple_args);
+			return NULL;
+		}
+		for (i = 0; i < nkw; i++) {
+			PyObject *key = PyTuple_GET_ITEM(kwnames, i);
+			if (PyDict_SetItem(kwds, key, args[nargs + i]) < 0) {
+				Py_DECREF(kwds);
+				Py_DECREF(tuple_args);
+				return NULL;
+			}
+		}
+	}
+
+	result = pytealet_run_impl(self, tuple_args, kwds, mstate);
+	Py_XDECREF(kwds);
+	Py_DECREF(tuple_args);
+	return result;
+}
+
 /* switch to a different tealet */
 static PyObject *
-pytealet_switch(PyObject *_self, PyObject *args)
+pytealet_switch_impl(PyObject *_self, PyObject *args, PyTealetModuleState *mstate)
 {
 	PyTealetObject *self = (PyTealetObject *)_self;
 	PyTealetObject *current;
@@ -581,9 +651,6 @@ pytealet_switch(PyObject *_self, PyObject *args)
 		return NULL;
 
 	if (self->state != STATE_RUN) {
-		PyTealetModuleState *mstate = PyTealet_GetModuleStateOrError();
-		if (!mstate)
-			return NULL;
 		PyErr_SetString(mstate->state_error, "must be active");
 		return NULL;
 	}
@@ -605,10 +672,7 @@ pytealet_switch(PyObject *_self, PyObject *args)
 	dustbin_clear(current->tealet);
 	
 	if (fail == TEALET_ERR_DEFUNCT) {
-		PyTealetModuleState *mstate = PyTealet_GetModuleStateOrError();
 		Py_DECREF(pyarg);
-		if (!mstate)
-			return NULL;
 		PyErr_SetString(mstate->defunct_error, "target is defunct");
 		return NULL;
 	} else if (fail == TEALET_ERR_MEM) {
@@ -619,11 +683,40 @@ pytealet_switch(PyObject *_self, PyObject *args)
 	pyarg = (PyObject *)switch_arg;
 	return pyarg;
 }
+
+static PyObject *
+pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+			   Py_ssize_t nargs, PyObject *kwnames)
+{
+	PyTealetModuleState *mstate;
+	PyObject *tuple_args;
+	PyObject *result;
+	Py_ssize_t i;
+
+	if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
+		PyErr_SetString(PyExc_TypeError, "switch() takes no keyword arguments");
+		return NULL;
+	}
+	mstate = PyTealet_GetModuleStateFromDefiningClass(defining_class);
+	if (!mstate)
+		return NULL;
+	tuple_args = PyTuple_New(nargs);
+	if (!tuple_args)
+		return NULL;
+	for (i = 0; i < nargs; i++) {
+		PyObject *item = args[i];
+		Py_INCREF(item);
+		PyTuple_SET_ITEM(tuple_args, i, item);
+	}
+	result = pytealet_switch_impl(self, tuple_args, mstate);
+	Py_DECREF(tuple_args);
+	return result;
+}
 	
 static struct PyMethodDef pytealet_methods[] = {
-	{"stub", (PyCFunction) pytealet_stub, METH_NOARGS, ""},
-	{"run", (PyCFunction) pytealet_run, METH_VARARGS|METH_KEYWORDS, ""},
-    {"switch", (PyCFunction) pytealet_switch, METH_VARARGS, ""},
+	{"stub", (PyCFunction)(void(*)(void))pytealet_stub, METH_METHOD|METH_FASTCALL|METH_KEYWORDS, ""},
+	{"run", (PyCFunction)(void(*)(void))pytealet_run, METH_METHOD|METH_FASTCALL|METH_KEYWORDS, ""},
+    {"switch", (PyCFunction)(void(*)(void))pytealet_switch, METH_METHOD|METH_FASTCALL|METH_KEYWORDS, ""},
 	{NULL,       NULL}          /* sentinel */
 };
 
@@ -699,46 +792,28 @@ static struct PyGetSetDef pytealet_getset[] = {
 };
 
 
-static PyTypeObject PyTealetType = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    "_tealet.tealet",                           /* tp_name */
-    sizeof(PyTealetObject),                     /* tp_basicsize */
-    0,                                          /* tp_itemsize */
-    (destructor)pytealet_dealloc,                 /* tp_dealloc */
-    0,                                          /* tp_print */
-    0,                                          /* tp_getattr */
-    0,                                          /* tp_setattr */
-    0,                                          /* tp_compare */
-    0,                                          /* tp_repr */
-    0,                                          /* tp_as_number */
-    0,                                          /* tp_as_sequence */
-    0,                                          /* tp_as_mapping */
-    0,                                          /* tp_hash */
-    0,                                          /* tp_call */
-    0,                                          /* tp_str */
-    0,                                          /* tp_getattro */
-    0,                                          /* tp_setattro */
-    0,                                          /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,   /* tp_flags */
-    "",                                         /* tp_doc */
-    0,                                          /* tp_traverse */
-    0,                                          /* tp_clear */
-    0,                                          /* tp_richcompare */
-    offsetof(PyTealetObject,weakreflist),       /* tp_weaklistoffset */
-    0,                                          /* tp_iter */
-    0,                                          /* tp_iternext */
-    pytealet_methods,                           /* tp_methods */
-    0,                                          /* tp_members */
-    pytealet_getset,                            /* tp_getset */
-    0,                                          /* tp_base */
-    0,                                          /* tp_dict */
-    0,                                          /* tp_descr_get */
-    0,                                          /* tp_descr_set */
-    0,                                          /* tp_dictoffset */
-    0,                                          /* tp_init */
-    0,                                          /* tp_alloc */
-    pytealet_new,                               /* tp_new */
-    0,                                          /* tp_free */
+/* CPython type slot table stores C function pointers in void* fields by API design. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+static PyType_Slot pytealet_type_slots[] = {
+	{Py_tp_dealloc, pytealet_dealloc},
+	{Py_tp_methods, pytealet_methods},
+	{Py_tp_getset, pytealet_getset},
+	{Py_tp_new, pytealet_new},
+	{0, NULL}
+};
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+static PyType_Spec pytealet_type_spec = {
+	"_tealet.tealet",
+	sizeof(PyTealetObject),
+	0,
+	Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+	pytealet_type_slots
 };
 
 
@@ -940,7 +1015,7 @@ static PyTealetObject *GetMainWithState(int create, PyTealetModuleState *mstate)
 		*tealet_main_userpointer(tmain) = (void*)mdata;
 
 		/* create the main tealet */
-		t_main = (PyTealetObject*)pytealet_new(&PyTealetType, NULL, NULL);
+		t_main = (PyTealetObject*)pytealet_new(mstate->tealet_type, NULL, NULL);
 		if (!t_main) {
 			tealet_finalize(tmain);
 			PyMem_Free(mdata);
@@ -1058,6 +1133,7 @@ pytealet_module_exec(PyObject *m)
 {
 	PyTealetModuleState *mstate = (PyTealetModuleState*)PyModule_GetState(m);
 	PyTealetObject *main;
+	PyObject *type_obj;
 
 	if (!mstate) {
 		PyErr_SetString(PyExc_RuntimeError, "failed to get _tealet module state");
@@ -1078,15 +1154,18 @@ pytealet_module_exec(PyObject *m)
 		}
 	}
 
-	if (PyType_Ready(&PyTealetType) < 0)
+	type_obj = PyType_FromModuleAndSpec(m, &pytealet_type_spec, NULL);
+	if (!type_obj)
 		return -1;
-	mstate->tealet_type = &PyTealetType;
+	mstate->tealet_type = (PyTypeObject*)type_obj;
+	if (PyModule_AddObjectRef(m, "tealet", type_obj) < 0) {
+		Py_DECREF(type_obj);
+		return -1;
+	}
+	Py_DECREF(type_obj);
 
 	main = GetMainWithState(1, mstate);
 	if (!main)
-		return -1;
-
-	if (PyModule_AddType(m, mstate->tealet_type) < 0)
 		return -1;
 
 	mstate->tealet_error = PyErr_NewException("_tealet.TealetError", NULL, NULL);
