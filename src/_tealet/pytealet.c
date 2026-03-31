@@ -129,8 +129,10 @@ typedef struct main_data
 {
 	long tid;
 	tealet_new_arg new_arg;
-	PyObject *dustbin[3];  /* make this a list eventually */
+	PyObject *dustbin;
 } main_data;
+
+#define DUSTBIN_PREALLOC 10
 
 
 /* Extra data stored with each tealet for the Python binding.
@@ -292,16 +294,56 @@ static void PyTealetTstate_IncRef(PyTealetTstate *saved)
 	Py_XINCREF(saved->context);
 }
 
-static void PyTealetTstate_DecRef(PyTealetTstate *saved)
+static void
+dustbin_push(tealet_t *tealet, PyObject *obj)
+{
+	main_data *mdata;
+	if (!obj)
+		return;
+	if (!tealet) {
+		Py_DECREF(obj);
+		return;
+	}
+	mdata = (main_data*)*tealet_main_userpointer(tealet);
+	if (!mdata || !mdata->dustbin || !PyList_Check(mdata->dustbin)) {
+		Py_DECREF(obj);
+		return;
+	}
+	if (PyList_Append(mdata->dustbin, obj) < 0) {
+		Py_DECREF(obj);
+		PyErr_WriteUnraisable(Py_None);
+		PyErr_Clear();
+		return;
+	}
+	Py_DECREF(obj);
+}
+
+static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_tealet)
 {
 	assert(saved->has_state == 1);
-	Py_XDECREF(saved->frame);
-	Py_XDECREF(saved->exc_type);
-	Py_XDECREF(saved->exc_val);
-	Py_XDECREF(saved->exc_tb);
-	Py_XDECREF(saved->exc_state.exc_value);
-	/* exc_info is a pointer to exc_state or a stack item, so we don't own a reference to it */
-	Py_XDECREF(saved->context);
+	if (dustbin_tealet) {
+		dustbin_push(dustbin_tealet, (PyObject*)saved->frame);
+		dustbin_push(dustbin_tealet, saved->exc_type);
+		dustbin_push(dustbin_tealet, saved->exc_val);
+		dustbin_push(dustbin_tealet, saved->exc_tb);
+		dustbin_push(dustbin_tealet, saved->exc_state.exc_value);
+		dustbin_push(dustbin_tealet, saved->context);
+	} else {
+		Py_XDECREF(saved->frame);
+		Py_XDECREF(saved->exc_type);
+		Py_XDECREF(saved->exc_val);
+		Py_XDECREF(saved->exc_tb);
+		Py_XDECREF(saved->exc_state.exc_value);
+		Py_XDECREF(saved->context);
+	}
+	saved->frame = NULL;
+	saved->exc_type = NULL;
+	saved->exc_val = NULL;
+	saved->exc_tb = NULL;
+	saved->exc_state.exc_value = NULL;
+	saved->context = NULL;
+	if (saved->exc_info == &saved->exc_state)
+		saved->exc_info = NULL;
 }
 
 /* helper to clear the python threadstate for hygiene */
@@ -338,11 +380,11 @@ static void PyTealetTstate_Copy(PyTealetTstate *dst, const PyThreadState *src)
 }
 
 /* drop our own threadstate refs, e.g. after failure, or at tealet end */
-static void PyTealetTstate_Drop(PyTealetTstate *dst)
+static void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet)
 {
 	if (!dst->has_state)
 		return;
-	PyTealetTstate_DecRef(dst);
+	PyTealetTstate_DecRef(dst, dustbin_tealet);
 	dst->has_state = 0;
 }
 
@@ -389,29 +431,17 @@ static void * PyTealet_GetStackFar(const PyThreadState *py_tstate)
  * clearing references won't affect the state of the program.
  */
 static void
-dustbin_fill(tealet_t *tealet, PyObject *a, PyObject *b, PyObject *c)
-{
-	main_data *mdata = (main_data*)*tealet_main_userpointer(tealet);
-	assert(!mdata->dustbin[0]);
-	assert(!mdata->dustbin[1]);
-	assert(!mdata->dustbin[2]);
-	mdata->dustbin[0] = a;
-	mdata->dustbin[1] = b;
-	mdata->dustbin[2] = c;
-}
-
-static void
 dustbin_clear(tealet_t *tealet)
 {
 	main_data *mdata = (main_data*)*tealet_main_userpointer(tealet);
-	PyObject *a, *b, *c;
-	a = mdata->dustbin[0];
-	b = mdata->dustbin[1];
-	c = mdata->dustbin[2];
-	mdata->dustbin[0] = mdata->dustbin[1] = mdata->dustbin[2] = NULL;
-	Py_XDECREF(a);
-	Py_XDECREF(b);
-	Py_XDECREF(c);
+	Py_ssize_t n;
+	n = PyList_GET_SIZE(mdata->dustbin);
+	if (n == 0)
+		return;
+	if (PyList_SetSlice(mdata->dustbin, 0, n, NULL) < 0) {
+		PyErr_WriteUnraisable(Py_None);
+		PyErr_Clear();
+	}
 }
 
 static PyObject *
@@ -467,7 +497,7 @@ pytealet_dealloc(PyObject *obj)
 		}
 	}
 	/* Release any owned saved thread-state references */
-	PyTealetTstate_Drop(&tealet->tstate);
+	PyTealetTstate_Drop(&tealet->tstate, NULL);
 	if (tealet->weakreflist != NULL)
         PyObject_ClearWeakRefs(obj);
 	if (tealet->tealet)
@@ -564,7 +594,7 @@ pytealet_run(PyObject *self, PyObject *args, PyObject *kwds)
 		PyTealetTstate_Copy(&current->tstate, tstate);
 		tealet = tealet_new(current->tealet, pytealet_main, &switch_arg, stack_limit);
 		if (!tealet) {
-			PyTealetTstate_Drop(&current->tstate);
+			PyTealetTstate_Drop(&current->tstate, NULL);
 			PyErr_NoMemory();
 			goto err;
 		}
@@ -841,12 +871,18 @@ pytealet_main(tealet_t *t_current, void *arg)
 	t_return = return_to->tealet;
 	
 	/* decref the objects after the switch */
-	dustbin_fill(t_return, func, (PyObject*)tealet, result);
+	dustbin_push(t_return, func);
+	dustbin_push(t_return, (PyObject*)tealet);
+	dustbin_push(t_return, result);
 	
 	Py_INCREF(return_arg);
 
-	/* save the thread state; release deferred to pytealet_dealloc */
+	/* Tealet is exiting permanently: clear active PyThreadState for the switch,
+	 * then drop saved refs immediately so frame locals (including 'current')
+	 * do not keep the Python tealet object alive until GC.
+	 */
 	PyTealetTstate_Save(&tealet->tstate, tstate);
+	PyTealetTstate_Drop(&tealet->tstate, t_return);
 
 	if (tealet_exit(t_return, (void*)return_arg, TEALET_EXIT_DELETE))
 		tealet_exit(t_return->main, (void *)return_arg, TEALET_EXIT_DELETE);
@@ -908,6 +944,19 @@ static PyTealetObject *GetMain(int create)
 		}
 		memset(mdata, 0, sizeof(*mdata));
 		mdata->tid = PyThread_get_thread_ident();
+		mdata->dustbin = PyList_New(DUSTBIN_PREALLOC);
+		if (!mdata->dustbin) {
+			tealet_finalize(tmain);
+			PyMem_Free(mdata);
+			PyErr_NoMemory();
+			return NULL;
+		}
+		if (PyList_SetSlice(mdata->dustbin, 0, DUSTBIN_PREALLOC, NULL) < 0) {
+			Py_DECREF(mdata->dustbin);
+			tealet_finalize(tmain);
+			PyMem_Free(mdata);
+			return NULL;
+		}
 		*tealet_main_userpointer(tmain) = (void*)mdata;
 
 		/* create the main tealet */
