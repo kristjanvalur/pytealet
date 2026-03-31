@@ -16,6 +16,7 @@ PYTEALET_BUILD_CONFIG_HEADER = os.path.abspath("src/_tealet/pytealet_build_confi
 # Default to source builds, with fallback support for prebuilt binaries.
 BUILD_LIBTEALET_FROM_SOURCE = os.environ.get("BUILD_LIBTEALET_FROM_SOURCE", "1") == "1"
 LIBTEALET_DEBUG = os.environ.get("LIBTEALET_DEBUG", "1") == "1"
+PYTEALET_EXT_DEBUG = os.environ.get("PYTEALET_EXT_DEBUG", "0") == "1"
 
 def get_abi_name():
     """Determine the ABI name for pre-built libraries using libtealet's abiname utility."""
@@ -153,6 +154,13 @@ if platform.system() != "Windows":
         extra_compile_args.extend([
             "-include",
             PYTEALET_BUILD_CONFIG_HEADER,
+        ])
+
+    if PYTEALET_EXT_DEBUG:
+        extra_compile_args.extend([
+            "-g",
+            "-O0",
+            "-UNDEBUG",
         ])
 
 # Define the extension

@@ -83,6 +83,7 @@ class TestStatus:
         assert t.main == _tealet.main()
         assert t.state == _tealet.STATE_RUN
 
+    @pytest.mark.stub
     def test_status_stub(self):
         stub = get_new()()
         status = [None]
@@ -158,6 +159,7 @@ class TestSwitch:
         assert status[0] == 7
 
 
+    @pytest.mark.stub
     def test_switch_new(self):
         # 1 is high on the stack.  We then create 2 lower on the stack
         # the execution is : m 1 m 2 1 m 2 m */
@@ -183,6 +185,7 @@ class TestSwitch:
         assert tealet2.state == _tealet.STATE_RUN;
         tealet2.switch()
 
+    @pytest.mark.stub
     def test_switch_arg(self):
         # 1 is high on the stack.  We then create 2 lower on the stack
         # the execution is : m 1 m 2 1 m 2 m */
