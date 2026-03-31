@@ -7,6 +7,18 @@
 
 The pytealet C extension has been successfully modernized for Python 3.10+ but has critical runtime issues that prevent it from working correctly. This document tracks known issues and their fixes.
 
+## Recent Validation (March 31, 2026)
+
+- Debug rebuild succeeds with strict defaults (`-std=c17 -pedantic-errors`) via `./scripts/fast_build.sh debug`.
+- `_tealet` smoke import/creation checks in the fast build script pass.
+- `tests/test_tealet.py` passes fully with stub tests enabled:
+    - `PYTEALET_ENABLE_STUB_TESTS=1 uv run pytest tests/test_tealet.py -q`
+    - Result: `12 passed`.
+- Recent stabilization included:
+    - Including libtealet stub helper declarations (`tools.h`) in `pytealet.c`.
+    - Removing local `TEALET_EXTRA` macro redefinition in favor of upstream `TEALET_EXTRA(t, tp)`.
+    - Refactoring dustbin handling to a list-backed mechanism with preallocation intent and deferred tstate decref routing only on the `pytealet_main()` exit path.
+
 ---
 
 ## P0 - Critical (Prevents Operation)
