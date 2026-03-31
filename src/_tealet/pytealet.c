@@ -164,22 +164,6 @@ PyTealet_GetModuleStateOrError(void)
 	return mstate;
 }
 
-static PyTealetModuleState *
-PyTealet_GetModuleStateFromDefiningClass(PyTypeObject *defining_class)
-{
-	PyTealetModuleState *mstate;
-	if (!defining_class) {
-		PyErr_SetString(PyExc_RuntimeError, "defining class unavailable");
-		return NULL;
-	}
-	mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
-	if (!mstate) {
-		PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable from type");
-		return NULL;
-	}
-	return mstate;
-}
-
 static int
 PyTealet_Check(PyObject *op)
 {
@@ -472,15 +456,22 @@ pytealet_dealloc(PyObject *obj)
 	Py_TYPE(obj)->tp_free(obj);
 }
 
-/* make stub here */
 static PyObject *
-pytealet_stub_impl(PyObject *self, PyTealetModuleState *mstate)
+pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+			 Py_ssize_t nargs, PyObject *kwnames)
 {
 	PyTealetObject *main, *pytealet = (PyTealetObject*)self;
 	tealet_t *tresult;
 	PyThreadState *tstate = PyThreadState_GET();
 	void *stack_far;
+	if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
+		PyErr_SetString(PyExc_TypeError, "stub() takes no arguments");
+		return NULL;
+	}
 	if (pytealet->state != STATE_NEW) {
+		PyTealetModuleState *mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
+		if (!mstate)
+			return NULL;
 		PyErr_SetString(mstate->state_error, "must be new");
 		return NULL;
 	}
@@ -492,7 +483,6 @@ pytealet_stub_impl(PyObject *self, PyTealetModuleState *mstate)
 	tresult = tealet_stub_new(main->tealet, stack_far);
 	if (!tresult)
 		return PyErr_NoMemory();
-	// capture the tstate of the current thread, which we will restore when the stub runs
 	PyTealetTstate_Copy(&pytealet->tstate, tstate);
 	pytealet->tealet = tresult;
 	pytealet->state = STATE_STUB;
@@ -501,40 +491,29 @@ pytealet_stub_impl(PyObject *self, PyTealetModuleState *mstate)
 	return self;
 }
 
-static PyObject *
-pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-			 Py_ssize_t nargs, PyObject *kwnames)
-{
-	PyTealetModuleState *mstate;
-	if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
-		PyErr_SetString(PyExc_TypeError, "stub() takes no arguments");
-		return NULL;
-	}
-	mstate = PyTealet_GetModuleStateFromDefiningClass(defining_class);
-	if (!mstate)
-		return NULL;
-	return pytealet_stub_impl(self, mstate);
-}
-
 /* run a tealet and optinonally run */
 static PyObject *
-pytealet_run_impl(PyObject *self, PyObject *args, PyObject *kwds, PyTealetModuleState *mstate)
+pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+			Py_ssize_t nargs, PyObject *kwnames)
 {
 	PyTealetObject *target = (PyTealetObject *)self;
 	PyTealetObject *current;
-	PyObject *func; 
+	PyObject *func;
 	PyObject *farg = Py_None;
 	int fail;
 	tealet_t *tealet;
 	char *keywords[] = {"function", "arg", NULL};
 	PyThreadState *tstate = PyThreadState_GET();
-	PyObject *result = NULL;
+	PyObject *tuple_args;
+	PyObject *kwds = NULL;
+	PyObject *result;
+	Py_ssize_t i;
+	Py_ssize_t nkw = kwnames ? PyTuple_GET_SIZE(kwnames) : 0;
 	int created_from_new;
 	PyTealetMainData *mdata;
 	PyTealetNewArg *ptarg;
 	void *switch_arg;
 
-	/* target->tealet is null or a stub tealet.  GetCurrent works either way. */
 	current = GetCurrent(target);
 	if (!current)
 		return NULL;
@@ -542,68 +521,12 @@ pytealet_run_impl(PyObject *self, PyObject *args, PyObject *kwds, PyTealetModule
 		return NULL;
 
 	if (target->state != STATE_NEW && target->state != STATE_STUB) {
+		PyTealetModuleState *mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
+		if (!mstate)
+			return NULL;
 		PyErr_SetString(mstate->state_error, "must be new or stub");
 		return NULL;
 	}
-	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|O:run", keywords,
-		&func, &farg))
-		return NULL;
-	
-	created_from_new = (target->state == STATE_NEW);
-	mdata = (PyTealetMainData*)*tealet_main_userpointer(current->tealet);
-	ptarg = &mdata->new_arg;
-	switch_arg = (void*)ptarg;
-	
-	ptarg->dest = target;
-	ptarg->func = func;
-	ptarg->arg = farg;
-	
-	if (!created_from_new) {
-		/* running the stub is like switching to it.  It owns its own
-		 * thread state already and will apply it
-		 */
-		PyTealetTstate_Save(&current->tstate, tstate);
-		fail = tealet_stub_run(target->tealet, pytealet_main, &switch_arg);
-		PyTealetTstate_Restore(&current->tstate, tstate);
-		if (fail) {
-			PyErr_NoMemory();
-			goto err;
-		}
-	} else {
-		void *stack_limit = PyTealet_GetStackFar(tstate);
-		// get our own copy of the tstate, the new tealet inherits the current.
-		PyTealetTstate_Copy(&current->tstate, tstate);
-		tealet = tealet_new(current->tealet, pytealet_main, &switch_arg, stack_limit);
-		if (!tealet) {
-			PyTealetTstate_Drop(&current->tstate, NULL);
-			PyErr_NoMemory();
-			goto err;
-		}
-		// success, the target has just done a PyTealetTstate_Save(), now we complete the move
-		PyTealetTstate_Restore(&current->tstate, tstate);
-	}
-	/* success */
-	result = (PyObject *)switch_arg;
-err:
-	/* clear garbage */
-	dustbin_clear(current->tealet);
-	return result;
-}
-
-static PyObject *
-pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-			Py_ssize_t nargs, PyObject *kwnames)
-{
-	PyTealetModuleState *mstate;
-	PyObject *tuple_args;
-	PyObject *kwds = NULL;
-	PyObject *result;
-	Py_ssize_t i;
-	Py_ssize_t nkw = kwnames ? PyTuple_GET_SIZE(kwnames) : 0;
-
-	mstate = PyTealet_GetModuleStateFromDefiningClass(defining_class);
-	if (!mstate)
-		return NULL;
 
 	tuple_args = PyTuple_New(nargs);
 	if (!tuple_args)
@@ -630,7 +553,46 @@ pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args
 		}
 	}
 
-	result = pytealet_run_impl(self, tuple_args, kwds, mstate);
+	if (!PyArg_ParseTupleAndKeywords(tuple_args, kwds, "O|O:run", keywords,
+		&func, &farg)) {
+		result = NULL;
+		goto run_cleanup;
+	}
+
+	created_from_new = (target->state == STATE_NEW);
+	mdata = (PyTealetMainData*)*tealet_main_userpointer(current->tealet);
+	ptarg = &mdata->new_arg;
+	switch_arg = (void*)ptarg;
+
+	ptarg->dest = target;
+	ptarg->func = func;
+	ptarg->arg = farg;
+
+	if (!created_from_new) {
+		PyTealetTstate_Save(&current->tstate, tstate);
+		fail = tealet_stub_run(target->tealet, pytealet_main, &switch_arg);
+		PyTealetTstate_Restore(&current->tstate, tstate);
+		if (fail) {
+			PyErr_NoMemory();
+			result = NULL;
+			goto run_cleanup;
+		}
+	} else {
+		void *stack_limit = PyTealet_GetStackFar(tstate);
+		PyTealetTstate_Copy(&current->tstate, tstate);
+		tealet = tealet_new(current->tealet, pytealet_main, &switch_arg, stack_limit);
+		if (!tealet) {
+			PyTealetTstate_Drop(&current->tstate, NULL);
+			PyErr_NoMemory();
+			result = NULL;
+			goto run_cleanup;
+		}
+		PyTealetTstate_Restore(&current->tstate, tstate);
+	}
+
+	result = (PyObject *)switch_arg;
+run_cleanup:
+	dustbin_clear(current->tealet);
 	Py_XDECREF(kwds);
 	Py_DECREF(tuple_args);
 	return result;
@@ -638,57 +600,16 @@ pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args
 
 /* switch to a different tealet */
 static PyObject *
-pytealet_switch_impl(PyObject *_self, PyObject *args, PyTealetModuleState *mstate)
+pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+			   Py_ssize_t nargs, PyObject *kwnames)
 {
-	PyTealetObject *self = (PyTealetObject *)_self;
+	PyTealetModuleState *mstate = NULL;
+	PyTealetObject *target = (PyTealetObject *)self;
 	PyTealetObject *current;
 	int fail;
 	PyThreadState *tstate = PyThreadState_GET();
 	PyObject *pyarg = Py_None;
 	void *switch_arg;
-	
-	if (!PyArg_ParseTuple(args, "|O:switch", &pyarg))
-		return NULL;
-
-	if (self->state != STATE_RUN) {
-		PyErr_SetString(mstate->state_error, "must be active");
-		return NULL;
-	}
-	assert(self->tealet);
-	current = GetCurrent(NULL);
-	if (!current)
-		return NULL;
-	if (CheckTarget(self, current))
-		return NULL;
-	
-	Py_INCREF(pyarg);
-	switch_arg = (void*)pyarg;
-	/* switch */
-	PyTealetTstate_Save(&current->tstate, tstate);
-	fail = tealet_switch(self->tealet, &switch_arg);
-	PyTealetTstate_Restore(&current->tstate, tstate);
-
-	/* clear out garbage */
-	dustbin_clear(current->tealet);
-	
-	if (fail == TEALET_ERR_DEFUNCT) {
-		Py_DECREF(pyarg);
-		PyErr_SetString(mstate->defunct_error, "target is defunct");
-		return NULL;
-	} else if (fail == TEALET_ERR_MEM) {
-		Py_DECREF(pyarg);
-		return PyErr_NoMemory();
-	}
-	/* return the arg passed to us */
-	pyarg = (PyObject *)switch_arg;
-	return pyarg;
-}
-
-static PyObject *
-pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-			   Py_ssize_t nargs, PyObject *kwnames)
-{
-	PyTealetModuleState *mstate;
 	PyObject *tuple_args;
 	PyObject *result;
 	Py_ssize_t i;
@@ -697,9 +618,6 @@ pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *a
 		PyErr_SetString(PyExc_TypeError, "switch() takes no keyword arguments");
 		return NULL;
 	}
-	mstate = PyTealet_GetModuleStateFromDefiningClass(defining_class);
-	if (!mstate)
-		return NULL;
 	tuple_args = PyTuple_New(nargs);
 	if (!tuple_args)
 		return NULL;
@@ -708,7 +626,56 @@ pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *a
 		Py_INCREF(item);
 		PyTuple_SET_ITEM(tuple_args, i, item);
 	}
-	result = pytealet_switch_impl(self, tuple_args, mstate);
+
+	if (!PyArg_ParseTuple(tuple_args, "|O:switch", &pyarg)) {
+		result = NULL;
+		goto switch_cleanup;
+	}
+
+	if (target->state != STATE_RUN) {
+		mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
+		if (!mstate) {
+			result = NULL;
+			goto switch_cleanup;
+		}
+		PyErr_SetString(mstate->state_error, "must be active");
+		result = NULL;
+		goto switch_cleanup;
+	}
+	assert(target->tealet);
+	current = GetCurrent(NULL);
+	if (!current || CheckTarget(target, current)) {
+		result = NULL;
+		goto switch_cleanup;
+	}
+
+	Py_INCREF(pyarg);
+	switch_arg = (void*)pyarg;
+	PyTealetTstate_Save(&current->tstate, tstate);
+	fail = tealet_switch(target->tealet, &switch_arg);
+	PyTealetTstate_Restore(&current->tstate, tstate);
+
+	dustbin_clear(current->tealet);
+
+	if (fail == TEALET_ERR_DEFUNCT) {
+		mstate = (PyTealetModuleState*)PyType_GetModuleState(defining_class);
+		if (!mstate) {
+			Py_DECREF(pyarg);
+			result = NULL;
+			goto switch_cleanup;
+		}
+		Py_DECREF(pyarg);
+		PyErr_SetString(mstate->defunct_error, "target is defunct");
+		result = NULL;
+		goto switch_cleanup;
+	} else if (fail == TEALET_ERR_MEM) {
+		Py_DECREF(pyarg);
+		result = PyErr_NoMemory();
+		goto switch_cleanup;
+	}
+	result = (PyObject *)switch_arg;
+
+switch_cleanup:
 	Py_DECREF(tuple_args);
 	return result;
 }
