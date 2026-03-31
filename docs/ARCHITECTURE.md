@@ -465,6 +465,20 @@ PyTealetObject *t_main = (PyTealetObject*)PyThread_tss_get(&mstate->tls_key);
 **Thread Safety:**
 Tealets can only switch within the same thread family. Cross-thread switches are detected and raise `InvalidError`.
 
+### API Direction: Tealet-Centric Introspection
+
+Design choice: keep the explicit tealet callback hook (libtealet-style) in `run` rather than relying only on module-level lookups.
+
+Planned direction:
+- Prefer obtaining family/context relationships from a tealet object itself.
+- Add more tealet-facing methods/properties mirroring libtealet concepts (`current`, `prev`, and related family/navigation hooks).
+- Reduce dependence on TLS/global/module lookups for routine relationship queries.
+
+Rationale:
+- Keeps behavior aligned with libtealet semantics.
+- Makes control-flow relationships explicit at call sites.
+- Improves portability to multi-interpreter scenarios by favoring object-local navigation over ambient globals.
+
 ### Thread Shutdown Considerations (Deferred)
 
 Current direction is **TLS-per-module-state** (`mstate->tls_key`) so main-tealet ownership is scoped per interpreter/module state.
