@@ -982,67 +982,92 @@ static PyMethodDef module_methods[] = {
 	{NULL, NULL, 0, NULL}  /* Sentinel */
 };
 
-static struct PyModuleDef _tealet_module = {
-	PyModuleDef_HEAD_INIT,
-	"_tealet",   /* name of module */
-	NULL,        /* module documentation, may be NULL */
-	-1,          /* size of per-interpreter state of the module,
-	                or -1 if the module keeps state in global variables. */
-	module_methods
-};
-
-PyMODINIT_FUNC
-PyInit__tealet(void)
+static int
+pytealet_module_exec(PyObject *m)
 {
-	PyObject *m;
 	PyTealetObject *main;
 
-	if (PyThread_tss_create(&tls_key) != 0) {
-		PyErr_SetString(PyExc_RuntimeError, "failed to create thread-local key");
-		return NULL;
+	if (!PyThread_tss_is_created(&tls_key)) {
+		if (PyThread_tss_create(&tls_key) != 0) {
+			PyErr_SetString(PyExc_RuntimeError, "failed to create thread-local key");
+			return -1;
+		}
 	}
 
-	/* init the type */
 	if (PyType_Ready(&PyTealetType) < 0)
-		return NULL;
+		return -1;
 
 	main = GetMain(1);
 	if (!main)
-		return NULL;
-	
-	m = PyModule_Create(&_tealet_module);
-	if (m == NULL)
-		return NULL;
+		return -1;
 
-	/* Todo: Improve error handling */
-	Py_INCREF(&PyTealetType);
-	if (PyModule_AddObject(m, "tealet", (PyObject*)&PyTealetType) < 0) {
-		Py_DECREF(&PyTealetType);
-		Py_DECREF(m);
-		return NULL;
-	}
-	
+	if (PyModule_AddType(m, &PyTealetType) < 0)
+		return -1;
+
 	TealetError = PyErr_NewException("_tealet.TealetError", NULL, NULL);
+	if (!TealetError)
+		return -1;
 	Py_INCREF(TealetError);
-	PyModule_AddObject(m, "TealetError", TealetError);
-	
+	if (PyModule_AddObject(m, "TealetError", TealetError) < 0)
+		return -1;
+
 	DefunctError = PyErr_NewException("_tealet.DefunctError", TealetError, NULL);
+	if (!DefunctError)
+		return -1;
 	Py_INCREF(DefunctError);
-	PyModule_AddObject(m, "DefunctError", DefunctError);
-	
+	if (PyModule_AddObject(m, "DefunctError", DefunctError) < 0)
+		return -1;
+
 	InvalidError = PyErr_NewException("_tealet.InvalidError", TealetError, NULL);
+	if (!InvalidError)
+		return -1;
 	Py_INCREF(InvalidError);
-	PyModule_AddObject(m, "InvalidError", InvalidError);
-	
+	if (PyModule_AddObject(m, "InvalidError", InvalidError) < 0)
+		return -1;
+
 	StateError = PyErr_NewException("_tealet.StateError", TealetError, NULL);
+	if (!StateError)
+		return -1;
 	Py_INCREF(StateError);
-	PyModule_AddObject(m, "StateError", StateError);
+	if (PyModule_AddObject(m, "StateError", StateError) < 0)
+		return -1;
 
 	PyModule_AddIntMacro(m, STATE_NEW);
 	PyModule_AddIntMacro(m, STATE_STUB);
 	PyModule_AddIntMacro(m, STATE_RUN);
 	PyModule_AddIntMacro(m, STATE_EXIT);
-	
-	return m;
+
+	return 0;
+}
+
+/* CPython API uses void* in module slots; this conversion is intentional. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+static PyModuleDef_Slot _tealet_module_slots[] = {
+	{Py_mod_exec, pytealet_module_exec},
+	{0, NULL}
+};
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+static struct PyModuleDef _tealet_module = {
+	PyModuleDef_HEAD_INIT,
+	"_tealet",   /* name of module */
+	NULL,        /* module documentation, may be NULL */
+	0,           /* no per-module C state (globals remain process-global) */
+	module_methods,
+	_tealet_module_slots,
+	NULL,
+	NULL,
+	NULL
+};
+
+PyMODINIT_FUNC
+PyInit__tealet(void)
+{
+	return PyModuleDef_Init(&_tealet_module);
 }
 
