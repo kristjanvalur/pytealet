@@ -46,6 +46,11 @@
 #define STATE_RUN 2
 #define STATE_EXIT 3
 
+#ifndef PYTEALET_DEFER_DELETE
+/* Keep the exited tealet in the pytealet structure for access to the tealet api. */
+#define PYTEALET_DEFER_DELETE 0
+#endif
+
 /* Forward declaration */
 typedef struct PyTealetObject PyTealetObject;
 static struct PyModuleDef _tealet_module;
@@ -487,13 +492,18 @@ static PyObject *pytealet_current(PyObject *self, PyTypeObject *defining_class, 
                                   Py_ssize_t nargs, PyObject *kwnames) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
     PyTealetObject *current;
+    PyTealetObject *base = (PyTealetObject *)self;
     if (!mstate)
         return NULL;
     if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
         PyErr_SetString(PyExc_TypeError, "current() takes no arguments");
         return NULL;
     }
-    current = GetCurrent(mstate, (PyTealetObject *)self, 0);
+    if (!base->tealet) {
+        PyErr_SetString(mstate->state_error, "must be active");
+        return NULL;
+    }
+    current = GetCurrent(mstate, base, 0);
     if (!current)
         return NULL;
     return Py_NewRef((PyObject *)current);
@@ -515,9 +525,8 @@ static PyObject *pytealet_previous(PyObject *self, PyTypeObject *defining_class,
     }
 
     if (!base->tealet) {
-        base = GetMain(mstate, 0);
-        if (!base)
-            return NULL;
+        PyErr_SetString(mstate->state_error, "must be active");
+        return NULL;
     }
     anchor = base->tealet;
     raw_prev = tealet_previous(anchor);
@@ -539,10 +548,8 @@ static PyObject *pytealet_main_method(PyObject *self, PyTypeObject *defining_cla
         return NULL;
     }
     if (!base->tealet) {
-		/* happens only for new tealets, not yet run.  then we have to find the current for this thread.
-		 * but we don't attempt to create a new one.
-		 */
-        return Py_XNewRef((PyObject *)GetMain(mstate, 0));
+        PyErr_SetString(mstate->state_error, "must be active");
+        return NULL;
     } else {
         return GetWrapperRef(base->tealet->main);
     }
@@ -816,6 +823,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     PyObject *result, *return_arg;
     PyTealetObject *return_to;
     tealet_t *t_return;
+    int exit_mode = TEALET_EXIT_DELETE;
     PyThreadState *tstate = PyThreadState_GET();
 
     if (tealet->state == STATE_STUB) {
@@ -892,8 +900,12 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
     /* clear the old tealet */
     tealet->state = STATE_EXIT;
-    tealet->tealet = NULL; /* will be auto-deleted on return */
-    TEALET_SET_PYOBJECT(t_current, NULL);
+    if (PYTEALET_DEFER_DELETE)
+        exit_mode = TEALET_EXIT_DEFAULT;
+    if (exit_mode == TEALET_EXIT_DELETE) {
+        tealet->tealet = NULL; /* will be auto-deleted on return */
+        TEALET_SET_PYOBJECT(t_current, NULL);
+    }
     t_return = return_to->tealet;
 
     /* decref the objects after the switch */
@@ -910,8 +922,8 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     PyTealetTstate_Save(&tealet->tstate, tstate);
     PyTealetTstate_Drop(&tealet->tstate, t_return);
 
-    if (tealet_exit(t_return, (void *)return_arg, TEALET_EXIT_DELETE))
-        tealet_exit(t_return->main, (void *)return_arg, TEALET_EXIT_DELETE);
+    if (tealet_exit(t_return, (void *)return_arg, exit_mode))
+        tealet_exit(t_return->main, (void *)return_arg, exit_mode);
     /* never reach here */
     return 0;
 }
@@ -1164,6 +1176,8 @@ static int pytealet_module_exec(PyObject *m) {
     PyModule_AddIntMacro(m, STATE_STUB);
     PyModule_AddIntMacro(m, STATE_RUN);
     PyModule_AddIntMacro(m, STATE_EXIT);
+    if (PyModule_AddIntConstant(m, "PYTEALET_DEFER_DELETE", PYTEALET_DEFER_DELETE) < 0)
+        return -1;
 
     return 0;
 }

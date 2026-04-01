@@ -70,10 +70,14 @@ class TestModule:
 
 
 class TestTealetTraversalMethods:
-    def test_current_and_main_on_new_tealet(self):
+    def test_methods_fail_on_new_tealet(self):
         t = _tealet.tealet()
-        assert t.current() == _tealet.current()
-        assert t.main() == _tealet.main()
+        with pytest.raises(_tealet.StateError):
+            t.current()
+        with pytest.raises(_tealet.StateError):
+            t.main()
+        with pytest.raises(_tealet.StateError):
+            t.previous()
 
     def test_current_main_previous_inside_running_tealet(self):
         seen = {}
@@ -89,6 +93,21 @@ class TestTealetTraversalMethods:
         assert seen["self_is_current"] is True
         assert seen["main"] == _tealet.main()
         assert seen["previous"] == _tealet.main()
+
+    @pytest.mark.skip(reason="Deferred-delete post-exit behavior is experimental; re-enable when PYTEALET_DEFER_DELETE is being exercised")
+    def test_main_on_exited_tealet_depends_on_defer_delete_flag(self):
+        def run_and_exit(current, arg):
+            return _tealet.main()
+
+        t = _tealet.tealet()
+        t.run(run_and_exit, None)
+        assert t.state == _tealet.STATE_EXIT
+
+        if getattr(_tealet, "PYTEALET_DEFER_DELETE", 0):
+            assert t.main() == _tealet.main()
+        else:
+            with pytest.raises(_tealet.StateError):
+                t.main()
 
 class TestSimple:
     def test_simple(self):

@@ -258,6 +258,28 @@ In a continuation-based system, the caller might exit before we return. Therefor
 - Put them in the dustbin for cleanup after switch
 - Never rely on borrowed references surviving a context switch
 
+---
+
+## Shutdown and Teardown Ordering
+
+### Main-tealet lifetime vs Python object lifetime
+
+`tealet_finalize()` tears down the native main tealet and its runtime structures. In Python, however, `PyTealetObject` instances may outlive module shutdown because GC/refcount destruction order is not deterministic at interpreter teardown.
+
+This creates a potential ordering hazard:
+
+- Native layer may be finalized first (`tealet_finalize` / module teardown)
+- Individual Python tealet wrappers may be deallocated later
+- Late deallocation may still try to interact with native tealet pointers
+
+### Current implication
+
+pytealet must defensively handle stale-or-unavailable runtime state during late object cleanup. This is especially important for experimental modes that defer native tealet deletion to Python object teardown.
+
+### Follow-up design note
+
+If late wrapper cleanup after main-tealet finalization is required, pytealet may need an explicit per-wrapper invalidation/deletion path that does not depend on a live main tealet runtime. This likely requires additional ownership/invalidation bookkeeping in pytealet, and possibly small lifecycle API support in libtealet.
+
 This shows deep understanding of the coroutine problem domain.
 
 ---
