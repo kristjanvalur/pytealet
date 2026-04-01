@@ -63,10 +63,32 @@ class TestModule:
         assert _tealet.main() == _tealet.current()
 
     def test_main2(self):
-        assert _tealet.main() == _tealet.current().main
+        assert _tealet.main() == _tealet.current().main()
 
     def test_main3(self):
         assert _tealet.main().state == _tealet.STATE_RUN
+
+
+class TestTealetTraversalMethods:
+    def test_current_and_main_on_new_tealet(self):
+        t = _tealet.tealet()
+        assert t.current() == _tealet.current()
+        assert t.main() == _tealet.main()
+
+    def test_current_main_previous_inside_running_tealet(self):
+        seen = {}
+
+        def run(current, arg):
+            seen["self_is_current"] = (current.current() == current)
+            seen["main"] = current.main()
+            seen["previous"] = current.previous()
+            return _tealet.main()
+
+        _tealet.tealet().run(run, None)
+
+        assert seen["self_is_current"] is True
+        assert seen["main"] == _tealet.main()
+        assert seen["previous"] == _tealet.main()
 
 class TestSimple:
     def test_simple(self):
@@ -80,7 +102,7 @@ class TestSimple:
 class TestStatus:
     def test_status_run(self):
         t = _tealet.current()
-        assert t.main == _tealet.main()
+        assert t.main() == _tealet.main()
         assert t.state == _tealet.STATE_RUN
 
     @pytest.mark.stub
