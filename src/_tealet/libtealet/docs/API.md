@@ -1,6 +1,6 @@
 # API Reference
 
-Complete reference for the libtealet API. Core functions are declared in `tealet.h`; helper extensions are declared in `tools.h`.
+Complete reference for the libtealet API. Core functions are declared in `tealet.h`; helper extensions are declared in `tealet_extras.h`.
 
 ## Table of Contents
 
@@ -12,7 +12,7 @@ Complete reference for the libtealet API. Core functions are declared in `tealet
 - [Stack Utilities](#stack-utilities)
 - [Memory Management](#memory-management)
 - [Custom Allocators](#custom-allocators)
-- [Helper Extensions (`tools.h`)](#helper-extensions-toolsh)
+- [Helper Extensions (`tealet_extras.h`)](#helper-extensions-tealet_extrash)
 - [Error Codes](#error-codes)
 - [Constants and Macros](#constants-and-macros)
 
@@ -504,6 +504,32 @@ This function does not return unless `TEALET_EXIT_DEFER` is set.
 
 ## Status and Inspection
 
+### `tealet_previous()`
+
+```c
+tealet_t *tealet_previous(tealet_t *tealet);
+```
+
+Get the tealet that most recently switched to the current tealet.
+
+**Parameters:**
+- `tealet`: Any tealet derived from the same main tealet
+
+**Returns:**
+- Pointer to the previous tealet when available
+- `NULL` when no previous tealet is recorded
+- `NULL` when the previously recorded tealet has been destroyed
+
+**Usage:**
+```c
+tealet_t *prev = tealet_previous(current);
+if (prev == NULL) {
+    /* No valid previous tealet */
+}
+```
+
+---
+
 ### `tealet_status()`
 
 ```c
@@ -882,11 +908,13 @@ tealet_alloc_t alloc = TEALET_ALLOC_INIT_MALLOC;
 
 ---
 
-## Helper Extensions (`tools.h`)
+## Helper Extensions (`tealet_extras.h`)
 
 These APIs are convenience helpers built on top of the core tealet primitives (`tealet_create`, `tealet_switch`, `tealet_malloc`, and `tealet_duplicate`).
 
-They are optional extensions intended for common patterns (stats-collecting allocator and copyable stubs). For low-level behavior details, you can inspect the implementation in `src/tools.c`.
+For backward compatibility, `tools.h` remains as an alias header that includes `tealet_extras.h`.
+
+They are optional extensions intended for common patterns (stats-collecting allocator and copyable stubs). For low-level behavior details, you can inspect the implementation in `src/tealet_extras.c`.
 
 ### `tealet_statsalloc_init()`
 

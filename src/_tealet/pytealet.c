@@ -10,7 +10,7 @@
 #include <string.h>
 
 #include "tealet.h"
-#include "tools.h"
+#include "tealet_extras.h"
 
 /* Python minor-version helpers for readable version-specific conditionals. */
 #if PY_VERSION_HEX >= 0x030A0000 && PY_VERSION_HEX < 0x030B0000

@@ -7,6 +7,7 @@
 
 # Version
 VERSION = 0.4.0
+VERSION = 0.4.1
 STACKMAN_VERSION = 1.2.0
 
 # Stack-integrity compile-time defaults (can be overridden from shell).
@@ -49,13 +50,13 @@ FORMAT_FILES := $(shell find src tests -type f \( -name '*.c' -o -name '*.h' \))
 CLANG_FORMAT ?= clang-format
 
 coreobj = src/tealet.o #src/switch_S.o src/switch_c.o
-allobj = $(coreobj) src/tools.o
+allobj = $(coreobj) src/tealet_extras.o
 
 src/tealet.o: src/tealet.c src/tealet.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ src/tealet.c
 
-src/tools.o: src/tools.c src/tools.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ src/tools.c
+src/tealet_extras.o: src/tealet_extras.c src/tealet_extras.h src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ src/tealet_extras.c
 
 bin:
 	mkdir -p bin
