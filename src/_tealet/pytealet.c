@@ -12,6 +12,10 @@
 #include "tealet.h"
 #include "tealet_extras.h"
 
+/* ===================================================================== */
+/* Compile-Time Version Feature Flags                                    */
+/* ===================================================================== */
+
 /* Python minor-version helpers for readable version-specific conditionals. */
 #if PY_VERSION_HEX >= 0x030A0000 && PY_VERSION_HEX < 0x030B0000
 #define PY310 1
@@ -50,6 +54,10 @@
 /* Keep the exited tealet in the pytealet structure for access to the tealet api. */
 #define PYTEALET_DEFER_DELETE 0
 #endif
+
+/* ===================================================================== */
+/* Core Types and Module State                                           */
+/* ===================================================================== */
 
 /* Forward declaration */
 typedef struct PyTealetObject PyTealetObject;
@@ -149,6 +157,10 @@ struct PyTealetTstate {
 
 typedef struct PyTealetTstate PyTealetTstate;
 
+/* ===================================================================== */
+/* PyTealetTstate Snapshot Declarations                                  */
+/* ===================================================================== */
+
 /* Basic PyTealetTstate operations */
 
 /* Initialize snapshot bookkeeping (no state saved yet). */
@@ -191,6 +203,10 @@ static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTe
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
 
+/* ===================================================================== */
+/* Type and Module Access Helpers                                        */
+/* ===================================================================== */
+
 /* TODO(py311+): For __init__/tp_init and other paths that only have a type,
  * prefer PyType_GetModuleByDef(type, &_tealet_module) to resolve this module,
  * then PyModule_GetState(module). This should replace fallback class-walk logic
@@ -222,6 +238,10 @@ static int PyTealet_Check(PyObject *op, PyTealetModuleState *mstate) {
 static int PyTealet_CheckExact(PyObject *op, PyTealetModuleState *mstate) {
     return mstate && mstate->tealet_type && (Py_TYPE(op) == mstate->tealet_type);
 }
+
+/* ===================================================================== */
+/* PyTealetTstate Snapshot Implementation                                */
+/* ===================================================================== */
 
 static void PyTealetTstate_Init(PyTealetTstate *saved) { saved->has_state = 0; }
 
@@ -309,6 +329,19 @@ static void dustbin_push(tealet_t *tealet, PyObject *obj) {
         return;
     }
     Py_DECREF(obj);
+}
+
+/* Clear deferred decref objects after a safe switch point. */
+static void dustbin_clear(tealet_t *tealet) {
+    PyTealetMainData *mdata = (PyTealetMainData *)*tealet_main_userpointer(tealet);
+    Py_ssize_t n;
+    n = PyList_GET_SIZE(mdata->dustbin);
+    if (n == 0)
+        return;
+    if (PyList_SetSlice(mdata->dustbin, 0, n, NULL) < 0) {
+        PyErr_WriteUnraisable(Py_None);
+        PyErr_Clear();
+    }
 }
 
 static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_tealet) {
@@ -412,22 +445,9 @@ static void *PyTealet_GetStackFar(const PyThreadState *py_tstate) {
     return NULL;
 }
 
-/* Helper functions to fill/empty the dustbin.  We must be careful not to
- * clear references at a delicate moment before switching, rather
- * references must be cleared after, so that any side-effects of
- * clearing references won't affect the state of the program.
- */
-static void dustbin_clear(tealet_t *tealet) {
-    PyTealetMainData *mdata = (PyTealetMainData *)*tealet_main_userpointer(tealet);
-    Py_ssize_t n;
-    n = PyList_GET_SIZE(mdata->dustbin);
-    if (n == 0)
-        return;
-    if (PyList_SetSlice(mdata->dustbin, 0, n, NULL) < 0) {
-        PyErr_WriteUnraisable(Py_None);
-        PyErr_Clear();
-    }
-}
+/* ===================================================================== */
+/* Python Tealet Type API (Methods and Accessors)                        */
+/* ===================================================================== */
 
 static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds) {
     PyTealetObject *src = NULL;
@@ -828,6 +848,10 @@ static struct PyGetSetDef pytealet_getset[] = {{"state", pytealet_get_state, NUL
                                                {"thread_id", pytealet_get_tid, NULL, "", NULL},
                                                {0}};
 
+/* ===================================================================== */
+/* Python Type Metadata                                                  */
+/* ===================================================================== */
+
 /* CPython type slot table stores C function pointers in void* fields by API
  * design. */
 #if defined(__GNUC__)
@@ -846,120 +870,9 @@ static PyType_Slot pytealet_type_slots[] = {{Py_tp_dealloc, pytealet_dealloc},
 static PyType_Spec pytealet_type_spec = {"_tealet.tealet", sizeof(PyTealetObject), 0,
                                          Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE, pytealet_type_slots};
 
-/* The main function.  Invoked either from tealet.new or tealet.run */
-static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
-    PyTealetNewArg *targ = (PyTealetNewArg *)arg;
-    PyTealetModuleState *mstate = targ->mstate;
-    PyTealetObject *tealet = targ->dest;
-    PyObject *func = targ->func;
-    PyObject *farg = targ->arg;
-    PyObject *result, *return_arg;
-    PyTealetObject *return_to;
-    tealet_t *t_return;
-    int exit_mode = TEALET_EXIT_DELETE;
-    PyThreadState *tstate = PyThreadState_GET();
-
-    if (tealet->state == STATE_STUB) {
-        assert(t_current == tealet->tealet);
-        assert(TEALET_PYOBJECT(t_current) == tealet);
-
-        /* set the tstate from our own copy */
-        PyTealetTstate_Restore(&tealet->tstate, tstate);
-    } else {
-        assert(tealet->state == STATE_NEW);
-        /* set up the pointer in the tealet */
-        tealet->tealet = t_current;
-        TEALET_SET_PYOBJECT(t_current, tealet);
-    }
-
-    /* We only have borrowed references from the calling tealet.
-     * the argument to the function will get their own reference, but
-     * anything we need after the function we keep oru own references
-     * for, because when the function returns, the calling tealet
-     * may have exited and dropped the references we borrowed.
-     */
-    Py_INCREF(func);
-    Py_INCREF(tealet);
-
-    /* clear frame and run the tealet function */
-    tealet->state = STATE_RUN;
-    result = PyObject_CallFunctionObjArgs(func, tealet, farg, NULL);
-
-    /* return_to can be a tuple of tealet, arg */
-    return_to = NULL;
-    return_arg = NULL;
-    if (result && PyTuple_Check(result)) {
-        /* arg and return_to are borrowed refs */
-        if (PyTuple_GET_SIZE(result) > 0)
-            return_to = (PyTealetObject *)PyTuple_GET_ITEM(result, 0);
-        if (PyTuple_GET_SIZE(result) > 1)
-            return_arg = PyTuple_GET_ITEM(result, 1);
-    } else
-        return_to = (PyTealetObject *)result;
-
-    /* perform sanity checks on the result */
-    if (return_to) {
-        /* it is ok to rock the GC boat here, because we will switch to
-         * main in case of error, and main is always around
-         */
-        if (!PyTealet_Check((PyObject *)return_to, mstate)) {
-            return_to = NULL;
-            PyErr_SetString(PyExc_TypeError, "tealet object expected");
-        } else if (return_to->state != STATE_RUN) {
-            return_to = NULL;
-            PyErr_SetString(mstate->state_error, "must be 'run'");
-        } else if (CheckTarget(mstate, return_to, tealet))
-            return_to = NULL;
-    }
-    if (!return_to) {
-        Py_CLEAR(result);
-        return_arg = NULL;
-    }
-    if (!return_arg)
-        return_arg = Py_None;
-
-    /* handle errors */
-    if (!return_to) {
-        PyErr_WriteUnraisable(func);
-        /* must switch to main */
-        return_to = GetMain(mstate, 0);
-        assert(return_to);
-        result = (PyObject *)return_to;
-        Py_INCREF(result);
-    }
-    /* now, the reference to return_to and return_arg are borrowed, kept alive
-     * by 'result', which may be the same as return_to.
-     */
-
-    /* clear the old tealet */
-    tealet->state = STATE_EXIT;
-    if (PYTEALET_DEFER_DELETE)
-        exit_mode = TEALET_EXIT_DEFAULT;
-    if (exit_mode == TEALET_EXIT_DELETE) {
-        tealet->tealet = NULL; /* will be auto-deleted on return */
-        TEALET_SET_PYOBJECT(t_current, NULL);
-    }
-    t_return = return_to->tealet;
-
-    /* decref the objects after the switch */
-    dustbin_push(t_return, func);
-    dustbin_push(t_return, (PyObject *)tealet);
-    dustbin_push(t_return, result);
-
-    Py_INCREF(return_arg);
-
-    /* Tealet is exiting permanently: clear active PyThreadState for the switch,
-     * then drop saved refs immediately so frame locals (including 'current')
-     * do not keep the Python tealet object alive until GC.
-     */
-    PyTealetTstate_Save(&tealet->tstate, tstate);
-    PyTealetTstate_Drop(&tealet->tstate, t_return);
-
-    if (tealet_exit(t_return, (void *)return_arg, exit_mode))
-        tealet_exit(t_return->main, (void *)return_arg, exit_mode);
-    /* never reach here */
-    return 0;
-}
+/* ===================================================================== */
+/* Runtime Support (Allocator and Lineage)                               */
+/* ===================================================================== */
 
 /* Wrapper functions for system malloc/free to match libtealet's allocator API.
  */
@@ -1083,9 +996,128 @@ static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTe
     return 0;
 }
 
-/******************************************
- * Module methods
- */
+/* ===================================================================== */
+/* Core Runtime Switching Callback                                       */
+/* ===================================================================== */
+
+/* The main function.  Invoked either from tealet.new or tealet.run */
+static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
+    PyTealetNewArg *targ = (PyTealetNewArg *)arg;
+    PyTealetModuleState *mstate = targ->mstate;
+    PyTealetObject *tealet = targ->dest;
+    PyObject *func = targ->func;
+    PyObject *farg = targ->arg;
+    PyObject *result, *return_arg;
+    PyTealetObject *return_to;
+    tealet_t *t_return;
+    int exit_mode = TEALET_EXIT_DELETE;
+    PyThreadState *tstate = PyThreadState_GET();
+
+    if (tealet->state == STATE_STUB) {
+        assert(t_current == tealet->tealet);
+        assert(TEALET_PYOBJECT(t_current) == tealet);
+
+        /* set the tstate from our own copy */
+        PyTealetTstate_Restore(&tealet->tstate, tstate);
+    } else {
+        assert(tealet->state == STATE_NEW);
+        /* set up the pointer in the tealet */
+        tealet->tealet = t_current;
+        TEALET_SET_PYOBJECT(t_current, tealet);
+    }
+
+    /* We only have borrowed references from the calling tealet.
+     * the argument to the function will get their own reference, but
+     * anything we need after the function we keep oru own references
+     * for, because when the function returns, the calling tealet
+     * may have exited and dropped the references we borrowed.
+     */
+    Py_INCREF(func);
+    Py_INCREF(tealet);
+
+    /* clear frame and run the tealet function */
+    tealet->state = STATE_RUN;
+    result = PyObject_CallFunctionObjArgs(func, tealet, farg, NULL);
+
+    /* return_to can be a tuple of tealet, arg */
+    return_to = NULL;
+    return_arg = NULL;
+    if (result && PyTuple_Check(result)) {
+        /* arg and return_to are borrowed refs */
+        if (PyTuple_GET_SIZE(result) > 0)
+            return_to = (PyTealetObject *)PyTuple_GET_ITEM(result, 0);
+        if (PyTuple_GET_SIZE(result) > 1)
+            return_arg = PyTuple_GET_ITEM(result, 1);
+    } else
+        return_to = (PyTealetObject *)result;
+
+    /* perform sanity checks on the result */
+    if (return_to) {
+        /* it is ok to rock the GC boat here, because we will switch to
+         * main in case of error, and main is always around
+         */
+        if (!PyTealet_Check((PyObject *)return_to, mstate)) {
+            return_to = NULL;
+            PyErr_SetString(PyExc_TypeError, "tealet object expected");
+        } else if (return_to->state != STATE_RUN) {
+            return_to = NULL;
+            PyErr_SetString(mstate->state_error, "must be 'run'");
+        } else if (CheckTarget(mstate, return_to, tealet))
+            return_to = NULL;
+    }
+    if (!return_to) {
+        Py_CLEAR(result);
+        return_arg = NULL;
+    }
+    if (!return_arg)
+        return_arg = Py_None;
+
+    /* handle errors */
+    if (!return_to) {
+        PyErr_WriteUnraisable(func);
+        /* must switch to main */
+        return_to = GetMain(mstate, 0);
+        assert(return_to);
+        result = (PyObject *)return_to;
+        Py_INCREF(result);
+    }
+    /* now, the reference to return_to and return_arg are borrowed, kept alive
+     * by 'result', which may be the same as return_to.
+     */
+
+    /* clear the old tealet */
+    tealet->state = STATE_EXIT;
+    if (PYTEALET_DEFER_DELETE)
+        exit_mode = TEALET_EXIT_DEFAULT;
+    if (exit_mode == TEALET_EXIT_DELETE) {
+        tealet->tealet = NULL; /* will be auto-deleted on return */
+        TEALET_SET_PYOBJECT(t_current, NULL);
+    }
+    t_return = return_to->tealet;
+
+    /* decref the objects after the switch */
+    dustbin_push(t_return, func);
+    dustbin_push(t_return, (PyObject *)tealet);
+    dustbin_push(t_return, result);
+
+    Py_INCREF(return_arg);
+
+    /* Tealet is exiting permanently: clear active PyThreadState for the switch,
+     * then drop saved refs immediately so frame locals (including 'current')
+     * do not keep the Python tealet object alive until GC.
+     */
+    PyTealetTstate_Save(&tealet->tstate, tstate);
+    PyTealetTstate_Drop(&tealet->tstate, t_return);
+
+    if (tealet_exit(t_return, (void *)return_arg, exit_mode))
+        tealet_exit(t_return->main, (void *)return_arg, exit_mode);
+    /* never reach here */
+    return 0;
+}
+
+/* ===================================================================== */
+/* Module API and Lifecycle                                              */
+/* ===================================================================== */
 
 static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
