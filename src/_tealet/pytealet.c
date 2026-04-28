@@ -110,21 +110,22 @@ static PyObject *GetWrapperRef(tealet_t *tealet) {
     return Py_NewRef(wrapper);
 }
 
-/* a structure that captures the tstate of a tealet.  The fields stored
- * and their semantics may change from python version to version.
- * Before switching away from a tealet, we capture the current tstate into
- * this structure, with our own private references.  When we return back,
- * we restore the tstate and release our references.
+/* Captures the Python thread-state snapshot for a tealet.
  *
- * There exists an optmizable path switch-switch path between tealet a and b:
- * 1) switch from a to b, creating new tstate refs in a, but leaving tstate
- * intact. 2) in B, switch back, clearing the tstate and moving b's tstate copy
- * to the python tstate.
+ * Stored fields and semantics can vary across Python versions.
+ * Before switching away from a tealet, we save the current PyThreadState here.
+ * When switching back, we restore it and release any owned references.
  *
- * In this case, when we know that this symmetry exist, we can simply _move_ the
- * tstate from python to local, and flom local to python, without adjusting
- * references.
+ * There is an optimized symmetric switch path between tealets A and B:
+ * 1) A switches to B and moves thread-state into A's local snapshot.
+ * 2) B switches back and moves its saved snapshot into PyThreadState.
  *
+ * In that plain switch/switch case, state can be moved in and out without
+ * refcount churn.
+ *
+ * Reference adjustment is only needed when ownership changes:
+ * a) Creating/running a new tealet requires a copied snapshot with owned refs.
+ * b) Exiting a tealet requires clearing its snapshot and releasing owned refs.
  */
 struct PyTealetTstate {
     PyFrameObject *frame;
@@ -147,6 +148,30 @@ struct PyTealetTstate {
 };
 
 typedef struct PyTealetTstate PyTealetTstate;
+
+/* Basic PyTealetTstate operations */
+
+/* Initialize snapshot bookkeeping (no state saved yet). */
+static void PyTealetTstate_Init(PyTealetTstate *saved);
+/* Copy raw fields from PyThreadState into snapshot (no refcount changes). */
+static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src);
+/* Copy raw fields from snapshot back into PyThreadState. */
+static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst);
+/* Acquire owned references for objects captured in a saved snapshot. */
+static void PyTealetTstate_IncRef(PyTealetTstate *saved);
+/* Release owned references for objects captured in a saved snapshot. */
+static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_tealet);
+
+/* Higher level helper used in switching */
+
+/* Save a copied snapshot and own references (for duplicated/new ownership). */
+static void PyTealetTstate_Copy(PyTealetTstate *dst, const PyThreadState *src);
+/* Drop a saved snapshot and release owned references. */
+static void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet);
+/* Move active PyThreadState into snapshot before switching away. */
+static void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src);
+/* Restore active PyThreadState from snapshot after switching back. */
+static void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst);
 
 /* The python tealet object */
 struct PyTealetObject {
@@ -305,8 +330,9 @@ static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_teale
     }
 }
 
-/* helper to clear the python threadstate for hygiene */
+/* Debug-only hygiene helper: clear active Python thread state slots. */
 static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
+#if defined(Py_DEBUG)
     py_tstate->frame = NULL;
     py_tstate->curexc_type = NULL;
     py_tstate->curexc_value = NULL;
@@ -320,13 +346,20 @@ static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
 #if defined(PY_HAS_CFRAME)
     py_tstate->cframe = NULL;
 #endif
+#else
+    (void)py_tstate;
+#endif
 }
 
-/* helper to null or clear the python threadstate for hygiene */
+/* Debug-only hygiene helper: verify sentinel clear state. */
 static void PyTealetTstate_AssertClearPy(PyThreadState *py_tstate) {
+#if defined(Py_DEBUG)
     /* should never be null in a valid situation, null indicates that we
      * previously cleared it.*/
     assert(py_tstate->exc_info == NULL);
+#else
+    (void)py_tstate;
+#endif
 }
 
 /* copy the threadstate, e.g. when we create a stub */
