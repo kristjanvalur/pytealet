@@ -45,6 +45,21 @@
 #define PY_HAS_CFRAME
 #endif
 
+#if defined(PY310)
+#define PY_HAS_TSTATE_FRAME
+#define PY_HAS_RECURSION_DEPTH
+#else
+#define PY_HAS_RECURSION_REMAINING
+#endif
+
+#if defined(PY_HAS_CFRAME)
+#if defined(PY310)
+typedef CFrame PyTealetCFrame;
+#else
+typedef _PyCFrame PyTealetCFrame;
+#endif
+#endif
+
 #define STATE_NEW 0
 #define STATE_STUB 1
 #define STATE_RUN 2
@@ -142,7 +157,12 @@ struct PyTealetTstate {
     PyObject *exc_tb;
     _PyErr_StackItem *exc_info;
     _PyErr_StackItem exc_state;
+#if defined(PY_HAS_RECURSION_DEPTH)
     int recursion_depth;
+#else
+    int recursion_remaining;
+    int recursion_limit;
+#endif
     int trash_delete_nesting;
     PyObject *context; /* Python 3.7+ contextvars */
     int has_state;     /* Debug helper: 1 when this struct currently stores a saved
@@ -151,7 +171,7 @@ struct PyTealetTstate {
      * Stack-slicing preserves the CFrame struct itself; we just save the
      * pointer */
 #if defined(PY_HAS_CFRAME)
-    CFrame *cframe;
+    PyTealetCFrame *cframe;
 #endif
 };
 
@@ -247,8 +267,17 @@ static void PyTealetTstate_Init(PyTealetTstate *saved) { saved->has_state = 0; }
 
 /* Raw copy the tstate files from PyThreadState to our local structure */
 static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
+#if defined(PY_HAS_TSTATE_FRAME)
     dst->frame = src->frame;
+#else
+    dst->frame = NULL;
+#endif
+#if defined(PY_HAS_RECURSION_DEPTH)
     dst->recursion_depth = src->recursion_depth;
+#else
+    dst->recursion_remaining = src->recursion_remaining;
+    dst->recursion_limit = src->recursion_limit;
+#endif
 
     dst->exc_type = src->curexc_type;
     dst->exc_val = src->curexc_value;
@@ -271,8 +300,15 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 
 /* Raw copy previously saved tealet tstate into PyThreadState. */
 static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
+#if defined(PY_HAS_TSTATE_FRAME)
     dst->frame = src->frame;
+#endif
+#if defined(PY_HAS_RECURSION_DEPTH)
     dst->recursion_depth = src->recursion_depth;
+#else
+    dst->recursion_remaining = src->recursion_remaining;
+    dst->recursion_limit = src->recursion_limit;
+#endif
 
     dst->curexc_type = src->exc_type;
     dst->curexc_value = src->exc_val;
@@ -366,14 +402,21 @@ static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_teale
 /* Debug-only hygiene helper: clear active Python thread state slots. */
 static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
 #if defined(Py_DEBUG)
+#if defined(PY_HAS_TSTATE_FRAME)
     py_tstate->frame = NULL;
+#endif
     py_tstate->curexc_type = NULL;
     py_tstate->curexc_value = NULL;
     py_tstate->curexc_traceback = NULL;
     py_tstate->exc_info = NULL; /* use this as a sentinel, should never be null
                                    in a valid situation */
     py_tstate->exc_state.exc_value = NULL;
+#if defined(PY_HAS_RECURSION_DEPTH)
     py_tstate->recursion_depth = 0;
+#else
+    py_tstate->recursion_remaining = 0;
+    py_tstate->recursion_limit = 0;
+#endif
     py_tstate->trash_delete_nesting = 0;
     py_tstate->context = NULL;
 #if defined(PY_HAS_CFRAME)
@@ -416,6 +459,12 @@ static void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet) {
 static void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src) {
     assert(dst->has_state == 0);
     PyTealetTstate_Get(dst, src);
+#if !defined(PY_HAS_TSTATE_FRAME)
+    /* 3.11+: tstate no longer stores a direct frame pointer. Capture
+     * the current frame explicitly so dormant tealet.frame remains useful.
+     */
+    dst->frame = (PyFrameObject *)Py_XNewRef((PyObject *)PyEval_GetFrame());
+#endif
     PyTealetTstate_ClearPy(src);
     dst->has_state = 1;
 }
@@ -425,6 +474,10 @@ static void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst) {
     assert(src->has_state == 1);
     PyTealetTstate_AssertClearPy(dst);
     PyTealetTstate_Put(src, dst);
+#if !defined(PY_HAS_TSTATE_FRAME)
+    /* 3.11+: frame is not restored into tstate, so release our snapshot ref. */
+    Py_CLEAR(src->frame);
+#endif
     src->has_state = 0;
 }
 
@@ -824,8 +877,7 @@ static PyObject *pytealet_get_frame(PyObject *_self, void *_closure) {
     if (!frame) {
         /* is it the current tealet of the current thread? */
         if (self == GetCurrent(mstate, NULL, 0)) {
-            PyThreadState *tstate = PyThreadState_GET();
-            frame = (PyObject *)tstate->frame;
+            frame = (PyObject *)PyEval_GetFrame();
         }
     }
     if (!frame)
@@ -1139,35 +1191,9 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return Py_XNewRef((PyObject *)GetMain(mstate, 1));
 }
 
-static PyObject *hide_frame(PyObject *self, PyObject *_args) {
-    /* this function calls a method, clearing the frame.  This hides
-     * higher frames in the callstack
-     */
-    PyObject *func, *args = NULL, *kwds = NULL;
-    PyThreadState *tstate = PyThreadState_GET();
-    PyFrameObject *f = tstate->frame;
-    PyObject *result;
-    if (!PyArg_ParseTuple(_args, "O|OO:hide_frame", &func, &args, &kwds))
-        return NULL;
-    if (!args) {
-        PyObject *empty = PyTuple_New(0);
-        if (!empty)
-            return NULL;
-        tstate->frame = NULL;
-        result = PyObject_Call(func, empty, kwds);
-        Py_DECREF(empty);
-    } else {
-        tstate->frame = NULL;
-        result = PyObject_Call(func, args, kwds);
-    }
-    tstate->frame = f;
-    return result;
-}
-
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
-    {"hide_frame", (PyCFunction)hide_frame, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
 

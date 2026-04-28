@@ -26,11 +26,6 @@ _tealet.main() -> tealet
 ```
 Returns the main tealet for this thread (the root of the tealet tree).
 
-```python
-_tealet.hide_frame(func, *args, **kwds) -> result
-```
-Calls `func(*args, **kwds)` with the current frame hidden from the stack trace. Used internally to clean up tracebacks.
-
 **Module-Level Classes:**
 
 ```python

@@ -125,7 +125,7 @@ class greenlet(object):
         run, (err, args, kwds) = arg
         try:
             if not err:
-                result = _tealet.hide_frame(run, args, kwds)
+                result = run(*args, **kwds)
                 arg = (False, (result,), None)
             else:
                 raise err, args, kwds
