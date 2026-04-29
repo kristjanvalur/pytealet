@@ -28,8 +28,11 @@
 #endif
 #endif
 
-#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+#if PY_VERSION_HEX >= 0x030C0000
+#define PY312P 1
+#if PY_VERSION_HEX < 0x030D0000
 #define PY312 1
+#endif
 #endif
 
 #if PY_VERSION_HEX >= 0x030D0000 && PY_VERSION_HEX < 0x030E0000
@@ -50,9 +53,6 @@
 
 #if defined(PY310)
 #define PY_HAS_TSTATE_FRAME
-#define PY_HAS_RECURSION_DEPTH
-#else
-#define PY_HAS_RECURSION_REMAINING
 #endif
 
 #if defined(PY_HAS_CFRAME)
@@ -170,11 +170,15 @@ struct PyTealetTstate {
     _PyErr_StackItem exc_state;
 
     /* current recursion state */
-#if defined(PY_HAS_RECURSION_DEPTH)
+#if defined(PY310)
     int recursion_depth;
-#else
+#elif defined(PY311)
     int recursion_remaining;
     int recursion_limit;
+#else /* 3.12+ */
+    int py_recursion_remaining;
+    int py_recursion_limit;
+    int c_recursion_remaining;
 #endif
 
     int trash_delete_nesting;  /* destructor nesting level, conserved. */
@@ -187,7 +191,9 @@ struct PyTealetTstate {
     PyTealetCFrame *cframe;
 #endif
 #if defined(Py311P)
+#if defined(PY311)
     int cframe_use_tracing;  /* tracing flag from cframe */
+#endif
     /* new in 3.11, these four must be preserved together */
     void *cframe_current_frame;
     _PyStackChunk *datastack_chunk;
@@ -298,16 +304,26 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 #else
     dst->frame = NULL;
 #endif
-#if defined(PY_HAS_RECURSION_DEPTH)
+#if defined(PY310)
     dst->recursion_depth = src->recursion_depth;
-#else
+#elif defined(PY311)
     dst->recursion_remaining = src->recursion_remaining;
     dst->recursion_limit = src->recursion_limit;
+#else /* 3.12+ */
+    dst->py_recursion_remaining = src->py_recursion_remaining;
+    dst->py_recursion_limit = src->py_recursion_limit;
+    dst->c_recursion_remaining = src->c_recursion_remaining;
 #endif
 
+#if defined(PY310) || defined(PY311)
     dst->exc_type = src->curexc_type;
     dst->exc_val = src->curexc_value;
     dst->exc_tb = src->curexc_traceback;
+#else
+    dst->exc_type = NULL;
+    dst->exc_val = NULL;
+    dst->exc_tb = NULL;
+#endif
 
     dst->exc_state = src->exc_state;
     /* Keep dst->exc_info self-contained when it points at exc_state. */
@@ -323,12 +339,18 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 #endif
 #if defined(Py311P)
     dst->cframe_current_frame = src->cframe ? (void *)src->cframe->current_frame : NULL;
+#if defined(PY311)
     dst->cframe_use_tracing = src->cframe ? src->cframe->use_tracing : 0;
+#endif
     dst->datastack_chunk = src->datastack_chunk;
     dst->datastack_top = src->datastack_top;
     dst->datastack_limit = src->datastack_limit;
 #endif
+#if !defined(PY312P)
     dst->trash_delete_nesting = src->trash_delete_nesting;
+#else /* 3.12+ */
+    dst->trash_delete_nesting = src->trash.delete_nesting;
+#endif
 }
 
 /* Raw copy previously saved tealet tstate into PyThreadState. */
@@ -336,16 +358,22 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
 #if defined(PY_HAS_TSTATE_FRAME)
     dst->frame = src->frame;
 #endif
-#if defined(PY_HAS_RECURSION_DEPTH)
+#if defined(PY310)
     dst->recursion_depth = src->recursion_depth;
-#else
+#elif defined(PY311)
     dst->recursion_remaining = src->recursion_remaining;
     dst->recursion_limit = src->recursion_limit;
+#else /* 3.12+ */
+    dst->py_recursion_remaining = src->py_recursion_remaining;
+    dst->py_recursion_limit = src->py_recursion_limit;
+    dst->c_recursion_remaining = src->c_recursion_remaining;
 #endif
 
+#if defined(PY310) || defined(PY311)
     dst->curexc_type = src->exc_type;
     dst->curexc_value = src->exc_val;
     dst->curexc_traceback = src->exc_tb;
+#endif
 
     dst->exc_state = src->exc_state;
     if (src->exc_info == &src->exc_state)
@@ -361,14 +389,20 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
 #endif
 #if defined(Py311P)
     if (dst->cframe) {
+#if defined(PY311)
         dst->cframe->use_tracing = src->cframe_use_tracing;
+#endif
         dst->cframe->current_frame = src->cframe_current_frame;
     }
     dst->datastack_chunk = src->datastack_chunk;
     dst->datastack_top = src->datastack_top;
     dst->datastack_limit = src->datastack_limit;
 #endif
+#if !defined(PY312P)
     dst->trash_delete_nesting = src->trash_delete_nesting;
+#else /* 3.12+ */
+    dst->trash.delete_nesting = src->trash_delete_nesting;
+#endif
 }
 
 /* Increment and decrement the reference count of the tstate's references.
@@ -447,19 +481,29 @@ static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
 #if defined(PY_HAS_TSTATE_FRAME)
     py_tstate->frame = NULL;
 #endif
+#if defined(PY310) || defined(PY311)
     py_tstate->curexc_type = NULL;
     py_tstate->curexc_value = NULL;
     py_tstate->curexc_traceback = NULL;
+#endif
     py_tstate->exc_info = NULL; /* use this as a sentinel, should never be null
                                    in a valid situation */
     py_tstate->exc_state.exc_value = NULL;
-#if defined(PY_HAS_RECURSION_DEPTH)
+#if defined(PY310)
     py_tstate->recursion_depth = 0;
-#else
+#elif defined(PY311)
     py_tstate->recursion_remaining = 0;
     py_tstate->recursion_limit = 0;
+#else /* 3.12+ */
+    py_tstate->py_recursion_remaining = 0;
+    py_tstate->py_recursion_limit = 0;
+    py_tstate->c_recursion_remaining = 0;
 #endif
+#if !defined(PY312P)
     py_tstate->trash_delete_nesting = 0;
+#else /* 3.12+ */
+    py_tstate->trash.delete_nesting = 0;
+#endif
     py_tstate->context = NULL;
 #if defined(PY_HAS_CFRAME)
     py_tstate->cframe = NULL;
