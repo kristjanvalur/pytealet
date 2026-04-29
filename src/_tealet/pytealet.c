@@ -226,7 +226,7 @@ struct PyTealetObject {
 };
 
 /* helpers for getting main and current and checking relationship */
-static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls, int set_error);
+static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls);
 static PyTealetObject *GetMain(PyTealetModuleState *mstate, int create);
 static PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *main, int create_main);
 static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *main);
@@ -237,28 +237,33 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
 /* Type and Module Access Helpers                                        */
 /* ===================================================================== */
 
-/* TODO(py311+): For __init__/tp_init and other paths that only have a type,
- * prefer PyType_GetModuleByDef(type, &_tealet_module) to resolve this module,
- * then PyModule_GetState(module). This should replace fallback class-walk logic
- * once our minimum supported Python version includes that API.
- */
-static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls, int set_error) {
+static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls) {
+#if defined(Py311P)
+    PyObject *module = PyType_GetModuleByDef(cls, &_tealet_module);
+    if (module) {
+        PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(module);
+        assert(mstate != NULL);
+        return mstate;
+    }
+    return NULL;
+#else
     PyTypeObject *cur = cls;
     while (cur) {
         PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(cur);
+        cur = cur->tp_base;
         if (mstate)
             return mstate;
         if (PyErr_Occurred()) {
-            if (PyErr_ExceptionMatches(PyExc_TypeError))
+            if (PyErr_ExceptionMatches(PyExc_TypeError) && cur != NULL)
                 PyErr_Clear();
             else
                 return NULL;
         }
-        cur = cur->tp_base;
     }
-    if (set_error)
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+    if (!PyErr_Occurred())
+        PyErr_SetString(PyExc_TypeError, "type is not part of a module");
     return NULL;
+#endif
 }
 
 static int PyTealet_Check(PyObject *op, PyTealetModuleState *mstate) {
@@ -531,7 +536,7 @@ static void *PyTealet_GetStackFar(const PyThreadState *py_tstate) {
 static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds) {
     PyTealetObject *src = NULL;
     PyTealetObject *result;
-    PyTealetModuleState *mstate = GetModuleStateFromClass(subtype, 1);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(subtype);
     if (!mstate)
         return NULL;
     if (args && PyTuple_GET_SIZE(args) > 0) {
@@ -875,7 +880,7 @@ static struct PyMethodDef pytealet_methods[] = {
  */
 static PyObject *pytealet_get_main(PyObject *_self, void *_closure) {
     PyTealetObject *self = (PyTealetObject *)_self;
-    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self), 1);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     if (!mstate)
         return NULL;
 
@@ -896,7 +901,7 @@ static PyObject *pytealet_get_state(PyObject *_self, void *_closure) {
 
 static PyObject *pytealet_get_frame(PyObject *_self, void *_closure) {
     PyTealetObject *self = (PyTealetObject *)_self;
-    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self), 1);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     if (!mstate)
         return NULL;
     PyObject *frame = self->tstate.has_state ? (PyObject *)self->tstate.frame : NULL;
