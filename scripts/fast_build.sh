@@ -38,8 +38,9 @@ try:
     t = _tealet.tealet()
     print(f'✓ Created tealet: {t}')
     print(f'✓ State: {t.state}')
-    print(f'✓ Main: {t.main}')
-    print(f'✓ Main state: {t.main.state}')
+    main_t = _tealet.main()
+    print(f'✓ Main: {main_t}')
+    print(f'✓ Main state: {main_t.state}')
     
 except Exception as e:
     print(f'✗ C extension failed: {e}')
