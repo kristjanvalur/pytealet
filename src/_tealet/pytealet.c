@@ -21,8 +21,11 @@
 #define PY310 1
 #endif
 
-#if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030C0000
+#if PY_VERSION_HEX >= 0x030B0000
+#define Py311P 1
+#if PY_VERSION_HEX < 0x030C0000
 #define PY311 1
+#endif
 #endif
 
 #if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
@@ -173,6 +176,13 @@ struct PyTealetTstate {
 #if defined(PY_HAS_CFRAME)
     PyTealetCFrame *cframe;
 #endif
+#if defined(Py311P)
+    int cframe_use_tracing;
+    void *cframe_current_frame;
+    _PyStackChunk *datastack_chunk;
+    PyObject **datastack_top;
+    PyObject **datastack_limit;
+#endif
 };
 
 typedef struct PyTealetTstate PyTealetTstate;
@@ -295,6 +305,13 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 #if defined(PY_HAS_CFRAME)
     dst->cframe = src->cframe;
 #endif
+#if defined(Py311P)
+    dst->cframe_current_frame = src->cframe ? (void *)src->cframe->current_frame : NULL;
+    dst->cframe_use_tracing = src->cframe ? src->cframe->use_tracing : 0;
+    dst->datastack_chunk = src->datastack_chunk;
+    dst->datastack_top = src->datastack_top;
+    dst->datastack_limit = src->datastack_limit;
+#endif
     dst->trash_delete_nesting = src->trash_delete_nesting;
 }
 
@@ -325,6 +342,15 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
 
 #if defined(PY_HAS_CFRAME)
     dst->cframe = src->cframe;
+#endif
+#if defined(Py311P)
+    if (dst->cframe) {
+        dst->cframe->use_tracing = src->cframe_use_tracing;
+        dst->cframe->current_frame = src->cframe_current_frame;
+    }
+    dst->datastack_chunk = src->datastack_chunk;
+    dst->datastack_top = src->datastack_top;
+    dst->datastack_limit = src->datastack_limit;
 #endif
     dst->trash_delete_nesting = src->trash_delete_nesting;
 }
@@ -1064,6 +1090,9 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     tealet_t *t_return;
     int exit_mode = TEALET_EXIT_DELETE;
     PyThreadState *tstate = PyThreadState_GET();
+#if defined(PY_HAS_CFRAME)
+    PyTealetCFrame trace_info;
+#endif
 
     if (tealet->state == STATE_STUB) {
         assert(t_current == tealet->tealet);
@@ -1076,6 +1105,18 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         /* set up the pointer in the tealet */
         tealet->tealet = t_current;
         TEALET_SET_PYOBJECT(t_current, tealet);
+#if defined(Py311P)
+        /* First entry of a brand-new tealet must not inherit parent eval
+         * frame/datastack links from another C stack.
+         */
+        trace_info = tstate->root_cframe;
+        tstate->cframe = &trace_info;
+        tstate->cframe->previous = &tstate->root_cframe;
+        tstate->cframe->current_frame = NULL;
+        tstate->datastack_chunk = NULL;
+        tstate->datastack_top = NULL;
+        tstate->datastack_limit = NULL;
+#endif
     }
 
     /* We only have borrowed references from the calling tealet.
