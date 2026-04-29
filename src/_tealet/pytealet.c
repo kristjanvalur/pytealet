@@ -154,30 +154,41 @@ static PyObject *GetWrapperRef(tealet_t *tealet) {
  * b) Exiting a tealet requires clearing its snapshot and releasing owned refs.
  */
 struct PyTealetTstate {
+    int has_state;     /* Debug helper: 1 when this struct currently stores a saved
+                          tstate */
+
+    /* For < 3.11, cached from PyThreadState. Queried on switch for later
+     * versions, for introspection of a dormant tealet.
+     */
     PyFrameObject *frame;
+
+    /* current exception state */
     PyObject *exc_type;
     PyObject *exc_val;
     PyObject *exc_tb;
     _PyErr_StackItem *exc_info;
     _PyErr_StackItem exc_state;
+
+    /* current recursion state */
 #if defined(PY_HAS_RECURSION_DEPTH)
     int recursion_depth;
 #else
     int recursion_remaining;
     int recursion_limit;
 #endif
-    int trash_delete_nesting;
+
+    int trash_delete_nesting;  /* destructor nesting level, conserved. */
     PyObject *context; /* Python 3.7+ contextvars */
-    int has_state;     /* Debug helper: 1 when this struct currently stores a saved
-                          tstate */
+
+#if defined(PY_HAS_CFRAME)
     /* Python 3.10-3.12: cframe tracks C-level call frames (removed in 3.13)
      * Stack-slicing preserves the CFrame struct itself; we just save the
      * pointer */
-#if defined(PY_HAS_CFRAME)
     PyTealetCFrame *cframe;
 #endif
 #if defined(Py311P)
-    int cframe_use_tracing;
+    int cframe_use_tracing;  /* tracing flag from cframe */
+    /* new in 3.11, these four must be preserved together */
     void *cframe_current_frame;
     _PyStackChunk *datastack_chunk;
     PyObject **datastack_top;
