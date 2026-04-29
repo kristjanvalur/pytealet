@@ -232,6 +232,9 @@ uv sync --reinstall-package tealet
 ## Key Differences from greenlet
 
 - Built on libtealet instead of direct stackman integration
+- Does not use the external greenlet module at runtime
+- Uses an internal greenlet emulation layer
+- The internal greenlet emulation layer is currently not working and is disabled
 - May have different performance characteristics
 - Uses tealet's memory allocator interface
 - Supports custom allocators via `tealet_alloc_t`
