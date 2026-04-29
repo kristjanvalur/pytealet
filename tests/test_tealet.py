@@ -264,7 +264,6 @@ class TestSwitch:
 
 
 class TestFrameIntrospection:
-    @pytest.mark.skipif(sys.version_info < (3, 12), reason="targets 3.12+ suspended frame exposure behavior")
     @pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "fork"), reason="requires os.fork (not available on Windows)")
     def test_suspended_frame_traceback_materialization_after_stack_churn(self):
         def payload():
@@ -297,9 +296,9 @@ class TestFrameIntrospection:
                 names.append(cursor.f_code.co_name)
                 cursor = cursor.f_back
 
-            assert "inner" in names
-            assert "outer" in names
-            assert "suspend_with_nested_frames" in names
+            # Keep a concrete shape expectation for stable versions.
+            # If 3.12+ frame exposure internals change, this can be adjusted.
+            assert names[0:3] == ["inner", "outer", "suspend_with_nested_frames"]
 
             tb = None
             cursor = frame
@@ -310,8 +309,9 @@ class TestFrameIntrospection:
                 cursor = cursor.f_back
 
             rendered = "".join(traceback.format_tb(tb))
-            assert "inner" in rendered
-            assert "outer" in rendered
+            assert "in inner" in rendered
+            assert "in outer" in rendered
+            assert "in suspend_with_nested_frames" in rendered
 
             t.switch()
             assert t.state == _tealet.STATE_EXIT
