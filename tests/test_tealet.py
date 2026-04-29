@@ -1,5 +1,10 @@
 import pytest
 import math
+import os
+import signal
+import sys
+import traceback
+import types
 
 import _tealet
 import random
@@ -256,6 +261,81 @@ class TestSwitch:
         assert tealet2.state == _tealet.STATE_RUN;
         r = tealet2.switch(6)
         assert r == 7
+
+
+class TestFrameIntrospection:
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="targets 3.12+ suspended frame exposure behavior")
+    @pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "fork"), reason="requires os.fork (not available on Windows)")
+    def test_suspended_frame_traceback_materialization_after_stack_churn(self):
+        def payload():
+            def suspend_with_nested_frames(current, arg):
+                def outer():
+                    def inner():
+                        return current.main().switch("paused")
+                    return inner()
+                outer()
+                return current.main()
+
+            def churn(current, arg):
+                scratch = [0] * 128
+                return current.main(), len(scratch)
+
+            t = _tealet.tealet()
+            assert t.run(suspend_with_nested_frames, None) == "paused"
+
+            for _ in range(200):
+                _tealet.tealet().run(churn, None)
+
+            frame = t.frame
+            assert frame is not None
+
+            names = []
+            cursor = frame
+            for _ in range(32):
+                if cursor is None:
+                    break
+                names.append(cursor.f_code.co_name)
+                cursor = cursor.f_back
+
+            assert "inner" in names
+            assert "outer" in names
+            assert "suspend_with_nested_frames" in names
+
+            tb = None
+            cursor = frame
+            for _ in range(32):
+                if cursor is None:
+                    break
+                tb = types.TracebackType(tb, cursor, max(cursor.f_lasti, 0), cursor.f_lineno)
+                cursor = cursor.f_back
+
+            rendered = "".join(traceback.format_tb(tb))
+            assert "inner" in rendered
+            assert "outer" in rendered
+
+            t.switch()
+            assert t.state == _tealet.STATE_EXIT
+
+        pid = os.fork()
+        if pid == 0:
+            try:
+                payload()
+            except BaseException:
+                traceback.print_exc()
+                os._exit(1)
+            os._exit(0)
+
+        _, status = os.waitpid(pid, 0)
+        if os.WIFSIGNALED(status):
+            sig = os.WTERMSIG(status)
+            try:
+                sig_name = signal.Signals(sig).name
+            except ValueError:
+                sig_name = "UNKNOWN"
+            pytest.fail(f"child crashed while traversing suspended tealet.frame: signal {sig} ({sig_name})")
+
+        assert os.WIFEXITED(status), f"child ended unexpectedly with status={status}"
+        assert os.WEXITSTATUS(status) == 0
 
 
 class TestRandom1:
