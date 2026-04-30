@@ -35,7 +35,7 @@ void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
 #endif
 }
 
-#if defined(PY312P) && !defined(PY_HAS_TSTATE_FRAME)
+#if defined(PY312P)
 static void PyTealetFrameInfo_ClearRewrites(PyTealetFrameInfo *info) { info->size = 0; }
 
 static int PyTealetFrameInfo_RecordRewrite(PyTealetFrameInfo *info, _PyInterpreterFrame **location) {
@@ -76,8 +76,7 @@ static void PyTealetFrameInfo_ExposeFrames(PyTealetFrameInfo *info) {
  * We visit the frame chain and intentionally re-write previous frame links to skip over
  * incomplete frames and frames that are stored by the C stack, since these can not
  * be safely traversed when the stack that they belong to is saved into heap storage.
- * TODO: We should also terminate the frame chain early if we encounter a frame that
- * is outside the current tealet.
+ * Rewrites are reversed on release.
  */
 static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
 #if defined(PY312P)

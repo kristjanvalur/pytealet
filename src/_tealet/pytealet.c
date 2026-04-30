@@ -1115,7 +1115,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     int exit_mode = TEALET_EXIT_DELETE;
     PyThreadState *tstate = PyThreadState_GET();
 #if defined(PY_HAS_CFRAME)
-    PyTealetCFrame trace_info;
+    PyTealetCFrame top_frame;
 #endif
 
     if (tealet->state == STATE_STUB) {
@@ -1124,25 +1124,26 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
         /* set the tstate from our own copy */
         PyTealetTstate_Restore(&tealet->tstate, tstate);
-        PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
     } else {
         assert(tealet->state == STATE_NEW);
         /* set up the pointer in the tealet */
         tealet->tealet = t_current;
         TEALET_SET_PYOBJECT(t_current, tealet);
-#if defined(Py311P)
-        /* First entry of a brand-new tealet must not inherit parent eval
-         * frame/datastack links from another C stack.
-         */
-        trace_info = tstate->root_cframe;
-        tstate->cframe = &trace_info;
-        tstate->cframe->previous = &tstate->root_cframe;
-        tstate->cframe->current_frame = NULL;
-        tstate->datastack_chunk = NULL;
-        tstate->datastack_top = NULL;
-        tstate->datastack_limit = NULL;
-#endif
     }
+
+#if defined(Py311P)
+    /* Entering tealet code must not inherit parent eval/datastack links from
+     * another C stack.  We copy the cframe into a local variable and reset it so that
+     * it has no parents.
+     */
+    top_frame = tstate->root_cframe;
+    tstate->cframe = &top_frame;
+    tstate->cframe->previous = &tstate->root_cframe;
+    tstate->cframe->current_frame = NULL;
+    tstate->datastack_chunk = NULL;
+    tstate->datastack_top = NULL;
+    tstate->datastack_limit = NULL;
+#endif
 
     /* We only have borrowed references from the calling tealet.
      * the argument to the function will get their own reference, but
