@@ -195,10 +195,8 @@ struct PyTealetObject {
 
     /* thread state information */
     PyTealetTstate tstate;
-#if !defined(PY_HAS_TSTATE_FRAME)
     /* Dormant frame snapshot and (3.12+) reversible frame rewrites. */
     PyTealetFrameInfo frame_info;
-#endif
 };
 
 /* helpers for getting main and current and checking relationship */
@@ -566,9 +564,7 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
     result->state = STATE_NEW;
     result->tealet = NULL;
     PyTealetTstate_Init(&result->tstate);
-#if !defined(PY_HAS_TSTATE_FRAME)
     PyTealetFrameInfo_Init(&result->frame_info);
-#endif
     result->weakreflist = NULL;
 
     if (src) {
@@ -582,10 +578,8 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
             TEALET_SET_PYOBJECT(result->tealet, result);
             result->tstate = src->tstate;
             PyTealetTstate_IncRef(&result->tstate);
-#if !defined(PY_HAS_TSTATE_FRAME)
             /* Stub tealets should not carry dormant frame snapshots. */
             PyTealetFrameInfo_Init(&result->frame_info);
-#endif
         }
         result->state = src->state;
     }
@@ -602,10 +596,8 @@ static void pytealet_dealloc(PyObject *obj) {
     }
     /* Release any owned saved thread-state references */
     PyTealetTstate_Drop(&tealet->tstate, NULL);
-#if !defined(PY_HAS_TSTATE_FRAME)
     PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
     PyTealetFrameInfo_Fini(&tealet->frame_info);
-#endif
     if (tealet->weakreflist != NULL)
         PyObject_ClearWeakRefs(obj);
     if (tealet->tealet)
@@ -804,8 +796,7 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     ptarg->arg = farg;
 
     if (!created_from_new) {
-        if (PyTealetFrameInfo_Capture(&current->frame_info, 1) < 0)
-            PyErr_Clear();
+        PyTealetFrameInfo_Capture(&current->frame_info, 1);
         PyTealetTstate_Save(&current->tstate, tstate);
         fail = tealet_stub_run(target->tealet, pytealet_main, &switch_arg);
         PyTealetTstate_Restore(&current->tstate, tstate);
@@ -871,8 +862,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
 
     Py_INCREF(pyarg);
     switch_arg = (void *)pyarg;
-    if (PyTealetFrameInfo_Capture(&current->frame_info, 1) < 0)
-        PyErr_Clear();
+    PyTealetFrameInfo_Capture(&current->frame_info, 1);
     PyTealetTstate_Save(&current->tstate, tstate);
     fail = tealet_switch(target->tealet, &switch_arg);
     PyTealetTstate_Restore(&current->tstate, tstate);
@@ -928,23 +918,21 @@ static PyObject *pytealet_get_state(PyObject *_self, void *_closure) {
 
 static PyObject *pytealet_get_frame(PyObject *_self, void *_closure) {
     PyTealetObject *self = (PyTealetObject *)_self;
-    PyTealetObject *current;
+    PyObject *frame;
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     if (!mstate)
         return NULL;
 #if defined(PY_HAS_TSTATE_FRAME)
-    PyObject *frame = self->tstate.has_state ? (PyObject *)self->tstate.frame : NULL;
+    frame = self->tstate.has_state ? (PyObject *)self->tstate.frame : NULL;
 #else
-    PyObject *frame = self->tstate.has_state ? (PyObject *)self->frame_info.frame : NULL;
+    frame = PyTealetFrameInfo_GetFrame(&self->frame_info);
 #endif
-    if (frame)
-        return Py_NewRef(frame);
-
-    /* No stored frame (e.g. new/stub): only current tealet exposes live frame. */
-    current = GetCurrent(mstate, NULL, 0);
-    if (current == self)
-        frame = (PyObject *)PyEval_GetFrame();
-
+    if (!frame) {
+        /* is it the current tealet of the current thread? */
+        if (self == GetCurrent(mstate, NULL, 0)) {
+            frame = (PyObject *)PyEval_GetFrame();
+        }
+    }
     if (!frame)
         frame = Py_None;
     return Py_NewRef(frame);
@@ -1139,9 +1127,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
         /* set the tstate from our own copy */
         PyTealetTstate_Restore(&tealet->tstate, tstate);
-#if !defined(PY_HAS_TSTATE_FRAME)
-    PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
-#endif
+        PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
     } else {
         assert(tealet->state == STATE_NEW);
         /* set up the pointer in the tealet */
@@ -1241,14 +1227,9 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
      * then drop saved refs immediately so frame locals (including 'current')
      * do not keep the Python tealet object alive until GC.
      */
-#if !defined(PY_HAS_TSTATE_FRAME)
-    if (PyTealetFrameInfo_Capture(&tealet->frame_info, 1) < 0)
-        PyErr_Clear();
-#endif
+    PyTealetFrameInfo_Capture(&tealet->frame_info, 1);
     PyTealetTstate_Save(&tealet->tstate, tstate);
-#if !defined(PY_HAS_TSTATE_FRAME)
     PyTealetFrameInfo_Release(&tealet->frame_info, t_return);
-#endif
     PyTealetTstate_Drop(&tealet->tstate, t_return);
 
     if (tealet_exit(t_return, (void *)return_arg, exit_mode))

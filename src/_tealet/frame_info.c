@@ -11,13 +11,16 @@ typedef struct PyTealetFrameInfoEntry {
 } PyTealetFrameInfoEntry;
 #endif
 
-#if !defined(PY_HAS_TSTATE_FRAME)
 void PyTealetFrameInfo_Init(PyTealetFrameInfo *info) {
+#if !defined(PY_HAS_TSTATE_FRAME)
     info->frame = NULL;
 #if defined(PY312P)
     info->items = NULL;
     info->size = 0;
     info->capacity = 0;
+#endif
+#else
+    info->unused = 0;
 #endif
 }
 
@@ -32,7 +35,7 @@ void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
 #endif
 }
 
-#if defined(PY312P)
+#if defined(PY312P) && !defined(PY_HAS_TSTATE_FRAME)
 static void PyTealetFrameInfo_ClearRewrites(PyTealetFrameInfo *info) { info->size = 0; }
 
 static int PyTealetFrameInfo_RecordRewrite(PyTealetFrameInfo *info, _PyInterpreterFrame **location) {
@@ -69,9 +72,16 @@ static void PyTealetFrameInfo_ExposeFrames(PyTealetFrameInfo *info) {
 }
 #endif
 
-/* 3.12+: hide unsafe/incomplete frames by rewriting frame links */
-static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info, PyFrameObject *top_frame) {
+/* 3.12+: hide unsafe/incomplete frames by rewriting frame links.
+ * We visit the frame chain and intentionally re-write previous frame links to skip over
+ * incomplete frames and frames that are stored by the C stack, since these can not
+ * be safely traversed when the stack that they belong to is saved into heap storage.
+ * TODO: We should also terminate the frame chain early if we encounter a frame that
+ * is outside the current tealet.
+ */
+static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
 #if defined(PY312P)
+    PyFrameObject *top_frame = info->frame;
     _PyInterpreterFrame **last_link;
     _PyInterpreterFrame *iframe;
 
@@ -108,25 +118,45 @@ static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info, PyFrameObject *
     return 0;
 #else
     (void)info;
-    (void)top_frame;
     return 0;
 #endif
 }
 
 int PyTealetFrameInfo_Capture(PyTealetFrameInfo *info, int rewrite_chain) {
+#if defined(PY_HAS_TSTATE_FRAME)
+    (void)info;
+    (void)rewrite_chain;
+    return 0;
+#else
     PyFrameObject *frame = (PyFrameObject *)PyEval_GetFrame();
     if (!frame) {
         info->frame = NULL;
         return 0;
     }
-    if (rewrite_chain && PyTealetFrameInfo_HideFrames(info, frame) < 0) {
-        return -1;
-    }
+
     Py_XSETREF(info->frame, (PyFrameObject *)Py_XNewRef((PyObject *)frame));
+    if (rewrite_chain && PyTealetFrameInfo_HideFrames(info) < 0) {
+        /* Best-effort rewrite only: keep captured frame and clear transient error. */
+        PyErr_Clear();
+    }
     return 0;
+#endif
+}
+
+PyObject *PyTealetFrameInfo_GetFrame(const PyTealetFrameInfo *info) {
+#if defined(PY_HAS_TSTATE_FRAME)
+    (void)info;
+    return NULL;
+#else
+    return (PyObject *)info->frame;
+#endif
 }
 
 void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet) {
+#if defined(PY_HAS_TSTATE_FRAME)
+    (void)info;
+    (void)dustbin_tealet;
+#else
 #if defined(PY312P)
     PyTealetFrameInfo_ExposeFrames(info);
 #endif
@@ -136,5 +166,5 @@ void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet
     } else {
         Py_CLEAR(info->frame);
     }
-}
 #endif
+}
