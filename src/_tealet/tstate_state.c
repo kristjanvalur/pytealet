@@ -141,13 +141,13 @@ static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_teale
     assert(saved->has_state == 1);
     if (dustbin_tealet) {
 #if defined(PY_HAS_TSTATE_FRAME)
-        dustbin_push(dustbin_tealet, (PyObject *)saved->frame);
+        PyTealet_dustbin_push(dustbin_tealet, (PyObject *)saved->frame);
 #endif
-        dustbin_push(dustbin_tealet, saved->exc_type);
-        dustbin_push(dustbin_tealet, saved->exc_val);
-        dustbin_push(dustbin_tealet, saved->exc_tb);
-        dustbin_push(dustbin_tealet, saved->exc_state.exc_value);
-        dustbin_push(dustbin_tealet, saved->context);
+        PyTealet_dustbin_push(dustbin_tealet, saved->exc_type);
+        PyTealet_dustbin_push(dustbin_tealet, saved->exc_val);
+        PyTealet_dustbin_push(dustbin_tealet, saved->exc_tb);
+        PyTealet_dustbin_push(dustbin_tealet, saved->exc_state.exc_value);
+        PyTealet_dustbin_push(dustbin_tealet, saved->context);
     } else {
 #if defined(PY_HAS_TSTATE_FRAME)
         Py_XDECREF(saved->frame);

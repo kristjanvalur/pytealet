@@ -51,6 +51,7 @@ typedef _PyCFrame PyTealetCFrame;
 #endif
 #endif
 
-void dustbin_push(tealet_t *tealet, PyObject *obj);
+/* push an object into the tealet dustbin, to be decrefed later. */
+void PyTealet_dustbin_push(tealet_t *tealet, PyObject *obj);
 
 #endif

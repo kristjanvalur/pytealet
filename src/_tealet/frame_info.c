@@ -160,7 +160,7 @@ void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet
     PyTealetFrameInfo_ExposeFrames(info);
 #endif
     if (dustbin_tealet) {
-        dustbin_push(dustbin_tealet, (PyObject *)info->frame);
+        PyTealet_dustbin_push(dustbin_tealet, (PyObject *)info->frame);
         info->frame = NULL;
     } else {
         Py_CLEAR(info->frame);

@@ -155,7 +155,7 @@ static int PyTealet_CheckExact(PyObject *op, PyTealetModuleState *mstate) {
     return mstate && mstate->tealet_type && (Py_TYPE(op) == mstate->tealet_type);
 }
 
-void dustbin_push(tealet_t *tealet, PyObject *obj) {
+void PyTealet_dustbin_push(tealet_t *tealet, PyObject *obj) {
     PyTealetMainData *mdata;
     if (!obj)
         return;
@@ -171,8 +171,6 @@ void dustbin_push(tealet_t *tealet, PyObject *obj) {
     if (PyList_Append(mdata->dustbin, obj) < 0) {
         PyErr_WriteUnraisable(Py_None);
         PyErr_Clear();
-        Py_DECREF(obj);
-        return;
     }
     Py_DECREF(obj);
 }
@@ -890,9 +888,9 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     t_return = return_to->tealet;
 
     /* decref the objects after the switch */
-    dustbin_push(t_return, func);
-    dustbin_push(t_return, (PyObject *)tealet);
-    dustbin_push(t_return, result);
+    PyTealet_dustbin_push(t_return, func);
+    PyTealet_dustbin_push(t_return, (PyObject *)tealet);
+    PyTealet_dustbin_push(t_return, result);
 
     Py_INCREF(return_arg);
 
