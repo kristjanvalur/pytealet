@@ -800,6 +800,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         TEALET_SET_PYOBJECT(t_current, tealet);
     }
 
+    /* The tealet now has its own private Thread state and we can modify safely. */
 #if defined(Py311P)
     /* Entering tealet code must not inherit parent eval/datastack links from
      * another C stack.  We copy the cframe into a local variable and reset it so that
@@ -814,8 +815,8 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     tstate->datastack_limit = NULL;
 #endif
 #if defined(PY_HAS_TSTATE_FRAME)
-    /* 3.10: start tealet execution with no inherited Python frame chain. */
-    tstate->frame = NULL;
+    /* 3.10: drop the current frame reference before entering tealet code. */
+    Py_CLEAR(tstate->frame);
 #endif
 
     /* We only have borrowed references from the calling tealet.
