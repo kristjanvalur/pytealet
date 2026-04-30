@@ -128,6 +128,7 @@ else:
 sources = [
     "src/_tealet/pytealet.c",
     "src/_tealet/frame_info.c",
+    "src/_tealet/tstate_state.c",
 ]
 
 # Include directories
