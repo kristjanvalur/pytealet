@@ -118,17 +118,23 @@ typedef struct PyTealetExtra {
     PyTealetObject *pytealet;
 } PyTealetExtra;
 
-#if defined(PY312P)
-typedef struct PyTealetFrameFixEntry {
+
+/* structures to help query frame state for dormant tealets in 3.11 and above */
+#if !defined(PY_HAS_TSTATE_FRAME)
+typedef struct PyTealetFrameInfoEntry {
     _PyInterpreterFrame **location;
     _PyInterpreterFrame *old_value;
-} PyTealetFrameFixEntry;
+} PyTealetFrameInfoEntry;
 
-typedef struct PyTealetFrameFix {
-    PyTealetFrameFixEntry *items;
+typedef struct PyTealetFrameInfo {
+    /* Snapshot of the dormant frame object for tealet.frame queries. */
+    PyFrameObject *frame;
+#if defined(PY312P)
+    PyTealetFrameInfoEntry *items;
     Py_ssize_t size;
     Py_ssize_t capacity;
-} PyTealetFrameFix;
+#endif
+} PyTealetFrameInfo;
 #endif
 
 /* Helper macros for type-safe access to the tealet extra data */
@@ -173,10 +179,9 @@ struct PyTealetTstate {
     int has_state;     /* Debug helper: 1 when this struct currently stores a saved
                           tstate */
 
-    /* For < 3.11, cached from PyThreadState. Queried on switch for later
-     * versions, for introspection of a dormant tealet.
-     */
+#if defined(PY_HAS_TSTATE_FRAME)
     PyFrameObject *frame;
+#endif
 
     /* current exception state */
     PyObject *exc_type;
@@ -216,10 +221,9 @@ struct PyTealetTstate {
     PyObject **datastack_top;
     PyObject **datastack_limit;
 #endif
-#if defined(PY312P)
-    /* Reversible pointer rewrites used to expose safe frame chains while
-     * suspended. */
-    PyTealetFrameFix frame_fix;
+#if !defined(PY_HAS_TSTATE_FRAME)
+    /* For 3.11+, stores dormant frame and (3.12+) reversible frame rewrites. */
+    PyTealetFrameInfo frame_info;
 #endif
 };
 
@@ -253,19 +257,6 @@ static void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src);
 /* Restore active PyThreadState from snapshot after switching back. */
 static void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst);
 
-/* 3.12+: hide incomplete frames from the frame chain */
-static int PyTealet_ExposeFrameChain(PyTealetTstate *saved, PyFrameObject *top_frame);
-/* 3.12+: restore original frame chain */
-static void PyTealet_UnexposeFrameChain(PyTealetTstate *saved);
-
-#if defined(PY312P)
-static void PyTealetFrameFix_Init(PyTealetFrameFix *fix);
-static void PyTealetFrameFix_Clear(PyTealetFrameFix *fix);
-static void PyTealetFrameFix_Release(PyTealetFrameFix *fix);
-static int PyTealetFrameFix_Record(PyTealetFrameFix *fix, _PyInterpreterFrame **location);
-static void PyTealetFrameFix_Restore(PyTealetFrameFix *fix);
-#endif
-
 /* The python tealet object */
 struct PyTealetObject {
     PyObject_HEAD int state;
@@ -281,6 +272,7 @@ static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls);
 static PyTealetObject *GetMain(PyTealetModuleState *mstate, int create);
 static PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *main, int create_main);
 static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *main);
+static void dustbin_push(tealet_t *tealet, PyObject *obj);
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
 
@@ -329,56 +321,144 @@ static int PyTealet_CheckExact(PyObject *op, PyTealetModuleState *mstate) {
 /* PyTealetTstate Snapshot Implementation                                */
 /* ===================================================================== */
 
+/* ===================================================================== */
+/* PyTealetFrameInfo Methods                                             */
+/* ===================================================================== */
+
+#if !defined(PY_HAS_TSTATE_FRAME)
+static void PyTealetFrameInfo_Init(PyTealetFrameInfo *info) {
+    info->frame = NULL;
 #if defined(PY312P)
-static void PyTealetFrameFix_Init(PyTealetFrameFix *fix) {
-    fix->items = NULL;
-    fix->size = 0;
-    fix->capacity = 0;
+    info->items = NULL;
+    info->size = 0;
+    info->capacity = 0;
+#endif
 }
 
-static void PyTealetFrameFix_Clear(PyTealetFrameFix *fix) { fix->size = 0; }
-
-static void PyTealetFrameFix_Release(PyTealetFrameFix *fix) {
-    free(fix->items);
-    fix->items = NULL;
-    fix->size = 0;
-    fix->capacity = 0;
+static void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
+#if defined(PY312P)
+    free(info->items);
+    info->items = NULL;
+    info->size = 0;
+    info->capacity = 0;
+#endif
 }
 
-static int PyTealetFrameFix_Record(PyTealetFrameFix *fix, _PyInterpreterFrame **location) {
-    PyTealetFrameFixEntry *entry;
+#if defined(PY312P)
+static void PyTealetFrameInfo_ClearRewrites(PyTealetFrameInfo *info) { info->size = 0; }
+
+static void PyTealetFrameInfo_DetachScratch(PyTealetFrameInfo *info) {
+    info->items = NULL;
+    info->size = 0;
+    info->capacity = 0;
+}
+
+static int PyTealetFrameInfo_RecordRewrite(PyTealetFrameInfo *info, _PyInterpreterFrame **location) {
+    PyTealetFrameInfoEntry *entry;
     Py_ssize_t next_capacity;
     void *new_items;
 
-    if (fix->size == fix->capacity) {
-        next_capacity = fix->capacity ? fix->capacity * 2 : 8;
-        new_items = realloc(fix->items, (size_t)next_capacity * sizeof(PyTealetFrameFixEntry));
+    if (info->size == info->capacity) {
+        next_capacity = info->capacity ? info->capacity * 2 : 8;
+        new_items = realloc(info->items, (size_t)next_capacity * sizeof(PyTealetFrameInfoEntry));
         if (!new_items) {
             PyErr_NoMemory();
             return -1;
         }
-        fix->items = (PyTealetFrameFixEntry *)new_items;
-        fix->capacity = next_capacity;
+        info->items = (PyTealetFrameInfoEntry *)new_items;
+        info->capacity = next_capacity;
     }
 
-    entry = &fix->items[fix->size++];
+    entry = &info->items[info->size++];
     entry->location = location;
     entry->old_value = *location;
     return 0;
 }
 
-static void PyTealetFrameFix_Restore(PyTealetFrameFix *fix) {
-    while (fix->size > 0) {
-        PyTealetFrameFixEntry *entry = &fix->items[--fix->size];
+/* 3.12+: expose original links by restoring rewritten frame pointers */
+static void PyTealetFrameInfo_ExposeFrames(PyTealetFrameInfo *info) {
+    while (info->size > 0) {
+        PyTealetFrameInfoEntry *entry = &info->items[--info->size];
         *entry->location = entry->old_value;
     }
 }
 #endif
 
+/* 3.12+: hide unsafe/incomplete frames by rewriting frame links */
+static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info, PyFrameObject *top_frame) {
+#if defined(PY312P)
+    _PyInterpreterFrame **last_link;
+    _PyInterpreterFrame *iframe;
+
+    if (!top_frame) {
+        return 0;
+    }
+
+    PyTealetFrameInfo_ClearRewrites(info);
+    last_link = &top_frame->f_frame;
+    iframe = top_frame->f_frame;
+    while (iframe) {
+        if (!_PyFrame_IsIncomplete(iframe) && iframe->owner != FRAME_OWNED_BY_CSTACK) {
+            /* a complete frame.  if the last link didn't point to it, rewrite. */
+            if (*last_link != iframe) {
+                if (PyTealetFrameInfo_RecordRewrite(info, last_link) < 0) {
+                    PyTealetFrameInfo_ExposeFrames(info);
+                    return -1;
+                }
+                *last_link = iframe;
+            }
+            last_link = &iframe->previous;
+        }
+        iframe = iframe->previous;
+    }
+
+    /* handle the last link */
+    if (*last_link != NULL) {
+        if (PyTealetFrameInfo_RecordRewrite(info, last_link) < 0) {
+            PyTealetFrameInfo_ExposeFrames(info);
+            return -1;
+        }
+        *last_link = NULL;
+    }
+    return 0;
+#else
+    (void)info;
+    (void)top_frame;
+    return 0;
+#endif
+}
+
+static int PyTealetFrameInfo_Capture(PyTealetFrameInfo *info, int rewrite_chain) {
+    PyFrameObject *frame = (PyFrameObject *)PyEval_GetFrame();
+    if (!frame) {
+        info->frame = NULL;
+        return 0;
+    }
+    if (rewrite_chain && PyTealetFrameInfo_HideFrames(info, frame) < 0) {
+        return -1;
+    }
+    Py_XSETREF(info->frame, (PyFrameObject *)Py_XNewRef((PyObject *)frame));
+    return 0;
+}
+
+static void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet) {
+#if defined(PY312P)
+    PyTealetFrameInfo_ExposeFrames(info);
+#endif
+    if (dustbin_tealet) {
+        dustbin_push(dustbin_tealet, (PyObject *)info->frame);
+        info->frame = NULL;
+    } else {
+        Py_CLEAR(info->frame);
+    }
+}
+
+#endif
+
 static void PyTealetTstate_Init(PyTealetTstate *saved) {
     saved->has_state = 0;
-#if defined(PY312P)
-    PyTealetFrameFix_Init(&saved->frame_fix);
+#if !defined(PY_HAS_TSTATE_FRAME)
+    PyTealetFrameInfo_Init(&saved->frame_info);
 #endif
 }
 
@@ -387,7 +467,8 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 #if defined(PY_HAS_TSTATE_FRAME)
     dst->frame = src->frame;
 #else
-    dst->frame = NULL;
+    /* Reset any prior dormant-frame snapshot in this reusable container. */
+    PyTealetFrameInfo_Release(&dst->frame_info, NULL);
 #endif
 #if defined(PY310)
     dst->recursion_depth = src->recursion_depth;
@@ -496,7 +577,11 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
  */
 static void PyTealetTstate_IncRef(PyTealetTstate *saved) {
     assert(saved->has_state == 1);
+#if defined(PY_HAS_TSTATE_FRAME)
     Py_XINCREF(saved->frame);
+#else
+    Py_XINCREF(saved->frame_info.frame);
+#endif
     Py_XINCREF(saved->exc_type);
     Py_XINCREF(saved->exc_val);
     Py_XINCREF(saved->exc_tb);
@@ -544,14 +629,18 @@ static void dustbin_clear(tealet_t *tealet) {
 static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_tealet) {
     assert(saved->has_state == 1);
     if (dustbin_tealet) {
+#if defined(PY_HAS_TSTATE_FRAME)
         dustbin_push(dustbin_tealet, (PyObject *)saved->frame);
+#endif
         dustbin_push(dustbin_tealet, saved->exc_type);
         dustbin_push(dustbin_tealet, saved->exc_val);
         dustbin_push(dustbin_tealet, saved->exc_tb);
         dustbin_push(dustbin_tealet, saved->exc_state.exc_value);
         dustbin_push(dustbin_tealet, saved->context);
     } else {
+#if defined(PY_HAS_TSTATE_FRAME)
         Py_XDECREF(saved->frame);
+#endif
         Py_XDECREF(saved->exc_type);
         Py_XDECREF(saved->exc_val);
         Py_XDECREF(saved->exc_tb);
@@ -615,12 +704,11 @@ static void PyTealetTstate_Copy(PyTealetTstate *dst, const PyThreadState *src) {
     PyTealetTstate_Get(dst, src);
     dst->has_state = 1;
     PyTealetTstate_IncRef(dst);
-    #if !defined(PY_HAS_TSTATE_FRAME)
+#if !defined(PY_HAS_TSTATE_FRAME)
     /* 3.11+: tstate no longer stores a direct frame pointer. Capture
      * the current frame explicitly so dormant tealet.frame remains useful.
      */
-    dst->frame = (PyFrameObject *)Py_XNewRef((PyObject *)PyEval_GetFrame());
-    if (PyTealet_ExposeFrameChain(dst, dst->frame) < 0)
+    if (PyTealetFrameInfo_Capture(&dst->frame_info, 1) < 0)
         PyErr_Clear();
 #endif
 }
@@ -629,62 +717,11 @@ static void PyTealetTstate_Copy(PyTealetTstate *dst, const PyThreadState *src) {
 static void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet) {
     if (!dst->has_state)
         return;
-#if defined(PY312P)
-    PyTealetFrameFix_Restore(&dst->frame_fix);
+#if !defined(PY_HAS_TSTATE_FRAME)
+    PyTealetFrameInfo_Release(&dst->frame_info, dustbin_tealet);
 #endif
     PyTealetTstate_DecRef(dst, dustbin_tealet);
     dst->has_state = 0;
-}
-
-static int PyTealet_ExposeFrameChain(PyTealetTstate *saved, PyFrameObject *top_frame) {
-#if defined(PY312P)
-    _PyInterpreterFrame **last_link;
-    _PyInterpreterFrame *iframe;
-
-    if (!top_frame) {
-        return 0;
-    }
-
-    PyTealetFrameFix_Clear(&saved->frame_fix);
-    last_link = &top_frame->f_frame;
-    iframe = top_frame->f_frame;
-    while (iframe) {
-        if (!_PyFrame_IsIncomplete(iframe) && iframe->owner != FRAME_OWNED_BY_CSTACK) {
-            /* a complete frame.  if the last link didn't point to it, rewrite. */
-            if (*last_link != iframe) {
-                if (PyTealetFrameFix_Record(&saved->frame_fix, last_link) < 0) {
-                    PyTealetFrameFix_Restore(&saved->frame_fix);
-                    return -1;
-                }
-                *last_link = iframe;
-            }
-            last_link = &iframe->previous;
-        }
-        iframe = iframe->previous;
-    }
-
-    /* handle the last link */
-    if (*last_link != NULL) {
-        if (PyTealetFrameFix_Record(&saved->frame_fix, last_link) < 0) {
-            PyTealetFrameFix_Restore(&saved->frame_fix);
-            return -1;
-        }
-        *last_link = NULL;
-    }
-    return 0;
-#else
-    (void)saved;
-    (void)top_frame;
-    return 0;
-#endif
-}
-
-static void PyTealet_UnexposeFrameChain(PyTealetTstate *saved) {
-#if defined(PY312P)
-    PyTealetFrameFix_Restore(&saved->frame_fix);
-#else
-    (void)saved;
-#endif
 }
 
 /* Move out the threadstate to a saved struct before switch. someone will
@@ -696,8 +733,7 @@ static void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src) {
     /* 3.11+: tstate no longer stores a direct frame pointer. Capture
      * the current frame explicitly so dormant tealet.frame remains useful.
      */
-    dst->frame = (PyFrameObject *)Py_XNewRef((PyObject *)PyEval_GetFrame());
-    if (PyTealet_ExposeFrameChain(dst, dst->frame) < 0)
+    if (PyTealetFrameInfo_Capture(&dst->frame_info, 1) < 0)
         PyErr_Clear();
 #endif
     PyTealetTstate_ClearPy(src);
@@ -708,13 +744,10 @@ static void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src) {
 static void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst) {
     assert(src->has_state == 1);
     PyTealetTstate_AssertClearPy(dst);
-#if defined(PY312P) && !defined(PY_HAS_TSTATE_FRAME)
-    PyTealet_UnexposeFrameChain(src);
-#endif
     PyTealetTstate_Put(src, dst);
 #if !defined(PY_HAS_TSTATE_FRAME)
-    /* 3.11+: frame is not restored into tstate, so release our snapshot ref. */
-    Py_CLEAR(src->frame);
+    /* 3.11+: frame is not restored into tstate, so release our snapshot state. */
+    PyTealetFrameInfo_Release(&src->frame_info, NULL);
 #endif
     src->has_state = 0;
 }
@@ -776,8 +809,8 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
             TEALET_SET_PYOBJECT(result->tealet, result);
             result->tstate = src->tstate;
 #if defined(PY312P)
-            /* Stub duplication must not share frame-fix scratch storage. */
-            PyTealetFrameFix_Init(&result->tstate.frame_fix);
+            /* Stub duplication must not share rewrite scratch storage. */
+            PyTealetFrameInfo_DetachScratch(&result->tstate.frame_info);
 #endif
             PyTealetTstate_IncRef(&result->tstate);
         }
@@ -796,8 +829,8 @@ static void pytealet_dealloc(PyObject *obj) {
     }
     /* Release any owned saved thread-state references */
     PyTealetTstate_Drop(&tealet->tstate, NULL);
-#if defined(PY312P)
-    PyTealetFrameFix_Release(&tealet->tstate.frame_fix);
+#if !defined(PY_HAS_TSTATE_FRAME)
+    PyTealetFrameInfo_Fini(&tealet->tstate.frame_info);
 #endif
     if (tealet->weakreflist != NULL)
         PyObject_ClearWeakRefs(obj);
@@ -1118,7 +1151,11 @@ static PyObject *pytealet_get_frame(PyObject *_self, void *_closure) {
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     if (!mstate)
         return NULL;
+#if defined(PY_HAS_TSTATE_FRAME)
     PyObject *frame = self->tstate.has_state ? (PyObject *)self->tstate.frame : NULL;
+#else
+    PyObject *frame = self->tstate.has_state ? (PyObject *)self->tstate.frame_info.frame : NULL;
+#endif
     if (!frame) {
         /* is it the current tealet of the current thread? */
         if (self == GetCurrent(mstate, NULL, 0)) {
