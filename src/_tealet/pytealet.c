@@ -525,13 +525,16 @@ static void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst) {
  */
 
 static void *PyTealet_GetStackFar(const PyThreadState *py_tstate) {
-#if defined(PY_HAS_CFRAME)
-    /* python 3.10 has cframe on stack.  make sure we save our stacks to include
-     * this whole structure
+#if defined(PY_HAS_CFRAME) && !defined(Py311P)
+    /* Python 3.10 keeps cframe on the stack; ensure saved stack range
+     * includes that structure.
      */
     if (py_tstate->cframe)
         return tealet_stack_further(&py_tstate->cframe[0], &py_tstate->cframe[1]);
 #else
+    /* Py311P we have our own stack local object pointed to by tstate->cframe
+     * so we don't need to take it into account.
+     */
     (void)py_tstate;
 #endif
     return NULL;
@@ -1114,7 +1117,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     tealet_t *t_return;
     int exit_mode = TEALET_EXIT_DELETE;
     PyThreadState *tstate = PyThreadState_GET();
-#if defined(PY_HAS_CFRAME)
+#if defined(Py311P)
     PyTealetCFrame top_frame;
 #endif
 
@@ -1143,6 +1146,10 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     tstate->datastack_chunk = NULL;
     tstate->datastack_top = NULL;
     tstate->datastack_limit = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_FRAME)
+    /* 3.10: start tealet execution with no inherited Python frame chain. */
+    tstate->frame = NULL;
 #endif
 
     /* We only have borrowed references from the calling tealet.
