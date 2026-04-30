@@ -1,0 +1,140 @@
+#include "frame_info.h"
+
+#include <stdlib.h>
+
+#if defined(PY312P)
+#include "internal/pycore_frame.h"
+
+typedef struct PyTealetFrameInfoEntry {
+    _PyInterpreterFrame **location;
+    _PyInterpreterFrame *old_value;
+} PyTealetFrameInfoEntry;
+#endif
+
+#if !defined(PY_HAS_TSTATE_FRAME)
+void PyTealetFrameInfo_Init(PyTealetFrameInfo *info) {
+    info->frame = NULL;
+#if defined(PY312P)
+    info->items = NULL;
+    info->size = 0;
+    info->capacity = 0;
+#endif
+}
+
+void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
+#if defined(PY312P)
+    free(info->items);
+    info->items = NULL;
+    info->size = 0;
+    info->capacity = 0;
+#else
+    (void)info;
+#endif
+}
+
+#if defined(PY312P)
+static void PyTealetFrameInfo_ClearRewrites(PyTealetFrameInfo *info) { info->size = 0; }
+
+static int PyTealetFrameInfo_RecordRewrite(PyTealetFrameInfo *info, _PyInterpreterFrame **location) {
+    PyTealetFrameInfoEntry *entry;
+    PyTealetFrameInfoEntry *items;
+    Py_ssize_t next_capacity;
+    void *new_items;
+
+    if (info->size == info->capacity) {
+        next_capacity = info->capacity ? info->capacity * 2 : 8;
+        new_items = realloc(info->items, (size_t)next_capacity * sizeof(PyTealetFrameInfoEntry));
+        if (!new_items) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        info->items = new_items;
+        info->capacity = next_capacity;
+    }
+
+    items = (PyTealetFrameInfoEntry *)info->items;
+    entry = &items[info->size++];
+    entry->location = location;
+    entry->old_value = *location;
+    return 0;
+}
+
+/* 3.12+: expose original links by restoring rewritten frame pointers */
+static void PyTealetFrameInfo_ExposeFrames(PyTealetFrameInfo *info) {
+    PyTealetFrameInfoEntry *items = (PyTealetFrameInfoEntry *)info->items;
+    while (info->size > 0) {
+        PyTealetFrameInfoEntry *entry = &items[--info->size];
+        *entry->location = entry->old_value;
+    }
+}
+#endif
+
+/* 3.12+: hide unsafe/incomplete frames by rewriting frame links */
+static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info, PyFrameObject *top_frame) {
+#if defined(PY312P)
+    _PyInterpreterFrame **last_link;
+    _PyInterpreterFrame *iframe;
+
+    if (!top_frame) {
+        return 0;
+    }
+
+    PyTealetFrameInfo_ClearRewrites(info);
+    last_link = &top_frame->f_frame;
+    iframe = top_frame->f_frame;
+    while (iframe) {
+        if (!_PyFrame_IsIncomplete(iframe) && iframe->owner != FRAME_OWNED_BY_CSTACK) {
+            /* a complete frame. if the last link didn't point to it, rewrite. */
+            if (*last_link != iframe) {
+                if (PyTealetFrameInfo_RecordRewrite(info, last_link) < 0) {
+                    PyTealetFrameInfo_ExposeFrames(info);
+                    return -1;
+                }
+                *last_link = iframe;
+            }
+            last_link = &iframe->previous;
+        }
+        iframe = iframe->previous;
+    }
+
+    /* handle the last link */
+    if (*last_link != NULL) {
+        if (PyTealetFrameInfo_RecordRewrite(info, last_link) < 0) {
+            PyTealetFrameInfo_ExposeFrames(info);
+            return -1;
+        }
+        *last_link = NULL;
+    }
+    return 0;
+#else
+    (void)info;
+    (void)top_frame;
+    return 0;
+#endif
+}
+
+int PyTealetFrameInfo_Capture(PyTealetFrameInfo *info, int rewrite_chain) {
+    PyFrameObject *frame = (PyFrameObject *)PyEval_GetFrame();
+    if (!frame) {
+        info->frame = NULL;
+        return 0;
+    }
+    if (rewrite_chain && PyTealetFrameInfo_HideFrames(info, frame) < 0) {
+        return -1;
+    }
+    Py_XSETREF(info->frame, (PyFrameObject *)Py_XNewRef((PyObject *)frame));
+    return 0;
+}
+
+void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet) {
+#if defined(PY312P)
+    PyTealetFrameInfo_ExposeFrames(info);
+#endif
+    if (dustbin_tealet) {
+        dustbin_push(dustbin_tealet, (PyObject *)info->frame);
+        info->frame = NULL;
+    } else {
+        Py_CLEAR(info->frame);
+    }
+}
+#endif

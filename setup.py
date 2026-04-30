@@ -127,6 +127,7 @@ else:
 # Source files for the extension (only pytealet.c, link against pre-built libtealet)
 sources = [
     "src/_tealet/pytealet.c",
+    "src/_tealet/frame_info.c",
 ]
 
 # Include directories
