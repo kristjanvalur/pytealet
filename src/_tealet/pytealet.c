@@ -389,14 +389,14 @@ void dustbin_push(tealet_t *tealet, PyObject *obj) {
         return;
     }
     mdata = (PyTealetMainData *)*tealet_main_userpointer(tealet);
-    if (!mdata || !mdata->dustbin || !PyList_Check(mdata->dustbin)) {
+    if (!mdata || !mdata->dustbin) {
         Py_DECREF(obj);
         return;
     }
     if (PyList_Append(mdata->dustbin, obj) < 0) {
-        Py_DECREF(obj);
         PyErr_WriteUnraisable(Py_None);
         PyErr_Clear();
+        Py_DECREF(obj);
         return;
     }
     Py_DECREF(obj);
@@ -795,32 +795,29 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     ptarg->func = func;
     ptarg->arg = farg;
 
+    PyTealetFrameInfo_Capture(&current->frame_info, 1);
     if (!created_from_new) {
-        PyTealetFrameInfo_Capture(&current->frame_info, 1);
         PyTealetTstate_Save(&current->tstate, tstate);
         fail = tealet_stub_run(target->tealet, pytealet_main, &switch_arg);
         PyTealetTstate_Restore(&current->tstate, tstate);
-        PyTealetFrameInfo_Release(&current->frame_info, NULL);
-        if (fail) {
-            PyErr_NoMemory();
-            result = NULL;
-            goto run_cleanup;
-        }
     } else {
         void *stack_limit = PyTealet_GetStackFar(tstate);
         PyTealetTstate_Copy(&current->tstate, tstate);
         tealet = tealet_new(current->tealet, pytealet_main, &switch_arg, stack_limit);
-        if (!tealet) {
+        fail = (tealet == NULL);
+        if (fail) {
             PyTealetTstate_Drop(&current->tstate, NULL);
-            PyErr_NoMemory();
-            result = NULL;
-            goto run_cleanup;
+        } else {
+            PyTealetTstate_Restore(&current->tstate, tstate);
         }
-        PyTealetTstate_Restore(&current->tstate, tstate);
     }
-
-    result = (PyObject *)switch_arg;
-run_cleanup:
+    PyTealetFrameInfo_Release(&current->frame_info, NULL);
+    if (fail) {
+        PyErr_NoMemory();
+        result = NULL;
+    } else {
+        result = (PyObject *)switch_arg;
+    }
     dustbin_clear(current->tealet);
     return result;
 }
