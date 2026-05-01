@@ -1,7 +1,9 @@
 .PHONY: cext-clean cext-cc cext-cc-debug cext-cc-warnings cext-cc-ci format-c format-c-check
 
 CLANG_FORMAT ?= clang-format-14
-C_FORMAT_FILES := src/_tealet/pytealet.c src/_tealet/pytealet_build_config.h
+EXT_SRC := $(sort $(wildcard src/_tealet/*.c))
+EXT_SRC_ALL := $(sort $(EXT_SRC) $(wildcard src/_tealet/*.h))
+C_FORMAT_FILES ?= $(EXT_SRC_ALL)
 
 PY_CC := $(shell uv run python -c "import sysconfig; print((sysconfig.get_config_var('CC') or 'cc').split()[0])")
 PY_CFLAGS := $(shell uv run python -c "import sysconfig; print(sysconfig.get_config_var('CFLAGS') or '')")
@@ -11,27 +13,29 @@ EXT_INCLUDE_FLAGS := -Isrc/_tealet -Isrc/_tealet/libtealet/src -Isrc/_tealet/lib
 EXT_BASE_FLAGS := -std=c17 -pedantic-errors -Wall -Wno-unused-function -include $(abspath src/_tealet/pytealet_build_config.h)
 EXT_DEBUG_FLAGS := -g -O0 -UNDEBUG
 EXT_CI_FLAGS := -Werror
-EXT_SRC := src/_tealet/pytealet.c
-EXT_OBJ := tmp/build/pytealet.o
+EXT_OBJ := $(patsubst src/_tealet/%.c,tmp/build/%.o,$(EXT_SRC))
+
+EXT_MODE_FLAGS :=
+
+tmp/build:
+	mkdir -p $@
+
+tmp/build/%.o: src/_tealet/%.c | tmp/build
+	$(PY_CC) $(PY_CFLAGS) $(PY_INCLUDE_FLAGS) $(EXT_INCLUDE_FLAGS) $(EXT_BASE_FLAGS) $(EXT_MODE_FLAGS) -c $< -o $@
 
 cext-clean:
 	rm -rf tmp/build
 
-cext-cc: cext-clean
-	mkdir -p tmp/build
-	$(PY_CC) $(PY_CFLAGS) $(PY_INCLUDE_FLAGS) $(EXT_INCLUDE_FLAGS) $(EXT_BASE_FLAGS) -c $(EXT_SRC) -o $(EXT_OBJ)
+cext-cc: cext-clean $(EXT_OBJ)
 
-cext-cc-debug: cext-clean
-	mkdir -p tmp/build
-	$(PY_CC) $(PY_CFLAGS) $(PY_INCLUDE_FLAGS) $(EXT_INCLUDE_FLAGS) $(EXT_BASE_FLAGS) $(EXT_DEBUG_FLAGS) -c $(EXT_SRC) -o $(EXT_OBJ)
+cext-cc-debug: EXT_MODE_FLAGS := $(EXT_DEBUG_FLAGS)
+cext-cc-debug: cext-clean $(EXT_OBJ)
 
-cext-cc-warnings: cext-clean
-	mkdir -p tmp/build
-	$(PY_CC) $(PY_CFLAGS) $(PY_INCLUDE_FLAGS) $(EXT_INCLUDE_FLAGS) $(EXT_BASE_FLAGS) -c $(EXT_SRC) -o $(EXT_OBJ) 2>&1 | grep -Ei "warning:|deprecated" || true
+cext-cc-warnings: cext-clean $(EXT_OBJ)
+	@$(PY_CC) $(PY_CFLAGS) $(PY_INCLUDE_FLAGS) $(EXT_INCLUDE_FLAGS) $(EXT_BASE_FLAGS) -fsyntax-only $(EXT_SRC) 2>&1 | grep -Ei "warning:|deprecated" || true
 
-cext-cc-ci: cext-clean
-	mkdir -p tmp/build
-	$(PY_CC) $(PY_CFLAGS) $(PY_INCLUDE_FLAGS) $(EXT_INCLUDE_FLAGS) $(EXT_BASE_FLAGS) $(EXT_CI_FLAGS) -c $(EXT_SRC) -o $(EXT_OBJ)
+cext-cc-ci: EXT_MODE_FLAGS := $(EXT_CI_FLAGS)
+cext-cc-ci: cext-clean $(EXT_OBJ)
 
 format-c:
 	$(CLANG_FORMAT) -i $(C_FORMAT_FILES)

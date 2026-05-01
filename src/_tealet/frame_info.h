@@ -1,20 +1,19 @@
-#ifndef PYTEALET_FRAME_INFO_H
-#define PYTEALET_FRAME_INFO_H
-
-#include "Python.h"
-#include "frameobject.h"
-
-#include "tealet.h"
-#include "pytealet.h"
-
-
 /* This file defines a structure which holds information about the Python frame of
  * a suspended tealet, for introspection.
  * In some Python versions, this requires re-writing frames on the stack so that
  * the frame objects are accessible and can be safely refcounted accessed.
  */
 
- typedef struct PyTealetFrameInfo {
+#ifndef PYTEALET_FRAME_INFO_H
+#define PYTEALET_FRAME_INFO_H
+
+#include "Python.h"
+#include "frameobject.h"
+
+#include "pytealet.h"
+#include "tealet.h"
+
+typedef struct PyTealetFrameInfo {
 #if !defined(PY_HAS_TSTATE_FRAME)
     /* Snapshot of the dormant frame object for tealet.frame queries. */
     PyFrameObject *frame;

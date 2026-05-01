@@ -1,3 +1,11 @@
+/* Implementation of frame info structures.
+ * To keep frame information available for dormant tealets, we need to both keep
+ * an active PyFrameObject alive, and also ensure that none of the frame links
+ * point to incomplete frames, because the Python internal API will then try
+ * to recreate them when accessed. This will fail for tealets that have
+ * their stack swapped out.
+ */
+
 #include "frame_info.h"
 
 #include <stdlib.h>

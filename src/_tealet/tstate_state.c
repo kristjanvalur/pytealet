@@ -209,9 +209,7 @@ static void PyTealetTstate_AssertClearPy(PyThreadState *py_tstate) {
 #endif
 }
 
-void PyTealetTstate_Init(PyTealetTstate *saved) {
-    saved->has_state = 0;
-}
+void PyTealetTstate_Init(PyTealetTstate *saved) { saved->has_state = 0; }
 
 /* copy the threadstate, e.g. when we create a stub */
 void PyTealetTstate_Copy(PyTealetTstate *dst, const PyThreadState *src) {
