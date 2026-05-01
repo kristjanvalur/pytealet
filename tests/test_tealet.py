@@ -1,7 +1,5 @@
 import pytest
 import math
-import os
-import signal
 import sys
 import traceback
 import types
@@ -264,86 +262,65 @@ class TestSwitch:
 
 
 class TestFrameIntrospection:
-    @pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "fork"), reason="requires os.fork (not available on Windows)")
     def test_suspended_frame_traceback_after_parent_stack_change(self):
-        def payload():
-            def recurse(depth, fn):
-                if depth == 0:
-                    return fn()
-                return recurse(depth - 1, fn)
+        def recurse(depth, fn):
+            if depth == 0:
+                return fn()
+            return recurse(depth - 1, fn)
 
-            def suspend_with_nested_frames(current, arg):
-                def outer():
-                    def inner():
-                        return current.main().switch("paused")
-                    return inner()
-                outer()
-                return current.main()
+        def suspend_with_nested_frames(current, arg):
+            def outer():
+                def inner():
+                    return current.main().switch("paused")
 
-            def spawner_function():
-                return t.run(suspend_with_nested_frames, None)
+                return inner()
 
-            t = _tealet.tealet()
-            assert recurse(5, spawner_function) == "paused"
+            outer()
+            return current.main()
 
-            def query_traceback():
-                frame = t.frame
-                assert frame is not None
+        def spawner_function():
+            return t.run(suspend_with_nested_frames, None)
 
-                names = []
-                cursor = frame
-                for _ in range(32):
-                    if cursor is None:
-                        break
-                    names.append(cursor.f_code.co_name)
-                    cursor = cursor.f_back
+        t = _tealet.tealet()
+        assert recurse(5, spawner_function) == "paused"
 
-                # Keep a concrete shape expectation for stable versions.
-                # If 3.12+ frame exposure internals change, this can be adjusted.
-                assert names[0:3] == ["inner", "outer", "suspend_with_nested_frames"]
+        def query_traceback():
+            frame = t.frame
+            assert frame is not None
 
-                tb = None
-                cursor = frame
-                for _ in range(32):
-                    if cursor is None:
-                        break
-                    tb = types.TracebackType(tb, cursor, max(cursor.f_lasti, 0), cursor.f_lineno)
-                    cursor = cursor.f_back
+            names = []
+            cursor = frame
+            for _ in range(32):
+                if cursor is None:
+                    break
+                names.append(cursor.f_code.co_name)
+                cursor = cursor.f_back
 
-                rendered = "".join(traceback.format_tb(tb))
-                return names, rendered
+            # Keep a concrete shape expectation for stable versions.
+            # If 3.12+ frame exposure internals change, this can be adjusted.
+            assert names[0:3] == ["inner", "outer", "suspend_with_nested_frames"]
 
-            names, rendered = recurse(5, query_traceback)
-            assert "in inner" in rendered
-            assert "in outer" in rendered
-            assert "in suspend_with_nested_frames" in rendered
-            if sys.version_info >= (3, 12):
-                assert "spawner_function" not in names
-                assert "in spawner_function" not in rendered
+            tb = None
+            cursor = frame
+            for _ in range(32):
+                if cursor is None:
+                    break
+                tb = types.TracebackType(tb, cursor, max(cursor.f_lasti, 0), cursor.f_lineno)
+                cursor = cursor.f_back
 
-            t.switch()
-            assert t.state == _tealet.STATE_EXIT
+            rendered = "".join(traceback.format_tb(tb))
+            return names, rendered
 
-        pid = os.fork()
-        if pid == 0:
-            try:
-                payload()
-            except BaseException:
-                traceback.print_exc()
-                os._exit(1)
-            os._exit(0)
+        names, rendered = recurse(5, query_traceback)
+        assert "in inner" in rendered
+        assert "in outer" in rendered
+        assert "in suspend_with_nested_frames" in rendered
+        if sys.version_info >= (3, 12):
+            assert "spawner_function" not in names
+            assert "in spawner_function" not in rendered
 
-        _, status = os.waitpid(pid, 0)
-        if os.WIFSIGNALED(status):
-            sig = os.WTERMSIG(status)
-            try:
-                sig_name = signal.Signals(sig).name
-            except ValueError:
-                sig_name = "UNKNOWN"
-            pytest.fail(f"child crashed while traversing suspended tealet.frame: signal {sig} ({sig_name})")
-
-        assert os.WIFEXITED(status), f"child ended unexpectedly with status={status}"
-        assert os.WEXITSTATUS(status) == 0
+        t.switch()
+        assert t.state == _tealet.STATE_EXIT
 
 
 class TestRandom1:

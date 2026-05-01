@@ -13,15 +13,29 @@
 #include "pytealet.h"
 #include "tealet.h"
 
+#if defined(PY312P)
+#include "internal/pycore_frame.h"
+
+typedef struct PyTealetFrameInfoEntry {
+    _PyInterpreterFrame **location;
+    _PyInterpreterFrame *old_value;
+} PyTealetFrameInfoEntry;
+
+#ifndef PYTEALET_FRAMEINFO_FIXED_ITEMS
+#define PYTEALET_FRAMEINFO_FIXED_ITEMS 2
+#endif
+#endif
+
 typedef struct PyTealetFrameInfo {
 #if !defined(PY_HAS_TSTATE_FRAME)
     /* Snapshot of the dormant frame object for tealet.frame queries. */
     PyFrameObject *frame;
 #if defined(PY312P)
-    /* Internal rewrite storage owned by frame_info.c implementation. */
-    void *items;
+    /* Rewrites use a small inline buffer first, then heap storage on overflow. */
+    PyTealetFrameInfoEntry *items;
     Py_ssize_t size;
     Py_ssize_t capacity;
+    PyTealetFrameInfoEntry fixed_items[PYTEALET_FRAMEINFO_FIXED_ITEMS];
 #endif
 #else
     /* C89 does not allow empty structs; keep a single placeholder byte. */

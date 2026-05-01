@@ -8,24 +8,15 @@
 
 #include "frame_info.h"
 
-#include <stdlib.h>
-
-#if defined(PY312P)
-#include "internal/pycore_frame.h"
-
-typedef struct PyTealetFrameInfoEntry {
-    _PyInterpreterFrame **location;
-    _PyInterpreterFrame *old_value;
-} PyTealetFrameInfoEntry;
-#endif
+#include <string.h>
 
 void PyTealetFrameInfo_Init(PyTealetFrameInfo *info) {
 #if !defined(PY_HAS_TSTATE_FRAME)
     info->frame = NULL;
 #if defined(PY312P)
-    info->items = NULL;
+    info->items = info->fixed_items;
     info->size = 0;
-    info->capacity = 0;
+    info->capacity = PYTEALET_FRAMEINFO_FIXED_ITEMS;
 #endif
 #else
     info->unused = 0;
@@ -34,10 +25,8 @@ void PyTealetFrameInfo_Init(PyTealetFrameInfo *info) {
 
 void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
 #if defined(PY312P)
-    free(info->items);
-    info->items = NULL;
-    info->size = 0;
-    info->capacity = 0;
+    if (info->items != info->fixed_items)
+        PyMem_Free(info->items);
 #else
     (void)info;
 #endif
@@ -46,15 +35,30 @@ void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
 #if defined(PY312P)
 static void PyTealetFrameInfo_ClearRewrites(PyTealetFrameInfo *info) { info->size = 0; }
 
+/* Rewrite-buffer strategy:
+ * 1) Start with the inline fixed buffer (info->fixed_items).
+ * 2) On overflow, move to heap storage and copy existing entries.
+ * 3) Once on heap, grow exponentially with PyMem_Realloc.
+ * This keeps the common small case allocation-free while preserving amortized
+ * linear behavior for larger chains.
+ */
 static int PyTealetFrameInfo_RecordRewrite(PyTealetFrameInfo *info, _PyInterpreterFrame **location) {
     PyTealetFrameInfoEntry *entry;
-    PyTealetFrameInfoEntry *items;
     Py_ssize_t next_capacity;
-    void *new_items;
+    PyTealetFrameInfoEntry *new_items;
 
     if (info->size == info->capacity) {
-        next_capacity = info->capacity ? info->capacity * 2 : 8;
-        new_items = realloc(info->items, (size_t)next_capacity * sizeof(PyTealetFrameInfoEntry));
+        next_capacity = info->capacity ? info->capacity * 2 : PYTEALET_FRAMEINFO_FIXED_ITEMS;
+        if (next_capacity <= info->capacity)
+            next_capacity = info->capacity + 1;
+        if (info->items == info->fixed_items) {
+            new_items = (PyTealetFrameInfoEntry *)PyMem_Malloc((size_t)next_capacity * sizeof(PyTealetFrameInfoEntry));
+            if (new_items && info->size > 0)
+                memcpy(new_items, info->items, (size_t)info->size * sizeof(PyTealetFrameInfoEntry));
+        } else {
+            new_items = (PyTealetFrameInfoEntry *)PyMem_Realloc(info->items,
+                                                                (size_t)next_capacity * sizeof(PyTealetFrameInfoEntry));
+        }
         if (!new_items) {
             PyErr_NoMemory();
             return -1;
@@ -63,8 +67,7 @@ static int PyTealetFrameInfo_RecordRewrite(PyTealetFrameInfo *info, _PyInterpret
         info->capacity = next_capacity;
     }
 
-    items = (PyTealetFrameInfoEntry *)info->items;
-    entry = &items[info->size++];
+    entry = &info->items[info->size++];
     entry->location = location;
     entry->old_value = *location;
     return 0;
@@ -72,9 +75,8 @@ static int PyTealetFrameInfo_RecordRewrite(PyTealetFrameInfo *info, _PyInterpret
 
 /* 3.12+: expose original links by restoring rewritten frame pointers */
 static void PyTealetFrameInfo_ExposeFrames(PyTealetFrameInfo *info) {
-    PyTealetFrameInfoEntry *items = (PyTealetFrameInfoEntry *)info->items;
     while (info->size > 0) {
-        PyTealetFrameInfoEntry *entry = &items[--info->size];
+        PyTealetFrameInfoEntry *entry = &info->items[--info->size];
         *entry->location = entry->old_value;
     }
 }
