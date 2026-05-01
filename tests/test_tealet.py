@@ -279,6 +279,7 @@ class TestSwitch:
 
 class TestFrameIntrospection:
     def test_dormant_frame_is_none_when_introspection_disabled(self):
+        has_pending_frame_introspection = sys.version_info >= (3, 11)
         compiled = bool(getattr(_tealet, "PYTEALET_WITH_PENDING_FRAME_INTROSPECTION", 1))
         original_enabled = _tealet.frame_introspection()
 
@@ -295,11 +296,12 @@ class TestFrameIntrospection:
             t = _tealet.tealet()
             assert t.run(suspend, None) == "paused"
 
-            if compiled:
+            if compiled and has_pending_frame_introspection:
                 assert t.frame is not None
                 assert _tealet.frame_introspection(False) is False
 
-            assert t.frame is None
+            if has_pending_frame_introspection:
+                assert t.frame is None
             t.switch()
             assert t.state == _tealet.STATE_EXIT
         finally:
