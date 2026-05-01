@@ -7,6 +7,7 @@
  */
 
 #include "frame_info.h"
+#include "pytealet.h"
 
 #include <string.h>
 

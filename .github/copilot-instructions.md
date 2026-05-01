@@ -20,7 +20,11 @@ pytealet/
 │   │   ├── greenlet.py      # Greenlet-compatible interface
 │   │   └── tealet.py        # Tealet-specific wrapper
 │   └── _tealet/             # C extension module
-│       ├── pytealet.c       # Main C extension (modernized for Python 3.10+)
+│       ├── pytealet.c       # Core runtime logic for tealet objects
+│       ├── pytealet_module.c # CPython module lifecycle hooks
+│       ├── pytealet_common.h # Shared compile-time feature/version macros
+│       ├── pytealet.h       # Shared internal API declarations
+│       ├── pytealet_module.h # Module-state struct layout
 │       ├── libtealet/       # Pre-built libtealet v0.3.2
 │       │   ├── lib/         # Platform-specific pre-built libraries
 │       │   ├── tealet/      # libtealet headers
@@ -273,7 +277,7 @@ When contributing:
 
 ## Next Steps / Current Priorities
 
-1. **Python 3 Compatibility**: Update `_tealet.c` for Python 3.10+ C API
+1. **Python 3 Compatibility**: Continue cross-version hardening in `pytealet.c` / `tstate_state.c` / `frame_info.c`
 2. **Build Verification**: Get extension building on Linux, macOS, Windows
 3. **Test Suite**: Ensure tests pass with modernized code
 4. **Documentation**: Add Python API docs based on greenlet compatibility

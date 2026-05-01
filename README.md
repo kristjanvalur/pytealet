@@ -22,7 +22,11 @@ pytealet/
 │   │   ├── greenlet.py
 │   │   └── tealet.py
 │   └── _tealet/             # C extension module
-│       ├── _tealet.c        # Main extension code
+│       ├── pytealet.c       # Core runtime for tealet objects
+│       ├── pytealet_module.c # CPython module lifecycle
+│       ├── pytealet_common.h # Shared compile-time feature/version macros
+│       ├── pytealet.h       # Shared internal API declarations
+│       ├── pytealet_module.h # Module-state layout shared by C files
 │       └── libtealet/       # libtealet v0.3.2 from GitHub
 ├── tests/
 │   ├── test_tealet.py
@@ -62,7 +66,7 @@ The C extension (`_tealet`) links against pre-built libtealet libraries. It depe
 - C compiler (gcc, clang, or MSVC)
 - Make (for ABI detection)
 
-**Current Status:** The build infrastructure is complete, but `_tealet.c` requires Python 3 compatibility updates.
+**Current Status:** The build infrastructure and Python 3 modernization are in place; active work is focused on runtime stability and stress-test robustness.
 
 ## Contributing
 

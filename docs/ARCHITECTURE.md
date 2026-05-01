@@ -6,7 +6,17 @@
 
 ## Overview
 
-The pytealet.c code is a Python C extension that wraps libtealet to provide stack-slicing coroutines to Python. This document describes the design, architecture, and intended operation of the system.
+The `_tealet` extension is a Python C extension that wraps libtealet to provide stack-slicing coroutines to Python. Its implementation is split across several C files and shared headers. This document describes the design, architecture, and intended operation of the system.
+
+### Current C Source Layout
+
+- `src/_tealet/pytealet.c`: Core runtime logic for tealet objects (run/switch paths and active runtime helpers)
+- `src/_tealet/pytealet_module.c`: CPython module lifecycle (module functions and init/exec/traverse/clear/free)
+- `src/_tealet/tstate_state.c`: Save/restore helpers for `PyThreadState` fields across switches
+- `src/_tealet/frame_info.c`: Dormant-frame capture and 3.12+ rewrite/restore support
+- `src/_tealet/pytealet_common.h`: Shared compile-time version/feature macros and compatibility typedefs
+- `src/_tealet/pytealet.h`: Shared internal API declarations exported between extension translation units
+- `src/_tealet/pytealet_module.h`: Per-module state layout shared by module/runtime sources
 
 ---
 
@@ -83,6 +93,11 @@ Current state of the tealet:
 tealet.frame -> frame | None
 ```
 The current Python frame for this tealet, or None if not active.
+
+For suspended tealets, frame exposure is best-effort and version-dependent:
+- Python 3.10 uses saved `PyThreadState` frame references.
+- Python 3.11+ captures frame information via the dedicated frame-info path.
+- Python 3.12+ may temporarily rewrite frame links to hide unsafe internal frames while a dormant tealet is being introspected.
 
 ```python
 tealet.thread_id -> int
@@ -182,7 +197,7 @@ The Python object persists even after the C-level tealet is deleted, allowing sa
 
 ### Dustbin Pattern
 
-**Location:** Lines 193-211
+**Location:** `src/_tealet/pytealet.c` (runtime helpers used by run/switch and tealet exit)
 
 **Purpose:** Defer Python object cleanup until after context switches.
 
@@ -193,46 +208,57 @@ When switching contexts, we can't safely decref Python objects:
 - **After switch:** Old stack is gone, can't safely run cleanup code
 
 **The Solution:**
-Store objects to be decref'd in the main tealet's `main_data` structure (the "dustbin"), then safely decref them after the context switch completes and the new stack is established.
+Store objects to be decref'd in the main tealet's per-thread dustbin list, then safely decref them after the context switch completes and the new stack is established.
 
 ```c
-static void dustbin_fill(tealet_t *tealet, PyObject *a, PyObject *b, PyObject *c)
-{
-    main_data *mdata = (main_data*)*tealet_main_userpointer(tealet);
-    assert(!mdata->dustbin[0]);  // Detects double-fill bugs
-    assert(!mdata->dustbin[1]);
-    assert(!mdata->dustbin[2]);
-    mdata->dustbin[0] = a;
-    mdata->dustbin[1] = b;
-    mdata->dustbin[2] = c;
+void PyTealet_dustbin_push(tealet_t *tealet, PyObject *obj) {
+    PyTealetMainData *mdata;
+    if (!obj)
+        return;
+    if (!tealet) {
+        Py_DECREF(obj);
+        return;
+    }
+    mdata = (PyTealetMainData *)*tealet_main_userpointer(tealet);
+    if (!mdata || !mdata->dustbin) {
+        Py_DECREF(obj);
+        return;
+    }
+    if (PyList_Append(mdata->dustbin, obj) < 0) {
+        PyErr_WriteUnraisable(Py_None);
+        PyErr_Clear();
+    }
+    Py_DECREF(obj);
 }
 
-static void dustbin_empty(tealet_t *tealet)
-{
-    main_data *mdata = (main_data*)*tealet_main_userpointer(tealet);
-    Py_XDECREF(mdata->dustbin[0]);
-    Py_XDECREF(mdata->dustbin[1]);
-    Py_XDECREF(mdata->dustbin[2]);
-    mdata->dustbin[0] = mdata->dustbin[1] = mdata->dustbin[2] = NULL;
+static void dustbin_clear(tealet_t *tealet) {
+    PyTealetMainData *mdata = (PyTealetMainData *)*tealet_main_userpointer(tealet);
+    Py_ssize_t n = PyList_GET_SIZE(mdata->dustbin);
+    if (n == 0)
+        return;
+    if (PyList_SetSlice(mdata->dustbin, 0, n, NULL) < 0) {
+        PyErr_WriteUnraisable(Py_None);
+        PyErr_Clear();
+    }
 }
 ```
 
 **Usage Pattern:**
-1. Before context switch: Fill dustbin with objects to cleanup
+1. Before/around context switch: Push objects into dustbin as ownership is transferred
 2. Perform context switch
-3. After switch completes: Empty dustbin to decref objects
+3. After switch completes: Clear dustbin list to decref queued objects
 
 **Design Trade-offs:**
 - ✅ Solves the problem correctly
-- ✅ Assertions detect misuse
-- ⚠️ Limited to 3 objects (sufficient for current usage)
+- ✅ Handles variable number of deferred decrefs
+- ✅ Handles error paths with write-unraisable fallback
 - ✅ Used consistently in `pytealet_run()` and `pytealet_switch()`
 
 ---
 
 ### Reference Counting Strategy
 
-**Location:** `pytealet_main()` lines 555-557
+**Location:** `pytealet_main()` in `src/_tealet/pytealet.c`
 
 **Design Pattern:**
 
@@ -281,7 +307,7 @@ This shows deep understanding of the coroutine problem domain.
 
 ### Storage Architecture
 
-**Location:** `GetMain()` lines 632-672
+**Location:** `GetMain()` in `src/_tealet/pytealet.c`
 
 The design uses two separate storage mechanisms:
 
@@ -303,7 +329,8 @@ typedef struct tealet_extra {
 ```c
 typedef struct main_data {
     long tid;               // OS thread ID
-    PyObject *dustbin[3];   // Deferred cleanup
+    PyTealetNewArg new_arg; // Staging area for tealet entry handoff
+    PyObject *dustbin;      // Deferred cleanup list
 } main_data;
 ```
 
@@ -393,59 +420,99 @@ Can only switch to RUN.
 
 ### Save/Restore Pattern
 
-**Location:** Lines 137-184
+**Location:** `src/_tealet/tstate_state.c` and `src/_tealet/tstate_state.h`
 
 **What's Saved Across Context Switches:**
-- `frame` - Current Python stack frame
-- `recursion_depth` - Python recursion counter
-- `curexc_type/value/traceback` - Current exception (Python 3.7+)
+- Frame pointers / frame references (version-dependent)
+- Recursion counters (version-dependent fields)
+- Current exception and error-stack state
+- Context vars and selected cframe/datastack fields where applicable
 
 **Design:**
 ```c
-save_tstate(current, tstate);
+PyTealetTstate_Save(&current->tstate, tstate);
 // ... do tealet operation ...
-restore_tstate(current, tstate);
+PyTealetTstate_Restore(&current->tstate, tstate);
 ```
 
 **Key Details:**
-- Uses correct Python 3.7+ fields (`curexc_*` not `exc_*`)
-- Clears old state to prevent contamination
-- Assertions verify invariants
-- Frame is a weak reference (not refcounted)
+- Uses Python-version-gated field handling in one place (`tstate_state.c`)
+- Keeps save/restore logic centralized to reduce cross-version drift
+- Separates pure state capture from deferred decref/drop behavior
+
+### Dormant Frame Query and Chain Isolation
+
+**Locations:**
+- `src/_tealet/frame_info.c` and `src/_tealet/frame_info.h`
+- `src/_tealet/pytealet.c` (`pytealet_get_frame()` and tealet entry setup in `pytealet_main()`)
+
+#### Why this exists
+
+When a tealet is suspended, its execution stack may be stored in heap-backed slices and parts of the interpreter frame chain may be incomplete or C-stack-owned. If we expose frame links naively, Python's frame machinery can attempt to traverse or materialize frames that are not safe to walk in that state.
+
+The architecture therefore separates:
+- Frame capture for dormant introspection
+- Runtime thread-state save/restore for switching
+- Temporary frame-link sanitization for safe traversal in newer Python versions
+
+#### Dormant frame capture model
+
+On non-`PY_HAS_TSTATE_FRAME` builds, the frame-info path captures the currently visible frame with `PyEval_GetFrame()` and stores a strong reference in `PyTealetFrameInfo`.
+
+On release, links are restored first, then the stored frame reference is dropped (or deferred via dustbin when appropriate).
+
+#### Python 3.12+ frame-chain rewiring
+
+For 3.12+, frame traversal safety requires additional filtering:
+- The chain is scanned through `_PyInterpreterFrame->previous`.
+- Incomplete frames (`_PyFrame_IsIncomplete`) are skipped.
+- Frames owned by the C stack (`FRAME_OWNED_BY_CSTACK`) are skipped.
+- Link rewrites are recorded as reversible edits (`location`, `old_value`).
+
+This produces a temporary "safe" chain for introspection. Rewrites are always unwound in reverse order before releasing frame info.
+
+If rewrite recording fails (for example, OOM), the implementation restores already-edited links and degrades to best-effort behavior rather than leaving a partially rewritten chain.
+
+#### Tealet entry isolation (prevent walking outside function-rooted tealets)
+
+At tealet entry, runtime setup intentionally detaches frame-walking roots from the parent context:
+- On 3.11+, it installs a fresh top cframe view and clears `current_frame` plus datastack links.
+- On 3.10, it clears `tstate->frame` (`Py_CLEAR(tstate->frame)`) before entering tealet code.
+
+Rationale: frame walking from a function-rooted tealet must not "escape" into the caller's external stack chain. Entering with a clean top-of-chain boundary keeps introspection local to the tealet lineage and avoids cross-stack leakage.
 
 ---
 
 ## Stub Mechanism
 
 ### Purpose:
-Create a template tealet that can be duplicated multiple times for reuse.
+Create a paused tealet template that can be duplicated and then run with a chosen function.
 
 ### Implementation:
 
 ```c
-static tealet_t *stub_main(tealet_t *current, void *arg)
-{
-    void *myarg = 0;
-    tealet_switch((tealet_t*)arg, &myarg);  // Switch back to caller
-    
-    // Now we're running for real (after duplication)
-    struct stub_arg sarg = *(struct stub_arg*)myarg;
-    tealet_free(sarg.current, myarg);
-    return (sarg.run)(sarg.current, sarg.runarg);
+/* libtealet (tealet_extras.c) */
+tealet_t *tealet_stub_new(tealet_t *t, void *stack_far) {
+    return tealet_create(t, _tealet_stub_main, stack_far);
 }
 ```
 
+The pytealet wrapper uses this API directly:
+- `pytealet_stub()` calls `tealet_stub_new(main->tealet, stack_far)` and marks the wrapper as `STATE_STUB`.
+- `pytealet_run()` uses `tealet_stub_run(target->tealet, pytealet_main, &switch_arg)` when the target is a stub.
+- Duplicating a stub wrapper (`_tealet.tealet(existing_stub)`) duplicates native state with `tealet_duplicate()` and duplicates saved thread state.
+
 ### Flow:
-1. `stub_new()` creates a tealet with `stub_main` as run function
-2. Immediately switches back to caller (creating a suspended tealet)
-3. Later, someone calls `stub_run()` which switches to the stub
-4. Stub receives arguments and calls the real run function
-5. Real function executes
+1. `tealet_stub_new()` creates a paused tealet using `tealet_create(..., _tealet_stub_main, ...)`.
+2. The stub can be duplicated (`tealet_duplicate`) before use.
+3. `tealet_stub_run()` allocates a small `stub_arg`, stores `(current, run, runarg)`, and switches to the stub.
+4. `_tealet_stub_main` receives `stub_arg`, frees it with tealet allocator, and tail-calls the requested run function.
+5. In pytealet, that run function is `pytealet_main`, which performs Python-level run/switch semantics.
 
 ### Benefits:
-- Efficient: Create expensive setup once, duplicate cheaply
-- Matches greenlet semantics
-- Clever use of stack duplication via `tealet_duplicate()`
+- Efficient paused-template creation with explicit run dispatch.
+- Supports duplicate-from-stub workflows naturally.
+- Keeps stub-specific trampoline logic in libtealet helper APIs.
 
 ### Memory Management:
 ```c
@@ -455,6 +522,7 @@ Uses tealet's allocator for cross-context data, freed after use:
 ```c
 tealet_free(sarg.current, myarg);
 ```
+If switching fails, `tealet_stub_run()` frees the allocation on the failure path as well.
 
 ---
 

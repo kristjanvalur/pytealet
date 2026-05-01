@@ -27,7 +27,7 @@
 #include "Python.h"
 #include "frameobject.h"
 
-#include "pytealet.h"
+#include "pytealet_common.h"
 #include "tealet.h"
 
 typedef struct PyTealetTstate {

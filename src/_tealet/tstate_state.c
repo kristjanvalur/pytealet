@@ -10,6 +10,7 @@
  */
 
 #include "tstate_state.h"
+#include "pytealet.h"
 
 #include <assert.h>
 

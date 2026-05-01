@@ -1,4 +1,10 @@
 
+/* pytealet.c - core runtime logic for Python tealet objects.
+ *
+ * This file implements active tealet behavior: object methods, switch/run paths,
+ * runtime helpers, and thread-state integration used during context switches.
+ */
+
 #include "Python.h"
 #include "frameobject.h"
 #include "pythread.h"
@@ -11,40 +17,14 @@
 
 #include "frame_info.h"
 #include "pytealet.h"
+#include "pytealet_module.h"
 #include "tealet.h"
 #include "tealet_extras.h"
 #include "tstate_state.h"
 
 /* ===================================================================== */
-/* Compile-Time Version Feature Flags                                    */
-/* ===================================================================== */
-
-#define STATE_NEW 0
-#define STATE_STUB 1
-#define STATE_RUN 2
-#define STATE_EXIT 3
-
-#ifndef PYTEALET_DEFER_DELETE
-/* Keep the exited tealet in the pytealet structure for access to the tealet api. */
-#define PYTEALET_DEFER_DELETE 0
-#endif
-
-/* ===================================================================== */
 /* Core Types and Module State                                           */
 /* ===================================================================== */
-
-/* Forward declaration */
-typedef struct PyTealetObject PyTealetObject;
-static struct PyModuleDef _tealet_module;
-
-typedef struct PyTealetModuleState {
-    Py_tss_t tls_key;
-    PyTypeObject *tealet_type;
-    PyObject *tealet_error;
-    PyObject *invalid_error;
-    PyObject *state_error;
-    PyObject *defunct_error;
-} PyTealetModuleState;
 
 typedef struct PyTealetNewArg {
     PyTealetObject *dest;
@@ -106,8 +86,8 @@ struct PyTealetObject {
 
 /* helpers for getting main and current and checking relationship */
 static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls);
-static PyTealetObject *GetMain(PyTealetModuleState *mstate, int create);
-static PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *main, int create_main);
+PyTealetObject *GetMain(PyTealetModuleState *mstate, int create);
+PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *main, int create_main);
 static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *main);
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
@@ -636,8 +616,8 @@ static PyType_Slot pytealet_type_slots[] = {{Py_tp_dealloc, pytealet_dealloc},
 #pragma GCC diagnostic pop
 #endif
 
-static PyType_Spec pytealet_type_spec = {"_tealet.tealet", sizeof(PyTealetObject), 0,
-                                         Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE, pytealet_type_slots};
+PyType_Spec pytealet_type_spec = {"_tealet.tealet", sizeof(PyTealetObject), 0, Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+                                  pytealet_type_slots};
 
 /* ===================================================================== */
 /* Runtime Support (Allocator and Lineage)                               */
@@ -656,7 +636,7 @@ static void tealet_free_wrapper(void *ptr, void *context) {
 }
 
 /* return a borrowed reference to this thread's main tealet */
-static PyTealetObject *GetMain(PyTealetModuleState *mstate, int create) {
+PyTealetObject *GetMain(PyTealetModuleState *mstate, int create) {
     /* Get the thread's main tealet */
     PyTealetObject *t_main;
     if (!mstate)
@@ -740,7 +720,7 @@ static PyTealetObject *GetMain(PyTealetModuleState *mstate, int create) {
 }
 
 /* return a borrowed ref to this threads current tealet */
-static PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main) {
+PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main) {
     /* if we are being passed no tealet, or it is a new tealet,
      * we must get the current main from the thread-local storage */
     if (!pytealet || !pytealet->tealet)
@@ -907,166 +887,3 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     /* never reach here */
     return 0;
 }
-
-/* ===================================================================== */
-/* Module API and Lifecycle                                              */
-/* ===================================================================== */
-
-static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
-    }
-    /* get the current.  if there is no main tealet at this time, create it. */
-    return Py_XNewRef((PyObject *)GetCurrent(mstate, NULL, 1));
-}
-
-static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
-    }
-    /* create main if it doesn't already exist for this thread */
-    return Py_XNewRef((PyObject *)GetMain(mstate, 1));
-}
-
-static PyMethodDef module_methods[] = {
-    {"current", (PyCFunction)module_current, METH_NOARGS, ""},
-    {"main", (PyCFunction)module_main, METH_NOARGS, ""},
-    {NULL, NULL, 0, NULL} /* Sentinel */
-};
-
-static int pytealet_module_exec(PyObject *m) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(m);
-    PyTealetObject *main;
-    PyObject *type_obj;
-
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "failed to get _tealet module state");
-        return -1;
-    }
-
-    memset(&mstate->tls_key, 0, sizeof(mstate->tls_key));
-    mstate->tealet_type = NULL;
-    mstate->tealet_error = NULL;
-    mstate->invalid_error = NULL;
-    mstate->state_error = NULL;
-    mstate->defunct_error = NULL;
-
-    if (!PyThread_tss_is_created(&mstate->tls_key)) {
-        if (PyThread_tss_create(&mstate->tls_key) != 0) {
-            PyErr_SetString(PyExc_RuntimeError, "failed to create thread-local key");
-            return -1;
-        }
-    }
-
-    type_obj = PyType_FromModuleAndSpec(m, &pytealet_type_spec, NULL);
-    if (!type_obj)
-        return -1;
-    mstate->tealet_type = (PyTypeObject *)type_obj;
-    if (PyModule_AddObjectRef(m, "tealet", type_obj) < 0) {
-        Py_DECREF(type_obj);
-        return -1;
-    }
-    Py_DECREF(type_obj);
-
-    main = GetMain(mstate, 1);
-    if (!main)
-        return -1;
-
-    mstate->tealet_error = PyErr_NewException("_tealet.TealetError", NULL, NULL);
-    if (!mstate->tealet_error)
-        return -1;
-    Py_INCREF(mstate->tealet_error);
-    if (PyModule_AddObject(m, "TealetError", mstate->tealet_error) < 0)
-        return -1;
-
-    mstate->defunct_error = PyErr_NewException("_tealet.DefunctError", mstate->tealet_error, NULL);
-    if (!mstate->defunct_error)
-        return -1;
-    Py_INCREF(mstate->defunct_error);
-    if (PyModule_AddObject(m, "DefunctError", mstate->defunct_error) < 0)
-        return -1;
-
-    mstate->invalid_error = PyErr_NewException("_tealet.InvalidError", mstate->tealet_error, NULL);
-    if (!mstate->invalid_error)
-        return -1;
-    Py_INCREF(mstate->invalid_error);
-    if (PyModule_AddObject(m, "InvalidError", mstate->invalid_error) < 0)
-        return -1;
-
-    mstate->state_error = PyErr_NewException("_tealet.StateError", mstate->tealet_error, NULL);
-    if (!mstate->state_error)
-        return -1;
-    Py_INCREF(mstate->state_error);
-    if (PyModule_AddObject(m, "StateError", mstate->state_error) < 0)
-        return -1;
-
-    PyModule_AddIntMacro(m, STATE_NEW);
-    PyModule_AddIntMacro(m, STATE_STUB);
-    PyModule_AddIntMacro(m, STATE_RUN);
-    PyModule_AddIntMacro(m, STATE_EXIT);
-    if (PyModule_AddIntConstant(m, "PYTEALET_DEFER_DELETE", PYTEALET_DEFER_DELETE) < 0)
-        return -1;
-
-    return 0;
-}
-
-static int pytealet_module_traverse(PyObject *m, visitproc visit, void *arg) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(m);
-    if (!mstate)
-        return 0;
-    Py_VISIT(mstate->tealet_error);
-    Py_VISIT(mstate->invalid_error);
-    Py_VISIT(mstate->state_error);
-    Py_VISIT(mstate->defunct_error);
-    return 0;
-}
-
-static int pytealet_module_clear(PyObject *m) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(m);
-    if (!mstate)
-        return 0;
-    Py_CLEAR(mstate->tealet_error);
-    Py_CLEAR(mstate->invalid_error);
-    Py_CLEAR(mstate->state_error);
-    Py_CLEAR(mstate->defunct_error);
-    mstate->tealet_type = NULL;
-    return 0;
-}
-
-static void pytealet_module_free(void *m) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState((PyObject *)m);
-    if (!mstate)
-        return;
-    /* TODO: Per-thread teardown for mstate->tls_key is deferred.
-     * Deleting the TSS key does not decref thread-local PyObject* values.
-     * Implement per-mstate thread shutdown cleanup in a follow-up change.
-     */
-    if (PyThread_tss_is_created(&mstate->tls_key))
-        PyThread_tss_delete(&mstate->tls_key);
-}
-
-/* CPython API uses void* in module slots; this conversion is intentional. */
-#if defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-#endif
-static PyModuleDef_Slot _tealet_module_slots[] = {{Py_mod_exec, pytealet_module_exec}, {0, NULL}};
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
-
-static struct PyModuleDef _tealet_module = {PyModuleDef_HEAD_INIT,
-                                            "_tealet", /* name of module */
-                                            NULL,      /* module documentation, may be NULL */
-                                            sizeof(PyTealetModuleState),
-                                            module_methods,
-                                            _tealet_module_slots,
-                                            pytealet_module_traverse,
-                                            pytealet_module_clear,
-                                            pytealet_module_free};
-
-PyMODINIT_FUNC PyInit__tealet(void) { return PyModuleDef_Init(&_tealet_module); }
