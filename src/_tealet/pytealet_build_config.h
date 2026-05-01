@@ -17,8 +17,14 @@
  * syncing to the current libtealet baseline.
  *
  * Keep this header in place because setup.py force-includes it for both
- * libtealet and extension builds, but there are currently no active
- * pytealet-local compile-time switches defined here.
+ * libtealet and extension builds.
  */
+
+/* Disable dormant-tealet frame introspection/rewrite support.
+ *
+ * Default is enabled in pytealet_common.h; this local override forces behavior
+ * that matches the 3.10-style no-pending-frame-introspection path.
+ */
+#define PYTEALET_WITH_PENDING_FRAME_INTROSPECTION 0
 
 #endif /* PYTEALET_BUILD_CONFIG_H */
