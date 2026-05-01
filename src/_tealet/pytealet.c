@@ -365,6 +365,7 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     PyThreadState *tstate = PyThreadState_GET();
     PyObject *result;
     int created_from_new;
+    int frame_introspection_enabled;
     PyTealetMainData *mdata;
     PyTealetNewArg *ptarg;
     void *switch_arg;
@@ -442,7 +443,9 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     ptarg->func = func;
     ptarg->arg = farg;
 
-    PyTealetFrameInfo_Capture(&current->frame_info, 1);
+    frame_introspection_enabled = (mstate->frame_introspection_enabled != 0);
+    if (frame_introspection_enabled)
+        PyTealetFrameInfo_Capture(&current->frame_info, 1);
     if (!created_from_new) {
         PyTealetTstate_Save(&current->tstate, tstate);
         fail = tealet_stub_run(target->tealet, pytealet_main, &switch_arg);
@@ -458,7 +461,8 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
             PyTealetTstate_Restore(&current->tstate, tstate);
         }
     }
-    PyTealetFrameInfo_Release(&current->frame_info, NULL);
+    if (frame_introspection_enabled)
+        PyTealetFrameInfo_Release(&current->frame_info, NULL);
     if (fail) {
         PyErr_NoMemory();
         result = NULL;
@@ -480,6 +484,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     PyObject *pyarg = Py_None;
     void *switch_arg;
     PyObject *result;
+    int frame_introspection_enabled;
     if (!mstate)
         return NULL;
 
@@ -506,11 +511,14 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
 
     Py_INCREF(pyarg);
     switch_arg = (void *)pyarg;
-    PyTealetFrameInfo_Capture(&current->frame_info, 1);
+    frame_introspection_enabled = (mstate->frame_introspection_enabled != 0);
+    if (frame_introspection_enabled)
+        PyTealetFrameInfo_Capture(&current->frame_info, 1);
     PyTealetTstate_Save(&current->tstate, tstate);
     fail = tealet_switch(target->tealet, &switch_arg);
     PyTealetTstate_Restore(&current->tstate, tstate);
-    PyTealetFrameInfo_Release(&current->frame_info, NULL);
+    if (frame_introspection_enabled)
+        PyTealetFrameInfo_Release(&current->frame_info, NULL);
 
     dustbin_clear(current->tealet);
 
@@ -569,7 +577,10 @@ static PyObject *pytealet_get_frame(PyObject *_self, void *_closure) {
 #if defined(PY_HAS_TSTATE_FRAME)
     frame = self->tstate.has_state ? (PyObject *)self->tstate.frame : NULL;
 #else
-    frame = PyTealetFrameInfo_GetFrame(&self->frame_info);
+    if (mstate->frame_introspection_enabled)
+        frame = PyTealetFrameInfo_GetFrame(&self->frame_info);
+    else
+        frame = NULL;
 #endif
     if (!frame) {
         /* is it the current tealet of the current thread? */
@@ -877,9 +888,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
      * then drop saved refs immediately so frame locals (including 'current')
      * do not keep the Python tealet object alive until GC.
      */
-    PyTealetFrameInfo_Capture(&tealet->frame_info, 1);
     PyTealetTstate_Save(&tealet->tstate, tstate);
-    PyTealetFrameInfo_Release(&tealet->frame_info, t_return);
     PyTealetTstate_Drop(&tealet->tstate, t_return);
 
     if (tealet_exit(t_return, (void *)return_arg, exit_mode))

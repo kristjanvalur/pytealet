@@ -12,7 +12,7 @@
 #include <string.h>
 
 void PyTealetFrameInfo_Init(PyTealetFrameInfo *info) {
-#if !defined(PY_HAS_TSTATE_FRAME)
+#if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION)
     info->frame = NULL;
 #if defined(PY312P)
     info->items = info->fixed_items;
@@ -25,7 +25,7 @@ void PyTealetFrameInfo_Init(PyTealetFrameInfo *info) {
 }
 
 void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
-#if defined(PY312P)
+#if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
     if (info->items != info->fixed_items)
         PyMem_Free(info->items);
 #else
@@ -33,7 +33,7 @@ void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
 #endif
 }
 
-#if defined(PY312P)
+#if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
 static void PyTealetFrameInfo_ClearRewrites(PyTealetFrameInfo *info) { info->size = 0; }
 
 /* Rewrite-buffer strategy:
@@ -90,7 +90,7 @@ static void PyTealetFrameInfo_ExposeFrames(PyTealetFrameInfo *info) {
  * Rewrites are reversed on release.
  */
 static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
-#if defined(PY312P)
+#if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
     PyFrameObject *top_frame = info->frame;
     _PyInterpreterFrame **last_link;
     _PyInterpreterFrame *iframe;
@@ -133,7 +133,7 @@ static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
 }
 
 int PyTealetFrameInfo_Capture(PyTealetFrameInfo *info, int rewrite_chain) {
-#if defined(PY_HAS_TSTATE_FRAME)
+#if !defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION)
     (void)info;
     (void)rewrite_chain;
     return 0;
@@ -154,7 +154,7 @@ int PyTealetFrameInfo_Capture(PyTealetFrameInfo *info, int rewrite_chain) {
 }
 
 PyObject *PyTealetFrameInfo_GetFrame(const PyTealetFrameInfo *info) {
-#if defined(PY_HAS_TSTATE_FRAME)
+#if !defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION)
     (void)info;
     return NULL;
 #else
@@ -163,7 +163,7 @@ PyObject *PyTealetFrameInfo_GetFrame(const PyTealetFrameInfo *info) {
 }
 
 void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet) {
-#if defined(PY_HAS_TSTATE_FRAME)
+#if !defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION)
     (void)info;
     (void)dustbin_tealet;
 #else

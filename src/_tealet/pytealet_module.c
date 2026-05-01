@@ -28,9 +28,47 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return Py_XNewRef((PyObject *)GetMain(mstate, 1));
 }
 
+/* Get/set dormant tealet frame introspection at runtime.
+ * - frame_introspection() -> bool
+ * - frame_introspection(enabled) -> bool
+ */
+static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
+    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    Py_ssize_t nargs;
+    int enabled;
+
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+
+    nargs = args ? PyTuple_GET_SIZE(args) : 0;
+    if (nargs == 0)
+        return PyBool_FromLong(mstate->frame_introspection_enabled != 0);
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "frame_introspection() takes at most 1 argument");
+        return NULL;
+    }
+
+    enabled = PyObject_IsTrue(PyTuple_GET_ITEM(args, 0));
+    if (enabled < 0)
+        return NULL;
+
+#if !PYTEALET_WITH_PENDING_FRAME_INTROSPECTION
+    if (enabled) {
+        PyErr_SetString(PyExc_RuntimeError, "pending frame introspection is compile-time disabled in this build");
+        return NULL;
+    }
+#endif
+
+    mstate->frame_introspection_enabled = enabled;
+    return PyBool_FromLong(mstate->frame_introspection_enabled != 0);
+}
+
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
+    {"frame_introspection", (PyCFunction)module_frame_introspection, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
 
@@ -44,6 +82,7 @@ static int pytealet_module_exec(PyObject *m) {
     }
 
     memset(&mstate->tls_key, 0, sizeof(mstate->tls_key));
+    mstate->frame_introspection_enabled = PYTEALET_WITH_PENDING_FRAME_INTROSPECTION;
     mstate->tealet_type = NULL;
     mstate->tealet_error = NULL;
     mstate->invalid_error = NULL;
@@ -103,6 +142,9 @@ static int pytealet_module_exec(PyObject *m) {
     PyModule_AddIntMacro(m, STATE_RUN);
     PyModule_AddIntMacro(m, STATE_EXIT);
     if (PyModule_AddIntConstant(m, "PYTEALET_DEFER_DELETE", PYTEALET_DEFER_DELETE) < 0)
+        return -1;
+    if (PyModule_AddIntConstant(m, "PYTEALET_WITH_PENDING_FRAME_INTROSPECTION",
+                                PYTEALET_WITH_PENDING_FRAME_INTROSPECTION) < 0)
         return -1;
 
     return 0;

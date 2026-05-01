@@ -36,6 +36,14 @@ _tealet.main() -> tealet
 ```
 Returns the main tealet for this thread (the root of the tealet tree).
 
+```python
+_tealet.frame_introspection([enabled]) -> bool
+```
+Gets or sets dormant-tealet frame introspection at runtime.
+- With no argument, returns current setting.
+- With one argument, sets and returns the new setting.
+- Enabling can raise `RuntimeError` when compile-time support is disabled.
+
 **Module-Level Classes:**
 
 ```python
@@ -99,6 +107,10 @@ For suspended tealets, frame exposure is best-effort and version-dependent:
 - Python 3.11+ captures frame information via the dedicated frame-info path.
 - Python 3.12+ may temporarily rewrite frame links to hide unsafe internal frames while a dormant tealet is being introspected.
 
+Runtime policy can additionally disable dormant-frame exposure through
+`_tealet.frame_introspection(False)`. In that mode, suspended tealets report
+`None` for `.frame` while active/current-frame lookups still behave normally.
+
 ```python
 tealet.thread_id -> int
 ```
@@ -111,6 +123,7 @@ _tealet.STATE_NEW = 0
 _tealet.STATE_STUB = 1
 _tealet.STATE_RUN = 2
 _tealet.STATE_EXIT = 3
+_tealet.PYTEALET_WITH_PENDING_FRAME_INTROSPECTION = 0 | 1
 ```
 
 **Exception Classes:**

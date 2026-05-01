@@ -13,7 +13,11 @@
 #include "pytealet_common.h"
 #include "tealet.h"
 
-#if defined(PY312P)
+#if !defined(PY_HAS_TSTATE_FRAME) && PYTEALET_WITH_PENDING_FRAME_INTROSPECTION
+#define PYTEALET_HAS_PENDING_FRAME_INTROSPECTION 1
+#endif
+
+#if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
 #include "internal/pycore_frame.h"
 
 typedef struct PyTealetFrameInfoEntry {
@@ -27,7 +31,7 @@ typedef struct PyTealetFrameInfoEntry {
 #endif
 
 typedef struct PyTealetFrameInfo {
-#if !defined(PY_HAS_TSTATE_FRAME)
+#if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION)
     /* Snapshot of the dormant frame object for tealet.frame queries. */
     PyFrameObject *frame;
 #if defined(PY312P)

@@ -14,6 +14,14 @@
 #define STATE_RUN 2
 #define STATE_EXIT 3
 
+/* Controls dormant-tealet frame introspection for Python versions that do not
+ * expose tstate->frame directly. When set to 0, frame capture/rewriting is
+ * disabled and behavior matches the 3.10-style no-pending-frame path.
+ */
+#ifndef PYTEALET_WITH_PENDING_FRAME_INTROSPECTION
+#define PYTEALET_WITH_PENDING_FRAME_INTROSPECTION 1
+#endif
+
 #ifndef PYTEALET_DEFER_DELETE
 /* Keep the exited tealet in the pytealet structure for access to the tealet api. */
 #define PYTEALET_DEFER_DELETE 0

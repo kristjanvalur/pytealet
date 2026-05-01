@@ -55,6 +55,19 @@ uv pip install -e ".[dev]"
 pytest tests/
 ```
 
+### Runtime Frame Introspection Toggle
+
+The extension exposes a module-level runtime switch for dormant-tealet frame exposure:
+
+```python
+import _tealet
+
+enabled = _tealet.frame_introspection()      # get current setting
+_tealet.frame_introspection(False)           # disable dormant-frame capture
+```
+
+Compile-time capability is exposed as `_tealet.PYTEALET_WITH_PENDING_FRAME_INTROSPECTION`.
+
 ### Building the C Extension
 
 The C extension (`_tealet`) links against pre-built libtealet libraries. It depends on:
