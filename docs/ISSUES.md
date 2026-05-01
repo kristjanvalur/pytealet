@@ -221,6 +221,27 @@ PyThread_set_key_value(tls_key, ...);
 
 ---
 
+### 📝 TODO: Finalization-Aware Runtime Handling
+
+**Location:** `src/_tealet/` (module teardown, thread-state save/restore, deferred cleanup)
+
+**Problem:**
+The runtime currently has no explicit finalization guard strategy. During interpreter shutdown, operations that are usually safe can become unsafe or re-entrant, especially around deferred destruction and thread-state restoration paths.
+
+**Why This Matters (3.13+):**
+- Python 3.13 provides public `Py_IsFinalizing()`.
+- Greenlet-style compatibility paths use finalization-aware behavior to avoid unsafe cleanup work during shutdown.
+
+**TODO Scope:**
+- Add a clear shutdown policy for pytealet paths that perform deferred decref/cleanup.
+- Gate non-essential cleanup work when `Py_IsFinalizing()` is true.
+- Review module/thread teardown paths for assumptions that require a live interpreter.
+- Add tests that exercise teardown-sensitive paths where practical.
+
+**Priority:** P2 (stability hardening)
+
+---
+
 ## Testing Recommendations
 
 ### Critical Path Tests (Must Pass Before Release)

@@ -57,7 +57,12 @@ typedef struct PyTealetTstate {
     int c_recursion_remaining;
 #endif
 
+#if !defined(PY313P)
     int trash_delete_nesting; /* destructor nesting level, conserved. */
+#else
+    PyObject *delete_later; /* Python 3.13+: trash queue head on tstate */
+#endif
+
     PyObject *context;        /* Python 3.7+ contextvars */
 
 #if defined(PY_HAS_CFRAME)
@@ -71,7 +76,7 @@ typedef struct PyTealetTstate {
     int cframe_use_tracing; /* tracing flag from cframe */
 #endif
     /* new in 3.11, these four must be preserved together */
-    void *cframe_current_frame;
+    void *current_frame;         /* tstate->cstate->current_frame, or in 3.13plus, tstate->current_frame */
     _PyStackChunk *datastack_chunk;
     PyObject **datastack_top;
     PyObject **datastack_limit;

@@ -772,7 +772,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     tealet_t *t_return;
     int exit_mode = TEALET_EXIT_DELETE;
     PyThreadState *tstate = PyThreadState_GET();
-#if defined(Py311P)
+#if defined(Py311P) && defined(PY_HAS_CFRAME)
     PyTealetCFrame top_frame;
 #endif
 
@@ -790,7 +790,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     }
 
     /* The tealet now has its own private Thread state and we can modify safely. */
-#if defined(Py311P)
+#if defined(Py311P) && defined(PY_HAS_CFRAME)
     /* Entering tealet code must not inherit parent eval/datastack links from
      * another C stack.  We copy the cframe into a local variable and reset it so that
      * it has no parents.
@@ -806,6 +806,15 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 #if defined(PY_HAS_TSTATE_FRAME)
     /* 3.10: drop the current frame reference before entering tealet code. */
     Py_CLEAR(tstate->frame);
+#endif
+
+#if defined(PY312P)
+    /* During first entry, avoid rewriting beyond the entry frame boundary. */
+#if defined(PY_HAS_CFRAME)
+    PyTealetFrameInfo_SetStopFrame(&tealet->frame_info, tstate->cframe ? (void *)tstate->cframe->current_frame : NULL);
+#else
+    PyTealetFrameInfo_SetStopFrame(&tealet->frame_info, (void *)tstate->current_frame);
+#endif
 #endif
 
     /* We only have borrowed references from the calling tealet.
