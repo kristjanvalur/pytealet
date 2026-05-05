@@ -87,6 +87,11 @@ typedef struct PyTealetTstate {
     PyObject **datastack_top;
     PyObject **datastack_limit;
 #endif
+#if defined(PY314P)
+    /* CPython tier2/JIT active executor. Treat as frame-like state: moved
+     * with execution context and nulled for fresh branches. */
+    PyObject *current_executor;
+#endif
 } PyTealetTstate;
 
 void PyTealetTstate_Init(PyTealetTstate *saved);

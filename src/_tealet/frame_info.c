@@ -103,7 +103,11 @@ static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
     last_link = &top_frame->f_frame;
     iframe = top_frame->f_frame;
     while (iframe) {
+    #if defined(PY315P)
+        if (!_PyFrame_IsIncomplete(iframe)) {
+    #else
         if (!_PyFrame_IsIncomplete(iframe) && iframe->owner != FRAME_OWNED_BY_CSTACK) {
+    #endif
             /* a complete frame. if the last link didn't point to it, rewrite. */
             if (*last_link != iframe) {
                 if (PyTealetFrameInfo_RecordRewrite(info, last_link) < 0) {

@@ -270,6 +270,9 @@ static void PyTealetTstate_GetFrame(PyTealetTstate *dst, const PyThreadState *sr
 #if defined(PY_HAS_TSTATE_FRAME)
     dst->frame = src->frame;
 #endif
+#if defined(PY314P)
+    dst->current_executor = src->current_executor;
+#endif
 #if defined(PY_HAS_CFRAME)
     dst->cframe = src->cframe;
 #endif
@@ -292,6 +295,9 @@ static void PyTealetTstate_GetFrame(PyTealetTstate *dst, const PyThreadState *sr
 static void PyTealetTstate_PutFrame(const PyTealetTstate *src, PyThreadState *dst) {
 #if defined(PY_HAS_TSTATE_FRAME)
     dst->frame = src->frame;
+#endif
+#if defined(PY314P)
+    dst->current_executor = src->current_executor;
 #endif
 #if defined(PY_HAS_CFRAME)
     dst->cframe = src->cframe;
@@ -325,6 +331,9 @@ static void PyTealetTstate_ClearFrame(PyTealetTstate *ttstate, PyThreadState *ts
 #if defined(PY_HAS_TSTATE_FRAME)
         ttstate->frame = NULL;
 #endif
+    #if defined(PY314P)
+        ttstate->current_executor = NULL;
+    #endif
 #if defined(Py311P)
 #if defined(PY_HAS_CFRAME)
         ttstate->cframe = NULL;
@@ -340,6 +349,9 @@ static void PyTealetTstate_ClearFrame(PyTealetTstate *ttstate, PyThreadState *ts
 #if defined(PY_HAS_TSTATE_FRAME)
         tstate->frame = NULL;
 #endif
+    #if defined(PY314P)
+        tstate->current_executor = NULL;
+    #endif
 #if defined(Py311P)
 #if defined(PY_HAS_CFRAME)
         tstate->cframe = NULL;
@@ -357,6 +369,10 @@ static void PyTealetTstate_ClearFrame(PyTealetTstate *ttstate, PyThreadState *ts
 void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) {
 #if defined(PY_HAS_TSTATE_FRAME)
     assert(ttstate->frame == NULL);
+#endif
+#if defined(PY314P)
+    /* A fresh execution branch starts without an active tier2/JIT executor. */
+    tstate->current_executor = NULL;
 #endif
 #if defined(Py311P)
 #if defined(PY_HAS_CFRAME)
@@ -385,6 +401,11 @@ void PyTealetTstate_Frame_Cleanup(PyTealetTstate *ttstate, PyThreadState *tstate
 #if defined(PY_HAS_TSTATE_FRAME)
     PyTealet_dustbin_push(dustbin_tealet, (PyObject *)tstate->frame);
     tstate->frame = NULL;
+#endif
+#if defined(PY314P)
+    /* If a tealet exits while owning an active executor, release it. */
+    PyTealet_dustbin_push(dustbin_tealet, tstate->current_executor);
+    tstate->current_executor = NULL;
 #endif
 #if defined(Py311P)
     /* if we have a datastack chunk, we need to release the frames in it before we can drop the tstate. */
