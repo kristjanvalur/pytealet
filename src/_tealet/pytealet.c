@@ -786,18 +786,9 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         TEALET_SET_PYOBJECT(t_current, tealet);
     }
 
-#if defined(PY312P)
-    /* During first entry, avoid rewriting beyond the entry frame boundary. */
-#if defined(PY_HAS_CFRAME)
-    PyTealetFrameInfo_SetStopFrame(&tealet->frame_info, tstate->cframe ? (void *)tstate->cframe->current_frame : NULL);
-#else
-    PyTealetFrameInfo_SetStopFrame(&tealet->frame_info, (void *)tstate->current_frame);
-#endif
-#endif
-
     /* We only have borrowed references from the calling tealet.
      * the argument to the function will get their own reference, but
-     * anything we need after the function we keep oru own references
+     * anything we need after the function we keep our own references
      * for, because when the function returns, the calling tealet
      * may have exited and dropped the references we borrowed.
      */
