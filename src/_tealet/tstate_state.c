@@ -37,7 +37,9 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 #else /* 3.12+ */
     dst->py_recursion_remaining = src->py_recursion_remaining;
     dst->py_recursion_limit = src->py_recursion_limit;
+#if !defined(PY314P)
     dst->c_recursion_remaining = src->c_recursion_remaining;
+#endif
 #endif
 
 #if defined(PY310) || defined(PY311)
@@ -78,7 +80,9 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
 #else /* 3.12+ */
     dst->py_recursion_remaining = src->py_recursion_remaining;
     dst->py_recursion_limit = src->py_recursion_limit;
+#if !defined(PY314P)
     dst->c_recursion_remaining = src->c_recursion_remaining;
+#endif
 #endif
 
 #if defined(PY310) || defined(PY311)
@@ -165,7 +169,9 @@ static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
 #else /* 3.12+ */
     py_tstate->py_recursion_remaining = 0;
     py_tstate->py_recursion_limit = 0;
+#if !defined(PY314P)
     py_tstate->c_recursion_remaining = 0;
+#endif
 #endif
 #if defined(PY312)
     py_tstate->trash.delete_nesting = 0;

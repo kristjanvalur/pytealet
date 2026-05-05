@@ -53,12 +53,18 @@
 #endif
 #endif
 
-#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+#if PY_VERSION_HEX >= 0x030E0000
+#define PY314P 1
+#if PY_VERSION_HEX < 0x030F0000
 #define PY314 1
 #endif
+#endif
 
-#if PY_VERSION_HEX >= 0x030F0000 && PY_VERSION_HEX < 0x03100000
+#if PY_VERSION_HEX >= 0x030F0000
+#define PY315P 1
+#if PY_VERSION_HEX < 0x03100000
 #define PY315 1
+#endif
 #endif
 
 #if defined(PY310) || defined(PY311) || defined(PY312)

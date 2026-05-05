@@ -50,7 +50,9 @@ typedef struct PyTealetTstate {
 #else /* 3.12+ */
     int py_recursion_remaining;
     int py_recursion_limit;
+#if !defined(PY314P)
     int c_recursion_remaining;
+#endif
 #endif
 
 #if !defined(PY313P)

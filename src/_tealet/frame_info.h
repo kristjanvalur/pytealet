@@ -29,6 +29,17 @@
 #define Py_BUILD_CORE
 #endif
 #include "internal/pycore_frame.h"
+#if defined(PY314P)
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+#include "internal/pycore_interpframe_structs.h"
+#include "internal/pycore_interpframe.h"
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+#endif
 #if defined(PYTEALET_DEFINED_PY_BUILD_CORE)
 #undef Py_BUILD_CORE
 #undef PYTEALET_DEFINED_PY_BUILD_CORE
