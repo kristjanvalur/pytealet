@@ -190,7 +190,12 @@ static void pytealet_module_free(void *m) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #endif
-static PyModuleDef_Slot _tealet_module_slots[] = {{Py_mod_exec, pytealet_module_exec}, {0, NULL}};
+static PyModuleDef_Slot _tealet_module_slots[] = {
+    {Py_mod_exec, pytealet_module_exec},
+#if defined(Py_mod_gil)
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL}};
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
