@@ -277,7 +277,7 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
     tresult = tealet_stub_new(main->tealet, stack_far);
     if (!tresult)
         return PyErr_NoMemory();
-    PyTealetTstate_Copy(&pytealet->tstate, tstate);
+    PyTealetTstate_Copy(&pytealet->tstate, tstate, 1);  /* dst (new) belongs to the new tealet */
     pytealet->tealet = tresult;
     pytealet->state = STATE_STUB;
     TEALET_SET_PYOBJECT(tresult, pytealet);
@@ -452,11 +452,11 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
         PyTealetTstate_Restore(&current->tstate, tstate);
     } else {
         void *stack_limit = PyTealet_GetStackFar(tstate);
-        PyTealetTstate_Copy(&current->tstate, tstate);
+        PyTealetTstate_Copy(&current->tstate, tstate, 0); /* src (current) belongs to new tealet */
         tealet = tealet_new(current->tealet, pytealet_main, &switch_arg, stack_limit);
         fail = (tealet == NULL);
         if (fail) {
-            PyTealetTstate_Drop(&current->tstate, NULL);
+            PyTealetTstate_UndoCopy(&current->tstate, tstate, 0);
         } else {
             PyTealetTstate_Restore(&current->tstate, tstate);
         }
@@ -772,10 +772,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     tealet_t *t_return;
     int exit_mode = TEALET_EXIT_DELETE;
     PyThreadState *tstate = PyThreadState_GET();
-#if defined(Py311P)
-    PyTealetCFrame top_frame;
-#endif
-
+    
     if (tealet->state == STATE_STUB) {
         assert(t_current == tealet->tealet);
         assert(TEALET_PYOBJECT(t_current) == tealet);
@@ -789,25 +786,6 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         TEALET_SET_PYOBJECT(t_current, tealet);
     }
 
-    /* The tealet now has its own private Thread state and we can modify safely. */
-#if defined(Py311P)
-    /* Entering tealet code must not inherit parent eval/datastack links from
-     * another C stack.  We copy the cframe into a local variable and reset it so that
-     * it has no parents.
-     */
-    top_frame = tstate->root_cframe;
-    tstate->cframe = &top_frame;
-    tstate->cframe->previous = &tstate->root_cframe;
-    tstate->cframe->current_frame = NULL;
-    tstate->datastack_chunk = NULL;
-    tstate->datastack_top = NULL;
-    tstate->datastack_limit = NULL;
-#endif
-#if defined(PY_HAS_TSTATE_FRAME)
-    /* 3.10: drop the current frame reference before entering tealet code. */
-    Py_CLEAR(tstate->frame);
-#endif
-
     /* We only have borrowed references from the calling tealet.
      * the argument to the function will get their own reference, but
      * anything we need after the function we keep oru own references
@@ -817,10 +795,15 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     Py_INCREF(func);
     Py_INCREF(tealet);
 
-    /* clear frame and run the tealet function */
+    /* The tealet now has its own private Thread state and we can modify safely.
+     * initialize local python frame bookkeeping and memory arena
+     */
+    PyTealetTstate_Frame_Setup(&tealet->tstate, tstate);
+
+    /* run the tealet function */
     tealet->state = STATE_RUN;
     result = PyObject_CallFunctionObjArgs(func, tealet, farg, NULL);
-
+    
     /* return_to can be a tuple of tealet, arg */
     return_to = NULL;
     return_arg = NULL;
@@ -888,6 +871,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
      * then drop saved refs immediately so frame locals (including 'current')
      * do not keep the Python tealet object alive until GC.
      */
+    PyTealetTstate_Frame_Cleanup(&tealet->tstate, tstate, t_return);
     PyTealetTstate_Save(&tealet->tstate, tstate);
     PyTealetTstate_Drop(&tealet->tstate, t_return);
 

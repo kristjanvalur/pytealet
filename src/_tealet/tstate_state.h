@@ -34,10 +34,6 @@ typedef struct PyTealetTstate {
     int has_state; /* Debug helper: 1 when this struct currently stores a saved
                       tstate */
 
-#if defined(PY_HAS_TSTATE_FRAME)
-    PyFrameObject *frame;
-#endif
-
     /* current exception state */
     PyObject *exc_type;
     PyObject *exc_val;
@@ -60,6 +56,11 @@ typedef struct PyTealetTstate {
     int trash_delete_nesting; /* destructor nesting level, conserved. */
     PyObject *context;        /* Python 3.7+ contextvars */
 
+    /* python frame related variables */
+
+#if defined(PY_HAS_TSTATE_FRAME)
+    PyFrameObject *frame;
+#endif
 #if defined(PY_HAS_CFRAME)
     /* Python 3.10-3.12: cframe tracks C-level call frames (removed in 3.13)
      * Stack-slicing preserves the CFrame struct itself; we just save the
@@ -67,11 +68,14 @@ typedef struct PyTealetTstate {
     PyTealetCFrame *cframe;
 #endif
 #if defined(Py311P)
+#if defined(PY_HAS_CFRAME)
+    PyTealetCFrame top_cframe;
+#endif
 #if defined(PY311)
     int cframe_use_tracing; /* tracing flag from cframe */
 #endif
     /* new in 3.11, these four must be preserved together */
-    void *cframe_current_frame;
+    void *current_frame;
     _PyStackChunk *datastack_chunk;
     PyObject **datastack_top;
     PyObject **datastack_limit;
@@ -80,18 +84,32 @@ typedef struct PyTealetTstate {
 
 void PyTealetTstate_Init(PyTealetTstate *saved);
 
-/* copy the python threadstate, leaving it unchanged */
-void PyTealetTstate_Copy(PyTealetTstate *dst, const PyThreadState *src);
+/* copy the Python thread state.
+ * Frame-related state is isolated for new tealet creation:
+ * - dst_is_new=1 clears frame fields in dst
+ * - dst_is_new=0 clears frame fields in src
+ */
+void PyTealetTstate_Copy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new);
+/* undo the copy operation in case of error */
+void PyTealetTstate_UndoCopy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new);
 
 /* duplicate a saved threadstate, e.g. when duplicating a tealet */
 void PyTealetTstate_Duplicate(PyTealetTstate *dst, const PyTealetTstate *src);
 
-/* drop the threadstate, e.g. on error or when cleaning up*/
+/* drop the thread state, e.g. on error or when cleaning up */
 void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet);
 
-/* save the current threadstate into the tealet state */
+/* save the current thread state into the tealet state */
 void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src);
 
 void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst);
+
+/* python frame state initialization and cleanup*/
+
+/* Set up the frame state object when a tealet starts running */
+void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate);
+
+/* clean up the frame state, including releasing the local frame stack */
+void PyTealetTstate_Frame_Cleanup(PyTealetTstate *ttstate, PyThreadState *tstate, tealet_t *dustbin_tealet);
 
 #endif
