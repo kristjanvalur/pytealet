@@ -58,7 +58,6 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
         dst->exc_info = src->exc_info;
 
     dst->context = src->context;
-
     PyTealetTstate_GetFrame(dst, src);
 }
 
@@ -89,7 +88,6 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
 
     dst->context = src->context;
     dst->context_ver++; /* Invalidate contextvars cache */
-
     PyTealetTstate_PutFrame(src, dst);
 }
 
@@ -103,6 +101,9 @@ static void PyTealetTstate_IncRef(PyTealetTstate *saved) {
     Py_XINCREF(saved->exc_val);
     Py_XINCREF(saved->exc_tb);
     Py_XINCREF(saved->exc_state.exc_value);
+#if defined(PY313P)
+    Py_XINCREF(saved->delete_later);
+#endif
     /* exc_info is a pointer to exc_state or a stack item, so we don't own a
      * reference to it */
     Py_XINCREF(saved->context);
@@ -115,12 +116,18 @@ static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_teale
         PyTealet_dustbin_push(dustbin_tealet, saved->exc_val);
         PyTealet_dustbin_push(dustbin_tealet, saved->exc_tb);
         PyTealet_dustbin_push(dustbin_tealet, saved->exc_state.exc_value);
+    #if defined(PY313P)
+        PyTealet_dustbin_push(dustbin_tealet, saved->delete_later);
+    #endif
         PyTealet_dustbin_push(dustbin_tealet, saved->context);
     } else {
         Py_XDECREF(saved->exc_type);
         Py_XDECREF(saved->exc_val);
         Py_XDECREF(saved->exc_tb);
         Py_XDECREF(saved->exc_state.exc_value);
+    #if defined(PY313P)
+        Py_XDECREF(saved->delete_later);
+    #endif
         Py_XDECREF(saved->context);
     }
 }
@@ -146,10 +153,12 @@ static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
     py_tstate->py_recursion_limit = 0;
     py_tstate->c_recursion_remaining = 0;
 #endif
-#if !defined(PY312P)
-    py_tstate->trash_delete_nesting = 0;
-#else /* 3.12+ */
+#if defined(PY312)
     py_tstate->trash.delete_nesting = 0;
+#elif defined(PY313P)
+    py_tstate->delete_later = NULL;
+#else
+    py_tstate->trash_delete_nesting = 0;
 #endif
     py_tstate->context = NULL;
     PyTealetTstate_ClearFrame(NULL, py_tstate);
@@ -169,7 +178,12 @@ static void PyTealetTstate_AssertClearPy(PyThreadState *py_tstate) {
 #endif
 }
 
-void PyTealetTstate_Init(PyTealetTstate *saved) { saved->has_state = 0; }
+void PyTealetTstate_Init(PyTealetTstate *saved) {
+    saved->has_state = 0;
+#if defined(PY313P)
+    saved->delete_later = NULL;
+#endif
+}
 
 /* copy the thread state, e.g. when we create a stub, or when we save current and
  * continue in a new tealet */
@@ -245,7 +259,11 @@ static void PyTealetTstate_GetFrame(PyTealetTstate *dst, const PyThreadState *sr
     dst->cframe = src->cframe;
 #endif
 #if defined(Py311P)
+#if defined(PY_HAS_CFRAME)
     dst->current_frame = src->cframe ? (void *)src->cframe->current_frame : NULL;
+#else
+    dst->current_frame = (void *)src->current_frame;
+#endif
 #if defined(PY311)
     dst->cframe_use_tracing = src->cframe ? src->cframe->use_tracing : 0;
 #endif
@@ -253,10 +271,12 @@ static void PyTealetTstate_GetFrame(PyTealetTstate *dst, const PyThreadState *sr
     dst->datastack_top = src->datastack_top;
     dst->datastack_limit = src->datastack_limit;
 #endif
-#if !defined(PY312P)
-    dst->trash_delete_nesting = src->trash_delete_nesting;
-#else /* 3.12+ */
+#if defined(PY312)
     dst->trash_delete_nesting = src->trash.delete_nesting;
+#elif defined(PY313P)
+    dst->delete_later = src->delete_later;
+#else
+    dst->trash_delete_nesting = src->trash_delete_nesting;
 #endif
 }
 
@@ -269,20 +289,26 @@ static void PyTealetTstate_PutFrame(const PyTealetTstate *src, PyThreadState *ds
     dst->cframe = src->cframe;
 #endif
 #if defined(Py311P)
+#if defined(PY_HAS_CFRAME)
     if (dst->cframe) {
 #if defined(PY311)
         dst->cframe->use_tracing = src->cframe_use_tracing;
 #endif
         dst->cframe->current_frame = src->current_frame;
     }
+#else
+    dst->current_frame = src->current_frame;
+#endif
     dst->datastack_chunk = src->datastack_chunk;
     dst->datastack_top = src->datastack_top;
     dst->datastack_limit = src->datastack_limit;
 #endif
-#if !defined(PY312P)
-    dst->trash_delete_nesting = src->trash_delete_nesting;
-#else /* 3.12+ */
+#if defined(PY312)
     dst->trash.delete_nesting = src->trash_delete_nesting;
+#elif defined(PY313P)
+    dst->delete_later = src->delete_later;
+#else
+    dst->trash_delete_nesting = src->trash_delete_nesting;
 #endif
 }
 
@@ -332,6 +358,7 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
     assert(ttstate->frame == NULL);
 #endif
 #if defined(Py311P)
+#if defined(PY_HAS_CFRAME)
     /* Entering tealet code must not inherit parent eval/datastack links from
      * another C stack.  We copy the cframe into a local variable and reset it so that
      * it has no parents.
@@ -341,6 +368,9 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
     ttstate->top_cframe.previous = &tstate->root_cframe;
     ttstate->top_cframe.current_frame = NULL;
     tstate->cframe = &ttstate->top_cframe;
+#else
+    tstate->current_frame = NULL;
+#endif
 
     /* These should be NULL because we copied and then cleared frame state. */
     assert(tstate->datastack_chunk == NULL);

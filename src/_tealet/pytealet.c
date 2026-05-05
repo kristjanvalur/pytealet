@@ -772,7 +772,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     tealet_t *t_return;
     int exit_mode = TEALET_EXIT_DELETE;
     PyThreadState *tstate = PyThreadState_GET();
-    
+
     if (tealet->state == STATE_STUB) {
         assert(t_current == tealet->tealet);
         assert(TEALET_PYOBJECT(t_current) == tealet);
@@ -785,6 +785,15 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         tealet->tealet = t_current;
         TEALET_SET_PYOBJECT(t_current, tealet);
     }
+
+#if defined(PY312P)
+    /* During first entry, avoid rewriting beyond the entry frame boundary. */
+#if defined(PY_HAS_CFRAME)
+    PyTealetFrameInfo_SetStopFrame(&tealet->frame_info, tstate->cframe ? (void *)tstate->cframe->current_frame : NULL);
+#else
+    PyTealetFrameInfo_SetStopFrame(&tealet->frame_info, (void *)tstate->current_frame);
+#endif
+#endif
 
     /* We only have borrowed references from the calling tealet.
      * the argument to the function will get their own reference, but

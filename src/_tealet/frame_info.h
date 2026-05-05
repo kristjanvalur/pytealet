@@ -35,6 +35,8 @@ typedef struct PyTealetFrameInfo {
     /* Snapshot of the dormant frame object for tealet.frame queries. */
     PyFrameObject *frame;
 #if defined(PY312P)
+    /* Do not traverse/rewrite beyond this frame during chain hiding. */
+    void *stop_frame;
     /* Rewrites use a small inline buffer first, then heap storage on overflow. */
     PyTealetFrameInfoEntry *items;
     Py_ssize_t size;
@@ -48,6 +50,7 @@ typedef struct PyTealetFrameInfo {
 } PyTealetFrameInfo;
 
 void PyTealetFrameInfo_Init(PyTealetFrameInfo *info);
+void PyTealetFrameInfo_SetStopFrame(PyTealetFrameInfo *info, void *stop_frame);
 void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info);
 int PyTealetFrameInfo_Capture(PyTealetFrameInfo *info, int rewrite_chain);
 PyObject *PyTealetFrameInfo_GetFrame(const PyTealetFrameInfo *info);

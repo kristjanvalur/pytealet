@@ -15,12 +15,22 @@ void PyTealetFrameInfo_Init(PyTealetFrameInfo *info) {
 #if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION)
     info->frame = NULL;
 #if defined(PY312P)
+    info->stop_frame = NULL;
     info->items = info->fixed_items;
     info->size = 0;
     info->capacity = PYTEALET_FRAMEINFO_FIXED_ITEMS;
 #endif
 #else
     info->unused = 0;
+#endif
+}
+
+void PyTealetFrameInfo_SetStopFrame(PyTealetFrameInfo *info, void *stop_frame) {
+#if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
+    info->stop_frame = stop_frame;
+#else
+    (void)info;
+    (void)stop_frame;
 #endif
 }
 
@@ -92,6 +102,7 @@ static void PyTealetFrameInfo_ExposeFrames(PyTealetFrameInfo *info) {
 static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
 #if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
     PyFrameObject *top_frame = info->frame;
+    _PyInterpreterFrame *stop_frame = (_PyInterpreterFrame *)info->stop_frame;
     _PyInterpreterFrame **last_link;
     _PyInterpreterFrame *iframe;
 
@@ -102,7 +113,7 @@ static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
     PyTealetFrameInfo_ClearRewrites(info);
     last_link = &top_frame->f_frame;
     iframe = top_frame->f_frame;
-    while (iframe) {
+    while (iframe && iframe != stop_frame) {
         if (!_PyFrame_IsIncomplete(iframe) && iframe->owner != FRAME_OWNED_BY_CSTACK) {
             /* a complete frame. if the last link didn't point to it, rewrite. */
             if (*last_link != iframe) {
