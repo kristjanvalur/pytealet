@@ -277,7 +277,7 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
     tresult = tealet_stub_new(main->tealet, stack_far);
     if (!tresult)
         return PyErr_NoMemory();
-    PyTealetTstate_Copy(&pytealet->tstate, tstate, 1);  /* dst (new) belongs to the new tealet */
+    PyTealetTstate_Copy(&pytealet->tstate, tstate, 1); /* dst (new) belongs to the new tealet */
     pytealet->tealet = tresult;
     pytealet->state = STATE_STUB;
     TEALET_SET_PYOBJECT(tresult, pytealet);
@@ -812,7 +812,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     /* run the tealet function */
     tealet->state = STATE_RUN;
     result = PyObject_CallFunctionObjArgs(func, tealet, farg, NULL);
-    
+
     /* return_to can be a tuple of tealet, arg */
     return_to = NULL;
     return_arg = NULL;

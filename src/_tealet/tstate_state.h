@@ -59,7 +59,7 @@ typedef struct PyTealetTstate {
     PyObject *delete_later; /* Python 3.13+: trash queue head on tstate */
 #endif
 
-    PyObject *context;        /* Python 3.7+ contextvars */
+    PyObject *context; /* Python 3.7+ contextvars */
 
     /* python frame related variables */
 
@@ -80,7 +80,7 @@ typedef struct PyTealetTstate {
     int cframe_use_tracing; /* tracing flag from cframe */
 #endif
     /* new in 3.11, these four must be preserved together */
-    void *current_frame;         /* tstate->cstate->current_frame, or in 3.13plus, tstate->current_frame */
+    void *current_frame; /* tstate->cstate->current_frame, or in 3.13plus, tstate->current_frame */
     _PyStackChunk *datastack_chunk;
     PyObject **datastack_top;
     PyObject **datastack_limit;

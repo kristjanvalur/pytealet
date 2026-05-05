@@ -24,7 +24,7 @@
  *
  * Default is enabled in pytealet_common.h; this local override forces behavior
  * that matches the 3.10-style no-pending-frame-introspection path.
+ * #define PYTEALET_WITH_PENDING_FRAME_INTROSPECTION 0
  */
-#define PYTEALET_WITH_PENDING_FRAME_INTROSPECTION 0
 
 #endif /* PYTEALET_BUILD_CONFIG_H */

@@ -18,7 +18,21 @@
 #endif
 
 #if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
+/*
+ * Hack: CPython internal frame definitions are gated behind Py_BUILD_CORE,
+ * but pending frame introspection requires _PyInterpreterFrame details on
+ * 3.12+ (including 3.13). Define it only around this include to minimize
+ * namespace/policy bleed into the rest of the extension.
+ */
+#if !defined(Py_BUILD_CORE)
+#define PYTEALET_DEFINED_PY_BUILD_CORE 1
+#define Py_BUILD_CORE
+#endif
 #include "internal/pycore_frame.h"
+#if defined(PYTEALET_DEFINED_PY_BUILD_CORE)
+#undef Py_BUILD_CORE
+#undef PYTEALET_DEFINED_PY_BUILD_CORE
+#endif
 
 typedef struct PyTealetFrameInfoEntry {
     _PyInterpreterFrame **location;
