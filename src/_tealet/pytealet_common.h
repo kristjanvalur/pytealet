@@ -67,15 +67,60 @@
 #endif
 #endif
 
+/* PyThreadState capability macros for clearer compatibility guards. */
+
+#if defined(PY310) || defined(PY311)
+#define PY_HAS_TSTATE_CUREXC_FIELDS
+#endif
+
+#if defined(PY310)
+#define PY_HAS_TSTATE_RECURSION_DEPTH
+#endif
+
+#if defined(PY311)
+#define PY_HAS_TSTATE_RECURSION_REMAINING
+#endif
+
+#if defined(PY312P)
+#define PY_HAS_TSTATE_PY_RECURSION_REMAINING
+#endif
+
+#if defined(PY312) || defined(PY313)
+#define PY_HAS_TSTATE_C_RECURSION_REMAINING
+#endif
+
 #if defined(PY310) || defined(PY311) || defined(PY312)
-#define PY_HAS_CFRAME
+#define PY_HAS_TSTATE_TRASH_DELETE_NESTING
+#endif
+
+#if defined(PY313P)
+#define PY_HAS_TSTATE_DELETE_LATER
+#endif
+
+#define PY_HAS_TSTATE_CONTEXT
+
+#if defined(PY310) || defined(PY311) || defined(PY312)
+#define PY_HAS_TSTATE_CFRAME
 #endif
 
 #if defined(PY310)
 #define PY_HAS_TSTATE_FRAME
 #endif
 
-#if defined(PY_HAS_CFRAME)
+#if defined(Py311P)
+#define PY_HAS_TSTATE_CURRENT_FRAME
+#define PY_HAS_TSTATE_DATASTACK
+#endif
+
+#if defined(PY311)
+#define PY_HAS_TSTATE_CFRAME_USE_TRACING
+#endif
+
+#if defined(PY314P)
+#define PY_HAS_TSTATE_CURRENT_EXECUTOR
+#endif
+
+#if defined(PY_HAS_TSTATE_CFRAME)
 #if defined(PY310)
 typedef CFrame PyTealetCFrame;
 #else

@@ -171,7 +171,7 @@ static void dustbin_clear(tealet_t *tealet) {
  */
 
 static void *PyTealet_GetStackFar(const PyThreadState *py_tstate) {
-#if defined(PY_HAS_CFRAME) && !defined(Py311P)
+#if defined(PY_HAS_TSTATE_CFRAME) && !defined(Py311P)
     /* Python 3.10 keeps cframe on the stack; ensure saved stack range
      * includes that structure.
      */

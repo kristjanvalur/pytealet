@@ -42,23 +42,23 @@ typedef struct PyTealetTstate {
     _PyErr_StackItem exc_state;
 
     /* current recursion state */
-#if defined(PY310)
+#if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
     int recursion_depth;
-#elif defined(PY311)
+#elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
     int recursion_remaining;
     int recursion_limit;
 #else /* 3.12+ */
     int py_recursion_remaining;
     int py_recursion_limit;
-#if !defined(PY314P)
+#if defined(PY_HAS_TSTATE_C_RECURSION_REMAINING)
     int c_recursion_remaining;
 #endif
 #endif
 
-#if !defined(PY313P)
-    int trash_delete_nesting; /* destructor nesting level, conserved. */
-#else
+#if defined(PY_HAS_TSTATE_DELETE_LATER)
     PyObject *delete_later; /* Python 3.13+: trash queue head on tstate */
+#else
+    int trash_delete_nesting; /* destructor nesting level, conserved. */
 #endif
 
     PyObject *context; /* Python 3.7+ contextvars */
@@ -68,17 +68,17 @@ typedef struct PyTealetTstate {
 #if defined(PY_HAS_TSTATE_FRAME)
     PyFrameObject *frame;
 #endif
-#if defined(PY_HAS_CFRAME)
+#if defined(PY_HAS_TSTATE_CFRAME)
     /* Python 3.10-3.12: cframe tracks C-level call frames (removed in 3.13)
      * Stack-slicing preserves the CFrame struct itself; we just save the
      * pointer */
     PyTealetCFrame *cframe;
 #endif
-#if defined(Py311P)
-#if defined(PY_HAS_CFRAME)
+#if defined(PY_HAS_TSTATE_DATASTACK)
+#if defined(PY_HAS_TSTATE_CFRAME)
     PyTealetCFrame top_cframe;
 #endif
-#if defined(PY311)
+#if defined(PY_HAS_TSTATE_CFRAME_USE_TRACING)
     int cframe_use_tracing; /* tracing flag from cframe */
 #endif
     /* new in 3.11, these four must be preserved together */
@@ -87,7 +87,7 @@ typedef struct PyTealetTstate {
     PyObject **datastack_top;
     PyObject **datastack_limit;
 #endif
-#if defined(PY314P)
+#if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
     /* CPython tier2/JIT active executor. Treat as frame-like state: moved
      * with execution context and nulled for fresh branches. */
     PyObject *current_executor;
