@@ -13,14 +13,15 @@
 #include "pytealet.h"
 
 #include <assert.h>
+#include <string.h>
 
 /* we need to treat the "frame" part of the tstate specially, since we
  * can't share it among tealets.  We must be careful when we branch off
  * to a new tealet that we clear either the source or destination frame data */
-static void PyTealetTstate_GetFrame(PyTealetTstate *dst, const PyThreadState *src);
-static void PyTealetTstate_PutFrame(const PyTealetTstate *src, PyThreadState *dst);
+static void PyTealetTstate_GetFrame(PyTealetTstateFrame *dst, const PyThreadState *src);
+static void PyTealetTstate_PutFrame(const PyTealetTstateFrame *src, PyThreadState *dst);
 /* clean the python frame structures in either python or our threadstate */
-static void PyTealetTstate_ClearFrame(PyTealetTstate *ttstate, PyThreadState *tstate);
+static void PyTealetTstate_ClearFrame(PyTealetTstateFrame *ttstate, PyThreadState *tstate);
 /* directly clean up datastack pointer members and clear them afterwards. */
 #if defined(PY_HAS_TSTATE_DATASTACK)
 static void PyTealetTstate_CleanupDatastack(_PyStackChunk **datastack_chunk, PyObject ***datastack_top,
@@ -42,23 +43,6 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 #endif
 #endif
 
-#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
-    dst->exc_type = src->curexc_type;
-    dst->exc_val = src->curexc_value;
-    dst->exc_tb = src->curexc_traceback;
-#else
-    dst->exc_type = NULL;
-    dst->exc_val = NULL;
-    dst->exc_tb = NULL;
-#endif
-
-    dst->exc_state = src->exc_state;
-    /* Keep dst->exc_info self-contained when it points at exc_state. */
-    if (src->exc_info == &src->exc_state)
-        dst->exc_info = &dst->exc_state;
-    else
-        dst->exc_info = src->exc_info;
-
     dst->context = src->context;
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
     dst->delete_later = src->delete_later;
@@ -67,7 +51,7 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 #else /* 3.10-3.11 */
     dst->trash_delete_nesting = src->trash_delete_nesting;
 #endif
-    PyTealetTstate_GetFrame(dst, src);
+    PyTealetTstate_GetFrame(&dst->frame_data, src);
 }
 
 /* Raw copy previously saved tealet tstate into PyThreadState. */
@@ -85,18 +69,6 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
 #endif
 #endif
 
-#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
-    dst->curexc_type = src->exc_type;
-    dst->curexc_value = src->exc_val;
-    dst->curexc_traceback = src->exc_tb;
-#endif
-
-    dst->exc_state = src->exc_state;
-    if (src->exc_info == &src->exc_state)
-        dst->exc_info = &dst->exc_state;
-    else
-        dst->exc_info = src->exc_info;
-
     dst->context = src->context;
     dst->context_ver++; /* Invalidate contextvars cache */
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
@@ -106,7 +78,7 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
 #else /* 3.10-3.11 */
     dst->trash_delete_nesting = src->trash_delete_nesting;
 #endif
-    PyTealetTstate_PutFrame(src, dst);
+    PyTealetTstate_PutFrame(&src->frame_data, dst);
 }
 
 /* Increment and decrement the reference count of the tstate's references.
@@ -115,10 +87,6 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
  */
 static void PyTealetTstate_IncRef(PyTealetTstate *saved) {
     assert(saved->has_state == 1);
-    Py_XINCREF(saved->exc_type);
-    Py_XINCREF(saved->exc_val);
-    Py_XINCREF(saved->exc_tb);
-    Py_XINCREF(saved->exc_state.exc_value);
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
     Py_XINCREF(saved->delete_later);
 #endif
@@ -130,19 +98,11 @@ static void PyTealetTstate_IncRef(PyTealetTstate *saved) {
 static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_tealet) {
     assert(saved->has_state == 1);
     if (dustbin_tealet) {
-        PyTealet_dustbin_push(dustbin_tealet, saved->exc_type);
-        PyTealet_dustbin_push(dustbin_tealet, saved->exc_val);
-        PyTealet_dustbin_push(dustbin_tealet, saved->exc_tb);
-        PyTealet_dustbin_push(dustbin_tealet, saved->exc_state.exc_value);
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
         PyTealet_dustbin_push(dustbin_tealet, saved->delete_later);
 #endif
         PyTealet_dustbin_push(dustbin_tealet, saved->context);
     } else {
-        Py_XDECREF(saved->exc_type);
-        Py_XDECREF(saved->exc_val);
-        Py_XDECREF(saved->exc_tb);
-        Py_XDECREF(saved->exc_state.exc_value);
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
         Py_XDECREF(saved->delete_later);
 #endif
@@ -182,6 +142,8 @@ static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
 #endif
     py_tstate->context = NULL;
     PyTealetTstate_ClearFrame(NULL, py_tstate);
+    /* Save/restore invariant: NULL marks the in-between (cleared) live tstate. */
+    py_tstate->exc_info = NULL;
 #else
     (void)py_tstate;
 #endif
@@ -190,8 +152,7 @@ static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
 /* Debug-only hygiene helper: verify sentinel clear state. */
 static void PyTealetTstate_AssertClearPy(PyThreadState *py_tstate) {
 #if defined(Py_DEBUG)
-    /* should never be null in a valid situation, null indicates that we
-     * previously cleared it.*/
+    /* We use exc_info == NULL as a sentinel for the save/restore in-between state. */
     assert(py_tstate->exc_info == NULL);
 #else
     (void)py_tstate;
@@ -206,9 +167,9 @@ void PyTealetTstate_Copy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new
     assert(dst->has_state == 0);
     PyTealetTstate_Get(dst, src);
     dst->has_state = 1;
-    /* the new tealet must have nulled python fields, they can't be shared */
+    /* the new tealet must have a fresh frame stack, they can't be shared */
     if (dst_is_new) {
-        PyTealetTstate_ClearFrame(dst, NULL);
+        PyTealetTstate_ClearFrame(&dst->frame_data, NULL);
     } else {
         PyTealetTstate_ClearFrame(NULL, src);
     }
@@ -221,7 +182,7 @@ void PyTealetTstate_Copy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new
 void PyTealetTstate_UndoCopy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new) {
     assert(dst->has_state == 1);
     if (!dst_is_new) {
-        PyTealetTstate_PutFrame(dst, src);
+        PyTealetTstate_PutFrame(&dst->frame_data, src);
     }
     PyTealetTstate_DecRef(dst, NULL);
     dst->has_state = 0;
@@ -266,7 +227,20 @@ void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst) {
  */
 
 /* Get frame state info from PyThreadState into private tstate. */
-static void PyTealetTstate_GetFrame(PyTealetTstate *dst, const PyThreadState *src) {
+static void PyTealetTstate_GetFrame(PyTealetTstateFrame *dst, const PyThreadState *src) {
+#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+    dst->curexc_type = src->curexc_type;
+    dst->curexc_value = src->curexc_value;
+    dst->curexc_traceback = src->curexc_traceback;
+#endif
+
+    dst->exc_state = src->exc_state;
+    /* Keep saved exc_info self-contained when it points at exc_state. */
+    if (src->exc_info == &src->exc_state)
+        dst->exc_info = &dst->exc_state;
+    else
+        dst->exc_info = src->exc_info;
+
 #if defined(PY_HAS_TSTATE_FRAME)
     dst->frame = src->frame;
 #endif
@@ -292,7 +266,19 @@ static void PyTealetTstate_GetFrame(PyTealetTstate *dst, const PyThreadState *sr
 }
 
 /* Write tealet tstate frame info into PyThreadState. */
-static void PyTealetTstate_PutFrame(const PyTealetTstate *src, PyThreadState *dst) {
+static void PyTealetTstate_PutFrame(const PyTealetTstateFrame *src, PyThreadState *dst) {
+#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+    dst->curexc_type = src->curexc_type;
+    dst->curexc_value = src->curexc_value;
+    dst->curexc_traceback = src->curexc_traceback;
+#endif
+
+    dst->exc_state = src->exc_state;
+    if (src->exc_info == &src->exc_state)
+        dst->exc_info = &dst->exc_state;
+    else
+        dst->exc_info = src->exc_info;
+
 #if defined(PY_HAS_TSTATE_FRAME)
     dst->frame = src->frame;
 #endif
@@ -323,29 +309,46 @@ static void PyTealetTstate_PutFrame(const PyTealetTstate *src, PyThreadState *ds
  * This needs to be done when we create a new tstate, when spawning a tealet, since
  * they cannot be shared between tealets.  One of the tstates keeps the existing
  * settings, and the other is cleared.
+ * Note, this is for hygiene only, and optional asserts.  At runtime we don't
+ * depend on the fields being clear.
  */
-static void PyTealetTstate_ClearFrame(PyTealetTstate *ttstate, PyThreadState *tstate) {
+static void PyTealetTstate_ClearFrame(PyTealetTstateFrame *ttstate, PyThreadState *tstate) {
     /* assert exactly one of tstate and ttstate is non-null */
     assert((tstate == NULL) != (ttstate == NULL));
+#ifndef NDEBUG
     if (ttstate) {
+#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+    ttstate->curexc_type = NULL;
+    ttstate->curexc_value = NULL;
+    ttstate->curexc_traceback = NULL;
+#endif
+    memset(&ttstate->exc_state, 0, sizeof(ttstate->exc_state));
+    ttstate->exc_info = &ttstate->exc_state;
 #if defined(PY_HAS_TSTATE_FRAME)
-        ttstate->frame = NULL;
+    ttstate->frame = NULL;
 #endif
     #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
-        ttstate->current_executor = NULL;
+    ttstate->current_executor = NULL;
     #endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
 #if defined(PY_HAS_TSTATE_CFRAME)
-        ttstate->cframe = NULL;
+    ttstate->cframe = NULL;
 #else
-        ttstate->current_frame = NULL;
+    ttstate->current_frame = NULL;
 #endif
-        ttstate->datastack_chunk = NULL;
-        ttstate->datastack_top = NULL;
-        ttstate->datastack_limit = NULL;
+    ttstate->datastack_chunk = NULL;
+    ttstate->datastack_top = NULL;
+    ttstate->datastack_limit = NULL;
 #endif
 
     } else {
+#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+    tstate->curexc_type = NULL;
+    tstate->curexc_value = NULL;
+    tstate->curexc_traceback = NULL;
+#endif
+    memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
+    tstate->exc_info = &tstate->exc_state;
 #if defined(PY_HAS_TSTATE_FRAME)
         tstate->frame = NULL;
 #endif
@@ -363,13 +366,26 @@ static void PyTealetTstate_ClearFrame(PyTealetTstate *ttstate, PyThreadState *ts
         tstate->datastack_limit = NULL;
 #endif
     }
+#else /* NDEBUG */
+    (void)ttstate;
+    (void)tstate;
+#endif
 }
 
-/* Set up the frame state object when a tealet starts running */
+/* Set up the frame state related fields in the tstate when a tealet starts running.
+ * Note that the 'asserts' for current tstate fields are to verify that
+ * PyTealetTestate_Frame_Clear() was properly called, which in debug builds
+ * provides hygiene.
+ */
 void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) {
-#if defined(PY_HAS_TSTATE_FRAME)
-    assert(ttstate->frame == NULL);
+    PyTealetTstateFrame *frame_data = &ttstate->frame_data;
+#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+    tstate->curexc_type = NULL;
+    tstate->curexc_value = NULL;
+    tstate->curexc_traceback = NULL;
 #endif
+    memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
+    tstate->exc_info = &tstate->exc_state;
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
     /* A fresh execution branch starts without an active tier2/JIT executor. */
     assert(tstate->current_executor == NULL);
@@ -381,10 +397,10 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
      * it has no parents.
      */
     assert(tstate->cframe == NULL);
-    ttstate->top_cframe = tstate->root_cframe;
-    ttstate->top_cframe.previous = &tstate->root_cframe;
-    ttstate->top_cframe.current_frame = NULL;
-    tstate->cframe = &ttstate->top_cframe;
+    frame_data->top_cframe = tstate->root_cframe;
+    frame_data->top_cframe.previous = &tstate->root_cframe;
+    frame_data->top_cframe.current_frame = NULL;
+    tstate->cframe = &frame_data->top_cframe;
 #else
     tstate->current_frame = NULL;
 #endif
@@ -397,7 +413,19 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
 }
 
 /* clean up the frame state, including releasing the local frame stack */
-void PyTealetTstate_Frame_Cleanup(PyTealetTstate *ttstate, PyThreadState *tstate, tealet_t *dustbin_tealet) {
+void PyTealetTstate_Frame_Cleanup(PyThreadState *tstate, tealet_t *dustbin_tealet) {
+#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+    PyTealet_dustbin_push(dustbin_tealet, tstate->curexc_type);
+    PyTealet_dustbin_push(dustbin_tealet, tstate->curexc_value);
+    PyTealet_dustbin_push(dustbin_tealet, tstate->curexc_traceback);
+    tstate->curexc_type = NULL;
+    tstate->curexc_value = NULL;
+    tstate->curexc_traceback = NULL;
+#endif
+    PyTealet_dustbin_push(dustbin_tealet, tstate->exc_state.exc_value);
+    memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
+    tstate->exc_info = &tstate->exc_state;
+
 #if defined(PY_HAS_TSTATE_FRAME)
     PyTealet_dustbin_push(dustbin_tealet, (PyObject *)tstate->frame);
     tstate->frame = NULL;
@@ -414,7 +442,6 @@ void PyTealetTstate_Frame_Cleanup(PyTealetTstate *ttstate, PyThreadState *tstate
 #else
     (void)tstate;
 #endif
-    (void)ttstate;
     (void)dustbin_tealet;
 }
 

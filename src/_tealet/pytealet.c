@@ -685,7 +685,7 @@ static PyObject *pytealet_get_frame(PyObject *_self, void *_closure) {
     if (!mstate)
         return NULL;
 #if defined(PY_HAS_TSTATE_FRAME)
-    frame = self->tstate.has_state ? (PyObject *)self->tstate.frame : NULL;
+    frame = self->tstate.has_state ? (PyObject *)self->tstate.frame_data.frame : NULL;
 #else
     if (mstate->frame_introspection_enabled)
         frame = PyTealetFrameInfo_GetFrame(&self->frame_info);
@@ -997,7 +997,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
      * then drop saved refs immediately so frame locals (including 'current')
      * do not keep the Python tealet object alive until GC.
      */
-    PyTealetTstate_Frame_Cleanup(&tealet->tstate, tstate, t_return);
+    PyTealetTstate_Frame_Cleanup(tstate, t_return);
     PyTealetTstate_Save(&tealet->tstate, tstate);
     PyTealetTstate_Drop(&tealet->tstate, t_return);
 

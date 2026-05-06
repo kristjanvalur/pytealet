@@ -30,69 +30,73 @@
 #include "pytealet_common.h"
 #include "tealet.h"
 
-typedef struct PyTealetTstate {
-    int has_state; /* Debug helper: 1 when this struct currently stores a saved
-                      tstate */
-
-    /* current exception state */
-    PyObject *exc_type;
-    PyObject *exc_val;
-    PyObject *exc_tb;
-    _PyErr_StackItem *exc_info;
-    _PyErr_StackItem exc_state;
-
-    /* current recursion state */
-#if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
-    int recursion_depth;
-#elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
-    int recursion_remaining;
-    int recursion_limit;
-#else /* 3.12+ */
-    int py_recursion_remaining;
-    int py_recursion_limit;
-#if defined(PY_HAS_TSTATE_C_RECURSION_REMAINING)
-    int c_recursion_remaining;
-#endif
-#endif
-
-#if defined(PY_HAS_TSTATE_DELETE_LATER)
-    PyObject *delete_later; /* Python 3.13+: trash queue head on tstate */
-#else
-    int trash_delete_nesting; /* destructor nesting level, conserved. */
-#endif
-
-    PyObject *context; /* Python 3.7+ contextvars */
-
-    /* python frame related variables */
-
+    typedef struct PyTealetTstateFrame {
+        /* current exception state */
+    #if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+        PyObject *curexc_type;
+        PyObject *curexc_value;
+        PyObject *curexc_traceback;
+    #endif
+        _PyErr_StackItem *exc_info;
+        _PyErr_StackItem exc_state;
 #if defined(PY_HAS_TSTATE_FRAME)
-    PyFrameObject *frame;
+        PyFrameObject *frame;
 #endif
 #if defined(PY_HAS_TSTATE_CFRAME)
-    /* Python 3.10-3.12: cframe tracks C-level call frames (removed in 3.13)
-     * Stack-slicing preserves the CFrame struct itself; we just save the
-     * pointer */
-    PyTealetCFrame *cframe;
+        /* Python 3.10-3.12: cframe tracks C-level call frames (removed in 3.13)
+         * Stack-slicing preserves the CFrame struct itself; we just save the
+         * pointer */
+        PyTealetCFrame *cframe;
 #endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
 #if defined(PY_HAS_TSTATE_CFRAME)
-    PyTealetCFrame top_cframe;
+        PyTealetCFrame top_cframe;
 #endif
 #if defined(PY_HAS_TSTATE_CFRAME_USE_TRACING)
-    int cframe_use_tracing; /* tracing flag from cframe */
+        int cframe_use_tracing; /* tracing flag from cframe */
 #endif
-    /* new in 3.11, these four must be preserved together */
-    void *current_frame; /* tstate->cstate->current_frame, or in 3.13plus, tstate->current_frame */
-    _PyStackChunk *datastack_chunk;
-    PyObject **datastack_top;
-    PyObject **datastack_limit;
+        /* new in 3.11, these four must be preserved together */
+        void *current_frame; /* tstate->cstate->current_frame, or in 3.13plus, tstate->current_frame */
+        _PyStackChunk *datastack_chunk;
+        PyObject **datastack_top;
+        PyObject **datastack_limit;
 #endif
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
-    /* CPython tier2/JIT active executor. Treat as frame-like state: moved
-     * with execution context and nulled for fresh branches. */
-    PyObject *current_executor;
-#endif
-} PyTealetTstate;
+        /* CPython tier2/JIT active executor. Treat as frame-like state: moved
+         * with execution context and nulled for fresh branches. */
+        PyObject *current_executor;
+    #endif
+    } PyTealetTstateFrame;
+
+    typedef struct PyTealetTstate {
+        int has_state; /* Debug helper: 1 when this struct currently stores a saved
+                          tstate */
+
+        /* current recursion state */
+    #if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
+        int recursion_depth;
+    #elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
+        int recursion_remaining;
+        int recursion_limit;
+    #else /* 3.12+ */
+        int py_recursion_remaining;
+        int py_recursion_limit;
+    #if defined(PY_HAS_TSTATE_C_RECURSION_REMAINING)
+        int c_recursion_remaining;
+    #endif
+    #endif
+
+    #if defined(PY_HAS_TSTATE_DELETE_LATER)
+        PyObject *delete_later; /* Python 3.13+: trash queue head on tstate */
+    #else
+        int trash_delete_nesting; /* destructor nesting level, conserved. */
+    #endif
+
+        PyObject *context; /* Python 3.7+ contextvars */
+
+        /* frame-like execution state that cannot be shared between branches */
+        PyTealetTstateFrame frame_data;
+    } PyTealetTstate;
 
 void PyTealetTstate_Init(PyTealetTstate *saved);
 
@@ -122,6 +126,6 @@ void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst);
 void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate);
 
 /* clean up the frame state, including releasing the local frame stack */
-void PyTealetTstate_Frame_Cleanup(PyTealetTstate *ttstate, PyThreadState *tstate, tealet_t *dustbin_tealet);
+void PyTealetTstate_Frame_Cleanup(PyThreadState *tstate, tealet_t *dustbin_tealet);
 
 #endif
