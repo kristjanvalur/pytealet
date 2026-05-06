@@ -229,6 +229,69 @@ static PyObject *module_error_was_remote(PyObject *mod, PyObject *Py_UNUSED(_ign
     return PyBool_FromLong(PyTealet_ErrorWasRemote(mstate));
 }
 
+static PyObject *module_hide_frame(PyObject *mod, PyObject *args) {
+    PyObject *func;
+    PyObject *func_args = NULL;
+    PyObject *kwds = NULL;
+    PyObject *result;
+    int created_empty_args = 0;
+    PyThreadState *tstate = PyThreadState_GET();
+#if defined(PY_HAS_TSTATE_FRAME)
+    PyFrameObject *saved_frame = tstate->frame;
+#endif
+#if defined(PY_HAS_TSTATE_CFRAME) && defined(PY_HAS_TSTATE_DATASTACK)
+    void *saved_current_frame = tstate->cframe ? (void *)tstate->cframe->current_frame : NULL;
+#elif defined(PY_HAS_TSTATE_CURRENT_FRAME)
+    void *saved_current_frame = (void *)tstate->current_frame;
+#endif
+
+    (void)mod;
+
+    /* Calls callable(*args, **kwds) while hiding trampoline/caller frames to
+     * improve greenlet traceback compatibility. We always restore the parent
+     * frame linkage before returning, including when PyObject_Call fails and
+     * propagates an exception.
+     */
+    if (!PyArg_ParseTuple(args, "O|OO:hide_frame", &func, &func_args, &kwds))
+        return NULL;
+
+    if (!func_args) {
+        func_args = PyTuple_New(0);
+        if (!func_args)
+            return NULL;
+        created_empty_args = 1;
+    } else if (!PyTuple_Check(func_args)) {
+        PyErr_SetString(PyExc_TypeError, "hide_frame() args must be a tuple");
+        return NULL;
+    }
+
+#if defined(PY_HAS_TSTATE_FRAME)
+    tstate->frame = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_CFRAME) && defined(PY_HAS_TSTATE_DATASTACK)
+    if (tstate->cframe)
+        tstate->cframe->current_frame = NULL;
+#elif defined(PY_HAS_TSTATE_CURRENT_FRAME)
+    tstate->current_frame = NULL;
+#endif
+
+    result = PyObject_Call(func, func_args, kwds);
+
+#if defined(PY_HAS_TSTATE_FRAME)
+    tstate->frame = saved_frame;
+#endif
+#if defined(PY_HAS_TSTATE_CFRAME) && defined(PY_HAS_TSTATE_DATASTACK)
+    if (tstate->cframe)
+        tstate->cframe->current_frame = saved_current_frame;
+#elif defined(PY_HAS_TSTATE_CURRENT_FRAME)
+    tstate->current_frame = saved_current_frame;
+#endif
+
+    if (created_empty_args)
+        Py_DECREF(func_args);
+    return result;
+}
+
 /* Get/set dormant tealet frame introspection at runtime.
  * - frame_introspection() -> bool
  * - frame_introspection(enabled) -> bool
@@ -273,6 +336,7 @@ static PyMethodDef module_methods[] = {
     {"active_tealets", (PyCFunction)module_active_tealets, METH_NOARGS, ""},
     {"thread_kill", (PyCFunction)module_thread_kill, METH_VARARGS, ""},
     {"error_was_remote", (PyCFunction)module_error_was_remote, METH_NOARGS, ""},
+    {"hide_frame", (PyCFunction)module_hide_frame, METH_VARARGS, ""},
     {"frame_introspection", (PyCFunction)module_frame_introspection, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
