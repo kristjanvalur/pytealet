@@ -12,6 +12,7 @@
 struct PyTealetModuleState {
     Py_tss_t tls_key;
     int frame_introspection_enabled;
+    int creating_main;
     PyTypeObject *tealet_type;
     PyObject *tealet_error;
     PyObject *invalid_error;

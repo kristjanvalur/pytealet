@@ -81,6 +81,11 @@ Switches execution to this tealet, passing an optional argument.
 - **Returns:** Value passed back when someone switches to us
 - **Thread-safe:** Only within same thread family
 
+```python
+tealet.belongs_to_current() -> bool
+```
+Returns whether this tealet object belongs to the current thread.
+
 **Tealet Object Properties (read-only):**
 
 ```python
@@ -114,7 +119,14 @@ Runtime policy can additionally disable dormant-frame exposure through
 ```python
 tealet.thread_id -> int
 ```
-The OS thread ID that owns this tealet's family.
+The owning thread ID for this tealet object. This is set when the object is
+created and is used for cross-thread API guards.
+
+Thread ownership rules enforced by the C API:
+- Creating a tealet object ensures a thread-main tealet exists for that thread.
+- `run()` and `switch()` do not auto-create a main tealet in the caller thread;
+    they validate ownership and reject foreign-thread use.
+- `stub()` is only allowed from the owning thread.
 
 **Module Constants:**
 

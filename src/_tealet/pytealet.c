@@ -77,6 +77,7 @@ static PyObject *GetWrapperRef(tealet_t *tealet) {
 struct PyTealetObject {
     PyObject_HEAD int state;
     tealet_t *tealet;
+    long owner_tid;       /* thread that owns this tealet object */
 #if !defined(Py312P)
     PyObject *weakreflist; /* List of weak references */
 #endif
@@ -272,8 +273,17 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
     PyTealetObject *src = NULL;
     PyTealetObject *result;
     PyTealetModuleState *mstate = GetModuleStateFromClass(subtype);
+    long current_tid;
     if (!mstate)
         return NULL;
+
+    /* Every non-main tealet object is bound to an existing thread-main. */
+    if (!mstate->creating_main) {
+        if (!GetMain(mstate, 1))
+            return NULL;
+    }
+    current_tid = PyThread_get_thread_ident();
+
     if (args && PyTuple_GET_SIZE(args) > 0) {
         src = (PyTealetObject *)PyTuple_GET_ITEM(args, 0);
         if (!PyTealet_Check((PyObject *)src, mstate)) {
@@ -290,6 +300,7 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
         return NULL;
     result->state = STATE_NEW;
     result->tealet = NULL;
+    result->owner_tid = current_tid;
     PyTealetTstate_Init(&result->tstate);
     PyTealetFrameInfo_Init(&result->frame_info);
 #if !defined(Py312P)
@@ -297,6 +308,9 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
 #endif
 
     if (src) {
+        /* we can pass STUB and NEW tealets in, in both cases the
+         * result belongs to the same thread as the original.
+         */
         if (src->state == STATE_STUB) {
             /* duplicate the stub tealet and the tstate */
             result->tealet = tealet_duplicate(src->tealet);
@@ -309,6 +323,7 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
             /* We don't capture frame info for stubs. */
         }
         result->state = src->state;
+        result->owner_tid = src->owner_tid;
     }
     return (PyObject *)result;
 }
@@ -346,6 +361,10 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
     }
     if (pytealet->state != STATE_NEW) {
         PyErr_SetString(mstate->state_error, "must be new");
+        return NULL;
+    }
+    if (pytealet->owner_tid != PyThread_get_thread_ident()) {
+        PyErr_SetString(mstate->invalid_error, "cannot stub from a different thread");
         return NULL;
     }
     assert(pytealet->tealet == NULL);
@@ -430,6 +449,17 @@ static PyObject *pytealet_main_method(PyObject *self, PyTypeObject *defining_cla
     }
 }
 
+static PyObject *pytealet_belongs_to_current(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                             Py_ssize_t nargs, PyObject *kwnames) {
+    PyTealetObject *base = (PyTealetObject *)self;
+    (void)defining_class;
+    if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
+        PyErr_SetString(PyExc_TypeError, "belongs_to_current() takes no arguments");
+        return NULL;
+    }
+    return PyBool_FromLong(base->owner_tid == PyThread_get_thread_ident());
+}
+
 /* run a tealet and optinonally run */
 static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                               PyObject *kwnames) {
@@ -449,9 +479,8 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     void *switch_arg;
     if (!mstate)
         return NULL;
-
     current = GetCurrent(mstate, target, 0, &mdata);
-    if (!current)
+    if (!current && PyErr_Occurred())
         return NULL;
     if (CheckTarget(mstate, target, current))
         return NULL;
@@ -617,7 +646,9 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     assert(target->tealet);
     /* we don't have a source tealet, so we must get it from the thread state. */
     current = GetCurrent(mstate, NULL, 0, NULL);
-    if (!current || CheckTarget(mstate, target, current))
+    if (!current && PyErr_Occurred())
+        return NULL;
+    if (CheckTarget(mstate, target, current))
         return NULL;
 
     Py_INCREF(pyarg);
@@ -650,6 +681,8 @@ static struct PyMethodDef pytealet_methods[] = {
     {"current", (PyCFunction)(void (*)(void))pytealet_current, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"previous", (PyCFunction)(void (*)(void))pytealet_previous, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"main", (PyCFunction)(void (*)(void))pytealet_main_method, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
+    {"belongs_to_current", (PyCFunction)(void (*)(void))pytealet_belongs_to_current,
+     METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"switch", (PyCFunction)(void (*)(void))pytealet_switch, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {NULL, NULL} /* sentinel */
@@ -706,12 +739,7 @@ static PyObject *pytealet_get_frame(PyObject *_self, void *_closure) {
 
 static PyObject *pytealet_get_tid(PyObject *_self, void *_closure) {
     PyTealetObject *self = (PyTealetObject *)_self;
-    long tid = 0;
-    if (self->tealet) {
-        PyTealetMainData *mdata = (PyTealetMainData *)*tealet_main_userpointer(self->tealet);
-        tid = mdata->tid;
-    }
-    return PyLong_FromLong(tid);
+    return PyLong_FromLong(self->owner_tid);
 }
 
 static struct PyGetSetDef pytealet_getset[] = {{"state", pytealet_get_state, NULL, "", NULL},
@@ -832,7 +860,9 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
         *tealet_main_userpointer(tmain) = (void *)mdata;
 
         /* create the main tealet */
+        mstate->creating_main = 1;
         t_main = (PyTealetObject *)pytealet_new(mstate->tealet_type, NULL, NULL);
+        mstate->creating_main = 0;
         if (!t_main) {
             Py_DECREF(mdata->dustbin);
             tealet_finalize(tmain);
@@ -888,17 +918,30 @@ PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet
 
 /* check if a target tealet is valid */
 static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *ref) {
-    if (!ref)
-        ref = GetMain(mstate, 1, NULL);
-    if (!ref)
-        return -1;
-    if (!target->tealet)
-        return 0; /* no tealet yet */
-    if (ref->tealet->main != target->tealet->main) {
-        PyErr_SetString(mstate->invalid_error, "foreign tealet");
-        return -1;
+    if (!ref) {
+        goto mismatch;
+    }
+    if (!target->tealet) {
+        /* tealet object will be created on demand */
+        if (target->owner_tid != ref->owner_tid) {
+            goto mismatch;
+        }
+    } else {
+        /* use main comparison to verify tealet ownership */
+        if (ref->tealet->main != target->tealet->main) {
+            goto mismatch;
+        }
+    }
+    if (ref) {
+        assert (target->owner_tid == ref->owner_tid);
     }
     return 0;
+
+mismatch:
+    if (ref)
+        assert (target->owner_tid != ref->owner_tid);
+    PyErr_SetString(mstate->invalid_error, "thread mismatch: cannot switch to a tealet from a different thread");
+    return -1;
 }
 
 /* ===================================================================== */
@@ -972,8 +1015,11 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         } else if (return_to->state != STATE_RUN) {
             return_to = NULL;
             PyErr_SetString(mstate->state_error, "must be 'run'");
-        } else if (CheckTarget(mstate, return_to, tealet))
+        } else if (CheckTarget(mstate, return_to, tealet)) {
+            PyErr_WriteUnraisable(Py_None);
+            PyErr_Clear();
             return_to = NULL;
+        }
     }
     if (!return_to) {
         Py_CLEAR(result);

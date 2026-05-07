@@ -89,6 +89,82 @@ class TestModule:
             _tealet.frame_introspection(original)
 
 
+class TestThreadOwnership:
+    def test_new_tealet_has_owner_tid_and_belongs(self):
+        t = _tealet.tealet()
+        assert t.thread_id == _tealet.current().thread_id
+        assert t.belongs_to_current() is True
+
+    def test_stub_rejected_from_foreign_thread(self):
+        data = {}
+        created = threading.Event()
+        done = threading.Event()
+
+        def worker():
+            data["t"] = _tealet.tealet()
+            created.set()
+            done.wait(timeout=1.0)
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert created.wait(timeout=1.0)
+        try:
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].stub()
+        finally:
+            done.set()
+            th.join(timeout=1.0)
+
+    def test_run_rejected_from_foreign_thread(self):
+        data = {}
+        created = threading.Event()
+        done = threading.Event()
+
+        def worker():
+            data["t"] = _tealet.tealet()
+            created.set()
+            done.wait(timeout=1.0)
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert created.wait(timeout=1.0)
+        try:
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].run(lambda current, arg: current.main(), None)
+        finally:
+            done.set()
+            th.join(timeout=1.0)
+
+    def test_switch_rejected_from_foreign_thread(self):
+        data = {}
+        ready = threading.Event()
+        release = threading.Event()
+
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        def worker():
+            t = _tealet.tealet()
+            t.stub()
+            data["t"] = t
+            data["first"] = t.run(parked, None)
+            ready.set()
+            if release.wait(timeout=1.0):
+                t.switch()
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert ready.wait(timeout=1.0)
+        try:
+            assert data["first"] == "paused"
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].switch()
+        finally:
+            release.set()
+            th.join(timeout=1.0)
+
+
 class TestTealetTraversalMethods:
     def test_methods_fail_on_new_tealet(self):
         t = _tealet.tealet()
