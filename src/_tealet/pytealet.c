@@ -274,8 +274,7 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
     if (!main)
         return NULL;
     stack_far = PyTealet_GetStackFar(PyThreadState_GET());
-    tresult = tealet_stub_new(main->tealet, stack_far);
-    if (!tresult)
+    if (tealet_stub_new(main->tealet, &tresult, stack_far))
         return PyErr_NoMemory();
     PyTealetTstate_Copy(&pytealet->tstate, tstate, 1); /* dst (new) belongs to the new tealet */
     pytealet->tealet = tresult;
@@ -453,10 +452,14 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     } else {
         void *stack_limit = PyTealet_GetStackFar(tstate);
         PyTealetTstate_Copy(&current->tstate, tstate, 0); /* src (current) belongs to new tealet */
-        tealet = tealet_new(current->tealet, pytealet_main, &switch_arg, stack_limit);
+        tealet = tealet_new(current->tealet);
         fail = (tealet == NULL);
+        if (!fail)
+            fail = tealet_run(tealet, pytealet_main, &switch_arg, stack_limit, TEALET_START_SWITCH);
         if (fail) {
             PyTealetTstate_UndoCopy(&current->tstate, tstate, 0);
+            if (tealet)
+                tealet_delete(tealet);
         } else {
             PyTealetTstate_Restore(&current->tstate, tstate);
         }
@@ -515,7 +518,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Capture(&current->frame_info, 1);
     PyTealetTstate_Save(&current->tstate, tstate);
-    fail = tealet_switch(target->tealet, &switch_arg);
+    fail = tealet_switch(target->tealet, &switch_arg, TEALET_XFER_DEFAULT);
     PyTealetTstate_Restore(&current->tstate, tstate);
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Release(&current->frame_info, NULL);
@@ -853,7 +856,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     /* clear the old tealet */
     tealet->state = STATE_EXIT;
     if (PYTEALET_DEFER_DELETE)
-        exit_mode = TEALET_EXIT_DEFAULT;
+        exit_mode = TEALET_XFER_DEFAULT;
     if (exit_mode == TEALET_EXIT_DELETE) {
         tealet->tealet = NULL; /* will be auto-deleted on return */
         TEALET_SET_PYOBJECT(t_current, NULL);
