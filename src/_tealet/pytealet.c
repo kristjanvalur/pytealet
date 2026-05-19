@@ -133,6 +133,43 @@ static int PyTealet_CheckExact(PyObject *op, PyTealetModuleState *mstate) {
     return mstate && mstate->tealet_type && (Py_TYPE(op) == mstate->tealet_type);
 }
 
+/* Translate libtealet TEALET_ERR_* codes to Python exceptions. */
+static int PyTealet_TranslateTealetError(PyTealetModuleState *mstate, int err, const char *what) {
+    const char *msg = what ? what : "tealet operation failed";
+    if (err == 0)
+        return 0;
+    if (err == TEALET_ERR_MEM) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    if (err == TEALET_ERR_DEFUNCT) {
+        if (mstate && mstate->defunct_error)
+            PyErr_SetString(mstate->defunct_error, msg);
+        else
+            PyErr_SetString(PyExc_RuntimeError, msg);
+        return -1;
+    }
+    if (err == TEALET_ERR_PANIC) {
+        if (mstate && mstate->panic_error)
+            PyErr_SetString(mstate->panic_error, msg);
+        else
+            PyErr_SetString(PyExc_RuntimeError, msg);
+        return -1;
+    }
+    if (err == TEALET_ERR_INVAL) {
+        PyErr_SetString(PyExc_RuntimeError, msg);
+        return -1;
+    }
+#ifdef TEALET_ERR_INTEGRITY
+    if (err == TEALET_ERR_INTEGRITY) {
+        PyErr_SetString(PyExc_RuntimeError, msg);
+        return -1;
+    }
+#endif
+    PyErr_Format(PyExc_RuntimeError, "%s (libtealet error %d)", msg, err);
+    return -1;
+}
+
 void PyTealet_dustbin_push(tealet_t *tealet, PyObject *obj) {
     PyTealetMainData *mdata;
     if (!obj)
@@ -453,8 +490,9 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
         void *stack_limit = PyTealet_GetStackFar(tstate);
         PyTealetTstate_Copy(&current->tstate, tstate, 0); /* src (current) belongs to new tealet */
         tealet = tealet_new(current->tealet);
-        fail = (tealet == NULL);
-        if (!fail)
+        if (!tealet)
+            fail = TEALET_ERR_MEM;
+        else
             fail = tealet_run(tealet, pytealet_main, &switch_arg, stack_limit, TEALET_START_SWITCH);
         if (fail) {
             PyTealetTstate_UndoCopy(&current->tstate, tstate, 0);
@@ -467,7 +505,7 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Release(&current->frame_info, NULL);
     if (fail) {
-        PyErr_NoMemory();
+        PyTealet_TranslateTealetError(mstate, fail, "tealet run failed");
         result = NULL;
     } else {
         result = (PyObject *)switch_arg;
@@ -525,13 +563,10 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
 
     dustbin_clear(current->tealet);
 
-    if (fail == TEALET_ERR_DEFUNCT) {
+    if (fail) {
         Py_DECREF(pyarg);
-        PyErr_SetString(mstate->defunct_error, "target is defunct");
+        PyTealet_TranslateTealetError(mstate, fail, "tealet switch failed");
         return NULL;
-    } else if (fail == TEALET_ERR_MEM) {
-        Py_DECREF(pyarg);
-        return PyErr_NoMemory();
     }
     result = (PyObject *)switch_arg;
     return result;
@@ -878,8 +913,15 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     PyTealetTstate_Save(&tealet->tstate, tstate);
     PyTealetTstate_Drop(&tealet->tstate, t_return);
 
-    if (tealet_exit(t_return, (void *)return_arg, exit_mode))
-        tealet_exit(t_return->main, (void *)return_arg, exit_mode);
+    {
+        int exit_fail;
+        exit_fail = tealet_exit(t_return, (void *)return_arg, exit_mode | TEALET_XFER_NOFAIL);
+        if (exit_fail) {
+            PyTealet_TranslateTealetError(mstate, exit_fail, "tealet exit failed");
+            PyErr_WriteUnraisable(func);
+            abort();
+        }
+    }
     /* never reach here */
     return 0;
 }

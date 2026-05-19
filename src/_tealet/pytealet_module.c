@@ -88,6 +88,7 @@ static int pytealet_module_exec(PyObject *m) {
     mstate->invalid_error = NULL;
     mstate->state_error = NULL;
     mstate->defunct_error = NULL;
+    mstate->panic_error = NULL;
 
     if (!PyThread_tss_is_created(&mstate->tls_key)) {
         if (PyThread_tss_create(&mstate->tls_key) != 0) {
@@ -121,6 +122,13 @@ static int pytealet_module_exec(PyObject *m) {
         return -1;
     Py_INCREF(mstate->defunct_error);
     if (PyModule_AddObject(m, "DefunctError", mstate->defunct_error) < 0)
+        return -1;
+
+    mstate->panic_error = PyErr_NewException("_tealet.PanicError", mstate->tealet_error, NULL);
+    if (!mstate->panic_error)
+        return -1;
+    Py_INCREF(mstate->panic_error);
+    if (PyModule_AddObject(m, "PanicError", mstate->panic_error) < 0)
         return -1;
 
     mstate->invalid_error = PyErr_NewException("_tealet.InvalidError", mstate->tealet_error, NULL);
@@ -158,6 +166,7 @@ static int pytealet_module_traverse(PyObject *m, visitproc visit, void *arg) {
     Py_VISIT(mstate->invalid_error);
     Py_VISIT(mstate->state_error);
     Py_VISIT(mstate->defunct_error);
+    Py_VISIT(mstate->panic_error);
     return 0;
 }
 
@@ -169,6 +178,7 @@ static int pytealet_module_clear(PyObject *m) {
     Py_CLEAR(mstate->invalid_error);
     Py_CLEAR(mstate->state_error);
     Py_CLEAR(mstate->defunct_error);
+    Py_CLEAR(mstate->panic_error);
     mstate->tealet_type = NULL;
     return 0;
 }
