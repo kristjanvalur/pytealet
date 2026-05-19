@@ -3,6 +3,7 @@ import math
 import sys
 import traceback
 import types
+import threading
 
 import _tealet
 import random
@@ -174,6 +175,27 @@ class TestSubclass:
         assert self.sc.dude[0] == 1
 
 class TestSwitch:
+    def test_switch_panic_keyword(self):
+        assert _tealet.current().switch(panic=False) is None
+        with pytest.raises(_tealet.PanicError) as exc:
+            _tealet.current().switch("panic-value", panic=True)
+        assert exc.value.value == "panic-value"
+
+        with pytest.raises(_tealet.PanicError) as exc2:
+            _tealet.current().switch(panic=True)
+        assert exc2.value.value is None
+
+    def test_switch_panic_payload_identity_from_tealet(self):
+        payload = {"kind": "panic", "n": 7}
+
+        def worker(current, main):
+            main.switch(payload, panic=True)
+            return _tealet.main()
+
+        with pytest.raises(_tealet.PanicError) as exc:
+            _tealet.tealet().run(worker, _tealet.main())
+        assert exc.value.value is payload
+
     def test_switch(self):
         status = [0]
         t = [None, None]

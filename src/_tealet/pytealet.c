@@ -133,9 +133,48 @@ static int PyTealet_CheckExact(PyObject *op, PyTealetModuleState *mstate) {
     return mstate && mstate->tealet_type && (Py_TYPE(op) == mstate->tealet_type);
 }
 
-/* Translate libtealet TEALET_ERR_* codes to Python exceptions. */
-static int PyTealet_TranslateTealetError(PyTealetModuleState *mstate, int err, const char *what) {
+static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const char *what, PyObject *value) {
+    PyObject *exc_type;
+    PyObject *msg_obj;
+    PyObject *exc_obj;
+    const char *msg = what ? what : "tealet panic";
+
+    if (!mstate || !mstate->panic_error) {
+        PyErr_SetString(PyExc_RuntimeError, msg);
+        return -1;
+    }
+
+    exc_type = mstate->panic_error;
+    msg_obj = PyUnicode_FromString(msg);
+    if (!msg_obj)
+        return -1;
+    exc_obj = PyObject_CallFunctionObjArgs(exc_type, msg_obj, NULL);
+    Py_DECREF(msg_obj);
+    if (!exc_obj)
+        return -1;
+
+    if (!value)
+        value = Py_None;
+    if (PyObject_SetAttrString(exc_obj, "value", value) < 0) {
+        Py_DECREF(exc_obj);
+        return -1;
+    }
+
+    PyErr_SetObject(exc_type, exc_obj);
+    Py_DECREF(exc_obj);
+    return -1;
+}
+
+/* Translate libtealet TEALET_ERR_* codes to Python exceptions.
+ * panic_value is an owned reference that is consumed (stolen) by this helper.
+ */
+static int PyTealet_TranslateTealetError(PyTealetModuleState *mstate, int err, const char *what,
+                                         PyObject *panic_value) {
     const char *msg = what ? what : "tealet operation failed";
+    if (err != TEALET_ERR_PANIC && panic_value) {
+        Py_DECREF(panic_value);
+        panic_value = NULL;
+    }
     if (err == 0)
         return 0;
     if (err == TEALET_ERR_MEM) {
@@ -150,11 +189,9 @@ static int PyTealet_TranslateTealetError(PyTealetModuleState *mstate, int err, c
         return -1;
     }
     if (err == TEALET_ERR_PANIC) {
-        if (mstate && mstate->panic_error)
-            PyErr_SetString(mstate->panic_error, msg);
-        else
-            PyErr_SetString(PyExc_RuntimeError, msg);
-        return -1;
+        int tr = PyTealet_SetPanicErrorWithValue(mstate, msg, panic_value ? panic_value : Py_None);
+        Py_XDECREF(panic_value);
+        return tr;
     }
     if (err == TEALET_ERR_INVAL) {
         PyErr_SetString(PyExc_RuntimeError, msg);
@@ -494,7 +531,7 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
             fail = TEALET_ERR_MEM;
         else
             fail = tealet_run(tealet, pytealet_main, &switch_arg, stack_limit, TEALET_START_SWITCH);
-        if (fail) {
+        if (fail && fail != TEALET_ERR_PANIC) {
             PyTealetTstate_UndoCopy(&current->tstate, tstate, 0);
             if (tealet)
                 tealet_delete(tealet);
@@ -505,7 +542,8 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Release(&current->frame_info, NULL);
     if (fail) {
-        PyTealet_TranslateTealetError(mstate, fail, "tealet run failed");
+        PyTealet_TranslateTealetError(mstate, fail, "tealet run failed",
+                                      fail == TEALET_ERR_PANIC ? (PyObject *)switch_arg : NULL);
         result = NULL;
     } else {
         result = (PyObject *)switch_arg;
@@ -520,25 +558,53 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
     PyTealetObject *target = (PyTealetObject *)self;
     PyTealetObject *current;
+    int switch_flags = TEALET_XFER_DEFAULT;
+    int panic_enabled;
     int fail;
     PyThreadState *tstate = PyThreadState_GET();
     PyObject *pyarg = Py_None;
+    PyObject *panic_obj = NULL;
     void *switch_arg;
     PyObject *result;
     int frame_introspection_enabled;
+    Py_ssize_t i;
     if (!mstate)
         return NULL;
 
-    if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
-        PyErr_SetString(PyExc_TypeError, "switch() takes no keyword arguments");
-        return NULL;
-    }
     if (nargs > 1) {
         PyErr_Format(PyExc_TypeError, "switch() takes at most 1 argument (%zd given)", nargs);
         return NULL;
     }
     if (nargs == 1)
         pyarg = args[0];
+
+    if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
+        for (i = 0; i < PyTuple_GET_SIZE(kwnames); i++) {
+            PyObject *key = PyTuple_GET_ITEM(kwnames, i);
+            PyObject *val = args[nargs + i];
+            if (!PyUnicode_Check(key)) {
+                PyErr_SetString(PyExc_TypeError, "switch() keyword names must be strings");
+                return NULL;
+            }
+            if (PyUnicode_CompareWithASCIIString(key, "panic") == 0) {
+                if (panic_obj != NULL) {
+                    PyErr_SetString(PyExc_TypeError, "switch() got multiple values for argument 'panic'");
+                    return NULL;
+                }
+                panic_obj = val;
+            } else {
+                PyErr_Format(PyExc_TypeError, "switch() got an unexpected keyword argument '%U'", key);
+                return NULL;
+            }
+        }
+    }
+    if (panic_obj != NULL) {
+        panic_enabled = PyObject_IsTrue(panic_obj);
+        if (panic_enabled < 0)
+            return NULL;
+        if (panic_enabled)
+            switch_flags |= TEALET_XFER_PANIC;
+    }
 
     if (target->state != STATE_RUN) {
         PyErr_SetString(mstate->state_error, "must be active");
@@ -556,7 +622,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Capture(&current->frame_info, 1);
     PyTealetTstate_Save(&current->tstate, tstate);
-    fail = tealet_switch(target->tealet, &switch_arg, TEALET_XFER_DEFAULT);
+    fail = tealet_switch(target->tealet, &switch_arg, switch_flags);
     PyTealetTstate_Restore(&current->tstate, tstate);
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Release(&current->frame_info, NULL);
@@ -564,8 +630,11 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     dustbin_clear(current->tealet);
 
     if (fail) {
-        Py_DECREF(pyarg);
-        PyTealet_TranslateTealetError(mstate, fail, "tealet switch failed");
+        if (fail != TEALET_ERR_PANIC) {
+            Py_DECREF(pyarg);
+            switch_arg = NULL; /* non-panic errors don't return a value */
+        }
+        PyTealet_TranslateTealetError(mstate, fail, "tealet switch failed", (PyObject *)switch_arg);
         return NULL;
     }
     result = (PyObject *)switch_arg;
@@ -917,7 +986,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         int exit_fail;
         exit_fail = tealet_exit(t_return, (void *)return_arg, exit_mode | TEALET_XFER_NOFAIL);
         if (exit_fail) {
-            PyTealet_TranslateTealetError(mstate, exit_fail, "tealet exit failed");
+            PyTealet_TranslateTealetError(mstate, exit_fail, "tealet exit failed", NULL);
             PyErr_WriteUnraisable(func);
             abort();
         }
