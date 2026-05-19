@@ -17,6 +17,9 @@ jobs:
     steps:
     - uses: actions/checkout@v6
 
+    - name: check version metadata sync
+      run: make check-version-sync
+
     - name: refresh apt package index
       run: sudo apt-get update
 
@@ -49,6 +52,7 @@ jobs:
             emulator: qemu-riscv64 -L /usr/riscv64-linux-gnu
     
     env:
+      TEALET_WITH_TESTING: 1
       PLATFORMFLAGS: ${{matrix.platformflags}}
       PLATFORM_PREFIX: ${{matrix.platformtools}}
       EMULATOR: ${{matrix.emulator}}
@@ -90,6 +94,8 @@ jobs:
   
   sanitizer-tests:
     runs-on: ubuntu-latest
+    env:
+      TEALET_WITH_TESTING: 1
     steps:
     - uses: actions/checkout@v6
 
@@ -119,6 +125,8 @@ jobs:
             abi: darwin_x86_64
           - os: macos-latest
             abi: darwin_arm64
+    env:
+      TEALET_WITH_TESTING: 1
     
     steps:
     - uses: actions/checkout@v6
@@ -155,7 +163,6 @@ jobs:
           - platform: ARM64
             folder: ARM64
             abi: win_arm64
-    
     steps:
     - uses: actions/checkout@v6
     
@@ -211,7 +218,6 @@ jobs:
         mkdir -p release/tealet
         cp src/tealet.h release/tealet/
         cp src/tealet_extras.h release/tealet/
-        cp src/tools.h release/tealet/
         cp -r stackman release/
         cp Makefile README.md LICENSE release/
         

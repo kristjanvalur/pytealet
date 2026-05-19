@@ -1,21 +1,27 @@
 /*
- *  * This test is an adaption of the example for the setcontext() library
- *   * as illustrated at https://en.wikipedia.org/wiki/Setcontext
- *    * It serves to show how to do a similar thin using tealets
- *     */
+ * This test follows the control-flow shape of the setcontext/swapcontext
+ * iterator example from:
+ * https://en.wikipedia.org/wiki/Setcontext#Example
+ *
+ * Mapping of the original idea to tealets:
+ * - iterator context function      -> loop_func()
+ * - swapcontext(main, iterator)    -> tealet_run(..., TEALET_START_SWITCH)
+ *   and later tealet_switch(loop, ...)
+ * - swapcontext(iterator, main)    -> tealet_switch(tealet_previous(current), ...)
+ * - iterator completion            -> tealet_exit(tealet_previous(current), ...)
+ *
+ * As in the original example, the iterator yields one value per iteration,
+ * main prints it, and then resumes the iterator until completion.
+ */
 
 #include "tealet.h"
-#include "tealet_extras.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-/* This is the iterator function. It is entered on the first call to
- * swapcontext, and loops from 0 to 9. Each value is saved in i_from_iterator,
- * and then swapcontext used to return to the main loop.  The main loop prints
- * the value and calls swapcontext to swap back into the function. When the end
- * of the loop is reached, the function exits, and execution switches to the
- * context pointed to by main_context1. */
+/* Iterator function analogous to the setcontext example's iterator context.
+ * It yields values to main and resumes on each switch back until it exits.
+ */
 tealet_t *loop_func(tealet_t *current, void *arg) {
   int i;
 
@@ -24,12 +30,11 @@ tealet_t *loop_func(tealet_t *current, void *arg) {
     void *value = (void *)(intptr_t)i;
 
     /* Switch to main tealet */
-    tealet_switch(tealet_previous(current), &value);
+    tealet_switch(tealet_previous(current), &value, TEALET_XFER_DEFAULT);
     /* after switch, any void* passed _to_ us is in 'value' */
   }
-  /* exit, without deleting, so that the caller can query status */
-  tealet_exit(tealet_previous(current), NULL, TEALET_FLAG_NONE);
-  return 0; /* not reached */
+  /* return-flow completion: hand control back to previous tealet */
+  return tealet_previous(current);
 }
 
 int main(void) {
@@ -38,20 +43,22 @@ int main(void) {
   tealet_t *tmain = tealet_initialize(&talloc, 0);
   tealet_t *loop;
   void *data; /* data exchange object */
-  int configure_result;
 
   if (tmain == NULL)
     return 1;
 
-  configure_result = tealet_configure_check_stack(tmain, 0);
-  if (configure_result != 0) {
+  /* how many rounds? */
+  data = (void *)10;
+  loop = tealet_new(tmain);
+  if (loop == NULL) {
     tealet_finalize(tmain);
     return 1;
   }
-
-  /* how many rounds? */
-  data = (void *)10;
-  loop = tealet_new(tmain, loop_func, &data, NULL);
+  if (tealet_run(loop, loop_func, &data, NULL, TEALET_START_SWITCH) != 0) {
+    tealet_delete(loop);
+    tealet_finalize(tmain);
+    return 1;
+  }
 
   /* loop until the tealet has exited */
   while (tealet_status(loop) == TEALET_STATUS_ACTIVE) {
@@ -59,7 +66,7 @@ int main(void) {
      * only retrieve the result
      */
     printf("%d\n", (int)(intptr_t)data);
-    tealet_switch(loop, &data);
+    tealet_switch(loop, &data, TEALET_XFER_DEFAULT);
   }
   tealet_delete(loop);
   tealet_finalize(tmain);

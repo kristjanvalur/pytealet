@@ -147,7 +147,7 @@ static int worker_recursive(tealet_t *current, int depth) {
       } else {
         /* Immediate exit: child tealets switch to main, main unwinds */
         if (current != g_main) {
-          tealet_switch(g_main, NULL);
+          tealet_switch(g_main, NULL, TEALET_XFER_DEFAULT);
           /* we should not resume this */
           assert(0);
         }
@@ -174,14 +174,18 @@ static int worker_recursive(tealet_t *current, int depth) {
       /* Switch to another tealet */
       target = pick_random_tealet(current);
       if (target) {
-        tealet_switch(target, NULL);
+        tealet_switch(target, NULL, TEALET_XFER_DEFAULT);
       }
       continue;
 
     } else if (choice == 3 && g_tealet_count < MAX_TEALETS) {
       /* Create new tealet at current stack depth */
       void *arg = NULL;
-      tealet_new(current, worker_entry, &arg, NULL);
+      tealet_t *created = tealet_new(current);
+      if (created != NULL) {
+        if (tealet_run(created, worker_entry, &arg, NULL, TEALET_START_SWITCH) != 0)
+          tealet_delete(created);
+      }
       continue;
 
     } else if (choice == 4 && current != g_main && g_tealet_count >= MAX_TEALETS) {
@@ -203,7 +207,7 @@ static int worker_recursive(tealet_t *current, int depth) {
         /* Switch to a random tealet */
         target = pick_random_tealet(current);
         if (target) {
-          tealet_switch(target, NULL);
+          tealet_switch(target, NULL, TEALET_XFER_DEFAULT);
         }
         /* We shouldn't resume here - we've exited */
         assert(0);
@@ -250,9 +254,9 @@ static tealet_t *worker_entry(tealet_t *current, void *arg) {
     /* Exit with defer flag to return cleanly, then switch to random tealet */
     target = pick_random_tealet(current);
     if (target) {
-      tealet_exit(target, NULL, TEALET_FLAG_DEFER);
+      tealet_exit(target, NULL, TEALET_EXIT_DEFER);
     } else {
-      tealet_exit(g_main, NULL, TEALET_FLAG_DEFER);
+      tealet_exit(g_main, NULL, TEALET_EXIT_DEFER);
     }
     /* Return cleanly - tealet_exit with DEFER will handle the switch */
     return g_main;
@@ -260,7 +264,7 @@ static tealet_t *worker_entry(tealet_t *current, void *arg) {
 
   /* When we return here normally, we're done - exit to main without auto-delete
    */
-  tealet_exit(g_main, NULL, TEALET_FLAG_NONE);
+  tealet_exit(g_main, NULL, TEALET_XFER_DEFAULT);
 
   /* Unreachable */
   return g_main;
@@ -343,7 +347,7 @@ int main(int argc, char *argv[]) {
           if (g_verbose) {
             printf("  Switching to tealet %d to unwind\n", i);
           }
-          tealet_switch(g_tealets[i], NULL);
+          tealet_switch(g_tealets[i], NULL, TEALET_XFER_DEFAULT);
         }
       }
     }
@@ -362,6 +366,7 @@ int main(int argc, char *argv[]) {
         int status = tealet_status(g_tealets[i]);
         printf("  Tealet %d: status=%d (%s)\n", i, status,
                status == TEALET_STATUS_ACTIVE    ? "ACTIVE"
+               : status == TEALET_STATUS_NEW     ? "NEW"
                : status == TEALET_STATUS_EXITED  ? "EXITED"
                : status == TEALET_STATUS_DEFUNCT ? "DEFUNCT"
                                                  : "UNKNOWN");

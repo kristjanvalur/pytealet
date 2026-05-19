@@ -33,12 +33,14 @@ static tealet_t *worker_run(tealet_t *t, void *arg) {
   char buffer[100];
   int depth = (int)(intptr_t)arg;
 
+  (void)t;
+
   /* Consume stack based on depth parameter */
   if (depth > 0)
     consume_stack(depth, buffer);
 
   /* Yield back to main */
-  tealet_switch(g_main, NULL);
+  tealet_switch(g_main, NULL, TEALET_XFER_DEFAULT);
 
   return g_main;
 }
@@ -65,17 +67,23 @@ int main(void) {
 
   /* Create and run a tealet to build up its stack with multiple chunks */
   printf("1. Creating tealet and forcing stack growth into multiple chunks...\n");
-  t1 = tealet_new(g_main, worker_run, NULL, NULL);
-  if (!t1) {
+  t1 = tealet_new(g_main);
+  if (t1 == NULL) {
     fprintf(stderr, "Failed to create tealet\n");
+    tealet_finalize(g_main);
+    return 1;
+  }
+  if (tealet_run(t1, worker_run, NULL, NULL, TEALET_START_SWITCH) != 0) {
+    fprintf(stderr, "Failed to start tealet\n");
+    tealet_delete(t1);
     tealet_finalize(g_main);
     return 1;
   }
 
   /* Switch to it a few times to build up stack */
-  tealet_switch(t1, NULL);
-  tealet_switch(t1, NULL);
-  tealet_switch(t1, NULL);
+  tealet_switch(t1, NULL, TEALET_XFER_DEFAULT);
+  tealet_switch(t1, NULL, TEALET_XFER_DEFAULT);
+  tealet_switch(t1, NULL, TEALET_XFER_DEFAULT);
 
   /* Now t1 has a saved stack with multiple chunks */
   tealet_get_stats(g_main, &stats);

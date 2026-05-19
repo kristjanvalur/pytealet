@@ -1,3 +1,7 @@
+/**
+ * @file tealet_extras.h
+ * @brief Public helper extensions for libtealet.
+ */
 #include "tealet.h"
 #ifndef _TEALET_EXTRAS_H_
 #define _TEALET_EXTRAS_H_
@@ -17,6 +21,14 @@ TEALET_API
 void tealet_statsalloc_init(tealet_statsalloc_t *alloc, tealet_alloc_t *base);
 
 /****************************************************************
+ * Convenience creation wrappers built on tealet_new() + tealet_run().
+ */
+
+/* Allocate a NEW tealet and run it according to TEALET_START_* flags. */
+TEALET_API
+int tealet_spawn(tealet_t *tealet, tealet_t **pcreated, tealet_run_t run, void **parg, void *stack_far, int flags);
+
+/****************************************************************
  * A tealet stub mechanism.
  * A stub is a special paused tealet, that can be restarted to
  * run any function.  It can also be duplicated, providing a
@@ -24,13 +36,13 @@ void tealet_statsalloc_init(tealet_statsalloc_t *alloc, tealet_alloc_t *base);
  * position on the stack.
  */
 
-/* create a stub and return it */
+/* create a stub and return it via out-parameter */
 TEALET_API
-tealet_t *tealet_stub_new(tealet_t *tealet, void *stack_far);
+int tealet_stub_new(tealet_t *tealet, tealet_t **pstub, void *stack_far);
 
 /*
  * Run a previously created stub.
- * Behaviour is similar to tealet_new(), except that 'stub' must be the
+ * Behaviour is similar to tealet_spawn(), except that 'stub' must be the
  * result of tealet_stub_new(), or the result
  * of tealet_duplicate() on such a stub.  Otherwise
  * behaviour is undefined.

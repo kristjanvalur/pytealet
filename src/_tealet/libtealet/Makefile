@@ -6,19 +6,21 @@
 #
 
 # Version
-VERSION = 0.4.0
-VERSION = 0.4.1
-STACKMAN_VERSION = 1.2.0
+VERSION = 0.7.0
+STACKMAN_VERSION = 1.2.1
 
 # Stack-integrity compile-time defaults (can be overridden from shell).
 # Example disable: make TEALET_WITH_STACK_GUARD=0 TEALET_WITH_STACK_SNAPSHOT=0
 TEALET_WITH_STACK_GUARD ?= 1
 TEALET_WITH_STACK_SNAPSHOT ?= 1
+TEALET_WITH_TESTING ?= 0
 
 CPPFLAGS += -Isrc -Istackman/stackman $(PLATFORMFLAGS) -DTEALET_WITH_STATS=1 \
 	-DTEALET_WITH_STACK_GUARD=$(TEALET_WITH_STACK_GUARD) \
-	-DTEALET_WITH_STACK_SNAPSHOT=$(TEALET_WITH_STACK_SNAPSHOT)
+	-DTEALET_WITH_STACK_SNAPSHOT=$(TEALET_WITH_STACK_SNAPSHOT) \
+	-DTEALET_WITH_TESTING=$(TEALET_WITH_TESTING)
 CFLAGS += -fPIC -Wall $(PLATFORMFLAGS)
+DEPFLAGS = -MMD -MP
 LDFLAGS += -Lbin $(PLATFORMFLAGS)
 
 # Handle cross-compilation
@@ -48,15 +50,19 @@ all: bin/libtealet.so bin/libtealet.a
 
 FORMAT_FILES := $(shell find src tests -type f \( -name '*.c' -o -name '*.h' \))
 CLANG_FORMAT ?= clang-format
+DOXYGEN ?= doxygen
+DOXYFILE ?= Doxyfile
+DOC_OUTPUT_DIR ?= docs/_build/doxygen
+SCRIPT_DIR ?= scripts
 
 coreobj = src/tealet.o #src/switch_S.o src/switch_c.o
 allobj = $(coreobj) src/tealet_extras.o
 
 src/tealet.o: src/tealet.c src/tealet.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ src/tealet.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ src/tealet.c
 
 src/tealet_extras.o: src/tealet_extras.c src/tealet_extras.h src/tealet.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ src/tealet_extras.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ src/tealet_extras.c
 
 bin:
 	mkdir -p bin
@@ -73,7 +79,7 @@ bin/libtealet.a: bin $(allobj)
 	@rm -rf bin/tmp_ar
 
 clean:
-	rm -f src/*.o tests/*.o *.out *.so
+	rm -f src/*.o src/*.d tests/*.o tests/*.d *.out *.so
 	rm -rf bin/*
 
 .PHONY: abiname
@@ -88,7 +94,56 @@ ifeq ($(shell uname -s),Darwin)
 	STATIC_FLAG :=
 endif
 
-.PHONY: test tests format check-format
+.PHONY: test tests format check-format docs docs-clean docs-check sync-version check-version-sync \
+	roll-changelog check-changelog-roll rollup
+
+# Version metadata synchronization
+# Authoritative source: src/tealet.h (TEALET_VERSION)
+# Mirrored fields that must match:
+#   - Makefile: VERSION = ...
+#   - README.md: **Version x.y.z**
+#   - Doxyfile: PROJECT_NUMBER = ...
+# Use `make sync-version` after updating TEALET_VERSION in src/tealet.h.
+# Use `make check-version-sync` in CI/release checks to prevent drift.
+
+check-version-sync:
+	@$(SCRIPT_DIR)/sync-version.sh -check
+
+sync-version:
+	@$(SCRIPT_DIR)/sync-version.sh
+
+# Changelog rolling helpers
+# Usage:
+#   make roll-changelog ROLL_VERSION=0.5.2 ROLL_DATE=2026-05-08
+# Defaults:
+#   ROLL_VERSION defaults to VERSION from this Makefile
+#   ROLL_DATE defaults to today's date (YYYY-MM-DD)
+#
+# Expected changelog conventions:
+# - "## [Unreleased]" section exists at top.
+# - Footer link exists as: [Unreleased]: .../compare/vX.Y.Z...HEAD
+#
+# Behavior:
+# - Inserts "## [ROLL_VERSION] - ROLL_DATE" immediately after Unreleased.
+# - Repoints [Unreleased] link to compare/vROLL_VERSION...HEAD.
+# - Adds [ROLL_VERSION] compare link from previous unreleased base to ROLL_VERSION.
+ROLL_VERSION ?= $(VERSION)
+ROLL_DATE ?= $(shell date +%F)
+
+check-changelog-roll:
+	@$(SCRIPT_DIR)/roll-changelog.sh -check
+
+roll-changelog: check-changelog-roll
+	@$(SCRIPT_DIR)/roll-changelog.sh "$(ROLL_VERSION)" "$(ROLL_DATE)"
+
+# Release metadata rollup helper:
+# - validates/syncs version metadata from src/tealet.h
+# - rolls CHANGELOG.md using ROLL_VERSION/ROLL_DATE
+#
+# Example:
+#   make rollup ROLL_VERSION=0.5.2 ROLL_DATE=2026-05-08
+rollup: sync-version roll-changelog
+	@echo "*** Rollup complete for $(ROLL_VERSION) ($(ROLL_DATE)) ***"
 
 tests: bin/test-static bin/test-dynamic
 tests: bin/test-setcontext bin/test-chunks bin/test-stochastic bin/test-fork bin/test-config
@@ -113,49 +168,97 @@ check-format:
 	@command -v $(CLANG_FORMAT) >/dev/null 2>&1 || (echo "ERROR: $(CLANG_FORMAT) not found" && exit 1)
 	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
 
+docs:
+	@command -v $(DOXYGEN) >/dev/null 2>&1 || (echo "ERROR: $(DOXYGEN) not found" && exit 1)
+	@rm -rf $(DOC_OUTPUT_DIR)
+	@mkdir -p $(DOC_OUTPUT_DIR)
+	$(DOXYGEN) $(DOXYFILE)
+	@echo "*** Docs generated at $(DOC_OUTPUT_DIR)/html/index.html ***"
+
+docs-clean:
+	rm -rf $(DOC_OUTPUT_DIR)
+
+docs-check:
+	@command -v $(DOXYGEN) >/dev/null 2>&1 || (echo "ERROR: $(DOXYGEN) not found" && exit 1)
+	@rm -rf $(DOC_OUTPUT_DIR)
+	@mkdir -p $(DOC_OUTPUT_DIR)
+	$(DOXYGEN) $(DOXYFILE)
+	@test ! -s $(DOC_OUTPUT_DIR)/warnings.log || (echo "ERROR: Doxygen warnings detected:" && cat $(DOC_OUTPUT_DIR)/warnings.log && exit 1)
+	@echo "*** Docs check passed (no Doxygen warnings) ***"
+
 # Multiple chunks and sharing test
 bin/test-chunks: bin tests/test_chunks.o bin/libtealet.a
 	$(CC) $(LDFLAGS) $(STATIC_FLAG) -o $@ tests/test_chunks.o -ltealet
 
 tests/test_chunks.o: tests/test_chunks.c src/tealet.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ tests/test_chunks.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_chunks.c
 
 # Stochastic switching test
 bin/test-stochastic: bin tests/test_stochastic.o bin/libtealet.a
 	$(CC) $(LDFLAGS) $(STATIC_FLAG) -o $@ tests/test_stochastic.o -ltealet
 
 tests/test_stochastic.o: tests/test_stochastic.c src/tealet.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ tests/test_stochastic.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_stochastic.c
 
 # Fork test
 bin/test-fork: bin tests/test_fork.o bin/libtealet.a
 	$(CC) $(LDFLAGS) $(STATIC_FLAG) -o $@ tests/test_fork.o -ltealet
 
 tests/test_fork.o: tests/test_fork.c src/tealet.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ tests/test_fork.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_fork.c
 
 # Configure API test
 bin/test-config: bin tests/test_config.o bin/libtealet.a
 	$(CC) $(LDFLAGS) $(STATIC_FLAG) -o $@ tests/test_config.o -ltealet
 
 tests/test_config.o: tests/test_config.c src/tealet.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ tests/test_config.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_config.c
 
 # Current tealet test
 bin/test-current: bin tests/test_current.o bin/libtealet.a
 	$(CC) $(LDFLAGS) $(STATIC_FLAG) -o $@ tests/test_current.o -ltealet
 
 tests/test_current.o: tests/test_current.c src/tealet.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ tests/test_current.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_current.c
+
+# Load compiler-generated header dependencies when present.
+-include $(wildcard src/*.d tests/*.d)
+
+tests/setcontext.o: tests/setcontext.c src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/setcontext.c
 
 bin/test-setcontext: bin tests/setcontext.o bin/libtealet.so
 	$(CC) $(LDFLAGS) $(STATIC_FLAG) -o $@ tests/setcontext.o ${DEBUG} -ltealet
 
-bin/test-static: bin tests/tests.o bin/libtealet.a
-	$(CC) $(LDFLAGS) $(STATIC_FLAG) -o $@ tests/tests.o ${DEBUG} -ltealet
+tests/tests.o: tests/tests.c src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/tests.c
 
-bin/test-dynamic: bin tests/tests.o bin/libtealet.so
-	$(CC) $(LDFLAGS) -g -o $@ tests/tests.o ${DEBUG} -ltealet
+tests/test_locking.o: tests/test_locking.c src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_locking.c
+
+tests/test_transfer.o: tests/test_transfer.c src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_transfer.c
+
+tests/test_stress.o: tests/test_stress.c src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_stress.c
+
+tests/test_resilience.o: tests/test_resilience.c src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_resilience.c
+
+tests/test_lifecycle.o: tests/test_lifecycle.c src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_lifecycle.c
+
+tests/test_stack.o: tests/test_stack.c src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_stack.c
+
+tests/test_stats_extra.o: tests/test_stats_extra.c src/tealet.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ tests/test_stats_extra.c
+
+bin/test-static: bin tests/tests.o tests/test_locking.o tests/test_transfer.o tests/test_stress.o tests/test_resilience.o tests/test_lifecycle.o tests/test_stack.o tests/test_stats_extra.o bin/libtealet.a
+	$(CC) $(LDFLAGS) $(STATIC_FLAG) -o $@ tests/tests.o tests/test_locking.o tests/test_transfer.o tests/test_stress.o tests/test_resilience.o tests/test_lifecycle.o tests/test_stack.o tests/test_stats_extra.o ${DEBUG} -ltealet
+
+bin/test-dynamic: bin tests/tests.o tests/test_locking.o tests/test_transfer.o tests/test_stress.o tests/test_resilience.o tests/test_lifecycle.o tests/test_stack.o tests/test_stats_extra.o bin/libtealet.so
+	$(CC) $(LDFLAGS) -g -o $@ tests/tests.o tests/test_locking.o tests/test_transfer.o tests/test_stress.o tests/test_resilience.o tests/test_lifecycle.o tests/test_stack.o tests/test_stats_extra.o ${DEBUG} -ltealet
 
 # Sanitizer tests - run on single platform for sanity checking
 .PHONY: test-sanitizers test-ubsan test-valgrind
@@ -169,6 +272,7 @@ bin/test-dynamic: bin tests/tests.o bin/libtealet.so
 test-ubsan: clean
 	@echo "=== Building with UndefinedBehaviorSanitizer ==="
 	$(MAKE) bin/test-static bin/test-setcontext bin/test-stochastic bin/test-fork \
+		TEALET_WITH_TESTING=$(TEALET_WITH_TESTING) \
 		CFLAGS="-fPIC -Wall $(PLATFORMFLAGS) -g -fsanitize=undefined -fno-omit-frame-pointer" \
 		LDFLAGS="-Lbin -L$(LIB) $(PLATFORMFLAGS) -fsanitize=undefined" \
 		STATIC_FLAG=""

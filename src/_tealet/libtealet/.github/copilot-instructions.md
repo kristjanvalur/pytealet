@@ -12,7 +12,8 @@
 - Inspired by Stackless Python and the Python Greenlet project
 
 ### Dependencies
-- **stackman**: Low-level stack operations library (git submodule)
+- **stackman**: Low-level stack operations library vendored in-tree under `stackman/` from the official Stackman release tarball (not a git submodule).
+- Source for vendor updates: `https://github.com/stackless-dev/stackman/releases/download/vX.Y.Z/stackman-X.Y.Z.tar.gz`
 - Minimal runtime dependencies: `memcpy()`, `malloc()` (replaceable), `assert()` (debug builds only)
 
 ## Architecture
@@ -22,11 +23,32 @@
 1. **tealet.h / tealet.c**: Core coroutine implementation
    - `tealet_t`: Main coroutine structure
    - `tealet_run_t`: Function pointer type for coroutine entry points
-   - Lifecycle: `tealet_initialize()` → `tealet_create()`/`tealet_new()` → `tealet_switch()` → `tealet_exit()`/`tealet_finalize()`
+  - Lifecycle: `tealet_initialize()` → `tealet_new()` → `tealet_run()`/`tealet_switch()` → `tealet_exit()`/`tealet_finalize()`
 
 2. **tealet_extras.h / tealet_extras.c**: Helper utilities for the library
 
 3. **stackman**: Low-level stack switching (bundled distribution in `stackman/`)
+
+### Recent structural conventions (important)
+
+- Keep public API layout grouped consistently in both `src/tealet.c` and `src/tealet.h`:
+  1) **core lifecycle/switching**, 2) **status/query**, 3) **configuration**, 4) **utility helpers**,
+  and testing-only debug hooks at file end under `#if TEALET_WITH_TESTING`.
+- Preserve section banners (`/************************************************************ ... */`) when adding/moving APIs.
+- In `tealet.h`, treat declaration order and comments as the canonical API surface; keep
+  implementation-only detail in `tealet.c`.
+- Preserve the `g_` member naming convention (for example `g_current`, `g_flags`):
+  this is a historical carry-over from the codebase's greenlet origins and is
+  intentionally retained as a nod to that lineage.
+- Prefer explicit flag-based state over sentinel signaling where practical:
+  - per-tealet flags now include `EXITING`, `DEFUNCT`, `AUTODELETE`, `EXITED`
+  - per-stack flags include `DEFUNCT`
+- Exited tealets are represented by `TEALET_TFLAGS_EXITED` (not by nulling `stack_far`).
+- Deferred exit currently borrows main temporary storage (`g_flags`/`g_arg`); keep the
+  invariant assert before setting deferred state.
+- For test-only debug entry points, keep them non-public and colocated at end of `tealet.c`
+  within the testing guard.
+
 
 ### Key Data Structures
 
@@ -50,13 +72,15 @@ tealet_finalize(main);
 
 ### Creating and Switching
 ```c
-// Pattern 1: Create then switch
-tealet_t *g = tealet_create(main, run_func, NULL);
+// Pattern 1: Create/bind then switch
+tealet_t *g = tealet_new(main);
+tealet_run(g, run_func, NULL, NULL, TEALET_START_DEFAULT);
 void *arg = my_data;
-tealet_switch(g, &arg);
+tealet_switch(g, &arg, TEALET_XFER_DEFAULT);
 
 // Pattern 2: Create and switch atomically
-tealet_t *g = tealet_new(main, run_func, &arg, NULL);
+tealet_t *g = tealet_new(main);
+tealet_run(g, run_func, &arg, NULL, TEALET_START_SWITCH);
 ```
 
 ### Run Function Pattern
@@ -71,9 +95,9 @@ tealet_t *my_run(tealet_t *current, void *arg) {
 ### Exiting Pattern
 ```c
 // In run function:
-tealet_exit(target, arg, TEALET_FLAG_DELETE);  // Delete current tealet
-tealet_exit(target, arg, TEALET_FLAG_NONE);     // Keep tealet alive
-tealet_exit(target, arg, TEALET_FLAG_DEFER);    // Defer to return statement
+tealet_exit(target, arg, TEALET_EXIT_DELETE);  // Delete current tealet
+tealet_exit(target, arg, TEALET_XFER_DEFAULT);     // Keep tealet alive
+tealet_exit(target, arg, TEALET_EXIT_DEFER);    // Defer to return statement
 ```
 
 ## Code Style & Conventions
@@ -84,7 +108,7 @@ tealet_exit(target, arg, TEALET_FLAG_DEFER);    // Defer to return statement
 - Types: `*_t` suffix (e.g., `tealet_t`, `tealet_run_t`)
 - Error codes: Negative integers (`TEALET_ERR_*`)
 - Status codes: `TEALET_STATUS_*`
-- Flags: `TEALET_FLAG_*`
+- Flags: `TEALET_XFER_*`, `TEALET_EXIT_*`, `TEALET_RUN_*`
 
 ### C Standards
 - Written in C89/C90 compatible style
@@ -94,13 +118,41 @@ tealet_exit(target, arg, TEALET_FLAG_DEFER);    // Defer to return statement
 ### Memory Management
 - All allocations go through `tealet_alloc_t` interface
 - Use `TEALET_ALLOC_MALLOC()` and `TEALET_ALLOC_FREE()` macros
-- Tealets auto-freed when run function returns (unless TEALET_FLAG_DELETE not set)
+- Tealets auto-freed when run function returns (unless TEALET_EXIT_DELETE not set)
 
 ### Error Handling
 - Functions return negative error codes or NULL on failure
 - `TEALET_ERR_MEM`: Memory allocation failed
 - `TEALET_ERR_DEFUNCT`: Target tealet is corrupt
 - Use `assert()` for debug builds
+
+### Example snippets policy (review-critical)
+- Example/tutorial code is primarily illustrative and may intentionally omit
+  exhaustive error handling and edge-case branches.
+- Do not require production-style hardening in principle-focused snippets unless
+  the example is explicitly presented as a robust error-handling pattern.
+- In reviews, prioritize correctness of the demonstrated concept and API usage
+  over full defensive handling of every failure mode.
+
+### Validation and undefined behavior policy (review-critical)
+- Do not propose broad runtime argument/flag validation by default.
+- `TEALET_ERR_INVAL` exists primarily for application logic errors (for example,
+  wrong tealet object, wrong ownership/domain assumptions, or impossible call
+  context), not as a general "flag sanitizer" for every invalid bit pattern.
+- Unknown flag bits and undocumented flag combinations are intentionally
+  **undefined behavior** unless explicitly documented otherwise.
+- Keep public API docs focused on defined/supported behavior; do not expand API
+  docs to enumerate undefined behavior cases.
+- In reviews, avoid requesting extra checks or docs for undefined flag misuse
+  unless maintainers explicitly choose to define those semantics.
+
+### Test assertions policy (review-critical)
+- Files under `tests/` (including `tests/tests.c`) are run in debug-oriented
+  builds as part of this project's validation workflow.
+- In test code, `assert(0)` used to mark logically unreachable control-flow
+  paths is intentional and acceptable.
+- Do not request replacing such `assert(0)` calls with `abort()` by default;
+  treat them as test invariants unless maintainers explicitly ask otherwise.
 
 ## Important Warnings
 
@@ -152,6 +204,28 @@ CFLAGS="-O3 -flto" LDFLAGS="-O3 -flto" make test  # Optimized build
 - `-Wall`: Enable warnings
 - `-Isrc -Istackman/stackman`: Include paths
 
+## Release version sync
+
+`src/tealet.h` is the single authoritative source of release version information.
+
+When bumping versions, update `TEALET_VERSION_*` / `TEALET_VERSION` there first, then keep all other public/versioned metadata synchronized:
+
+- `src/tealet.h` (`TEALET_VERSION_*` and `TEALET_VERSION`)
+- `Makefile` (`VERSION = ...`)
+- `README.md` (`**Version x.y.z**` near the top)
+- `Doxyfile` (`PROJECT_NUMBER = ...`)
+
+Use the built-in helpers:
+
+- `make sync-version` to copy `TEALET_VERSION` from `src/tealet.h` into the other version fields.
+- `make check-version-sync` to validate all version fields match.
+
+For changelog release rollups:
+
+- `make check-changelog-roll` validates that `CHANGELOG.md` has the required `Unreleased` section and compare-link format.
+- `make roll-changelog ROLL_VERSION=x.y.z ROLL_DATE=YYYY-MM-DD` inserts a release header from `Unreleased` and updates footer compare links.
+- `make rollup ROLL_VERSION=x.y.z ROLL_DATE=YYYY-MM-DD` runs both metadata sync and changelog rollup in one step.
+
 ## Examples
 
 See `tests/setcontext.c` for a practical example implementing `longjmp()`-like functionality using tealets.
@@ -167,6 +241,21 @@ See `tests/setcontext.c` for a practical example implementing `longjmp()`-like f
 7. Consider thread safety in multi-threaded contexts
 
 ## Documentation Style Guide
+
+### In-code documentation standard
+- Prefer **Doxygen-style** comments for extracted/referenceable API docs.
+- For public APIs in `src/tealet.h`, use `/** ... */` blocks and standard tags where useful
+  (`@brief`, `@param`, `@return`, `@note`, `@warning`).
+- Be selective in `src/tealet.h`: use Doxygen for declaration-level API docs, but keep
+  incidental comments (macro headings, trailing inline comments, header guards) as regular
+  `/* ... */` comments.
+- Keep canonical user-facing API docs on declarations in `tealet.h`; in `tealet.c`, keep
+  comments implementation-focused.
+- In `src/tealet.c`, reserve Doxygen blocks for meaningful internal function-level notes placed
+  immediately before function definitions; keep inline flow comments and local notes as `/* ... */`.
+- Section banners in both files must always be non-Doxygen (`/* ... */`), never `/** ... */`.
+- Preserve section/group organization in docs so generated references mirror code layout:
+  core lifecycle/switching → status/query → configuration → utility.
 
 ### Tone and Voice
 - **Direct and concise**: Avoid unnecessary verbosity; state facts clearly
@@ -242,7 +331,8 @@ Use this when you need to [specific use case].
 
 \`\`\`c
 // Practical example
-tealet_t *t = tealet_new(main, my_func, &arg, NULL);
+tealet_t *t = tealet_new(main);
+tealet_run(t, my_func, &arg, NULL, TEALET_START_SWITCH);
 \`\`\`
 
 **Note:** Platform-specific behavior or limitations.

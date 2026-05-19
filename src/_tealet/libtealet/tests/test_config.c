@@ -17,6 +17,29 @@
 
 static int test_count = 0;
 static int test_passed = 0;
+static int prepare_worker(tealet_t *main_tealet, tealet_t **pworker, tealet_run_t run) {
+  tealet_t *worker;
+  int result;
+
+  if (pworker == NULL)
+    return TEALET_ERR_INVAL;
+  *pworker = NULL;
+
+  worker = tealet_new(main_tealet);
+  if (worker == NULL)
+    return TEALET_ERR_MEM;
+
+  result = tealet_run(worker, run, NULL, NULL, TEALET_START_DEFAULT);
+  if (result != 0) {
+    tealet_delete(worker);
+    return result;
+  }
+
+  *pworker = worker;
+  return 0;
+}
+
+static void finalize_main_checked(tealet_t *main_tealet) { tealet_finalize(main_tealet); }
 
 /*
  * Runtime outcomes for alignment-sensitive mprotect split tests.
@@ -107,13 +130,13 @@ static tealet_t *run_write_to_target(tealet_t *current, void *arg) {
   original = *target;
   *target ^= 0x5Au;
 
-  switch_result = tealet_switch(command->return_to, NULL);
+  switch_result = tealet_switch(command->return_to, NULL, TEALET_XFER_DEFAULT);
   if (command->first_switch_result)
     *command->first_switch_result = switch_result;
 
   if (switch_result == TEALET_ERR_INTEGRITY) {
     *target = original;
-    switch_result = tealet_switch(command->return_to, NULL);
+    switch_result = tealet_switch(command->return_to, NULL, TEALET_XFER_DEFAULT);
   }
 
   if (command->recovery_switch_result)
@@ -251,13 +274,13 @@ static tealet_t *run_write_with_mprotect_split(tealet_t *current, void *arg) {
   original = *target;
   *target ^= 0x5Au;
 
-  switch_result = tealet_switch(command->return_to, NULL);
+  switch_result = tealet_switch(command->return_to, NULL, TEALET_XFER_DEFAULT);
   if (command->first_switch_result)
     *command->first_switch_result = switch_result;
 
   if (switch_result == TEALET_ERR_INTEGRITY) {
     *target = original;
-    switch_result = tealet_switch(command->return_to, NULL);
+    switch_result = tealet_switch(command->return_to, NULL, TEALET_XFER_DEFAULT);
   }
 
   if (command->recovery_switch_result)
@@ -301,7 +324,9 @@ static int run_integrity_switch_case(int fail_policy, int write_inside, int *fir
   assert((cfg.flags & TEALET_CONFIGF_STACK_INTEGRITY) != 0);
   assert((cfg.flags & TEALET_CONFIGF_STACK_SNAPSHOT) != 0);
 
-  writer = tealet_create(main_tealet, run_write_to_target, NULL);
+  writer = NULL;
+  result = prepare_worker(main_tealet, &writer, run_write_to_target);
+  assert(result == 0);
   assert(writer != NULL);
 
   first_switch_result = 0;
@@ -313,11 +338,11 @@ static int run_integrity_switch_case(int fail_policy, int write_inside, int *fir
   command->recovery_switch_result = &second_switch_result;
 
   arg = command;
-  result = tealet_switch(writer, &arg);
+  result = tealet_switch(writer, &arg, TEALET_XFER_DEFAULT);
   assert(result == 0);
   tealet_free(main_tealet, outside_target);
   tealet_free(main_tealet, command);
-  tealet_finalize(main_tealet);
+  finalize_main_checked(main_tealet);
 
   if (first_result)
     *first_result = first_switch_result;
@@ -365,7 +390,9 @@ static int run_mprotect_split_case(int write_guard_page, int *first_result, int 
   assert((cfg.flags & TEALET_CONFIGF_STACK_SNAPSHOT) != 0);
   assert((cfg.flags & TEALET_CONFIGF_STACK_GUARD) != 0);
 
-  writer = tealet_create(main_tealet, run_write_with_mprotect_split, NULL);
+  writer = NULL;
+  result = prepare_worker(main_tealet, &writer, run_write_with_mprotect_split);
+  assert(result == 0);
   assert(writer != NULL);
 
   first_switch_result = 0;
@@ -377,20 +404,20 @@ static int run_mprotect_split_case(int write_guard_page, int *first_result, int 
   command->recovery_switch_result = &second_switch_result;
 
   arg = command;
-  result = tealet_switch(writer, &arg);
+  result = tealet_switch(writer, &arg, TEALET_XFER_DEFAULT);
   if (write_guard_page) {
     if (first_result)
       *first_result = first_switch_result;
     if (recovery_result)
       *recovery_result = second_switch_result;
     tealet_free(main_tealet, command);
-    tealet_finalize(main_tealet);
+    finalize_main_checked(main_tealet);
     return result;
   }
 
   assert(result == 0);
   tealet_free(main_tealet, command);
-  tealet_finalize(main_tealet);
+  finalize_main_checked(main_tealet);
 
   if (first_result)
     *first_result = first_switch_result;
@@ -426,7 +453,7 @@ static void test_get_defaults(void) {
   assert(cfg.stack_integrity_fail_policy == TEALET_STACK_INTEGRITY_FAIL_ASSERT);
   assert(cfg.stack_guard_limit == NULL);
 
-  tealet_finalize(main_tealet);
+  finalize_main_checked(main_tealet);
   PASS();
 }
 
@@ -480,7 +507,7 @@ static void test_set_canonicalizes_unsupported(void) {
   assert(get_cfg.stack_guard_mode == set_cfg.stack_guard_mode);
   assert(get_cfg.stack_guard_limit == NULL);
 
-  tealet_finalize(main_tealet);
+  finalize_main_checked(main_tealet);
   PASS();
 }
 
@@ -504,7 +531,7 @@ static void test_set_snapshot_supported_build(void) {
   assert((cfg.flags & TEALET_CONFIGF_STACK_INTEGRITY) != 0);
   assert(cfg.stack_integrity_bytes == 2048);
 
-  tealet_finalize(main_tealet);
+  finalize_main_checked(main_tealet);
   PASS();
 #endif
 }
@@ -569,11 +596,13 @@ static void test_set_while_snapshot_active_resizes(void) {
   command->return_to = main_tealet;
   command->configure_result = TEALET_ERR_MEM;
 
-  worker = tealet_create(main_tealet, run_resize_snapshot_while_active, NULL);
+  worker = NULL;
+  result = prepare_worker(main_tealet, &worker, run_resize_snapshot_while_active);
+  assert(result == 0);
   assert(worker != NULL);
 
   arg = command;
-  result = tealet_switch(worker, &arg);
+  result = tealet_switch(worker, &arg, TEALET_XFER_DEFAULT);
   assert(result == 0);
   assert(command->configure_result == 0);
 
@@ -583,7 +612,7 @@ static void test_set_while_snapshot_active_resizes(void) {
   assert(get_cfg.stack_integrity_bytes == 4096);
 
   tealet_free(main_tealet, command);
-  tealet_finalize(main_tealet);
+  finalize_main_checked(main_tealet);
   PASS();
 #endif
 }
@@ -787,7 +816,7 @@ static void test_set_invalid_version(void) {
   result = tealet_configure_set(main_tealet, &cfg);
   assert(result == TEALET_ERR_INVAL);
 
-  tealet_finalize(main_tealet);
+  finalize_main_checked(main_tealet);
   PASS();
 }
 
@@ -809,7 +838,7 @@ static void test_header_size_validation(void) {
   result = tealet_configure_set(main_tealet, &cfg);
   assert(result == TEALET_ERR_INVAL);
 
-  tealet_finalize(main_tealet);
+  finalize_main_checked(main_tealet);
   PASS();
 }
 

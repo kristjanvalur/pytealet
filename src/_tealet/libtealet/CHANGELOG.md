@@ -7,6 +7,249 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-12
+
+### Added
+- **NOFAIL transfer policies for both exit and switch APIs**
+  - Added `TEALET_XFER_NOFAIL` to provide a
+    robustness-oriented transfer mode for callers that prioritize forward
+    progress under memory pressure/defunct-target conditions.
+  - NOFAIL attempts the requested transfer with FORCE first.
+  - On expected runtime transfer failures (`TEALET_ERR_MEM` /
+    `TEALET_ERR_DEFUNCT`), NOFAIL falls back to `PANIC|FORCE` transfer to main.
+  - Other errors (for example `TEALET_ERR_INVAL`, and `TEALET_ERR_PANIC` on
+    switch) are returned unchanged.
+
+### Changed
+- **`tealet_t.main` is now const-qualified in the public API** (initialized internally via a targeted cast-based write during allocation).
+
+- **Fork and start-mode API cleanup for orthogonality**
+  - Simplified `tealet_fork()` by removing side out-parameter signaling and
+    documenting side detection via `tealet_current(child) == child`.
+  - Renamed shared start flags from `TEALET_RUN_*` to `TEALET_START_*` to
+    better reflect usage across `tealet_run()`, `tealet_fork()`, and
+    `tealet_spawn()`.
+  - Updated tests and public docs to use the simplified fork contract and the
+    `TEALET_START_*` flag family.
+
+- **Regression test suite was restructured into focused modules**
+  - Split the former monolithic regression harness into dedicated test files
+    (lifecycle, transfer, locking, resilience, stack, stats, and stress) with
+    shared harness helpers.
+  - Preserved existing behavior while improving maintainability and
+    cross-platform project integration.
+
+- **Transfer internals now use one-shot signaling flags with explicit consumption points**
+  - Renamed the internal transient per-tealet force bit from `EXITFORCE` to
+    `SAVEFORCE` to reflect that it applies to save behavior generally, not only
+    exit flows.
+  - Clarified internal ownership/lifecycle: transfer prep sets one-shot signals
+    (`SAVEFORCE`, `PANIC`) before the handoff, and low-level transfer helpers
+    consume and clear them during the same operation.
+
+- **Switch/exit transfer paths are now factored around shared kinship**
+  - Refactored `tealet_switch()` and `tealet_exit()` to leverage a shared
+    internal transfer helper (`tealet_xfer_inner`) for common transfer
+    mechanics, while preserving each API's mode-specific behavior.
+  - Kept mode-specific semantics explicit (for example exit-mode invariants and
+    retry policy orchestration) while reducing duplicate transfer plumbing.
+
+- **Run-return lifecycle now keeps tealets alive by default**
+  - Returning from a tealet run function now follows default non-delete exit
+    semantics (equivalent to `TEALET_XFER_DEFAULT` transfer behavior for
+    `tealet_exit()`), so the tealet remains allocated instead of being
+    implicitly deleted.
+  - Automatic deletion remains available via explicit
+    `tealet_exit(..., TEALET_EXIT_DELETE)`.
+  - Tests and examples were updated to perform explicit `tealet_delete()`
+    cleanup where ownership remains with the caller.
+  - API/docs now clarify that `TEALET_EXIT_DELETE` invalidates outstanding
+    pointers to the exiting tealet after transfer.
+
+- **Creation semantics now use explicit allocation + bind/start steps**
+  - `tealet_new()` now allocates and returns a NEW/unbound tealet handle.
+  - `tealet_run()` is the bind/start primitive, with:
+    - `TEALET_START_DEFAULT` for deferred start (capture without immediate switch)
+    - `TEALET_START_SWITCH` for immediate start via an optimized single path
+      equivalent in effect to `TEALET_START_DEFAULT` + `tealet_switch()`.
+  - `tealet_fork()` now uses `TEALET_START_DEFAULT` / `TEALET_START_SWITCH`
+    mode flags.
+
+- **Public transfer flags were renamed to `TEALET_XFER_*`**
+  - User-facing switch/exit transfer behavior now uses shared
+    `TEALET_XFER_*` names.
+  - `tealet_switch()` now uses:
+    - `TEALET_XFER_FORCE` (was `TEALET_SWITCH_FORCE`)
+    - `TEALET_XFER_PANIC` (was `TEALET_SWITCH_PANIC`)
+    - `TEALET_XFER_NOFAIL` (was `TEALET_SWITCH_NOFAIL`)
+  - `tealet_exit()` now uses:
+    - `TEALET_XFER_FORCE` (was `TEALET_EXIT_FORCE`)
+    - `TEALET_XFER_PANIC` (was `TEALET_EXIT_PANIC`)
+    - `TEALET_XFER_NOFAIL` (was `TEALET_EXIT_NOFAIL`)
+    - plus exit-only `TEALET_EXIT_DELETE` / `TEALET_EXIT_DEFER`.
+  - `TEALET_XFER_*` occupies the low 8-bit transfer flag space; exit-only flags
+    begin at `0x100` to reserve headroom for future transfer-flag growth.
+
+- **Build now tracks generated header dependencies automatically**
+  - Make rules now emit and include compiler-generated dependency files for C
+    objects.
+  - Header edits now trigger the correct object rebuilds without requiring a
+    manual clean step.
+
+### Removed
+- **Legacy creation API surface removed from core**
+  - Removed core `tealet_create()` and the old create-and-start `tealet_new(...)`
+    out-parameter signature.
+  - Removed legacy `TEALET_FORK_DEFAULT` / `TEALET_FORK_SWITCH` flags in favor
+    of `TEALET_START_*`.
+
+- **Separate switch/exit transfer-flag names removed**
+  - Removed `TEALET_SWITCH_DEFAULT` / `TEALET_SWITCH_FORCE` /
+    `TEALET_SWITCH_PANIC` / `TEALET_SWITCH_NOFAIL`.
+  - Removed `TEALET_EXIT_DEFAULT` / `TEALET_EXIT_FORCE` /
+    `TEALET_EXIT_PANIC` / `TEALET_EXIT_NOFAIL`.
+
+### Documentation
+- Updated `README.md`, `docs/GETTING_STARTED.md`, `docs/API.md`,
+  `docs/ARCHITECTURE.md`, and `src/tealet.h` Doxygen comments to reflect the
+  new creation flow and start-mode semantics.
+
+## [0.6.0] - 2026-05-09
+
+### Changed
+- **Switch/exit behavior is now explicit via flags**
+  - `tealet_switch()` now takes a `flags` parameter and supports:
+    - `TEALET_SWITCH_DEFAULT`
+    - `TEALET_SWITCH_FORCE`
+    - `TEALET_SWITCH_PANIC`
+  - `TEALET_SWITCH_FORCE` / `TEALET_EXIT_FORCE` semantics are now documented explicitly, including the main-stack edge case where `TEALET_ERR_MEM` can still occur under FORCE.
+
+- **Creation APIs now return status codes with out-parameters**
+  - `tealet_new()` and `tealet_create()` now return `int` status and report created tealets via out-pointers.
+  - `tealet_stub_new()` in extras/helpers follows the same status-return pattern.
+  - Call sites and examples were migrated to the status-first style.
+
+- **Implicit run-return exit policy hardened and documented**
+  - Automatic exit on run-function return now uses an explicit retry/fallback policy:
+    - requested target (default)
+    - panic+force to main on defunct target
+    - requested target with FORCE on memory failure
+    - panic+force to main if FORCE still cannot complete transfer
+  - API docs now include a concise robust manual `tealet_exit()` pattern for implementors.
+
+- Updated bundled Stackman distribution to `v1.2.1`.
+
+### Documentation
+- Updated `README.md`, `docs/API.md`, `docs/ARCHITECTURE.md`, and `docs/GETTING_STARTED.md` to reflect the new signatures and behavioral semantics.
+
+## [0.5.1] - 2026-05-08
+
+### Added
+- **Switch-scoped lock mode configuration**
+  - Added explicit lock mode selection in `tealet_lock_t.mode`:
+    - `TEALET_LOCK_OFF`
+    - `TEALET_LOCK_SWITCH`
+
+### Changed
+- **Locking behavior is now mode-driven**
+  - `TEALET_LOCK_SWITCH` enables internal auto-locking for switching APIs only (`tealet_new()`, `tealet_create()`, `tealet_switch()`, `tealet_exit()`, `tealet_fork()`).
+  - `TEALET_LOCK_OFF` leaves lock ownership fully to integrator-managed scopes.
+  - Updated tests/helpers to configure lock mode explicitly where lock-callback behavior is validated.
+
+### Documentation
+- **Locking model and API docs refresh**
+  - Expanded and reorganized `docs/API.md` to clarify lock-mode semantics and switching-vs-manual locking expectations.
+  - Refined README/API split: README remains concise and points to `docs/API.md` as the canonical behavioral reference.
+  - Added release-version synchronization guidance and tooling notes (`make sync-version`, `make check-version-sync`) to reduce metadata drift.
+
+## [0.5.0] - 2026-05-07
+
+### Added
+- **Locking callback API for synchronized foreign-thread structure access**
+  - Added `tealet_lock_t` callback descriptor.
+  - Added `tealet_config_set_locking()` to configure lock/unlock callbacks per main-tealet domain.
+  - Added utility entry points `tealet_lock()` and `tealet_unlock()`.
+- **Incremental save algorithm documentation**
+  - Added `docs/INCREMENTAL_SAVE.md` describing partial-save invariants and transition behavior.
+
+### Changed
+- **Automatic lock ownership is now limited to core switching APIs**
+  - Internal auto-lock scope is centered on:
+    - `tealet_new()`
+    - `tealet_create()`
+    - `tealet_switch()`
+    - `tealet_exit()`
+    - `tealet_fork()`
+  - Non-switch APIs remain caller-synchronized where foreign-thread access is possible.
+
+### Fixed
+- **Unreachable exit fallback hardening**
+  - Hardened the unreachable `tealet_exit()` return path to fail fast via `abort()` in release builds.
+
+## [0.4.3] - 2026-04-22
+
+### Added
+- **Tealet origin flags API**
+  - Added `tealet_get_origin()` to expose tealet origin/lineage flags.
+  - Added public origin bits:
+    - `TEALET_ORIGIN_MAIN_LINEAGE`
+    - `TEALET_ORIGIN_FORK`
+  - Added convenience macros:
+    - `TEALET_IS_MAIN_LINEAGE()`
+    - `TEALET_IS_FORK()`
+  - Origin bits are tracked on existing per-tealet internal flags and preserved across relevant clone paths.
+
+### Changed
+- **Fork semantics documentation clarity**
+  - Clarified in `src/tealet.h`, `README.md`, and `docs/API.md` that main-lineage fork caveats are scoped to main-lineage execution (main or clone-of-main), not all forks.
+  - Clarified that forked children inherit the parent/current far boundary (`stack_far`) at fork time.
+
+### Tests
+- **Origin flag coverage**
+  - Added origin-flag assertions directly into existing `tealet_fork()` behavior tests in `tests/test_fork.c`.
+  - Added a regular non-fork tealet assertion path in `tests/tests.c` to verify baseline origin classification.
+
+## [0.4.2] - 2026-04-04
+
+### Added
+- **Panic reroute switch error (`TEALET_ERR_PANIC`)**
+  - Added `TEALET_ERR_PANIC` as a switch result in `main` when `tealet_exit()` reroutes to `main` because the requested exit target is defunct.
+  - Added internal panic-latch handling in switch/exit flow using an internal main-flag bit.
+- **Testing gate for internal hooks**
+  - Added `TEALET_WITH_TESTING` build knob (default `0`) propagated via Makefile.
+  - Added internal test-only hook `tealet_debug_force_defunct()` guarded by `TEALET_WITH_TESTING`.
+
+### Changed
+- **Switch caller sanity checks**
+  - Added caller-context verification in stack-switch paths to catch invalid caller/thread-stack usage earlier.
+  - Added and documented `tealet_config_t.max_stack_size` as caller-switch-sanity-only control:
+    - default `TEALET_DEFAULT_MAX_STACK_SIZE` (16 MiB)
+    - non-zero enforces caller stack-distance bound
+    - `0` removes stack-size assumptions by disabling this caller-distance validation
+- **Error-handling API docs**
+  - Expanded `docs/API.md` with dedicated error-handling guidance for `TEALET_ERR_MEM`, `TEALET_ERR_DEFUNCT`, and `TEALET_ERR_PANIC`.
+  - Documented practical recovery guidance for main vs non-main contexts.
+  - Clarified `tealet_new()` conceptual equivalence to `tealet_create()` + `tealet_switch()` and aligned failure semantics.
+- **State model cleanup for exited tealets**
+  - Switched exited-state representation to `TEALET_TFLAGS_EXITED` instead of relying on `stack_far == NULL` sentinel behavior.
+  - Tightened related invariants in exit/switch paths.
+- **Public API layout consistency**
+  - Reorganized declaration/definition order in `src/tealet.h` and `src/tealet.c` by function group:
+    core lifecycle/switching → status/query → configuration → utility.
+  - Kept testing-only debug hooks grouped at file end under `TEALET_WITH_TESTING` in `src/tealet.c`.
+- **In-code documentation conventions**
+  - Expanded declaration-level Doxygen docs in `src/tealet.h` for core/status/config/utility APIs.
+  - Adopted selective documentation style: declaration-level Doxygen in header; implementation-focused comments in `src/tealet.c`.
+  - Normalized section banners to unambiguous non-Doxygen form in both `src/tealet.h` and `src/tealet.c`.
+
+### Fixed
+- **Defunct delete safety**
+  - `tealet_delete()` now avoids decref on defunct marker state (`stack == (tealet_stack_t *)-1`).
+
+### Tests
+- **Panic reroute regression coverage**
+  - Added regression test for defunct-target exit reroute signaling (`TEALET_ERR_PANIC`) under `TEALET_WITH_TESTING=1`.
+
 ## [0.4.1] - 2026-03-31
 
 ### Changed
@@ -292,7 +535,13 @@ This release represents the accumulated work since the project's creation:
 - 2024-11: Documentation improvements
 - 2025-11: GitHub Copilot onboarding with copilot-instructions.md
 
-[Unreleased]: https://github.com/kristjanvalur/libtealet/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/kristjanvalur/libtealet/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/kristjanvalur/libtealet/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/kristjanvalur/libtealet/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/kristjanvalur/libtealet/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/kristjanvalur/libtealet/compare/v0.4.3...v0.5.0
+[0.4.3]: https://github.com/kristjanvalur/libtealet/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/kristjanvalur/libtealet/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/kristjanvalur/libtealet/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/kristjanvalur/libtealet/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/kristjanvalur/libtealet/compare/v0.3.1...v0.3.2
