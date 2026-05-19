@@ -760,16 +760,16 @@ Py_ssize_t PyTealet_WeaklistOffset(void) {
 /* Runtime Support (Allocator and Lineage)                               */
 /* ===================================================================== */
 
-/* Wrapper functions for system malloc/free to match libtealet's allocator API.
+/* Wrapper functions for Python memory APIs to match libtealet's allocator API.
  */
 static void *tealet_malloc_wrapper(size_t size, void *context) {
     (void)context; /* unused */
-    return malloc(size);
+    return PyMem_Malloc(size);
 }
 
 static void tealet_free_wrapper(void *ptr, void *context) {
     (void)context; /* unused */
-    free(ptr);
+    PyMem_Free(ptr);
 }
 
 /* return a borrowed reference to this thread's main tealet */
@@ -788,7 +788,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create) {
         tealet_alloc_t talloc;
         tealet_t *tmain;
         PyTealetMainData *mdata;
-        /* Use system malloc/free so valgrind can detect heap corruption */
+        /* Use PyMem allocators for libtealet heap allocations. */
         talloc.malloc_p = tealet_malloc_wrapper;
         talloc.free_p = tealet_free_wrapper;
         talloc.context = NULL;
