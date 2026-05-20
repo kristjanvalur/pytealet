@@ -25,11 +25,11 @@ rm -f src/_tealet*.so
 
 # Rebuild the extension with uv
 echo "Building C extension with uv..."
-uv sync --reinstall-package tealet
+uv sync --active --reinstall-package tealet
 
 # Test if it worked
 echo "Testing C extension..."
-uv run python -c "
+uv run --active python -c "
 try:
     import _tealet
     print('✓ _tealet module loaded successfully')
