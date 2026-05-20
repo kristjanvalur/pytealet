@@ -821,7 +821,7 @@ static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMain
     if (!mdata->domain_lock)
         return -1;
 
-    locking.mode = TEALET_LOCK_SWITCH;
+    locking.mode = TEALET_LOCK_AUTO;
     locking.lock = pytealet_domain_lock_cb;
     locking.unlock = pytealet_domain_unlock_cb;
     locking.arg = (void *)mdata->domain_lock;
