@@ -39,6 +39,9 @@ struct PyTealetMainData {
     PyTealetNewArg new_arg;
     PyObject *dustbin;
     PyObject *main_wrapper; /* strong ref to this thread's main tealet wrapper */
+#if PYTEALET_FREE_THREADED
+    PyThread_type_lock domain_lock;
+#endif
 };
 
 /* initial number of slots in dustbin, to avoid realloc on push */
@@ -801,6 +804,51 @@ static void tealet_free_wrapper(void *ptr, void *context) {
     PyMem_Free(ptr);
 }
 
+#if PYTEALET_FREE_THREADED
+static void pytealet_domain_lock_cb(void *arg) {
+    PyThread_type_lock lock = (PyThread_type_lock)arg;
+    PyThread_acquire_lock(lock, WAIT_LOCK);
+}
+
+static void pytealet_domain_unlock_cb(void *arg) {
+    PyThread_type_lock lock = (PyThread_type_lock)arg;
+    PyThread_release_lock(lock);
+}
+
+static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMainData *mdata) {
+    tealet_lock_t locking;
+    mdata->domain_lock = PyThread_allocate_lock();
+    if (!mdata->domain_lock)
+        return -1;
+
+    locking.mode = TEALET_LOCK_SWITCH;
+    locking.lock = pytealet_domain_lock_cb;
+    locking.unlock = pytealet_domain_unlock_cb;
+    locking.arg = (void *)mdata->domain_lock;
+    if (tealet_configure_set_locking(main_tealet, &locking) < 0) {
+        PyThread_free_lock(mdata->domain_lock);
+        mdata->domain_lock = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static void pytealet_free_domain_lock(PyTealetMainData *mdata) {
+    if (mdata && mdata->domain_lock) {
+        PyThread_free_lock(mdata->domain_lock);
+        mdata->domain_lock = NULL;
+    }
+}
+#else
+static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMainData *mdata) {
+    (void)main_tealet;
+    (void)mdata;
+    return 0;
+}
+
+static void pytealet_free_domain_lock(PyTealetMainData *mdata) { (void)mdata; }
+#endif
+
 /* return a borrowed reference to this thread's main tealet */
 PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainData **mdata_out) {
     /* Get the thread's main tealet */
@@ -857,6 +905,14 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
             PyMem_Free(mdata);
             return NULL;
         }
+        if (pytealet_configure_domain_locking(tmain, mdata) < 0) {
+            Py_DECREF(mdata->dustbin);
+            tealet_finalize(tmain);
+            pytealet_free_domain_lock(mdata);
+            PyMem_Free(mdata);
+            PyErr_SetString(PyExc_RuntimeError, "failed to configure tealet domain lock callbacks");
+            return NULL;
+        }
         *tealet_main_userpointer(tmain) = (void *)mdata;
 
         /* create the main tealet */
@@ -866,6 +922,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
         if (!t_main) {
             Py_DECREF(mdata->dustbin);
             tealet_finalize(tmain);
+            pytealet_free_domain_lock(mdata);
             PyMem_Free(mdata);
             return NULL;
         }
@@ -879,6 +936,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
             Py_CLEAR(mdata->main_wrapper);
             Py_DECREF(mdata->dustbin);
             tealet_finalize(tmain);
+            pytealet_free_domain_lock(mdata);
             PyMem_Free(mdata);
             PyErr_SetString(PyExc_RuntimeError, "failed to set thread-local main tealet");
             return NULL;
