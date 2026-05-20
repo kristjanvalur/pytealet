@@ -76,7 +76,9 @@ static PyObject *GetWrapperRef(tealet_t *tealet) {
 struct PyTealetObject {
     PyObject_HEAD int state;
     tealet_t *tealet;
+#if !defined(Py312P)
     PyObject *weakreflist; /* List of weak references */
+#endif
 
     /* thread state information */
     PyTealetTstate tstate;
@@ -281,14 +283,16 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
             return NULL;
         }
     }
-    result = (PyTealetObject *)subtype->tp_alloc(subtype, 0);
+    result = (PyTealetObject *)PyType_GenericAlloc(subtype, 0);
     if (!result)
         return NULL;
     result->state = STATE_NEW;
     result->tealet = NULL;
     PyTealetTstate_Init(&result->tstate);
     PyTealetFrameInfo_Init(&result->frame_info);
+#if !defined(Py312P)
     result->weakreflist = NULL;
+#endif
 
     if (src) {
         if (src->state == STATE_STUB) {
@@ -315,12 +319,11 @@ static void pytealet_dealloc(PyObject *obj) {
             PyErr_WriteUnraisable(Py_None);
         }
     }
+    PyObject_ClearWeakRefs(obj);
     /* Release any owned saved thread-state references */
     PyTealetTstate_Drop(&tealet->tstate, NULL);
     PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
     PyTealetFrameInfo_Fini(&tealet->frame_info);
-    if (tealet->weakreflist != NULL)
-        PyObject_ClearWeakRefs(obj);
     if (tealet->tealet)
         tealet_delete(tealet->tealet);
     Py_TYPE(obj)->tp_free(obj);
@@ -734,8 +737,24 @@ static PyType_Slot pytealet_type_slots[] = {{Py_tp_dealloc, pytealet_dealloc},
 #pragma GCC diagnostic pop
 #endif
 
-PyType_Spec pytealet_type_spec = {"_tealet.tealet", sizeof(PyTealetObject), 0, Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+PyType_Spec pytealet_type_spec = {"_tealet.tealet",
+                                  sizeof(PyTealetObject),
+                                  0,
+                                  Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE
+#if defined(Py312P)
+                                      | Py_TPFLAGS_MANAGED_WEAKREF
+#endif
+                                  ,
                                   pytealet_type_slots};
+
+/* Only needed on pre-3.12 builds where tp_weaklistoffset must be
+ * set explicitly after dynamic type creation.
+ */
+#if !defined(Py312P)
+Py_ssize_t PyTealet_WeaklistOffset(void) {
+    return (Py_ssize_t)offsetof(PyTealetObject, weakreflist);
+}
+#endif
 
 /* ===================================================================== */
 /* Runtime Support (Allocator and Lineage)                               */

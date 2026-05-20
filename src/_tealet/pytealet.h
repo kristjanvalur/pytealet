@@ -18,6 +18,9 @@ extern struct PyModuleDef _tealet_module;
 
 PyTealetObject *GetMain(PyTealetModuleState *mstate, int create);
 PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main);
+#if !defined(Py312P)
+Py_ssize_t PyTealet_WeaklistOffset(void);
+#endif
 
 /* push an object into the tealet dustbin, to be decrefed later. */
 void PyTealet_dustbin_push(tealet_t *tealet, PyObject *obj);

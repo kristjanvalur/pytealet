@@ -101,6 +101,9 @@ static int pytealet_module_exec(PyObject *m) {
     if (!type_obj)
         return -1;
     mstate->tealet_type = (PyTypeObject *)type_obj;
+#if !defined(Py312P)
+    mstate->tealet_type->tp_weaklistoffset = PyTealet_WeaklistOffset();
+#endif
     if (PyModule_AddObjectRef(m, "tealet", type_obj) < 0) {
         Py_DECREF(type_obj);
         return -1;
