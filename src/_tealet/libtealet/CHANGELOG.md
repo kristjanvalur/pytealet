@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-05-20
+
+### Changed
+- **Lock mode naming and scope were updated for clearer semantics**
+  - Renamed public lock mode `TEALET_LOCK_SWITCH` to `TEALET_LOCK_AUTO`.
+  - Expanded automatic locking coverage to include structure APIs:
+    `tealet_new()`, `tealet_duplicate()`, and `tealet_delete()`, in addition
+    to existing transfer/lifecycle paths.
+
+### Tests
+- Updated locking transition coverage for AUTO mode behavior.
+- Added dedicated transition coverage for automatic locking on
+  `tealet_new()`, `tealet_duplicate()`, and `tealet_delete()`.
+
+### Documentation
+- Updated API locking docs to use `TEALET_LOCK_AUTO` terminology and reflect
+  expanded automatic-lock coverage.
+
+## [0.7.1] - 2026-05-19
+
+### Fixed
+- **PANIC propagation during startup handoff now reaches creators consistently**
+  - `tealet_run(..., TEALET_START_SWITCH)` now preserves first-switch out-argument handoff when startup returns `TEALET_ERR_PANIC`, so creator-side startup returns observe the propagated value.
+  - `tealet_stub_run()` now preserves `TEALET_ERR_PANIC` signaling and avoids treating panic-resume as a generic failure path during trampoline startup.
+
+### Tests
+- Added transfer regression coverage for panic startup propagation:
+  - panic propagation to creator of a fresh tealet started with `TEALET_START_SWITCH`
+  - panic propagation through `tealet_stub_run()`
+
 ## [0.7.0] - 2026-05-12
 
 ### Added
@@ -535,7 +565,9 @@ This release represents the accumulated work since the project's creation:
 - 2024-11: Documentation improvements
 - 2025-11: GitHub Copilot onboarding with copilot-instructions.md
 
-[Unreleased]: https://github.com/kristjanvalur/libtealet/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/kristjanvalur/libtealet/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/kristjanvalur/libtealet/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/kristjanvalur/libtealet/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/kristjanvalur/libtealet/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kristjanvalur/libtealet/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/kristjanvalur/libtealet/compare/v0.5.0...v0.5.1
