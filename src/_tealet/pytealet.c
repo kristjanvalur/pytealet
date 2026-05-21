@@ -349,6 +349,17 @@ static void pytealet_dealloc(PyObject *obj) {
     Py_TYPE(obj)->tp_free(obj);
 }
 
+/* Thread policy:
+ * - duplicate/new and deallocation are allowed cross-thread.
+ * - volatile traversal/control APIs enforce owner-thread affinity.
+ */
+static int pytealet_require_owner_thread(PyTealetModuleState *mstate, PyTealetObject *tealet, const char *api) {
+    if (tealet->owner_tid == PyThread_get_thread_ident())
+        return 0;
+    PyErr_Format(mstate->invalid_error, "cannot call %s() from a different thread", api);
+    return -1;
+}
+
 static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                PyObject *kwnames) {
     PyTealetObject *main, *pytealet = (PyTealetObject *)self;
@@ -366,10 +377,8 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
         PyErr_SetString(mstate->state_error, "must be new");
         return NULL;
     }
-    if (pytealet->owner_tid != PyThread_get_thread_ident()) {
-        PyErr_SetString(mstate->invalid_error, "cannot stub from a different thread");
+    if (pytealet_require_owner_thread(mstate, pytealet, "stub"))
         return NULL;
-    }
     assert(pytealet->tealet == NULL);
     main = GetMain(mstate, 1, NULL);
     if (!main)
@@ -396,6 +405,8 @@ static PyObject *pytealet_current(PyObject *self, PyTypeObject *defining_class, 
         PyErr_SetString(PyExc_TypeError, "current() takes no arguments");
         return NULL;
     }
+    if (pytealet_require_owner_thread(mstate, base, "current"))
+        return NULL;
     if (!base->tealet) {
         PyErr_SetString(mstate->state_error, "must be active");
         return NULL;
@@ -420,6 +431,8 @@ static PyObject *pytealet_previous(PyObject *self, PyTypeObject *defining_class,
         PyErr_SetString(PyExc_TypeError, "previous() takes no arguments");
         return NULL;
     }
+    if (pytealet_require_owner_thread(mstate, base, "previous"))
+        return NULL;
 
     if (!base->tealet) {
         PyErr_SetString(mstate->state_error, "must be active");
@@ -444,6 +457,8 @@ static PyObject *pytealet_main_method(PyObject *self, PyTypeObject *defining_cla
         PyErr_SetString(PyExc_TypeError, "main() takes no arguments");
         return NULL;
     }
+    if (pytealet_require_owner_thread(mstate, base, "main"))
+        return NULL;
     if (!base->tealet) {
         PyErr_SetString(mstate->state_error, "must be active");
         return NULL;
@@ -698,6 +713,8 @@ static PyObject *pytealet_get_main(PyObject *_self, void *_closure) {
     PyTealetObject *self = (PyTealetObject *)_self;
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     if (!mstate)
+        return NULL;
+    if (pytealet_require_owner_thread(mstate, self, "main"))
         return NULL;
 
     if (!self->tealet) {

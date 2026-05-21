@@ -127,6 +127,11 @@ Thread ownership rules enforced by the C API:
 - `run()` and `switch()` do not auto-create a main tealet in the caller thread;
     they validate ownership and reject foreign-thread use.
 - `stub()` is only allowed from the owning thread.
+- Volatile traversal methods (`current()`, `main()`, `previous()`) are only
+    allowed from the owning thread.
+- Duplicate-from-stub (`_tealet.tealet(existing_stub)`) is allowed across
+    threads.
+- Wrapper deallocation is allowed across threads.
 
 **Module Constants:**
 
@@ -153,7 +158,8 @@ Raised when trying to switch to a defunct (corrupted) tealet.
 ```python
 _tealet.InvalidError(TealetError)
 ```
-Raised when trying to switch to a tealet from a different thread family.
+Raised when a thread-restricted operation is called from a different thread
+family.
 
 ```python
 _tealet.StateError(TealetError)

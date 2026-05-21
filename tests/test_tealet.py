@@ -4,6 +4,9 @@ import sys
 import traceback
 import types
 import threading
+import queue
+import weakref
+import gc
 
 import _tealet
 import random
@@ -160,6 +163,88 @@ class TestThreadOwnership:
             assert data["first"] == "paused"
             with pytest.raises(_tealet.InvalidError):
                 data["t"].switch()
+        finally:
+            release.set()
+            th.join(timeout=1.0)
+
+    def test_duplicate_stub_allowed_from_foreign_thread(self):
+        data = {}
+        ready = threading.Event()
+        release = threading.Event()
+
+        def worker():
+            t = _tealet.tealet()
+            t.stub()
+            data["owner_tid"] = t.thread_id
+            data["stub"] = t
+            ready.set()
+            release.wait(timeout=1.0)
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert ready.wait(timeout=1.0)
+        try:
+            assert data["owner_tid"] != _tealet.current().thread_id
+            dup = _tealet.tealet(data["stub"])
+            assert dup.thread_id == data["owner_tid"]
+            assert dup.belongs_to_current() is False
+            with pytest.raises(_tealet.InvalidError):
+                dup.run(lambda current, arg: current.main(), None)
+        finally:
+            release.set()
+            th.join(timeout=1.0)
+
+    def test_dealloc_allowed_from_foreign_thread(self):
+        q = queue.Queue()
+
+        def worker():
+            t = _tealet.tealet()
+            t.stub()
+            q.put((t.thread_id, t))
+            t = None
+
+        th = threading.Thread(target=worker)
+        th.start()
+        owner_tid, foreign_tealet = q.get(timeout=1.0)
+        th.join(timeout=1.0)
+
+        assert owner_tid != _tealet.current().thread_id
+        ref = weakref.ref(foreign_tealet)
+        del foreign_tealet
+        gc.collect()
+        assert ref() is None
+
+    def test_traversal_rejected_from_foreign_thread(self):
+        data = {}
+        ready = threading.Event()
+        release = threading.Event()
+
+        def parked(current, arg):
+            current.main().switch("paused")
+            release.wait(timeout=1.0)
+            current.main().switch("done")
+            return current.main()
+
+        def worker():
+            t = _tealet.tealet()
+            t.stub()
+            data["t"] = t
+            data["first"] = t.run(parked, None)
+            ready.set()
+            if release.wait(timeout=1.0):
+                t.switch()
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert ready.wait(timeout=1.0)
+        try:
+            assert data["first"] == "paused"
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].current()
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].main()
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].previous()
         finally:
             release.set()
             th.join(timeout=1.0)
