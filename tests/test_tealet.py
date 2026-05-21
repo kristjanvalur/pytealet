@@ -93,23 +93,33 @@ class TestModule:
 
 
 class TestThreadCleanup:
-    def test_thread_cleanup_returns_nerfed_wrappers(self):
+    """Tests for thread cleanup semantics and edge cases."""
+
+    def test_thread_cleanup_returns_only_run_tealets(self):
+        """Cleanup only returns RUN tealets with ACTIVE status, not STUB or main."""
         thread_main = _tealet.main()
         stub = _tealet.tealet()
         stub.stub()
-        dup = _tealet.tealet(stub)
-
+        
+        # Create a tealet that switches back to main
+        # When it returns, it will be INACTIVE (finished), not in nerfed
+        def switch_back(current, arg):
+            # Switch back to main and return
+            thread_main.switch()
+        
+        t = _tealet.tealet()
+        t.run(switch_back, None)  # t runs and switches back, stays suspended
+        
         nerfed = _tealet.thread_cleanup()
         nerfed_ids = {id(x) for x in nerfed}
 
-        # Only unfinished non-main tealets are returned in nerfed.
-        # Main is cleanly deleted as part of cleanup, not forcibly invalidated.
-        # Nerfed tealets have their tealet pointer nulled but keep their original state.
+        # t switched back to main and remains suspended in RUN state,
+        # so cleanup should include it in nerfed.
+        # STUB tealets are not returned (can be safely collected).
+        # Main is cleanly deleted, not forcibly invalidated.
         assert id(thread_main) not in nerfed_ids
-        assert id(stub) in nerfed_ids
-        assert id(dup) in nerfed_ids
-        assert stub.state == _tealet.STATE_STUB
-        assert dup.state == _tealet.STATE_STUB
+        assert id(stub) not in nerfed_ids  # STUB not in nerfed
+        assert id(t) in nerfed_ids  # suspended RUN tealet is in nerfed
 
         # Recreate main for this thread so subsequent tests keep the usual baseline.
         assert _tealet.main().state == _tealet.STATE_RUN
@@ -121,6 +131,121 @@ class TestThreadCleanup:
             return current.main()
 
         _tealet.tealet().run(run, None)
+
+    def test_cleanup_empty_lineage(self):
+        """Cleanup with only main tealet (no non-main tealets) returns empty list."""
+        _tealet.main()  # ensure main exists
+        nerfed = _tealet.thread_cleanup()
+        assert nerfed == []
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_stub_tealets_not_returned(self):
+        """STUB tealets are not returned in nerfed (can be safely collected)."""
+        _tealet.main()
+        stub1 = _tealet.tealet()
+        stub1.stub()
+        stub2 = _tealet.tealet()
+        stub2.stub()
+        
+        nerfed = _tealet.thread_cleanup()
+        nerfed_ids = {id(x) for x in nerfed}
+        
+        # STUB tealets are not in nerfed (they can be safely garbage collected)
+        assert id(stub1) not in nerfed_ids
+        assert id(stub2) not in nerfed_ids
+        assert nerfed == []
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_fresh_start_after_cleanup(self):
+        """After cleanup, can create new main and tealets in same thread."""
+        # First lineage - only STUB, so nerfed will be empty
+        _tealet.main()
+        stub1 = _tealet.tealet()
+        stub1.stub()
+        nerfed = _tealet.thread_cleanup()
+        assert nerfed == []
+
+        # New lineage in same thread
+        main2 = _tealet.main()
+        assert main2.state == _tealet.STATE_RUN
+        stub2 = _tealet.tealet()
+        stub2.stub()
+        assert stub2.state == _tealet.STATE_STUB
+        nerfed2 = _tealet.thread_cleanup()
+        assert nerfed2 == []  # STUB not in nerfed
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_with_finished_tealets(self):
+        """Finished tealets (not ACTIVE) are not included in nerfed."""
+        _tealet.main()
+        
+        def finish_work(current, arg):
+            return current.main()
+        
+        stub = _tealet.tealet()
+        stub.stub()
+        stub.run(finish_work, None)  # Run to completion, becomes inactive
+        
+        nerfed = _tealet.thread_cleanup()
+        # Finished tealet should not be in nerfed (not ACTIVE status)
+        assert isinstance(nerfed, list)
+        assert nerfed == []
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_with_dead_weakrefs(self):
+        """Cleanup gracefully handles dead weakrefs (GC'd wrappers)."""
+        _tealet.main()
+        stub = _tealet.tealet()
+        stub.stub()
+        
+        # Delete local reference to stub to allow GC
+        del stub
+        gc.collect()
+        
+        # Cleanup should handle dead weakrefs without crashing
+        nerfed = _tealet.thread_cleanup()
+        assert isinstance(nerfed, list)
+        # The stub was GC'd and wasn't RUN anyway, so won't be in nerfed
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_main_never_in_nerfed(self):
+        """Main tealet is never in nerfed, only non-main RUN tealets."""
+        main = _tealet.main()
+        stub = _tealet.tealet()
+        stub.stub()
+        
+        nerfed = _tealet.thread_cleanup()
+        nerfed_ids = {id(x) for x in nerfed}
+        
+        # Main is never in nerfed (cleanly deleted)
+        assert id(main) not in nerfed_ids
+        # STUB is not in nerfed (not RUN)
+        assert id(stub) not in nerfed_ids
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_idempotent_on_empty_lineage(self):
+        """Calling cleanup multiple times on empty lineage is idempotent."""
+        _tealet.main()
+        nerfed1 = _tealet.thread_cleanup()
+        assert nerfed1 == []
+        
+        # Second cleanup should be idempotent (no error, no main)
+        nerfed2 = _tealet.thread_cleanup()
+        assert nerfed2 == []
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
 
 
 class TestThreadOwnership:

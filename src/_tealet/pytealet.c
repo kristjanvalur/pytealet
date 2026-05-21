@@ -414,7 +414,8 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
 
 static void pytealet_dealloc(PyObject *obj) {
     PyTealetObject *tealet = (PyTealetObject *)obj;
-    if (tealet->tealet && tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE) {
+    /* warn if we have an active tealet that is not a stub */
+    if (tealet->tealet && tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE  && tealet->state != STATE_STUB) {
         int err = PyErr_WarnEx(PyExc_RuntimeWarning, "freeing an active tealet leaks memory", 1);
         if (err) {
             PyErr_WriteUnraisable(Py_None);
@@ -1158,8 +1159,14 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
             continue;
         }
         /* only add live tealets to the list*/
-        int t_status = tealet_status(wrapper->tealet);
-        if (t_status == TEALET_STATUS_ACTIVE) {
+        int add_to_list = 0;
+        if (tealet_status(wrapper->tealet) == TEALET_STATUS_ACTIVE);
+            add_to_list = 1;
+        /* but stubs are okay to delete and don't leak memory */
+        if (wrapper->state == STATE_STUB)
+            add_to_list = 0;
+        
+        if (add_to_list) {
             if (PyList_Append(nerfed, obj) < 0) {
                 PyErr_WriteUnraisable(Py_None);
                 PyErr_Clear();
