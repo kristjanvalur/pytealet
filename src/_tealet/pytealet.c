@@ -1094,8 +1094,6 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
             return_to = NULL;
             PyErr_SetString(mstate->state_error, "must be 'run'");
         } else if (CheckTarget(mstate, return_to, tealet)) {
-            PyErr_WriteUnraisable(Py_None);
-            PyErr_Clear();
             return_to = NULL;
         }
     }
