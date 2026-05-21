@@ -132,6 +132,21 @@ class TestThreadCleanup:
 
         _tealet.tealet().run(run, None)
 
+    def test_cleanup_nerfed_suspended_tealet_cannot_switch(self):
+        """A suspended RUN tealet returned by cleanup cannot be switched to again."""
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(parked, None) == "paused"
+
+        nerfed = _tealet.thread_cleanup()
+        assert any(id(x) == id(t) for x in nerfed)
+
+        with pytest.raises(_tealet.StateError):
+            t.switch()
+
     def test_cleanup_empty_lineage(self):
         """Cleanup with only main tealet (no non-main tealets) returns empty list."""
         _tealet.main()  # ensure main exists

@@ -1173,6 +1173,7 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
          */
         tealet_delete(wrapper->tealet);
         wrapper->tealet = NULL;
+        wrapper->state = STATE_EXIT;
         Py_CLEAR(wrapper->tracking_ref);
         Py_DECREF(obj);
     }
