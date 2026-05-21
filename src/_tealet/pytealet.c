@@ -34,11 +34,12 @@ typedef struct PyTealetNewArg {
 } PyTealetNewArg;
 
 /* the structure we associate with the main tealet */
-typedef struct PyTealetMainData {
+struct PyTealetMainData {
     long tid;
     PyTealetNewArg new_arg;
     PyObject *dustbin;
-} PyTealetMainData;
+    PyObject *main_wrapper; /* strong ref to this thread's main tealet wrapper */
+};
 
 /* initial number of slots in dustbin, to avoid realloc on push */
 #define DUSTBIN_PREALLOC 10
@@ -88,8 +89,9 @@ struct PyTealetObject {
 
 /* helpers for getting main and current and checking relationship */
 static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls);
-PyTealetObject *GetMain(PyTealetModuleState *mstate, int create);
-PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *main, int create_main);
+PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainData **mdata_out);
+PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *main, int create_main,
+                           PyTealetMainData **mdata_out);
 static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *main);
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
@@ -347,7 +349,7 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
         return NULL;
     }
     assert(pytealet->tealet == NULL);
-    main = GetMain(mstate, 1);
+    main = GetMain(mstate, 1, NULL);
     if (!main)
         return NULL;
     stack_far = PyTealet_GetStackFar(PyThreadState_GET());
@@ -376,7 +378,7 @@ static PyObject *pytealet_current(PyObject *self, PyTypeObject *defining_class, 
         PyErr_SetString(mstate->state_error, "must be active");
         return NULL;
     }
-    current = GetCurrent(mstate, base, 0);
+    current = GetCurrent(mstate, base, 0, NULL);
     if (!current)
         return NULL;
     return Py_NewRef((PyObject *)current);
@@ -448,7 +450,7 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     if (!mstate)
         return NULL;
 
-    current = GetCurrent(mstate, target, 0);
+    current = GetCurrent(mstate, target, 0, &mdata);
     if (!current)
         return NULL;
     if (CheckTarget(mstate, target, current))
@@ -510,7 +512,6 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
         farg = Py_None;
 
     created_from_new = (target->state == STATE_NEW);
-    mdata = (PyTealetMainData *)*tealet_main_userpointer(current->tealet);
     ptarg = &mdata->new_arg;
     switch_arg = (void *)ptarg;
 
@@ -615,7 +616,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     }
     assert(target->tealet);
     /* we don't have a source tealet, so we must get it from the thread state. */
-    current = GetCurrent(mstate, NULL, 0);
+    current = GetCurrent(mstate, NULL, 0, NULL);
     if (!current || CheckTarget(mstate, target, current))
         return NULL;
 
@@ -667,7 +668,7 @@ static PyObject *pytealet_get_main(PyObject *_self, void *_closure) {
         /* happens only for new tealets, not yet run.  then we have to find the current for this thread.
          * but we don't attempt to create a new one.
          */
-        return Py_XNewRef((PyObject *)GetMain(mstate, 0));
+        return Py_XNewRef((PyObject *)GetMain(mstate, 0, NULL));
     } else {
         return GetWrapperRef(self->tealet->main);
     }
@@ -694,7 +695,7 @@ static PyObject *pytealet_get_frame(PyObject *_self, void *_closure) {
 #endif
     if (!frame) {
         /* is it the current tealet of the current thread? */
-        if (self == GetCurrent(mstate, NULL, 0)) {
+        if (self == GetCurrent(mstate, NULL, 0, NULL)) {
             frame = (PyObject *)PyEval_GetFrame();
         }
     }
@@ -773,21 +774,21 @@ static void tealet_free_wrapper(void *ptr, void *context) {
 }
 
 /* return a borrowed reference to this thread's main tealet */
-PyTealetObject *GetMain(PyTealetModuleState *mstate, int create) {
+PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainData **mdata_out) {
     /* Get the thread's main tealet */
+    PyTealetMainData *mdata;
     PyTealetObject *t_main;
     if (!mstate)
         return NULL;
-    t_main = (PyTealetObject *)PyThread_tss_get(&mstate->tls_key);
-    if (!t_main && !create) {
+    mdata = (PyTealetMainData *)PyThread_tss_get(&mstate->tls_key);
+    if (!mdata && !create) {
         return NULL;
     }
 
     /* main tealet doesn't exist yet.  create it. */
-    if (!t_main) {
+    if (!mdata) {
         tealet_alloc_t talloc;
         tealet_t *tmain;
-        PyTealetMainData *mdata;
         /* Use PyMem allocators for libtealet heap allocations. */
         talloc.malloc_p = tealet_malloc_wrapper;
         talloc.free_p = tealet_free_wrapper;
@@ -833,6 +834,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create) {
         /* create the main tealet */
         t_main = (PyTealetObject *)pytealet_new(mstate->tealet_type, NULL, NULL);
         if (!t_main) {
+            Py_DECREF(mdata->dustbin);
             tealet_finalize(tmain);
             PyMem_Free(mdata);
             return NULL;
@@ -840,37 +842,54 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create) {
         t_main->tealet = tmain;
         t_main->state = STATE_RUN;
         TEALET_SET_PYOBJECT(tmain, t_main); /* back link */
-        if (PyThread_tss_set(&mstate->tls_key, (void *)t_main) != 0) {
+        mdata->main_wrapper = (PyObject *)t_main;
+        if (PyThread_tss_set(&mstate->tls_key, (void *)mdata) != 0) {
             TEALET_SET_PYOBJECT(tmain, NULL);
             t_main->tealet = NULL;
-            Py_DECREF(t_main);
+            Py_CLEAR(mdata->main_wrapper);
+            Py_DECREF(mdata->dustbin);
             tealet_finalize(tmain);
             PyMem_Free(mdata);
             PyErr_SetString(PyExc_RuntimeError, "failed to set thread-local main tealet");
             return NULL;
         }
+    } else {
+        t_main = (PyTealetObject *)mdata->main_wrapper;
     }
+    assert(t_main);
     assert(t_main->tealet);
     assert(TEALET_IS_MAIN(t_main->tealet));
     assert(t_main->state == STATE_RUN);
+    if (mdata_out)
+        *mdata_out = mdata;
     return t_main;
 }
 
 /* return a borrowed ref to this threads current tealet */
-PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main) {
+PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main,
+                           PyTealetMainData **mdata_out) {
+    tealet_t *t_current;
     /* if we are being passed no tealet, or it is a new tealet,
      * we must get the current main from the thread-local storage */
-    if (!pytealet || !pytealet->tealet)
-        pytealet = GetMain(mstate, create_main);
+    if (!pytealet || !pytealet->tealet) {
+        pytealet = GetMain(mstate, create_main, mdata_out);
+    }
+
     if (!pytealet)
         return NULL;
-    return TEALET_PYOBJECT(tealet_current(pytealet->tealet));
+    if (mdata_out)
+        *mdata_out = (PyTealetMainData *)*tealet_main_userpointer(pytealet->tealet->main);
+    t_current = tealet_current(pytealet->tealet);
+    if (t_current != pytealet->tealet) {
+        return TEALET_PYOBJECT(t_current);
+    }
+    return pytealet;
 }
 
 /* check if a target tealet is valid */
 static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *ref) {
     if (!ref)
-        ref = GetMain(mstate, 1);
+        ref = GetMain(mstate, 1, NULL);
     if (!ref)
         return -1;
     if (!target->tealet)
@@ -967,7 +986,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     if (!return_to) {
         PyErr_WriteUnraisable(func);
         /* must switch to main */
-        return_to = GetMain(mstate, 0);
+        return_to = GetMain(mstate, 0, NULL);
         assert(return_to);
         result = (PyObject *)return_to;
         Py_INCREF(result);

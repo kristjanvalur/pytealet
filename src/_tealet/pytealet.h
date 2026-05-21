@@ -12,12 +12,14 @@
 
 typedef struct PyTealetObject PyTealetObject;
 typedef struct PyTealetModuleState PyTealetModuleState;
+typedef struct PyTealetMainData PyTealetMainData;
 
 extern PyType_Spec pytealet_type_spec;
 extern struct PyModuleDef _tealet_module;
 
-PyTealetObject *GetMain(PyTealetModuleState *mstate, int create);
-PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main);
+PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainData **mdata_out);
+PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main,
+						   PyTealetMainData **mdata_out);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);
 #endif

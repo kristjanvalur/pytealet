@@ -15,7 +15,7 @@ static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
         return NULL;
     }
     /* get the current.  if there is no main tealet at this time, create it. */
-    return Py_XNewRef((PyObject *)GetCurrent(mstate, NULL, 1));
+    return Py_XNewRef((PyObject *)GetCurrent(mstate, NULL, 1, NULL));
 }
 
 static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
@@ -25,7 +25,7 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
         return NULL;
     }
     /* create main if it doesn't already exist for this thread */
-    return Py_XNewRef((PyObject *)GetMain(mstate, 1));
+    return Py_XNewRef((PyObject *)GetMain(mstate, 1, NULL));
 }
 
 /* Get/set dormant tealet frame introspection at runtime.
@@ -110,7 +110,7 @@ static int pytealet_module_exec(PyObject *m) {
     }
     Py_DECREF(type_obj);
 
-    if (!GetMain(mstate, 1))
+    if (!GetMain(mstate, 1, NULL))
         return -1;
 
     mstate->tealet_error = PyErr_NewException("_tealet.TealetError", NULL, NULL);
