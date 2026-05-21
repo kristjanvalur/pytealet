@@ -36,6 +36,8 @@ typedef struct PyTealetNewArg {
 /* the structure we associate with the main tealet */
 struct PyTealetMainData {
     long tid;
+    struct PyTealetMainData *ring_prev;
+    struct PyTealetMainData *ring_next;
     PyTealetNewArg new_arg;
     PyObject *dustbin;
     PyObject *main_wrapper; /* strong ref to this thread's main tealet wrapper */
@@ -102,6 +104,8 @@ static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTe
 static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds, int creating_main);
 static int pytealet_track_wrapper(PyTealetMainData *mdata, PyTealetObject *wrapper);
 static void pytealet_untrack_wrapper(PyTealetObject *wrapper);
+static int pytealet_link_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata);
+static void pytealet_unlink_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
 
@@ -272,6 +276,54 @@ static int pytealet_track_wrapper(PyTealetMainData *mdata, PyTealetObject *wrapp
     }
     wrapper->tracking_ref = wref;
     return 0;
+}
+
+static int pytealet_link_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
+    PyTealetMainData *head;
+
+    assert(mstate);
+    assert(mdata);
+    assert(mstate->thread_data_lock);
+
+    PyThread_acquire_lock(mstate->thread_data_lock, WAIT_LOCK);
+    head = mstate->thread_data_ring;
+    if (!head) {
+        mdata->ring_prev = mdata;
+        mdata->ring_next = mdata;
+        mstate->thread_data_ring = mdata;
+    } else {
+        PyTealetMainData *tail = head->ring_prev;
+        assert(tail);
+        mdata->ring_next = head;
+        mdata->ring_prev = tail;
+        tail->ring_next = mdata;
+        head->ring_prev = mdata;
+    }
+    PyThread_release_lock(mstate->thread_data_lock);
+    return 0;
+}
+
+static void pytealet_unlink_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
+    assert(mstate);
+    assert(mdata);
+    assert(mstate->thread_data_lock);
+
+    PyThread_acquire_lock(mstate->thread_data_lock, WAIT_LOCK);
+    if (mdata->ring_next && mdata->ring_prev) {
+        if (mdata->ring_next == mdata) {
+            assert(mdata->ring_prev == mdata);
+            if (mstate->thread_data_ring == mdata)
+                mstate->thread_data_ring = NULL;
+        } else {
+            if (mstate->thread_data_ring == mdata)
+                mstate->thread_data_ring = mdata->ring_next;
+            mdata->ring_prev->ring_next = mdata->ring_next;
+            mdata->ring_next->ring_prev = mdata->ring_prev;
+        }
+        mdata->ring_prev = NULL;
+        mdata->ring_next = NULL;
+    }
+    PyThread_release_lock(mstate->thread_data_lock);
 }
 
 static void pytealet_untrack_wrapper(PyTealetObject *wrapper) {
@@ -1057,6 +1109,20 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
             PyErr_SetString(PyExc_RuntimeError, "failed to set thread-local main tealet");
             return NULL;
         }
+        if (pytealet_link_thread_data(mstate, mdata) < 0) {
+            TEALET_SET_PYOBJECT(tmain, NULL);
+            t_main->tealet = NULL;
+            t_main->state = STATE_EXIT;
+            Py_CLEAR(mdata->main_wrapper);
+            PyThread_tss_set(&mstate->tls_key, NULL);
+            Py_DECREF(mdata->dustbin);
+            Py_DECREF(mdata->wrappers);
+            tealet_finalize(tmain);
+            pytealet_free_domain_lock(mdata);
+            PyMem_Free(mdata);
+            PyErr_SetString(PyExc_RuntimeError, "failed to register thread main data");
+            return NULL;
+        }
     } else {
         t_main = (PyTealetObject *)mdata->main_wrapper;
     }
@@ -1195,6 +1261,7 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
 
     Py_CLEAR(mdata->dustbin);
     Py_CLEAR(mdata->wrappers);
+    pytealet_unlink_thread_data(mstate, mdata);
     pytealet_free_domain_lock(mdata);
     PyMem_Free(mdata);
 

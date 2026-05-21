@@ -92,6 +92,8 @@ static int pytealet_module_exec(PyObject *m) {
     }
 
     memset(&mstate->tls_key, 0, sizeof(mstate->tls_key));
+    mstate->thread_data_lock = NULL;
+    mstate->thread_data_ring = NULL;
     mstate->frame_introspection_enabled = PYTEALET_WITH_PENDING_FRAME_INTROSPECTION;
     mstate->tealet_type = NULL;
     mstate->tealet_error = NULL;
@@ -105,6 +107,12 @@ static int pytealet_module_exec(PyObject *m) {
             PyErr_SetString(PyExc_RuntimeError, "failed to create thread-local key");
             return -1;
         }
+    }
+
+    mstate->thread_data_lock = PyThread_allocate_lock();
+    if (!mstate->thread_data_lock) {
+        PyErr_SetString(PyExc_RuntimeError, "failed to allocate thread-data lock");
+        return -1;
     }
 
     type_obj = PyType_FromModuleAndSpec(m, &pytealet_type_spec, NULL);
@@ -206,6 +214,11 @@ static void pytealet_module_free(void *m) {
      */
     if (PyThread_tss_is_created(&mstate->tls_key))
         PyThread_tss_delete(&mstate->tls_key);
+    if (mstate->thread_data_lock) {
+        PyThread_free_lock(mstate->thread_data_lock);
+        mstate->thread_data_lock = NULL;
+    }
+    mstate->thread_data_ring = NULL;
 }
 
 /* CPython API uses void* in module slots; this conversion is intentional. */

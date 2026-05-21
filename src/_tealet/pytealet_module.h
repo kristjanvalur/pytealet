@@ -11,6 +11,8 @@
 
 struct PyTealetModuleState {
     Py_tss_t tls_key;
+    PyThread_type_lock thread_data_lock;
+    struct PyTealetMainData *thread_data_ring;
     int frame_introspection_enabled;
     PyTypeObject *tealet_type;
     PyObject *tealet_error;
