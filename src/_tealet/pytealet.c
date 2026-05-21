@@ -586,9 +586,11 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     PyTealetMainData *mdata;
     PyTealetNewArg *ptarg;
     void *switch_arg;
+    
     if (!mstate)
         return NULL;
-    current = GetCurrent(mstate, target, 0, &mdata);
+    
+        current = GetCurrent(mstate, NULL, 0, &mdata);
     if (!current && PyErr_Occurred())
         return NULL;
     if (CheckTarget(mstate, target, current))
@@ -1221,9 +1223,7 @@ static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTe
             goto mismatch;
         }
     }
-    if (ref) {
-        assert(target->owner_tid == ref->owner_tid);
-    }
+    assert(target->owner_tid == ref->owner_tid);
     return 0;
 
 mismatch:
