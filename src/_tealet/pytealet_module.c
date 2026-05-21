@@ -206,12 +206,23 @@ static int pytealet_module_clear(PyObject *m) {
 
 static void pytealet_module_free(void *m) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState((PyObject *)m);
+    PyTealetMainData *mdata;
     if (!mstate)
         return;
-    /* TODO: Per-thread teardown for mstate->tls_key is deferred.
-     * Deleting the TSS key does not decref thread-local PyObject* values.
-     * Implement per-mstate thread shutdown cleanup in a follow-up change.
+
+    /* Best-effort drain of per-thread lineages registered in this module.
+     * We fetch one node at a time without holding the lock across cleanup,
+     * because cleanup unlinks using the same module lock.
      */
+    while (mstate->thread_data_lock) {
+        PyThread_acquire_lock(mstate->thread_data_lock, WAIT_LOCK);
+        mdata = mstate->thread_data_ring;
+        PyThread_release_lock(mstate->thread_data_lock);
+        if (!mdata)
+            break;
+        (void)PyTealet_ThreadCleanupMdataForTeardown(mstate, mdata);
+    }
+
     if (PyThread_tss_is_created(&mstate->tls_key))
         PyThread_tss_delete(&mstate->tls_key);
     if (mstate->thread_data_lock) {
