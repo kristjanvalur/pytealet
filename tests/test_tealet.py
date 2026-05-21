@@ -12,6 +12,11 @@ import _tealet
 import random
 random.seed(0)
 
+
+def join_thread_or_fail(th, timeout=1.0):
+    th.join(timeout=timeout)
+    assert not th.is_alive(), "worker thread did not terminate in time"
+
 # Utility stuff for creating tealets
 def tealet_new_descend(descend, func=None, arg=None, klass=_tealet.tealet, retarg=False):
     while descend > 0:
@@ -101,8 +106,7 @@ class TestThreadCleanup:
         stub = _tealet.tealet()
         stub.stub()
         
-        # Create a tealet that switches back to main
-        # When it returns, it will be INACTIVE (finished), not in nerfed
+        # Create a tealet that switches back to main and stays suspended in RUN.
         def switch_back(current, arg):
             # Switch back to main and return
             thread_main.switch()
@@ -287,7 +291,7 @@ class TestThreadOwnership:
                 data["t"].stub()
         finally:
             done.set()
-            th.join(timeout=1.0)
+            join_thread_or_fail(th)
 
     def test_run_rejected_from_foreign_thread(self):
         data = {}
@@ -307,7 +311,7 @@ class TestThreadOwnership:
                 data["t"].run(lambda current, arg: current.main(), None)
         finally:
             done.set()
-            th.join(timeout=1.0)
+            join_thread_or_fail(th)
 
     def test_switch_rejected_from_foreign_thread(self):
         data = {}
@@ -336,7 +340,7 @@ class TestThreadOwnership:
                 data["t"].switch()
         finally:
             release.set()
-            th.join(timeout=1.0)
+            join_thread_or_fail(th)
 
     def test_duplicate_stub_allowed_from_foreign_thread(self):
         data = {}
@@ -363,7 +367,7 @@ class TestThreadOwnership:
                 dup.run(lambda current, arg: current.main(), None)
         finally:
             release.set()
-            th.join(timeout=1.0)
+            join_thread_or_fail(th)
 
     def test_dealloc_allowed_from_foreign_thread(self):
         q = queue.Queue()
@@ -377,7 +381,7 @@ class TestThreadOwnership:
         th = threading.Thread(target=worker)
         th.start()
         owner_tid, foreign_tealet = q.get(timeout=1.0)
-        th.join(timeout=1.0)
+        join_thread_or_fail(th)
 
         assert owner_tid != _tealet.current().thread_id
         ref = weakref.ref(foreign_tealet)
@@ -418,7 +422,7 @@ class TestThreadOwnership:
                 data["t"].previous()
         finally:
             release.set()
-            th.join(timeout=1.0)
+            join_thread_or_fail(th)
 
 
 class TestTealetTraversalMethods:
