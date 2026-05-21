@@ -281,11 +281,16 @@ static void pytealet_untrack_wrapper(PyTealetObject *wrapper) {
     if (!wrapper->tracking_ref)
         return;
 
-    mdata = (PyTealetMainData *)*tealet_main_userpointer(wrapper->tealet->main);
-    assert(mdata && mdata->wrappers);
-    if (PySet_Discard(mdata->wrappers, wrapper->tracking_ref) < 0) {
-        PyErr_WriteUnraisable(Py_None);
-        PyErr_Clear();
+    /* if the tealet has been deleted, we can't get at the correct main
+     * data, so we just let it go
+     */
+    if (wrapper->tealet) {
+        mdata = (PyTealetMainData *)*tealet_main_userpointer(wrapper->tealet->main);
+        assert(mdata && mdata->wrappers);
+        if (PySet_Discard(mdata->wrappers, wrapper->tracking_ref) < 0) {
+            PyErr_WriteUnraisable(Py_None);
+            PyErr_Clear();
+        }
     }
     Py_CLEAR(wrapper->tracking_ref);
 }
@@ -409,7 +414,7 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
 
 static void pytealet_dealloc(PyObject *obj) {
     PyTealetObject *tealet = (PyTealetObject *)obj;
-    if (tealet->state == STATE_RUN) {
+    if (tealet->tealet && tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE) {
         int err = PyErr_WarnEx(PyExc_RuntimeWarning, "freeing an active tealet leaks memory", 1);
         if (err) {
             PyErr_WriteUnraisable(Py_None);
@@ -1089,7 +1094,7 @@ PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet
 }
 
 /* Explicitly clean up this thread's tealet lineage and return wrappers whose
- * native tealet handles were forcibly invalidated.
+ * native tealet handles in the active state and forcibly invalidated.
  */
 PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
     PyTealetObject *current;
@@ -1147,21 +1152,32 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
             Py_DECREF(obj);
             continue;
         }
-
-        if (PyList_Append(nerfed, obj) < 0) {
-            PyErr_WriteUnraisable(Py_None);
-            PyErr_Clear();
+        /* ignore any main tealet, will be handled separately */
+        if (TEALET_IS_MAIN(wrapper->tealet)) {
+            Py_DECREF(obj);
+            continue;
         }
-        /* manually kill and delete the tealet */
+        /* only add live tealets to the list*/
+        int t_status = tealet_status(wrapper->tealet);
+        if (t_status == TEALET_STATUS_ACTIVE) {
+            if (PyList_Append(nerfed, obj) < 0) {
+                PyErr_WriteUnraisable(Py_None);
+                PyErr_Clear();
+            }
+        }
+
+        /* deallocate the tealet handle.  if it was active, this destroys
+         * the saved stack.
+        */
         tealet_delete(wrapper->tealet);
         wrapper->tealet = NULL;
-        wrapper->state = STATE_EXIT;
         Py_CLEAR(wrapper->tracking_ref);
         Py_DECREF(obj);
     }
     if (iter) {
         Py_DECREF(iter);
         if (PyErr_Occurred()) {
+            /* errors during iter-next */
             Py_DECREF(nerfed);
             return NULL;
         }
@@ -1170,6 +1186,7 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
     /* clear main tealet, and destroy the linage */
     TEALET_SET_PYOBJECT(((PyTealetObject*)mdata->main_wrapper)->tealet, NULL);
     ((PyTealetObject*)mdata->main_wrapper)->tealet = NULL;
+    ((PyTealetObject*)mdata->main_wrapper)->state = STATE_EXIT;
     Py_CLEAR(mdata->main_wrapper);
     tealet_finalize(main_tealet);
 

@@ -102,11 +102,14 @@ class TestThreadCleanup:
         nerfed = _tealet.thread_cleanup()
         nerfed_ids = {id(x) for x in nerfed}
 
-        assert id(thread_main) in nerfed_ids
+        # Only unfinished non-main tealets are returned in nerfed.
+        # Main is cleanly deleted as part of cleanup, not forcibly invalidated.
+        # Nerfed tealets have their tealet pointer nulled but keep their original state.
+        assert id(thread_main) not in nerfed_ids
         assert id(stub) in nerfed_ids
         assert id(dup) in nerfed_ids
-        assert stub.state == _tealet.STATE_EXIT
-        assert dup.state == _tealet.STATE_EXIT
+        assert stub.state == _tealet.STATE_STUB
+        assert dup.state == _tealet.STATE_STUB
 
         # Recreate main for this thread so subsequent tests keep the usual baseline.
         assert _tealet.main().state == _tealet.STATE_RUN
