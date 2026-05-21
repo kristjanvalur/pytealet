@@ -97,6 +97,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
 PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *main, int create_main,
                            PyTealetMainData **mdata_out);
 static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *main);
+static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds, int creating_main);
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
 
@@ -272,7 +273,7 @@ static void *PyTealet_GetStackFar(const PyThreadState *py_tstate) {
 /* Python Tealet Type API (Methods and Accessors)                        */
 /* ===================================================================== */
 
-static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds) {
+static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds, int creating_main) {
     PyTealetObject *src = NULL;
     PyTealetObject *result;
     PyTealetModuleState *mstate = GetModuleStateFromClass(subtype);
@@ -281,7 +282,7 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
         return NULL;
 
     /* Every non-main tealet object is bound to an existing thread-main. */
-    if (!mstate->creating_main) {
+    if (!creating_main) {
         if (!GetMain(mstate, 1))
             return NULL;
     }
@@ -329,6 +330,10 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
         result->owner_tid = src->owner_tid;
     }
     return (PyObject *)result;
+}
+
+static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds) {
+    return pytealet_new_impl(subtype, args, kwds, 0);
 }
 
 static void pytealet_dealloc(PyObject *obj) {
@@ -933,9 +938,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
         *tealet_main_userpointer(tmain) = (void *)mdata;
 
         /* create the main tealet */
-        mstate->creating_main = 1;
-        t_main = (PyTealetObject *)pytealet_new(mstate->tealet_type, NULL, NULL);
-        mstate->creating_main = 0;
+        t_main = (PyTealetObject *)pytealet_new_impl(mstate->tealet_type, NULL, NULL, 1);
         if (!t_main) {
             Py_DECREF(mdata->dustbin);
             tealet_finalize(tmain);

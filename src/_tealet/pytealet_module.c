@@ -83,7 +83,6 @@ static int pytealet_module_exec(PyObject *m) {
 
     memset(&mstate->tls_key, 0, sizeof(mstate->tls_key));
     mstate->frame_introspection_enabled = PYTEALET_WITH_PENDING_FRAME_INTROSPECTION;
-    mstate->creating_main = 0;
     mstate->tealet_type = NULL;
     mstate->tealet_error = NULL;
     mstate->invalid_error = NULL;
