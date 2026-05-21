@@ -1011,7 +1011,9 @@ static void pytealet_free_domain_lock(PyTealetMainData *mdata) { (void)mdata; }
 PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainData **mdata_out) {
     /* Get the thread's main tealet */
     PyTealetMainData *mdata;
-    PyTealetObject *t_main;
+    PyTealetObject *t_main = NULL;
+    tealet_t *tmain = NULL;
+    int tss_registered = 0;
     if (!mstate)
         return NULL;
     mdata = (PyTealetMainData *)PyThread_tss_get(&mstate->tls_key);
@@ -1022,7 +1024,6 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
     /* main tealet doesn't exist yet.  create it. */
     if (!mdata) {
         tealet_alloc_t talloc;
-        tealet_t *tmain;
         /* Use PyMem allocators for libtealet heap allocations. */
         talloc.malloc_p = tealet_malloc_wrapper;
         talloc.free_p = tealet_free_wrapper;
@@ -1030,98 +1031,62 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
         tmain = tealet_initialize(&talloc, sizeof(PyTealetExtra));
         if (!tmain) {
             PyErr_NoMemory();
-            return NULL;
+            goto fail;
         }
         {
             const char *check_stack_env = getenv("PYTEALET_CHECK_STACK");
             if (check_stack_env && *check_stack_env && *check_stack_env != '0') {
                 if (tealet_configure_check_stack(tmain, 0) < 0) {
-                    tealet_finalize(tmain);
                     PyErr_SetString(PyExc_RuntimeError, "tealet_configure_check_stack failed");
-                    return NULL;
+                    goto fail;
                 }
             }
         }
         mdata = (PyTealetMainData *)PyMem_Malloc(sizeof(*mdata));
         if (!mdata) {
-            tealet_finalize(tmain);
             PyErr_NoMemory();
-            return NULL;
+            goto fail;
         }
         memset(mdata, 0, sizeof(*mdata));
         mdata->tid = PyThread_get_thread_ident();
         mdata->dustbin = PyList_New(DUSTBIN_PREALLOC);
         if (!mdata->dustbin) {
-            tealet_finalize(tmain);
-            PyMem_Free(mdata);
             PyErr_NoMemory();
-            return NULL;
+            goto fail;
         }
         mdata->wrappers = PySet_New(NULL);
         if (!mdata->wrappers) {
-            Py_DECREF(mdata->dustbin);
-            tealet_finalize(tmain);
-            PyMem_Free(mdata);
             PyErr_NoMemory();
-            return NULL;
+            goto fail;
         }
         if (PyList_SetSlice(mdata->dustbin, 0, DUSTBIN_PREALLOC, NULL) < 0) {
-            Py_DECREF(mdata->dustbin);
-            Py_DECREF(mdata->wrappers);
-            tealet_finalize(tmain);
-            PyMem_Free(mdata);
-            return NULL;
+            goto fail;
         }
         if (pytealet_configure_domain_locking(tmain, mdata) < 0) {
-            Py_DECREF(mdata->dustbin);
-            Py_DECREF(mdata->wrappers);
-            tealet_finalize(tmain);
-            pytealet_free_domain_lock(mdata);
-            PyMem_Free(mdata);
             PyErr_SetString(PyExc_RuntimeError, "failed to configure tealet domain lock callbacks");
-            return NULL;
+            goto fail;
         }
         *tealet_main_userpointer(tmain) = (void *)mdata;
 
         /* create the main tealet */
         t_main = (PyTealetObject *)pytealet_new_impl(mstate->tealet_type, NULL, NULL, 1);
-        if (!t_main) {
-            Py_DECREF(mdata->dustbin);
-            Py_DECREF(mdata->wrappers);
-            tealet_finalize(tmain);
-            pytealet_free_domain_lock(mdata);
-            PyMem_Free(mdata);
-            return NULL;
-        }
+        if (!t_main)
+            goto fail;
+
         t_main->tealet = tmain;
         t_main->state = STATE_RUN;
         TEALET_SET_PYOBJECT(tmain, t_main); /* back link */
         mdata->main_wrapper = (PyObject *)t_main;
         if (PyThread_tss_set(&mstate->tls_key, (void *)mdata) != 0) {
-            TEALET_SET_PYOBJECT(tmain, NULL);
-            t_main->tealet = NULL;
-            Py_CLEAR(mdata->main_wrapper);
-            Py_DECREF(mdata->dustbin);
-            Py_DECREF(mdata->wrappers);
-            tealet_finalize(tmain);
-            pytealet_free_domain_lock(mdata);
-            PyMem_Free(mdata);
             PyErr_SetString(PyExc_RuntimeError, "failed to set thread-local main tealet");
-            return NULL;
+            goto fail;
         }
+        tss_registered = 1;
+
         if (pytealet_link_thread_data(mstate, mdata) < 0) {
-            TEALET_SET_PYOBJECT(tmain, NULL);
-            t_main->tealet = NULL;
-            t_main->state = STATE_EXIT;
-            Py_CLEAR(mdata->main_wrapper);
-            PyThread_tss_set(&mstate->tls_key, NULL);
-            Py_DECREF(mdata->dustbin);
-            Py_DECREF(mdata->wrappers);
-            tealet_finalize(tmain);
-            pytealet_free_domain_lock(mdata);
-            PyMem_Free(mdata);
-            PyErr_SetString(PyExc_RuntimeError, "failed to register thread main data");
-            return NULL;
+            if (!PyErr_Occurred())
+                PyErr_SetString(PyExc_RuntimeError, "failed to register thread main data");
+            goto fail;
         }
     } else {
         t_main = (PyTealetObject *)mdata->main_wrapper;
@@ -1133,6 +1098,29 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
     if (mdata_out)
         *mdata_out = mdata;
     return t_main;
+
+fail:
+    if (tss_registered) {
+        (void)PyThread_tss_set(&mstate->tls_key, NULL);
+    }
+    if (mdata) {
+        if (mdata->main_wrapper) {
+            if (t_main && t_main->tealet)
+                TEALET_SET_PYOBJECT(t_main->tealet, NULL);
+            if (t_main)
+                t_main->tealet = NULL;
+            if (t_main)
+                t_main->state = STATE_EXIT;
+            Py_CLEAR(mdata->main_wrapper);
+        }
+        Py_CLEAR(mdata->dustbin);
+        Py_CLEAR(mdata->wrappers);
+        pytealet_free_domain_lock(mdata);
+        PyMem_Free(mdata);
+    }
+    if (tmain)
+        tealet_finalize(tmain);
+    return NULL;
 }
 
 /* return a borrowed ref to this threads current tealet */
