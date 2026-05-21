@@ -586,11 +586,11 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     PyTealetMainData *mdata;
     PyTealetNewArg *ptarg;
     void *switch_arg;
-    
+
     if (!mstate)
         return NULL;
-    
-        current = GetCurrent(mstate, NULL, 0, &mdata);
+
+    current = GetCurrent(mstate, NULL, 0, &mdata);
     if (!current && PyErr_Occurred())
         return NULL;
     if (CheckTarget(mstate, target, current))
@@ -1207,28 +1207,27 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
     return nerfed;
 }
 
-/* check if a target tealet is valid */
+/* check if a target tealet is valid, compared to a reference one.
+ * we primarily use the thread_ids stored on the objects but
+ * also assert the main line relationship
+ */
 static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *ref) {
-    if (!ref) {
+    if (!ref)
         goto mismatch;
+
+    if (target->owner_tid != ref->owner_tid)
+        goto mismatch;
+
+    if (ref->tealet && target->tealet) {
+        /* assert main lineage relationship */
+        assert(ref->tealet->main == target->tealet->main);
     }
-    if (!target->tealet) {
-        /* tealet object will be created on demand */
-        if (target->owner_tid != ref->owner_tid) {
-            goto mismatch;
-        }
-    } else {
-        /* use main comparison to verify tealet ownership */
-        if (ref->tealet->main != target->tealet->main) {
-            goto mismatch;
-        }
-    }
-    assert(target->owner_tid == ref->owner_tid);
     return 0;
 
 mismatch:
-    if (ref)
-        assert(target->owner_tid != ref->owner_tid);
+    if (ref && ref->tealet && target->tealet) {
+        assert(ref->tealet->main != target->tealet->main);
+    }
     PyErr_SetString(mstate->invalid_error, "thread mismatch: cannot switch to a tealet from a different thread");
     return -1;
 }
