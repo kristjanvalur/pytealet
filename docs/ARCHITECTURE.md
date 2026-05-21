@@ -129,8 +129,13 @@ Thread ownership rules enforced by the C API:
 - `stub()` is only allowed from the owning thread.
 - Volatile traversal methods (`current()`, `main()`, `previous()`) are only
     allowed from the owning thread.
-- Duplicate-from-stub (`_tealet.tealet(existing_stub)`) is allowed across
-    threads.
+- Cross-thread duplication via `_tealet.tealet(existing_tealet)` is allowed
+    when `existing_tealet` is in `STATE_STUB` or `STATE_NEW`.
+- Duplicating a `STATE_STUB` tealet preserves the existing dormant/stub
+    execution context for use by the new wrapper.
+- Duplicating a `STATE_NEW` tealet is also supported; it duplicates an
+    unstarted tealet wrapper and preserves its not-yet-run status until it is
+    run from its owning thread.
 - Wrapper deallocation is allowed across threads.
 
 **Module Constants:**
