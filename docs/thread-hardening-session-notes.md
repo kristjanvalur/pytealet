@@ -35,7 +35,7 @@ Scope: Cross-thread ownership hardening for critical pytealet operations, plus r
   - foreign-thread `run()` rejected
   - foreign-thread `switch()` rejected
   - foreign-thread `current()` / `main()` / `previous()` rejected
-  - foreign-thread stub duplicate allowed
+  - foreign-thread duplicate allowed (source in `STATE_NEW` or `STATE_STUB`)
   - foreign-thread deallocation path allowed
 - Full suite snapshot:
   - `tests/`: **26 passed, 1 skipped** (py313-debug env)
@@ -66,7 +66,7 @@ Scope: Cross-thread ownership hardening for critical pytealet operations, plus r
 - Owner-thread restricted:
   - `stub()`, `run()`, `switch()`, `current()`, `main()`, `previous()`.
 - Explicitly permitted cross-thread:
-  - duplicate-from-stub via `_tealet.tealet(existing_stub)`.
+  - duplicate via `_tealet.tealet(existing_tealet)` when source is `STATE_NEW` or `STATE_STUB`.
   - wrapper deallocation path (`pytealet_dealloc()` -> `tealet_delete()`).
 - Always-safe metadata/inspection:
   - `thread_id`, `state`, `belongs_to_current()`.
