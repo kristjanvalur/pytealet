@@ -37,6 +37,16 @@ _tealet.main() -> tealet
 Returns the main tealet for this thread (the root of the tealet tree).
 
 ```python
+_tealet.thread_cleanup() -> list[tealet]
+```
+Explicitly tears down this thread's tealet lineage and returns wrappers whose
+native tealet handles were forcibly invalidated. Intended for optional worker
+thread shutdown cleanup.
+- Must be called from the thread's main tealet context.
+- Return order is unspecified.
+- Idempotent for already-cleaned thread state (returns an empty list).
+
+```python
 _tealet.frame_introspection([enabled]) -> bool
 ```
 Gets or sets dormant-tealet frame introspection at runtime.
@@ -49,7 +59,8 @@ Gets or sets dormant-tealet frame introspection at runtime.
 ```python
 class _tealet.tealet([source_tealet])
 ```
-The core tealet class. If `source_tealet` is provided and is a STUB, creates a duplicate.
+The core tealet class. If `source_tealet` is provided and is in `STATE_NEW` or
+`STATE_STUB`, creates a duplicate wrapper in the same lineage.
 
 **Tealet Object Methods:**
 

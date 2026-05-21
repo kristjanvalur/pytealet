@@ -39,6 +39,7 @@ struct PyTealetMainData {
     PyTealetNewArg new_arg;
     PyObject *dustbin;
     PyObject *main_wrapper; /* strong ref to this thread's main tealet wrapper */
+    PyObject *wrappers; /* set of weakrefs to non-main wrappers in this main lineage */
 #if PYTEALET_FREE_THREADED
     PyThread_type_lock domain_lock;
 #endif
@@ -80,7 +81,8 @@ static PyObject *GetWrapperRef(tealet_t *tealet) {
 struct PyTealetObject {
     PyObject_HEAD int state;
     tealet_t *tealet;
-    long owner_tid;       /* thread that owns this tealet object */
+    unsigned long owner_tid;       /* thread that owns this tealet object */
+    PyObject *tracking_ref; /* weakref object stored in main-lineage wrapper set */
 #if !defined(Py312P)
     PyObject *weakreflist; /* List of weak references */
 #endif
@@ -97,7 +99,10 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
 PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *main, int create_main,
                            PyTealetMainData **mdata_out);
 static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *main);
-static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds, int creating_main);
+static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds,
+                                   int creating_main);
+static int pytealet_track_wrapper(PyTealetMainData *mdata, PyTealetObject *wrapper);
+static void pytealet_untrack_wrapper(PyTealetObject *wrapper);
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
 
@@ -249,6 +254,61 @@ static void dustbin_clear(tealet_t *tealet) {
     }
 }
 
+static int pytealet_track_wrapper(PyTealetMainData *mdata, PyTealetObject *wrapper) {
+    PyObject *wref;
+
+    assert(mdata);
+    assert(wrapper);
+    assert(mdata->wrappers);
+    assert(!wrapper->tracking_ref);
+    assert(wrapper->tealet);
+    assert(!TEALET_IS_MAIN(wrapper->tealet));
+    
+    wref = PyWeakref_NewRef((PyObject *)wrapper, NULL);
+    if (!wref)
+        return -1;
+    if (PySet_Add(mdata->wrappers, wref) < 0) {
+        Py_DECREF(wref);
+        return -1;
+    }
+    wrapper->tracking_ref = wref;
+    return 0;
+}
+
+static void pytealet_untrack_wrapper(PyTealetObject *wrapper) {
+    PyTealetMainData *mdata;
+    assert(wrapper);
+    if (!wrapper->tracking_ref)
+        return;
+
+    mdata = (PyTealetMainData *)*tealet_main_userpointer(wrapper->tealet->main);
+    assert(mdata && mdata->wrappers);
+    if (PySet_Discard(mdata->wrappers, wrapper->tracking_ref) < 0) {
+        PyErr_WriteUnraisable(Py_None);
+        PyErr_Clear();
+    }
+    Py_CLEAR(wrapper->tracking_ref);
+}
+
+/* Resolve a weakref to a strong reference when alive.
+ * Returns: 1 if alive (*obj_out is new ref), 0 if dead (*obj_out is NULL),
+ * -1 on API error.
+ */
+static int pytealet_weakref_get_live(PyObject *wref, PyObject **obj_out) {
+    *obj_out = NULL;
+#if defined(PY313P)
+    return PyWeakref_GetRef(wref, obj_out);
+#else
+    {
+        PyObject *obj = PyWeakref_GetObject(wref);
+        if (!obj || obj == Py_None)
+            return 0;
+        *obj_out = Py_NewRef(obj);
+        return 1;
+    }
+#endif
+}
+
 /* get the far pointer that we need at least ot store any stack based data
  * currently in the python tstate.  this varies by python version
  */
@@ -273,17 +333,19 @@ static void *PyTealet_GetStackFar(const PyThreadState *py_tstate) {
 /* Python Tealet Type API (Methods and Accessors)                        */
 /* ===================================================================== */
 
-static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds, int creating_main) {
+static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds,
+                                   int creating_main) {
     PyTealetObject *src = NULL;
     PyTealetObject *result;
+    PyTealetMainData *lineage_mdata;
     PyTealetModuleState *mstate = GetModuleStateFromClass(subtype);
-    long current_tid;
+    unsigned long current_tid;
     if (!mstate)
         return NULL;
 
     /* Every non-main tealet object is bound to an existing thread-main. */
     if (!creating_main) {
-        if (!GetMain(mstate, 1))
+        if (!GetMain(mstate, 1, NULL))
             return NULL;
     }
     current_tid = PyThread_get_thread_ident();
@@ -305,6 +367,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     result->state = STATE_NEW;
     result->tealet = NULL;
     result->owner_tid = current_tid;
+    result->tracking_ref = NULL;
     PyTealetTstate_Init(&result->tstate);
     PyTealetFrameInfo_Init(&result->frame_info);
 #if !defined(Py312P)
@@ -323,6 +386,14 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
                 return PyErr_NoMemory();
             }
             TEALET_SET_PYOBJECT(result->tealet, result);
+            lineage_mdata = (PyTealetMainData *)*tealet_main_userpointer(result->tealet->main);
+            if (pytealet_track_wrapper(lineage_mdata, result) < 0) {
+                TEALET_SET_PYOBJECT(result->tealet, NULL);
+                tealet_delete(result->tealet);
+                result->tealet = NULL;
+                Py_DECREF(result);
+                return NULL;
+            }
             PyTealetTstate_Duplicate(&result->tstate, &src->tstate);
             /* We don't capture frame info for stubs. */
         }
@@ -344,6 +415,7 @@ static void pytealet_dealloc(PyObject *obj) {
             PyErr_WriteUnraisable(Py_None);
         }
     }
+    pytealet_untrack_wrapper(tealet);
     PyObject_ClearWeakRefs(obj);
     /* Release any owned saved thread-state references */
     PyTealetTstate_Drop(&tealet->tstate, NULL);
@@ -372,6 +444,8 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
     tealet_t *tresult;
     PyThreadState *tstate = PyThreadState_GET();
     void *stack_far;
+    PyTealetMainData *mdata;
+    
     if (!mstate)
         return NULL;
     if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
@@ -385,7 +459,7 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
     if (pytealet_require_owner_thread(mstate, pytealet, "stub"))
         return NULL;
     assert(pytealet->tealet == NULL);
-    main = GetMain(mstate, 1, NULL);
+    main = GetMain(mstate, 1, &mdata);
     if (!main)
         return NULL;
     stack_far = PyTealet_GetStackFar(PyThreadState_GET());
@@ -395,6 +469,14 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
     pytealet->tealet = tresult;
     pytealet->state = STATE_STUB;
     TEALET_SET_PYOBJECT(tresult, pytealet);
+    if (pytealet_track_wrapper(mdata, pytealet) < 0) {
+        TEALET_SET_PYOBJECT(tresult, NULL);
+        tealet_delete(tresult);
+        pytealet->tealet = NULL;
+        pytealet->state = STATE_NEW;
+        PyTealetTstate_Drop(&pytealet->tstate, NULL);
+        return NULL;
+    }
     return Py_NewRef(self);
 }
 
@@ -764,7 +846,7 @@ static PyObject *pytealet_get_frame(PyObject *_self, void *_closure) {
 
 static PyObject *pytealet_get_tid(PyObject *_self, void *_closure) {
     PyTealetObject *self = (PyTealetObject *)_self;
-    return PyLong_FromLong(self->owner_tid);
+    return PyLong_FromUnsignedLong(self->owner_tid);
 }
 
 static struct PyGetSetDef pytealet_getset[] = {{"state", pytealet_get_state, NULL, "", NULL},
@@ -921,14 +1003,24 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
             PyErr_NoMemory();
             return NULL;
         }
+        mdata->wrappers = PySet_New(NULL);
+        if (!mdata->wrappers) {
+            Py_DECREF(mdata->dustbin);
+            tealet_finalize(tmain);
+            PyMem_Free(mdata);
+            PyErr_NoMemory();
+            return NULL;
+        }
         if (PyList_SetSlice(mdata->dustbin, 0, DUSTBIN_PREALLOC, NULL) < 0) {
             Py_DECREF(mdata->dustbin);
+            Py_DECREF(mdata->wrappers);
             tealet_finalize(tmain);
             PyMem_Free(mdata);
             return NULL;
         }
         if (pytealet_configure_domain_locking(tmain, mdata) < 0) {
             Py_DECREF(mdata->dustbin);
+            Py_DECREF(mdata->wrappers);
             tealet_finalize(tmain);
             pytealet_free_domain_lock(mdata);
             PyMem_Free(mdata);
@@ -941,6 +1033,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
         t_main = (PyTealetObject *)pytealet_new_impl(mstate->tealet_type, NULL, NULL, 1);
         if (!t_main) {
             Py_DECREF(mdata->dustbin);
+            Py_DECREF(mdata->wrappers);
             tealet_finalize(tmain);
             pytealet_free_domain_lock(mdata);
             PyMem_Free(mdata);
@@ -955,6 +1048,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
             t_main->tealet = NULL;
             Py_CLEAR(mdata->main_wrapper);
             Py_DECREF(mdata->dustbin);
+            Py_DECREF(mdata->wrappers);
             tealet_finalize(tmain);
             pytealet_free_domain_lock(mdata);
             PyMem_Free(mdata);
@@ -992,6 +1086,106 @@ PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet
         return TEALET_PYOBJECT(t_current);
     }
     return pytealet;
+}
+
+/* Explicitly clean up this thread's tealet lineage and return wrappers whose
+ * native tealet handles were forcibly invalidated.
+ */
+PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
+    PyTealetObject *current;
+    PyTealetMainData *mdata;
+    PyObject *nerfed;
+    PyObject *wrappers = NULL;
+    PyObject *iter = NULL;
+    PyObject *wref;
+    tealet_t *main_tealet;
+
+    assert(mstate);
+    nerfed = PyList_New(0);
+    if (!nerfed)
+        return NULL;
+
+    current = GetCurrent(mstate, NULL, 0, &mdata);
+    if (!current) {
+        /* no current tealet , idempotent result (cleanup non-existing)*/
+        return nerfed;
+    }
+    assert(mdata);
+    if (!TEALET_IS_MAIN(current->tealet)) {
+        Py_DECREF(nerfed);
+        PyErr_SetString(mstate->state_error, "thread_cleanup() must be called from this thread's main tealet");
+        return NULL;
+    }
+    main_tealet = current->tealet;
+
+    wrappers = mdata->wrappers;
+    assert(wrappers);
+
+    iter = PyObject_GetIter(wrappers);
+    if (!iter) {
+        Py_DECREF(nerfed);
+        return NULL;
+    }
+
+    while (iter && (wref = PyIter_Next(iter))) {
+        PyObject *obj = NULL;
+        PyTealetObject *wrapper;
+        int weak_status;
+
+        weak_status = pytealet_weakref_get_live(wref, &obj);
+        Py_DECREF(wref);
+        if (weak_status < 0) {
+            Py_DECREF(iter);
+            Py_DECREF(nerfed);
+            return NULL;
+        }
+        if (weak_status == 0)
+            continue;
+        assert(PyTealet_Check(obj, mstate));
+        wrapper = (PyTealetObject *)obj;
+        if (!wrapper->tealet) {
+            Py_DECREF(obj);
+            continue;
+        }
+
+        if (PyList_Append(nerfed, obj) < 0) {
+            PyErr_WriteUnraisable(Py_None);
+            PyErr_Clear();
+        }
+        /* manually kill and delete the tealet */
+        PyTealetTstate_Drop(&wrapper->tstate, NULL);
+        PyTealetFrameInfo_Release(&wrapper->frame_info, NULL);
+        TEALET_SET_PYOBJECT(wrapper->tealet, NULL);
+        tealet_delete(wrapper->tealet);
+        wrapper->tealet = NULL;
+        wrapper->state = STATE_EXIT;
+        Py_CLEAR(wrapper->tracking_ref);
+        Py_DECREF(obj);
+    }
+    if (iter) {
+        Py_DECREF(iter);
+        if (PyErr_Occurred()) {
+            Py_DECREF(nerfed);
+            return NULL;
+        }
+    }
+
+    /* clear main tealet, and destroy the linage */
+    ((PyTealetObject*)mdata->main_wrapper)->tealet = NULL;
+    Py_CLEAR(mdata->main_wrapper);
+    tealet_finalize(main_tealet);
+
+    Py_CLEAR(mdata->dustbin);
+    Py_CLEAR(mdata->wrappers);
+    pytealet_free_domain_lock(mdata);
+    PyMem_Free(mdata);
+    
+    if (PyThread_tss_set(&mstate->tls_key, NULL) != 0) {
+        PyErr_WriteUnraisable(Py_None);
+        PyErr_Clear();
+    }
+    
+    return nerfed;
 }
 
 /* check if a target tealet is valid */
@@ -1036,6 +1230,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     PyObject *result, *return_arg;
     PyTealetObject *return_to;
     tealet_t *t_return;
+    PyTealetMainData *mdata;
     int exit_mode = TEALET_EXIT_DELETE;
     PyThreadState *tstate = PyThreadState_GET();
 
@@ -1050,6 +1245,11 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         /* set up the pointer in the tealet */
         tealet->tealet = t_current;
         TEALET_SET_PYOBJECT(t_current, tealet);
+        mdata = (PyTealetMainData *)*tealet_main_userpointer(t_current->main);
+        if (pytealet_track_wrapper(mdata, tealet) < 0) {
+            PyErr_WriteUnraisable(Py_None);
+            PyErr_Clear();
+        }
     }
 
     /* We only have borrowed references from the calling tealet.

@@ -92,6 +92,34 @@ class TestModule:
             _tealet.frame_introspection(original)
 
 
+class TestThreadCleanup:
+    def test_thread_cleanup_returns_nerfed_wrappers(self):
+        thread_main = _tealet.main()
+        stub = _tealet.tealet()
+        stub.stub()
+        dup = _tealet.tealet(stub)
+
+        nerfed = _tealet.thread_cleanup()
+        nerfed_ids = {id(x) for x in nerfed}
+
+        assert id(thread_main) in nerfed_ids
+        assert id(stub) in nerfed_ids
+        assert id(dup) in nerfed_ids
+        assert stub.state == _tealet.STATE_EXIT
+        assert dup.state == _tealet.STATE_EXIT
+
+        # Recreate main for this thread so subsequent tests keep the usual baseline.
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_thread_cleanup_requires_main_tealet_context(self):
+        def run(current, arg):
+            with pytest.raises(_tealet.StateError):
+                _tealet.thread_cleanup()
+            return current.main()
+
+        _tealet.tealet().run(run, None)
+
+
 class TestThreadOwnership:
     def test_new_tealet_has_owner_tid_and_belongs(self):
         t = _tealet.tealet()

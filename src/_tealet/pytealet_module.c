@@ -28,6 +28,15 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return Py_XNewRef((PyObject *)GetMain(mstate, 1, NULL));
 }
 
+static PyObject *module_thread_cleanup(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    return PyTealet_ThreadCleanup(mstate);
+}
+
 /* Get/set dormant tealet frame introspection at runtime.
  * - frame_introspection() -> bool
  * - frame_introspection(enabled) -> bool
@@ -68,6 +77,7 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
+    {"thread_cleanup", (PyCFunction)module_thread_cleanup, METH_NOARGS, ""},
     {"frame_introspection", (PyCFunction)module_frame_introspection, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
