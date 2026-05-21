@@ -1155,10 +1155,8 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
             continue;
         }
         /* only add live tealets to the list*/
-        int add_to_list = 0;
-        if (tealet_status(wrapper->tealet) == TEALET_STATUS_ACTIVE)
-            ;
-        add_to_list = 1;
+        int add_to_list =
+            (tealet_status(wrapper->tealet) == TEALET_STATUS_ACTIVE);
         /* but stubs are okay to delete and don't leak memory */
         if (wrapper->state == STATE_STUB)
             add_to_list = 0;
