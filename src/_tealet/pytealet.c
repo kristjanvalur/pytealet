@@ -1153,9 +1153,6 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
             PyErr_Clear();
         }
         /* manually kill and delete the tealet */
-        PyTealetTstate_Drop(&wrapper->tstate, NULL);
-        PyTealetFrameInfo_Release(&wrapper->frame_info, NULL);
-        TEALET_SET_PYOBJECT(wrapper->tealet, NULL);
         tealet_delete(wrapper->tealet);
         wrapper->tealet = NULL;
         wrapper->state = STATE_EXIT;
@@ -1171,6 +1168,7 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
     }
 
     /* clear main tealet, and destroy the linage */
+    TEALET_SET_PYOBJECT(((PyTealetObject*)mdata->main_wrapper)->tealet, NULL);
     ((PyTealetObject*)mdata->main_wrapper)->tealet = NULL;
     Py_CLEAR(mdata->main_wrapper);
     tealet_finalize(main_tealet);
