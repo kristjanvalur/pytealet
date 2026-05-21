@@ -104,6 +104,8 @@ static int CheckTarget(PyTealetModuleState *mstate, PyTealetObject *target, PyTe
 static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds, int creating_main);
 static int pytealet_track_wrapper(PyTealetMainData *mdata, PyTealetObject *wrapper);
 static void pytealet_untrack_wrapper(PyTealetObject *wrapper);
+static void pytealet_domain_lock(PyTealetMainData *mdata);
+static void pytealet_domain_unlock(PyTealetMainData *mdata);
 static int pytealet_link_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 static void pytealet_unlink_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *nerfed,
@@ -272,10 +274,14 @@ static int pytealet_track_wrapper(PyTealetMainData *mdata, PyTealetObject *wrapp
     wref = PyWeakref_NewRef((PyObject *)wrapper, NULL);
     if (!wref)
         return -1;
+
+    pytealet_domain_lock(mdata);
     if (PySet_Add(mdata->wrappers, wref) < 0) {
+        pytealet_domain_unlock(mdata);
         Py_DECREF(wref);
         return -1;
     }
+    pytealet_domain_unlock(mdata);
     wrapper->tracking_ref = wref;
     return 0;
 }
@@ -338,9 +344,13 @@ static void pytealet_untrack_wrapper(PyTealetObject *wrapper) {
      * data, so we just let it go
      */
     if (wrapper->tealet) {
+        int discard_rc;
         mdata = (PyTealetMainData *)*tealet_main_userpointer(wrapper->tealet->main);
         assert(mdata && mdata->wrappers);
-        if (PySet_Discard(mdata->wrappers, wrapper->tracking_ref) < 0) {
+        pytealet_domain_lock(mdata);
+        discard_rc = PySet_Discard(mdata->wrappers, wrapper->tracking_ref);
+        pytealet_domain_unlock(mdata);
+        if (discard_rc < 0) {
             PyErr_WriteUnraisable(Py_None);
             PyErr_Clear();
         }
@@ -999,6 +1009,23 @@ static void pytealet_free_domain_lock(PyTealetMainData *mdata) {
         mdata->domain_lock = NULL;
     }
 }
+
+/* Access to mdata->wrappers must be externally synchronized in free-threaded
+ * builds. Set operations are not a safe atomic boundary for complex entries:
+ * they can invoke hashing/equality/weakref machinery and race with concurrent
+ * mutation from other threads.
+ */
+static void pytealet_domain_lock(PyTealetMainData *mdata) {
+    assert(mdata);
+    assert(mdata->domain_lock);
+    PyThread_acquire_lock(mdata->domain_lock, WAIT_LOCK);
+}
+
+static void pytealet_domain_unlock(PyTealetMainData *mdata) {
+    assert(mdata);
+    assert(mdata->domain_lock);
+    PyThread_release_lock(mdata->domain_lock);
+}
 #else
 static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMainData *mdata) {
     (void)main_tealet;
@@ -1007,6 +1034,10 @@ static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMain
 }
 
 static void pytealet_free_domain_lock(PyTealetMainData *mdata) { (void)mdata; }
+
+static void pytealet_domain_lock(PyTealetMainData *mdata) { (void)mdata; }
+
+static void pytealet_domain_unlock(PyTealetMainData *mdata) { (void)mdata; }
 #endif
 
 /* return a borrowed reference to this thread's main tealet */
@@ -1169,7 +1200,9 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
         PyTealetObject *wrapper;
         int weak_status;
 
+        pytealet_domain_lock(mdata);
         wref = PySet_Pop(wrappers);
+        pytealet_domain_unlock(mdata);
         if (!wref) {
             if (PyErr_ExceptionMatches(PyExc_KeyError)) {
                 PyErr_Clear();
