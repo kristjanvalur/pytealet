@@ -1,4 +1,6 @@
 # A greenlet emulation module using tealets
+import contextvars
+import threading
 import weakref
 import sys
 
@@ -37,6 +39,8 @@ class greenlet(object):
         # must create it on this thread, not dynamically when run
         # this will bind it to the right thread
         self.run = run
+        self._gr_context = None
+        self._is_running = False
         if isinstance(parent, _tealet.tealet):
             # main greenlet for this thread
             self._tealet = parent
@@ -103,13 +107,39 @@ class greenlet(object):
             return f.f_back.f_back
 
     @property
+    def gr_context(self):
+        if self._is_running and self._tealet.thread_id != threading.get_ident():
+            raise ValueError("running in a different thread")
+        if self._gr_context is not None:
+            return self._gr_context
+
+        current = self._tealet._get_context()
+        if current is not None and current:
+            self._gr_context = current
+            return current
+        return None
+
+    @gr_context.setter
+    def gr_context(self, value):
+        if self._is_running and self._tealet.thread_id != threading.get_ident():
+            raise ValueError("running in a different thread")
+
+        if value is not None and not isinstance(value, contextvars.Context):
+            raise TypeError("greenlet context must be a contextvars.Context or None")
+
+        self._gr_context = value
+        self._tealet._set_context(value)
+
+    @gr_context.deleter
+    def gr_context(self):
+        raise AttributeError("can't delete context attribute")
+
+    @property
     def dead(self):
         return self._tealet.state == _tealet.STATE_EXIT
 
-    def __nonzero__(self):
+    def __bool__(self):
         return self._tealet.state == _tealet.STATE_RUN
-
-    __bool__ = __nonzero__
 
     def switch(self, *args, **kwds):
         return self._switch((False, args, kwds))
@@ -124,12 +154,23 @@ class greenlet(object):
             run = getattr(self, "run", None)
             if run:
                 del self.run
-                # here we can tweak how we create the new stack
-                arg = self._tealet.run(self._greenlet_main, (run, arg))
+                ctx = self._gr_context
+                if ctx is None:
+                    ctx = contextvars.Context()
+                self._is_running = True
+                try:
+                    # here we can tweak how we create the new stack
+                    arg = self._tealet.run(self._greenlet_main, (run, arg, ctx))
+                finally:
+                    self._is_running = False
             else:
                 if not self:
                     return self._parent()._switch(arg)
-                arg = self._tealet.switch(arg)
+                self._is_running = True
+                try:
+                    arg = self._tealet.switch(arg)
+                finally:
+                    self._is_running = False
         return self._Result(arg)
 
     @staticmethod
@@ -174,13 +215,19 @@ class greenlet(object):
 
     @staticmethod
     def _greenlet_main(current, arg):
-        run, (err, args, kwds) = arg
+        run, (err, args, kwds), ctx = arg
         try:
             if not err:
-                result = _tealet.hide_frame(run, args, kwds)
+                def _call_run():
+                    return _tealet.hide_frame(run, args, kwds)
+
+                result = ctx.run(_call_run)
                 arg = (False, (result,), None)
             else:
-                greenlet._raise_triplet(err, args, kwds)
+                def _raise():
+                    greenlet._raise_triplet(err, args, kwds)
+
+                ctx.run(_raise)
         except GreenletExit as e:
             arg = (False, (e,), None)
         except BaseException:
@@ -197,6 +244,20 @@ class greenlet(object):
         while not p:
             p = p.parent
         return p
+
+    def _clear_current_context(self):
+        current = contextvars.copy_context()
+        for var in current:
+            var.set(None)
+
+    def _apply_context(self, ctx):
+        current = contextvars.copy_context()
+        target_vars = set(ctx)
+        for var in current:
+            if var not in target_vars:
+                var.set(None)
+        for var, val in ctx.items():
+            var.set(val)
 
     getcurrent = staticmethod(getcurrent)
     error = error
