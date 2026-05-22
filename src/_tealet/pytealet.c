@@ -6,7 +6,6 @@
  */
 
 #include "Python.h"
-#include "cpython/context.h"
 #include "frameobject.h"
 #include "pythread.h"
 #include "structmember.h"
@@ -22,6 +21,12 @@
 #include "tealet.h"
 #include "tealet_extras.h"
 #include "tstate_state.h"
+
+#if defined(Py311P)
+#include "cpython/context.h"
+#else
+#include "context.h"
+#endif
 
 /* ===================================================================== */
 /* Core Types and Module State                                           */
