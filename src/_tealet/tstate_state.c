@@ -43,6 +43,8 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 #endif
 #endif
 
+    /* context follows stricter transfer rules than other members*/
+    assert (dst->context == NULL); /* it should have been cleared on last PUT */
     dst->context = src->context;
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
     dst->delete_later = src->delete_later;
@@ -55,7 +57,7 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
 }
 
 /* Raw copy previously saved tealet tstate into PyThreadState. */
-static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
+static void PyTealetTstate_Put(PyTealetTstate *src, PyThreadState *dst) {
 #if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
     dst->recursion_depth = src->recursion_depth;
 #elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
@@ -71,6 +73,7 @@ static void PyTealetTstate_Put(const PyTealetTstate *src, PyThreadState *dst) {
 
     dst->context = src->context;
     dst->context_ver++; /* Invalidate contextvars cache */
+    src->context = NULL; /* ownership transferred to live tstate */
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
     dst->delete_later = src->delete_later;
 #elif defined(PY312)
@@ -102,11 +105,12 @@ static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_teale
         PyTealet_dustbin_push(dustbin_tealet, saved->delete_later);
 #endif
         PyTealet_dustbin_push(dustbin_tealet, saved->context);
+        saved->context = NULL;
     } else {
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
         Py_XDECREF(saved->delete_later);
 #endif
-        Py_XDECREF(saved->context);
+        Py_CLEAR(saved->context);
     }
 }
 
@@ -159,7 +163,10 @@ static void PyTealetTstate_AssertClearPy(PyThreadState *py_tstate) {
 #endif
 }
 
-void PyTealetTstate_Init(PyTealetTstate *saved) { saved->has_state = 0; }
+void PyTealetTstate_Init(PyTealetTstate *saved) {
+    saved->has_state = 0;
+    saved->context = NULL;
+}
 
 /* copy the thread state, e.g. when we create a stub, or when we save current and
  * continue in a new tealet */
@@ -199,8 +206,17 @@ void PyTealetTstate_Duplicate(PyTealetTstate *dst, const PyTealetTstate *src) {
 
 /* drop our own threadstate refs, e.g. after failure, or at tealet end */
 void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet) {
-    if (!dst->has_state)
+    if (!dst->has_state) {
+        /* context can live outside the has_state flag*/
+        if (dst->context) {
+            if (dustbin_tealet)
+                PyTealet_dustbin_push(dustbin_tealet, dst->context);
+            else
+                Py_DECREF(dst->context);
+            dst->context = NULL;
+        }
         return;
+    }
     PyTealetTstate_DecRef(dst, dustbin_tealet);
     dst->has_state = 0;
 }

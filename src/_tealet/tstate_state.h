@@ -92,6 +92,11 @@
         int trash_delete_nesting; /* destructor nesting level, conserved. */
     #endif
 
+        /* context pointer can be valid even if has_state is 0. If non-null
+         * in this struct, we own a reference to it.
+         * This pointer can be accessed via API functions to set and get the
+         * tealet context both prior to and during execution.
+         */
         PyObject *context; /* Python 3.7+ contextvars */
 
         /* frame-like execution state that cannot be shared between branches */

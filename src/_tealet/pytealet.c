@@ -22,6 +22,12 @@
 #include "tealet_extras.h"
 #include "tstate_state.h"
 
+#if defined(Py311P)
+#include "cpython/context.h"
+#else
+#include "context.h"
+#endif
+
 /* ===================================================================== */
 /* Core Types and Module State                                           */
 /* ===================================================================== */
@@ -533,7 +539,14 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
     stack_far = PyTealet_GetStackFar(PyThreadState_GET());
     if (tealet_stub_new(main->tealet, &tresult, stack_far))
         return PyErr_NoMemory();
+
+    /* Copy the tstate, but leave the currently set "context" intact */
+    PyObject *context = pytealet->tstate.context;
+    pytealet->tstate.context = NULL;
     PyTealetTstate_Copy(&pytealet->tstate, tstate, 1); /* dst (new) belongs to the new tealet */
+    Py_XDECREF(pytealet->tstate.context);
+    pytealet->tstate.context = context;
+
     pytealet->tealet = tresult;
     pytealet->state = STATE_STUB;
     TEALET_SET_PYOBJECT(tresult, pytealet);
@@ -734,6 +747,7 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     } else {
         void *stack_limit = PyTealet_GetStackFar(tstate);
         PyTealetTstate_Copy(&current->tstate, tstate, 0); /* src (current) belongs to new tealet */
+
         tealet = tealet_new(current->tealet);
         if (!tealet)
             fail = TEALET_ERR_MEM;
@@ -851,6 +865,79 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     return result;
 }
 
+static PyObject *pytealet_get_context(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetObject *tealet = (PyTealetObject *)self;
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(tealet));
+    PyTealetObject *current = NULL;
+    PyObject *ctx = NULL;
+
+    if (!mstate)
+        return NULL;
+
+    current = GetCurrent(mstate, NULL, 0, NULL);
+    if (!current && PyErr_Occurred())
+        return NULL;
+    if (!current) {
+        PyErr_SetString(mstate->state_error, "no current tealet");
+        return NULL;
+    }
+    if (CheckTarget(mstate, tealet, current, "context"))
+        return NULL;
+
+    if (current == tealet) {
+        /* get the active context */
+        ctx = PyThreadState_GET()->context;
+    } else {
+        ctx = tealet->tstate.context;
+    }
+
+    if (!ctx)
+        Py_RETURN_NONE;
+    return Py_NewRef(ctx);
+}
+
+static PyObject *pytealet_set_context(PyObject *self, PyObject *value) {
+    PyTealetObject *tealet = (PyTealetObject *)self;
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(tealet));
+    PyTealetObject *current = NULL;
+    PyObject *new_ctx = (value == Py_None) ? NULL : value;
+
+    if (!mstate)
+        return NULL;
+
+    if (new_ctx && !PyContext_CheckExact(new_ctx)) {
+        PyErr_SetString(PyExc_TypeError, "context must be a contextvars.Context or None");
+        return NULL;
+    }
+
+    current = GetCurrent(mstate, NULL, 0, NULL);
+    if (!current && PyErr_Occurred())
+        return NULL;
+    if (!current) {
+        PyErr_SetString(mstate->state_error, "no current tealet");
+        return NULL;
+    }
+    if (CheckTarget(mstate, tealet, current, "context"))
+        return NULL;
+
+    if (current == tealet) {
+        /* set the active context */
+        PyThreadState *tstate = PyThreadState_GET();
+        PyObject *old_ctx = tstate->context;
+        Py_XINCREF(new_ctx);
+        tstate->context = new_ctx;
+        tstate->context_ver++;
+        Py_XDECREF(old_ctx);
+    } else {
+        PyObject *old_ctx = tealet->tstate.context;
+        Py_XINCREF(new_ctx);
+        tealet->tstate.context = new_ctx;
+        Py_XDECREF(old_ctx);
+    }
+
+    Py_RETURN_NONE;
+}
+
 static struct PyMethodDef pytealet_methods[] = {
     {"stub", (PyCFunction)(void (*)(void))pytealet_stub, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"current", (PyCFunction)(void (*)(void))pytealet_current, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
@@ -866,6 +953,26 @@ static struct PyMethodDef pytealet_methods[] = {
 /* ===================================================================== */
 /* Properties                                                            */
 /* ===================================================================== */
+static PyObject *pytealet_get_context_prop(PyObject *_self, void *_closure) {
+    (void)_closure;
+    return pytealet_get_context(_self, NULL);
+}
+
+static int pytealet_set_context_prop(PyObject *_self, PyObject *value, void *_closure) {
+    PyObject *result;
+
+    (void)_closure;
+    if (!value) {
+        PyErr_SetString(PyExc_AttributeError, "can't delete context attribute");
+        return -1;
+    }
+    result = pytealet_set_context(_self, value);
+    if (!result)
+        return -1;
+    Py_DECREF(result);
+    return 0;
+}
+
 static PyObject *pytealet_get_main(PyObject *_self, void *_closure) {
     PyTealetObject *self = (PyTealetObject *)_self;
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
@@ -921,6 +1028,7 @@ static PyObject *pytealet_get_tid(PyObject *_self, void *_closure) {
 
 static struct PyGetSetDef pytealet_getset[] = {{"state", pytealet_get_state, NULL, "", NULL},
                                                {"frame", pytealet_get_frame, NULL, "", NULL},
+                                               {"context", pytealet_get_context_prop, pytealet_set_context_prop, "", NULL},
                                                {"thread_id", pytealet_get_tid, NULL, "", NULL},
                                                {0}};
 
@@ -1383,7 +1491,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         assert(t_current == tealet->tealet);
         assert(TEALET_PYOBJECT(t_current) == tealet);
 
-        /* set the tstate from our own copy */
+        /* set the tstate from our own copy.  This includes the context. */
         PyTealetTstate_Restore(&tealet->tstate, tstate);
     } else {
         assert(tealet->state == STATE_NEW);
@@ -1395,6 +1503,16 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
             PyErr_WriteUnraisable(Py_None);
             PyErr_Clear();
         }
+    
+        /* set the context of the freshly running tealet by moving it out
+         * of the tealet's tstate and into the python thread state.
+         */
+        PyObject *new_ctx = tealet->tstate.context;
+        PyObject *old_ctx = tstate->context;
+        tstate->context = new_ctx;
+        tealet->tstate.context = NULL; /* ownership transferred to tstate */
+        tstate->context_ver++;
+        Py_XDECREF(old_ctx);
     }
 
     /* We only have borrowed references from the calling tealet.
