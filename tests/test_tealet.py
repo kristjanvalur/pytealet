@@ -9,6 +9,7 @@ import weakref
 import gc
 
 import _tealet
+import contextvars
 import random
 random.seed(0)
 
@@ -241,17 +242,150 @@ class TestThreadCleanup:
         main = _tealet.main()
         stub = _tealet.tealet()
         stub.stub()
-        
+
         nerfed = _tealet.thread_cleanup()
         nerfed_ids = {id(x) for x in nerfed}
-        
-        # Main is never in nerfed (cleanly deleted)
+
         assert id(main) not in nerfed_ids
-        # STUB is not in nerfed (not RUN)
         assert id(stub) not in nerfed_ids
-        
+
         # Recreate main for subsequent tests
         assert _tealet.main().state == _tealet.STATE_RUN
+
+
+class TestTealetContext:
+    def test_new_tealet_context_is_none(self):
+        t = _tealet.tealet()
+        assert t._get_context() is None
+        t._set_context(None)
+        assert t._get_context() is None
+
+    def test_direct_run_default_context_is_null(self):
+        var = contextvars.ContextVar("ctx", default=None)
+        var.set(7)
+
+        def worker(current, _arg):
+            assert current._get_context() is None
+            assert var.get() is None
+            return current.main()
+
+        t = _tealet.tealet()
+        t.run(worker, None)
+
+    def test_set_context_on_new_before_run(self):
+        var = contextvars.ContextVar("ctx", default=None)
+        ctx = contextvars.Context()
+        ctx.run(var.set, 11)
+
+        def worker(current, _arg):
+            assert var.get() == 11
+            return current.main()
+
+        t = _tealet.tealet()
+        t._set_context(ctx)
+        t.run(worker, None)
+
+    def test_set_context_on_stub_before_run(self):
+        var = contextvars.ContextVar("ctx", default=None)
+        ctx = contextvars.Context()
+        ctx.run(var.set, 17)
+
+        def worker(current, _arg):
+            assert var.get() == 17
+            return current.main()
+
+        t = _tealet.tealet()
+        t.stub()
+        t._set_context(ctx)
+        t.run(worker, None)
+
+    def test_running_context_creation_and_clear(self):
+        var = contextvars.ContextVar("ctx", default=None)
+
+        def worker(current, _arg):
+            assert current._get_context() is None
+            assert var.get() is None
+            var.set(1)
+            ctx = current._get_context()
+            assert ctx is not None
+            assert ctx[var] == 1
+            current._set_context(None)
+            assert current._get_context() is None
+            assert var.get() is None
+            return current.main()
+
+        _tealet.tealet().run(worker, None)
+
+    def test_set_context_while_suspended(self):
+        var = contextvars.ContextVar("ctx", default=None)
+        suspended = []
+
+        def worker(current, _arg):
+            var.set(1)
+            current.main().switch("paused")
+            suspended.append(var.get())
+            current.main().switch("paused")
+            suspended.append(var.get())
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(worker, None) == "paused"
+
+        ctx = contextvars.Context()
+        ctx.run(var.set, 2)
+        t._set_context(ctx)
+        assert t.switch() == "paused"
+        assert suspended[0] == 2
+
+        t._set_context(None)
+        t.switch()
+        assert suspended[1] is None
+
+    def test_context_access_different_thread_fails(self):
+        var = contextvars.ContextVar("ctx", default=None)
+        holder = []
+        started = threading.Event()
+        ready = threading.Event()
+
+        def worker(current, _arg):
+            var.set(1)
+            started.set()
+            ready.wait(2.0)
+            current.main().switch()
+            return current.main()
+
+        def thread_fn():
+            t = _tealet.tealet()
+            holder.append(t)
+            t.run(worker, None)
+
+        thread = threading.Thread(target=thread_fn, daemon=True)
+        thread.start()
+        started.wait(2.0)
+        t = holder[0]
+
+        with pytest.raises(_tealet.InvalidError):
+            t._get_context()
+        with pytest.raises(_tealet.InvalidError):
+            t._set_context(None)
+
+        ready.set()
+        thread.join(timeout=2.0)
+
+    def test_context_weakref_cleanup(self):
+        ctx = contextvars.Context()
+        try:
+            ref = weakref.ref(ctx)
+        except TypeError:
+            pytest.skip("contextvars.Context does not support weakref")
+
+        t = _tealet.tealet()
+        t._set_context(ctx)
+        del t
+        del ctx
+        gc.collect()
+
+        assert ref() is None
 
     def test_cleanup_idempotent_on_empty_lineage(self):
         """Calling cleanup multiple times on empty lineage is idempotent."""
