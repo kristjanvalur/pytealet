@@ -3,6 +3,7 @@ import weakref
 import sys
 
 import _tealet
+from . import _greenlet
 
 
 class error(Exception):

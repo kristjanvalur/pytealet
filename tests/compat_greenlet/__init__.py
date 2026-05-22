@@ -21,12 +21,12 @@ try:
     importlib.import_module("greenlet")
 except ModuleNotFoundError:
     import tealet.greenlet as _tealet_greenlet
-    import _tealet as _tealet_mod
+    import tealet.greenlet._greenlet as _tealet_greenlet_mod
 
     sys.modules.setdefault("greenlet", _tealet_greenlet)
-    sys.modules.setdefault("greenlet._greenlet", _tealet_mod)
+    sys.modules.setdefault("greenlet._greenlet", _tealet_greenlet_mod)
     if not hasattr(_tealet_greenlet, "_greenlet"):
-        _tealet_greenlet._greenlet = _tealet_mod
+        _tealet_greenlet._greenlet = _tealet_greenlet_mod
 
 from greenlet import greenlet as RawGreenlet
 from greenlet import getcurrent
@@ -40,18 +40,8 @@ if not hasattr(_greenlet_module, "GREENLET_USE_GC"):
     # exists.
     _greenlet_module.GREENLET_USE_GC = True
 
-try:
-    from greenlet._greenlet import get_pending_cleanup_count
-    from greenlet._greenlet import get_total_main_greenlets
-except ImportError:
-    # Placeholder shims for tealet until a proper _greenlet emulation layer
-    # exists. These keep the upstream tests importable so we can measure
-    # broader compatibility gaps.
-    def get_pending_cleanup_count():
-        return 0
-
-    def get_total_main_greenlets():
-        return 1
+from greenlet._greenlet import get_pending_cleanup_count
+from greenlet._greenlet import get_total_main_greenlets
 
 from . import leakcheck
 
