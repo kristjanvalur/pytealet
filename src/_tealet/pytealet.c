@@ -881,7 +881,7 @@ static PyObject *pytealet_get_context(PyObject *self, PyObject *Py_UNUSED(_ignor
         PyErr_SetString(mstate->state_error, "no current tealet");
         return NULL;
     }
-    if (CheckTarget(mstate, tealet, current, "context()"))
+    if (CheckTarget(mstate, tealet, current, "context"))
         return NULL;
 
     if (current == tealet) {
@@ -917,7 +917,7 @@ static PyObject *pytealet_set_context(PyObject *self, PyObject *value) {
         PyErr_SetString(mstate->state_error, "no current tealet");
         return NULL;
     }
-    if (CheckTarget(mstate, tealet, current, "context()"))
+    if (CheckTarget(mstate, tealet, current, "context"))
         return NULL;
 
     if (current == tealet) {

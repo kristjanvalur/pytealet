@@ -15,28 +15,6 @@
 #include <assert.h>
 #include <string.h>
 
-#if defined(Py_DEBUG)
-#define PYTEALET_CONTEXT_TRACE 1
-#endif
-
-#if defined(PYTEALET_CONTEXT_TRACE)
-static void PyTealetTstate_LogContext(const char *label, const PyTealetTstate *state, const PyThreadState *tstate) {
-    PyObject *ctx = state ? state->context : NULL;
-    PyObject *tctx = tstate ? tstate->context : NULL;
-    long ctx_rc = ctx ? (long)Py_REFCNT(ctx) : -1L;
-    long tctx_rc = tctx ? (long)Py_REFCNT(tctx) : -1L;
-    fprintf(stderr,
-            "[pytealet][ctx] %s state=%p ctx=%p rc=%ld tstate=%p tctx=%p trc=%ld\n",
-            label,
-            (void *)state,
-            (void *)ctx,
-            ctx_rc,
-            (void *)tstate,
-            (void *)tctx,
-            tctx_rc);
-}
-#endif
-
 /* we need to treat the "frame" part of the tstate specially, since we
  * can't share it among tealets.  We must be careful when we branch off
  * to a new tealet that we clear either the source or destination frame data */
@@ -52,9 +30,6 @@ static void PyTealetTstate_CleanupDatastack(_PyStackChunk **datastack_chunk, PyO
 
 /* Raw copy the tstate fields from PyThreadState to our local structure. */
 static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Get:before", dst, src);
-#endif
 #if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
     dst->recursion_depth = src->recursion_depth;
 #elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
@@ -79,16 +54,10 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src) {
     dst->trash_delete_nesting = src->trash_delete_nesting;
 #endif
     PyTealetTstate_GetFrame(&dst->frame_data, src);
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Get:after", dst, src);
-#endif
 }
 
 /* Raw copy previously saved tealet tstate into PyThreadState. */
 static void PyTealetTstate_Put(PyTealetTstate *src, PyThreadState *dst) {
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Put:before", src, dst);
-#endif
 #if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
     dst->recursion_depth = src->recursion_depth;
 #elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
@@ -113,9 +82,6 @@ static void PyTealetTstate_Put(PyTealetTstate *src, PyThreadState *dst) {
     dst->trash_delete_nesting = src->trash_delete_nesting;
 #endif
     PyTealetTstate_PutFrame(&src->frame_data, dst);
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Put:after", src, dst);
-#endif
 }
 
 /* Increment and decrement the reference count of the tstate's references.
@@ -240,9 +206,6 @@ void PyTealetTstate_Duplicate(PyTealetTstate *dst, const PyTealetTstate *src) {
 
 /* drop our own threadstate refs, e.g. after failure, or at tealet end */
 void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet) {
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Drop:before", dst, NULL);
-#endif
     if (!dst->has_state) {
         /* context can live outside the has_state flag*/
         if (dst->context) {
@@ -256,38 +219,23 @@ void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet) {
     }
     PyTealetTstate_DecRef(dst, dustbin_tealet);
     dst->has_state = 0;
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Drop:after", dst, NULL);
-#endif
 }
 
 /* Move out the thread state to a saved struct before switch.
  * The caller restores it afterwards. */
 void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src) {
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Save:before", dst, src);
-#endif
     assert(dst->has_state == 0);
     PyTealetTstate_Get(dst, src);
     PyTealetTstate_ClearPy(src);
     dst->has_state = 1;
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Save:after", dst, src);
-#endif
 }
 
 /* Restore the thread state after someone has saved it. */
 void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst) {
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Restore:before", src, dst);
-#endif
     assert(src->has_state == 1);
     PyTealetTstate_AssertClearPy(dst);
     PyTealetTstate_Put(src, dst);
     src->has_state = 0;
-#if defined(PYTEALET_CONTEXT_TRACE)
-    PyTealetTstate_LogContext("Restore:after", src, dst);
-#endif
 }
 
 /* Frame state functions. We treat the frame part of the thread state with specific semantics

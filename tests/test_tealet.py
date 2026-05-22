@@ -366,16 +366,17 @@ class TestTealetContext:
 
         thread = threading.Thread(target=thread_fn, daemon=True)
         thread.start()
-        started.wait(2.0)
+        assert started.wait(2.0), "worker thread did not signal started"
         t = holder[0]
 
-        with pytest.raises(_tealet.InvalidError):
-            _ = t.context
-        with pytest.raises(_tealet.InvalidError):
-            t.context = None
-
-        ready.set()
-        thread.join(timeout=2.0)
+        try:
+            with pytest.raises(_tealet.InvalidError):
+                _ = t.context
+            with pytest.raises(_tealet.InvalidError):
+                t.context = None
+        finally:
+            ready.set()
+            join_thread_or_fail(thread, timeout=2.0)
 
     def test_context_weakref_cleanup(self):
         ctx = contextvars.Context()

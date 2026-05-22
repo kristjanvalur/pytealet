@@ -15,7 +15,7 @@ class ErrorWrapper(object):
         pass
     def __exit__(self, tp, val, tb):
         if isinstance(val, _tealet.TealetError):
-            raise error, val, tb
+            raise error(val).with_traceback(tb)
 ErrorWrapper = ErrorWrapper() # stateless singleton
 
 tealetmap = weakref.WeakValueDictionary()
@@ -105,11 +105,32 @@ class greenlet(object):
         return self._Result(arg)
 
     @staticmethod
+    def _raise_triplet(err, val, tb):
+        if not err:
+            return
+
+        if isinstance(err, BaseException):
+            exc = err
+        elif isinstance(val, BaseException):
+            exc = val
+        else:
+            if val is None:
+                exc = err()
+            elif isinstance(val, tuple):
+                exc = err(*val)
+            else:
+                exc = err(val)
+
+        if tb is not None:
+            raise exc.with_traceback(tb)
+        raise exc
+
+    @staticmethod
     def _Result(arg):
         # The return value is stored in the current greenlet.
         err, args, kwds = arg
         if err:
-            raise err, args, kwds
+            greenlet._raise_triplet(err, args, kwds)
         if args and kwds:
             return (args, kwds)
         elif kwds:
@@ -128,7 +149,7 @@ class greenlet(object):
                 result = run(*args, **kwds)
                 arg = (False, (result,), None)
             else:
-                raise err, args, kwds
+                greenlet._raise_triplet(err, args, kwds)
         except GreenletExit as e:
             arg = (False, (e,), None)
         except:
