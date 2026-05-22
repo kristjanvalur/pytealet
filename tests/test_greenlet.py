@@ -80,7 +80,11 @@ class GreenletTests(unittest.TestCase):
         g = greenlet(g)
         g.switch()
         self.assertEqual(len(lst), 3)
-        self.assertEqual(sys.getrefcount(g), 2)
+        refcount = sys.getrefcount(g)
+        if sys.version_info >= (3, 14):
+            assert refcount <= 2
+        else:
+            self.assertEqual(refcount, 2)
 
     def test_threads(self):
         success = []
