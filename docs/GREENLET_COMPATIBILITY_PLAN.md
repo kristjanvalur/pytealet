@@ -30,6 +30,7 @@ compatibility an explicit higher-level adapter.
 - Legacy greenlet tests exist in `tests/test_greenlet.py`.
 - Greenlet tests are disabled by default via `PYTEALET_ENABLE_GREENLET_TESTS` in `tests/conftest.py`.
 - Existing tests import `greenlet` directly, so they need to target the tealet shim explicitly for compatibility-layer validation.
+- Legacy greenlet module runs with the legacy tests; focus now shifts to contemporary upstream greenlet compatibility.
 
 ## Phase 1: Make Legacy Tests Work On Modern Python
 
@@ -90,3 +91,26 @@ After legacy suite is stable:
 1. Complete Python 3 shim port.
 2. Rewire legacy tests to use `tealet.greenlet`.
 3. Run legacy suite and categorize first failure set.
+
+## Upstream Compat Snapshot (2026-05-22)
+
+Ran `PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1 pytest tests/compat_greenlet` on
+Python 3.15a8 with the tealet shim. Result: 44 failed, 9 passed, run interrupted
+after ~83s.
+
+Primary gaps observed:
+
+- No real `greenlet._greenlet` surface; placeholder stubs required for
+  `get_pending_cleanup_count`/`get_total_main_greenlets`.
+- No `gr_context` support (contextvars propagation/assignment failures).
+- Generator/Genlet path assumes `run` attribute and safe `__del__`; current
+  implementation raises in `__del__` for subclasses without `_tealet` state.
+- Parent/dead semantics mismatches (switch/throw error paths, unstarted parent
+  behavior, reparenting after death).
+- Leakcheck failures across many tests (refcount deltas in switch/dealloc/frame
+  paths and threading cases).
+- Missing C/C++ test helpers (`_test_extension`, `_test_extension_cpp`), so
+  extension-based scenarios are skipped or fail to import.
+
+These failures suggest a dedicated emulation layer for `greenlet` and
+`greenlet._greenlet` will likely be needed before pursuing full upstream parity.
