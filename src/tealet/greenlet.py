@@ -83,6 +83,9 @@ class greenlet(object):
     def __nonzero__(self):
         return self._tealet.state == _tealet.STATE_RUN
 
+    def __bool__(self):
+        return self.__nonzero__()
+
     def switch(self, *args, **kwds):
         return self._switch((False, args, kwds))
 
