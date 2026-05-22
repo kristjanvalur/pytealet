@@ -4,7 +4,9 @@ import time
 import threading
 import unittest
 
-from greenlet import greenlet
+from tealet import greenlet as greenlet_module
+
+greenlet = greenlet_module.greenlet
 
 class SomeError(Exception):
     pass
@@ -129,35 +131,60 @@ class GreenletTests(unittest.TestCase):
     def test_dealloc_other_thread(self):
         seen = []
         someref = []
-        lock = threading.Lock()
-        lock.acquire()
-        lock2 = threading.Lock()
-        lock2.acquire()
+        cv = threading.Condition()
+        state = {'step': 0, 'worker_error': None}
+
         def f():
-            g1 = greenlet(fmain)
-            g1.switch(seen)
-            someref.append(g1)
-            del g1
-            gc.collect()
-            lock.release()
-            lock2.acquire()
-            greenlet()   # trigger release
-            lock.release()
-            lock2.acquire()
+            try:
+                g1 = greenlet(fmain)
+                g1.switch(seen)
+                someref.append(g1)
+                del g1
+                gc.collect()
+
+                with cv:
+                    state['step'] = 1  # worker prepared g1 and dropped local ref
+                    cv.notify_all()
+                    cv.wait_for(lambda: state['step'] >= 2, timeout=1.0)
+
+                greenlet()   # trigger cross-thread pending release processing
+
+                with cv:
+                    state['step'] = 3  # worker executed release trigger
+                    cv.notify_all()
+            except BaseException as exc:
+                with cv:
+                    state['worker_error'] = exc
+                    cv.notify_all()
+
         t = threading.Thread(target=f)
         t.start()
-        lock.acquire()
-        self.assertEqual(seen, [])
-        self.assertEqual(len(someref), 1)
-        del someref[:]
-        gc.collect()
-        # g1 is not released immediately because it's from another thread
-        self.assertEqual(seen, [])
-        lock2.release()
-        lock.acquire()
-        self.assertEqual(seen, [greenlet.GreenletExit])
-        lock2.release()
-        t.join()
+        try:
+            with cv:
+                ready = cv.wait_for(lambda: state['step'] >= 1 or state['worker_error'] is not None, timeout=1.0)
+            self.assertTrue(ready, 'worker did not reach ready step in time')
+            self.assertIsNone(state['worker_error'], f'worker raised: {state["worker_error"]!r}')
+
+            self.assertEqual(seen, [])
+            self.assertEqual(len(someref), 1)
+            del someref[:]
+            gc.collect()
+            # g1 is not released immediately because it's from another thread
+            self.assertEqual(seen, [])
+
+            with cv:
+                state['step'] = 2  # allow worker to run release trigger
+                cv.notify_all()
+                triggered = cv.wait_for(lambda: state['step'] >= 3 or state['worker_error'] is not None, timeout=1.0)
+            self.assertTrue(triggered, 'worker did not execute release trigger in time')
+            self.assertIsNone(state['worker_error'], f'worker raised: {state["worker_error"]!r}')
+
+            # Wait for worker to actually finish before checking final seen state.
+            t.join(timeout=1.0)
+            self.assertFalse(t.is_alive(), 'worker thread did not exit in time')
+            self.assertEqual(seen, [greenlet.GreenletExit])
+        finally:
+            t.join(timeout=1.0)
 
     def test_frame(self):
         def f1():
@@ -236,7 +263,7 @@ class GreenletTests(unittest.TestCase):
 
         greenlet(f).switch()
 
-    for k in locals().keys():
+    for k in list(locals().keys()):
         if False and k.startswith('test') and "test_exception" not in k:
             del locals()[k]
 

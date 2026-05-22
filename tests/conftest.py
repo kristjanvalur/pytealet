@@ -25,9 +25,3 @@ def pytest_sessionstart(session):
 def pytest_configure(config):
 	config.addinivalue_line("markers", "stub: tests that exercise stub functionality")
 	config.addinivalue_line("markers", "greenlet_compat: tests that require greenlet compatibility layer")
-
-
-def pytest_ignore_collect(collection_path, config):
-	if os.environ.get("PYTEALET_ENABLE_GREENLET_TESTS") == "1":
-		return False
-	return collection_path.name == "test_greenlet.py"

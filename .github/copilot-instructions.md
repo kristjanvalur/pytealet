@@ -56,8 +56,34 @@ uv venv --python 3.10
 uv sync --dev
 ```
 
+### Debug Interpreter Setup (CPython --with-pydebug)
+When using a custom debug CPython build (`python3.xd`), prefer `uv pip` workflows.
+
+- `uv sync` may fail due package compatibility checks against debug ABI interpreters.
+- `pip` may also be unreliable in debug builds if optional modules like `_ssl` are missing.
+- Use `uv pip` with an explicit interpreter path instead.
+
+```bash
+# Create venv from debug interpreter
+uv venv --python /path/to/cpython-debug/python .venv-cpython310-debug
+
+# Install project and dev deps using uv pip (preferred for debug venvs)
+uv pip install --python .venv-cpython310-debug/bin/python -e .[dev]
+
+# Run tests with that interpreter
+PYTEALET_ENABLE_GREENLET_TESTS=1 \
+    .venv-cpython310-debug/bin/python -m pytest tests/test_greenlet.py -v
+```
+
+Reminder: when using uv with an activated venv, prefer the `--active` flag to
+avoid environment mismatch warnings, for example:
+```bash
+source .venv-cpython310-debug/bin/activate
+PYTEALET_ENABLE_GREENLET_TESTS=1 uv run --active python -m pytest tests/test_greenlet.py -v
+```
+
 ### Building the C Extension
-**Use the fast build script for development:**
+**Use the fast build script for development (works with debug venvs too):**
 ```bash
 ./scripts/fast_build.sh          # Optimized build (default)
 ./scripts/fast_build.sh debug    # Debug build with -g -O0
