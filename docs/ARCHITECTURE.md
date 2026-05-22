@@ -97,7 +97,7 @@ tealet.belongs_to_current() -> bool
 ```
 Returns whether this tealet object belongs to the current thread.
 
-**Tealet Object Properties (read-only):**
+**Tealet Object Properties:**
 
 ```python
 tealet.main -> tealet
@@ -132,6 +132,23 @@ tealet.thread_id -> int
 ```
 The owning thread ID for this tealet object. This is set when the object is
 created and is used for cross-thread API guards.
+
+```python
+tealet.context -> contextvars.Context | None
+```
+Execution context for the tealet. This is a first-class, assignable property.
+
+Context semantics:
+- New tealets start with `context = None`.
+- A tealet in `STATE_NEW` or `STATE_STUB` can have `context` assigned before
+    `run()`. That context is then used when the tealet starts executing.
+- A suspended tealet (`STATE_RUN` but not currently executing) can have
+    `context` replaced; the updated context is used when it is resumed.
+- Setting `context = None` clears the tealet context.
+- The value must be `contextvars.Context` or `None`; other values raise
+    `TypeError`.
+- Cross-thread context access follows normal tealet ownership checks and raises
+    `InvalidError` for foreign-thread access.
 
 Thread ownership rules enforced by the C API:
 - Creating a tealet object ensures a thread-main tealet exists for that thread.
