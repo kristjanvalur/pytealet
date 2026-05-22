@@ -653,7 +653,6 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
 
     if (!mstate)
         return NULL;
-
     current = GetCurrent(mstate, NULL, 0, &mdata);
     if (!current && PyErr_Occurred())
         return NULL;
@@ -778,7 +777,6 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     Py_ssize_t i;
     if (!mstate)
         return NULL;
-
     if (nargs > 1) {
         PyErr_Format(PyExc_TypeError, "switch() takes at most 1 argument (%zd given)", nargs);
         return NULL;
@@ -1471,7 +1469,6 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         TEALET_SET_PYOBJECT(t_current, NULL);
     }
     t_return = return_to->tealet;
-
     /* decref the objects after the switch */
     PyTealet_dustbin_push(t_return, func);
     PyTealet_dustbin_push(t_return, (PyObject *)tealet);

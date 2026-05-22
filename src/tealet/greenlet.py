@@ -13,10 +13,13 @@ class GreenletExit(BaseException):
 class ErrorWrapper(object):
     def __enter__(self):
         pass
+
     def __exit__(self, tp, val, tb):
         if isinstance(val, _tealet.TealetError):
-            raise error, val, tb
-ErrorWrapper = ErrorWrapper() # stateless singleton
+            raise error(val).with_traceback(tb)
+
+
+ErrorWrapper = ErrorWrapper()  # stateless singleton
 
 tealetmap = weakref.WeakValueDictionary()
 
@@ -36,7 +39,7 @@ class greenlet(object):
         if isinstance(parent, _tealet.tealet):
             # main greenlet for this thread
             self._tealet = parent
-            self.parent = self # main greenlets are their own parents and don't go away
+            self.parent = self  # main greenlets are their own parents and don't go away
             self._main = self
             self._garbage = []
         else:
@@ -45,8 +48,7 @@ class greenlet(object):
                 parent = getcurrent()
             self.parent = parent
             self._main = parent._main
-            # perform housekeeping
-            del self._main._garbage[:]
+            self._main._process_garbage()
         tealetmap[self._tealet] = self
 
     def __del__(self):
@@ -54,7 +56,7 @@ class greenlet(object):
             if _tealet.current() == self._tealet:
                 # Can't kill ourselves from here
                 return
-            tealetmap[self._tealet] = self # re-insert
+            tealetmap[self._tealet] = self  # re-insert
             old = self.parent
             self.parent = getcurrent()
             try:
@@ -65,6 +67,29 @@ class greenlet(object):
                 self._main._garbage.append(self)
             finally:
                 self.parent = old
+
+    def _process_garbage(self):
+        garbage = self._garbage
+        if not garbage:
+            return
+
+        pending = garbage[:]
+        del garbage[:]
+        current = getcurrent()
+        for g in pending:
+            if not g:
+                continue
+            if g is current:
+                garbage.append(g)
+                continue
+            old_parent = g.parent
+            g.parent = current
+            try:
+                g.throw()
+            except error:
+                garbage.append(g)
+            finally:
+                g.parent = old_parent
 
     @property
     def gr_frame(self):
@@ -83,6 +108,8 @@ class greenlet(object):
     def __nonzero__(self):
         return self._tealet.state == _tealet.STATE_RUN
 
+    __bool__ = __nonzero__
+
     def switch(self, *args, **kwds):
         return self._switch((False, args, kwds))
 
@@ -96,7 +123,7 @@ class greenlet(object):
             run = getattr(self, "run", None)
             if run:
                 del self.run
-                #here we can tweak how we create the new stack
+                # here we can tweak how we create the new stack
                 arg = self._tealet.run(self._greenlet_main, (run, arg))
             else:
                 if not self:
@@ -105,11 +132,35 @@ class greenlet(object):
         return self._Result(arg)
 
     @staticmethod
+    def _raise_triplet(err, val, tb):
+        if not err:
+            return
+
+        if isinstance(err, BaseException):
+            exc = err
+        elif isinstance(val, BaseException):
+            exc = val
+        else:
+            if val is None:
+                exc = err()
+            elif isinstance(val, tuple):
+                exc = err(*val)
+            else:
+                exc = err(val)
+
+        try:
+            if tb is not None:
+                raise exc.with_traceback(tb)
+            raise exc
+        finally:
+            exc = None
+            
+    @staticmethod
     def _Result(arg):
         # The return value is stored in the current greenlet.
         err, args, kwds = arg
         if err:
-            raise err, args, kwds
+            greenlet._raise_triplet(err, args, kwds)
         if args and kwds:
             return (args, kwds)
         elif kwds:
@@ -125,16 +176,19 @@ class greenlet(object):
         run, (err, args, kwds) = arg
         try:
             if not err:
-                result = run(*args, **kwds)
+                result = _tealet.hide_frame(run, args, kwds)
                 arg = (False, (result,), None)
             else:
-                raise err, args, kwds
+                greenlet._raise_triplet(err, args, kwds)
         except GreenletExit as e:
             arg = (False, (e,), None)
-        except:
+        except BaseException:
             arg = sys.exc_info()
         p = getcurrent()._parent()
-        return p._tealet, arg
+        try:
+            return p._tealet, arg
+        finally:
+            arg = None
 
     def _parent(self):
         # Find the closest parent alive

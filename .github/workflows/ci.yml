@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - development
+      - green-tealet
       - main
   pull_request:
 
