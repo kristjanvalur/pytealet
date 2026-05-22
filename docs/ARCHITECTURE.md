@@ -37,6 +37,16 @@ _tealet.main() -> tealet
 Returns the main tealet for this thread (the root of the tealet tree).
 
 ```python
+_tealet.thread_cleanup() -> list[tealet]
+```
+Explicitly tears down this thread's tealet lineage and returns wrappers whose
+native tealet handles were forcibly invalidated. Intended for optional worker
+thread shutdown cleanup.
+- Must be called from the thread's main tealet context.
+- Return order is unspecified.
+- Idempotent for already-cleaned thread state (returns an empty list).
+
+```python
 _tealet.frame_introspection([enabled]) -> bool
 ```
 Gets or sets dormant-tealet frame introspection at runtime.
@@ -49,7 +59,8 @@ Gets or sets dormant-tealet frame introspection at runtime.
 ```python
 class _tealet.tealet([source_tealet])
 ```
-The core tealet class. If `source_tealet` is provided and is a STUB, creates a duplicate.
+The core tealet class. If `source_tealet` is provided and is in `STATE_NEW` or
+`STATE_STUB`, creates a duplicate wrapper in the same lineage.
 
 **Tealet Object Methods:**
 
@@ -80,6 +91,11 @@ Switches execution to this tealet, passing an optional argument.
   - `arg`: Optional value to pass to the target tealet
 - **Returns:** Value passed back when someone switches to us
 - **Thread-safe:** Only within same thread family
+
+```python
+tealet.belongs_to_current() -> bool
+```
+Returns whether this tealet object belongs to the current thread.
 
 **Tealet Object Properties (read-only):**
 
@@ -114,7 +130,24 @@ Runtime policy can additionally disable dormant-frame exposure through
 ```python
 tealet.thread_id -> int
 ```
-The OS thread ID that owns this tealet's family.
+The owning thread ID for this tealet object. This is set when the object is
+created and is used for cross-thread API guards.
+
+Thread ownership rules enforced by the C API:
+- Creating a tealet object ensures a thread-main tealet exists for that thread.
+- `run()` and `switch()` do not auto-create a main tealet in the caller thread;
+    they validate ownership and reject foreign-thread use.
+- `stub()` is only allowed from the owning thread.
+- Volatile traversal methods (`current()`, `main()`, `previous()`) are only
+    allowed from the owning thread.
+- Cross-thread duplication via `_tealet.tealet(existing_tealet)` is allowed
+    when `existing_tealet` is in `STATE_STUB` or `STATE_NEW`.
+- Duplicating a `STATE_STUB` tealet preserves the existing dormant/stub
+    execution context for use by the new wrapper.
+- Duplicating a `STATE_NEW` tealet is also supported; it duplicates an
+    unstarted tealet wrapper and preserves its not-yet-run status until it is
+    run from its owning thread.
+- Wrapper deallocation is allowed across threads.
 
 **Module Constants:**
 
@@ -141,7 +174,8 @@ Raised when trying to switch to a defunct (corrupted) tealet.
 ```python
 _tealet.InvalidError(TealetError)
 ```
-Raised when trying to switch to a tealet from a different thread family.
+Raised when a thread-restricted operation is called from a different thread
+family.
 
 ```python
 _tealet.StateError(TealetError)

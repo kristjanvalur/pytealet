@@ -4,10 +4,18 @@ import sys
 import traceback
 import types
 import threading
+import queue
+import weakref
+import gc
 
 import _tealet
 import random
 random.seed(0)
+
+
+def join_thread_or_fail(th, timeout=1.0):
+    th.join(timeout=timeout)
+    assert not th.is_alive(), "worker thread did not terminate in time"
 
 # Utility stuff for creating tealets
 def tealet_new_descend(descend, func=None, arg=None, klass=_tealet.tealet, retarg=False):
@@ -87,6 +95,334 @@ class TestModule:
                     _tealet.frame_introspection(True)
         finally:
             _tealet.frame_introspection(original)
+
+
+class TestThreadCleanup:
+    """Tests for thread cleanup semantics and edge cases."""
+
+    def test_thread_cleanup_returns_only_run_tealets(self):
+        """Cleanup only returns RUN tealets with ACTIVE status, not STUB or main."""
+        thread_main = _tealet.main()
+        stub = _tealet.tealet()
+        stub.stub()
+        
+        # Create a tealet that switches back to main and stays suspended in RUN.
+        def switch_back(current, arg):
+            # Switch back to main and return
+            thread_main.switch()
+        
+        t = _tealet.tealet()
+        t.run(switch_back, None)  # t runs and switches back, stays suspended
+        
+        nerfed = _tealet.thread_cleanup()
+        nerfed_ids = {id(x) for x in nerfed}
+
+        # t switched back to main and remains suspended in RUN state,
+        # so cleanup should include it in nerfed.
+        # STUB tealets are not returned (can be safely collected).
+        # Main is cleanly deleted, not forcibly invalidated.
+        assert id(thread_main) not in nerfed_ids
+        assert id(stub) not in nerfed_ids  # STUB not in nerfed
+        assert id(t) in nerfed_ids  # suspended RUN tealet is in nerfed
+
+        # Recreate main for this thread so subsequent tests keep the usual baseline.
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_thread_cleanup_requires_main_tealet_context(self):
+        def run(current, arg):
+            with pytest.raises(_tealet.StateError):
+                _tealet.thread_cleanup()
+            return current.main()
+
+        _tealet.tealet().run(run, None)
+
+    def test_cleanup_nerfed_suspended_tealet_cannot_switch(self):
+        """A suspended RUN tealet returned by cleanup cannot be switched to again."""
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(parked, None) == "paused"
+
+        nerfed = _tealet.thread_cleanup()
+        assert any(id(x) == id(t) for x in nerfed)
+
+        with pytest.raises(_tealet.StateError):
+            t.switch()
+
+    def test_cleanup_empty_lineage(self):
+        """Cleanup with only main tealet (no non-main tealets) returns empty list."""
+        _tealet.main()  # ensure main exists
+        nerfed = _tealet.thread_cleanup()
+        assert nerfed == []
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_stub_tealets_not_returned(self):
+        """STUB tealets are not returned in nerfed (can be safely collected)."""
+        _tealet.main()
+        stub1 = _tealet.tealet()
+        stub1.stub()
+        stub2 = _tealet.tealet()
+        stub2.stub()
+        
+        nerfed = _tealet.thread_cleanup()
+        nerfed_ids = {id(x) for x in nerfed}
+        
+        # STUB tealets are not in nerfed (they can be safely garbage collected)
+        assert id(stub1) not in nerfed_ids
+        assert id(stub2) not in nerfed_ids
+        assert nerfed == []
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_fresh_start_after_cleanup(self):
+        """After cleanup, can create new main and tealets in same thread."""
+        # First lineage - only STUB, so nerfed will be empty
+        _tealet.main()
+        stub1 = _tealet.tealet()
+        stub1.stub()
+        nerfed = _tealet.thread_cleanup()
+        assert nerfed == []
+
+        # New lineage in same thread
+        main2 = _tealet.main()
+        assert main2.state == _tealet.STATE_RUN
+        stub2 = _tealet.tealet()
+        stub2.stub()
+        assert stub2.state == _tealet.STATE_STUB
+        nerfed2 = _tealet.thread_cleanup()
+        assert nerfed2 == []  # STUB not in nerfed
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_with_finished_tealets(self):
+        """Finished tealets (not ACTIVE) are not included in nerfed."""
+        _tealet.main()
+        
+        def finish_work(current, arg):
+            return current.main()
+        
+        stub = _tealet.tealet()
+        stub.stub()
+        stub.run(finish_work, None)  # Run to completion, becomes inactive
+        
+        nerfed = _tealet.thread_cleanup()
+        # Finished tealet should not be in nerfed (not ACTIVE status)
+        assert isinstance(nerfed, list)
+        assert nerfed == []
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_with_dead_weakrefs(self):
+        """Cleanup gracefully handles dead weakrefs (GC'd wrappers)."""
+        _tealet.main()
+        stub = _tealet.tealet()
+        stub.stub()
+        
+        # Delete local reference to stub to allow GC
+        del stub
+        gc.collect()
+        
+        # Cleanup should handle dead weakrefs without crashing
+        nerfed = _tealet.thread_cleanup()
+        assert isinstance(nerfed, list)
+        # The stub was GC'd and wasn't RUN anyway, so won't be in nerfed
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_main_never_in_nerfed(self):
+        """Main tealet is never in nerfed, only non-main RUN tealets."""
+        main = _tealet.main()
+        stub = _tealet.tealet()
+        stub.stub()
+        
+        nerfed = _tealet.thread_cleanup()
+        nerfed_ids = {id(x) for x in nerfed}
+        
+        # Main is never in nerfed (cleanly deleted)
+        assert id(main) not in nerfed_ids
+        # STUB is not in nerfed (not RUN)
+        assert id(stub) not in nerfed_ids
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_cleanup_idempotent_on_empty_lineage(self):
+        """Calling cleanup multiple times on empty lineage is idempotent."""
+        _tealet.main()
+        nerfed1 = _tealet.thread_cleanup()
+        assert nerfed1 == []
+        
+        # Second cleanup should be idempotent (no error, no main)
+        nerfed2 = _tealet.thread_cleanup()
+        assert nerfed2 == []
+        
+        # Recreate main for subsequent tests
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+
+class TestThreadOwnership:
+    def test_new_tealet_has_owner_tid_and_belongs(self):
+        t = _tealet.tealet()
+        assert t.thread_id == _tealet.current().thread_id
+        assert t.belongs_to_current() is True
+
+    def test_stub_rejected_from_foreign_thread(self):
+        data = {}
+        created = threading.Event()
+        done = threading.Event()
+
+        def worker():
+            data["t"] = _tealet.tealet()
+            created.set()
+            done.wait(timeout=1.0)
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert created.wait(timeout=1.0)
+        try:
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].stub()
+        finally:
+            done.set()
+            join_thread_or_fail(th)
+
+    def test_run_rejected_from_foreign_thread(self):
+        data = {}
+        created = threading.Event()
+        done = threading.Event()
+
+        def worker():
+            data["t"] = _tealet.tealet()
+            created.set()
+            done.wait(timeout=1.0)
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert created.wait(timeout=1.0)
+        try:
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].run(lambda current, arg: current.main(), None)
+        finally:
+            done.set()
+            join_thread_or_fail(th)
+
+    def test_switch_rejected_from_foreign_thread(self):
+        data = {}
+        ready = threading.Event()
+        release = threading.Event()
+
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        def worker():
+            t = _tealet.tealet()
+            t.stub()
+            data["t"] = t
+            data["first"] = t.run(parked, None)
+            ready.set()
+            if release.wait(timeout=1.0):
+                t.switch()
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert ready.wait(timeout=1.0)
+        try:
+            assert data["first"] == "paused"
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].switch()
+        finally:
+            release.set()
+            join_thread_or_fail(th)
+
+    def test_duplicate_stub_allowed_from_foreign_thread(self):
+        data = {}
+        ready = threading.Event()
+        release = threading.Event()
+
+        def worker():
+            t = _tealet.tealet()
+            t.stub()
+            data["owner_tid"] = t.thread_id
+            data["stub"] = t
+            ready.set()
+            release.wait(timeout=1.0)
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert ready.wait(timeout=1.0)
+        try:
+            assert data["owner_tid"] != _tealet.current().thread_id
+            dup = _tealet.tealet(data["stub"])
+            assert dup.thread_id == data["owner_tid"]
+            assert dup.belongs_to_current() is False
+            with pytest.raises(_tealet.InvalidError):
+                dup.run(lambda current, arg: current.main(), None)
+        finally:
+            release.set()
+            join_thread_or_fail(th)
+
+    def test_dealloc_allowed_from_foreign_thread(self):
+        q = queue.Queue()
+
+        def worker():
+            t = _tealet.tealet()
+            t.stub()
+            q.put((t.thread_id, t))
+            t = None
+
+        th = threading.Thread(target=worker)
+        th.start()
+        owner_tid, foreign_tealet = q.get(timeout=1.0)
+        join_thread_or_fail(th)
+
+        assert owner_tid != _tealet.current().thread_id
+        ref = weakref.ref(foreign_tealet)
+        del foreign_tealet
+        gc.collect()
+        assert ref() is None
+
+    def test_traversal_rejected_from_foreign_thread(self):
+        data = {}
+        ready = threading.Event()
+        release = threading.Event()
+
+        def parked(current, arg):
+            current.main().switch("paused")
+            release.wait(timeout=1.0)
+            current.main().switch("done")
+            return current.main()
+
+        def worker():
+            t = _tealet.tealet()
+            t.stub()
+            data["t"] = t
+            data["first"] = t.run(parked, None)
+            ready.set()
+            if release.wait(timeout=1.0):
+                t.switch()
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert ready.wait(timeout=1.0)
+        try:
+            assert data["first"] == "paused"
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].current()
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].main()
+            with pytest.raises(_tealet.InvalidError):
+                data["t"].previous()
+        finally:
+            release.set()
+            join_thread_or_fail(th)
 
 
 class TestTealetTraversalMethods:

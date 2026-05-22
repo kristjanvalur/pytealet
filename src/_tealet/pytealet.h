@@ -20,6 +20,8 @@ extern struct PyModuleDef _tealet_module;
 PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainData **mdata_out);
 PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main,
 						   PyTealetMainData **mdata_out);
+PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate);
+int PyTealet_ThreadCleanupMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);
 #endif

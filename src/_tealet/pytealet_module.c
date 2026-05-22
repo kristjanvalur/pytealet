@@ -28,6 +28,15 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return Py_XNewRef((PyObject *)GetMain(mstate, 1, NULL));
 }
 
+static PyObject *module_thread_cleanup(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    return PyTealet_ThreadCleanup(mstate);
+}
+
 /* Get/set dormant tealet frame introspection at runtime.
  * - frame_introspection() -> bool
  * - frame_introspection(enabled) -> bool
@@ -68,6 +77,7 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
+    {"thread_cleanup", (PyCFunction)module_thread_cleanup, METH_NOARGS, ""},
     {"frame_introspection", (PyCFunction)module_frame_introspection, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
@@ -82,6 +92,8 @@ static int pytealet_module_exec(PyObject *m) {
     }
 
     memset(&mstate->tls_key, 0, sizeof(mstate->tls_key));
+    mstate->thread_data_lock = NULL;
+    mstate->thread_data_ring = NULL;
     mstate->frame_introspection_enabled = PYTEALET_WITH_PENDING_FRAME_INTROSPECTION;
     mstate->tealet_type = NULL;
     mstate->tealet_error = NULL;
@@ -95,6 +107,12 @@ static int pytealet_module_exec(PyObject *m) {
             PyErr_SetString(PyExc_RuntimeError, "failed to create thread-local key");
             return -1;
         }
+    }
+
+    mstate->thread_data_lock = PyThread_allocate_lock();
+    if (!mstate->thread_data_lock) {
+        PyErr_SetString(PyExc_RuntimeError, "failed to allocate thread-data lock");
+        return -1;
     }
 
     type_obj = PyType_FromModuleAndSpec(m, &pytealet_type_spec, NULL);
@@ -188,14 +206,30 @@ static int pytealet_module_clear(PyObject *m) {
 
 static void pytealet_module_free(void *m) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState((PyObject *)m);
+    PyTealetMainData *mdata;
     if (!mstate)
         return;
-    /* TODO: Per-thread teardown for mstate->tls_key is deferred.
-     * Deleting the TSS key does not decref thread-local PyObject* values.
-     * Implement per-mstate thread shutdown cleanup in a follow-up change.
+
+    /* Best-effort drain of per-thread lineages registered in this module.
+     * We fetch one node at a time without holding the lock across cleanup,
+     * because cleanup unlinks using the same module lock.
      */
+    while (mstate->thread_data_lock) {
+        PyThread_acquire_lock(mstate->thread_data_lock, WAIT_LOCK);
+        mdata = mstate->thread_data_ring;
+        PyThread_release_lock(mstate->thread_data_lock);
+        if (!mdata)
+            break;
+        (void)PyTealet_ThreadCleanupMdataForTeardown(mstate, mdata);
+    }
+
     if (PyThread_tss_is_created(&mstate->tls_key))
         PyThread_tss_delete(&mstate->tls_key);
+    if (mstate->thread_data_lock) {
+        PyThread_free_lock(mstate->thread_data_lock);
+        mstate->thread_data_lock = NULL;
+    }
+    mstate->thread_data_ring = NULL;
 }
 
 /* CPython API uses void* in module slots; this conversion is intentional. */
