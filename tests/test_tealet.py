@@ -117,6 +117,38 @@ class TestModule:
 class TestThreadCleanup:
     """Tests for thread cleanup semantics and edge cases."""
 
+    @staticmethod
+    def _count_dead_weakrefs():
+        gc.collect()
+        gc.collect()
+        return sum(1 for o in gc.get_objects() if isinstance(o, weakref.ReferenceType) and o() is None)
+
+    def test_run_tealets_do_not_accumulate_dead_weakrefs(self):
+        """Regression: exited non-main tealets must not strand weakrefs in lineage tracking."""
+
+        def worker(current, _arg):
+            return current.main()
+
+        def run_batch(rounds=5, batch_size=4):
+            for _ in range(rounds):
+                tealets = [_tealet.tealet() for _ in range(batch_size)]
+                for t in tealets:
+                    t.run(worker, None)
+                del tealets
+
+        before = self._count_dead_weakrefs()
+        run_batch()
+        after_first = self._count_dead_weakrefs()
+        run_batch()
+        after_second = self._count_dead_weakrefs()
+
+        growth_first = after_first - before
+        growth_second = after_second - after_first
+
+        # Prior leak behavior grew by ~4 per round (20 per batch).
+        # Keep a small tolerance for unrelated interpreter noise.
+        assert growth_second <= 4
+
     def test_thread_kill_then_thread_cleanup_is_empty(self):
         def parked(current, arg):
             current.main().switch("paused")
