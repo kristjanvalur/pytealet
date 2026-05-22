@@ -96,6 +96,22 @@ class TestModule:
         finally:
             _tealet.frame_introspection(original)
 
+    def test_hide_frame_hides_callers(self):
+        def inner():
+            return [frame.name for frame in traceback.extract_stack()]
+
+        def wrapper_normal():
+            return inner()
+
+        def wrapper_hide():
+            return _tealet.hide_frame(inner)
+
+        normal_names = wrapper_normal()
+        hidden_names = wrapper_hide()
+
+        assert "wrapper_normal" in normal_names
+        assert "wrapper_hide" not in hidden_names
+
 
 class TestThreadCleanup:
     """Tests for thread cleanup semantics and edge cases."""
