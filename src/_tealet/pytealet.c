@@ -1512,8 +1512,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         tstate->context = new_ctx;
         tealet->tstate.context = NULL; /* ownership transferred to tstate */
         tstate->context_ver++;
-        if (old_ctx != new_ctx)
-            Py_XDECREF(old_ctx);
+        Py_XDECREF(old_ctx);
     }
 
     /* We only have borrowed references from the calling tealet.
