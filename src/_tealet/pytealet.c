@@ -6,6 +6,7 @@
  */
 
 #include "Python.h"
+#include "cpython/context.h"
 #include "frameobject.h"
 #include "pythread.h"
 #include "structmember.h"
@@ -899,6 +900,11 @@ static PyObject *pytealet_set_context(PyObject *self, PyObject *value) {
     if (!mstate)
         return NULL;
 
+    if (new_ctx && !PyContext_CheckExact(new_ctx)) {
+        PyErr_SetString(PyExc_TypeError, "context must be a contextvars.Context or None");
+        return NULL;
+    }
+
     current = GetCurrent(mstate, NULL, 0, NULL);
     if (!current && PyErr_Occurred())
         return NULL;
@@ -936,14 +942,32 @@ static struct PyMethodDef pytealet_methods[] = {
      METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"switch", (PyCFunction)(void (*)(void))pytealet_switch, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
-    {"_get_context", (PyCFunction)pytealet_get_context, METH_NOARGS, ""},
-    {"_set_context", (PyCFunction)pytealet_set_context, METH_O, ""},
     {NULL, NULL} /* sentinel */
 };
 
 /* ===================================================================== */
 /* Properties                                                            */
 /* ===================================================================== */
+static PyObject *pytealet_get_context_prop(PyObject *_self, void *_closure) {
+    (void)_closure;
+    return pytealet_get_context(_self, NULL);
+}
+
+static int pytealet_set_context_prop(PyObject *_self, PyObject *value, void *_closure) {
+    PyObject *result;
+
+    (void)_closure;
+    if (!value) {
+        PyErr_SetString(PyExc_AttributeError, "can't delete context attribute");
+        return -1;
+    }
+    result = pytealet_set_context(_self, value);
+    if (!result)
+        return -1;
+    Py_DECREF(result);
+    return 0;
+}
+
 static PyObject *pytealet_get_main(PyObject *_self, void *_closure) {
     PyTealetObject *self = (PyTealetObject *)_self;
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
@@ -999,6 +1023,7 @@ static PyObject *pytealet_get_tid(PyObject *_self, void *_closure) {
 
 static struct PyGetSetDef pytealet_getset[] = {{"state", pytealet_get_state, NULL, "", NULL},
                                                {"frame", pytealet_get_frame, NULL, "", NULL},
+                                               {"context", pytealet_get_context_prop, pytealet_set_context_prop, "", NULL},
                                                {"thread_id", pytealet_get_tid, NULL, "", NULL},
                                                {0}};
 
