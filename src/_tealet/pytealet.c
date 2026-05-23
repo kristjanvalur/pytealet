@@ -1582,6 +1582,11 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
     /* clear the old tealet */
     tealet->state = STATE_EXIT;
+    /* Stop tracking this wrapper while lineage pointers are still valid.
+     * If we wait until object dealloc, tealet may already be NULL and the
+     * weakref can remain stranded in mdata->wrappers until thread_cleanup().
+     */
+    pytealet_untrack_wrapper(tealet);
     if (PYTEALET_DEFER_DELETE)
         exit_mode = TEALET_XFER_DEFAULT;
     if (exit_mode == TEALET_EXIT_DELETE) {
