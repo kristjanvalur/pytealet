@@ -28,13 +28,16 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return Py_XNewRef((PyObject *)GetMain(mstate, 1, NULL));
 }
 
-static PyObject *module_thread_cleanup(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+static PyObject *module_thread_cleanup(PyObject *mod, PyObject *args) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    Py_ssize_t cleanup_passes = 3;
     if (!mstate) {
         PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
         return NULL;
     }
-    return PyTealet_ThreadCleanup(mstate);
+    if (!PyArg_ParseTuple(args, "|n:thread_cleanup", &cleanup_passes))
+        return NULL;
+    return PyTealet_ThreadCleanup(mstate, cleanup_passes);
 }
 
 static PyObject *module_active_tealets(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
@@ -46,7 +49,7 @@ static PyObject *module_active_tealets(PyObject *mod, PyObject *Py_UNUSED(_ignor
     return PyTealet_ActiveTealets(mstate);
 }
 
-static PyObject *module_active_tealets_kill(PyObject *mod, PyObject *args) {
+static PyObject *module_thread_kill(PyObject *mod, PyObject *args) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
     Py_ssize_t cleanup_passes = 3;
 
@@ -54,10 +57,10 @@ static PyObject *module_active_tealets_kill(PyObject *mod, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "|n:active_tealets_kill", &cleanup_passes))
+    if (!PyArg_ParseTuple(args, "|n:thread_kill", &cleanup_passes))
         return NULL;
 
-    return PyTealet_ActiveTealetsKill(mstate, cleanup_passes);
+    return PyTealet_ThreadKill(mstate, cleanup_passes);
 }
 
 /* Get/set dormant tealet frame introspection at runtime.
@@ -100,9 +103,9 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
-    {"thread_cleanup", (PyCFunction)module_thread_cleanup, METH_NOARGS, ""},
+    {"thread_cleanup", (PyCFunction)module_thread_cleanup, METH_VARARGS, ""},
     {"active_tealets", (PyCFunction)module_active_tealets, METH_NOARGS, ""},
-    {"active_tealets_kill", (PyCFunction)module_active_tealets_kill, METH_VARARGS, ""},
+    {"thread_kill", (PyCFunction)module_thread_kill, METH_VARARGS, ""},
     {"frame_introspection", (PyCFunction)module_frame_introspection, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };

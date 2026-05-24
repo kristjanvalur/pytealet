@@ -101,7 +101,7 @@ class TestModule:
 class TestThreadCleanup:
     """Tests for thread cleanup semantics and edge cases."""
 
-    def test_active_tealets_kill_then_thread_cleanup_is_empty(self):
+    def test_thread_kill_then_thread_cleanup_is_empty(self):
         def parked(current, arg):
             current.main().switch("paused")
             return current.main()
@@ -116,7 +116,7 @@ class TestThreadCleanup:
         assert id(t1) in active_ids
         assert id(t2) in active_ids
 
-        remaining = _tealet.active_tealets_kill()
+        remaining = _tealet.thread_kill()
         assert remaining == []
         assert t1.state == _tealet.STATE_EXIT
         assert t2.state == _tealet.STATE_EXIT
@@ -125,7 +125,7 @@ class TestThreadCleanup:
         # Recreate main for subsequent tests.
         assert _tealet.main().state == _tealet.STATE_RUN
 
-    def test_active_tealets_kill_cleanup_passes(self):
+    def test_thread_kill_cleanup_passes(self):
         catches = [0]
 
         def stubborn(current, arg):
@@ -140,11 +140,11 @@ class TestThreadCleanup:
         t = _tealet.tealet()
         assert t.run(stubborn, None) == "paused"
 
-        remaining = _tealet.active_tealets_kill(1)
+        remaining = _tealet.thread_kill(1)
         assert any(id(x) == id(t) for x in remaining)
         assert t.state == _tealet.STATE_RUN
 
-        remaining2 = _tealet.active_tealets_kill(3)
+        remaining2 = _tealet.thread_kill(3)
         assert all(id(x) != id(t) for x in remaining2)
         assert t.state == _tealet.STATE_EXIT
 
@@ -207,8 +207,8 @@ class TestThreadCleanup:
 
         _tealet.tealet().run(run, None)
 
-    def test_thread_cleanup_returns_only_run_tealets(self):
-        """Cleanup only returns RUN tealets with ACTIVE status, not STUB or main."""
+    def test_thread_cleanup_kills_run_tealets_before_force_cleanup(self):
+        """Cleanup first kills active RUN tealets, so nerfed excludes them."""
         thread_main = _tealet.main()
         stub = _tealet.tealet()
         stub.stub()
@@ -224,13 +224,14 @@ class TestThreadCleanup:
         nerfed = _tealet.thread_cleanup()
         nerfed_ids = {id(x) for x in nerfed}
 
-        # t switched back to main and remains suspended in RUN state,
-        # so cleanup should include it in nerfed.
+        # thread_cleanup() now performs thread_kill() first, so suspended RUN
+        # tealets are exited before forced handle teardown and are not in nerfed.
         # STUB tealets are not returned (can be safely collected).
         # Main is cleanly deleted, not forcibly invalidated.
         assert id(thread_main) not in nerfed_ids
         assert id(stub) not in nerfed_ids  # STUB not in nerfed
-        assert id(t) in nerfed_ids  # suspended RUN tealet is in nerfed
+        assert id(t) not in nerfed_ids
+        assert t.state == _tealet.STATE_EXIT
 
         # Recreate main for this thread so subsequent tests keep the usual baseline.
         assert _tealet.main().state == _tealet.STATE_RUN
@@ -243,8 +244,8 @@ class TestThreadCleanup:
 
         _tealet.tealet().run(run, None)
 
-    def test_cleanup_nerfed_suspended_tealet_cannot_switch(self):
-        """A suspended RUN tealet returned by cleanup cannot be switched to again."""
+    def test_cleanup_suspended_tealet_cannot_switch(self):
+        """A suspended RUN tealet is killed by cleanup and cannot be switched."""
         def parked(current, arg):
             current.main().switch("paused")
             return current.main()
@@ -253,7 +254,8 @@ class TestThreadCleanup:
         assert t.run(parked, None) == "paused"
 
         nerfed = _tealet.thread_cleanup()
-        assert any(id(x) == id(t) for x in nerfed)
+        assert all(id(x) != id(t) for x in nerfed)
+        assert t.state == _tealet.STATE_EXIT
 
         with pytest.raises(_tealet.StateError):
             t.switch()

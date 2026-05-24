@@ -122,6 +122,8 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
                                          int clear_current_tss, int best_effort);
 static int pytealet_collect_active_wrappers(PyTealetModuleState *mstate, PyTealetMainData *mdata,
                                             PyObject *active_out);
+static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata,
+                                            Py_ssize_t cleanup_passes);
 static uint64_t pytealet_throw_next_token(PyTealetMainData *mdata);
 static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, PyObject *exc, PyObject *fallback);
 static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out,
@@ -2079,13 +2081,61 @@ static int pytealet_kill_active_snapshot(PyTealetModuleState *mstate, PyObject *
     return 0;
 }
 
+/* Internal helper used by thread_kill() and thread_cleanup().
+ * Repeatedly throws TealetExit into active wrappers and returns any remaining
+ * active wrappers after cleanup_passes attempts.
+ */
+static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata,
+                                            Py_ssize_t cleanup_passes) {
+    Py_ssize_t pass_idx;
+
+    assert(mstate);
+    assert(mdata);
+
+    if (cleanup_passes < 1) {
+        PyErr_SetString(PyExc_ValueError, "cleanup_passes must be >= 1");
+        return NULL;
+    }
+
+    for (pass_idx = 0; pass_idx < cleanup_passes; pass_idx++) {
+        PyObject *active = PyList_New(0);
+        if (!active)
+            return NULL;
+
+        if (pytealet_collect_active_wrappers(mstate, mdata, active) < 0) {
+            Py_DECREF(active);
+            return NULL;
+        }
+        if (PyList_GET_SIZE(active) == 0)
+            return active;
+
+        if (pytealet_kill_active_snapshot(mstate, active) < 0) {
+            Py_DECREF(active);
+            return NULL;
+        }
+        Py_DECREF(active);
+    }
+
+    {
+        PyObject *active = PyList_New(0);
+        if (!active)
+            return NULL;
+        if (pytealet_collect_active_wrappers(mstate, mdata, active) < 0) {
+            Py_DECREF(active);
+            return NULL;
+        }
+        return active;
+    }
+}
+
 /* Explicitly clean up this thread's tealet lineage and return wrappers whose
  * native tealet handles were active and forcibly invalidated.
  */
-PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
+PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes) {
     PyTealetObject *current;
     PyTealetMainData *mdata;
     PyObject *nerfed;
+    PyObject *remaining;
 
     assert(mstate);
     nerfed = PyList_New(0);
@@ -2103,6 +2153,13 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
         PyErr_SetString(mstate->state_error, "thread_cleanup() must be called from this thread's main tealet");
         return NULL;
     }
+
+    remaining = pytealet_thread_kill_inner(mstate, mdata, cleanup_passes);
+    if (!remaining) {
+        Py_DECREF(nerfed);
+        return NULL;
+    }
+    Py_DECREF(remaining);
 
     if (pytealet_thread_cleanup_inner(mstate, mdata, nerfed, 1, 0) < 0) {
         Py_DECREF(nerfed);
@@ -2147,31 +2204,26 @@ PyObject *PyTealet_ActiveTealets(PyTealetModuleState *mstate) {
 /* Try to kill active non-main tealets by throwing TealetExit repeatedly,
  * up to cleanup_passes attempts. Returns remaining active wrappers.
  */
-PyObject *PyTealet_ActiveTealetsKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes) {
-    Py_ssize_t pass_idx;
+PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes) {
+    PyTealetObject *current;
+    PyTealetMainData *mdata;
+    PyObject *active;
 
     assert(mstate);
 
-    if (cleanup_passes < 1) {
-        PyErr_SetString(PyExc_ValueError, "cleanup_passes must be >= 1");
+    current = GetCurrent(mstate, NULL, 0, &mdata);
+    if (!current) {
+        /* no current tealet, idempotent result */
+        active = PyList_New(0);
+        return active;
+    }
+    assert(mdata);
+    if (!TEALET_IS_MAIN(current->tealet)) {
+        PyErr_SetString(mstate->state_error, "thread_kill() must be called from this thread's main tealet");
         return NULL;
     }
 
-    for (pass_idx = 0; pass_idx < cleanup_passes; pass_idx++) {
-        PyObject *active = PyTealet_ActiveTealets(mstate);
-        if (!active)
-            return NULL;
-        if (PyList_GET_SIZE(active) == 0)
-            return active;
-
-        if (pytealet_kill_active_snapshot(mstate, active) < 0) {
-            Py_DECREF(active);
-            return NULL;
-        }
-        Py_DECREF(active);
-    }
-
-    return PyTealet_ActiveTealets(mstate);
+    return pytealet_thread_kill_inner(mstate, mdata, cleanup_passes);
 }
 
 /* Internal API for module teardown paths: clean one lineage without

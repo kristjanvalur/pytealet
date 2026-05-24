@@ -20,9 +20,9 @@ extern struct PyModuleDef _tealet_module;
 PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainData **mdata_out);
 PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main,
 						   PyTealetMainData **mdata_out);
-PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate);
+PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes);
 PyObject *PyTealet_ActiveTealets(PyTealetModuleState *mstate);
-PyObject *PyTealet_ActiveTealetsKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes);
+PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes);
 int PyTealet_ThreadCleanupMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);
