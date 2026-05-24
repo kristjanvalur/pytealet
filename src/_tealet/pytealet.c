@@ -124,7 +124,7 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
 static int pytealet_collect_active_wrappers(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *active_out,
                                             PyTealetObject *caller, unsigned int collect_flags);
 static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata,
-                                            Py_ssize_t cleanup_passes, PyTealetObject *caller);
+                                            Py_ssize_t cleanup_passes, PyTealetObject *caller, PyObject *kill_exc_spec);
 static uint64_t pytealet_throw_next_token(PyTealetMainData *mdata);
 static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, PyObject *exc, PyObject *fallback);
 static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out,
@@ -2220,7 +2220,39 @@ static int pytealet_collect_active_wrappers(PyTealetModuleState *mstate, PyTeale
 /* Best-effort kill of each tealet in a snapshot of active wrappers.
  * Any per-target failure is reported as unraisable and processing continues.
  */
-static int pytealet_kill_active_snapshot(PyTealetModuleState *mstate, PyObject *active_snapshot) {
+static PyObject *pytealet_make_kill_exception(PyTealetModuleState *mstate, PyObject *kill_exc_spec) {
+    PyObject *exc;
+
+    if (!kill_exc_spec || kill_exc_spec == Py_None)
+        return PyObject_CallNoArgs(mstate->tealet_exit_error);
+
+    if (!PyCallable_Check(kill_exc_spec)) {
+        PyErr_SetString(PyExc_TypeError, "kill_exc must be callable or None");
+        return NULL;
+    }
+
+    exc = PyObject_CallNoArgs(kill_exc_spec);
+    if (!exc)
+        return NULL;
+    if (!PyExceptionInstance_Check(exc)) {
+        Py_DECREF(exc);
+        PyErr_SetString(PyExc_TypeError, "kill_exc callable must return an exception instance");
+        return NULL;
+    }
+    return exc;
+}
+
+static int pytealet_validate_kill_exception(PyObject *kill_exc_spec) {
+    if (!kill_exc_spec || kill_exc_spec == Py_None)
+        return 0;
+    if (PyCallable_Check(kill_exc_spec))
+        return 0;
+
+    PyErr_SetString(PyExc_TypeError, "kill_exc must be callable or None");
+    return -1;
+}
+
+static int pytealet_kill_active_snapshot(PyTealetModuleState *mstate, PyObject *active_snapshot, PyObject *kill_exc_spec) {
     Py_ssize_t i;
 
     assert(mstate);
@@ -2240,7 +2272,7 @@ static int pytealet_kill_active_snapshot(PyTealetModuleState *mstate, PyObject *
         if (target->state != STATE_RUN || !target->tealet)
             continue;
 
-        exc = PyObject_CallNoArgs(mstate->tealet_exit_error);
+        exc = pytealet_make_kill_exception(mstate, kill_exc_spec);
         if (!exc)
             return -1;
 
@@ -2260,11 +2292,12 @@ static int pytealet_kill_active_snapshot(PyTealetModuleState *mstate, PyObject *
 }
 
 /* Internal helper used by thread_kill() and thread_cleanup().
- * Repeatedly throws TealetExit into active wrappers and returns any remaining
- * active wrappers after cleanup_passes attempts.
+ * Repeatedly throws the configured kill exception into active wrappers and
+ * returns any remaining active wrappers after cleanup_passes attempts.
  */
 static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata,
-                                            Py_ssize_t cleanup_passes, PyTealetObject *caller) {
+                                            Py_ssize_t cleanup_passes, PyTealetObject *caller,
+                                            PyObject *kill_exc_spec) {
     Py_ssize_t pass_idx;
 
     assert(mstate);
@@ -2274,6 +2307,9 @@ static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTeale
         PyErr_SetString(PyExc_ValueError, "cleanup_passes must be >= 1");
         return NULL;
     }
+
+    if (pytealet_validate_kill_exception(kill_exc_spec) < 0)
+        return NULL;
 
     for (pass_idx = 0; pass_idx < cleanup_passes; pass_idx++) {
         PyObject *active = PyList_New(0);
@@ -2288,7 +2324,7 @@ static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTeale
         if (PyList_GET_SIZE(active) == 0)
             return active;
 
-        if (pytealet_kill_active_snapshot(mstate, active) < 0) {
+        if (pytealet_kill_active_snapshot(mstate, active, kill_exc_spec) < 0) {
             Py_DECREF(active);
             return NULL;
         }
@@ -2313,7 +2349,7 @@ static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTeale
  * Phase 2: force-teardown remaining handles and return wrappers that were
  * still active at force-teardown time.
  */
-PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes) {
+PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec) {
     PyTealetObject *current;
     PyTealetMainData *mdata;
     PyObject *nerfed;
@@ -2339,7 +2375,7 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup
         return NULL;
     }
 
-    remaining = pytealet_thread_kill_inner(mstate, mdata, cleanup_passes, current);
+    remaining = pytealet_thread_kill_inner(mstate, mdata, cleanup_passes, current, kill_exc_spec);
     if (!remaining) {
         Py_DECREF(nerfed);
         return NULL;
@@ -2384,14 +2420,15 @@ PyObject *PyTealet_ActiveTealets(PyTealetModuleState *mstate) {
     return active;
 }
 
-/* Try to kill active non-main tealets by throwing TealetExit repeatedly,
- * up to cleanup_passes attempts. Can be called from any tealet in the
- * current lineage, and never targets the caller tealet itself.
+/* Try to kill active non-main tealets by throwing a configured exception
+ * repeatedly, up to cleanup_passes attempts. Can be called from any tealet in
+ * the current lineage, and never targets the caller tealet itself.
  *
  * thread_kill() is not guaranteed to return control to the caller tealet:
- * a target may catch TealetExit and switch to a different scheduling point.
+ * a target may catch the injected exception and switch to a different
+ * scheduling point.
  */
-PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes) {
+PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec) {
     PyTealetObject *current;
     PyTealetMainData *mdata;
     PyObject *active;
@@ -2407,7 +2444,7 @@ PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_pa
         return active;
     }
 
-    return pytealet_thread_kill_inner(mstate, mdata, cleanup_passes, current);
+    return pytealet_thread_kill_inner(mstate, mdata, cleanup_passes, current, kill_exc_spec);
 }
 
 /* Internal API for module teardown paths: clean one lineage without

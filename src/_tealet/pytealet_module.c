@@ -188,13 +188,14 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
 static PyObject *module_thread_cleanup(PyObject *mod, PyObject *args) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
     Py_ssize_t cleanup_passes = 3;
+    PyObject *kill_exc = Py_None;
     if (!mstate) {
         PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "|n:thread_cleanup", &cleanup_passes))
+    if (!PyArg_ParseTuple(args, "|nO:thread_cleanup", &cleanup_passes, &kill_exc))
         return NULL;
-    return PyTealet_ThreadCleanup(mstate, cleanup_passes);
+    return PyTealet_ThreadCleanup(mstate, cleanup_passes, kill_exc);
 }
 
 static PyObject *module_active_tealets(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
@@ -209,15 +210,16 @@ static PyObject *module_active_tealets(PyObject *mod, PyObject *Py_UNUSED(_ignor
 static PyObject *module_thread_kill(PyObject *mod, PyObject *args) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
     Py_ssize_t cleanup_passes = 3;
+    PyObject *kill_exc = Py_None;
 
     if (!mstate) {
         PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "|n:thread_kill", &cleanup_passes))
+    if (!PyArg_ParseTuple(args, "|nO:thread_kill", &cleanup_passes, &kill_exc))
         return NULL;
 
-    return PyTealet_ThreadKill(mstate, cleanup_passes);
+    return PyTealet_ThreadKill(mstate, cleanup_passes, kill_exc);
 }
 
 static PyObject *module_error_was_remote(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {

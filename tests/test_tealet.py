@@ -228,6 +228,53 @@ class TestThreadCleanup:
         caller = _tealet.tealet()
         caller.run(run, None)
 
+    def test_thread_kill_accepts_callable_exception_factory(self):
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(parked, None) == "paused"
+
+        remaining = _tealet.thread_kill(1, _tealet.TealetExit)
+        assert all(id(x) != id(t) for x in remaining)
+        assert t.state == _tealet.STATE_EXIT
+
+        assert _tealet.thread_cleanup() == []
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_thread_kill_rejects_exception_instance_spec(self):
+        with pytest.raises(TypeError, match="callable or None"):
+            _tealet.thread_kill(1, _tealet.TealetExit())
+
+    def test_thread_kill_rejects_non_exception_factory_result(self):
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(parked, None) == "paused"
+
+        with pytest.raises(TypeError, match="must return an exception instance"):
+            _tealet.thread_kill(1, lambda: 42)
+
+        # Cleanup lineages to avoid cross-test contamination.
+        _tealet.thread_kill(3)
+        assert _tealet.thread_cleanup() == []
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_thread_cleanup_accepts_callable_exception_factory(self):
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(parked, None) == "paused"
+
+        assert _tealet.thread_cleanup(1, _tealet.TealetExit) == []
+        assert t.state == _tealet.STATE_EXIT
+        assert _tealet.main().state == _tealet.STATE_RUN
+
     def test_thread_cleanup_kills_run_tealets_before_force_cleanup(self):
         """Cleanup first kills active RUN tealets, so nerfed excludes them."""
         thread_main = _tealet.main()
