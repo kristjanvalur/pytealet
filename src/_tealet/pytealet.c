@@ -387,6 +387,7 @@ static void pytealet_untrack_wrapper(PyTealetObject *wrapper) {
             PyErr_Clear();
         }
     }
+    /* weakrefs don't cause side effects when deleted */
     Py_CLEAR(wrapper->tracking_ref);
 }
 
@@ -2289,7 +2290,7 @@ mismatch:
 /* process return argument from callable and convert.  We unpack arguments
  * and validate, and treat validation errors as an exception
  * return new references to return_to and return_arg.
- * avoid DECREF to not trigger GC code.
+ * This runs before the exit-switch safety boundary, so direct DECREF is fine.
  */
 static void pytealet_process_return_arg(PyTealetModuleState *mstate,PyTealetObject *current, PyObject *result, PyTealetObject **return_to, PyObject **return_arg, PyObject **return_exc) {
     int err = 0;
@@ -2318,7 +2319,7 @@ static void pytealet_process_return_arg(PyTealetModuleState *mstate,PyTealetObje
             err = -1;
         }
         if (err) {
-            PyTealet_dustbin_push(current->tealet, (PyObject *)(*return_to));
+            Py_DECREF((PyObject *)(*return_to));
             *return_to = NULL;
         }
     } else {
@@ -2470,13 +2471,18 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         Py_DECREF(return_exc);
         return_exc = NULL;
     }
-   
+
+    /* Now we have started the exit process, already possibly setting an exception on the target.
+     * we must be careful not to do anything that might cause arbitrary control flow, such as
+     * triggering object deletion (which can invoke __del__ methods.), so all decrefs must
+     * be via the dustbin at this point.*/
 
     /* clear the old tealet */
     tealet->state = STATE_EXIT;
     /* Stop tracking this wrapper while lineage pointers are still valid.
      * If we wait until object dealloc, tealet may already be NULL and the
      * weakref can remain stranded in mdata->wrappers until thread_cleanup().
+     * This call is safe, we drop weakref objects and no arbitrary __del__ code can run.
      */
     pytealet_untrack_wrapper(tealet);
     if (PYTEALET_DEFER_DELETE)
