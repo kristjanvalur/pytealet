@@ -105,7 +105,10 @@ static PyMethodDef module_methods[] = {
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
     {"thread_cleanup", (PyCFunction)module_thread_cleanup, METH_VARARGS, ""},
     {"active_tealets", (PyCFunction)module_active_tealets, METH_NOARGS, ""},
-    {"thread_kill", (PyCFunction)module_thread_kill, METH_VARARGS, ""},
+    {"thread_kill", (PyCFunction)module_thread_kill, METH_VARARGS,
+     "thread_kill(cleanup_passes=3) -> list\n\n"
+     "Best-effort TealetExit injection into active non-main tealets.\n"
+     "Not guaranteed to return to the caller: targets may catch and switch elsewhere."},
     {"frame_introspection", (PyCFunction)module_frame_introspection, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };

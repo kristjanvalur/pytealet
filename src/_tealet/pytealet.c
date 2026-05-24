@@ -644,7 +644,8 @@ static int pytealet_throw_registry_redirect(PyTealetModuleState *mstate, PyTeale
         assert(fallback_t->owner_tid == tealet->owner_tid);
         assert(fallback_t->tealet->main == tealet->tealet->main);
         if (fallback_t->state == STATE_RUN && fallback_t->tealet) {
-            /* transfer ownership of throw_fallback to *return_to_io */
+            /* transfer ownership of throw_fallback to *return_to_io */
+
             Py_DECREF(*return_to_io);
             *return_to_io = fallback_t;
             Py_DECREF(throw_exc);
@@ -1223,6 +1224,9 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
 /* Inner C API for exception injection. This performs all validation and
  * token bookkeeping, while the Python API wrapper handles argument parsing.
  * target is required.
+ *
+ * Callers should not assume any particular resume path once the exception is
+ * delivered to the target: target code may catch and switch elsewhere.
  */
 static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
                                         PyTealetMainData *mdata, PyObject *exc, PyObject *fallback) {
@@ -1357,6 +1361,9 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
 
 /* Convenience API: schedule exception for a RUN target and route uncaught
  * unwind back to the current tealet, then switch immediately.
+ *
+ * This does not guarantee a switch back to the caller: target code may catch
+ * the injected exception and switch to a different tealet.
  */
 static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                 Py_ssize_t nargs, PyObject *kwnames) {
@@ -1494,9 +1501,15 @@ static struct PyMethodDef pytealet_methods[] = {
      METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"switch", (PyCFunction)(void (*)(void))pytealet_switch, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
-    {"throw", (PyCFunction)(void (*)(void))pytealet_throw, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
-    {"set_exception", (PyCFunction)(void (*)(void))pytealet_set_exception, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
-     ""},
+    {"throw", (PyCFunction)(void (*)(void))pytealet_throw, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+     "throw(exception) -> object\n\n"
+     "Inject exception into target and switch to it.\n"
+     "No guarantee the caller resumes: target may catch and switch elsewhere."},
+    {"set_exception", (PyCFunction)(void (*)(void))pytealet_set_exception,
+     METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+     "set_exception(exception, fallback=None) -> None\n\n"
+     "Queue exception for delivery when target next runs.\n"
+     "No guarantee about which tealet runs after delivery; target may catch and switch elsewhere."},
     {NULL, NULL} /* sentinel */
 };
 
@@ -2231,6 +2244,9 @@ PyObject *PyTealet_ActiveTealets(PyTealetModuleState *mstate) {
 /* Try to kill active non-main tealets by throwing TealetExit repeatedly,
  * up to cleanup_passes attempts. Can be called from any tealet in the
  * current lineage, and never targets the caller tealet itself.
+ *
+ * thread_kill() is not guaranteed to return control to the caller tealet:
+ * a target may catch TealetExit and switch to a different scheduling point.
  */
 PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes) {
     PyTealetObject *current;
