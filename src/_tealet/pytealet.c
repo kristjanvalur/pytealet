@@ -125,6 +125,10 @@ static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, 
 static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out,
                                        PyObject **fallback_out);
 static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result);
+static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
+                                        PyTealetMainData *mdata, PyObject *exc, PyObject *fallback);
+static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                        Py_ssize_t nargs, PyObject *kwnames);
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
 
@@ -1171,6 +1175,82 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     return result;
 }
 
+/* Inner C API for exception injection. This performs all validation and
+ * token bookkeeping, while the Python API wrapper handles argument parsing.
+ * target is required.
+ */
+static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
+                                        PyTealetMainData *mdata, PyObject *exc, PyObject *fallback) {
+    uint64_t token;
+
+    assert(mstate);
+    assert(target);
+    assert(current);
+    assert(mdata);
+    assert(exc);
+
+    if (!PyExceptionInstance_Check(exc)) {
+        PyErr_SetString(PyExc_TypeError, "exception must be a BaseException instance");
+        return -1;
+    }
+
+    if (target->state != STATE_RUN || !target->tealet) {
+        PyErr_SetString(mstate->state_error, "target tealet must be active");
+        return -1;
+    }
+    if (CheckTarget(mstate, target, current, "set_exception()"))
+        return -1;
+
+    if (!fallback)
+        fallback = Py_None;
+
+    if (fallback != Py_None) {
+        PyTealetObject *fallback_t;
+        if (!PyTealet_Check(fallback, mstate)) {
+            PyErr_SetString(PyExc_TypeError, "fallback must be a tealet or None");
+            return -1;
+        }
+        fallback_t = (PyTealetObject *)fallback;
+        if (fallback_t->state != STATE_RUN || !fallback_t->tealet) {
+            PyErr_SetString(mstate->state_error, "fallback tealet must be active");
+            return -1;
+        }
+        if (CheckTarget(mstate, fallback_t, target, "set_exception(fallback)"))
+            return -1;
+    }
+
+    /* any new exception overrides any pending throw */
+    if (mdata->pending_throw_token != 0) {
+        PyObject *old_exc = NULL;
+        PyObject *old_fallback = NULL;
+        int old_pop_rc = pytealet_throw_registry_pop(mdata, mdata->pending_throw_token, &old_exc, &old_fallback);
+        if (old_pop_rc < 0)
+            return -1;
+        Py_XDECREF(old_exc);
+        Py_XDECREF(old_fallback);
+        mdata->pending_throw_token = 0;
+    }
+
+    /* any new exception for the target overrides any in-flight handling of a previous one.*/
+    if (target->inflight_throw_token != 0) {
+        PyObject *old_exc = NULL;
+        PyObject *old_fallback = NULL;
+        int old_pop_rc = pytealet_throw_registry_pop(mdata, target->inflight_throw_token, &old_exc, &old_fallback);
+        if (old_pop_rc < 0)
+            return -1;
+        Py_XDECREF(old_exc);
+        Py_XDECREF(old_fallback);
+        target->inflight_throw_token = 0;
+    }
+
+    token = pytealet_throw_next_token(mdata);
+    if (pytealet_throw_registry_set(mdata, token, exc, fallback == Py_None ? NULL : fallback) < 0)
+        return -1;
+
+    mdata->pending_throw_token = token;
+    return 0;
+}
+
 static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                         Py_ssize_t nargs, PyObject *kwnames) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
@@ -1179,7 +1259,6 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
     PyTealetMainData *mdata;
     PyObject *exc = NULL;
     PyObject *fallback = Py_None;
-    uint64_t token;
 
     if (!mstate)
         return NULL;
@@ -1216,57 +1295,13 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
         PyErr_SetString(PyExc_TypeError, "set_exception() missing required argument 'exception'");
         return NULL;
     }
-    if (!PyExceptionInstance_Check(exc)) {
-        PyErr_SetString(PyExc_TypeError, "exception must be a BaseException instance");
-        return NULL;
-    }
-
-    if (target->state != STATE_RUN || !target->tealet) {
-        PyErr_SetString(mstate->state_error, "target tealet must be active");
-        return NULL;
-    }
 
     current = GetCurrent(mstate, NULL, 0, &mdata);
     if (!current && PyErr_Occurred())
         return NULL;
-    if (CheckTarget(mstate, target, current, "set_exception()"))
+
+    if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, fallback) < 0)
         return NULL;
-
-    if (fallback != Py_None) {
-        PyTealetObject *fallback_t;
-        if (!PyTealet_Check(fallback, mstate)) {
-            PyErr_SetString(PyExc_TypeError, "fallback must be a tealet or None");
-            return NULL;
-        }
-        fallback_t = (PyTealetObject *)fallback;
-        if (fallback_t->state != STATE_RUN || !fallback_t->tealet) {
-            PyErr_SetString(mstate->state_error, "fallback tealet must be active");
-            return NULL;
-        }
-        if (CheckTarget(mstate, fallback_t, target, "set_exception(fallback)"))
-            return NULL;
-    }
-
-    if (mdata->pending_throw_token != 0) {
-        PyErr_SetString(mstate->state_error, "a pending next-switch exception is already set");
-        return NULL;
-    }
-    if (target->inflight_throw_token != 0) {
-        PyObject *old_exc = NULL;
-        PyObject *old_fallback = NULL;
-        int old_pop_rc = pytealet_throw_registry_pop(mdata, target->inflight_throw_token, &old_exc, &old_fallback);
-        if (old_pop_rc < 0)
-            return NULL;
-        Py_XDECREF(old_exc);
-        Py_XDECREF(old_fallback);
-        target->inflight_throw_token = 0;
-    }
-
-    token = pytealet_throw_next_token(mdata);
-    if (pytealet_throw_registry_set(mdata, token, exc, fallback == Py_None ? NULL : fallback) < 0)
-        return NULL;
-
-    mdata->pending_throw_token = token;
     Py_RETURN_NONE;
 }
 
@@ -1971,20 +2006,44 @@ static void pytealet_process_return_arg(PyTealetModuleState *mstate,PyTealetObje
     }
 }
 
-/* handle top level exception, silencing it, ignoring it, passing it on*/
-void pytealet_handle_top_level_exception(PyObject **exc) {
-    if (*exc) {
-        /* for now, just print the exception and clear it, but we may want to
-         * support passing it on to the next tealet in the future.  In that case,
-         * we would need to set up a special attribute on the tealet to hold the
-         * pending exception, and then have the main loop check for that and raise
-         * it if present.
-         */
-        pytealet_err_set_raised_exception(*exc);
-        *exc = NULL;
-        PyErr_WriteUnraisable(NULL);
-        PyErr_Clear();
+/* Handle uncaught top-level exceptions from a tealet worker.
+ * - TealetExit is swallowed.
+ * - SystemExit/KeyboardInterrupt are redirected to main and left in *exc_io
+ *   so caller can schedule deferred re-raise after switch.
+ * - all other exceptions are reported as unhandled.
+ */
+static void pytealet_handle_top_level_exception(PyTealetModuleState *mstate, PyTealetObject **return_to_io,
+                                                PyObject **exc_io) {
+    PyObject *exc;
+    assert(mstate);
+    assert(return_to_io && *return_to_io != NULL);
+    assert(exc_io);
+
+    exc = *exc_io;
+    if (!exc)
+        return;
+
+    if (mstate->tealet_exit_error && PyErr_GivenExceptionMatches(exc, mstate->tealet_exit_error)) {
+        Py_DECREF(exc);
+        *exc_io = NULL;
+        return;
     }
+
+    if (PyErr_GivenExceptionMatches(exc, PyExc_SystemExit) || PyErr_GivenExceptionMatches(exc, PyExc_KeyboardInterrupt)) {
+        PyTealetObject *main_t;
+
+        main_t = GetMain(mstate, 0, NULL);
+        if (main_t && *return_to_io != main_t) {
+            Py_DECREF(*return_to_io);
+            *return_to_io = (PyTealetObject *)Py_NewRef((PyObject *)main_t);
+        }
+        return;
+    }
+
+    pytealet_err_set_raised_exception(exc);
+    *exc_io = NULL;
+    PyErr_WriteUnraisable(NULL);
+    PyErr_Clear();
 }
 
 
@@ -2060,8 +2119,23 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     */
    (void)pytealet_throw_registry_redirect(mstate, mdata, tealet, return_exc, &return_to);
    
-   /* now, handle the top level exception, possibly ignoring, printing it */
-   pytealet_handle_top_level_exception(&return_exc);
+    /* Classify top-level worker exceptions; fatal ones are deferred and
+     * injected into the return target after this switch.
+     */
+    pytealet_handle_top_level_exception(mstate, &return_to, &return_exc);
+    if (return_exc) {
+        if (pytealet_set_exception_inner(mstate, return_to, tealet, mdata, return_exc, Py_None) < 0) {
+            /* If deferred delivery setup fails, at least report the original
+             * fatal exception rather than dropping it silently.
+             */
+            PyErr_Clear();
+            pytealet_err_set_raised_exception(return_exc);
+            PyErr_WriteUnraisable(NULL);
+            PyErr_Clear();
+        }
+        Py_DECREF(return_exc);
+        return_exc = NULL;
+    }
    
     
     
