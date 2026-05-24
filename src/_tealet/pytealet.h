@@ -21,6 +21,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
 PyTealetObject *GetCurrent(PyTealetModuleState *mstate, PyTealetObject *pytealet, int create_main,
 						   PyTealetMainData **mdata_out);
 PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate);
+PyObject *PyTealet_ActiveTealets(PyTealetModuleState *mstate);
 int PyTealet_ThreadCleanupMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);

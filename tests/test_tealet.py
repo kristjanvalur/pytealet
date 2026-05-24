@@ -101,6 +101,36 @@ class TestModule:
 class TestThreadCleanup:
     """Tests for thread cleanup semantics and edge cases."""
 
+    def test_active_tealets_returns_only_run_tealets(self):
+        thread_main = _tealet.main()
+        stub = _tealet.tealet()
+        stub.stub()
+
+        def switch_back(current, arg):
+            thread_main.switch()
+
+        t = _tealet.tealet()
+        t.run(switch_back, None)
+
+        active = _tealet.active_tealets()
+        active_ids = {id(x) for x in active}
+
+        assert id(thread_main) not in active_ids
+        assert id(stub) not in active_ids
+        assert id(t) in active_ids
+
+        # Cleanup current lineage so following tests start with a fresh main.
+        _tealet.thread_cleanup()
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_active_tealets_requires_main_tealet_context(self):
+        def run(current, arg):
+            with pytest.raises(_tealet.StateError):
+                _tealet.active_tealets()
+            return current.main()
+
+        _tealet.tealet().run(run, None)
+
     def test_thread_cleanup_returns_only_run_tealets(self):
         """Cleanup only returns RUN tealets with ACTIVE status, not STUB or main."""
         thread_main = _tealet.main()

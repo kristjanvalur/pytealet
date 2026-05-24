@@ -120,6 +120,8 @@ static int pytealet_link_thread_data(PyTealetModuleState *mstate, PyTealetMainDa
 static void pytealet_unlink_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *nerfed,
                                          int clear_current_tss, int best_effort);
+static int pytealet_collect_active_wrappers(PyTealetModuleState *mstate, PyTealetMainData *mdata,
+                                            PyObject *active_out);
 static uint64_t pytealet_throw_next_token(PyTealetMainData *mdata);
 static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, PyObject *exc, PyObject *fallback);
 static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out,
@@ -1922,6 +1924,57 @@ best_effort_fail:
     return -1;
 }
 
+/* Collect active non-main tealet wrappers for the current lineage without
+ * mutating runtime state.
+ */
+static int pytealet_collect_active_wrappers(PyTealetModuleState *mstate, PyTealetMainData *mdata,
+                                            PyObject *active_out) {
+    PyObject *snapshot = NULL;
+    Py_ssize_t i;
+
+    assert(mstate);
+    assert(mdata);
+    assert(active_out && PyList_Check(active_out));
+    assert(mdata->wrappers && PySet_Check(mdata->wrappers));
+
+    pytealet_domain_lock(mdata);
+    snapshot = PySequence_List(mdata->wrappers);
+    pytealet_domain_unlock(mdata);
+    if (!snapshot)
+        return -1;
+
+    for (i = 0; i < PyList_GET_SIZE(snapshot); i++) {
+        PyObject *wref = PyList_GET_ITEM(snapshot, i); /* borrowed */
+        PyObject *obj = NULL;
+        int weak_status = pytealet_weakref_get_live(wref, &obj);
+        if (weak_status < 0) {
+            Py_DECREF(snapshot);
+            return -1;
+        }
+        if (weak_status == 0)
+            continue;
+
+        assert(PyTealet_Check(obj, mstate));
+        {
+            PyTealetObject *wrapper = (PyTealetObject *)obj;
+            int add_to_list = 0;
+
+            if (wrapper->tealet && !TEALET_IS_MAIN(wrapper->tealet) && wrapper->state != STATE_STUB)
+                add_to_list = (tealet_status(wrapper->tealet) == TEALET_STATUS_ACTIVE);
+
+            if (add_to_list && PyList_Append(active_out, obj) < 0) {
+                Py_DECREF(obj);
+                Py_DECREF(snapshot);
+                return -1;
+            }
+        }
+        Py_DECREF(obj);
+    }
+
+    Py_DECREF(snapshot);
+    return 0;
+}
+
 /* Explicitly clean up this thread's tealet lineage and return wrappers whose
  * native tealet handles were active and forcibly invalidated.
  */
@@ -1952,6 +2005,39 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate) {
         return NULL;
     }
     return nerfed;
+}
+
+/* Return active non-main tealet wrappers for this thread's lineage.
+ * Requires being called from the current thread's main tealet, mirroring
+ * thread_cleanup() context rules.
+ */
+PyObject *PyTealet_ActiveTealets(PyTealetModuleState *mstate) {
+    PyTealetObject *current;
+    PyTealetMainData *mdata;
+    PyObject *active;
+
+    assert(mstate);
+    active = PyList_New(0);
+    if (!active)
+        return NULL;
+
+    current = GetCurrent(mstate, NULL, 0, &mdata);
+    if (!current) {
+        /* no current tealet, idempotent result */
+        return active;
+    }
+    assert(mdata);
+    if (!TEALET_IS_MAIN(current->tealet)) {
+        Py_DECREF(active);
+        PyErr_SetString(mstate->state_error, "active_tealets() must be called from this thread's main tealet");
+        return NULL;
+    }
+
+    if (pytealet_collect_active_wrappers(mstate, mdata, active) < 0) {
+        Py_DECREF(active);
+        return NULL;
+    }
+    return active;
 }
 
 /* Internal API for module teardown paths: clean one lineage without
