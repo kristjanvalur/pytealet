@@ -48,6 +48,9 @@ struct PyTealetMainData {
     PyObject *dustbin;
     PyObject *main_wrapper; /* strong ref to this thread's main tealet wrapper */
     PyObject *wrappers;     /* set of weakrefs to non-main wrappers in this main lineage */
+    uint64_t throw_next_token;    /* monotonically increasing throw token generator */
+    uint64_t pending_throw_token; /* token to deliver on the next switch/run return */
+    PyObject *throw_records;      /* dict[token] -> (exc_instance, fallback_tealet_or_None) */
 #if PYTEALET_FREE_THREADED
     PyThread_type_lock domain_lock;
 #endif
@@ -91,6 +94,7 @@ struct PyTealetObject {
     tealet_t *tealet;
     unsigned long owner_tid; /* thread that owns this tealet object */
     PyObject *tracking_ref;  /* weakref object stored in main-lineage wrapper set */
+    uint64_t inflight_throw_token; /* non-zero only while fallback-aware throw is in flight */
 #if !defined(Py312P)
     PyObject *weakreflist; /* List of weak references */
 #endif
@@ -116,6 +120,11 @@ static int pytealet_link_thread_data(PyTealetModuleState *mstate, PyTealetMainDa
 static void pytealet_unlink_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *nerfed,
                                          int clear_current_tss, int best_effort);
+static uint64_t pytealet_throw_next_token(PyTealetMainData *mdata);
+static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, PyObject *exc, PyObject *fallback);
+static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out,
+                                       PyObject **fallback_out);
+static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result);
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
 
@@ -364,6 +373,270 @@ static void pytealet_untrack_wrapper(PyTealetObject *wrapper) {
     Py_CLEAR(wrapper->tracking_ref);
 }
 
+static uint64_t pytealet_throw_next_token(PyTealetMainData *mdata) {
+    uint64_t token;
+    assert(mdata);
+    token = ++mdata->throw_next_token;
+    if (token == 0)
+        token = ++mdata->throw_next_token;
+    return token;
+}
+
+static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, PyObject *exc, PyObject *fallback) {
+    PyObject *key;
+    PyObject *record;
+    int rc;
+
+    assert(mdata);
+    assert(mdata->throw_records && PyDict_Check(mdata->throw_records));
+    assert(token != 0);
+    assert(exc);
+
+    if (!fallback)
+        fallback = Py_None;
+
+    key = PyLong_FromUnsignedLongLong(token);
+    if (!key)
+        return -1;
+
+    record = PyTuple_New(2);
+    if (!record) {
+        Py_DECREF(key);
+        return -1;
+    }
+    PyTuple_SET_ITEM(record, 0, Py_NewRef(exc));
+    PyTuple_SET_ITEM(record, 1, Py_NewRef(fallback));
+
+    rc = PyDict_SetItem(mdata->throw_records, key, record);
+    Py_DECREF(record);
+    Py_DECREF(key);
+    return rc;
+}
+
+static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out, PyObject **fallback_out) {
+    PyObject *key;
+    PyObject *record;
+    PyObject *exc;
+    PyObject *fallback;
+    int found = 0;
+
+    *exc_out = NULL;
+    *fallback_out = NULL;
+
+    assert(mdata);
+    assert(mdata->throw_records && PyDict_Check(mdata->throw_records));
+    assert(token != 0);
+
+    key = PyLong_FromUnsignedLongLong(token);
+    if (!key)
+        return -1;
+
+    record = PyDict_GetItemWithError(mdata->throw_records, key);
+    if (!record) {
+        Py_DECREF(key);
+        if (PyErr_Occurred())
+            return -1;
+        return 0;
+    }
+    Py_INCREF(record);
+    found = 1;
+
+    if (PyDict_DelItem(mdata->throw_records, key) < 0) {
+        Py_DECREF(record);
+        Py_DECREF(key);
+        return -1;
+    }
+    Py_DECREF(key);
+
+    if (!PyTuple_Check(record) || PyTuple_GET_SIZE(record) != 2) {
+        Py_DECREF(record);
+        PyErr_SetString(PyExc_RuntimeError, "corrupt throw record");
+        return -1;
+    }
+
+    exc = PyTuple_GET_ITEM(record, 0);
+    fallback = PyTuple_GET_ITEM(record, 1);
+    *exc_out = Py_NewRef(exc);
+    if (fallback != Py_None)
+        *fallback_out = Py_NewRef(fallback);
+    Py_DECREF(record);
+    return found;
+}
+
+/* Return 1 if needle appears in raised exception's cause/context chain,
+ * 0 otherwise. Uses identity matching against exception instances.
+ */
+static int pytealet_exception_chain_contains(PyObject *raised, PyObject *needle) {
+    PyObject *stack[256];
+    int top = 0;
+    int steps = 0;
+
+    if (!raised || !needle)
+        return 0;
+    if (!PyExceptionInstance_Check(raised) || !PyExceptionInstance_Check(needle))
+        return 0;
+
+    stack[top++] = Py_NewRef(raised);
+
+    while (top > 0 && steps < 256) {
+        PyObject *cursor = stack[--top];
+        PyObject *cause = NULL;
+        PyObject *context = NULL;
+
+        if (cursor == needle) {
+            Py_DECREF(cursor);
+            while (top > 0)
+                Py_DECREF(stack[--top]);
+            return 1;
+        }
+
+        cause = PyException_GetCause(cursor);
+        context = PyException_GetContext(cursor);
+        Py_DECREF(cursor);
+
+        if (cause) {
+            if (top < (int)(sizeof(stack) / sizeof(stack[0]))) {
+                stack[top++] = cause;
+            } else {
+                Py_DECREF(cause);
+            }
+        }
+        if (context) {
+            if (top < (int)(sizeof(stack) / sizeof(stack[0]))) {
+                stack[top++] = context;
+            } else {
+                Py_DECREF(context);
+            }
+        }
+        steps++;
+    }
+
+    while (top > 0)
+        Py_DECREF(stack[--top]);
+    return 0;
+}
+
+
+
+/* Check whether the currently raised exception chain contains needle,
+ * while preserving the active error indicator.
+ */
+static int pytealet_current_error_contains(PyObject *needle) {
+    PyObject *etype = NULL;
+    PyObject *evalue = NULL;
+    PyObject *etb = NULL;
+    int found = 0;
+
+    if (!needle || !PyExceptionInstance_Check(needle) || !PyErr_Occurred())
+        return 0;
+
+    PyErr_Fetch(&etype, &evalue, &etb);
+    PyErr_NormalizeException(&etype, &evalue, &etb);
+    found = pytealet_exception_chain_contains(evalue, needle);
+    PyErr_Restore(etype, evalue, etb);
+    return found;
+}
+
+/* Consume a tealet's inflight throw record and redirect uncaught unwind to
+ * fallback when the current exception chain matches the recorded exception.
+ * Returns 1 when redirect was applied, 0 otherwise.
+ */
+static int pytealet_throw_registry_redirect(PyTealetModuleState *mstate, PyTealetMainData *mdata,
+                                            PyTealetObject *tealet, PyObject *exception,
+                                            PyTealetObject **return_to_io) {
+    uint64_t token;
+    PyObject *throw_exc = NULL;
+    PyObject *throw_fallback = NULL;
+    int pop_rc;
+
+    assert(mstate);
+    assert(mdata);
+    assert(tealet);
+    assert(return_to_io && *return_to_io != NULL);
+
+    if (tealet->inflight_throw_token == 0)
+        return 0;
+
+    token = tealet->inflight_throw_token;
+    tealet->inflight_throw_token = 0;
+
+    pop_rc = pytealet_throw_registry_pop(mdata, token, &throw_exc, &throw_fallback);
+    if (pop_rc < 0) {
+        PyErr_WriteUnraisable(NULL);
+        PyErr_Clear();
+    } else if (pop_rc > 0 && exception && throw_fallback && pytealet_exception_chain_contains(exception, throw_exc)) {
+        PyTealetObject *fallback_t = (PyTealetObject *)throw_fallback;
+        /* should just assert the tealet check, fallback should have been checked on push */
+        if (PyTealet_Check((PyObject *)fallback_t, mstate) && fallback_t->state == STATE_RUN && fallback_t->tealet &&
+            fallback_t->owner_tid == tealet->owner_tid && fallback_t->tealet->main == tealet->tealet->main) {
+            /* transfer owndership of throw_fallback to *return_to_io */
+            Py_DECREF(*return_to_io);
+            *return_to_io = fallback_t;
+            Py_DECREF(throw_exc);
+            return 1;
+        }
+    }
+    Py_XDECREF(throw_exc);
+    Py_XDECREF(throw_fallback);
+    return 0;
+}
+
+static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result) {
+    uint64_t token;
+    int pop_rc;
+    PyObject *exc = NULL;
+    PyObject *fallback = NULL;
+
+    assert(mdata);
+    assert(current);
+
+    token = mdata->pending_throw_token;
+    if (token == 0)
+        return result;
+
+    mdata->pending_throw_token = 0;
+    pop_rc = pytealet_throw_registry_pop(mdata, token, &exc, &fallback);
+    if (pop_rc < 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    if (pop_rc == 0) {
+        return result;
+    }
+
+    if (fallback) {
+        if (current->inflight_throw_token != 0) {
+            PyObject *old_exc = NULL;
+            PyObject *old_fallback = NULL;
+            int old_pop_rc = pytealet_throw_registry_pop(mdata, current->inflight_throw_token, &old_exc, &old_fallback);
+            if (old_pop_rc < 0) {
+                Py_DECREF(result);
+                Py_DECREF(exc);
+                Py_DECREF(fallback);
+                return NULL;
+            }
+            Py_XDECREF(old_exc);
+            Py_XDECREF(old_fallback);
+            current->inflight_throw_token = 0;
+        }
+        if (pytealet_throw_registry_set(mdata, token, exc, fallback) < 0) {
+            Py_DECREF(result);
+            Py_DECREF(exc);
+            Py_DECREF(fallback);
+            return NULL;
+        }
+        current->inflight_throw_token = token;
+    }
+
+    Py_DECREF(result);
+    assert(PyExceptionInstance_Check(exc));
+
+    PyErr_SetObject((PyObject *)Py_TYPE(exc), exc);
+    Py_DECREF(exc);
+    Py_XDECREF(fallback);
+    return NULL;
+}
+
 /* Resolve a weakref to a strong reference when alive.
  * Returns: 1 if alive (*obj_out is new ref), 0 if dead (*obj_out is NULL),
  * -1 on API error.
@@ -441,6 +714,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     result->tealet = NULL;
     result->owner_tid = current_tid;
     result->tracking_ref = NULL;
+    result->inflight_throw_token = 0;
     PyTealetTstate_Init(&result->tstate);
     PyTealetFrameInfo_Init(&result->frame_info);
 #if !defined(Py312P)
@@ -490,6 +764,7 @@ static void pytealet_dealloc(PyObject *obj) {
         }
     }
     pytealet_untrack_wrapper(tealet);
+    tealet->inflight_throw_token = 0;
     PyObject_ClearWeakRefs(obj);
     /* Release any owned saved thread-state references */
     PyTealetTstate_Drop(&tealet->tstate, NULL);
@@ -769,6 +1044,7 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
         result = NULL;
     } else {
         result = (PyObject *)switch_arg;
+        result = pytealet_maybe_raise_pending_throw(mdata, current, result);
     }
     dustbin_clear(current->tealet);
     return result;
@@ -789,6 +1065,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     void *switch_arg;
     PyObject *result;
     int frame_introspection_enabled;
+    PyTealetMainData *mdata;
     Py_ssize_t i;
     if (!mstate)
         return NULL;
@@ -834,7 +1111,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     }
     assert(target->tealet);
     /* we don't have a source tealet, so we must get it from the thread state. */
-    current = GetCurrent(mstate, NULL, 0, NULL);
+    current = GetCurrent(mstate, NULL, 0, &mdata);
     if (!current && PyErr_Occurred())
         return NULL;
     if (CheckTarget(mstate, target, current, "switch()"))
@@ -862,7 +1139,107 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
         return NULL;
     }
     result = (PyObject *)switch_arg;
+    result = pytealet_maybe_raise_pending_throw(mdata, current, result);
     return result;
+}
+
+static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                        Py_ssize_t nargs, PyObject *kwnames) {
+    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetObject *target = (PyTealetObject *)self;
+    PyTealetObject *current;
+    PyTealetMainData *mdata;
+    PyObject *exc = NULL;
+    PyObject *fallback = Py_None;
+    uint64_t token;
+
+    if (!mstate)
+        return NULL;
+
+    if (nargs < 1 || nargs > 2) {
+        PyErr_Format(PyExc_TypeError, "set_exception() takes 1 or 2 arguments (%zd given)", nargs);
+        return NULL;
+    }
+    exc = args[0];
+    if (nargs == 2)
+        fallback = args[1];
+
+    if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
+        Py_ssize_t i;
+        for (i = 0; i < PyTuple_GET_SIZE(kwnames); i++) {
+            PyObject *key = PyTuple_GET_ITEM(kwnames, i);
+            PyObject *val = args[nargs + i];
+            if (!PyUnicode_Check(key)) {
+                PyErr_SetString(PyExc_TypeError, "set_exception() keyword names must be strings");
+                return NULL;
+            }
+            if (PyUnicode_CompareWithASCIIString(key, "exception") == 0) {
+                exc = val;
+            } else if (PyUnicode_CompareWithASCIIString(key, "fallback") == 0) {
+                fallback = val;
+            } else {
+                PyErr_Format(PyExc_TypeError, "set_exception() got an unexpected keyword argument '%U'", key);
+                return NULL;
+            }
+        }
+    }
+
+    if (!exc) {
+        PyErr_SetString(PyExc_TypeError, "set_exception() missing required argument 'exception'");
+        return NULL;
+    }
+    if (!PyExceptionInstance_Check(exc)) {
+        PyErr_SetString(PyExc_TypeError, "exception must be a BaseException instance");
+        return NULL;
+    }
+
+    if (target->state != STATE_RUN || !target->tealet) {
+        PyErr_SetString(mstate->state_error, "target tealet must be active");
+        return NULL;
+    }
+
+    current = GetCurrent(mstate, NULL, 0, &mdata);
+    if (!current && PyErr_Occurred())
+        return NULL;
+    if (CheckTarget(mstate, target, current, "set_exception()"))
+        return NULL;
+
+    if (fallback != Py_None) {
+        PyTealetObject *fallback_t;
+        if (!PyTealet_Check(fallback, mstate)) {
+            PyErr_SetString(PyExc_TypeError, "fallback must be a tealet or None");
+            return NULL;
+        }
+        fallback_t = (PyTealetObject *)fallback;
+        if (fallback_t->state != STATE_RUN || !fallback_t->tealet) {
+            PyErr_SetString(mstate->state_error, "fallback tealet must be active");
+            return NULL;
+        }
+        if (CheckTarget(mstate, fallback_t, target, "set_exception(fallback)"))
+            return NULL;
+    }
+
+    if (mdata->pending_throw_token != 0) {
+        PyErr_SetString(mstate->state_error, "a pending next-switch exception is already set");
+        return NULL;
+    }
+    if (target->inflight_throw_token != 0) {
+        PyObject *old_exc = NULL;
+        PyObject *old_fallback = NULL;
+        int old_pop_rc = pytealet_throw_registry_pop(mdata, target->inflight_throw_token, &old_exc, &old_fallback);
+        if (old_pop_rc < 0)
+            return NULL;
+        Py_XDECREF(old_exc);
+        Py_XDECREF(old_fallback);
+        target->inflight_throw_token = 0;
+    }
+
+    token = pytealet_throw_next_token(mdata);
+    if (pytealet_throw_registry_set(mdata, token, exc, fallback == Py_None ? NULL : fallback) < 0)
+        return NULL;
+
+    mdata->pending_throw_token = token;
+    Py_RETURN_NONE;
 }
 
 static PyObject *pytealet_get_context(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
@@ -947,6 +1324,8 @@ static struct PyMethodDef pytealet_methods[] = {
      METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"switch", (PyCFunction)(void (*)(void))pytealet_switch, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
+    {"set_exception", (PyCFunction)(void (*)(void))pytealet_set_exception, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+     ""},
     {NULL, NULL} /* sentinel */
 };
 
@@ -1200,6 +1579,13 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
             PyErr_NoMemory();
             goto fail;
         }
+        mdata->throw_records = PyDict_New();
+        if (!mdata->throw_records) {
+            PyErr_NoMemory();
+            goto fail;
+        }
+        mdata->throw_next_token = 0;
+        mdata->pending_throw_token = 0;
         if (PyList_SetSlice(mdata->dustbin, 0, DUSTBIN_PREALLOC, NULL) < 0) {
             goto fail;
         }
@@ -1256,6 +1642,7 @@ fail:
         }
         Py_CLEAR(mdata->dustbin);
         Py_CLEAR(mdata->wrappers);
+        Py_CLEAR(mdata->throw_records);
         pytealet_free_domain_lock(mdata);
         PyMem_Free(mdata);
     }
@@ -1333,6 +1720,7 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
         assert(PyTealet_Check(obj, mstate));
         wrapper = (PyTealetObject *)obj;
         if (!wrapper->tealet) {
+            wrapper->inflight_throw_token = 0;
             Py_DECREF(obj);
             continue;
         }
@@ -1340,6 +1728,23 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
         if (TEALET_IS_MAIN(wrapper->tealet)) {
             Py_DECREF(obj);
             continue;
+        }
+
+        if (wrapper->inflight_throw_token != 0) {
+            PyObject *old_exc = NULL;
+            PyObject *old_fallback = NULL;
+            int pop_rc = pytealet_throw_registry_pop(mdata, wrapper->inflight_throw_token, &old_exc, &old_fallback);
+            if (pop_rc < 0) {
+                if (!best_effort) {
+                    Py_DECREF(obj);
+                    return -1;
+                }
+                PyErr_WriteUnraisable(Py_None);
+                PyErr_Clear();
+            }
+            Py_XDECREF(old_exc);
+            Py_XDECREF(old_fallback);
+            wrapper->inflight_throw_token = 0;
         }
 
         if (nerfed) {
@@ -1379,8 +1784,24 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
     if (main_tealet)
         tealet_finalize(main_tealet);
 
+    if (mdata->pending_throw_token != 0) {
+        PyObject *old_exc = NULL;
+        PyObject *old_fallback = NULL;
+        int pop_rc = pytealet_throw_registry_pop(mdata, mdata->pending_throw_token, &old_exc, &old_fallback);
+        if (pop_rc < 0) {
+            if (!best_effort)
+                return -1;
+            PyErr_WriteUnraisable(Py_None);
+            PyErr_Clear();
+        }
+        Py_XDECREF(old_exc);
+        Py_XDECREF(old_fallback);
+        mdata->pending_throw_token = 0;
+    }
+
     Py_CLEAR(mdata->dustbin);
     Py_CLEAR(mdata->wrappers);
+    Py_CLEAR(mdata->throw_records);
     pytealet_unlink_thread_data(mstate, mdata);
     pytealet_free_domain_lock(mdata);
     PyMem_Free(mdata);
@@ -1473,6 +1894,100 @@ mismatch:
 /* Core Runtime Switching Callback                                       */
 /* ===================================================================== */
 
+/* helpers to get and set exepciotn objects for portability */
+static PyObject *pytealet_err_get_raised_exception() {
+#ifdef Py312P
+    return PyErr_GetRaisedException();
+#else
+    PyObject *exc, *val, *tb;
+    PyErr_Fetch(&exc, &val, &tb);
+    PyErr_NormalizeException(&exc, &val, &tb);
+    /* decrefing these is safe, they are also owned by exc */
+    Py_XDECREF(exc);
+    Py_XDECREF(tb);
+    return val;
+#endif
+}
+
+static void pytealet_err_set_raised_exception(PyObject *exc) {
+#ifdef Py312P
+    PyErr_SetRaisedException(exc);
+#else
+    if (!exc){
+        PyErr_Clear();
+    } else {
+        PyErr_SetObject((PyObject*)Py_TYPE(exc), exc);
+        Py_DECREF(exc);
+    }
+#endif
+}
+
+/* process return argument from callable and convert.  We unpack arguments
+ * and validate, and treat validation errors as an exception
+ * return new references to return_to and return_arg.
+ * avoid DECREF to not trigger GC code.
+ */
+static void pytealet_process_return_arg(PyTealetModuleState *mstate,PyTealetObject *current, PyObject *result, PyTealetObject **return_to, PyObject **return_arg, PyObject **return_exc) {
+    int err = 0;
+    *return_to = NULL;
+    *return_arg = NULL;
+    *return_exc = NULL;
+    if (result) {
+        if (PyTuple_Check(result)) {
+            /* arg and return_to are borrowed refs */
+            if (PyTuple_GET_SIZE(result) > 0)
+                *return_to = (PyTealetObject *)Py_NewRef(PyTuple_GET_ITEM(result, 0));
+            if (PyTuple_GET_SIZE(result) > 1)
+                *return_arg = Py_NewRef(PyTuple_GET_ITEM(result, 1));
+        } else {
+            *return_to = (PyTealetObject *)Py_NewRef(result);
+        }
+
+         /* perform sanity checks on the return_to target */
+        if (!PyTealet_Check((PyObject *)(*return_to), mstate)) {
+            PyErr_SetString(PyExc_TypeError, "tealet object expected");
+            err = -1;
+        } else if ((*return_to)->state != STATE_RUN) {
+            PyErr_SetString(mstate->state_error, "must be 'run'");
+            err = -1;
+        } else if (CheckTarget(mstate, *return_to, current, "return")) {
+            err = -1;
+        }
+        if (err) {
+            PyTealet_dustbin_push(current->tealet, (PyObject *)(*return_to));
+            *return_to = NULL;
+        }
+    } else {
+        err = -1;
+    }
+    if (!*return_to) {
+        *return_to = (PyTealetObject *) Py_NewRef(GetMain(mstate, 0, NULL));
+    }
+    if (!*return_arg) {
+        *return_arg = Py_NewRef(Py_None);
+    }
+    if (err) {
+        *return_exc = pytealet_err_get_raised_exception();
+    }
+}
+
+/* handle top level exception, silencing it, ignoring it, passing it on*/
+void pytealet_handle_top_level_exception(PyObject **exc) {
+    if (*exc) {
+        /* for now, just print the exception and clear it, but we may want to
+         * support passing it on to the next tealet in the future.  In that case,
+         * we would need to set up a special attribute on the tealet to hold the
+         * pending exception, and then have the main loop check for that and raise
+         * it if present.
+         */
+        pytealet_err_set_raised_exception(*exc);
+        *exc = NULL;
+        PyErr_WriteUnraisable(NULL);
+        PyErr_Clear();
+    }
+}
+
+
 /* The main function.  Invoked either from tealet.new or tealet.run */
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     PyTealetNewArg *targ = (PyTealetNewArg *)arg;
@@ -1480,12 +1995,16 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     PyTealetObject *tealet = targ->dest;
     PyObject *func = targ->func;
     PyObject *farg = targ->arg;
-    PyObject *result, *return_arg;
     PyTealetObject *return_to;
+    PyObject *result, *return_arg;
+    PyObject *return_exc;
     tealet_t *t_return;
     PyTealetMainData *mdata;
     int exit_mode = TEALET_EXIT_DELETE;
     PyThreadState *tstate = PyThreadState_GET();
+
+    mdata = (PyTealetMainData *)*tealet_main_userpointer(t_current->main);
+    assert(mdata);
 
     if (tealet->state == STATE_STUB) {
         assert(t_current == tealet->tealet);
@@ -1498,7 +2017,6 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         /* set up the pointer in the tealet */
         tealet->tealet = t_current;
         TEALET_SET_PYOBJECT(t_current, tealet);
-        mdata = (PyTealetMainData *)*tealet_main_userpointer(t_current->main);
         if (pytealet_track_wrapper(mdata, tealet) < 0) {
             PyErr_WriteUnraisable(Py_None);
             PyErr_Clear();
@@ -1533,52 +2051,20 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     tealet->state = STATE_RUN;
     result = PyObject_CallFunctionObjArgs(func, tealet, farg, NULL);
 
-    /* return_to can be a tuple of tealet, arg */
-    return_to = NULL;
-    return_arg = NULL;
-    if (result && PyTuple_Check(result)) {
-        /* arg and return_to are borrowed refs */
-        if (PyTuple_GET_SIZE(result) > 0)
-            return_to = (PyTealetObject *)PyTuple_GET_ITEM(result, 0);
-        if (PyTuple_GET_SIZE(result) > 1)
-            return_arg = PyTuple_GET_ITEM(result, 1);
-    } else
-        return_to = (PyTealetObject *)result;
-
-    /* perform sanity checks on the result */
-    if (return_to) {
-        /* it is ok to rock the GC boat here, because we will switch to
-         * main in case of error, and main is always around
-         */
-        if (!PyTealet_Check((PyObject *)return_to, mstate)) {
-            return_to = NULL;
-            PyErr_SetString(PyExc_TypeError, "tealet object expected");
-        } else if (return_to->state != STATE_RUN) {
-            return_to = NULL;
-            PyErr_SetString(mstate->state_error, "must be 'run'");
-        } else if (CheckTarget(mstate, return_to, tealet, "return")) {
-            return_to = NULL;
-        }
-    }
-    if (!return_to) {
-        Py_CLEAR(result);
-        return_arg = NULL;
-    }
-    if (!return_arg)
-        return_arg = Py_None;
-
-    /* handle errors */
-    if (!return_to) {
-        PyErr_WriteUnraisable(func);
-        /* must switch to main */
-        return_to = GetMain(mstate, 0, NULL);
-        assert(return_to);
-        result = (PyObject *)return_to;
-        Py_INCREF(result);
-    }
-    /* now, the reference to return_to and return_arg are borrowed, kept alive
-     * by 'result', which may be the same as return_to.
-     */
+    pytealet_process_return_arg(mstate, tealet, result, &return_to, &return_arg, &return_exc);
+    Py_XDECREF(result);
+    
+    /* see if we should redirect the exit switch due to an exception, and clear up the pending token.
+    * return_to is null on entry if there was an exception, on exit we own an reference
+    * to the target, possibly main
+    */
+   (void)pytealet_throw_registry_redirect(mstate, mdata, tealet, return_exc, &return_to);
+   
+   /* now, handle the top level exception, possibly ignoring, printing it */
+   pytealet_handle_top_level_exception(&return_exc);
+   
+    
+    
 
     /* clear the old tealet */
     tealet->state = STATE_EXIT;
@@ -1598,9 +2084,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     /* decref the objects after the switch */
     PyTealet_dustbin_push(t_return, func);
     PyTealet_dustbin_push(t_return, (PyObject *)tealet);
-    PyTealet_dustbin_push(t_return, result);
-
-    Py_INCREF(return_arg);
+    PyTealet_dustbin_push(t_return, (PyObject *)return_to);
 
     /* Tealet is exiting permanently: clear active PyThreadState for the switch,
      * then drop saved refs immediately so frame locals (including 'current')

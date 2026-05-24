@@ -614,6 +614,30 @@ class TestSimple:
         get_new()(run, _tealet.current())
         assert status[0] == 1
 
+    def test_return_none_is_invalid_exit_target(self):
+        def run(current, arg):
+            return None
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            assert t.run(run, None) is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen, "expected unraisable error for None return target"
+        assert any(
+            isinstance(u.exc_value, TypeError) and "tealet object expected" in str(u.exc_value)
+            for u in seen
+        )
+
 class TestStatus:
     def test_status_run(self):
         t = _tealet.current()
@@ -773,6 +797,66 @@ class TestSwitch:
         assert tealet2.state == _tealet.STATE_RUN;
         r = tealet2.switch(6)
         assert r == 7
+
+
+class TestSetException:
+    def test_set_exception_delivers_on_next_switch(self):
+        seen = []
+
+        def worker(current, _arg):
+            try:
+                current.main().switch("paused")
+            except RuntimeError as exc:
+                seen.append(str(exc))
+            current.main().switch("done")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(worker, None) == "paused"
+
+        t.set_exception(RuntimeError("boom"))
+        assert t.switch() == "done"
+        assert t.switch() is None
+        assert t.state == _tealet.STATE_EXIT
+        assert seen == ["boom"]
+
+    def test_set_exception_with_fallback_redirects_uncaught_unwind(self):
+        def worker(current, _arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(worker, None) == "paused"
+
+        t.set_exception(ValueError("route"), fallback=_tealet.main())
+        assert t.switch() is None
+        assert t.state == _tealet.STATE_EXIT
+
+    def test_set_exception_overwrites_inflight_token_after_catch(self):
+        seen = []
+
+        def worker(current, _arg):
+            for idx in range(2):
+                try:
+                    current.main().switch(f"paused-{idx}")
+                except RuntimeError as exc:
+                    seen.append(str(exc))
+            current.main().switch("done")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(worker, None) == "paused-0"
+
+        t.set_exception(RuntimeError("boom-1"), fallback=_tealet.main())
+        assert t.switch() == "paused-1"
+
+        # First injected exception was caught inside worker; next call should
+        # overwrite prior inflight metadata rather than erroring.
+        t.set_exception(RuntimeError("boom-2"), fallback=_tealet.main())
+        assert t.switch() == "done"
+        assert t.switch() is None
+        assert t.state == _tealet.STATE_EXIT
+        assert seen == ["boom-1", "boom-2"]
 
 
 class TestFrameIntrospection:
