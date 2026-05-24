@@ -825,12 +825,28 @@ class TestSetException:
             current.main().switch("paused")
             return current.main()
 
-        t = _tealet.tealet()
-        assert t.run(worker, None) == "paused"
+        seen = []
+        original_hook = sys.unraisablehook
 
-        t.set_exception(ValueError("route"), fallback=_tealet.main())
-        assert t.switch() is None
-        assert t.state == _tealet.STATE_EXIT
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            assert t.run(worker, None) == "paused"
+
+            t.set_exception(ValueError("route"), fallback=_tealet.main())
+            assert t.switch() is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen, "expected unraisable error for uncaught injected exception"
+        assert any(
+            isinstance(u.exc_value, ValueError) and str(u.exc_value) == "route"
+            for u in seen
+        )
 
     def test_set_exception_overwrites_inflight_token_after_catch(self):
         seen = []

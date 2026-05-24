@@ -537,6 +537,35 @@ static int pytealet_current_error_contains(PyObject *needle) {
     return found;
 }
 
+/* Helpers to get/set raised exception objects across Python versions. */
+static PyObject *pytealet_err_get_raised_exception() {
+#ifdef Py312P
+    return PyErr_GetRaisedException();
+#else
+    PyObject *exc, *val, *tb;
+    PyErr_Fetch(&exc, &val, &tb);
+    PyErr_NormalizeException(&exc, &val, &tb);
+    /* Decrefing these is safe; val keeps the instance alive. */
+    Py_XDECREF(exc);
+    Py_XDECREF(tb);
+    return val;
+#endif
+}
+
+/* Takes ownership of exc when non-NULL. */
+static void pytealet_err_set_raised_exception(PyObject *exc) {
+#ifdef Py312P
+    PyErr_SetRaisedException(exc);
+#else
+    if (!exc) {
+        PyErr_Clear();
+    } else {
+        PyErr_SetObject((PyObject *)Py_TYPE(exc), exc);
+        Py_DECREF(exc);
+    }
+#endif
+}
+
 /* Consume a tealet's inflight throw record and redirect uncaught unwind to
  * fallback when the current exception chain matches the recorded exception.
  * Returns 1 when redirect was applied, 0 otherwise.
@@ -631,8 +660,7 @@ static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyT
     Py_DECREF(result);
     assert(PyExceptionInstance_Check(exc));
 
-    PyErr_SetObject((PyObject *)Py_TYPE(exc), exc);
-    Py_DECREF(exc);
+    pytealet_err_set_raised_exception(exc);
     Py_XDECREF(fallback);
     return NULL;
 }
@@ -1893,34 +1921,6 @@ mismatch:
 /* ===================================================================== */
 /* Core Runtime Switching Callback                                       */
 /* ===================================================================== */
-
-/* helpers to get and set exepciotn objects for portability */
-static PyObject *pytealet_err_get_raised_exception() {
-#ifdef Py312P
-    return PyErr_GetRaisedException();
-#else
-    PyObject *exc, *val, *tb;
-    PyErr_Fetch(&exc, &val, &tb);
-    PyErr_NormalizeException(&exc, &val, &tb);
-    /* decrefing these is safe, they are also owned by exc */
-    Py_XDECREF(exc);
-    Py_XDECREF(tb);
-    return val;
-#endif
-}
-
-static void pytealet_err_set_raised_exception(PyObject *exc) {
-#ifdef Py312P
-    PyErr_SetRaisedException(exc);
-#else
-    if (!exc){
-        PyErr_Clear();
-    } else {
-        PyErr_SetObject((PyObject*)Py_TYPE(exc), exc);
-        Py_DECREF(exc);
-    }
-#endif
-}
 
 /* process return argument from callable and convert.  We unpack arguments
  * and validate, and treat validation errors as an exception
