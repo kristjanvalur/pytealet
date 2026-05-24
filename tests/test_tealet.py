@@ -325,6 +325,7 @@ class TestThreadCleanup:
 
     def test_thread_cleanup_kills_run_tealets_before_force_cleanup(self):
         """Cleanup first kills active RUN tealets, so nerfed excludes them."""
+
         thread_main = _tealet.main()
         stub = _tealet.tealet()
         stub.stub()
