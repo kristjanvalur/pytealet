@@ -124,6 +124,7 @@ static uint64_t pytealet_throw_next_token(PyTealetMainData *mdata);
 static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, PyObject *exc, PyObject *fallback);
 static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out,
                                        PyObject **fallback_out);
+static void pytealet_clear_pending_exception(PyTealetMainData *mdata);
 static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result);
 static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
                                         PyTealetMainData *mdata, PyObject *exc, PyObject *fallback);
@@ -465,6 +466,32 @@ static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, 
         *fallback_out = Py_NewRef(fallback);
     Py_DECREF(record);
     return found;
+}
+
+/* Clear any pending throw scheduled by set_exception().
+ * Best effort: this helper never leaves an exception set.
+ */
+static void pytealet_clear_pending_exception(PyTealetMainData *mdata) {
+    uint64_t token;
+    int pop_rc;
+    PyObject *old_exc = NULL;
+    PyObject *old_fallback = NULL;
+
+    assert(mdata);
+
+    token = mdata->pending_throw_token;
+    if (token == 0)
+        return;
+
+    mdata->pending_throw_token = 0;
+    pop_rc = pytealet_throw_registry_pop(mdata, token, &old_exc, &old_fallback);
+    if (pop_rc < 0) {
+        PyErr_WriteUnraisable(NULL);
+        PyErr_Clear();
+        return;
+    }
+    Py_XDECREF(old_exc);
+    Py_XDECREF(old_fallback);
 }
 
 /* Return 1 if needle appears in raised exception's cause/context chain,
@@ -1164,6 +1191,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
 
     if (fail) {
         if (fail != TEALET_ERR_PANIC) {
+            pytealet_clear_pending_exception(mdata);
             Py_DECREF(pyarg);
             switch_arg = NULL; /* non-panic errors don't return a value */
         }
@@ -2137,8 +2165,6 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         return_exc = NULL;
     }
    
-    
-    
 
     /* clear the old tealet */
     tealet->state = STATE_EXIT;
