@@ -101,6 +101,7 @@ static int pytealet_module_exec(PyObject *m) {
     mstate->state_error = NULL;
     mstate->defunct_error = NULL;
     mstate->panic_error = NULL;
+    mstate->tealet_exit_error = NULL;
 
     if (!PyThread_tss_is_created(&mstate->tls_key)) {
         if (PyThread_tss_create(&mstate->tls_key) != 0) {
@@ -166,6 +167,14 @@ static int pytealet_module_exec(PyObject *m) {
     if (PyModule_AddObject(m, "StateError", mstate->state_error) < 0)
         return -1;
 
+    /* Control-flow exception for clean tealet termination from worker code. */
+    mstate->tealet_exit_error = PyErr_NewException("_tealet.TealetExit", PyExc_BaseException, NULL);
+    if (!mstate->tealet_exit_error)
+        return -1;
+    Py_INCREF(mstate->tealet_exit_error);
+    if (PyModule_AddObject(m, "TealetExit", mstate->tealet_exit_error) < 0)
+        return -1;
+
     PyModule_AddIntMacro(m, STATE_NEW);
     PyModule_AddIntMacro(m, STATE_STUB);
     PyModule_AddIntMacro(m, STATE_RUN);
@@ -188,6 +197,7 @@ static int pytealet_module_traverse(PyObject *m, visitproc visit, void *arg) {
     Py_VISIT(mstate->state_error);
     Py_VISIT(mstate->defunct_error);
     Py_VISIT(mstate->panic_error);
+    Py_VISIT(mstate->tealet_exit_error);
     return 0;
 }
 
@@ -200,6 +210,7 @@ static int pytealet_module_clear(PyObject *m) {
     Py_CLEAR(mstate->state_error);
     Py_CLEAR(mstate->defunct_error);
     Py_CLEAR(mstate->panic_error);
+    Py_CLEAR(mstate->tealet_exit_error);
     mstate->tealet_type = NULL;
     return 0;
 }

@@ -800,6 +800,35 @@ class TestSwitch:
 
 
 class TestSetException:
+    def test_set_exception_before_run_injects_at_run_entry(self):
+        entered = []
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def worker(current, _arg):
+            entered.append(True)
+            current.main().switch("paused")
+            return current.main()
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            t.set_exception(RuntimeError("boom-before-run"))
+            assert t.run(worker, None) is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert entered == []
+        assert seen, "expected unraisable error for uncaught injected exception"
+        assert any(
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-before-run"
+            for u in seen
+        )
+
     def test_set_exception_delivers_on_next_switch(self):
         seen = []
 
@@ -873,6 +902,41 @@ class TestSetException:
         assert t.switch() is None
         assert t.state == _tealet.STATE_EXIT
         assert seen == ["boom-1", "boom-2"]
+
+    def test_top_level_tealet_exit_is_swallowed(self):
+        def worker(current, _arg):
+            current.main().switch("paused")
+            raise _tealet.TealetExit()
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            assert t.run(worker, None) == "paused"
+            assert t.switch() is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen == []
+
+    @pytest.mark.parametrize("exc", [SystemExit("bye"), KeyboardInterrupt("stop")])
+    def test_top_level_fatal_baseexceptions_are_reraised_after_switch(self, exc):
+        def worker(current, _arg):
+            current.main().switch("paused")
+            raise exc
+
+        t = _tealet.tealet()
+        assert t.run(worker, None) == "paused"
+        with pytest.raises(type(exc)) as raised:
+            t.switch()
+        assert str(raised.value) == str(exc)
+        assert t.state == _tealet.STATE_EXIT
 
 
 class TestFrameIntrospection:

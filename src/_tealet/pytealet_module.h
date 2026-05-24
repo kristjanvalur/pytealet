@@ -20,6 +20,7 @@ struct PyTealetModuleState {
     PyObject *state_error;
     PyObject *defunct_error;
     PyObject *panic_error;
+    PyObject *tealet_exit_error;
 };
 
 #endif

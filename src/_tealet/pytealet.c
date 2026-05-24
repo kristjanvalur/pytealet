@@ -1222,8 +1222,13 @@ static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObj
         return -1;
     }
 
-    if (target->state != STATE_RUN || !target->tealet) {
-        PyErr_SetString(mstate->state_error, "target tealet must be active");
+    if (target->state == STATE_RUN) {
+        if (!target->tealet) {
+            PyErr_SetString(mstate->state_error, "target tealet must be active");
+            return -1;
+        }
+    } else if (target->state != STATE_NEW && target->state != STATE_STUB) {
+        PyErr_SetString(mstate->state_error, "target tealet must be active, new, or stub");
         return -1;
     }
     if (CheckTarget(mstate, target, current, "set_exception()"))
@@ -2136,7 +2141,12 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
     /* run the tealet function */
     tealet->state = STATE_RUN;
-    result = PyObject_CallFunctionObjArgs(func, tealet, farg, NULL);
+    /* Deliver any pending injected exception at run entry, before worker call. */
+    result = pytealet_maybe_raise_pending_throw(mdata, tealet, Py_NewRef(Py_None));
+    if (result) {
+        Py_DECREF(result);
+        result = PyObject_CallFunctionObjArgs(func, tealet, farg, NULL);
+    }
 
     pytealet_process_return_arg(mstate, tealet, result, &return_to, &return_arg, &return_exc);
     Py_XDECREF(result);
