@@ -101,8 +101,135 @@ class TestModule:
 class TestThreadCleanup:
     """Tests for thread cleanup semantics and edge cases."""
 
-    def test_thread_cleanup_returns_only_run_tealets(self):
-        """Cleanup only returns RUN tealets with ACTIVE status, not STUB or main."""
+    def test_thread_kill_then_thread_cleanup_is_empty(self):
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t1 = _tealet.tealet()
+        t2 = _tealet.tealet()
+        assert t1.run(parked, None) == "paused"
+        assert t2.run(parked, None) == "paused"
+
+        active = _tealet.active_tealets()
+        active_ids = {id(x) for x in active}
+        assert id(t1) in active_ids
+        assert id(t2) in active_ids
+
+        remaining = _tealet.thread_kill()
+        assert remaining == []
+        assert t1.state == _tealet.STATE_EXIT
+        assert t2.state == _tealet.STATE_EXIT
+
+        assert _tealet.thread_cleanup() == []
+        # Recreate main for subsequent tests.
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_thread_kill_cleanup_passes(self):
+        catches = [0]
+
+        def stubborn(current, arg):
+            while True:
+                try:
+                    current.main().switch("paused")
+                except _tealet.TealetExit:
+                    catches[0] += 1
+                    if catches[0] >= 2:
+                        raise
+
+        t = _tealet.tealet()
+        assert t.run(stubborn, None) == "paused"
+
+        remaining = _tealet.thread_kill(1)
+        assert any(id(x) == id(t) for x in remaining)
+        assert t.state == _tealet.STATE_RUN
+
+        remaining2 = _tealet.thread_kill(3)
+        assert all(id(x) != id(t) for x in remaining2)
+        assert t.state == _tealet.STATE_EXIT
+
+        assert _tealet.thread_cleanup() == []
+        # Recreate main for subsequent tests.
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_kill_active_tealets_then_cleanup_is_empty(self):
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t1 = _tealet.tealet()
+        t2 = _tealet.tealet()
+        assert t1.run(parked, None) == "paused"
+        assert t2.run(parked, None) == "paused"
+
+        active = _tealet.active_tealets()
+        active_ids = {id(x) for x in active}
+        assert id(t1) in active_ids
+        assert id(t2) in active_ids
+
+        for t in active:
+            assert t.throw(_tealet.TealetExit()) is None
+
+        assert t1.state == _tealet.STATE_EXIT
+        assert t2.state == _tealet.STATE_EXIT
+
+        assert _tealet.thread_cleanup() == []
+        # Recreate main for subsequent tests.
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_active_tealets_returns_only_run_tealets(self):
+        thread_main = _tealet.main()
+        stub = _tealet.tealet()
+        stub.stub()
+
+        def switch_back(current, arg):
+            thread_main.switch()
+
+        t = _tealet.tealet()
+        t.run(switch_back, None)
+
+        active = _tealet.active_tealets()
+        active_ids = {id(x) for x in active}
+
+        assert id(thread_main) not in active_ids
+        assert id(stub) not in active_ids
+        assert id(t) in active_ids
+
+        # Cleanup current lineage so following tests start with a fresh main.
+        _tealet.thread_cleanup()
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_active_tealets_allowed_from_non_main_tealet_context(self):
+        def run(current, arg):
+            active = _tealet.active_tealets()
+            assert any(id(x) == id(current) for x in active)
+            return current.main()
+
+        _tealet.tealet().run(run, None)
+
+    def test_thread_kill_allowed_from_non_main_skips_caller(self):
+        def parked(current, arg):
+            current.main().switch("peer-paused")
+            return current.main()
+
+        def run(current, arg):
+            peer = _tealet.tealet()
+            assert peer.run(parked, None) == "peer-paused"
+
+            remaining = _tealet.thread_kill()
+            remaining_ids = {id(x) for x in remaining}
+
+            assert id(current) not in remaining_ids
+            assert id(peer) not in remaining_ids
+            assert current.state == _tealet.STATE_RUN
+            assert peer.state == _tealet.STATE_EXIT
+            return current.main()
+
+        caller = _tealet.tealet()
+        caller.run(run, None)
+
+    def test_thread_cleanup_kills_run_tealets_before_force_cleanup(self):
+        """Cleanup first kills active RUN tealets, so nerfed excludes them."""
         thread_main = _tealet.main()
         stub = _tealet.tealet()
         stub.stub()
@@ -118,13 +245,14 @@ class TestThreadCleanup:
         nerfed = _tealet.thread_cleanup()
         nerfed_ids = {id(x) for x in nerfed}
 
-        # t switched back to main and remains suspended in RUN state,
-        # so cleanup should include it in nerfed.
+        # thread_cleanup() now performs thread_kill() first, so suspended RUN
+        # tealets are exited before forced handle teardown and are not in nerfed.
         # STUB tealets are not returned (can be safely collected).
         # Main is cleanly deleted, not forcibly invalidated.
         assert id(thread_main) not in nerfed_ids
         assert id(stub) not in nerfed_ids  # STUB not in nerfed
-        assert id(t) in nerfed_ids  # suspended RUN tealet is in nerfed
+        assert id(t) not in nerfed_ids
+        assert t.state == _tealet.STATE_EXIT
 
         # Recreate main for this thread so subsequent tests keep the usual baseline.
         assert _tealet.main().state == _tealet.STATE_RUN
@@ -137,8 +265,8 @@ class TestThreadCleanup:
 
         _tealet.tealet().run(run, None)
 
-    def test_cleanup_nerfed_suspended_tealet_cannot_switch(self):
-        """A suspended RUN tealet returned by cleanup cannot be switched to again."""
+    def test_cleanup_suspended_tealet_cannot_switch(self):
+        """A suspended RUN tealet is killed by cleanup and cannot be switched."""
         def parked(current, arg):
             current.main().switch("paused")
             return current.main()
@@ -147,7 +275,8 @@ class TestThreadCleanup:
         assert t.run(parked, None) == "paused"
 
         nerfed = _tealet.thread_cleanup()
-        assert any(id(x) == id(t) for x in nerfed)
+        assert all(id(x) != id(t) for x in nerfed)
+        assert t.state == _tealet.STATE_EXIT
 
         with pytest.raises(_tealet.StateError):
             t.switch()
@@ -614,6 +743,30 @@ class TestSimple:
         get_new()(run, _tealet.current())
         assert status[0] == 1
 
+    def test_return_none_is_invalid_exit_target(self):
+        def run(current, arg):
+            return None
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            assert t.run(run, None) is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen, "expected unraisable error for None return target"
+        assert any(
+            isinstance(u.exc_value, TypeError) and "tealet object expected" in str(u.exc_value)
+            for u in seen
+        )
+
 class TestStatus:
     def test_status_run(self):
         t = _tealet.current()
@@ -773,6 +926,187 @@ class TestSwitch:
         assert tealet2.state == _tealet.STATE_RUN;
         r = tealet2.switch(6)
         assert r == 7
+
+
+class TestSetException:
+    def test_throw_switches_and_uses_current_as_fallback(self):
+        def victim(current, _arg):
+            current.main().switch("victim-paused")
+            return current.main()
+
+        result = []
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def killer(current, target):
+            result.append(target.throw(RuntimeError("boom-throw")))
+            return current.main()
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            target = _tealet.tealet()
+            assert target.run(victim, None) == "victim-paused"
+
+            killer_t = _tealet.tealet()
+            assert killer_t.run(killer, target) is None
+
+            assert killer_t.state == _tealet.STATE_EXIT
+            assert target.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert result == [None]
+        assert seen, "expected unraisable error for uncaught injected exception"
+        assert any(
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw"
+            for u in seen
+        )
+
+    def test_throw_requires_running_target(self):
+        t = _tealet.tealet()
+        with pytest.raises(_tealet.StateError):
+            t.throw(RuntimeError("boom-throw-run"))
+
+    def test_set_exception_before_run_injects_at_run_entry(self):
+        entered = []
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def worker(current, _arg):
+            entered.append(True)
+            current.main().switch("paused")
+            return current.main()
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            t.set_exception(RuntimeError("boom-before-run"))
+            assert t.run(worker, None) is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert entered == []
+        assert seen, "expected unraisable error for uncaught injected exception"
+        assert any(
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-before-run"
+            for u in seen
+        )
+
+    def test_set_exception_delivers_on_next_switch(self):
+        seen = []
+
+        def worker(current, _arg):
+            try:
+                current.main().switch("paused")
+            except RuntimeError as exc:
+                seen.append(str(exc))
+            current.main().switch("done")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(worker, None) == "paused"
+
+        t.set_exception(RuntimeError("boom"))
+        assert t.switch() == "done"
+        assert t.switch() is None
+        assert t.state == _tealet.STATE_EXIT
+        assert seen == ["boom"]
+
+    def test_set_exception_with_fallback_redirects_uncaught_unwind(self):
+        def worker(current, _arg):
+            current.main().switch("paused")
+            return current.main()
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            assert t.run(worker, None) == "paused"
+
+            t.set_exception(ValueError("route"), fallback=_tealet.main())
+            assert t.switch() is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen, "expected unraisable error for uncaught injected exception"
+        assert any(
+            isinstance(u.exc_value, ValueError) and str(u.exc_value) == "route"
+            for u in seen
+        )
+
+    def test_set_exception_overwrites_inflight_token_after_catch(self):
+        seen = []
+
+        def worker(current, _arg):
+            for idx in range(2):
+                try:
+                    current.main().switch(f"paused-{idx}")
+                except RuntimeError as exc:
+                    seen.append(str(exc))
+            current.main().switch("done")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(worker, None) == "paused-0"
+
+        t.set_exception(RuntimeError("boom-1"), fallback=_tealet.main())
+        assert t.switch() == "paused-1"
+
+        # First injected exception was caught inside worker; next call should
+        # overwrite prior inflight metadata rather than erroring.
+        t.set_exception(RuntimeError("boom-2"), fallback=_tealet.main())
+        assert t.switch() == "done"
+        assert t.switch() is None
+        assert t.state == _tealet.STATE_EXIT
+        assert seen == ["boom-1", "boom-2"]
+
+    def test_top_level_tealet_exit_is_swallowed(self):
+        def worker(current, _arg):
+            current.main().switch("paused")
+            raise _tealet.TealetExit()
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            assert t.run(worker, None) == "paused"
+            assert t.switch() is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen == []
+
+    @pytest.mark.parametrize("exc", [SystemExit("bye"), KeyboardInterrupt("stop")])
+    def test_top_level_fatal_baseexceptions_are_reraised_after_switch(self, exc):
+        def worker(current, _arg):
+            current.main().switch("paused")
+            raise exc
+
+        t = _tealet.tealet()
+        assert t.run(worker, None) == "paused"
+        with pytest.raises(type(exc)) as raised:
+            t.switch()
+        assert str(raised.value) == str(exc)
+        assert t.state == _tealet.STATE_EXIT
 
 
 class TestFrameIntrospection:

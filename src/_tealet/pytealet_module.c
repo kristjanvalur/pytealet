@@ -28,13 +28,39 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return Py_XNewRef((PyObject *)GetMain(mstate, 1, NULL));
 }
 
-static PyObject *module_thread_cleanup(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+static PyObject *module_thread_cleanup(PyObject *mod, PyObject *args) {
+    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    Py_ssize_t cleanup_passes = 3;
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "|n:thread_cleanup", &cleanup_passes))
+        return NULL;
+    return PyTealet_ThreadCleanup(mstate, cleanup_passes);
+}
+
+static PyObject *module_active_tealets(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
     if (!mstate) {
         PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
         return NULL;
     }
-    return PyTealet_ThreadCleanup(mstate);
+    return PyTealet_ActiveTealets(mstate);
+}
+
+static PyObject *module_thread_kill(PyObject *mod, PyObject *args) {
+    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    Py_ssize_t cleanup_passes = 3;
+
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "|n:thread_kill", &cleanup_passes))
+        return NULL;
+
+    return PyTealet_ThreadKill(mstate, cleanup_passes);
 }
 
 /* Get/set dormant tealet frame introspection at runtime.
@@ -77,7 +103,9 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
-    {"thread_cleanup", (PyCFunction)module_thread_cleanup, METH_NOARGS, ""},
+    {"thread_cleanup", (PyCFunction)module_thread_cleanup, METH_VARARGS, ""},
+    {"active_tealets", (PyCFunction)module_active_tealets, METH_NOARGS, ""},
+    {"thread_kill", (PyCFunction)module_thread_kill, METH_VARARGS, ""},
     {"frame_introspection", (PyCFunction)module_frame_introspection, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
@@ -101,6 +129,7 @@ static int pytealet_module_exec(PyObject *m) {
     mstate->state_error = NULL;
     mstate->defunct_error = NULL;
     mstate->panic_error = NULL;
+    mstate->tealet_exit_error = NULL;
 
     if (!PyThread_tss_is_created(&mstate->tls_key)) {
         if (PyThread_tss_create(&mstate->tls_key) != 0) {
@@ -166,6 +195,14 @@ static int pytealet_module_exec(PyObject *m) {
     if (PyModule_AddObject(m, "StateError", mstate->state_error) < 0)
         return -1;
 
+    /* Control-flow exception for clean tealet termination from worker code. */
+    mstate->tealet_exit_error = PyErr_NewException("_tealet.TealetExit", PyExc_BaseException, NULL);
+    if (!mstate->tealet_exit_error)
+        return -1;
+    Py_INCREF(mstate->tealet_exit_error);
+    if (PyModule_AddObject(m, "TealetExit", mstate->tealet_exit_error) < 0)
+        return -1;
+
     PyModule_AddIntMacro(m, STATE_NEW);
     PyModule_AddIntMacro(m, STATE_STUB);
     PyModule_AddIntMacro(m, STATE_RUN);
@@ -188,6 +225,7 @@ static int pytealet_module_traverse(PyObject *m, visitproc visit, void *arg) {
     Py_VISIT(mstate->state_error);
     Py_VISIT(mstate->defunct_error);
     Py_VISIT(mstate->panic_error);
+    Py_VISIT(mstate->tealet_exit_error);
     return 0;
 }
 
@@ -200,6 +238,7 @@ static int pytealet_module_clear(PyObject *m) {
     Py_CLEAR(mstate->state_error);
     Py_CLEAR(mstate->defunct_error);
     Py_CLEAR(mstate->panic_error);
+    Py_CLEAR(mstate->tealet_exit_error);
     mstate->tealet_type = NULL;
     return 0;
 }
