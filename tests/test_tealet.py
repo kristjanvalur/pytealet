@@ -101,6 +101,82 @@ class TestModule:
 class TestThreadCleanup:
     """Tests for thread cleanup semantics and edge cases."""
 
+    def test_active_tealets_kill_then_thread_cleanup_is_empty(self):
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t1 = _tealet.tealet()
+        t2 = _tealet.tealet()
+        assert t1.run(parked, None) == "paused"
+        assert t2.run(parked, None) == "paused"
+
+        active = _tealet.active_tealets()
+        active_ids = {id(x) for x in active}
+        assert id(t1) in active_ids
+        assert id(t2) in active_ids
+
+        remaining = _tealet.active_tealets_kill()
+        assert remaining == []
+        assert t1.state == _tealet.STATE_EXIT
+        assert t2.state == _tealet.STATE_EXIT
+
+        assert _tealet.thread_cleanup() == []
+        # Recreate main for subsequent tests.
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_active_tealets_kill_cleanup_passes(self):
+        catches = [0]
+
+        def stubborn(current, arg):
+            while True:
+                try:
+                    current.main().switch("paused")
+                except _tealet.TealetExit:
+                    catches[0] += 1
+                    if catches[0] >= 2:
+                        raise
+
+        t = _tealet.tealet()
+        assert t.run(stubborn, None) == "paused"
+
+        remaining = _tealet.active_tealets_kill(1)
+        assert any(id(x) == id(t) for x in remaining)
+        assert t.state == _tealet.STATE_RUN
+
+        remaining2 = _tealet.active_tealets_kill(3)
+        assert all(id(x) != id(t) for x in remaining2)
+        assert t.state == _tealet.STATE_EXIT
+
+        assert _tealet.thread_cleanup() == []
+        # Recreate main for subsequent tests.
+        assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_kill_active_tealets_then_cleanup_is_empty(self):
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t1 = _tealet.tealet()
+        t2 = _tealet.tealet()
+        assert t1.run(parked, None) == "paused"
+        assert t2.run(parked, None) == "paused"
+
+        active = _tealet.active_tealets()
+        active_ids = {id(x) for x in active}
+        assert id(t1) in active_ids
+        assert id(t2) in active_ids
+
+        for t in active:
+            assert t.throw(_tealet.TealetExit()) is None
+
+        assert t1.state == _tealet.STATE_EXIT
+        assert t2.state == _tealet.STATE_EXIT
+
+        assert _tealet.thread_cleanup() == []
+        # Recreate main for subsequent tests.
+        assert _tealet.main().state == _tealet.STATE_RUN
+
     def test_active_tealets_returns_only_run_tealets(self):
         thread_main = _tealet.main()
         stub = _tealet.tealet()

@@ -2037,6 +2037,48 @@ static int pytealet_collect_active_wrappers(PyTealetModuleState *mstate, PyTeale
     return 0;
 }
 
+/* Best-effort kill of each tealet in a snapshot of active wrappers.
+ * Any per-target failure is reported as unraisable and processing continues.
+ */
+static int pytealet_kill_active_snapshot(PyTealetModuleState *mstate, PyObject *active_snapshot) {
+    Py_ssize_t i;
+
+    assert(mstate);
+    assert(active_snapshot && PyList_Check(active_snapshot));
+
+    for (i = 0; i < PyList_GET_SIZE(active_snapshot); i++) {
+        PyObject *obj = PyList_GET_ITEM(active_snapshot, i); /* borrowed */
+        PyTealetObject *target;
+        PyObject *exc = NULL;
+        PyObject *throw_result = NULL;
+        PyObject *throw_args[1];
+
+        if (!PyTealet_Check(obj, mstate))
+            continue;
+        target = (PyTealetObject *)obj;
+
+        if (target->state != STATE_RUN || !target->tealet)
+            continue;
+
+        exc = PyObject_CallNoArgs(mstate->tealet_exit_error);
+        if (!exc)
+            return -1;
+
+        throw_args[0] = exc;
+        throw_result = pytealet_throw((PyObject *)target, mstate->tealet_type, throw_args, 1, NULL);
+        Py_DECREF(exc);
+
+        if (!throw_result) {
+            PyErr_WriteUnraisable(obj);
+            PyErr_Clear();
+            continue;
+        }
+        Py_DECREF(throw_result);
+    }
+
+    return 0;
+}
+
 /* Explicitly clean up this thread's tealet lineage and return wrappers whose
  * native tealet handles were active and forcibly invalidated.
  */
@@ -2100,6 +2142,36 @@ PyObject *PyTealet_ActiveTealets(PyTealetModuleState *mstate) {
         return NULL;
     }
     return active;
+}
+
+/* Try to kill active non-main tealets by throwing TealetExit repeatedly,
+ * up to cleanup_passes attempts. Returns remaining active wrappers.
+ */
+PyObject *PyTealet_ActiveTealetsKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes) {
+    Py_ssize_t pass_idx;
+
+    assert(mstate);
+
+    if (cleanup_passes < 1) {
+        PyErr_SetString(PyExc_ValueError, "cleanup_passes must be >= 1");
+        return NULL;
+    }
+
+    for (pass_idx = 0; pass_idx < cleanup_passes; pass_idx++) {
+        PyObject *active = PyTealet_ActiveTealets(mstate);
+        if (!active)
+            return NULL;
+        if (PyList_GET_SIZE(active) == 0)
+            return active;
+
+        if (pytealet_kill_active_snapshot(mstate, active) < 0) {
+            Py_DECREF(active);
+            return NULL;
+        }
+        Py_DECREF(active);
+    }
+
+    return PyTealet_ActiveTealets(mstate);
 }
 
 /* Internal API for module teardown paths: clean one lineage without
