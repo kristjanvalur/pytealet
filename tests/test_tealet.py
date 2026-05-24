@@ -830,6 +830,47 @@ class TestSwitch:
 
 
 class TestSetException:
+    def test_throw_switches_and_uses_current_as_fallback(self):
+        def victim(current, _arg):
+            current.main().switch("victim-paused")
+            return current.main()
+
+        result = []
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def killer(current, target):
+            result.append(target.throw(RuntimeError("boom-throw")))
+            return current.main()
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            target = _tealet.tealet()
+            assert target.run(victim, None) == "victim-paused"
+
+            killer_t = _tealet.tealet()
+            assert killer_t.run(killer, target) is None
+
+            assert killer_t.state == _tealet.STATE_EXIT
+            assert target.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert result == [None]
+        assert seen, "expected unraisable error for uncaught injected exception"
+        assert any(
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw"
+            for u in seen
+        )
+
+    def test_throw_requires_running_target(self):
+        t = _tealet.tealet()
+        with pytest.raises(_tealet.StateError):
+            t.throw(RuntimeError("boom-throw-run"))
+
     def test_set_exception_before_run_injects_at_run_entry(self):
         entered = []
         seen = []

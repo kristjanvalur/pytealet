@@ -130,6 +130,8 @@ static void pytealet_clear_pending_exception(PyTealetMainData *mdata);
 static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result);
 static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
                                         PyTealetMainData *mdata, PyObject *exc, PyObject *fallback);
+static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                Py_ssize_t nargs, PyObject *kwnames);
 static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                         Py_ssize_t nargs, PyObject *kwnames);
 
@@ -1100,6 +1102,8 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Release(&current->frame_info, NULL);
     if (fail) {
+        if (fail != TEALET_ERR_PANIC)
+            pytealet_clear_pending_exception(mdata);
         PyTealet_TranslateTealetError(mstate, fail, "tealet run failed",
                                       fail == TEALET_ERR_PANIC ? (PyObject *)switch_arg : NULL);
         result = NULL;
@@ -1340,6 +1344,63 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
     Py_RETURN_NONE;
 }
 
+/* Convenience API: schedule exception for a RUN target and route uncaught
+ * unwind back to the current tealet, then switch immediately.
+ */
+static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                Py_ssize_t nargs, PyObject *kwnames) {
+    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetObject *target = (PyTealetObject *)self;
+    PyTealetObject *current;
+    PyTealetMainData *mdata;
+    PyObject *exc = NULL;
+
+    if (!mstate)
+        return NULL;
+
+    if (nargs != 1) {
+        PyErr_Format(PyExc_TypeError, "throw() takes 1 argument (%zd given)", nargs);
+        return NULL;
+    }
+    exc = args[0];
+
+    if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
+        Py_ssize_t i;
+        for (i = 0; i < PyTuple_GET_SIZE(kwnames); i++) {
+            PyObject *key = PyTuple_GET_ITEM(kwnames, i);
+            PyObject *val = args[nargs + i];
+            if (!PyUnicode_Check(key)) {
+                PyErr_SetString(PyExc_TypeError, "throw() keyword names must be strings");
+                return NULL;
+            }
+            if (PyUnicode_CompareWithASCIIString(key, "exception") == 0) {
+                exc = val;
+            } else {
+                PyErr_Format(PyExc_TypeError, "throw() got an unexpected keyword argument '%U'", key);
+                return NULL;
+            }
+        }
+    }
+
+    if (!exc) {
+        PyErr_SetString(PyExc_TypeError, "throw() missing required argument 'exception'");
+        return NULL;
+    }
+
+    if (target->state != STATE_RUN) {
+        PyErr_SetString(mstate->state_error, "throw() target must be active");
+        return NULL;
+    }
+
+    current = GetCurrent(mstate, NULL, 0, &mdata);
+    if (!current && PyErr_Occurred())
+        return NULL;
+
+    if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
+        return NULL;
+    return pytealet_switch(self, defining_class, NULL, 0, NULL);
+}
+
 static PyObject *pytealet_get_context(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
     PyTealetObject *tealet = (PyTealetObject *)self;
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(tealet));
@@ -1422,6 +1483,7 @@ static struct PyMethodDef pytealet_methods[] = {
      METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"switch", (PyCFunction)(void (*)(void))pytealet_switch, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
+    {"throw", (PyCFunction)(void (*)(void))pytealet_throw, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"set_exception", (PyCFunction)(void (*)(void))pytealet_set_exception, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
      ""},
     {NULL, NULL} /* sentinel */
