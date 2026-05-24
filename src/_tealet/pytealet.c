@@ -2308,10 +2308,13 @@ static void pytealet_process_return_arg(PyTealetModuleState *mstate,PyTealetObje
             *return_to = (PyTealetObject *)Py_NewRef(result);
         }
 
-         /* perform sanity checks on the return_to target */
-        if (!PyTealet_Check((PyObject *)(*return_to), mstate)) {
+        /* perform sanity checks on the return_to target */
+        if (!*return_to) {
             PyErr_SetString(PyExc_TypeError, "tealet object expected");
             err = -1;
+        } else if (!PyTealet_Check((PyObject *)(*return_to), mstate)) {
+            PyErr_SetString(PyExc_TypeError, "tealet object expected");
+            err = -1;
         } else if ((*return_to)->state != STATE_RUN) {
             PyErr_SetString(mstate->state_error, "must be 'run'");
             err = -1;
@@ -2319,7 +2322,9 @@ static void pytealet_process_return_arg(PyTealetModuleState *mstate,PyTealetObje
             err = -1;
         }
         if (err) {
-            Py_DECREF((PyObject *)(*return_to));
+            Py_XDECREF(*return_arg);
+            *return_arg = NULL;
+            Py_XDECREF((PyObject *)(*return_to));
             *return_to = NULL;
         }
     } else {
