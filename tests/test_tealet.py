@@ -199,13 +199,34 @@ class TestThreadCleanup:
         _tealet.thread_cleanup()
         assert _tealet.main().state == _tealet.STATE_RUN
 
-    def test_active_tealets_requires_main_tealet_context(self):
+    def test_active_tealets_allowed_from_non_main_tealet_context(self):
         def run(current, arg):
-            with pytest.raises(_tealet.StateError):
-                _tealet.active_tealets()
+            active = _tealet.active_tealets()
+            assert any(id(x) == id(current) for x in active)
             return current.main()
 
         _tealet.tealet().run(run, None)
+
+    def test_thread_kill_allowed_from_non_main_skips_caller(self):
+        def parked(current, arg):
+            current.main().switch("peer-paused")
+            return current.main()
+
+        def run(current, arg):
+            peer = _tealet.tealet()
+            assert peer.run(parked, None) == "peer-paused"
+
+            remaining = _tealet.thread_kill()
+            remaining_ids = {id(x) for x in remaining}
+
+            assert id(current) not in remaining_ids
+            assert id(peer) not in remaining_ids
+            assert current.state == _tealet.STATE_RUN
+            assert peer.state == _tealet.STATE_EXIT
+            return current.main()
+
+        caller = _tealet.tealet()
+        caller.run(run, None)
 
     def test_thread_cleanup_kills_run_tealets_before_force_cleanup(self):
         """Cleanup first kills active RUN tealets, so nerfed excludes them."""
