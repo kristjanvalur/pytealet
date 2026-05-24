@@ -638,9 +638,11 @@ static int pytealet_throw_registry_redirect(PyTealetModuleState *mstate, PyTeale
         PyErr_Clear();
     } else if (pop_rc > 0 && exception && throw_fallback && pytealet_exception_chain_contains(exception, throw_exc)) {
         PyTealetObject *fallback_t = (PyTealetObject *)throw_fallback;
-        /* should just assert the tealet check, fallback should have been checked on push */
-        if (PyTealet_Check((PyObject *)fallback_t, mstate) && fallback_t->state == STATE_RUN && fallback_t->tealet &&
-            fallback_t->owner_tid == tealet->owner_tid && fallback_t->tealet->main == tealet->tealet->main) {
+        (void)mstate;
+        assert(PyTealet_Check((PyObject *)fallback_t, mstate));
+        assert(fallback_t->owner_tid == tealet->owner_tid);
+        assert(fallback_t->tealet->main == tealet->tealet->main);
+        if (fallback_t->state == STATE_RUN && fallback_t->tealet) {
             /* transfer owndership of throw_fallback to *return_to_io */
             Py_DECREF(*return_to_io);
             *return_to_io = fallback_t;
