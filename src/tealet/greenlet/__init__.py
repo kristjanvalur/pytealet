@@ -36,13 +36,15 @@ def getcurrent():
         return greenlet(parent=t)
 
 class greenlet(object):
+    # class defaults for cases where __init__ is intentionally skipped
+    _gr_context = None
+    _is_running = False
+
     def __init__(self, run=_RUN_UNSET, parent=None):
         # must create it on this thread, not dynamically when run
         # this will bind it to the right thread
         if run is not _RUN_UNSET:
             self.run = run
-        self._gr_context = None
-        self._is_running = False
         if isinstance(parent, _tealet.tealet):
             # main greenlet for this thread
             self._tealet = parent
