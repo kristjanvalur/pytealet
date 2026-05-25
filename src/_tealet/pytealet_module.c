@@ -36,14 +36,9 @@ static PyTypeObject pytealet_domain_lock_type = {
 };
 
 PyObject *pytealet_domain_lock_obj_new(void) {
-    static int type_ready = 0;
     PyTealetDomainLockObject *obj;
 
-    if (!type_ready) {
-        if (PyType_Ready(&pytealet_domain_lock_type) < 0)
-            return NULL;
-        type_ready = 1;
-    }
+    assert((pytealet_domain_lock_type.tp_flags & Py_TPFLAGS_READY) != 0);
 
     obj = (PyTealetDomainLockObject *)PyObject_New(PyTealetDomainLockObject, &pytealet_domain_lock_type);
     if (!obj)
@@ -204,6 +199,12 @@ static int pytealet_module_exec(PyObject *m) {
     mstate->defunct_error = NULL;
     mstate->panic_error = NULL;
     mstate->tealet_exit_error = NULL;
+
+    /* Ready static helper types during module init so runtime allocation
+     * paths remain lock-free and race-free under free-threaded execution.
+     */
+    if (PyType_Ready(&pytealet_domain_lock_type) < 0)
+        return -1;
 
     if (!PyThread_tss_is_created(&mstate->tls_key)) {
         if (PyThread_tss_create(&mstate->tls_key) != 0) {
