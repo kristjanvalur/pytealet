@@ -23,4 +23,9 @@ struct PyTealetModuleState {
     PyObject *tealet_exit_error;
 };
 
+/* Internal domain-lock helpers shared with runtime code. */
+PyObject *pytealet_domain_lock_obj_new(void);
+void pytealet_domain_lock_obj_lock(PyObject *domain_lock_obj);
+void pytealet_domain_lock_obj_unlock(PyObject *domain_lock_obj);
+
 #endif

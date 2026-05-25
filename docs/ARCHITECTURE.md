@@ -147,8 +147,11 @@ Context semantics:
 - Setting `context = None` clears the tealet context.
 - The value must be `contextvars.Context` or `None`; other values raise
     `TypeError`.
-- Cross-thread context access follows normal tealet ownership checks and raises
-    `InvalidError` for foreign-thread access.
+- Cross-thread context access is allowed for non-running tealets
+    (`STATE_NEW`, `STATE_STUB`, or suspended `STATE_RUN`) under the lineage
+    domain lock.
+- Cross-thread context access to a currently running tealet raises
+    `InvalidError`.
 
 Thread ownership rules enforced by the C API:
 - Creating a tealet object ensures a thread-main tealet exists for that thread.
@@ -613,6 +616,32 @@ PyTealetObject *t_main = (PyTealetObject*)PyThread_tss_get(&mstate->tls_key);
 
 **Thread Safety:**
 Tealets can only switch within the same thread family. Cross-thread switches are detected and raise `InvalidError`.
+
+### Domain Lock and Cross-Thread Consistency
+
+Each lineage has one shared domain lock object stored in main-lineage data
+(`mdata->domain_lock_obj`). Every `PyTealetObject` stores a strong reference to
+that same lock (`tealet->domain_lock_obj`), including duplicated wrappers.
+
+This gives per-wrapper access to the lineage lock and allows pytealet code to
+guard wrapper state changes that may be observed across threads.
+
+The same lock is also configured into libtealet via
+`tealet_configure_set_locking(..., TEALET_LOCK_AUTO, ...)`, so internal
+libtealet switching and pytealet-level state checks synchronize on the same
+critical section.
+
+Current usage includes guarding:
+- Wrapper linkage publication/rollback (`wrapper->tealet` / `TEALET_SET_PYOBJECT`)
+    in run/stub transitions.
+- Wrapper linkage teardown during exit and thread cleanup.
+- Wrapper tracking set mutation (`mdata->wrappers`).
+- Context property reads/writes and running-state detection via
+    `tealet_current(...) == wrapper->tealet`.
+
+When this domain lock is held, `tealet_current`/GetCurrent-style relationship
+queries are stable with respect to concurrent switches, so API checks that rely
+on that identity are reliable.
 
 ### API Direction: Tealet-Centric Introspection
 

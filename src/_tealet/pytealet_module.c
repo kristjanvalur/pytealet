@@ -6,7 +6,76 @@
 
 #include "pytealet_module.h"
 
+#include <assert.h>
 #include <string.h>
+
+typedef struct PyTealetDomainLockObject {
+    PyObject_HEAD
+#if PYTEALET_FREE_THREADED
+    PyThread_type_lock lock;
+#endif
+} PyTealetDomainLockObject;
+
+static void pytealet_domain_lock_obj_dealloc(PyObject *obj) {
+    PyTealetDomainLockObject *self = (PyTealetDomainLockObject *)obj;
+#if PYTEALET_FREE_THREADED
+    if (self->lock) {
+        PyThread_free_lock(self->lock);
+        self->lock = NULL;
+    }
+#endif
+    Py_TYPE(obj)->tp_free(obj);
+}
+
+static PyTypeObject pytealet_domain_lock_type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_tealet._DomainLock",
+    .tp_basicsize = sizeof(PyTealetDomainLockObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = pytealet_domain_lock_obj_dealloc,
+};
+
+PyObject *pytealet_domain_lock_obj_new(void) {
+    PyTealetDomainLockObject *obj;
+
+    assert((pytealet_domain_lock_type.tp_flags & Py_TPFLAGS_READY) != 0);
+
+    obj = (PyTealetDomainLockObject *)PyObject_New(PyTealetDomainLockObject, &pytealet_domain_lock_type);
+    if (!obj)
+        return NULL;
+#if PYTEALET_FREE_THREADED
+    obj->lock = PyThread_allocate_lock();
+    if (!obj->lock) {
+        Py_DECREF((PyObject *)obj);
+        return PyErr_NoMemory();
+    }
+#endif
+    return (PyObject *)obj;
+}
+
+void pytealet_domain_lock_obj_lock(PyObject *domain_lock_obj) {
+    assert(domain_lock_obj != NULL);
+#if PYTEALET_FREE_THREADED
+    PyTealetDomainLockObject *lock_obj = (PyTealetDomainLockObject *)domain_lock_obj;
+    assert(lock_obj);
+    assert(lock_obj->lock);
+    PyThread_acquire_lock(lock_obj->lock, WAIT_LOCK);
+#else
+    (void)domain_lock_obj;
+#endif
+}
+
+void pytealet_domain_lock_obj_unlock(PyObject *domain_lock_obj) {
+    assert(domain_lock_obj != NULL);
+#if PYTEALET_FREE_THREADED
+    PyTealetDomainLockObject *lock_obj = (PyTealetDomainLockObject *)domain_lock_obj;
+    assert(lock_obj);
+    assert(lock_obj->lock);
+    PyThread_release_lock(lock_obj->lock);
+#else
+    (void)domain_lock_obj;
+#endif
+}
 
 static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
@@ -130,6 +199,12 @@ static int pytealet_module_exec(PyObject *m) {
     mstate->defunct_error = NULL;
     mstate->panic_error = NULL;
     mstate->tealet_exit_error = NULL;
+
+    /* Ready static helper types during module init so runtime allocation
+     * paths remain lock-free and race-free under free-threaded execution.
+     */
+    if (PyType_Ready(&pytealet_domain_lock_type) < 0)
+        return -1;
 
     if (!PyThread_tss_is_created(&mstate->tls_key)) {
         if (PyThread_tss_create(&mstate->tls_key) != 0) {
