@@ -932,9 +932,10 @@ out:
             pytealet->state = STATE_NEW;
             PyTealetTstate_Drop(&pytealet->tstate, NULL);
         }
-        tealet_delete(tresult);
     }
     pytealet_domain_unlock(mdata);
+    if (!result && tresult)
+        tealet_delete(tresult);
     return result;
 }
 
@@ -1997,13 +1998,17 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
         /* deallocate the tealet handle. if it was active, this destroys
          * the saved stack.
          */
-        if (wrapper->domain_lock_obj)
+        {
+            tealet_t *tealet_to_delete = wrapper->tealet;
             pytealet_domain_lock_obj_lock(wrapper->domain_lock_obj);
-        tealet_delete(wrapper->tealet);
-        wrapper->tealet = NULL;
-        wrapper->state = STATE_EXIT;
-        if (wrapper->domain_lock_obj)
+            if (tealet_to_delete)
+                TEALET_SET_PYOBJECT(tealet_to_delete, NULL);
+            wrapper->tealet = NULL;
+            wrapper->state = STATE_EXIT;
             pytealet_domain_lock_obj_unlock(wrapper->domain_lock_obj);
+            if (tealet_to_delete)
+                tealet_delete(tealet_to_delete);
+        }
         Py_CLEAR(wrapper->tracking_ref);
         Py_DECREF(obj);
     }
@@ -2011,14 +2016,12 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
     /* clear main tealet and destroy the lineage */
     if (mdata->main_wrapper) {
         PyTealetObject *main_wrapper = (PyTealetObject *)mdata->main_wrapper;
-        if (main_wrapper->domain_lock_obj)
-            pytealet_domain_lock_obj_lock(main_wrapper->domain_lock_obj);
+        pytealet_domain_lock_obj_lock(main_wrapper->domain_lock_obj);
         if (main_wrapper->tealet)
             TEALET_SET_PYOBJECT(main_wrapper->tealet, NULL);
         main_wrapper->tealet = NULL;
         main_wrapper->state = STATE_EXIT;
-        if (main_wrapper->domain_lock_obj)
-            pytealet_domain_lock_obj_unlock(main_wrapper->domain_lock_obj);
+        pytealet_domain_lock_obj_unlock(main_wrapper->domain_lock_obj);
     }
     Py_CLEAR(mdata->main_wrapper);
     if (main_tealet)
