@@ -48,12 +48,10 @@ struct PyTealetMainData {
     PyObject *dustbin;
     PyObject *main_wrapper;       /* strong ref to this thread's main tealet wrapper */
     PyObject *wrappers;           /* set of weakrefs to non-main wrappers in this main lineage */
+    PyObject *domain_lock_obj;    /* strong ref to lineage lock object */
     uint64_t throw_next_token;    /* monotonically increasing throw token generator */
     uint64_t pending_throw_token; /* token to deliver on the next switch/run return */
     PyObject *throw_records;      /* dict[token] -> (exc_instance, fallback_tealet_or_None) */
-#if PYTEALET_FREE_THREADED
-    PyThread_type_lock domain_lock;
-#endif
 };
 
 /* initial number of slots in dustbin, to avoid realloc on push */
@@ -93,6 +91,7 @@ struct PyTealetObject {
     PyObject_HEAD int state;
     tealet_t *tealet;
     unsigned long owner_tid;       /* thread that owns this tealet object */
+    PyObject *domain_lock_obj;     /* strong ref to lineage lock object */
     PyObject *tracking_ref;        /* weakref object stored in main-lineage wrapper set */
     uint64_t inflight_throw_token; /* non-zero only while fallback-aware throw is in flight */
 #if !defined(Py312P)
@@ -758,7 +757,7 @@ static void *PyTealet_GetStackFar(const PyThreadState *py_tstate) {
 static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds, int creating_main) {
     PyTealetObject *src = NULL;
     PyTealetObject *result;
-    PyTealetMainData *lineage_mdata;
+    PyTealetMainData *lineage_mdata = NULL;
     PyTealetModuleState *mstate = GetModuleStateFromClass(subtype);
     unsigned long current_tid;
     if (!mstate)
@@ -766,7 +765,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
 
     /* Every non-main tealet object is bound to an existing thread-main. */
     if (!creating_main) {
-        if (!GetMain(mstate, 1, NULL))
+        if (!GetMain(mstate, 1, &lineage_mdata))
             return NULL;
     }
     current_tid = PyThread_get_thread_ident();
@@ -788,6 +787,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     result->state = STATE_NEW;
     result->tealet = NULL;
     result->owner_tid = current_tid;
+    result->domain_lock_obj = NULL;
     result->tracking_ref = NULL;
     result->inflight_throw_token = 0;
     PyTealetTstate_Init(&result->tstate);
@@ -821,6 +821,10 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
         }
         result->state = src->state;
         result->owner_tid = src->owner_tid;
+        if (src->domain_lock_obj)
+            result->domain_lock_obj = Py_NewRef(src->domain_lock_obj);
+    } else if (lineage_mdata && lineage_mdata->domain_lock_obj) {
+        result->domain_lock_obj = Py_NewRef(lineage_mdata->domain_lock_obj);
     }
     return (PyObject *)result;
 }
@@ -847,6 +851,7 @@ static void pytealet_dealloc(PyObject *obj) {
     PyTealetFrameInfo_Fini(&tealet->frame_info);
     if (tealet->tealet)
         tealet_delete(tealet->tealet);
+    Py_CLEAR(tealet->domain_lock_obj);
     Py_TYPE(obj)->tp_free(obj);
 }
 
@@ -1647,37 +1652,31 @@ static void tealet_free_wrapper(void *ptr, void *context) {
 
 #if PYTEALET_FREE_THREADED
 static void pytealet_domain_lock_cb(void *arg) {
-    PyThread_type_lock lock = (PyThread_type_lock)arg;
-    PyThread_acquire_lock(lock, WAIT_LOCK);
+    pytealet_domain_lock_obj_lock((PyObject *)arg);
 }
 
 static void pytealet_domain_unlock_cb(void *arg) {
-    PyThread_type_lock lock = (PyThread_type_lock)arg;
-    PyThread_release_lock(lock);
+    pytealet_domain_lock_obj_unlock((PyObject *)arg);
 }
 
 static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMainData *mdata) {
     tealet_lock_t locking;
-    mdata->domain_lock = PyThread_allocate_lock();
-    if (!mdata->domain_lock)
-        return -1;
+    assert(mdata);
+    assert(mdata->domain_lock_obj);
 
     locking.mode = TEALET_LOCK_AUTO;
     locking.lock = pytealet_domain_lock_cb;
     locking.unlock = pytealet_domain_unlock_cb;
-    locking.arg = (void *)mdata->domain_lock;
+    locking.arg = (void *)mdata->domain_lock_obj;
     if (tealet_configure_set_locking(main_tealet, &locking) < 0) {
-        PyThread_free_lock(mdata->domain_lock);
-        mdata->domain_lock = NULL;
         return -1;
     }
     return 0;
 }
 
 static void pytealet_free_domain_lock(PyTealetMainData *mdata) {
-    if (mdata && mdata->domain_lock) {
-        PyThread_free_lock(mdata->domain_lock);
-        mdata->domain_lock = NULL;
+    if (mdata && mdata->domain_lock_obj) {
+        Py_CLEAR(mdata->domain_lock_obj);
     }
 }
 
@@ -1688,14 +1687,14 @@ static void pytealet_free_domain_lock(PyTealetMainData *mdata) {
  */
 static void pytealet_domain_lock(PyTealetMainData *mdata) {
     assert(mdata);
-    assert(mdata->domain_lock);
-    PyThread_acquire_lock(mdata->domain_lock, WAIT_LOCK);
+    assert(mdata->domain_lock_obj);
+    pytealet_domain_lock_obj_lock(mdata->domain_lock_obj);
 }
 
 static void pytealet_domain_unlock(PyTealetMainData *mdata) {
     assert(mdata);
-    assert(mdata->domain_lock);
-    PyThread_release_lock(mdata->domain_lock);
+    assert(mdata->domain_lock_obj);
+    pytealet_domain_lock_obj_unlock(mdata->domain_lock_obj);
 }
 #else
 static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMainData *mdata) {
@@ -1704,7 +1703,10 @@ static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMain
     return 0;
 }
 
-static void pytealet_free_domain_lock(PyTealetMainData *mdata) { (void)mdata; }
+static void pytealet_free_domain_lock(PyTealetMainData *mdata) {
+    if (mdata && mdata->domain_lock_obj)
+        Py_CLEAR(mdata->domain_lock_obj);
+}
 
 static void pytealet_domain_lock(PyTealetMainData *mdata) { (void)mdata; }
 
@@ -1753,6 +1755,9 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
         }
         memset(mdata, 0, sizeof(*mdata));
         mdata->tid = PyThread_get_thread_ident();
+        mdata->domain_lock_obj = pytealet_domain_lock_obj_new();
+        if (!mdata->domain_lock_obj)
+            goto fail;
         mdata->dustbin = PyList_New(DUSTBIN_PREALLOC);
         if (!mdata->dustbin) {
             PyErr_NoMemory();
@@ -1783,6 +1788,9 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
         t_main = (PyTealetObject *)pytealet_new_impl(mstate->tealet_type, NULL, NULL, 1);
         if (!t_main)
             goto fail;
+
+        if (mdata->domain_lock_obj)
+            t_main->domain_lock_obj = Py_NewRef(mdata->domain_lock_obj);
 
         t_main->tealet = tmain;
         t_main->state = STATE_RUN;
@@ -1949,9 +1957,13 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
         /* deallocate the tealet handle. if it was active, this destroys
          * the saved stack.
          */
+        if (wrapper->domain_lock_obj)
+            pytealet_domain_lock_obj_lock(wrapper->domain_lock_obj);
         tealet_delete(wrapper->tealet);
         wrapper->tealet = NULL;
         wrapper->state = STATE_EXIT;
+        if (wrapper->domain_lock_obj)
+            pytealet_domain_lock_obj_unlock(wrapper->domain_lock_obj);
         Py_CLEAR(wrapper->tracking_ref);
         Py_DECREF(obj);
     }
@@ -1959,10 +1971,14 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
     /* clear main tealet and destroy the lineage */
     if (mdata->main_wrapper) {
         PyTealetObject *main_wrapper = (PyTealetObject *)mdata->main_wrapper;
+        if (main_wrapper->domain_lock_obj)
+            pytealet_domain_lock_obj_lock(main_wrapper->domain_lock_obj);
         if (main_wrapper->tealet)
             TEALET_SET_PYOBJECT(main_wrapper->tealet, NULL);
         main_wrapper->tealet = NULL;
         main_wrapper->state = STATE_EXIT;
+        if (main_wrapper->domain_lock_obj)
+            pytealet_domain_lock_obj_unlock(main_wrapper->domain_lock_obj);
         Py_CLEAR(mdata->main_wrapper);
     }
     if (main_tealet)
