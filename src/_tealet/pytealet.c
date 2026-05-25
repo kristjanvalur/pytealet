@@ -1717,9 +1717,8 @@ static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMain
 }
 
 static void pytealet_free_domain_lock(PyTealetMainData *mdata) {
-    if (mdata && mdata->domain_lock_obj) {
+    if (mdata)
         Py_CLEAR(mdata->domain_lock_obj);
-    }
 }
 
 /* Access to mdata->wrappers must be externally synchronized in free-threaded
@@ -1746,7 +1745,7 @@ static int pytealet_configure_domain_locking(tealet_t *main_tealet, PyTealetMain
 }
 
 static void pytealet_free_domain_lock(PyTealetMainData *mdata) {
-    if (mdata && mdata->domain_lock_obj)
+    if (mdata)
         Py_CLEAR(mdata->domain_lock_obj);
 }
 
@@ -1871,8 +1870,8 @@ fail:
                 t_main->tealet = NULL;
             if (t_main)
                 t_main->state = STATE_EXIT;
-            Py_CLEAR(mdata->main_wrapper);
         }
+        Py_CLEAR(mdata->main_wrapper);
         Py_CLEAR(mdata->dustbin);
         Py_CLEAR(mdata->wrappers);
         Py_CLEAR(mdata->throw_records);
@@ -2020,8 +2019,8 @@ static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMa
         main_wrapper->state = STATE_EXIT;
         if (main_wrapper->domain_lock_obj)
             pytealet_domain_lock_obj_unlock(main_wrapper->domain_lock_obj);
-        Py_CLEAR(mdata->main_wrapper);
     }
+    Py_CLEAR(mdata->main_wrapper);
     if (main_tealet)
         tealet_finalize(main_tealet);
 
