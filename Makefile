@@ -1,9 +1,16 @@
-.PHONY: cext-clean cext-cc cext-cc-debug cext-cc-warnings cext-cc-ci format-c format-c-check
+.PHONY: cext-clean cext-cc cext-cc-debug cext-cc-warnings cext-cc-ci format-c format-c-check rebuild-ext test test-compat
 
 CLANG_FORMAT ?= clang-format-14
 EXT_SRC := $(sort $(wildcard src/_tealet/*.c))
 EXT_SRC_ALL := $(sort $(EXT_SRC) $(wildcard src/_tealet/*.h))
 C_FORMAT_FILES ?= $(EXT_SRC_ALL)
+
+PYTHON ?= $(if $(VIRTUAL_ENV),$(VIRTUAL_ENV)/bin/python,python)
+TEST ?= tests/
+PYTEST_ARGS ?=
+REBUILD_EXT ?= 0
+REBUILD_EXT_TRUE := 1 yes true TRUE
+PYTEST_REBUILD_FLAG := $(if $(filter $(REBUILD_EXT),$(REBUILD_EXT_TRUE)),--rebuild-ext,)
 
 PY_CC := $(shell uv run python -c "import sysconfig; print((sysconfig.get_config_var('CC') or 'cc').split()[0])")
 PY_CFLAGS := $(shell uv run python -c "import sysconfig; print(sysconfig.get_config_var('CFLAGS') or '')")
@@ -42,3 +49,12 @@ format-c:
 
 format-c-check:
 	$(CLANG_FORMAT) --dry-run --Werror $(C_FORMAT_FILES)
+
+rebuild-ext:
+	./scripts/fast_build.sh
+
+test:
+	$(PYTHON) -m pytest $(TEST) $(PYTEST_REBUILD_FLAG) $(PYTEST_ARGS)
+
+test-compat:
+	PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1 $(PYTHON) -m pytest tests/compat_greenlet $(PYTEST_REBUILD_FLAG) $(PYTEST_ARGS)
