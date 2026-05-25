@@ -36,7 +36,7 @@ def getcurrent():
         return greenlet(parent=t)
 
 class greenlet(object):
-    # class defaults for cases where __init__ is intentionally skipped
+    # class defaults for attributes that remain safe if __init__ is skipped
     _gr_context = None
     _is_running = False
 
@@ -45,6 +45,9 @@ class greenlet(object):
         # this will bind it to the right thread
         if run is not _RUN_UNSET:
             self.run = run
+        self._bootstrap(parent)
+ 
+    def _bootstrap(self, parent=None):
         if isinstance(parent, _tealet.tealet):
             # main greenlet for this thread
             self._tealet = parent
@@ -59,13 +62,15 @@ class greenlet(object):
             self._main = parent._main
             self._main._process_garbage()
         tealetmap[self._tealet] = self
+        return self._tealet
 
     def __del__(self):
-        if self:
-            if _tealet.current() == self._tealet:
+        tealet = getattr(self, "_tealet", None)
+        if tealet is not None and tealet.state == _tealet.STATE_RUN:
+            if _tealet.current() == tealet:
                 # Can't kill ourselves from here
                 return
-            tealetmap[self._tealet] = self  # re-insert
+            tealetmap[tealet] = self  # re-insert
             old = self.parent
             self.parent = getcurrent()
             try:
@@ -102,37 +107,44 @@ class greenlet(object):
 
     @property
     def gr_frame(self):
-        if self._tealet is _tealet.current():
+        tealet = getattr(self, "_tealet", None)
+        if tealet is None:
+            return None
+        if tealet is _tealet.current():
             return self._tealet.frame
         # tealet is paused.  Emulated greenlet by returning
         # the frame which called "switch" or "throw"
-        f = self._tealet.frame
+        f = tealet.frame
         if f:
             return f.f_back.f_back
 
     @property
     def gr_context(self):
-        if self._is_running and self._tealet.thread_id != threading.get_ident():
+        tealet = getattr(self, "_tealet", None)
+        if self._is_running and tealet is not None and tealet.thread_id != threading.get_ident():
             raise ValueError("running in a different thread")
         if self._gr_context is not None:
             return self._gr_context
 
-        current = self._tealet._get_context()
-        if current is not None and current:
-            self._gr_context = current
-            return current
+        if tealet is not None:
+            current = tealet.context
+            if current is not None and current:
+                self._gr_context = current
+                return current
         return None
 
     @gr_context.setter
     def gr_context(self, value):
-        if self._is_running and self._tealet.thread_id != threading.get_ident():
+        tealet = getattr(self, "_tealet", None)
+        if self._is_running and tealet is not None and tealet.thread_id != threading.get_ident():
             raise ValueError("running in a different thread")
 
         if value is not None and not isinstance(value, contextvars.Context):
             raise TypeError("greenlet context must be a contextvars.Context or None")
 
         self._gr_context = value
-        self._tealet._set_context(value)
+        if tealet is not None:
+            tealet.context = value
 
     @gr_context.deleter
     def gr_context(self):
@@ -140,10 +152,12 @@ class greenlet(object):
 
     @property
     def dead(self):
-        return self._tealet.state == _tealet.STATE_EXIT
+        tealet = getattr(self, "_tealet", None)
+        return tealet is not None and tealet.state == _tealet.STATE_EXIT
 
     def __bool__(self):
-        return self._tealet.state == _tealet.STATE_RUN
+        tealet = getattr(self, "_tealet", None)
+        return tealet is not None and tealet.state == _tealet.STATE_RUN
 
     def switch(self, *args, **kwds):
         return self._switch((False, args, kwds))
@@ -156,9 +170,9 @@ class greenlet(object):
     def _switch(self, arg):
         with ErrorWrapper:
             run = getattr(self, "run", _RUN_UNSET)
-            tealet = getattr(self, "_tealet", None)
-            is_unstarted = tealet is not None and tealet.state == _tealet.STATE_STUB
-
+            tealet = getattr(self, "_tealet", None) or self._bootstrap(getattr(self, "parent", None))
+            is_unstarted = tealet.state == _tealet.STATE_STUB
+            
             if is_unstarted:
                 if run is _RUN_UNSET:
                     raise AttributeError("run")
@@ -170,7 +184,7 @@ class greenlet(object):
                 self._is_running = True
                 try:
                     # here we can tweak how we create the new stack
-                    arg = self._tealet.run(self._greenlet_main, (run, arg, ctx))
+                    arg = tealet.run(self._greenlet_main, (run, arg, ctx))
                 finally:
                     self._is_running = False
             else:
@@ -178,7 +192,7 @@ class greenlet(object):
                     return self._parent()._switch(arg)
                 self._is_running = True
                 try:
-                    arg = self._tealet.switch(arg)
+                    arg = tealet.switch(arg)
                 finally:
                     self._is_running = False
         return self._Result(arg)
