@@ -507,6 +507,55 @@ class TestTealetContext:
             ready.set()
             join_thread_or_fail(thread, timeout=2.0)
 
+    def test_context_cross_thread_running_forbidden_suspended_allowed(self):
+        var = contextvars.ContextVar("ctx", default=None)
+        holder = []
+        observed = []
+        running_ready = threading.Event()
+        allow_suspend = threading.Event()
+        suspended_ready = threading.Event()
+        allow_resume = threading.Event()
+
+        def worker(current, _arg):
+            var.set(1)
+            running_ready.set()
+            assert allow_suspend.wait(2.0), "did not receive suspend signal"
+            current.main().switch("paused")
+            observed.append(var.get())
+            return current.main()
+
+        def thread_fn():
+            t = _tealet.tealet()
+            holder.append(t)
+            first = t.run(worker, None)
+            assert first == "paused"
+            suspended_ready.set()
+            assert allow_resume.wait(2.0), "did not receive resume signal"
+            t.switch()
+
+        thread = threading.Thread(target=thread_fn, daemon=True)
+        thread.start()
+        assert running_ready.wait(2.0), "worker thread did not enter running state"
+        t = holder[0]
+
+        # While running in a foreign thread, context access is forbidden.
+        with pytest.raises(_tealet.InvalidError):
+            _ = t.context
+        with pytest.raises(_tealet.InvalidError):
+            t.context = None
+
+        # Once suspended in the foreign thread, context mutation is allowed.
+        ctx = contextvars.Context()
+        ctx.run(var.set, 2)
+        allow_suspend.set()
+        assert suspended_ready.wait(2.0), "worker thread did not suspend"
+        t.context = ctx
+        assert t.context is ctx
+
+        allow_resume.set()
+        join_thread_or_fail(thread, timeout=2.0)
+        assert observed == [2]
+
     def test_context_weakref_cleanup(self):
         ctx = contextvars.Context()
         try:

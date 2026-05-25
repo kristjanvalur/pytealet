@@ -59,6 +59,7 @@ PyObject *pytealet_domain_lock_obj_new(void) {
 }
 
 void pytealet_domain_lock_obj_lock(PyObject *domain_lock_obj) {
+    assert(domain_lock_obj != NULL);
 #if PYTEALET_FREE_THREADED
     PyTealetDomainLockObject *lock_obj = (PyTealetDomainLockObject *)domain_lock_obj;
     assert(lock_obj);
@@ -70,6 +71,7 @@ void pytealet_domain_lock_obj_lock(PyObject *domain_lock_obj) {
 }
 
 void pytealet_domain_lock_obj_unlock(PyObject *domain_lock_obj) {
+    assert(domain_lock_obj != NULL);
 #if PYTEALET_FREE_THREADED
     PyTealetDomainLockObject *lock_obj = (PyTealetDomainLockObject *)domain_lock_obj;
     assert(lock_obj);
