@@ -25,6 +25,7 @@ class ErrorWrapper(object):
 ErrorWrapper = ErrorWrapper()  # stateless singleton
 
 tealetmap = weakref.WeakValueDictionary()
+_RUN_UNSET = object()
 
 def getcurrent():
     t = _tealet.current()
@@ -35,10 +36,11 @@ def getcurrent():
         return greenlet(parent=t)
 
 class greenlet(object):
-    def __init__(self, run=None, parent=None):
+    def __init__(self, run=_RUN_UNSET, parent=None):
         # must create it on this thread, not dynamically when run
         # this will bind it to the right thread
-        self.run = run
+        if run is not _RUN_UNSET:
+            self.run = run
         self._gr_context = None
         self._is_running = False
         if isinstance(parent, _tealet.tealet):
@@ -151,9 +153,15 @@ class greenlet(object):
 
     def _switch(self, arg):
         with ErrorWrapper:
-            run = getattr(self, "run", None)
-            if run:
-                del self.run
+            run = getattr(self, "run", _RUN_UNSET)
+            tealet = getattr(self, "_tealet", None)
+            is_unstarted = tealet is not None and tealet.state == _tealet.STATE_STUB
+
+            if is_unstarted:
+                if run is _RUN_UNSET:
+                    raise AttributeError("run")
+                if "run" in getattr(self, "__dict__", {}):
+                    del self.run
                 ctx = self._gr_context
                 if ctx is None:
                     ctx = contextvars.Context()
