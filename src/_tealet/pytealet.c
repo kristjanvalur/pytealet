@@ -912,7 +912,7 @@ static void pytealet_dealloc(PyObject *obj) {
     tealet->inflight_throw_token = 0;
     PyObject_ClearWeakRefs(obj);
     /* Release any owned saved thread-state references */
-    PyTealetTstate_Drop(&tealet->tstate, NULL);
+    PyTealetTstate_Drop(&tealet->tstate, NULL, 1);
     PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
     PyTealetFrameInfo_Fini(&tealet->frame_info);
     if (tealet->tealet)
@@ -969,12 +969,8 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
     }
 
     /* Copy the tstate, but leave the currently set "context" intact */
-    PyObject *context = pytealet->tstate.context;
-    pytealet->tstate.context = NULL;
-    PyTealetTstate_Copy(&pytealet->tstate, tstate, 1); /* dst (new) belongs to the new tealet */
-    Py_XDECREF(pytealet->tstate.context);
-    pytealet->tstate.context = context;
-
+    PyTealetTstate_Copy(&pytealet->tstate, tstate, 1, 0); /* dst (new) belongs to the new tealet */
+    
     pytealet->tealet = tresult;
     pytealet->state = STATE_STUB;
     TEALET_SET_PYOBJECT(tresult, pytealet);
@@ -991,7 +987,7 @@ out:
             TEALET_SET_PYOBJECT(tresult, NULL);
             pytealet->tealet = NULL;
             pytealet->state = STATE_NEW;
-            PyTealetTstate_Drop(&pytealet->tstate, NULL);
+            PyTealetTstate_Drop(&pytealet->tstate, NULL, 1);
         }
     }
     pytealet_domain_unlock(mdata);
@@ -1195,7 +1191,8 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
         PyTealetTstate_Restore(&current->tstate, tstate);
     } else {
         void *stack_limit = PyTealet_GetStackFar(tstate);
-        PyTealetTstate_Copy(&current->tstate, tstate, 0); /* src (current) belongs to new tealet */
+        /* copy the tstate including context into the old testate */
+        PyTealetTstate_Copy(&current->tstate, tstate, 0, 1); /* src (current) belongs to new tealet */
 
         tealet = tealet_new(current->tealet);
         if (!tealet)
@@ -2675,10 +2672,11 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     /* Tealet is exiting permanently: clear active PyThreadState for the switch,
      * then drop saved refs immediately so frame locals (including 'current')
      * do not keep the Python tealet object alive until GC.
+     * keep the context object valid after drop *
      */
     PyTealetTstate_Frame_Cleanup(tstate, t_return);
     PyTealetTstate_Save(&tealet->tstate, tstate);
-    PyTealetTstate_Drop(&tealet->tstate, t_return);
+    PyTealetTstate_Drop(&tealet->tstate, t_return, 0);
 
     {
         int exit_fail;

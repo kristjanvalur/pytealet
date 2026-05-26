@@ -110,7 +110,7 @@ void PyTealetTstate_Init(PyTealetTstate *saved);
  * - dst_is_new=1 clears frame fields in dst
  * - dst_is_new=0 clears frame fields in src
  */
-void PyTealetTstate_Copy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new);
+void PyTealetTstate_Copy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new, int copy_context);
 /* undo the copy operation in case of error */
 void PyTealetTstate_UndoCopy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new);
 
@@ -118,7 +118,7 @@ void PyTealetTstate_UndoCopy(PyTealetTstate *dst, PyThreadState *src, int dst_is
 void PyTealetTstate_Duplicate(PyTealetTstate *dst, const PyTealetTstate *src);
 
 /* drop the thread state, e.g. on error or when cleaning up */
-void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet);
+void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet, int with_context);
 
 /* save the current thread state into the tealet state */
 void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src);
