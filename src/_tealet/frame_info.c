@@ -176,11 +176,6 @@ void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet
 #if defined(PY312P)
     PyTealetFrameInfo_ExposeFrames(info);
 #endif
-    if (dustbin_tealet) {
-        PyTealet_dustbin_push(dustbin_tealet, (PyObject *)info->frame);
-        info->frame = NULL;
-    } else {
-        Py_CLEAR(info->frame);
-    }
+    PyTealet_CLEAR(dustbin_tealet, info->frame);
 #endif
 }

@@ -103,22 +103,12 @@ static void PyTealetTstate_IncRef(PyTealetTstate *saved, int with_context) {
 
 static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_tealet, int with_context) {
     assert(saved->has_state == 1);
-    if (dustbin_tealet) {
+    
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
-        PyTealet_dustbin_push(dustbin_tealet, saved->delete_later);
+    PyTealet_XDECREF(dustbin_tealet, saved->delete_later);
 #endif
-        if (with_context) {
-            PyTealet_dustbin_push(dustbin_tealet, saved->context);
-            saved->context = NULL;
-        }
-    } else {
-#if defined(PY_HAS_TSTATE_DELETE_LATER)
-        Py_XDECREF(saved->delete_later);
-#endif
-        if (with_context) {
-            Py_CLEAR(saved->context);
-        }
-    }
+    if (with_context)
+        PyTealet_CLEAR(dustbin_tealet, saved->context);
 }
 
 /* Debug-only hygiene helper: clear active Python thread state slots. */
@@ -213,13 +203,9 @@ void PyTealetTstate_Duplicate(PyTealetTstate *dst, const PyTealetTstate *src) {
 
 /* drop our own threadstate refs, e.g. after failure, or at tealet end */
 void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet, int with_context) {
-    if (with_context && dst->context) {
+    if (with_context) {
         /* context can live outside the has_state flag*/
-        if (dustbin_tealet)
-            PyTealet_dustbin_push(dustbin_tealet, dst->context);
-        else
-            Py_DECREF(dst->context);
-        dst->context = NULL;
+        PyTealet_CLEAR(dustbin_tealet, dst->context);
     }
     if (!dst->has_state)
         return;
@@ -438,25 +424,20 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
 /* clean up the frame state, including releasing the local frame stack */
 void PyTealetTstate_Frame_Cleanup(PyThreadState *tstate, tealet_t *dustbin_tealet) {
 #if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
-    PyTealet_dustbin_push(dustbin_tealet, tstate->curexc_type);
-    PyTealet_dustbin_push(dustbin_tealet, tstate->curexc_value);
-    PyTealet_dustbin_push(dustbin_tealet, tstate->curexc_traceback);
-    tstate->curexc_type = NULL;
-    tstate->curexc_value = NULL;
-    tstate->curexc_traceback = NULL;
+    PyTealet_CLEAR(dustbin_tealet, tstate->curexc_type);
+    PyTealet_CLEAR(dustbin_tealet, tstate->curexc_value);
+    PyTealet_CLEAR(dustbin_tealet, tstate->curexc_traceback
 #endif
     PyTealet_dustbin_push(dustbin_tealet, tstate->exc_state.exc_value);
     memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
     tstate->exc_info = &tstate->exc_state;
 
 #if defined(PY_HAS_TSTATE_FRAME)
-    PyTealet_dustbin_push(dustbin_tealet, (PyObject *)tstate->frame);
-    tstate->frame = NULL;
+    PyTealet_CLEAR(dustbin_tealet, tstate->frame);
 #endif
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
     /* If a tealet exits while owning an active executor, release it. */
-    PyTealet_dustbin_push(dustbin_tealet, tstate->current_executor);
-    tstate->current_executor = NULL;
+    PyTealet_CLEAR(dustbin_tealet, tstate->current_executor);
 #endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
     /* if we have a datastack chunk, we need to release the frames in it before we can drop the tstate. */

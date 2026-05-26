@@ -32,4 +32,26 @@ Py_ssize_t PyTealet_WeaklistOffset(void);
 /* push an object into the tealet dustbin, to be decrefed later. */
 void PyTealet_dustbin_push(tealet_t *tealet, PyObject *obj);
 
+/* a macro, similar to Py_CLEAR, but optionally pushes it to the dustbin */
+#define PyTealet_CLEAR(tealet, obj) \
+    do { \
+        if ((obj) && (tealet)) { \
+            PyObject *_tmp = (PyObject *)(obj); \
+            (obj) = NULL; \
+            PyTealet_dustbin_push(tealet, _tmp); \
+        } else { \
+            Py_CLEAR(obj); \
+        } \
+    } while (0)
+
+ /* and a similar XDECREF */
+#define PyTealet_XDECREF(tealet, obj) \
+    do { \
+        if ((obj) && (tealet)) { \
+            PyTealet_dustbin_push(tealet, (PyObject *)(obj)); \
+        } else { \
+            Py_XDECREF(obj); \
+        } \
+    } while (0)
+
 #endif
