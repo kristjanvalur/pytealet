@@ -132,6 +132,15 @@ static PyObject *module_thread_kill(PyObject *mod, PyObject *args) {
     return PyTealet_ThreadKill(mstate, cleanup_passes);
 }
 
+static PyObject *module_error_was_remote(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    return PyBool_FromLong(PyTealet_ErrorWasRemote(mstate));
+}
+
 /* Get/set dormant tealet frame introspection at runtime.
  * - frame_introspection() -> bool
  * - frame_introspection(enabled) -> bool
@@ -175,6 +184,7 @@ static PyMethodDef module_methods[] = {
     {"thread_cleanup", (PyCFunction)module_thread_cleanup, METH_VARARGS, ""},
     {"active_tealets", (PyCFunction)module_active_tealets, METH_NOARGS, ""},
     {"thread_kill", (PyCFunction)module_thread_kill, METH_VARARGS, ""},
+    {"error_was_remote", (PyCFunction)module_error_was_remote, METH_NOARGS, ""},
     {"frame_introspection", (PyCFunction)module_frame_introspection, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };

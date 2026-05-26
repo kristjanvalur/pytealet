@@ -52,6 +52,7 @@ struct PyTealetMainData {
     uint64_t throw_next_token;    /* monotonically increasing throw token generator */
     uint64_t pending_throw_token; /* token to deliver on the next switch/run return */
     PyObject *throw_records;      /* dict[token] -> (exc_instance, fallback_tealet_or_None) */
+    int last_error_remote;        /* set when the most recently raised exception was remotely delivered */
 };
 
 /* initial number of slots in dustbin, to avoid realloc on push */
@@ -129,6 +130,7 @@ static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, 
 static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out,
                                        PyObject **fallback_out);
 static PyObject *pytealet_take_pending_throw_exception(PyTealetMainData *mdata);
+static void pytealet_clear_last_error_remote(PyTealetModuleState *mstate);
 static void pytealet_clear_pending_exception(PyTealetMainData *mdata);
 static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result);
 static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
@@ -756,9 +758,42 @@ static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyT
     Py_DECREF(result);
     assert(PyExceptionInstance_Check(exc));
 
+    mdata->last_error_remote = 1;
     pytealet_err_set_raised_exception(exc);
     Py_XDECREF(fallback);
     return NULL;
+}
+
+/* Clear the per-thread remote-error flag at switching API entry.
+ * This helper never propagates lookup errors.
+ */
+static void pytealet_clear_last_error_remote(PyTealetModuleState *mstate) {
+    PyTealetMainData *mdata = NULL;
+
+    assert(mstate);
+
+    (void)GetMain(mstate, 0, &mdata);
+    if (PyErr_Occurred()) {
+        PyErr_WriteUnraisable(NULL);
+        PyErr_Clear();
+        return;
+    }
+    if (mdata)
+        mdata->last_error_remote = 0;
+}
+
+int PyTealet_ErrorWasRemote(PyTealetModuleState *mstate) {
+    PyTealetMainData *mdata = NULL;
+
+    if (!mstate)
+        return 0;
+
+    (void)GetMain(mstate, 0, &mdata);
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+        return 0;
+    }
+    return mdata ? (mdata->last_error_remote != 0) : 0;
 }
 
 /* Resolve a weakref to a strong reference when alive.
@@ -1090,6 +1125,8 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     if (!mstate)
         return NULL;
 
+    pytealet_clear_last_error_remote(mstate);
+
     current = GetCurrent(mstate, NULL, 0, &mdata);
     if (!current && PyErr_Occurred())
         return NULL;
@@ -1230,6 +1267,8 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     Py_ssize_t i;
     if (!mstate)
         return NULL;
+
+    pytealet_clear_last_error_remote(mstate);
 
     if (nargs > 1) {
         PyErr_Format(PyExc_TypeError, "switch() takes at most 1 argument (%zd given)", nargs);
@@ -1464,6 +1503,8 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
 
     if (!mstate)
         return NULL;
+
+    pytealet_clear_last_error_remote(mstate);
 
     if (nargs != 1) {
         PyErr_Format(PyExc_TypeError, "throw() takes 1 argument (%zd given)", nargs);
@@ -1884,6 +1925,7 @@ PyTealetObject *GetMain(PyTealetModuleState *mstate, int create, PyTealetMainDat
         }
         mdata->throw_next_token = 0;
         mdata->pending_throw_token = 0;
+        mdata->last_error_remote = 0;
         if (PyList_SetSlice(mdata->dustbin, 0, DUSTBIN_PREALLOC, NULL) < 0) {
             goto fail;
         }

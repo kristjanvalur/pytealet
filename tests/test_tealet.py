@@ -1120,6 +1120,30 @@ class TestSetException:
         assert t.state == _tealet.STATE_EXIT
         assert seen == ["boom"]
 
+    def test_error_was_remote_true_for_delivered_pending_exception(self):
+        t = _tealet.tealet()
+        assert _tealet.error_was_remote() is False
+
+        t.set_exception(RuntimeError("boom-remote-flag"))
+        with pytest.raises(RuntimeError):
+            _tealet.current().switch("resume")
+        assert _tealet.error_was_remote() is True
+
+        # Any new switching API call clears the flag on entry.
+        assert _tealet.current().switch() is None
+        assert _tealet.error_was_remote() is False
+
+    def test_error_was_remote_false_for_panic_with_pending_exception(self):
+        t = _tealet.tealet()
+        pending = RuntimeError("boom-panic-origin")
+        t.set_exception(pending)
+
+        with pytest.raises(_tealet.PanicError) as exc:
+            _tealet.current().switch("panic", panic=True)
+
+        assert exc.value.exception is pending
+        assert _tealet.error_was_remote() is False
+
     def test_set_exception_with_fallback_redirects_uncaught_unwind(self):
         def worker(current, _arg):
             current.main().switch("paused")
