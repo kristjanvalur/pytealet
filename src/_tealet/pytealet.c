@@ -130,7 +130,6 @@ static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, 
 static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out,
                                        PyObject **fallback_out);
 static PyObject *pytealet_take_pending_throw_exception(PyTealetMainData *mdata);
-static void pytealet_clear_last_error_remote(PyTealetModuleState *mstate);
 static void pytealet_clear_pending_exception(PyTealetMainData *mdata);
 static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result);
 static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
@@ -764,24 +763,6 @@ static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyT
     return NULL;
 }
 
-/* Clear the per-thread remote-error flag at switching API entry.
- * This helper never propagates lookup errors.
- */
-static void pytealet_clear_last_error_remote(PyTealetModuleState *mstate) {
-    PyTealetMainData *mdata = NULL;
-
-    assert(mstate);
-
-    (void)GetMain(mstate, 0, &mdata);
-    if (PyErr_Occurred()) {
-        PyErr_WriteUnraisable(NULL);
-        PyErr_Clear();
-        return;
-    }
-    if (mdata)
-        mdata->last_error_remote = 0;
-}
-
 int PyTealet_ErrorWasRemote(PyTealetModuleState *mstate) {
     PyTealetMainData *mdata = NULL;
 
@@ -1125,11 +1106,11 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     if (!mstate)
         return NULL;
 
-    pytealet_clear_last_error_remote(mstate);
-
     current = GetCurrent(mstate, NULL, 0, &mdata);
     if (!current && PyErr_Occurred())
         return NULL;
+    if (mdata)
+        mdata->last_error_remote = 0;
     if (CheckTarget(mstate, target, current, "run()"))
         return NULL;
 
@@ -1268,7 +1249,11 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     if (!mstate)
         return NULL;
 
-    pytealet_clear_last_error_remote(mstate);
+    current = GetCurrent(mstate, NULL, 0, &mdata);
+    if (!current && PyErr_Occurred())
+        return NULL;
+    if (mdata)
+        mdata->last_error_remote = 0;
 
     if (nargs > 1) {
         PyErr_Format(PyExc_TypeError, "switch() takes at most 1 argument (%zd given)", nargs);
@@ -1310,10 +1295,6 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
         return NULL;
     }
     assert(target->tealet);
-    /* we don't have a source tealet, so we must get it from the thread state. */
-    current = GetCurrent(mstate, NULL, 0, &mdata);
-    if (!current && PyErr_Occurred())
-        return NULL;
     if (CheckTarget(mstate, target, current, "switch()"))
         return NULL;
 
@@ -1504,7 +1485,11 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
     if (!mstate)
         return NULL;
 
-    pytealet_clear_last_error_remote(mstate);
+    current = GetCurrent(mstate, NULL, 0, &mdata);
+    if (!current && PyErr_Occurred())
+        return NULL;
+    if (mdata)
+        mdata->last_error_remote = 0;
 
     if (nargs != 1) {
         PyErr_Format(PyExc_TypeError, "throw() takes 1 argument (%zd given)", nargs);
@@ -1534,10 +1519,6 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
         PyErr_SetString(PyExc_TypeError, "throw() missing required argument 'exception'");
         return NULL;
     }
-
-    current = GetCurrent(mstate, NULL, 0, &mdata);
-    if (!current && PyErr_Occurred())
-        return NULL;
 
     if (target->state == STATE_RUN) {
         if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
