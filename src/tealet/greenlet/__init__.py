@@ -26,18 +26,74 @@ ErrorWrapper = ErrorWrapper()  # stateless singleton
 
 tealetmap = weakref.WeakValueDictionary()
 _RUN_UNSET = object()
+# Keep a strong reference to wrappers while they are actively switching.
+# This guards dealloc/resurrection edge cases exercised by
+# tests/compat_greenlet/test_greenlet.py::TestGreenlet::test_dealloc_switch_args_not_lost.
+_running_refs = {}
+_running_refcounts = {}
+
+
+def _pin_running(tealet, gr):
+    # Reference-count pins because the same raw tealet can be re-entered
+    # through nested switch paths.
+    _running_refs[tealet] = gr
+    _running_refcounts[tealet] = _running_refcounts.get(tealet, 0) + 1
+
+
+def _unpin_running(tealet):
+    # Drop the last strong pin once control has unwound out of switch/run.
+    count = _running_refcounts.get(tealet, 0)
+    if count <= 1:
+        _running_refcounts.pop(tealet, None)
+        _running_refs.pop(tealet, None)
+    else:
+        _running_refcounts[tealet] = count - 1
 
 def getcurrent():
-    t = _tealet.current()
-    try:
-        return tealetmap[t]
-    except KeyError:
-        assert _tealet.main() is t
-        return greenlet(parent=t)
+    return greenlet._get_or_create_wrapper(_tealet.current())
 
 class greenlet(object):
     # class defaults for attributes that remain safe if __init__ is skipped
     _is_running = False
+
+    @classmethod
+    def _get_or_create_main_wrapper(cls, main_t=None):
+        if main_t is None:
+            main_t = _tealet.main()
+        main_g = tealetmap.get(main_t)
+        if main_g is None:
+            main_g = cls(parent=main_t)
+        return main_g
+
+    @classmethod
+    def _create_surrogate_wrapper(cls, raw_t, main_g):
+        # Build a minimal wrapper when a live raw tealet exists but its Python
+        # wrapper was collected during teardown/dealloc edge paths.
+        gr = cls.__new__(cls)
+        gr._tealet = raw_t
+        gr.parent = main_g
+        gr._main = main_g._main
+        gr._garbage = []
+        tealetmap[raw_t] = gr
+        return gr
+
+    @classmethod
+    def _get_or_create_wrapper(cls, raw_t):
+        # Resolve the current raw tealet to a wrapper without asserting that
+        # only main can be missing from tealetmap.
+        gr = tealetmap.get(raw_t)
+        if gr is not None:
+            return gr
+
+        running = _running_refs.get(raw_t)
+        if running is not None:
+            return running
+
+        main_t = _tealet.main()
+        if main_t is raw_t:
+            return cls._get_or_create_main_wrapper(main_t)
+
+        return cls._create_surrogate_wrapper(raw_t, cls._get_or_create_main_wrapper(main_t))
 
     def __init__(self, run=_RUN_UNSET, parent=None):
         # must create it on this thread, not dynamically when run
@@ -173,20 +229,24 @@ class greenlet(object):
                     raise AttributeError("run")
                 if "run" in getattr(self, "__dict__", {}):
                     del self.run
+                _pin_running(tealet, self)
                 self._is_running = True
                 try:
                     # here we can tweak how we create the new stack
                     arg = tealet.run(self._greenlet_main, (run, arg))
                 finally:
                     self._is_running = False
+                    _unpin_running(tealet)
             else:
                 if not self:
                     return self._parent()._switch(arg)
+                _pin_running(tealet, self)
                 self._is_running = True
                 try:
                     arg = tealet.switch(arg)
                 finally:
                     self._is_running = False
+                    _unpin_running(tealet)
         return self._Result(arg)
 
     @staticmethod
@@ -216,6 +276,8 @@ class greenlet(object):
     @staticmethod
     def _Result(arg):
         # The return value is stored in the current greenlet.
+        if arg is None:
+            return None
         err, args, kwds = arg
         if err:
             greenlet._raise_triplet(err, args, kwds)
@@ -242,7 +304,7 @@ class greenlet(object):
             arg = (False, (e,), None)
         except BaseException:
             arg = sys.exc_info()
-        p = getcurrent()._parent()
+        p = greenlet._get_or_create_wrapper(current)._parent()
         try:
             return p._tealet, arg
         finally:
