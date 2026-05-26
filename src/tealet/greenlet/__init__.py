@@ -37,7 +37,6 @@ def getcurrent():
 
 class greenlet(object):
     # class defaults for attributes that remain safe if __init__ is skipped
-    _gr_context = None
     _is_running = False
 
     def __init__(self, run=_RUN_UNSET, parent=None):
@@ -123,15 +122,12 @@ class greenlet(object):
         tealet = getattr(self, "_tealet", None)
         if self._is_running and tealet is not None and tealet.thread_id != threading.get_ident():
             raise ValueError("running in a different thread")
-        if self._gr_context is not None:
-            return self._gr_context
-
-        if tealet is not None:
-            current = tealet.context
-            if current is not None and current:
-                self._gr_context = current
-                return current
-        return None
+        if tealet is None:
+            return None
+        current = tealet.context
+        if current is not None and not current:
+            return None
+        return current
 
     @gr_context.setter
     def gr_context(self, value):
@@ -142,7 +138,6 @@ class greenlet(object):
         if value is not None and not isinstance(value, contextvars.Context):
             raise TypeError("greenlet context must be a contextvars.Context or None")
 
-        self._gr_context = value
         if tealet is not None:
             tealet.context = value
 
@@ -178,13 +173,10 @@ class greenlet(object):
                     raise AttributeError("run")
                 if "run" in getattr(self, "__dict__", {}):
                     del self.run
-                ctx = self._gr_context
-                if ctx is None:
-                    ctx = contextvars.Context()
                 self._is_running = True
                 try:
                     # here we can tweak how we create the new stack
-                    arg = tealet.run(self._greenlet_main, (run, arg, ctx))
+                    arg = tealet.run(self._greenlet_main, (run, arg))
                 finally:
                     self._is_running = False
             else:
@@ -239,19 +231,13 @@ class greenlet(object):
 
     @staticmethod
     def _greenlet_main(current, arg):
-        run, (err, args, kwds), ctx = arg
+        run, (err, args, kwds) = arg
         try:
             if not err:
-                def _call_run():
-                    return _tealet.hide_frame(run, args, kwds)
-
-                result = ctx.run(_call_run)
+                result = _tealet.hide_frame(run, args, kwds)
                 arg = (False, (result,), None)
             else:
-                def _raise():
-                    greenlet._raise_triplet(err, args, kwds)
-
-                ctx.run(_raise)
+                greenlet._raise_triplet(err, args, kwds)
         except GreenletExit as e:
             arg = (False, (e,), None)
         except BaseException:
