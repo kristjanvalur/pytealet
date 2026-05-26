@@ -857,13 +857,13 @@ class TestSwitch:
         assert _tealet.current().switch(panic=False) is None
         with pytest.raises(_tealet.PanicError) as exc:
             _tealet.current().switch("panic-value", panic=True)
-        assert exc.value.value == "panic-value"
-        assert exc.value.exception is None
+        assert exc.value.result() == "panic-value"
+        assert exc.value.exception() is None
 
         with pytest.raises(_tealet.PanicError) as exc2:
             _tealet.current().switch(panic=True)
-        assert exc2.value.value is None
-        assert exc2.value.exception is None
+        assert exc2.value.result() is None
+        assert exc2.value.exception() is None
 
     def test_switch_panic_payload_identity_from_tealet(self):
         payload = {"kind": "panic", "n": 7}
@@ -874,8 +874,8 @@ class TestSwitch:
 
         with pytest.raises(_tealet.PanicError) as exc:
             _tealet.tealet().run(worker, _tealet.main())
-        assert exc.value.value is payload
-        assert exc.value.exception is None
+        assert exc.value.result() is payload
+        assert exc.value.exception() is None
 
     def test_switch_panic_carries_pending_throw_exception(self):
         pending = RuntimeError("boom-pending")
@@ -885,8 +885,9 @@ class TestSwitch:
         with pytest.raises(_tealet.PanicError) as exc:
             _tealet.current().switch("panic", panic=True)
 
-        assert exc.value.value == "panic"
-        assert exc.value.exception is pending
+        assert exc.value.exception() is pending
+        with pytest.raises(RuntimeError, match="boom-pending"):
+            exc.value.result()
 
     def test_switch(self):
         status = [0]
@@ -1141,7 +1142,7 @@ class TestSetException:
         with pytest.raises(_tealet.PanicError) as exc:
             _tealet.current().switch("panic", panic=True)
 
-        assert exc.value.exception is pending
+        assert exc.value.exception() is pending
         assert _tealet.error_was_remote() is False
 
     def test_set_exception_with_fallback_redirects_uncaught_unwind(self):

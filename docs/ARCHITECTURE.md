@@ -54,6 +54,19 @@ Gets or sets dormant-tealet frame introspection at runtime.
 - With one argument, sets and returns the new setting.
 - Enabling can raise `RuntimeError` when compile-time support is disabled.
 
+```python
+_tealet.error_was_remote() -> bool
+```
+Returns whether the most recently raised exception from this thread's switching
+APIs (`run()`, `switch()`, `throw()`) was remotely delivered through queued
+exception injection (`set_exception`/`throw`), rather than raised locally as an
+operational/runtime error.
+
+Behavior notes:
+- The flag is thread-local and lineage-scoped.
+- The flag is cleared at entry to each switching API (`run`, `switch`, `throw`).
+- If there is no active lineage (no thread main), result is `False`.
+
 **Module-Level Classes:**
 
 ```python
@@ -91,6 +104,26 @@ Switches execution to this tealet, passing an optional argument.
   - `arg`: Optional value to pass to the target tealet
 - **Returns:** Value passed back when someone switches to us
 - **Thread-safe:** Only within same thread family
+
+```python
+tealet.set_exception(exception, fallback=None) -> None
+```
+Queues an exception instance to be delivered on the next switch boundary into
+this tealet lineage.
+- `exception` must be an exception instance.
+- `fallback` (optional) is a tealet to resume if the injected exception is not
+    caught by the target flow.
+
+```python
+tealet.throw(exception) -> result
+```
+Convenience API that combines injection and transfer.
+- `STATE_RUN` target: equivalent to `set_exception(exception, fallback=current)`
+    followed by `switch()`.
+- `STATE_NEW`/`STATE_STUB` target: equivalent to
+    `set_exception(exception, fallback=current)` followed by `run()`.
+- `run()` accepts missing callable arguments in this case because the queued
+    exception is delivered before worker-call dispatch.
 
 ```python
 tealet.belongs_to_current() -> bool
@@ -201,6 +234,25 @@ family.
 _tealet.StateError(TealetError)
 ```
 Raised when an operation is invalid for the tealet's current state.
+
+```python
+_tealet.PanicError(TealetError)
+```
+Raised for panic-transfer failures (for example `switch(..., panic=True)`).
+
+`PanicError` payload methods:
+- `.result()`: returns panic transfer payload if no injected exception was
+    attached; raises that injected exception otherwise.
+- `.exception()`: returns the pending injected exception consumed from the
+    throw queue when panic translation occurs, or `None`.
+
+Operational-vs-remote distinction:
+- Remote delivered exception (from pending throw queue): raised as the injected
+    exception instance itself, and `_tealet.error_was_remote()` becomes `True`
+    until the next switching API call.
+- Local operational/runtime failure (state/invalid/defunct/panic translation):
+    raised as `_tealet` operational exception classes, and
+    `_tealet.error_was_remote()` remains `False`.
 
 ---
 

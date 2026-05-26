@@ -6,6 +6,8 @@
 
 #include "pytealet_module.h"
 
+#include "descrobject.h"
+
 #include <assert.h>
 #include <string.h>
 
@@ -75,6 +77,92 @@ void pytealet_domain_lock_obj_unlock(PyObject *domain_lock_obj) {
 #else
     (void)domain_lock_obj;
 #endif
+}
+
+static PyObject *panic_error_get_slot(PyObject *self, const char *name) {
+    PyObject *value = PyObject_GetAttrString(self, name);
+    if (!value) {
+        if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            PyErr_Clear();
+            Py_RETURN_NONE;
+        }
+        return NULL;
+    }
+    return value;
+}
+
+static PyObject *panic_error_exception(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
+    return panic_error_get_slot(self, "_exception");
+}
+
+static PyObject *panic_error_result(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
+    PyObject *exc = panic_error_get_slot(self, "_exception");
+    PyObject *result;
+
+    if (!exc)
+        return NULL;
+
+    if (exc != Py_None) {
+        if (!PyExceptionInstance_Check(exc)) {
+            Py_DECREF(exc);
+            PyErr_SetString(PyExc_TypeError, "PanicError internal _exception must be an exception instance or None");
+            return NULL;
+        }
+        PyErr_SetObject((PyObject *)Py_TYPE(exc), exc);
+        Py_DECREF(exc);
+        return NULL;
+    }
+    Py_DECREF(exc);
+
+    result = panic_error_get_slot(self, "_result");
+    if (!result)
+        return NULL;
+    return result;
+}
+
+static PyMethodDef panic_error_result_method = {
+    "result",
+    (PyCFunction)panic_error_result,
+    METH_NOARGS,
+    "Return panic payload, or raise stored remote exception if present.",
+};
+
+static PyMethodDef panic_error_exception_method = {
+    "exception",
+    (PyCFunction)panic_error_exception,
+    METH_NOARGS,
+    "Return stored remote exception instance or None.",
+};
+
+static int panic_error_install_methods(PyObject *panic_error_type_obj) {
+    PyTypeObject *panic_type;
+    PyObject *descriptor;
+
+    if (!PyType_Check(panic_error_type_obj)) {
+        PyErr_SetString(PyExc_TypeError, "PanicError object is not a type");
+        return -1;
+    }
+    panic_type = (PyTypeObject *)panic_error_type_obj;
+
+    descriptor = PyDescr_NewMethod(panic_type, &panic_error_result_method);
+    if (!descriptor)
+        return -1;
+    if (PyObject_SetAttrString(panic_error_type_obj, "result", descriptor) < 0) {
+        Py_DECREF(descriptor);
+        return -1;
+    }
+    Py_DECREF(descriptor);
+
+    descriptor = PyDescr_NewMethod(panic_type, &panic_error_exception_method);
+    if (!descriptor)
+        return -1;
+    if (PyObject_SetAttrString(panic_error_type_obj, "exception", descriptor) < 0) {
+        Py_DECREF(descriptor);
+        return -1;
+    }
+    Py_DECREF(descriptor);
+
+    return 0;
 }
 
 static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
@@ -261,6 +349,8 @@ static int pytealet_module_exec(PyObject *m) {
 
     mstate->panic_error = PyErr_NewException("_tealet.PanicError", mstate->tealet_error, NULL);
     if (!mstate->panic_error)
+        return -1;
+    if (panic_error_install_methods(mstate->panic_error) < 0)
         return -1;
     Py_INCREF(mstate->panic_error);
     if (PyModule_AddObject(m, "PanicError", mstate->panic_error) < 0)

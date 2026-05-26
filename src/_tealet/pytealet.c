@@ -210,14 +210,14 @@ static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const ch
 
     if (!value)
         value = Py_None;
-    if (PyObject_SetAttrString(exc_obj, "value", value) < 0) {
+    if (PyObject_SetAttrString(exc_obj, "_result", value) < 0) {
         Py_DECREF(exc_obj);
         return -1;
     }
 
     if (!exception)
         exception = Py_None;
-    if (PyObject_SetAttrString(exc_obj, "exception", exception) < 0) {
+    if (PyObject_SetAttrString(exc_obj, "_exception", exception) < 0) {
         Py_DECREF(exc_obj);
         return -1;
     }
@@ -529,7 +529,7 @@ static void pytealet_clear_pending_exception(PyTealetMainData *mdata) {
 
 /* Consume mdata pending throw token and return the queued exception instance.
  * Any fallback metadata is discarded here because panic errors expose the
- * exception via PanicError.exception instead of raising it through the
+ * exception via PanicError.exception() instead of raising it through the
  * normal maybe_raise_pending_throw path.
  */
 static PyObject *pytealet_take_pending_throw_exception(PyTealetMainData *mdata) {
