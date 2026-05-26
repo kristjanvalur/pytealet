@@ -11,7 +11,6 @@
 #include "structmember.h"
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -2629,12 +2628,11 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     }
 
     /* We only have borrowed references from the calling tealet.
-     * the argument to the function will get their own reference, but
-     * anything we need after the function we keep our own references
-     * for, because when the function returns, the calling tealet
-     * may have exited and dropped the references we borrowed.
+     * Keep tealet alive for the full callback lifetime because caller teardown
+     * can drop borrowed owners. For worker invocation, hold explicit refs to
+     * func/farg only around PyObject_CallFunctionObjArgs so we do not rely on
+     * call-helper internals for argument lifetime guarantees.
      */
-    Py_INCREF(func);
     Py_INCREF(tealet);
 
     /* The tealet now has its own private Thread state and we can modify safely.
@@ -2648,7 +2646,11 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     result = pytealet_maybe_raise_pending_throw(mdata, tealet, Py_NewRef(Py_None));
     if (result) {
         Py_DECREF(result);
+        Py_INCREF(func);
+        Py_INCREF(farg);
         result = PyObject_CallFunctionObjArgs(func, tealet, farg, NULL);
+        Py_DECREF(func);
+        Py_DECREF(farg);
     }
 
     pytealet_process_return_arg(mstate, tealet, result, &return_to, &return_arg, &return_exc);
@@ -2702,7 +2704,6 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     t_return = return_to->tealet;
 
     /* decref the objects after the switch */
-    PyTealet_dustbin_push(t_return, func);
     PyTealet_dustbin_push(t_return, (PyObject *)tealet);
     PyTealet_dustbin_push(t_return, (PyObject *)return_to);
 
