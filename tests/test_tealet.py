@@ -858,10 +858,12 @@ class TestSwitch:
         with pytest.raises(_tealet.PanicError) as exc:
             _tealet.current().switch("panic-value", panic=True)
         assert exc.value.value == "panic-value"
+        assert exc.value.exception is None
 
         with pytest.raises(_tealet.PanicError) as exc2:
             _tealet.current().switch(panic=True)
         assert exc2.value.value is None
+        assert exc2.value.exception is None
 
     def test_switch_panic_payload_identity_from_tealet(self):
         payload = {"kind": "panic", "n": 7}
@@ -873,6 +875,18 @@ class TestSwitch:
         with pytest.raises(_tealet.PanicError) as exc:
             _tealet.tealet().run(worker, _tealet.main())
         assert exc.value.value is payload
+        assert exc.value.exception is None
+
+    def test_switch_panic_carries_pending_throw_exception(self):
+        pending = RuntimeError("boom-pending")
+        t = _tealet.tealet()
+        t.set_exception(pending)
+
+        with pytest.raises(_tealet.PanicError) as exc:
+            _tealet.current().switch("panic", panic=True)
+
+        assert exc.value.value == "panic"
+        assert exc.value.exception is pending
 
     def test_switch(self):
         status = [0]
@@ -1014,10 +1028,48 @@ class TestSetException:
             for u in seen
         )
 
-    def test_throw_requires_running_target(self):
-        t = _tealet.tealet()
-        with pytest.raises(_tealet.StateError):
-            t.throw(RuntimeError("boom-throw-run"))
+    def test_throw_on_new_target_injects_at_run_entry(self):
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            assert t.throw(RuntimeError("boom-throw-run")) is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen, "expected unraisable error for uncaught thrown exception"
+        assert any(
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw-run"
+            for u in seen
+        )
+
+    def test_run_allows_dummy_args_when_pending_exception_exists(self):
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            t.set_exception(RuntimeError("boom-dummy-run"))
+            assert t.run("dummy-func", {"dummy": True}) is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen, "expected unraisable error for uncaught injected exception"
+        assert any(
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-dummy-run"
+            for u in seen
+        )
 
     def test_set_exception_before_run_injects_at_run_entry(self):
         entered = []

@@ -128,6 +128,7 @@ static uint64_t pytealet_throw_next_token(PyTealetMainData *mdata);
 static int pytealet_throw_registry_set(PyTealetMainData *mdata, uint64_t token, PyObject *exc, PyObject *fallback);
 static int pytealet_throw_registry_pop(PyTealetMainData *mdata, uint64_t token, PyObject **exc_out,
                                        PyObject **fallback_out);
+static PyObject *pytealet_take_pending_throw_exception(PyTealetMainData *mdata);
 static void pytealet_clear_pending_exception(PyTealetMainData *mdata);
 static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result);
 static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
@@ -185,7 +186,8 @@ static int PyTealet_CheckExact(PyObject *op, PyTealetModuleState *mstate) {
     return mstate && mstate->tealet_type && (Py_TYPE(op) == mstate->tealet_type);
 }
 
-static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const char *what, PyObject *value) {
+static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const char *what, PyObject *value,
+                                           PyObject *exception) {
     PyObject *exc_type;
     PyObject *msg_obj;
     PyObject *exc_obj;
@@ -212,6 +214,13 @@ static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const ch
         return -1;
     }
 
+    if (!exception)
+        exception = Py_None;
+    if (PyObject_SetAttrString(exc_obj, "exception", exception) < 0) {
+        Py_DECREF(exc_obj);
+        return -1;
+    }
+
     PyErr_SetObject(exc_type, exc_obj);
     Py_DECREF(exc_obj);
     return -1;
@@ -221,11 +230,15 @@ static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const ch
  * panic_value is an owned reference that is consumed (stolen) by this helper.
  */
 static int PyTealet_TranslateTealetError(PyTealetModuleState *mstate, int err, const char *what,
-                                         PyObject *panic_value) {
+                                         PyObject *panic_value, PyObject *panic_exception) {
     const char *msg = what ? what : "tealet operation failed";
     if (err != TEALET_ERR_PANIC && panic_value) {
         Py_DECREF(panic_value);
         panic_value = NULL;
+    }
+    if (err != TEALET_ERR_PANIC && panic_exception) {
+        Py_DECREF(panic_exception);
+        panic_exception = NULL;
     }
     if (err == 0)
         return 0;
@@ -241,7 +254,8 @@ static int PyTealet_TranslateTealetError(PyTealetModuleState *mstate, int err, c
         return -1;
     }
     if (err == TEALET_ERR_PANIC) {
-        int tr = PyTealet_SetPanicErrorWithValue(mstate, msg, panic_value ? panic_value : Py_None);
+        int tr = PyTealet_SetPanicErrorWithValue(mstate, msg, panic_value ? panic_value : Py_None, panic_exception);
+        Py_XDECREF(panic_exception);
         Py_XDECREF(panic_value);
         return tr;
     }
@@ -510,6 +524,37 @@ static void pytealet_clear_pending_exception(PyTealetMainData *mdata) {
     }
     Py_XDECREF(old_exc);
     Py_XDECREF(old_fallback);
+}
+
+/* Consume mdata pending throw token and return the queued exception instance.
+ * Any fallback metadata is discarded here because panic errors expose the
+ * exception via PanicError.exception instead of raising it through the
+ * normal maybe_raise_pending_throw path.
+ */
+static PyObject *pytealet_take_pending_throw_exception(PyTealetMainData *mdata) {
+    uint64_t token;
+    int pop_rc;
+    PyObject *exc = NULL;
+    PyObject *fallback = NULL;
+
+    assert(mdata);
+
+    token = mdata->pending_throw_token;
+    if (token == 0)
+        return NULL;
+
+    mdata->pending_throw_token = 0;
+    pop_rc = pytealet_throw_registry_pop(mdata, token, &exc, &fallback);
+    if (pop_rc < 0) {
+        PyErr_WriteUnraisable(NULL);
+        PyErr_Clear();
+        return NULL;
+    }
+    if (pop_rc == 0)
+        return NULL;
+
+    Py_XDECREF(fallback);
+    return exc;
 }
 
 /* Return 1 if needle appears in raised exception's cause/context chain,
@@ -1100,8 +1145,16 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     }
 
     if (func == NULL) {
-        PyErr_SetString(PyExc_TypeError, "run() missing required argument 'function' (pos 1)");
-        return NULL;
+        if (mdata && mdata->pending_throw_token != 0) {
+            /* When an injected exception is already queued for this lineage,
+             * worker call arguments are never reached. Allow run() to proceed
+             * without a real callable.
+             */
+            func = Py_None;
+        } else {
+            PyErr_SetString(PyExc_TypeError, "run() missing required argument 'function' (pos 1)");
+            return NULL;
+        }
     }
     if (farg == NULL)
         farg = Py_None;
@@ -1142,10 +1195,13 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Release(&current->frame_info, NULL);
     if (fail) {
+        PyObject *panic_exception = NULL;
         if (fail != TEALET_ERR_PANIC)
             pytealet_clear_pending_exception(mdata);
+        else
+            panic_exception = pytealet_take_pending_throw_exception(mdata);
         PyTealet_TranslateTealetError(mstate, fail, "tealet run failed",
-                                      fail == TEALET_ERR_PANIC ? (PyObject *)switch_arg : NULL);
+                                      fail == TEALET_ERR_PANIC ? (PyObject *)switch_arg : NULL, panic_exception);
         result = NULL;
     } else {
         result = (PyObject *)switch_arg;
@@ -1236,12 +1292,16 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     dustbin_clear(current->tealet);
 
     if (fail) {
+        PyObject *panic_exception = NULL;
         if (fail != TEALET_ERR_PANIC) {
             pytealet_clear_pending_exception(mdata);
             Py_DECREF(pyarg);
             switch_arg = NULL; /* non-panic errors don't return a value */
+        } else {
+            panic_exception = pytealet_take_pending_throw_exception(mdata);
         }
-        PyTealet_TranslateTealetError(mstate, fail, "tealet switch failed", (PyObject *)switch_arg);
+        PyTealet_TranslateTealetError(mstate, fail, "tealet switch failed", (PyObject *)switch_arg,
+                                      panic_exception);
         return NULL;
     }
     result = (PyObject *)switch_arg;
@@ -1387,8 +1447,9 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
     Py_RETURN_NONE;
 }
 
-/* Convenience API: schedule exception for a RUN target and route uncaught
- * unwind back to the current tealet, then switch immediately.
+/* Convenience API: schedule exception for target and transfer immediately.
+ * - RUN target: inject then switch.
+ * - NEW/STUB target: inject then run.
  *
  * This does not guarantee a switch back to the caller: target code may catch
  * the injected exception and switch to a different tealet.
@@ -1433,18 +1494,24 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
         return NULL;
     }
 
-    if (target->state != STATE_RUN) {
-        PyErr_SetString(mstate->state_error, "throw() target must be active");
-        return NULL;
-    }
-
     current = GetCurrent(mstate, NULL, 0, &mdata);
     if (!current && PyErr_Occurred())
         return NULL;
 
-    if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
-        return NULL;
-    return pytealet_switch(self, defining_class, NULL, 0, NULL);
+    if (target->state == STATE_RUN) {
+        if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
+            return NULL;
+        return pytealet_switch(self, defining_class, NULL, 0, NULL);
+    }
+
+    if (target->state == STATE_NEW || target->state == STATE_STUB) {
+        if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
+            return NULL;
+        return pytealet_run(self, defining_class, NULL, 0, NULL);
+    }
+
+    PyErr_SetString(mstate->state_error, "throw() target must be active, new, or stub");
+    return NULL;
 }
 
 /* Context is thread-affine only while a tealet is actively running.
@@ -2594,7 +2661,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         int exit_fail;
         exit_fail = tealet_exit(t_return, (void *)return_arg, exit_mode | TEALET_XFER_NOFAIL);
         if (exit_fail) {
-            PyTealet_TranslateTealetError(mstate, exit_fail, "tealet exit failed", NULL);
+            PyTealet_TranslateTealetError(mstate, exit_fail, "tealet exit failed", NULL, NULL);
             PyErr_WriteUnraisable(func);
             abort();
         }
