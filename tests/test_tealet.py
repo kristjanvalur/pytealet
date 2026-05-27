@@ -672,8 +672,13 @@ class TestThreadOwnership:
         th.start()
         assert created.wait(timeout=1.0)
         try:
-            with pytest.raises(_tealet.InvalidError):
+            with pytest.raises(_tealet.ThreadMismatchError) as exc:
                 data["t"].run(lambda current, arg: current.main(), None)
+            assert "thread mismatch: run() not allowed from a different thread" in str(exc.value)
+            assert exc.value.operation == "run()"
+            assert exc.value.current_tid == _tealet.current().thread_id
+            assert exc.value.target_tid == data["t"].thread_id
+            assert isinstance(exc.value.target_alive, bool)
         finally:
             done.set()
             join_thread_or_fail(th)
@@ -701,7 +706,7 @@ class TestThreadOwnership:
         assert ready.wait(timeout=1.0)
         try:
             assert data["first"] == "paused"
-            with pytest.raises(_tealet.InvalidError):
+            with pytest.raises(_tealet.ThreadMismatchError):
                 data["t"].switch()
         finally:
             release.set()
@@ -728,7 +733,7 @@ class TestThreadOwnership:
             dup = _tealet.tealet(data["stub"])
             assert dup.thread_id == data["owner_tid"]
             assert dup.belongs_to_current() is False
-            with pytest.raises(_tealet.InvalidError):
+            with pytest.raises(_tealet.ThreadMismatchError):
                 dup.run(lambda current, arg: current.main(), None)
         finally:
             release.set()

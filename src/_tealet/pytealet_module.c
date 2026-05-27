@@ -359,6 +359,7 @@ static int pytealet_module_exec(PyObject *m) {
     mstate->tealet_type = NULL;
     mstate->tealet_error = NULL;
     mstate->invalid_error = NULL;
+    mstate->thread_mismatch_error = NULL;
     mstate->state_error = NULL;
     mstate->defunct_error = NULL;
     mstate->panic_error = NULL;
@@ -429,6 +430,14 @@ static int pytealet_module_exec(PyObject *m) {
     if (PyModule_AddObject(m, "InvalidError", mstate->invalid_error) < 0)
         return -1;
 
+    mstate->thread_mismatch_error =
+        PyErr_NewException("_tealet.ThreadMismatchError", mstate->invalid_error, NULL);
+    if (!mstate->thread_mismatch_error)
+        return -1;
+    Py_INCREF(mstate->thread_mismatch_error);
+    if (PyModule_AddObject(m, "ThreadMismatchError", mstate->thread_mismatch_error) < 0)
+        return -1;
+
     mstate->state_error = PyErr_NewException("_tealet.StateError", mstate->tealet_error, NULL);
     if (!mstate->state_error)
         return -1;
@@ -463,6 +472,7 @@ static int pytealet_module_traverse(PyObject *m, visitproc visit, void *arg) {
         return 0;
     Py_VISIT(mstate->tealet_error);
     Py_VISIT(mstate->invalid_error);
+    Py_VISIT(mstate->thread_mismatch_error);
     Py_VISIT(mstate->state_error);
     Py_VISIT(mstate->defunct_error);
     Py_VISIT(mstate->panic_error);
@@ -476,6 +486,7 @@ static int pytealet_module_clear(PyObject *m) {
         return 0;
     Py_CLEAR(mstate->tealet_error);
     Py_CLEAR(mstate->invalid_error);
+    Py_CLEAR(mstate->thread_mismatch_error);
     Py_CLEAR(mstate->state_error);
     Py_CLEAR(mstate->defunct_error);
     Py_CLEAR(mstate->panic_error);

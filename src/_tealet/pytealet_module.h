@@ -17,6 +17,7 @@ struct PyTealetModuleState {
     PyTypeObject *tealet_type;
     PyObject *tealet_error;
     PyObject *invalid_error;
+    PyObject *thread_mismatch_error;
     PyObject *state_error;
     PyObject *defunct_error;
     PyObject *panic_error;

@@ -2460,6 +2460,129 @@ int PyTealet_ThreadCleanupMdataForTeardown(PyTealetModuleState *mstate, PyTealet
     return pytealet_thread_cleanup_inner(mstate, mdata, NULL, 0, 1);
 }
 
+/* Best-effort thread liveness probe by inspecting threading._active.
+ * Returns 1 if we could query and populate alive_out, 0 if unavailable.
+ * Never leaves an exception set.
+ */
+static int pytealet_thread_ident_is_alive(unsigned long thread_id, int *alive_out) {
+    PyObject *threading_mod = NULL;
+    PyObject *active = NULL;
+    PyObject *tid_obj = NULL;
+    int contains = 0;
+
+    assert(alive_out);
+    *alive_out = 0;
+
+    if (thread_id == (unsigned long)PyThread_get_thread_ident()) {
+        *alive_out = 1;
+        return 1;
+    }
+
+    threading_mod = PyImport_ImportModule("threading");
+    if (!threading_mod) {
+        PyErr_Clear();
+        return 0;
+    }
+
+    active = PyObject_GetAttrString(threading_mod, "_active");
+    Py_DECREF(threading_mod);
+    if (!active) {
+        PyErr_Clear();
+        return 0;
+    }
+
+    tid_obj = PyLong_FromUnsignedLong(thread_id);
+    if (!tid_obj) {
+        Py_DECREF(active);
+        PyErr_Clear();
+        return 0;
+    }
+
+    if (PyDict_Check(active))
+        contains = PyDict_Contains(active, tid_obj);
+    else
+        contains = PyMapping_HasKey(active, tid_obj);
+
+    Py_DECREF(tid_obj);
+    Py_DECREF(active);
+
+    if (contains < 0) {
+        PyErr_Clear();
+        return 0;
+    }
+
+    *alive_out = contains ? 1 : 0;
+    return 1;
+}
+
+/* Raise a structured thread-mismatch exception that includes owner metadata.
+ * If exception construction fails, propagate the underlying failure.
+ */
+static int pytealet_raise_thread_mismatch(PyTealetModuleState *mstate, const char *operation,
+                                          unsigned long current_tid, unsigned long target_tid) {
+    PyObject *err_type;
+    PyObject *msg = NULL;
+    PyObject *exc = NULL;
+    PyObject *attr = NULL;
+    int target_alive = 0;
+    const char *op_name = operation ? operation : "operation";
+
+    assert(mstate);
+
+    (void)pytealet_thread_ident_is_alive(target_tid, &target_alive);
+    err_type = mstate->thread_mismatch_error;
+    if (!err_type) {
+        PyErr_SetString(PyExc_RuntimeError, "ThreadMismatchError is not initialized");
+        return -1;
+    }
+
+    msg = PyUnicode_FromFormat("thread mismatch: %s not allowed from a different thread "
+                               "(current=%lu, target=%lu, target_alive=%s)",
+                               op_name, current_tid, target_tid,
+                               target_alive ? "True" : "False");
+    if (!msg)
+        return -1;
+
+    exc = PyObject_CallOneArg(err_type, msg);
+    Py_DECREF(msg);
+    msg = NULL;
+    if (!exc)
+        return -1;
+
+    attr = PyLong_FromUnsignedLong(current_tid);
+    if (!attr || PyObject_SetAttrString(exc, "current_tid", attr) < 0)
+        goto error;
+    Py_DECREF(attr);
+    attr = NULL;
+
+    attr = PyLong_FromUnsignedLong(target_tid);
+    if (!attr || PyObject_SetAttrString(exc, "target_tid", attr) < 0)
+        goto error;
+    Py_DECREF(attr);
+    attr = NULL;
+
+    attr = PyBool_FromLong(target_alive);
+    if (!attr || PyObject_SetAttrString(exc, "target_alive", attr) < 0)
+        goto error;
+    Py_DECREF(attr);
+    attr = NULL;
+
+    attr = PyUnicode_FromString(op_name);
+    if (!attr || PyObject_SetAttrString(exc, "operation", attr) < 0)
+        goto error;
+    Py_DECREF(attr);
+    attr = NULL;
+
+    PyErr_SetObject(err_type, exc);
+    Py_DECREF(exc);
+    return -1;
+
+error:
+    Py_XDECREF(attr);
+    Py_XDECREF(exc);
+    return -1;
+}
+
 /* check if a target tealet is valid, compared to a reference one.
  * we primarily use the thread_ids stored on the objects but
  * also assert the main line relationship
@@ -2482,8 +2605,8 @@ mismatch:
     if (ref && ref->tealet && target->tealet) {
         assert(ref->tealet->main != target->tealet->main);
     }
-    PyErr_Format(mstate->invalid_error, "thread mismatch: %s not allowed from a different thread", operation);
-    return -1;
+    return pytealet_raise_thread_mismatch(mstate, operation, (unsigned long)PyThread_get_thread_ident(),
+                                          target ? target->owner_tid : 0UL);
 }
 
 /* ===================================================================== */
