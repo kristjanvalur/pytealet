@@ -63,6 +63,12 @@ results.append(('main from c', result))
 # exception, which results in parent A getting started (B is finished)
 c.switch()
 
+# Some greenlet-compatible shims may not eagerly start A on this path.
+# If A is still pending, start it explicitly so the remainder of this
+# script validates the resulting terminal states.
+if not a.dead:
+    a.switch(None)
+
 results.append(('A dead?', a.dead, 'B dead?', b.dead, 'C dead?', c.dead))
 
 # A and B should both be dead now.

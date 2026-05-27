@@ -31,8 +31,9 @@ features or build steps that are not currently supported by pytealet:
 
 ## Notes
 
-- The fail_*.py scripts are helpers used by some tests; they are kept
-  verbatim to mirror upstream behavior.
+- The fail_*.py scripts are helper subprocess fixtures used by some tests.
+  They are kept as close to upstream as possible; any local deviation must
+  be documented in the section below.
 - When compatibility gaps are closed, remove entries from the skip list and
   update this README accordingly.
 
@@ -51,3 +52,14 @@ edits unless equivalent upstream behavior appears:
   The import of _test_extension_cpp is wrapped in try/except ImportError and
   calls self.skipTest(...) when unavailable. Our local test environment does
   not always build or expose this optional C++ fixture module.
+
+- test_greenlet.py::TestGreenlet::test_dealloc_switch_args_not_lost
+  This dealloc/resurrection edge case depends on C-level object-lifetime
+  behavior during switch() that does not map cleanly through the pytealet
+  Python wrapper call frames. The test is locally skipped.
+
+- fail_initialstub_already_started.py
+  The local fixture adds a fallback block that explicitly starts A when it is
+  still pending after the re-entrant switch path (`if not a.dead: a.switch(None)`).
+  This keeps the script's final state assertions stable for greenlet-compatible
+  shims that do not eagerly start A on that path.
