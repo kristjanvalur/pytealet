@@ -26,6 +26,7 @@ ErrorWrapper = ErrorWrapper()  # stateless singleton
 
 tealetmap = weakref.WeakValueDictionary()
 _RUN_UNSET = object()
+
 # Keep a strong reference to wrappers while they are actively switching.
 # This guards dealloc/resurrection edge cases exercised by
 # tests/compat_greenlet/test_greenlet.py::TestGreenlet::test_dealloc_switch_args_not_lost.
@@ -211,12 +212,12 @@ class greenlet(object):
         return tealet is not None and tealet.state == _tealet.STATE_RUN
 
     def switch(self, *args, **kwds):
-        return self._switch_or_throw((args, kwds))
+        return self._switch_or_throw((args, kwds), None)
 
     def throw(self, t=None, v=None, tb=None):
         exc = greenlet._normalize_throw(t, v, tb)
         try:
-            return self._switch_or_throw(exc)
+            return self._switch_or_throw(None, exc)
         except BaseException as raised:
             parent = getattr(self, "parent", None)
             p_tealet = getattr(parent, "_tealet", None)
@@ -255,17 +256,8 @@ class greenlet(object):
             exc = exc.with_traceback(tb)
         return exc
 
-    def _switch_or_throw(self, payload):
+    def _switch_or_throw(self, switch_payload, err):
         with ErrorWrapper:
-            is_throw = isinstance(payload, BaseException)
-            if is_throw:
-                err = payload
-                args = ()
-                kwds = {}
-            else:
-                args, kwds = payload
-                if kwds is None:
-                    kwds = {}
 
             run = getattr(self, "run", _RUN_UNSET)
             tealet = getattr(self, "_tealet", None) or self._bootstrap(getattr(self, "parent", None))
@@ -279,72 +271,44 @@ class greenlet(object):
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:
-                    if is_throw:
+                    if err is not None:
                         arg = tealet.run(self._greenlet_main_throw, (run, err))
                     else:
-                        arg = tealet.run(self._greenlet_main, (run, args, kwds))
+                        arg = tealet.run(self._greenlet_main, (run, switch_payload))
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
             else:
                 if not self:
                     parent = self._switch_parent()
-                    if is_throw:
+                    if err is not None:
                         if isinstance(err, GreenletExit):
                             return err
-                        return parent._switch_or_throw(err)
+                        return parent._switch_or_throw(None, err)
+                    args, kwds = switch_payload
                     if not args and not kwds and parent is getcurrent():
                         return ()
-                    return parent._switch_or_throw((args, kwds))
+                    return parent._switch_or_throw(switch_payload, None)
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:
-                    if is_throw:
+                    if err is not None:
                         arg = tealet.throw(err)
                     else:
-                        arg = tealet.switch((False, args, kwds))
+                        arg = tealet.switch(switch_payload)
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
-        return self._Result(arg)
 
-    @staticmethod
-    def _raise_triplet(err, val, tb):
-        if not err:
-            return
+       # unpack the switch payload.  switch() returns.
+       # on the other side depending on how it was called.
 
-        if isinstance(err, BaseException):
-            exc = err
-        elif isinstance(val, BaseException):
-            exc = val
-        else:
-            if val is None:
-                exc = err()
-            elif isinstance(val, tuple):
-                exc = err(*val)
-            else:
-                exc = err(val)
-
-        try:
-            if tb is not None:
-                raise exc.with_traceback(tb)
-            raise exc
-        finally:
-            exc = None
-
-    @staticmethod
-    def _Result(arg):
-        # The return value is stored in the current greenlet.
-        if arg is None:
-            return None
-        err, args, kwds = arg
-        if err:
-            greenlet._raise_triplet(err, args, kwds)
+        args, kwds = arg
         if args and kwds:
             return (args, kwds)
-        elif kwds:
+        if kwds:
             return kwds
-        elif args:
+        if args:
             if len(args) == 1:
                 return args[0]
             return args
@@ -352,12 +316,15 @@ class greenlet(object):
 
     @staticmethod
     def _greenlet_main(current, arg):
-        run, args, kwds = arg
+        run, switch_payload = arg
+        args, kwds = switch_payload
+        if kwds is None:
+            kwds = {}
         try:
             result = run(*args, **kwds)
-            arg = (False, (result,), None)
+            arg = ((result,), {})
         except GreenletExit as e:
-            arg = (False, (e,), None)
+            arg = ((e,), {})
         except BaseException as e:
             # Preserve parent-delivery semantics for uncaught worker errors by
             # queueing the exception onto the parent tealet before exit-switch.
@@ -376,7 +343,7 @@ class greenlet(object):
         try:
             raise exc
         except GreenletExit as e:
-            arg = (False, (e,), None)
+            arg = ((e,), {})
         except BaseException as e:
             p = greenlet._get_or_create_wrapper(current)._parent()
             p._tealet.set_exception(e)
