@@ -918,6 +918,7 @@ class TestGreenlet(TestCase):
             def __getattribute__(self, name):
                 if name == 'run':
                     raise SomeError
+                return RawGreenlet.__getattribute__(self, name)
 
 
         parent_never_started = Parent()

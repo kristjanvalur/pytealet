@@ -54,8 +54,17 @@ def getcurrent():
     return greenlet._get_or_create_wrapper(_tealet.current())
 
 class greenlet(object):
-    # class defaults for attributes that remain safe if __init__ is skipped
-    _is_running = False
+    # keep internal attributes out of the instance dict
+    __slots__ = (
+        "_tealet",
+        "parent",
+        "_main",
+        "_garbage",
+        "_is_running",
+        "run",
+        "__dict__",
+        "__weakref__",
+    )
 
     @classmethod
     def _get_or_create_main_wrapper(cls, main_t=None):
@@ -75,6 +84,7 @@ class greenlet(object):
         gr.parent = main_g
         gr._main = main_g._main
         gr._garbage = []
+        gr._is_running = False
         tealetmap[raw_t] = gr
         return gr
 
@@ -102,6 +112,12 @@ class greenlet(object):
         if run is not _RUN_UNSET:
             self.run = run
         self._bootstrap(parent)
+        self._is_running = False
+
+    def __delattr__(self, name):
+        if name == "__dict__":
+            raise TypeError("can't delete __dict__")
+        object.__delattr__(self, name)
  
     def _bootstrap(self, parent=None):
         if isinstance(parent, _tealet.tealet):
@@ -262,8 +278,10 @@ class greenlet(object):
             if is_unstarted:
                 if run is _RUN_UNSET:
                     raise AttributeError("run")
-                if "run" in getattr(self, "__dict__", {}):
+                try:
                     del self.run
+                except AttributeError:
+                    pass
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:
@@ -271,6 +289,16 @@ class greenlet(object):
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
+
+                # If this greenlet just finished and its immediate parent is
+                # unstarted, greenlet semantics require implicitly starting
+                # that parent with our return payload.
+                if tealet.state == _tealet.STATE_EXIT and arg is not None:
+                    parent = getattr(self, "parent", None)
+                    if parent is not None:
+                        parent_tealet = getattr(parent, "_tealet", None)
+                        if parent_tealet is not None and parent_tealet.state == _tealet.STATE_STUB:
+                            return parent._switch_or_throw(arg, None)
             else:
                 if not self:
                     # switching to a dead greenlet, find its nearest live parent.
@@ -299,11 +327,9 @@ class greenlet(object):
             return (args, kwds)
         if kwds:
             return kwds
-        if args:
-            if len(args) == 1:
-                return args[0]
-            return args
-        return None
+        if len(args) == 1:
+            return args[0]
+        return args
 
     @staticmethod
     def _greenlet_main(current, arg):
@@ -331,10 +357,13 @@ class greenlet(object):
             arg = None
 
     def _parent(self):
-        # Find the closest parent alive
+        # Find the closest parent alive.
         p = self.parent
-        while not p:
-            p = p.parent
+        while p is not None and not p:
+            nxt = p.parent
+            if nxt is p:
+                break
+            p = nxt
         return p
 
     def _switch_parent(self):
