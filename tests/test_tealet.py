@@ -1040,6 +1040,18 @@ class TestSwitch:
 
 
 class TestSetException:
+    def test_throw_to_self_raises_remote_and_clears_on_next_switch(self):
+        current = _tealet.current()
+
+        assert _tealet.error_was_remote() is False
+        with pytest.raises(RuntimeError, match="boom-self-throw"):
+            current.throw(RuntimeError("boom-self-throw"))
+        assert _tealet.error_was_remote() is True
+
+        # Any subsequent switching API call clears the remote-error marker.
+        assert current.switch() is None
+        assert _tealet.error_was_remote() is False
+
     def test_throw_switches_and_uses_current_as_fallback(self):
         def victim(current, _arg):
             current.main().switch("victim-paused")

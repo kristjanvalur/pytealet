@@ -1362,6 +1362,13 @@ static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObj
     if (!fallback)
         fallback = Py_None;
 
+    /* Self-target injections should not install a fallback switch target.
+     * If the exception is delivered back into the same tealet, fallback-based
+     * rerouting is nonsensical and can create confusing self-redirect paths.
+     */
+    if (fallback == (PyObject *)target)
+        fallback = Py_None;
+
     if (fallback != Py_None) {
         PyTealetObject *fallback_t;
         if (!PyTealet_Check(fallback, mstate)) {
