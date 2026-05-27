@@ -35,3 +35,19 @@ features or build steps that are not currently supported by pytealet:
   verbatim to mirror upstream behavior.
 - When compatibility gaps are closed, remove entries from the skip list and
   update this README accordingly.
+
+## Local adjustments to vendored tests
+
+When syncing from upstream greenlet tests, keep the following pytealet-local
+edits unless equivalent upstream behavior appears:
+
+- test_greenlet.py::TestGreenlet::test_switch_to_dead_greenlet_with_unstarted_perverse_parent
+  The local Parent.__getattribute__ override intentionally raises only for
+  "run", and delegates all other names to RawGreenlet.__getattribute__.
+  This keeps the test focused on run lookup behavior instead of breaking all
+  attribute access on the object.
+
+- test_greenlet.py::TestGreenlet::test_get_stack_with_nested_c_calls
+  The import of _test_extension_cpp is wrapped in try/except ImportError and
+  calls self.skipTest(...) when unavailable. Our local test environment does
+  not always build or expose this optional C++ fixture module.

@@ -980,7 +980,10 @@ class TestGreenlet(TestCase):
 
     def test_get_stack_with_nested_c_calls(self):
         from functools import partial
-        from . import _test_extension_cpp
+        try:
+            from . import _test_extension_cpp
+        except ImportError:
+            self.skipTest("_test_extension_cpp fixture module is unavailable")
 
         def recurse(v):
             if v > 0:
