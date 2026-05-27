@@ -211,6 +211,12 @@ class greenlet(object):
         tealet = getattr(self, "_tealet", None)
         return tealet is not None and tealet.state == _tealet.STATE_RUN
 
+    def __copy__(self):
+        raise TypeError("uncopyable object")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("uncopyable object")
+
     def switch(self, *args, **kwds):
         return self._switch_or_throw((args, kwds), None)
 
