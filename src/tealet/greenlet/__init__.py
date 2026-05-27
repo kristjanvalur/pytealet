@@ -2,7 +2,7 @@
 import contextvars
 import threading
 import weakref
-import sys
+import types
 
 import _tealet
 from . import _greenlet
@@ -111,7 +111,7 @@ class greenlet(object):
             self._garbage = []
         else:
             self._tealet = _tealet.tealet().stub()
-            if not parent:
+            if parent is None:
                 parent = getcurrent()
             self.parent = parent
             self._main = parent._main
@@ -211,19 +211,66 @@ class greenlet(object):
         return tealet is not None and tealet.state == _tealet.STATE_RUN
 
     def switch(self, *args, **kwds):
-        return self._switch((False, args, kwds))
+        return self._switch_or_throw((args, kwds))
 
     def throw(self, t=None, v=None, tb=None):
+        exc = greenlet._normalize_throw(t, v, tb)
+        try:
+            return self._switch_or_throw(exc)
+        except BaseException as raised:
+            parent = getattr(self, "parent", None)
+            p_tealet = getattr(parent, "_tealet", None)
+            if p_tealet is not None and p_tealet.state == _tealet.STATE_STUB:
+                try:
+                    parent.throw(raised)
+                except BaseException:
+                    pass
+            raise
+
+    @staticmethod
+    def _normalize_throw(t=None, v=None, tb=None):
         if not t:
             t = GreenletExit
-        return self._switch((t, v, tb))
 
-    def _switch(self, arg):
+        if tb is not None and not isinstance(tb, types.TracebackType):
+            raise TypeError("throw() third argument must be a traceback object")
+
+        if isinstance(t, BaseException):
+            if v is not None:
+                raise TypeError("instance exception may not have a separate value")
+            exc = t
+        elif isinstance(t, type) and issubclass(t, BaseException):
+            if v is None:
+                exc = t()
+            elif isinstance(v, tuple):
+                exc = t(*v)
+            else:
+                exc = t(v)
+        else:
+            raise TypeError(
+                "exceptions must be classes, or instances, not %s" % (type(t).__name__,)
+            )
+
+        if tb is not None:
+            exc = exc.with_traceback(tb)
+        return exc
+
+    def _switch_or_throw(self, payload):
         with ErrorWrapper:
+            is_throw = isinstance(payload, BaseException)
+            if is_throw:
+                err = payload
+                args = ()
+                kwds = {}
+            else:
+                args, kwds = payload
+                if kwds is None:
+                    kwds = {}
+
             run = getattr(self, "run", _RUN_UNSET)
             tealet = getattr(self, "_tealet", None) or self._bootstrap(getattr(self, "parent", None))
             is_unstarted = tealet.state == _tealet.STATE_STUB
-            
+
             if is_unstarted:
                 if run is _RUN_UNSET:
                     raise AttributeError("run")
@@ -232,18 +279,30 @@ class greenlet(object):
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:
-                    # here we can tweak how we create the new stack
-                    arg = tealet.run(self._greenlet_main, (run, arg))
+                    if is_throw:
+                        arg = tealet.run(self._greenlet_main_throw, (run, err))
+                    else:
+                        arg = tealet.run(self._greenlet_main, (run, args, kwds))
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
             else:
                 if not self:
-                    return self._parent()._switch(arg)
+                    parent = self._switch_parent()
+                    if is_throw:
+                        if isinstance(err, GreenletExit):
+                            return err
+                        return parent._switch_or_throw(err)
+                    if not args and not kwds and parent is getcurrent():
+                        return ()
+                    return parent._switch_or_throw((args, kwds))
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:
-                    arg = tealet.switch(arg)
+                    if is_throw:
+                        arg = tealet.throw(err)
+                    else:
+                        arg = tealet.switch((False, args, kwds))
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
@@ -293,17 +352,35 @@ class greenlet(object):
 
     @staticmethod
     def _greenlet_main(current, arg):
-        run, (err, args, kwds) = arg
+        run, args, kwds = arg
         try:
-            if not err:
-                result = _tealet.hide_frame(run, args, kwds)
-                arg = (False, (result,), None)
-            else:
-                greenlet._raise_triplet(err, args, kwds)
+            result = run(*args, **kwds)
+            arg = (False, (result,), None)
         except GreenletExit as e:
             arg = (False, (e,), None)
-        except BaseException:
-            arg = sys.exc_info()
+        except BaseException as e:
+            # Preserve parent-delivery semantics for uncaught worker errors by
+            # queueing the exception onto the parent tealet before exit-switch.
+            p = greenlet._get_or_create_wrapper(current)._parent()
+            p._tealet.set_exception(e)
+            arg = None
+        p = greenlet._get_or_create_wrapper(current)._parent()
+        try:
+            return p._tealet, arg
+        finally:
+            arg = None
+
+    @staticmethod
+    def _greenlet_main_throw(current, arg):
+        _run, exc = arg
+        try:
+            raise exc
+        except GreenletExit as e:
+            arg = (False, (e,), None)
+        except BaseException as e:
+            p = greenlet._get_or_create_wrapper(current)._parent()
+            p._tealet.set_exception(e)
+            arg = None
         p = greenlet._get_or_create_wrapper(current)._parent()
         try:
             return p._tealet, arg
@@ -315,6 +392,17 @@ class greenlet(object):
         p = self.parent
         while not p:
             p = p.parent
+        return p
+
+    def _switch_parent(self):
+        # Dead-target switch walks up past dead parents but may switch into an
+        # unstarted parent (which then starts), matching greenlet semantics.
+        p = self.parent
+        while p is not None and p.dead:
+            nxt = p.parent
+            if nxt is p:
+                break
+            p = nxt
         return p
 
     def _clear_current_context(self):
