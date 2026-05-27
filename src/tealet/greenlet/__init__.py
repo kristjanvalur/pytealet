@@ -306,7 +306,9 @@ class greenlet(object):
             if err is not None:
                 raise err
             args, kwds = switch_payload
-            result = run(*args, **kwds)
+            # Hide trampoline frames while entering user callback so suspended
+            # frame chains match greenlet-visible user code.
+            result = _tealet.hide_frame(run, args, kwds)
             arg = ((result,), {})
         except GreenletExit as e:
             arg = ((e,), {})
