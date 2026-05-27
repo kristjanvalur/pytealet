@@ -7,7 +7,6 @@ import os
 import sys
 import sysconfig
 import unittest
-import importlib
 
 from gc import collect
 from gc import get_objects
@@ -17,16 +16,8 @@ from time import time
 
 import psutil
 
-try:
-    importlib.import_module("greenlet")
-except ModuleNotFoundError:
-    import tealet.greenlet as _tealet_greenlet
-    import tealet.greenlet._greenlet as _tealet_greenlet_mod
-
-    sys.modules.setdefault("greenlet", _tealet_greenlet)
-    sys.modules.setdefault("greenlet._greenlet", _tealet_greenlet_mod)
-    if not hasattr(_tealet_greenlet, "_greenlet"):
-        _tealet_greenlet._greenlet = _tealet_greenlet_mod
+import tealet.greenlet as _tealet_greenlet
+_tealet_greenlet.install()
 
 from greenlet import greenlet as RawGreenlet
 from greenlet import getcurrent
@@ -240,9 +231,15 @@ class TestCase(unittest.TestCase, metaclass=TestCaseMetaClass):
             os.path.dirname(__file__),
             script_name,
         )
+        bootstrap = (
+            "import runpy, sys; "
+            "import tealet.greenlet as _tealet_greenlet; "
+            "_tealet_greenlet.install(); "
+            "runpy.run_path(sys.argv[1], run_name='__main__')"
+        )
 
         try:
-            return subprocess.check_output([sys.executable, script],
+            return subprocess.check_output([sys.executable, "-c", bootstrap, script],
                                            encoding='utf-8',
                                            stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as ex:

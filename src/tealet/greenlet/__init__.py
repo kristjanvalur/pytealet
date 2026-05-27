@@ -1,6 +1,7 @@
 # A greenlet emulation module using tealets
 import contextvars
 import os
+import sys
 import threading
 import weakref
 import types
@@ -69,6 +70,18 @@ class ErrorWrapper(object):
 
 
 ErrorWrapper = ErrorWrapper()  # stateless singleton
+
+
+def install(force=True):
+    """Expose tealet.greenlet as importable top-level greenlet modules."""
+    module = sys.modules[__name__]
+    existing = sys.modules.get("greenlet")
+    if existing is not None and existing is not module and not force:
+        raise RuntimeError("greenlet is already installed from a different module")
+
+    sys.modules["greenlet"] = module
+    sys.modules["greenlet._greenlet"] = _greenlet
+    return module
 
 tealetmap = weakref.WeakValueDictionary()
 _RUN_UNSET = object()
