@@ -216,17 +216,7 @@ class greenlet(object):
 
     def throw(self, t=None, v=None, tb=None):
         exc = greenlet._normalize_throw(t, v, tb)
-        try:
-            return self._switch_or_throw(None, exc)
-        except BaseException as raised:
-            parent = getattr(self, "parent", None)
-            p_tealet = getattr(parent, "_tealet", None)
-            if p_tealet is not None and p_tealet.state == _tealet.STATE_STUB:
-                try:
-                    parent.throw(raised)
-                except BaseException:
-                    pass
-            raise
+        return self._switch_or_throw(None, exc)
 
     @staticmethod
     def _normalize_throw(t=None, v=None, tb=None):
@@ -271,24 +261,20 @@ class greenlet(object):
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:
-                    if err is not None:
-                        arg = tealet.run(self._greenlet_main_throw, (run, err))
-                    else:
-                        arg = tealet.run(self._greenlet_main, (run, switch_payload))
+                    arg = tealet.run(self._greenlet_main, (run, switch_payload, err))
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
             else:
                 if not self:
+                    # switching to a dead greenlet, find its nearest live parent.
                     parent = self._switch_parent()
                     if err is not None:
                         if isinstance(err, GreenletExit):
                             return err
                         return parent._switch_or_throw(None, err)
-                    args, kwds = switch_payload
-                    if not args and not kwds and parent is getcurrent():
-                        return ()
                     return parent._switch_or_throw(switch_payload, None)
+                
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:
@@ -300,9 +286,8 @@ class greenlet(object):
                     self._is_running = False
                     _unpin_running(tealet)
 
-       # unpack the switch payload.  switch() returns.
-       # on the other side depending on how it was called.
-
+        # unpack the switch payload.  switch() returns differently shaped values
+        # depending on how it was called.
         args, kwds = arg
         if args and kwds:
             return (args, kwds)
@@ -316,11 +301,11 @@ class greenlet(object):
 
     @staticmethod
     def _greenlet_main(current, arg):
-        run, switch_payload = arg
-        args, kwds = switch_payload
-        if kwds is None:
-            kwds = {}
+        run, switch_payload, err = arg
         try:
+            if err is not None:
+                raise err
+            args, kwds = switch_payload
             result = run(*args, **kwds)
             arg = ((result,), {})
         except GreenletExit as e:
@@ -328,23 +313,6 @@ class greenlet(object):
         except BaseException as e:
             # Preserve parent-delivery semantics for uncaught worker errors by
             # queueing the exception onto the parent tealet before exit-switch.
-            p = greenlet._get_or_create_wrapper(current)._parent()
-            p._tealet.set_exception(e)
-            arg = None
-        p = greenlet._get_or_create_wrapper(current)._parent()
-        try:
-            return p._tealet, arg
-        finally:
-            arg = None
-
-    @staticmethod
-    def _greenlet_main_throw(current, arg):
-        _run, exc = arg
-        try:
-            raise exc
-        except GreenletExit as e:
-            arg = ((e,), {})
-        except BaseException as e:
             p = greenlet._get_or_create_wrapper(current)._parent()
             p._tealet.set_exception(e)
             arg = None
