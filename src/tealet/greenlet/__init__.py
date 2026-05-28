@@ -233,25 +233,33 @@ class greenlet(object):
         return self._tealet
 
     def __del__(self):
-        tealet = getattr(self, "_tealet", None)
         if getattr(self, "_main", None) is self:
             return  # we don't try to clean up main this way.
-        if tealet is not None and tealet.state == _tealet.STATE_RUN:
-            if _tealet.current() == tealet:
-                # Can't kill ourselves from here
-                return
-            tealetmap[tealet] = self  # re-insert
-            old = self.parent
-            # re-parent it to ourselves.  if it fails, put it on its own main garbage heap.
-            try:
-                self.parent = getcurrent()
-                self.throw()
-            except (_ParentThreadError, error):
-                # This must be a foreign tealet.  Insert it to
-                # it's main tealet's garbage heap
-                self._main._garbage.append(self)
-            finally:
-                self.parent = old
+        tealet = getattr(self, "_tealet", None)
+        if tealet is None:
+            return
+        # must be careful during teardown when module may be half cleared.
+        try:
+            if tealet.state == _tealet.STATE_RUN:
+                if _tealet.current() == tealet:
+                    # Can't kill ourselves from here
+                    return
+                current_wrapper = getcurrent()
+                tealetmap[tealet] = self  # re-insert
+                old = self.parent
+                # re-parent it to ourselves.  if it fails, put it on its own main garbage heap.
+                try:
+                    self.parent = current_wrapper
+                    self.throw()
+                except (_ParentThreadError, error):
+                    # This must be a foreign tealet.  Insert it to
+                    # it's main tealet's garbage heap
+                    self._main._garbage.append(self)
+                finally:
+                    self.parent = old
+        except (NameError, TypeError):
+            # we can hit those during teardown.
+            return
 
     def __repr__(self):
         tealet = getattr(self, "_tealet", None)
