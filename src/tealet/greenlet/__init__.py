@@ -85,6 +85,7 @@ def install(force=True):
 
 tealetmap = weakref.WeakValueDictionary()
 _RUN_UNSET = object()
+_garbage_process_guard = threading.local()
 
 # Keep a strong reference to wrappers while they are actively switching.
 # This guards dealloc/resurrection edge cases exercised by
@@ -114,7 +115,11 @@ def _thread_is_alive(thread_id):
     return any(t.ident == thread_id for t in threading.enumerate())
 
 def getcurrent():
-    return greenlet._get_or_create_wrapper(_tealet.current())
+    gr = greenlet._get_or_create_wrapper(_tealet.current())
+    # Drain per-main garbage when the owner thread re-enters greenlet APIs.
+    if gr._main is gr and gr._garbage:
+        gr._process_garbage()
+    return gr
 
 class greenlet(object):
     # keep internal attributes out of the instance dict
@@ -289,27 +294,36 @@ class greenlet(object):
         )
 
     def _process_garbage(self):
+        if getattr(_garbage_process_guard, "active", False):
+            return
+
         garbage = self._garbage
         if not garbage:
             return
 
-        pending = garbage[:]
-        del garbage[:]
-        current = getcurrent()
-        for g in pending:
-            if not g:
-                continue
-            if g is current:
-                garbage.append(g)
-                continue
-            old_parent = g.parent
-            g.parent = current
-            try:
-                g.throw()
-            except error:
-                garbage.append(g)
-            finally:
-                g.parent = old_parent
+        _garbage_process_guard.active = True
+        try:
+            pending = garbage[:]
+            del garbage[:]
+            # Resolve directly so internal cleanup does not recurse through
+            # getcurrent() garbage-drain hooks.
+            current = greenlet._get_or_create_wrapper(_tealet.current())
+            for g in pending:
+                if not g:
+                    continue
+                if g is current:
+                    garbage.append(g)
+                    continue
+                old_parent = g.parent
+                g.parent = current
+                try:
+                    g.throw()
+                except error:
+                    garbage.append(g)
+                finally:
+                    g.parent = old_parent
+        finally:
+            _garbage_process_guard.active = False
 
     @property
     def gr_frame(self):
