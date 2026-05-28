@@ -14,7 +14,7 @@
 typedef struct PyTealetDomainLockObject {
     PyObject_HEAD
 #if PYTEALET_FREE_THREADED
-    PyThread_type_lock lock;
+        PyThread_type_lock lock;
 #endif
 } PyTealetDomainLockObject;
 
@@ -30,8 +30,7 @@ static void pytealet_domain_lock_obj_dealloc(PyObject *obj) {
 }
 
 static PyTypeObject pytealet_domain_lock_type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "_tealet._DomainLock",
+    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_tealet._DomainLock",
     .tp_basicsize = sizeof(PyTealetDomainLockObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_dealloc = pytealet_domain_lock_obj_dealloc,
@@ -172,7 +171,7 @@ static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
         return NULL;
     }
     /* get the current.  if there is no main tealet at this time, create it. */
-    return Py_XNewRef((PyObject *)GetCurrent(mstate, NULL, 1, NULL));
+    return Py_XNewRef((PyObject *)PyTealet_GetOrCreateCurrent(mstate, NULL));
 }
 
 static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
@@ -182,7 +181,7 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
         return NULL;
     }
     /* create main if it doesn't already exist for this thread */
-    return Py_XNewRef((PyObject *)GetMain(mstate, 1, NULL));
+    return Py_XNewRef((PyObject *)PyTealet_GetOrCreateMain(mstate, NULL));
 }
 
 static PyObject *module_thread_cleanup(PyObject *mod, PyObject *args) {
@@ -397,7 +396,7 @@ static int pytealet_module_exec(PyObject *m) {
     }
     Py_DECREF(type_obj);
 
-    if (!GetMain(mstate, 1, NULL))
+    if (!PyTealet_GetOrCreateMain(mstate, NULL))
         return -1;
 
     mstate->tealet_error = PyErr_NewException("_tealet.TealetError", NULL, NULL);
@@ -430,8 +429,7 @@ static int pytealet_module_exec(PyObject *m) {
     if (PyModule_AddObject(m, "InvalidError", mstate->invalid_error) < 0)
         return -1;
 
-    mstate->thread_mismatch_error =
-        PyErr_NewException("_tealet.ThreadMismatchError", mstate->invalid_error, NULL);
+    mstate->thread_mismatch_error = PyErr_NewException("_tealet.ThreadMismatchError", mstate->invalid_error, NULL);
     if (!mstate->thread_mismatch_error)
         return -1;
     Py_INCREF(mstate->thread_mismatch_error);
@@ -528,12 +526,11 @@ static void pytealet_module_free(void *m) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #endif
-static PyModuleDef_Slot _tealet_module_slots[] = {
-    {Py_mod_exec, pytealet_module_exec},
+static PyModuleDef_Slot _tealet_module_slots[] = {{Py_mod_exec, pytealet_module_exec},
 #if defined(Py_mod_gil)
-    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+                                                  {Py_mod_gil, Py_MOD_GIL_NOT_USED},
 #endif
-    {0, NULL}};
+                                                  {0, NULL}};
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif

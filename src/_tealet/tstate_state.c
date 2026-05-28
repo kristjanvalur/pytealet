@@ -45,7 +45,7 @@ static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src, in
 
     /* context follows stricter transfer rules than other members*/
     if (with_context) {
-        assert (dst->context == NULL); /* it should have been cleared on last PUT */
+        assert(dst->context == NULL); /* it should have been cleared on last PUT */
         dst->context = src->context;
     }
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
@@ -74,7 +74,7 @@ static void PyTealetTstate_Put(PyTealetTstate *src, PyThreadState *dst) {
 #endif
 
     dst->context = src->context;
-    dst->context_ver++; /* Invalidate contextvars cache */
+    dst->context_ver++;  /* Invalidate contextvars cache */
     src->context = NULL; /* ownership transferred to live tstate */
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
     dst->delete_later = src->delete_later;
@@ -103,7 +103,7 @@ static void PyTealetTstate_IncRef(PyTealetTstate *saved, int with_context) {
 
 static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_tealet, int with_context) {
     assert(saved->has_state == 1);
-    
+
 #if defined(PY_HAS_TSTATE_DELETE_LATER)
     PyTealet_XDECREF(dustbin_tealet, saved->delete_later);
 #endif
@@ -209,7 +209,7 @@ void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet, int with
     }
     if (!dst->has_state)
         return;
-    
+
     PyTealetTstate_DecRef(dst, dustbin_tealet, with_context);
     dst->has_state = 0;
 }
@@ -327,43 +327,43 @@ static void PyTealetTstate_ClearFrame(PyTealetTstateFrame *ttstate, PyThreadStat
 #ifndef NDEBUG
     if (ttstate) {
 #if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
-    ttstate->curexc_type = NULL;
-    ttstate->curexc_value = NULL;
-    ttstate->curexc_traceback = NULL;
+        ttstate->curexc_type = NULL;
+        ttstate->curexc_value = NULL;
+        ttstate->curexc_traceback = NULL;
 #endif
-    memset(&ttstate->exc_state, 0, sizeof(ttstate->exc_state));
-    ttstate->exc_info = &ttstate->exc_state;
+        memset(&ttstate->exc_state, 0, sizeof(ttstate->exc_state));
+        ttstate->exc_info = &ttstate->exc_state;
 #if defined(PY_HAS_TSTATE_FRAME)
-    ttstate->frame = NULL;
+        ttstate->frame = NULL;
 #endif
-    #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
-    ttstate->current_executor = NULL;
-    #endif
+#if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
+        ttstate->current_executor = NULL;
+#endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
 #if defined(PY_HAS_TSTATE_CFRAME)
-    ttstate->cframe = NULL;
+        ttstate->cframe = NULL;
 #else
-    ttstate->current_frame = NULL;
+        ttstate->current_frame = NULL;
 #endif
-    ttstate->datastack_chunk = NULL;
-    ttstate->datastack_top = NULL;
-    ttstate->datastack_limit = NULL;
+        ttstate->datastack_chunk = NULL;
+        ttstate->datastack_top = NULL;
+        ttstate->datastack_limit = NULL;
 #endif
 
     } else {
 #if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
-    tstate->curexc_type = NULL;
-    tstate->curexc_value = NULL;
-    tstate->curexc_traceback = NULL;
+        tstate->curexc_type = NULL;
+        tstate->curexc_value = NULL;
+        tstate->curexc_traceback = NULL;
 #endif
-    memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
-    tstate->exc_info = &tstate->exc_state;
+        memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
+        tstate->exc_info = &tstate->exc_state;
 #if defined(PY_HAS_TSTATE_FRAME)
         tstate->frame = NULL;
 #endif
-    #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
+#if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
         tstate->current_executor = NULL;
-    #endif
+#endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
 #if defined(PY_HAS_TSTATE_CFRAME)
         tstate->cframe = NULL;
