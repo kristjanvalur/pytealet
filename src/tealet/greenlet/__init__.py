@@ -41,32 +41,35 @@ class ErrorWrapper(object):
     def __exit__(self, tp, val, tb):
         if val is None:
             return
-        if isinstance(val, _ParentThreadError):
-            raise error(
-                _cross_thread_switch_error_message(
-                    val.current_tid,
-                    val.target_tid,
-                    val.is_alive,
-                )
-            ).with_traceback(tb)
-        if isinstance(val, _tealet.ThreadMismatchError):
-            raise error(
-                _cross_thread_switch_error_message(
-                    val.current_tid,
-                    val.target_tid,
-                    bool(val.target_alive),
-                )
-            ).with_traceback(tb)
-        if isinstance(val, _tealet.TealetError):
-            msg = str(val)
-            # Map backend thread-mismatch wording for pending exception routing
-            # to the compatibility message expected by greenlet tests.
-            if (
-                "set_exception() not allowed from a different thread" in msg
-                or msg.startswith("thread mismatch:")
-            ):
-                msg = "cannot switch to a different thread (which happens to have exited)"
-            raise error(msg).with_traceback(tb)
+        try:
+            if isinstance(val, _ParentThreadError):
+                raise error(
+                    _cross_thread_switch_error_message(
+                        val.current_tid,
+                        val.target_tid,
+                        val.is_alive,
+                    )
+                ).with_traceback(tb)
+            if isinstance(val, _tealet.ThreadMismatchError):
+                raise error(
+                    _cross_thread_switch_error_message(
+                        val.current_tid,
+                        val.target_tid,
+                        bool(val.target_alive),
+                    )
+                ).with_traceback(tb)
+            if isinstance(val, _tealet.TealetError):
+                msg = str(val)
+                # Map backend thread-mismatch wording for pending exception routing
+                # to the compatibility message expected by greenlet tests.
+                if (
+                    "set_exception() not allowed from a different thread" in msg
+                    or msg.startswith("thread mismatch:")
+                ):
+                    msg = "cannot switch to a different thread (which happens to have exited)"
+                raise error(msg).with_traceback(tb)
+        finally:
+            tp = val = tb = None
 
 
 ErrorWrapper = ErrorWrapper()  # stateless singleton
@@ -498,6 +501,7 @@ class greenlet(object):
     @staticmethod
     def _greenlet_main(current, arg):
         run, switch_payload, err = arg
+        current_wrapper = None
         try:
             if err is not None:
                 raise err
@@ -511,10 +515,13 @@ class greenlet(object):
         except BaseException as e:
             # Preserve parent-delivery semantics for uncaught worker errors by
             # queueing the exception onto the parent tealet before exit-switch.
-            p = greenlet._get_or_create_wrapper(current)._parent()
+            current_wrapper = greenlet._get_or_create_wrapper(current)
+            p = current_wrapper._parent()
             p._tealet.set_exception(e)
             arg = None  # ignored, 'e' is raised on other side.
-        p = greenlet._get_or_create_wrapper(current)._parent()
+            event = "throw"
+        current_wrapper = current_wrapper or greenlet._get_or_create_wrapper(current)
+        p = current_wrapper._parent()
         try:
             return p._tealet, arg
         finally:
