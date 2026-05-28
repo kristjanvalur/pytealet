@@ -262,7 +262,7 @@ class greenlet(object):
                     self._main._garbage.append(self)
                 finally:
                     self.parent = old
-        except (NameError, TypeError):
+        except (NameError, TypeError, AttributeError):
             # we can hit those during teardown.
             return
 
