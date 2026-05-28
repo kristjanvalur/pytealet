@@ -322,6 +322,7 @@ class TestThreadCleanup:
         assert t.run(parked, None) == "paused"
 
         nerfed = _tealet.thread_cleanup()
+        _tealet.tealet() # create a new lineage for this thread
         assert all(id(x) != id(t) for x in nerfed)
         assert t.state == _tealet.STATE_EXIT
 

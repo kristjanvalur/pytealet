@@ -164,57 +164,52 @@ static int panic_error_install_methods(PyObject *panic_error_type_obj) {
     return 0;
 }
 
+/* helper to get module state.  During shutdown, the state may have been cleared
+ */
+#define GET_MODULE_STATE(m, s) do { \
+    s = (PyTealetModuleState *)PyModule_GetState(m); \
+    if (!s) { \
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable"); \
+        return NULL; \
+    } \
+} while (0)
+
 static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
-    }
+    PyTealetModuleState *mstate;
+    GET_MODULE_STATE(mod, mstate);
     /* get the current.  if there is no main tealet at this time, create it. */
     return Py_XNewRef((PyObject *)PyTealet_GetOrCreateCurrent(mstate, NULL));
 }
 
 static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
-    }
+    PyTealetModuleState *mstate;
+    GET_MODULE_STATE(mod, mstate);
     /* create main if it doesn't already exist for this thread */
     return Py_XNewRef((PyObject *)PyTealet_GetOrCreateMain(mstate, NULL));
 }
 
 static PyObject *module_thread_cleanup(PyObject *mod, PyObject *args) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    PyTealetModuleState *mstate;
+    GET_MODULE_STATE(mod, mstate);
     Py_ssize_t cleanup_passes = 3;
     PyObject *kill_exc = Py_None;
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
-    }
     if (!PyArg_ParseTuple(args, "|nO:thread_cleanup", &cleanup_passes, &kill_exc))
         return NULL;
     return PyTealet_ThreadCleanup(mstate, cleanup_passes, kill_exc);
 }
 
 static PyObject *module_active_tealets(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
-    }
+    PyTealetModuleState *mstate;
+    GET_MODULE_STATE(mod, mstate);
     return PyTealet_ActiveTealets(mstate);
 }
 
 static PyObject *module_thread_kill(PyObject *mod, PyObject *args) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    PyTealetModuleState *mstate;
+    GET_MODULE_STATE(mod, mstate);
     Py_ssize_t cleanup_passes = 3;
     PyObject *kill_exc = Py_None;
 
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
-    }
     if (!PyArg_ParseTuple(args, "|nO:thread_kill", &cleanup_passes, &kill_exc))
         return NULL;
 
@@ -222,11 +217,8 @@ static PyObject *module_thread_kill(PyObject *mod, PyObject *args) {
 }
 
 static PyObject *module_error_was_remote(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
-    }
+    PyTealetModuleState *mstate;
+    GET_MODULE_STATE(mod, mstate);
     return PyBool_FromLong(PyTealet_ErrorWasRemote(mstate));
 }
 
@@ -298,14 +290,11 @@ static PyObject *module_hide_frame(PyObject *mod, PyObject *args) {
  * - frame_introspection(enabled) -> bool
  */
 static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(mod);
+    PyTealetModuleState *mstate;
     Py_ssize_t nargs;
     int enabled;
-
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
-    }
+    
+    GET_MODULE_STATE(mod, mstate);
 
     nargs = args ? PyTuple_GET_SIZE(args) : 0;
     if (nargs == 0)
@@ -345,11 +334,7 @@ static PyMethodDef module_methods[] = {
 static int pytealet_module_exec(PyObject *m) {
     PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(m);
     PyObject *type_obj;
-
-    if (!mstate) {
-        PyErr_SetString(PyExc_RuntimeError, "failed to get _tealet module state");
-        return -1;
-    }
+    assert(mstate); /* cannot fail during module init */
 
     memset(&mstate->tls_key, 0, sizeof(mstate->tls_key));
     mstate->thread_data_lock = NULL;

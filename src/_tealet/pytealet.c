@@ -153,7 +153,10 @@ static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls) {
     PyObject *module = PyType_GetModuleByDef(cls, &_tealet_module);
     if (module) {
         PyTealetModuleState *mstate = (PyTealetModuleState *)PyModule_GetState(module);
-        assert(mstate != NULL);
+        if (!mstate) {
+            PyErr_SetString(PyExc_RuntimeError, "failed to get _tealet module state");
+            return NULL;
+        }
         return mstate;
     }
     return NULL;
@@ -165,14 +168,17 @@ static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls) {
         if (mstate)
             return mstate;
         if (PyErr_Occurred()) {
-            if (PyErr_ExceptionMatches(PyExc_TypeError) && cur != NULL)
+            if (PyErr_ExceptionMatches(PyExc_TypeError)) {
                 PyErr_Clear();
-            else
-                return NULL;
+                if (cur != NULL)
+                    continue;
+                break;
+            }
+            return NULL;
         }
     }
     if (!PyErr_Occurred())
-        PyErr_SetString(PyExc_TypeError, "type is not part of a module");
+        PyErr_SetString(PyExc_RuntimeError, "failed to get _tealet module state");
     return NULL;
 #endif
 }
@@ -937,7 +943,7 @@ static int pytealet_require_owner_thread(PyTealetModuleState *mstate, PyTealetOb
 static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                PyObject *kwnames) {
     PyTealetObject *main, *pytealet = (PyTealetObject *)self;
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     tealet_t *tresult = NULL;
     PyThreadState *tstate = PyThreadState_GET();
     void *stack_far;
@@ -1005,7 +1011,7 @@ out:
  */
 static PyObject *pytealet_current(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                   PyObject *kwnames) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     PyTealetObject *current;
     PyTealetObject *base = (PyTealetObject *)self;
     if (!mstate)
@@ -1028,7 +1034,7 @@ static PyObject *pytealet_current(PyObject *self, PyTypeObject *defining_class, 
 /* return the previous tealet (the one that switched to this tealet lineage) */
 static PyObject *pytealet_previous(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                    Py_ssize_t nargs, PyObject *kwnames) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     PyTealetObject *base = (PyTealetObject *)self;
     PyObject *prev;
     tealet_t *anchor;
@@ -1057,7 +1063,7 @@ static PyObject *pytealet_previous(PyObject *self, PyTypeObject *defining_class,
 /* return the main tealet for this tealet lineage */
 static PyObject *pytealet_main_method(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                       Py_ssize_t nargs, PyObject *kwnames) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     PyTealetObject *base = (PyTealetObject *)self;
     if (!mstate)
         return NULL;
@@ -1089,7 +1095,7 @@ static PyObject *pytealet_belongs_to_current(PyObject *self, PyTypeObject *defin
 /* run a tealet and optinonally run */
 static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                               PyObject *kwnames) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     PyTealetObject *target = (PyTealetObject *)self;
     PyTealetObject *current;
     PyObject *func;
@@ -1232,7 +1238,7 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
 /* switch to a different tealet */
 static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                  PyObject *kwnames) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     PyTealetObject *target = (PyTealetObject *)self;
     PyTealetObject *current;
     int switch_flags = TEALET_XFER_DEFAULT;
@@ -1420,7 +1426,7 @@ static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObj
 
 static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                         Py_ssize_t nargs, PyObject *kwnames) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     PyTealetObject *target = (PyTealetObject *)self;
     PyTealetObject *current;
     PyTealetMainData *mdata;
@@ -1481,7 +1487,7 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
  */
 static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                 PyObject *kwnames) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)PyType_GetModuleState(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     PyTealetObject *target = (PyTealetObject *)self;
     PyTealetObject *current;
     PyTealetMainData *mdata;
