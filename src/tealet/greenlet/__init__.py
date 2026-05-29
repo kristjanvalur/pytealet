@@ -101,6 +101,7 @@ def install(force=True):
 tealetmap = weakref.WeakValueDictionary()
 _RUN_UNSET = object()
 _garbage_process_guard = threading.local()
+_stub_tls = threading.local()
 _tracefunc = None
 
 # Keep a strong reference to wrappers while they are actively switching.
@@ -112,6 +113,24 @@ _running_refcounts = {}
 
 def gettrace():
     return _tracefunc
+
+
+def _get_thread_stub():
+    return getattr(_stub_tls, "stub", None)
+
+
+def set_stub(create=True):
+    if not isinstance(create, bool):
+        raise TypeError("create must be a bool")
+
+    old = _get_thread_stub()
+    if create:
+        stub = _tealet.tealet()
+        stub.stub()
+        _stub_tls.stub = stub
+    elif hasattr(_stub_tls, "stub"):
+        delattr(_stub_tls, "stub")
+    return old
 
 
 # tracing support.  Trace switch cargo and exceptions are wrapped so that a trace
@@ -191,6 +210,10 @@ def _unpin_running(tealet):
 
 def _thread_is_alive(thread_id):
     return any(t.ident == thread_id for t in threading.enumerate())
+
+
+def _is_unstarted_tealet(tealet):
+    return tealet is not None and tealet.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
 
 def getcurrent():
     gr = greenlet._get_or_create_wrapper(_tealet.current())
@@ -306,7 +329,11 @@ class greenlet(object):
             object.__setattr__(self, "parent", None)  # bypass our own setattr parent rules
             self._garbage = []
         else:
-            self._tealet = _tealet.tealet().stub()
+            stub = _get_thread_stub()
+            if stub is None:
+                self._tealet = _tealet.tealet()
+            else:
+                self._tealet = _tealet.tealet(stub)
             if parent is None:
                 parent = getcurrent()
             self.parent = parent
@@ -348,7 +375,7 @@ class greenlet(object):
         tealet = getattr(self, "_tealet", None)
         if tealet is None:
             state = "pending"
-        elif tealet.state == _tealet.STATE_STUB:
+        elif _is_unstarted_tealet(tealet):
             state = "pending"
         elif self.dead:
             is_main = getattr(self, "_main", None) is self
@@ -505,7 +532,7 @@ class greenlet(object):
             run = getattr(self, "run", _RUN_UNSET)
 
             tealet = getattr(self, "_tealet", None) or self._bootstrap(getattr(self, "parent", None))
-            is_unstarted = tealet.state == _tealet.STATE_STUB
+            is_unstarted = _is_unstarted_tealet(tealet)
             payload = switch_payload
             if err is None:
                 payload = _pack_switch_transport(switch_payload, tealet)
@@ -534,7 +561,7 @@ class greenlet(object):
                     parent = getattr(self, "parent", None)
                     if parent is not None:
                         parent_tealet = getattr(parent, "_tealet", None)
-                        if parent_tealet is not None and parent_tealet.state == _tealet.STATE_STUB:
+                        if _is_unstarted_tealet(parent_tealet):
                             return parent._switch_or_throw(arg, None)
             else:
                 if not self:
@@ -662,7 +689,7 @@ class UnswitchableGreenlet(greenlet):
             os.abort()
         if self.force_switch_error:
             tealet = getattr(self, "_tealet", None)
-            if tealet is not None and tealet.state == _tealet.STATE_STUB:
+            if _is_unstarted_tealet(tealet):
                 raise SystemError("Failed to switch stacks into a greenlet for the first time.")
             raise SystemError("Failed to switch stacks into a running greenlet.")
         return super().switch(*args, **kwds)

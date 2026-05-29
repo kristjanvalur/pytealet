@@ -1423,6 +1423,24 @@ class TestBrokenGreenlets(TestCase):
 
 class TestModule(TestCase):
 
+    def test_set_stub_controls_bootstrap_state(self):
+        import _tealet
+
+        greenlet.set_stub(False)
+        try:
+            g_new = RawGreenlet(lambda: None)
+            self.assertEqual(g_new._tealet.state, _tealet.STATE_NEW)
+
+            greenlet.set_stub(True)
+            g_stub = RawGreenlet(lambda: None)
+            self.assertEqual(g_stub._tealet.state, _tealet.STATE_STUB)
+        finally:
+            greenlet.set_stub(False)
+
+    def test_set_stub_requires_bool(self):
+        with self.assertRaises(TypeError):
+            greenlet.set_stub(create=None)
+
     @unittest.skipUnless(hasattr(sys, '_is_gil_enabled'),
                          "Needs 3.13 and above for sys._is_gil_enabled")
     def test_no_gil_on_free_threaded(self):
