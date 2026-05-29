@@ -16,6 +16,15 @@ class GreenletExit(BaseException):
     pass
 
 
+class _TraceException(BaseException):
+    """Internal transport for deferred throw tracing metadata."""
+
+    def __init__(self, original, trace_payload):
+        super().__init__(original)
+        self.original = original
+        self.trace_payload = trace_payload
+
+
 class _ParentThreadError(ValueError):
     "Special version of ValueError for identification inside handlers"
     def __init__(self, current_tid, target_tid, is_alive):
@@ -38,10 +47,13 @@ class ErrorWrapper(object):
     def __enter__(self):
         pass
 
-    def __exit__(self, tp, val, tb):
+    def __exit__(self, _, val, tb):
         if val is None:
             return
         try:
+            if isinstance(val, _TraceException):
+                _consume_trace("throw", val.trace_payload)
+                raise val.original.with_traceback(tb)
             if isinstance(val, _ParentThreadError):
                 raise error(
                     _cross_thread_switch_error_message(
@@ -69,7 +81,7 @@ class ErrorWrapper(object):
                     msg = "cannot switch to a different thread (which happens to have exited)"
                 raise error(msg).with_traceback(tb)
         finally:
-            tp = val = tb = None
+            val = tb = None
 
 
 ErrorWrapper = ErrorWrapper()  # stateless singleton
@@ -89,12 +101,75 @@ def install(force=True):
 tealetmap = weakref.WeakValueDictionary()
 _RUN_UNSET = object()
 _garbage_process_guard = threading.local()
+_tracefunc = None
 
 # Keep a strong reference to wrappers while they are actively switching.
 # This guards dealloc/resurrection edge cases exercised by
 # tests/compat_greenlet/test_greenlet.py::TestGreenlet::test_dealloc_switch_args_not_lost.
 _running_refs = {}
 _running_refcounts = {}
+
+
+def gettrace():
+    return _tracefunc
+
+
+# tracing support.  Trace switch cargo and exceptions are wrapped so that a trace
+# event can be generated after the switch.
+
+def settrace(callback):
+    if callback is not None and not callable(callback):
+        raise TypeError("trace function must be callable")
+
+    old = globals().get("_tracefunc", None)
+    globals()["_tracefunc"] = callback
+    return old
+
+
+def _invoke_trace(event, origin, target):
+    global _tracefunc
+    if _tracefunc is None:
+        return
+
+    try:
+        _tracefunc(event, (origin, target))
+    except BaseException:
+        _tracefunc = None
+        raise
+
+
+def _make_trace_payload(target_tealet):
+    if _tracefunc is None:
+        return None
+    return (_tealet.current(), target_tealet)
+
+
+def _consume_trace(event, trace_payload):
+    if trace_payload is None:
+        return
+    origin_tealet, target_tealet = trace_payload
+    origin = greenlet._get_or_create_wrapper(origin_tealet)
+    target = greenlet._get_or_create_wrapper(target_tealet)
+    _invoke_trace(event, origin, target)
+
+
+def _pack_switch_transport(switch_payload, target_tealet):
+    return (switch_payload, _make_trace_payload(target_tealet))
+
+
+def _unpack_switch_transport(transport):
+    switch_payload, trace_payload = transport
+    _consume_trace("switch", trace_payload)
+    return switch_payload
+
+
+def _wrap_throw_for_trace(err, target_tealet):
+    if not _tracefunc or isinstance(err, GreenletExit):
+        return err
+    trace_payload = _make_trace_payload(target_tealet)
+    if trace_payload is None:
+        return err
+    return _TraceException(err, trace_payload)
 
 
 def _pin_running(tealet, gr):
@@ -431,6 +506,11 @@ class greenlet(object):
 
             tealet = getattr(self, "_tealet", None) or self._bootstrap(getattr(self, "parent", None))
             is_unstarted = tealet.state == _tealet.STATE_STUB
+            payload = switch_payload
+            if err is None:
+                payload = _pack_switch_transport(switch_payload, tealet)
+            else:
+                err = _wrap_throw_for_trace(err, tealet)
 
             if is_unstarted:
                 if run is _RUN_UNSET:
@@ -442,7 +522,7 @@ class greenlet(object):
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:
-                    arg = tealet.run(self._greenlet_main, (run, switch_payload, err))
+                    arg = tealet.run(self._greenlet_main, (run, payload, err))
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
@@ -482,13 +562,14 @@ class greenlet(object):
                     if err is not None:
                         arg = tealet.throw(err)
                     else:
-                        arg = tealet.switch(switch_payload)
+                        arg = tealet.switch(payload)
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
 
         # unpack the switch payload.  switch() returns differently shaped values
         # depending on how it was called.
+        arg = _unpack_switch_transport(arg)
         args, kwds = arg
         if args and kwds:
             return (args, kwds)
@@ -505,6 +586,7 @@ class greenlet(object):
         try:
             if err is not None:
                 raise err
+            switch_payload = _unpack_switch_transport(switch_payload)
             args, kwds = switch_payload
             # Hide trampoline frames while entering user callback so suspended
             # frame chains match greenlet-visible user code.
@@ -517,11 +599,13 @@ class greenlet(object):
             # queueing the exception onto the parent tealet before exit-switch.
             current_wrapper = greenlet._get_or_create_wrapper(current)
             p = current_wrapper._parent()
-            p._tealet.set_exception(e)
+            wrapped = _wrap_throw_for_trace(e, p._tealet)
+            p._tealet.set_exception(wrapped)
             arg = None  # ignored, 'e' is raised on other side.
-            event = "throw"
         current_wrapper = current_wrapper or greenlet._get_or_create_wrapper(current)
         p = current_wrapper._parent()
+        if arg is not None:
+            arg = _pack_switch_transport(arg, p._tealet)
         try:
             return p._tealet, arg
         finally:
