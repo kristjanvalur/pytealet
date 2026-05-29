@@ -258,6 +258,15 @@ static PyObject *module_hide_frame(PyObject *mod, PyObject *args) {
         return NULL;
     }
 
+    if (kwds == Py_None) {
+        kwds = NULL;
+    } else if (kwds != NULL && !PyDict_Check(kwds)) {
+        PyErr_SetString(PyExc_TypeError, "hide_frame() kwargs must be a dict or None");
+        if (created_empty_args)
+            Py_DECREF(func_args);
+        return NULL;
+    }
+
 #if defined(PY_HAS_TSTATE_FRAME)
     tstate->frame = NULL;
 #endif
