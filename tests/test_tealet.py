@@ -113,6 +113,17 @@ class TestModule:
         assert "wrapper_normal" in normal_names
         assert "wrapper_hide" not in hidden_names
 
+    def test_hide_frame_accepts_none_kwargs(self):
+        def inner(*args, **kwargs):
+            return args, kwargs
+
+        result = _tealet.hide_frame(inner, (1, 2), None)
+        assert result == ((1, 2), {})
+
+    def test_hide_frame_rejects_non_dict_kwargs(self):
+        with pytest.raises(TypeError, match="kwargs must be a dict or None"):
+            _tealet.hide_frame(lambda: None, (), 42)
+
 
 class TestThreadCleanup:
     """Tests for thread cleanup semantics and edge cases."""
