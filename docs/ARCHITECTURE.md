@@ -37,7 +37,7 @@ _tealet.main() -> tealet
 Returns the main tealet for this thread (the root of the tealet tree).
 
 ```python
-_tealet.thread_cleanup() -> list[tealet]
+_tealet.thread_reap() -> list[tealet]
 ```
 Explicitly tears down this thread's tealet lineage and returns wrappers whose
 native tealet handles were forcibly invalidated. Intended for optional worker

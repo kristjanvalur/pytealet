@@ -19,10 +19,11 @@ extern struct PyModuleDef _tealet_module;
 
 PyTealetObject *PyTealet_GetOrCreateMain(PyTealetModuleState *mstate, PyTealetMainData **mdata_out);
 PyTealetObject *PyTealet_GetOrCreateCurrent(PyTealetModuleState *mstate, PyTealetMainData **mdata_out);
-PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
-PyObject *PyTealet_ActiveTealets(PyTealetModuleState *mstate);
+PyObject *PyTealet_ThreadReap(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
+PyObject *PyTealet_ThreadSweep(PyTealetModuleState *mstate);
+PyObject *PyTealet_ThreadActive(PyTealetModuleState *mstate);
 PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
-int PyTealet_ThreadCleanupMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata);
+int PyTealet_ThreadReapMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 int PyTealet_ErrorWasRemote(PyTealetModuleState *mstate);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);

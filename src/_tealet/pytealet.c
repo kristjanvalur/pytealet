@@ -116,8 +116,9 @@ static void pytealet_untrack_wrapper(PyTealetObject *wrapper, int lock_held);
 static void pytealet_domain_lock(PyTealetMainData *mdata);
 static void pytealet_domain_unlock(PyTealetMainData *mdata);
 static int pytealet_link_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata);
+static void pytealet_unlink_thread_data_locked(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 static void pytealet_unlink_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata);
-static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *nerfed,
+static int pytealet_thread_reap_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *nerfed,
                                          int clear_current_tss, int best_effort);
 static int pytealet_collect_active_wrappers(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *active_out,
                                             PyTealetObject *caller, unsigned int collect_flags);
@@ -339,29 +340,85 @@ static int pytealet_track_wrapper(PyTealetMainData *mdata, PyTealetObject *wrapp
     return 0;
 }
 
-static int pytealet_link_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
+/* Generic circular-ring helpers for PyTealetMainData nodes.
+ * The ring anchor points at an arbitrary node in the ring, or NULL for empty.
+ */
+static void pytealet_ring_append(PyTealetMainData **ring_anchor_io, PyTealetMainData *mdata) {
+    PyTealetMainData *head;
+    PyTealetMainData *tail;
+
+    assert(ring_anchor_io);
+    assert(mdata);
+    assert(!mdata->ring_prev && !mdata->ring_next);
+
+    head = *ring_anchor_io;
+    if (!head) {
+        mdata->ring_prev = mdata;
+        mdata->ring_next = mdata;
+        *ring_anchor_io = mdata;
+        return;
+    }
+
+    tail = head->ring_prev;
+    assert(tail);
+    mdata->ring_prev = tail;
+    mdata->ring_next = head;
+    tail->ring_next = mdata;
+    head->ring_prev = mdata;
+}
+
+static void pytealet_ring_remove(PyTealetMainData **ring_anchor_io, PyTealetMainData *mdata) {
+    assert(ring_anchor_io);
+    assert(mdata);
+
+    if (!mdata->ring_next || !mdata->ring_prev) {
+        assert(mdata->ring_next == NULL && mdata->ring_prev == NULL);
+        return;
+    }
+
+    if (mdata->ring_next == mdata) {
+        assert(mdata->ring_prev == mdata);
+        if (*ring_anchor_io == mdata)
+            *ring_anchor_io = NULL;
+    } else {
+        if (*ring_anchor_io == mdata)
+            *ring_anchor_io = mdata->ring_next;
+        mdata->ring_prev->ring_next = mdata->ring_next;
+        mdata->ring_next->ring_prev = mdata->ring_prev;
+    }
+
+    mdata->ring_prev = NULL;
+    mdata->ring_next = NULL;
+}
+
+static PyTealetMainData *pytealet_ring_pop(PyTealetMainData **ring_anchor_io) {
     PyTealetMainData *head;
 
+    assert(ring_anchor_io);
+    head = *ring_anchor_io;
+    if (!head)
+        return NULL;
+    pytealet_ring_remove(ring_anchor_io, head);
+    return head;
+}
+
+static int pytealet_link_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
     assert(mstate);
     assert(mdata);
     assert(mstate->thread_data_lock);
 
     PyThread_acquire_lock(mstate->thread_data_lock, WAIT_LOCK);
-    head = mstate->thread_data_ring;
-    if (!head) {
-        mdata->ring_prev = mdata;
-        mdata->ring_next = mdata;
-        mstate->thread_data_ring = mdata;
-    } else {
-        PyTealetMainData *tail = head->ring_prev;
-        assert(tail);
-        mdata->ring_next = head;
-        mdata->ring_prev = tail;
-        tail->ring_next = mdata;
-        head->ring_prev = mdata;
-    }
+    pytealet_ring_append(&mstate->thread_data_ring, mdata);
     PyThread_release_lock(mstate->thread_data_lock);
     return 0;
+}
+
+static void pytealet_unlink_thread_data_locked(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
+    assert(mstate);
+    assert(mdata);
+    assert(mstate->thread_data_lock);
+
+    pytealet_ring_remove(&mstate->thread_data_ring, mdata);
 }
 
 static void pytealet_unlink_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
@@ -370,20 +427,7 @@ static void pytealet_unlink_thread_data(PyTealetModuleState *mstate, PyTealetMai
     assert(mstate->thread_data_lock);
 
     PyThread_acquire_lock(mstate->thread_data_lock, WAIT_LOCK);
-    if (mdata->ring_next && mdata->ring_prev) {
-        if (mdata->ring_next == mdata) {
-            assert(mdata->ring_prev == mdata);
-            if (mstate->thread_data_ring == mdata)
-                mstate->thread_data_ring = NULL;
-        } else {
-            if (mstate->thread_data_ring == mdata)
-                mstate->thread_data_ring = mdata->ring_next;
-            mdata->ring_prev->ring_next = mdata->ring_next;
-            mdata->ring_next->ring_prev = mdata->ring_prev;
-        }
-        mdata->ring_prev = NULL;
-        mdata->ring_next = NULL;
-    }
+    pytealet_unlink_thread_data_locked(mstate, mdata);
     PyThread_release_lock(mstate->thread_data_lock);
 }
 
@@ -2020,7 +2064,7 @@ PyTealetObject *PyTealet_GetOrCreateCurrent(PyTealetModuleState *mstate, PyTeale
     return PyTealet_GetOrCreateMain(mstate, mdata_out);
 }
 
-static int pytealet_thread_cleanup_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *nerfed,
+static int pytealet_thread_reap_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *nerfed,
                                          int clear_current_tss, int best_effort) {
     PyObject *wrappers = NULL;
     PyObject *wref;
@@ -2320,7 +2364,7 @@ static int pytealet_kill_active_snapshot(PyTealetModuleState *mstate, PyObject *
     return 0;
 }
 
-/* Internal helper used by thread_kill() and thread_cleanup().
+/* Internal helper used by thread_kill() and thread_reap().
  * Repeatedly throws the configured kill exception into active wrappers and
  * returns any remaining active wrappers after cleanup_passes attempts.
  */
@@ -2378,7 +2422,7 @@ static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTeale
  * Phase 2: force-teardown remaining handles and return wrappers that were
  * still active at force-teardown time.
  */
-PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec) {
+PyObject *PyTealet_ThreadReap(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec) {
     PyTealetObject *current;
     PyTealetMainData *mdata;
     PyObject *nerfed;
@@ -2395,7 +2439,7 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup
         return nerfed;
     }
     if (!TEALET_IS_MAIN(current->tealet)) {
-        PyErr_SetString(mstate->state_error, "thread_cleanup() must be called from this thread's main tealet");
+        PyErr_SetString(mstate->state_error, "thread_reap() must be called from this thread's main tealet");
         Py_DECREF(nerfed);
         return NULL;
     }
@@ -2407,7 +2451,7 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup
     }
     Py_DECREF(remaining);
 
-    if (pytealet_thread_cleanup_inner(mstate, mdata, nerfed, 1, 0) < 0) {
+    if (pytealet_thread_reap_inner(mstate, mdata, nerfed, 1, 0) < 0) {
         Py_DECREF(nerfed);
         return NULL;
     }
@@ -2415,10 +2459,10 @@ PyObject *PyTealet_ThreadCleanup(PyTealetModuleState *mstate, Py_ssize_t cleanup
 }
 
 /* Return active non-main tealet wrappers for this thread's lineage.
- * Unlike thread_cleanup(), this can be called from any tealet in the
+ * Unlike thread_reap(), this can be called from any tealet in the
  * current lineage.
  */
-PyObject *PyTealet_ActiveTealets(PyTealetModuleState *mstate) {
+PyObject *PyTealet_ThreadActive(PyTealetModuleState *mstate) {
     PyTealetObject *current;
     PyTealetMainData *mdata;
     PyObject *active;
@@ -2469,8 +2513,8 @@ PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_pa
 /* Internal API for module teardown paths: clean one lineage without
  * current-thread/main-caller validation.
  */
-int PyTealet_ThreadCleanupMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
-    return pytealet_thread_cleanup_inner(mstate, mdata, NULL, 0, 1);
+int PyTealet_ThreadReapMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
+    return pytealet_thread_reap_inner(mstate, mdata, NULL, 0, 1);
 }
 
 /* Best-effort thread liveness probe by inspecting threading._active.
@@ -2526,6 +2570,223 @@ static int pytealet_thread_ident_is_alive(unsigned long thread_id, int *alive_ou
 
     *alive_out = contains ? 1 : 0;
     return 1;
+}
+
+/* Query/set helpers for Python sets of thread identifiers. */
+static int pytealet_tid_set_contains(PyObject *known_thread_ids, long tid, int *contains_out) {
+    PyObject *tid_obj;
+    int contains;
+
+    assert(known_thread_ids && PySet_Check(known_thread_ids));
+    assert(contains_out);
+
+    tid_obj = PyLong_FromLong(tid);
+    if (!tid_obj)
+        return -1;
+    contains = PySet_Contains(known_thread_ids, tid_obj);
+    Py_DECREF(tid_obj);
+    if (contains < 0)
+        return -1;
+    *contains_out = contains ? 1 : 0;
+    return 0;
+}
+
+static int pytealet_tid_set_add(PyObject *known_thread_ids, long tid) {
+    PyObject *tid_obj;
+    int rc;
+
+    assert(known_thread_ids && PySet_Check(known_thread_ids));
+
+    tid_obj = PyLong_FromLong(tid);
+    if (!tid_obj)
+        return -1;
+    rc = PySet_Add(known_thread_ids, tid_obj);
+    Py_DECREF(tid_obj);
+    return rc;
+}
+
+/* Build a best-effort snapshot of currently known live Python thread IDs.
+ * We always include the current thread id, even if threading._active is
+ * unavailable.
+ */
+static PyObject *pytealet_collect_known_thread_ids(unsigned long current_tid) {
+    PyObject *known_thread_ids;
+    PyObject *threading_mod = NULL;
+    PyObject *active = NULL;
+    PyObject *keys = NULL;
+    PyObject *iter = NULL;
+    PyObject *key;
+
+    known_thread_ids = PySet_New(NULL);
+    if (!known_thread_ids)
+        return NULL;
+
+    if (pytealet_tid_set_add(known_thread_ids, (long)current_tid) < 0) {
+        Py_DECREF(known_thread_ids);
+        return NULL;
+    }
+
+    threading_mod = PyImport_ImportModule("threading");
+    if (!threading_mod) {
+        PyErr_Clear();
+        return known_thread_ids;
+    }
+
+    active = PyObject_GetAttrString(threading_mod, "_active");
+    Py_DECREF(threading_mod);
+    if (!active) {
+        PyErr_Clear();
+        return known_thread_ids;
+    }
+
+    keys = PyMapping_Keys(active);
+    Py_DECREF(active);
+    if (!keys) {
+        PyErr_Clear();
+        return known_thread_ids;
+    }
+
+    iter = PyObject_GetIter(keys);
+    Py_DECREF(keys);
+    if (!iter) {
+        PyErr_Clear();
+        return known_thread_ids;
+    }
+
+    while ((key = PyIter_Next(iter)) != NULL) {
+        if (PySet_Add(known_thread_ids, key) < 0) {
+            Py_DECREF(key);
+            Py_DECREF(iter);
+            Py_DECREF(known_thread_ids);
+            return NULL;
+        }
+        Py_DECREF(key);
+    }
+    if (PyErr_Occurred())
+        PyErr_Clear();
+
+    Py_DECREF(iter);
+    return known_thread_ids;
+}
+
+/* Best-effort cleanup of detached lineage nodes.
+ * Never leaves an exception set.
+ */
+static void pytealet_detached_ring_drain(PyTealetModuleState *mstate, PyTealetMainData **ring_io) {
+    PyTealetMainData *mdata;
+
+    assert(mstate);
+    assert(ring_io);
+
+    while ((mdata = pytealet_ring_pop(ring_io)) != NULL) {
+        if (pytealet_thread_reap_inner(mstate, mdata, NULL, 0, 1) < 0) {
+            if (PyErr_Occurred()) {
+                PyErr_WriteUnraisable(Py_None);
+                PyErr_Clear();
+            }
+        }
+    }
+}
+
+/* Sweep stale per-thread lineages left behind by threads that are no longer
+ * alive in Python's threading registry.
+ *
+ * Returns wrappers that were still active and had to be forcibly nerfed.
+ */
+PyObject *PyTealet_ThreadSweep(PyTealetModuleState *mstate) {
+    PyObject *known_thread_ids = NULL;
+    PyObject *nerfed = NULL;
+    PyTealetMainData *detached_ring = NULL;
+    Py_ssize_t ring_count = 0;
+    Py_ssize_t idx;
+    int lock_held = 0;
+
+    assert(mstate);
+
+    nerfed = PyList_New(0);
+    if (!nerfed)
+        goto error;
+
+    known_thread_ids = pytealet_collect_known_thread_ids((unsigned long)PyThread_get_thread_ident());
+    if (!known_thread_ids)
+        goto error;
+
+    assert(mstate->thread_data_lock);
+    PyThread_acquire_lock(mstate->thread_data_lock, WAIT_LOCK);
+    lock_held = 1;
+
+    if (mstate->thread_data_ring) {
+        PyTealetMainData *cursor = mstate->thread_data_ring;
+        do {
+            assert(cursor);
+            assert(cursor->ring_next);
+            ring_count++;
+            cursor = cursor->ring_next;
+        } while (cursor != mstate->thread_data_ring);
+    }
+
+    if (ring_count > 0) {
+        PyTealetMainData *cursor = mstate->thread_data_ring;
+        for (idx = 0; idx < ring_count; idx++) {
+            PyTealetMainData *next = cursor->ring_next;
+            int in_known = 0;
+
+            if (pytealet_tid_set_contains(known_thread_ids, cursor->tid, &in_known) < 0)
+                goto error;
+
+            if (!in_known) {
+                int alive = 0;
+                int probed = pytealet_thread_ident_is_alive((unsigned long)cursor->tid, &alive);
+
+                if (probed && alive) {
+                    if (pytealet_tid_set_add(known_thread_ids, cursor->tid) < 0)
+                        goto error;
+                } else {
+                    pytealet_unlink_thread_data_locked(mstate, cursor);
+                    pytealet_ring_append(&detached_ring, cursor);
+                }
+            }
+
+            cursor = next;
+        }
+    }
+
+    PyThread_release_lock(mstate->thread_data_lock);
+    lock_held = 0;
+
+    while (detached_ring) {
+        PyTealetMainData *detached = pytealet_ring_pop(&detached_ring);
+
+        assert(detached);
+
+        if (pytealet_thread_reap_inner(mstate, detached, nerfed, 0, 1) < 0) {
+            if (PyErr_Occurred()) {
+                PyErr_WriteUnraisable(Py_None);
+                PyErr_Clear();
+            }
+        }
+    }
+
+    Py_DECREF(known_thread_ids);
+    return nerfed;
+
+error:
+    if (lock_held)
+        PyThread_release_lock(mstate->thread_data_lock);
+
+    if (detached_ring) {
+        PyObject *etype = NULL;
+        PyObject *evalue = NULL;
+        PyObject *etb = NULL;
+
+        PyErr_Fetch(&etype, &evalue, &etb);
+        pytealet_detached_ring_drain(mstate, &detached_ring);
+        PyErr_Restore(etype, evalue, etb);
+    }
+
+    Py_XDECREF(known_thread_ids);
+    Py_XDECREF(nerfed);
+    return NULL;
 }
 
 /* Raise a structured thread-mismatch exception that includes owner metadata.
@@ -2835,7 +3096,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     tealet->state = STATE_EXIT;
     /* Stop tracking this wrapper while lineage pointers are still valid.
      * If we wait until object dealloc, tealet may already be NULL and the
-     * weakref can remain stranded in mdata->wrappers until thread_cleanup().
+     * weakref can remain stranded in mdata->wrappers until thread_reap().
      * This call is safe, we drop weakref objects and no arbitrary __del__ code can run.
      */
     pytealet_domain_lock(mdata);

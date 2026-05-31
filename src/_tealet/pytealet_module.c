@@ -188,20 +188,26 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return Py_XNewRef((PyObject *)PyTealet_GetOrCreateMain(mstate, NULL));
 }
 
-static PyObject *module_thread_cleanup(PyObject *mod, PyObject *args) {
+static PyObject *module_thread_reap(PyObject *mod, PyObject *args) {
     PyTealetModuleState *mstate;
     GET_MODULE_STATE(mod, mstate);
     Py_ssize_t cleanup_passes = 3;
     PyObject *kill_exc = Py_None;
-    if (!PyArg_ParseTuple(args, "|nO:thread_cleanup", &cleanup_passes, &kill_exc))
+    if (!PyArg_ParseTuple(args, "|nO:thread_reap", &cleanup_passes, &kill_exc))
         return NULL;
-    return PyTealet_ThreadCleanup(mstate, cleanup_passes, kill_exc);
+    return PyTealet_ThreadReap(mstate, cleanup_passes, kill_exc);
 }
 
-static PyObject *module_active_tealets(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+static PyObject *module_thread_sweep(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     PyTealetModuleState *mstate;
     GET_MODULE_STATE(mod, mstate);
-    return PyTealet_ActiveTealets(mstate);
+    return PyTealet_ThreadSweep(mstate);
+}
+
+static PyObject *module_thread_active(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate;
+    GET_MODULE_STATE(mod, mstate);
+    return PyTealet_ThreadActive(mstate);
 }
 
 static PyObject *module_thread_kill(PyObject *mod, PyObject *args) {
@@ -331,8 +337,9 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
-    {"thread_cleanup", (PyCFunction)module_thread_cleanup, METH_VARARGS, ""},
-    {"active_tealets", (PyCFunction)module_active_tealets, METH_NOARGS, ""},
+    {"thread_reap", (PyCFunction)module_thread_reap, METH_VARARGS, ""},
+    {"thread_sweep", (PyCFunction)module_thread_sweep, METH_NOARGS, ""},
+    {"thread_active", (PyCFunction)module_thread_active, METH_NOARGS, ""},
     {"thread_kill", (PyCFunction)module_thread_kill, METH_VARARGS, ""},
     {"error_was_remote", (PyCFunction)module_error_was_remote, METH_NOARGS, ""},
     {"hide_frame", (PyCFunction)module_hide_frame, METH_VARARGS, ""},
@@ -503,7 +510,7 @@ static void pytealet_module_free(void *m) {
         PyThread_release_lock(mstate->thread_data_lock);
         if (!mdata)
             break;
-        (void)PyTealet_ThreadCleanupMdataForTeardown(mstate, mdata);
+        (void)PyTealet_ThreadReapMdataForTeardown(mstate, mdata);
     }
 
     if (PyThread_tss_is_created(&mstate->tls_key))

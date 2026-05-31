@@ -111,7 +111,7 @@ class TestThreadCleanup:
         assert t1.run(parked, None) == "paused"
         assert t2.run(parked, None) == "paused"
 
-        active = _tealet.active_tealets()
+        active = _tealet.thread_active()
         active_ids = {id(x) for x in active}
         assert id(t1) in active_ids
         assert id(t2) in active_ids
@@ -121,7 +121,7 @@ class TestThreadCleanup:
         assert t1.state == _tealet.STATE_EXIT
         assert t2.state == _tealet.STATE_EXIT
 
-        assert _tealet.thread_cleanup() == []
+        assert _tealet.thread_reap() == []
         # Recreate main for subsequent tests.
         assert _tealet.main().state == _tealet.STATE_RUN
 
@@ -148,7 +148,7 @@ class TestThreadCleanup:
         assert all(id(x) != id(t) for x in remaining2)
         assert t.state == _tealet.STATE_EXIT
 
-        assert _tealet.thread_cleanup() == []
+        assert _tealet.thread_reap() == []
         # Recreate main for subsequent tests.
         assert _tealet.main().state == _tealet.STATE_RUN
 
@@ -162,7 +162,7 @@ class TestThreadCleanup:
         assert t1.run(parked, None) == "paused"
         assert t2.run(parked, None) == "paused"
 
-        active = _tealet.active_tealets()
+        active = _tealet.thread_active()
         active_ids = {id(x) for x in active}
         assert id(t1) in active_ids
         assert id(t2) in active_ids
@@ -173,7 +173,7 @@ class TestThreadCleanup:
         assert t1.state == _tealet.STATE_EXIT
         assert t2.state == _tealet.STATE_EXIT
 
-        assert _tealet.thread_cleanup() == []
+        assert _tealet.thread_reap() == []
         # Recreate main for subsequent tests.
         assert _tealet.main().state == _tealet.STATE_RUN
 
@@ -188,7 +188,7 @@ class TestThreadCleanup:
         t = _tealet.tealet()
         t.run(switch_back, None)
 
-        active = _tealet.active_tealets()
+        active = _tealet.thread_active()
         active_ids = {id(x) for x in active}
 
         assert id(thread_main) not in active_ids
@@ -196,12 +196,12 @@ class TestThreadCleanup:
         assert id(t) in active_ids
 
         # Cleanup current lineage so following tests start with a fresh main.
-        _tealet.thread_cleanup()
+        _tealet.thread_reap()
         assert _tealet.main().state == _tealet.STATE_RUN
 
     def test_active_tealets_allowed_from_non_main_tealet_context(self):
         def run(current, arg):
-            active = _tealet.active_tealets()
+            active = _tealet.thread_active()
             assert any(id(x) == id(current) for x in active)
             return current.main()
 
@@ -240,7 +240,7 @@ class TestThreadCleanup:
         assert all(id(x) != id(t) for x in remaining)
         assert t.state == _tealet.STATE_EXIT
 
-        assert _tealet.thread_cleanup() == []
+        assert _tealet.thread_reap() == []
         assert _tealet.main().state == _tealet.STATE_RUN
 
     def test_thread_kill_rejects_exception_instance_spec(self):
@@ -260,7 +260,7 @@ class TestThreadCleanup:
 
         # Cleanup lineages to avoid cross-test contamination.
         _tealet.thread_kill(3)
-        assert _tealet.thread_cleanup() == []
+        assert _tealet.thread_reap() == []
         assert _tealet.main().state == _tealet.STATE_RUN
 
     def test_thread_cleanup_accepts_callable_exception_factory(self):
@@ -271,7 +271,7 @@ class TestThreadCleanup:
         t = _tealet.tealet()
         assert t.run(parked, None) == "paused"
 
-        assert _tealet.thread_cleanup(1, _tealet.TealetExit) == []
+        assert _tealet.thread_reap(1, _tealet.TealetExit) == []
         assert t.state == _tealet.STATE_EXIT
         assert _tealet.main().state == _tealet.STATE_RUN
 
@@ -289,10 +289,10 @@ class TestThreadCleanup:
         t = _tealet.tealet()
         t.run(switch_back, None)  # t runs and switches back, stays suspended
         
-        nerfed = _tealet.thread_cleanup()
+        nerfed = _tealet.thread_reap()
         nerfed_ids = {id(x) for x in nerfed}
 
-        # thread_cleanup() now performs thread_kill() first, so suspended RUN
+        # thread_reap() now performs thread_kill() first, so suspended RUN
         # tealets are exited before forced handle teardown and are not in nerfed.
         # STUB tealets are not returned (can be safely collected).
         # Main is cleanly deleted, not forcibly invalidated.
@@ -307,7 +307,7 @@ class TestThreadCleanup:
     def test_thread_cleanup_requires_main_tealet_context(self):
         def run(current, arg):
             with pytest.raises(_tealet.StateError):
-                _tealet.thread_cleanup()
+                _tealet.thread_reap()
             return current.main()
 
         _tealet.tealet().run(run, None)
@@ -321,7 +321,7 @@ class TestThreadCleanup:
         t = _tealet.tealet()
         assert t.run(parked, None) == "paused"
 
-        nerfed = _tealet.thread_cleanup()
+        nerfed = _tealet.thread_reap()
         _tealet.tealet() # create a new lineage for this thread
         assert all(id(x) != id(t) for x in nerfed)
         assert t.state == _tealet.STATE_EXIT
@@ -332,7 +332,7 @@ class TestThreadCleanup:
     def test_cleanup_empty_lineage(self):
         """Cleanup with only main tealet (no non-main tealets) returns empty list."""
         _tealet.main()  # ensure main exists
-        nerfed = _tealet.thread_cleanup()
+        nerfed = _tealet.thread_reap()
         assert nerfed == []
         # Recreate main for subsequent tests
         assert _tealet.main().state == _tealet.STATE_RUN
@@ -345,7 +345,7 @@ class TestThreadCleanup:
         stub2 = _tealet.tealet()
         stub2.stub()
         
-        nerfed = _tealet.thread_cleanup()
+        nerfed = _tealet.thread_reap()
         nerfed_ids = {id(x) for x in nerfed}
         
         # STUB tealets are not in nerfed (they can be safely garbage collected)
@@ -362,7 +362,7 @@ class TestThreadCleanup:
         _tealet.main()
         stub1 = _tealet.tealet()
         stub1.stub()
-        nerfed = _tealet.thread_cleanup()
+        nerfed = _tealet.thread_reap()
         assert nerfed == []
 
         # New lineage in same thread
@@ -371,7 +371,7 @@ class TestThreadCleanup:
         stub2 = _tealet.tealet()
         stub2.stub()
         assert stub2.state == _tealet.STATE_STUB
-        nerfed2 = _tealet.thread_cleanup()
+        nerfed2 = _tealet.thread_reap()
         assert nerfed2 == []  # STUB not in nerfed
         
         # Recreate main for subsequent tests
@@ -388,7 +388,7 @@ class TestThreadCleanup:
         stub.stub()
         stub.run(finish_work, None)  # Run to completion, becomes inactive
         
-        nerfed = _tealet.thread_cleanup()
+        nerfed = _tealet.thread_reap()
         # Finished tealet should not be in nerfed (not ACTIVE status)
         assert isinstance(nerfed, list)
         assert nerfed == []
@@ -407,7 +407,7 @@ class TestThreadCleanup:
         gc.collect()
         
         # Cleanup should handle dead weakrefs without crashing
-        nerfed = _tealet.thread_cleanup()
+        nerfed = _tealet.thread_reap()
         assert isinstance(nerfed, list)
         # The stub was GC'd and wasn't RUN anyway, so won't be in nerfed
         
@@ -420,7 +420,7 @@ class TestThreadCleanup:
         stub = _tealet.tealet()
         stub.stub()
 
-        nerfed = _tealet.thread_cleanup()
+        nerfed = _tealet.thread_reap()
         nerfed_ids = {id(x) for x in nerfed}
 
         assert id(main) not in nerfed_ids
@@ -622,15 +622,76 @@ class TestTealetContext:
     def test_cleanup_idempotent_on_empty_lineage(self):
         """Calling cleanup multiple times on empty lineage is idempotent."""
         _tealet.main()
-        nerfed1 = _tealet.thread_cleanup()
+        nerfed1 = _tealet.thread_reap()
         assert nerfed1 == []
         
         # Second cleanup should be idempotent (no error, no main)
-        nerfed2 = _tealet.thread_cleanup()
+        nerfed2 = _tealet.thread_reap()
         assert nerfed2 == []
         
         # Recreate main for subsequent tests
         assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_thread_sweep_reports_nerfed_from_dead_thread_lineage(self):
+        holder = []
+        ready = threading.Event()
+
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        def worker():
+            t = _tealet.tealet()
+            holder.append(t)
+            assert t.run(parked, None) == "paused"
+            ready.set()
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert ready.wait(timeout=1.0)
+        join_thread_or_fail(th)
+
+        t = holder[0]
+        nerfed = _tealet.thread_sweep()
+        assert any(id(x) == id(t) for x in nerfed)
+        assert t.state == _tealet.STATE_EXIT
+
+        # Re-running sweep should be idempotent once stale lineages are gone.
+        assert _tealet.thread_sweep() == []
+
+    def test_thread_sweep_skips_live_thread_lineage(self):
+        holder = []
+        ready = threading.Event()
+        release = threading.Event()
+
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        def worker():
+            t = _tealet.tealet()
+            holder.append(t)
+            assert t.run(parked, None) == "paused"
+            ready.set()
+            release.wait(timeout=1.0)
+
+        th = threading.Thread(target=worker)
+        th.start()
+        assert ready.wait(timeout=1.0)
+
+        t = holder[0]
+
+        try:
+            nerfed_live = _tealet.thread_sweep()
+            assert all(id(x) != id(t) for x in nerfed_live)
+            assert t.state == _tealet.STATE_RUN
+        finally:
+            release.set()
+            join_thread_or_fail(th)
+
+        nerfed_dead = _tealet.thread_sweep()
+        assert any(id(x) == id(t) for x in nerfed_dead)
+        assert t.state == _tealet.STATE_EXIT
 
 
 class TestThreadOwnership:

@@ -60,7 +60,7 @@ Scope: Cross-thread ownership hardening for critical pytealet operations, plus r
 
 1. Keep architecture docs synchronized with the new per-API cross-thread contract.
 2. Decide whether any additional readonly APIs should become owner-thread-only for consistency.
-3. Encourage worker-thread callers to use `_tealet.thread_cleanup()` before thread exit when they want best-effort teardown.
+3. Encourage worker-thread callers to use `_tealet.thread_reap()` before thread exit when they want best-effort teardown.
 
 ## API Inventory (Current Behavior)
 
@@ -72,4 +72,4 @@ Scope: Cross-thread ownership hardening for critical pytealet operations, plus r
 - Always-safe metadata/inspection:
   - `thread_id`, `state`, `belongs_to_current()`.
 - Optional lifecycle helper:
-  - `_tealet.thread_cleanup()` tears down this thread lineage and returns nerfed wrappers (order unspecified).
+  - `_tealet.thread_reap()` tears down this thread lineage and returns nerfed wrappers (order unspecified).

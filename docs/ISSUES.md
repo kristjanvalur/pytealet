@@ -228,7 +228,7 @@ PyThread_set_key_value(tls_key, ...);
 **Implemented:**
 - Added explicit per-thread lineage tracking in module state using a lock-protected circular list of `PyTealetMainData`.
 - Layered thread cleanup into:
-    - a Python-facing validated wrapper (`thread_cleanup()`), and
+    - a Python-facing validated wrapper (`thread_reap()`), and
     - an internal teardown-safe cleanup path for module shutdown.
 - Added module teardown ring draining in `pytealet_module_free()` to walk remaining thread lineages and clean them best-effort.
 - Updated cleanup invalidation semantics so cleaned wrappers are set to `STATE_EXIT` and reject further `switch()/run()` operations via normal state checks.
