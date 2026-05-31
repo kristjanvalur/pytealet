@@ -303,6 +303,8 @@ class TestGreenlet(TestCase):
         ok_to_exit_bg_thread = threading.Event()
 
         def f():
+            import _tealet
+
             g1 = RawGreenlet(fmain)
             g1.switch(seen)
             someref.append(g1)
@@ -315,6 +317,8 @@ class TestGreenlet(TestCase):
             bg_should_be_clear.set()
             ok_to_exit_bg_thread.wait(3)
             RawGreenlet() # One more time
+            # pytealet requires explicit lineage cleanup at thread exit.
+            _tealet.thread_cleanup()
 
         t = threading.Thread(target=f)
         t.start()
