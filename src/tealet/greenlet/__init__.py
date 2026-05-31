@@ -529,9 +529,9 @@ class greenlet(object):
 
     def _switch_or_throw(self, switch_payload, err):
         with ErrorWrapper:
-            run = getattr(self, "run", _RUN_UNSET)
-
-            tealet = getattr(self, "_tealet", None) or self._bootstrap(getattr(self, "parent", None))
+            tealet = self._tealet
+            if tealet is None:
+                tealet = self._bootstrap(self.parent)
             is_unstarted = _is_unstarted_tealet(tealet)
             payload = switch_payload
             if err is None:
@@ -540,16 +540,25 @@ class greenlet(object):
                 err = _wrap_throw_for_trace(err, tealet)
 
             if is_unstarted:
+                # getting this attribute can have side effets and run code, including switching.
+                run = getattr(self, "run", _RUN_UNSET)
                 if run is _RUN_UNSET:
                     raise AttributeError("run")
-                try:
-                    del self.run
-                except AttributeError:
-                    pass
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:
-                    arg = tealet.run(self._greenlet_main, (run, payload, err))
+                    try:
+                        arg = tealet.run(self._greenlet_main, (run, payload, err))
+                    except _tealet.StateError:
+                        # A re-entrancy, caused by the getattr(self, "run") above 
+                        # can cause the above to tried twice.  if we fail with a local
+                        # state error, just do a normal switch or throw.
+                        if _tealet.error_was_remote():
+                            raise
+                        if err is not None:
+                            arg = tealet.throw(err)
+                        else:
+                            arg = tealet.switch(payload)
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
@@ -558,11 +567,14 @@ class greenlet(object):
                 # unstarted, greenlet semantics require implicitly starting
                 # that parent with our return payload.
                 if tealet.state == _tealet.STATE_EXIT and arg is not None:
-                    parent = getattr(self, "parent", None)
+                    parent = self.parent
                     if parent is not None:
-                        parent_tealet = getattr(parent, "_tealet", None)
-                        if _is_unstarted_tealet(parent_tealet):
-                            return parent._switch_or_throw(arg, None)
+                        if _is_unstarted_tealet(parent._tealet):
+                            # tealet.run() returns transport-shaped payload;
+                            # decode before forwarding so parent receives the
+                            # canonical (args, kwds) switch payload.
+                            parent_payload = _unpack_switch_transport(arg)
+                            return parent._switch_or_throw(parent_payload, None)
             else:
                 if not self:
                     # switching to a dead greenlet, find its nearest live parent.
@@ -609,8 +621,20 @@ class greenlet(object):
     @staticmethod
     def _greenlet_main(current, arg):
         run, switch_payload, err = arg
-        current_wrapper = None
+        current_wrapper = greenlet._get_or_create_wrapper(current)
         try:
+            # Match greenlet startup ordering: clear the run attribute in the
+            # target context before entering user code. If clearing triggers
+            # Python callbacks that switch, control transfer semantics stay
+            # consistent with upstream behavior.
+            current_wrapper = greenlet._get_or_create_wrapper(current)
+            try:
+                del current_wrapper.run
+            except AttributeError:
+                pass
+            finally:
+                current_wrapper = None  # Don't hold strong reference to the wrapper durin user code.
+
             if err is not None:
                 raise err
             switch_payload = _unpack_switch_transport(switch_payload)
