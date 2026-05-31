@@ -63,3 +63,8 @@ edits unless equivalent upstream behavior appears:
   still pending after the re-entrant switch path (`if not a.dead: a.switch(None)`).
   This keeps the script's final state assertions stable for greenlet-compatible
   shims that do not eagerly start A on that path.
+
+- test_greenlet.py::TestGreenlet::test_dealloc_other_thread
+  The background thread helper calls `_tealet.thread_cleanup()` before thread
+  exit. pytealet requires explicit per-thread lineage finalization so leaked
+  wrapper-tracking containers are released deterministically in this scenario.
