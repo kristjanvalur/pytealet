@@ -100,6 +100,7 @@ def install(force=True):
 
 tealetmap = weakref.WeakValueDictionary()
 _RUN_UNSET = object()
+_DEFERRED_PARENT_THROW = object()
 _garbage_process_guard = threading.local()
 _stub_tls = threading.local()
 _tracefunc = None
@@ -189,6 +190,22 @@ def _wrap_throw_for_trace(err, target_tealet):
     if trace_payload is None:
         return err
     return _TraceException(err, trace_payload)
+
+
+def _pack_deferred_parent_throw(err):
+    return (((_DEFERRED_PARENT_THROW, err),), {})
+
+
+def _unpack_deferred_parent_throw(payload):
+    args, kwds = payload
+    if kwds or len(args) != 1:
+        return None
+    marker = args[0]
+    if not (isinstance(marker, tuple) and len(marker) == 2):
+        return None
+    if marker[0] is not _DEFERRED_PARENT_THROW:
+        return None
+    return marker[1]
 
 
 def _pin_running(tealet, gr):
@@ -572,10 +589,26 @@ class greenlet(object):
                         # state error, just do a normal switch or throw.
                         if _tealet.error_was_remote():
                             raise
+                        if tealet.state == _tealet.STATE_EXIT and err is not None:
+                            parent = self.parent
+                            if parent is not None and _is_unstarted_tealet(parent._tealet):
+                                # Child already exited, but raw runtime could not
+                                # switch into an unstarted parent. Deliver throw
+                                # by explicitly starting that parent.
+                                return parent._switch_or_throw(None, err)
                         if err is not None:
                             arg = tealet.throw(err)
                         else:
                             arg = tealet.switch(payload)
+                    except BaseException as run_exc:
+                        if tealet.state == _tealet.STATE_EXIT and err is not None:
+                            parent = self.parent
+                            if parent is not None and _is_unstarted_tealet(parent._tealet):
+                                # Preserve "throw goes to original parent" when
+                                # the child has already exited but the parent has
+                                # not started yet.
+                                return parent._switch_or_throw(None, run_exc)
+                        raise
                 finally:
                     self._is_running = False
                     _unpin_running(tealet)
@@ -583,14 +616,22 @@ class greenlet(object):
                 # If this greenlet just finished and its immediate parent is
                 # unstarted, greenlet semantics require implicitly starting
                 # that parent with our return payload.
-                if tealet.state == _tealet.STATE_EXIT and arg is not None:
+                if tealet.state == _tealet.STATE_EXIT:
                     parent = self.parent
-                    if parent is not None:
-                        if _is_unstarted_tealet(parent._tealet):
+                    if parent is not None and _is_unstarted_tealet(parent._tealet):
+                        if arg is None and err is not None:
+                            # Uncaught throw in an unstarted child must be
+                            # delivered by starting the unstarted parent with
+                            # the same throw semantics.
+                            return parent._switch_or_throw(None, err)
+                        if arg is not None:
                             # tealet.run() returns transport-shaped payload;
                             # decode before forwarding so parent receives the
                             # canonical (args, kwds) switch payload.
                             parent_payload = _unpack_switch_transport(arg)
+                            parent_throw = _unpack_deferred_parent_throw(parent_payload)
+                            if parent_throw is not None:
+                                return parent._switch_or_throw(None, parent_throw)
                             return parent._switch_or_throw(parent_payload, None)
             else:
                 if not self:
@@ -628,6 +669,12 @@ class greenlet(object):
         if arg is None:
             return None  # raw tealet switched back without a packed payload.
         arg = _unpack_switch_transport(arg)
+        deferred_parent_throw = _unpack_deferred_parent_throw(arg)
+        if deferred_parent_throw is not None:
+            parent = self.parent
+            if parent is None:
+                raise deferred_parent_throw
+            return parent._switch_or_throw(None, deferred_parent_throw)
         args, kwds = arg
         if args and kwds:
             return (args, kwds)
@@ -640,6 +687,7 @@ class greenlet(object):
     @staticmethod
     def _greenlet_main(current, arg):
         run, switch_payload, err = arg
+        target_tealet = None
         current_wrapper = greenlet._get_or_create_wrapper(current)
         try:
             # Match greenlet startup ordering: clear the run attribute in the
@@ -671,18 +719,29 @@ class greenlet(object):
                     raise
                 # Preserve parent-delivery semantics for uncaught worker errors by
                 # queueing the exception onto the parent tealet before exit-switch.
-                p = current_wrapper._parent()
+                p = current_wrapper._switch_parent()
+                if p is None:
+                    p = current_wrapper._parent()
                 e = _wrap_throw_for_trace(e, p._tealet)
-                p._tealet.set_exception(e)
-                arg = None  # arg is ignored when 'e' is raised on other side.
+                if _is_unstarted_tealet(p._tealet):
+                    # Raw set_exception() requires a running target. Return to
+                    # the current main and let caller route this into the
+                    # unstarted parent explicitly.
+                    arg = _pack_deferred_parent_throw(e)
+                    target_tealet = current_wrapper._main._tealet
+                else:
+                    p._tealet.set_exception(e)
+                    arg = None  # arg is ignored when 'e' is raised on other side.
             finally:
                 e = None
         current_wrapper = current_wrapper or greenlet._get_or_create_wrapper(current)
         p = current_wrapper._parent()
+        if target_tealet is None:
+            target_tealet = p._tealet
         if arg is not None:
-            arg = _pack_switch_transport(arg, p._tealet)
+            arg = _pack_switch_transport(arg, target_tealet)
         try:
-            return p._tealet, arg
+            return target_tealet, arg
         finally:
             arg = None
 
