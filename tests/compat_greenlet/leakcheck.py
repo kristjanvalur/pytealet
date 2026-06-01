@@ -71,6 +71,17 @@ SKIP_LEAKCHECKS = RUNNING_ON_MANYLINUX or os.environ.get('GREENLET_SKIP_LEAKCHEC
 SKIP_FAILING_LEAKCHECKS = os.environ.get('GREENLET_SKIP_FAILING_LEAKCHECKS')
 ONLY_FAILING_LEAKCHECKS = os.environ.get('GREENLET_ONLY_FAILING_LEAKCHECKS')
 
+
+def _best_effort_tealet_thread_sweep():
+    try:
+        import _tealet
+    except Exception:
+        return
+    try:
+        _tealet.thread_sweep()
+    except Exception:
+        return
+
 def ignores_leakcheck(func):
     """
     Ignore the given object during leakchecks.
@@ -219,6 +230,7 @@ class _RefCountChecker(object):
     def _run_test(self, args, kwargs):
         gc_enabled = gc.isenabled()
         gc.disable()
+        _best_effort_tealet_thread_sweep()
 
         if self.needs_setUp:
             self.testcase.setUp()
@@ -230,6 +242,7 @@ class _RefCountChecker(object):
             self.testcase.doCleanups()
             self.testcase.skipTearDown = True
             self.needs_setUp = True
+            _best_effort_tealet_thread_sweep()
             if gc_enabled:
                 gc.enable()
 

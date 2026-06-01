@@ -230,6 +230,7 @@ class greenlet(object):
         "_main",
         "_garbage",
         "_is_running",
+        "_is_dealloc",
         "run",
         "__dict__",
         "__weakref__",
