@@ -60,11 +60,9 @@ def enable_optional_cleanup(enabled):
 
 
 def get_clocks_used_doing_optional_cleanup():
-    # Upstream returns CPU clock ticks spent in optional cleanup and None when
-    # cleanup is disabled. Keep that shape for compat tests.
-    if not _optional_cleanup_enabled:
-        return None
-    return 0
+    # This shim does not implement upstream's GC-assisted optional cleanup
+    # algorithm, so no meaningful clock metric is available.
+    return None
 
 
 def get_pending_cleanup_count():

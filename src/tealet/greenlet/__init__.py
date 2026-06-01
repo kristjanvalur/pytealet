@@ -482,6 +482,17 @@ class greenlet(object):
             return True
         return False
 
+    @property
+    def _stack_saved(self):
+        tealet = getattr(self, "_tealet", None)
+        if tealet is None or tealet.state != _tealet.STATE_RUN:
+            return 0
+        # Running/current greenlets have no saved suspended stack segment.
+        if tealet is _tealet.current():
+            return 0
+        # Compat metric: expose a positive value when suspended stack is saved.
+        return 1
+
     def __bool__(self):
         tealet = getattr(self, "_tealet", None)
         return tealet is not None and tealet.state == _tealet.STATE_RUN and not self.dead
@@ -529,9 +540,9 @@ class greenlet(object):
 
     def _switch_or_throw(self, switch_payload, err):
         with ErrorWrapper:
-            tealet = self._tealet
+            tealet = getattr(self, "_tealet", None)
             if tealet is None:
-                tealet = self._bootstrap(self.parent)
+                tealet = self._bootstrap(getattr(self, "parent", None))
             is_unstarted = _is_unstarted_tealet(tealet)
             payload = switch_payload
             if err is None:
@@ -646,13 +657,18 @@ class greenlet(object):
         except GreenletExit as e:
             arg = ((e,), {})
         except BaseException as e:
-            # Preserve parent-delivery semantics for uncaught worker errors by
-            # queueing the exception onto the parent tealet before exit-switch.
-            current_wrapper = greenlet._get_or_create_wrapper(current)
-            p = current_wrapper._parent()
-            wrapped = _wrap_throw_for_trace(e, p._tealet)
-            p._tealet.set_exception(wrapped)
-            arg = None  # ignored, 'e' is raised on other side.
+            try:
+                # Preserve parent-delivery semantics for uncaught worker errors by
+                # queueing the exception onto the parent tealet before exit-switch.
+                current_wrapper = greenlet._get_or_create_wrapper(current)
+                p = current_wrapper._parent()
+                if p is current_wrapper:
+                    raise  # paret is same, e.g. during __del__, cannot handle.
+                e = _wrap_throw_for_trace(e, p._tealet)
+                p._tealet.set_exception(e)
+                arg = None  # arg is ignored when 'e' is raised on other side.
+            finally:
+                e = None
         current_wrapper = current_wrapper or greenlet._get_or_create_wrapper(current)
         p = current_wrapper._parent()
         if arg is not None:
