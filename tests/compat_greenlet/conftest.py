@@ -44,3 +44,21 @@ def pytest_collection_modifyitems(config, items):
         reason = skip_reasons.get(name)
         if reason:
             item.add_marker(pytest.mark.skip(reason=reason))
+
+
+@pytest.fixture(autouse=True)
+def _sweep_tealet_threads_between_compat_tests():
+    """Best-effort stale-thread cleanup around compat tests.
+
+    This keeps background thread lineages from leaking between tests,
+    especially for refcount-sensitive compat scenarios.
+    """
+    try:
+        import _tealet
+    except Exception:
+        yield
+        return
+
+    _tealet.thread_sweep()
+    yield
+    _tealet.thread_sweep()

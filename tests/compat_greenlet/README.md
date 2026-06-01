@@ -64,7 +64,14 @@ edits unless equivalent upstream behavior appears:
   This keeps the script's final state assertions stable for greenlet-compatible
   shims that do not eagerly start A on that path.
 
-- test_greenlet.py::TestGreenlet::test_dealloc_other_thread
-  The background thread helper calls `_tealet.thread_cleanup()` before thread
-  exit. pytealet requires explicit per-thread lineage finalization so leaked
-  wrapper-tracking containers are released deterministically in this scenario.
+- conftest.py::_sweep_tealet_threads_between_compat_tests (autouse fixture)
+  Compat tests run with a pytealet-local autouse fixture that calls
+  `_tealet.thread_sweep()` before and after each test. This replaced prior
+  per-test `_tealet.thread_cleanup()` injections and keeps cross-thread
+  lineage cleanup deterministic for leak-sensitive runs.
+
+- test_greenlet.py::TestGreenlet::test_parent_restored_on_kill
+  The worker catches `_tealet.TealetExit` around `hub.switch()` and the test
+  explicitly finalizes the resurrected greenlet via `resurrected.throw()` after
+  asserting parent restoration. This avoids retaining one suspended active
+  tealet per leakcheck iteration in pytealet.

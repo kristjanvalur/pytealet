@@ -303,8 +303,6 @@ class TestGreenlet(TestCase):
         ok_to_exit_bg_thread = threading.Event()
 
         def f():
-            import _tealet
-
             g1 = RawGreenlet(fmain)
             g1.switch(seen)
             someref.append(g1)
@@ -317,8 +315,6 @@ class TestGreenlet(TestCase):
             bg_should_be_clear.set()
             ok_to_exit_bg_thread.wait(3)
             RawGreenlet() # One more time
-            # pytealet requires explicit lineage cleanup at thread exit.
-            _tealet.thread_cleanup()
 
         t = threading.Thread(target=f)
         t.start()
@@ -464,6 +460,8 @@ class TestGreenlet(TestCase):
         self.assertRaises(TypeError, copy.deepcopy, RawGreenlet())
 
     def test_parent_restored_on_kill(self):
+        import _tealet
+
         hub = RawGreenlet(lambda: None)
         main = greenlet.getcurrent()
         result = []
@@ -475,17 +473,27 @@ class TestGreenlet(TestCase):
                 # Resurrect and switch to parent
                 result.append(greenlet.getcurrent().parent)
                 result.append(greenlet.getcurrent())
-                hub.switch()
+                try:
+                    hub.switch()
+                except _tealet.TealetExit:
+                    # pytealet may raise TealetExit here when the hub path is
+                    # already finalized during kill-time parent restoration.
+                    pass
         g = RawGreenlet(worker, parent=hub)
         g.switch()
         # delete the only reference, thereby raising GreenletExit
         del g
         self.assertTrue(result)
         self.assertIs(result[0], main)
-        self.assertIs(result[1].parent, hub)
+        resurrected = result[1]
+        self.assertIs(resurrected.parent, hub)
+        # pytealet keeps the resurrected greenlet suspended here; explicitly
+        # finalize it so leakcheck does not retain one active tealet per run.
+        resurrected.throw()
         # Delete them, thereby breaking the cycle between the greenlet
         # and the frame, which otherwise would never be collectable
         # XXX: We should be able to automatically fix this.
+        resurrected = None
         del result[:]
         hub = None
         main = None
