@@ -280,6 +280,7 @@ class greenlet(object):
         # this will bind it to the right thread
         if run is not _RUN_UNSET:
             self.run = run
+        self._is_dealloc = False
         self._bootstrap(parent)
         self._is_running = False
 
@@ -360,7 +361,11 @@ class greenlet(object):
                 # re-parent it to ourselves.  if it fails, put it on its own main garbage heap.
                 try:
                     self.parent = current_wrapper
-                    self.throw()
+                    self._is_dealloc = True
+                    try:
+                        self.throw()
+                    finally:
+                        self._is_dealloc = False
                 except (_ParentThreadError, error):
                     # This must be a foreign tealet.  Insert it to
                     # it's main tealet's garbage heap
@@ -619,6 +624,8 @@ class greenlet(object):
 
         # unpack the switch payload.  switch() returns differently shaped values
         # depending on how it was called.
+        if arg is None:
+            return None  # raw tealet switched back without a packed payload.
         arg = _unpack_switch_transport(arg)
         args, kwds = arg
         if args and kwds:
@@ -650,20 +657,20 @@ class greenlet(object):
                 raise err
             switch_payload = _unpack_switch_transport(switch_payload)
             args, kwds = switch_payload
-            # Hide trampoline frames while entering user callback so suspended
-            # frame chains match greenlet-visible user code.
             result = _tealet.hide_frame(run, args, kwds)
             arg = ((result,), {})
         except GreenletExit as e:
             arg = ((e,), {})
         except BaseException as e:
             try:
+                current_wrapper = greenlet._get_or_create_wrapper(current)
+                if getattr(current_wrapper, "_is_dealloc", False):
+                    # Dealloc path: keep the exception in the remote tealet.
+                    # pytealet_main reports it as unraisable on return.
+                    raise
                 # Preserve parent-delivery semantics for uncaught worker errors by
                 # queueing the exception onto the parent tealet before exit-switch.
-                current_wrapper = greenlet._get_or_create_wrapper(current)
                 p = current_wrapper._parent()
-                if p is current_wrapper:
-                    raise  # paret is same, e.g. during __del__, cannot handle.
                 e = _wrap_throw_for_trace(e, p._tealet)
                 p._tealet.set_exception(e)
                 arg = None  # arg is ignored when 'e' is raised on other side.
