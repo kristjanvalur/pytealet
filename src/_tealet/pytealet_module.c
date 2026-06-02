@@ -5,6 +5,7 @@
  */
 
 #include "pytealet_module.h"
+#include "pytealet_capi.h"
 
 #include "descrobject.h"
 
@@ -174,6 +175,126 @@ static int panic_error_install_methods(PyObject *panic_error_type_obj) {
             return NULL;                                                                                               \
         }                                                                                                              \
     } while (0)
+
+struct PyTealet_CAPI_Context {
+    PyObject *module;
+};
+
+static PyTealetModuleState *pytealet_capi_get_mstate(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate;
+
+    if (!ctx || !ctx->module) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid pytealet C API context");
+        return NULL;
+    }
+
+    mstate = (PyTealetModuleState *)PyModule_GetState(ctx->module);
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+
+    return mstate;
+}
+
+static PyTealet_CAPI_Context *pytealet_capi_ctx_new(void) {
+    PyTealet_CAPI_Context *ctx;
+    PyObject *module;
+
+    module = PyImport_ImportModule("_tealet");
+    if (!module)
+        return NULL;
+
+    ctx = (PyTealet_CAPI_Context *)PyMem_Calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        Py_DECREF(module);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    ctx->module = module;
+    return ctx;
+}
+
+static void pytealet_capi_ctx_free(PyTealet_CAPI_Context *ctx) {
+    if (!ctx)
+        return;
+    Py_XDECREF(ctx->module);
+    PyMem_Free(ctx);
+}
+
+static PyObject *pytealet_capi_current(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+    if (!mstate)
+        return NULL;
+    return Py_XNewRef((PyObject *)PyTealet_GetOrCreateCurrent(mstate, NULL));
+}
+
+static PyObject *pytealet_capi_main(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+    if (!mstate)
+        return NULL;
+    return Py_XNewRef((PyObject *)PyTealet_GetOrCreateMain(mstate, NULL));
+}
+
+static PyObject *pytealet_capi_thread_sweep(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealet_ThreadSweep(mstate);
+}
+
+static int pytealet_capi_check_tealet(PyTealet_CAPI_Context *ctx, PyObject *obj) {
+    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+    if (!mstate)
+        return -1;
+    if (!obj) {
+        PyErr_SetString(PyExc_TypeError, "obj must not be NULL");
+        return -1;
+    }
+    if (!mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet type unavailable");
+        return -1;
+    }
+    return PyObject_TypeCheck(obj, mstate->tealet_type) ? 1 : 0;
+}
+
+static PyObject *pytealet_capi_switch(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg) {
+    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealet_SwitchCAPI(mstate, target, arg);
+}
+
+static const PyTealet_CAPI pytealet_capi_table = {
+    PYTEALET_CAPI_ABI_VERSION,
+    sizeof(PyTealet_CAPI),
+    PYTEALET_CAPI_FEATURE_SWITCH,
+    pytealet_capi_ctx_new,
+    pytealet_capi_ctx_free,
+    pytealet_capi_current,
+    pytealet_capi_main,
+    pytealet_capi_thread_sweep,
+    pytealet_capi_check_tealet,
+    pytealet_capi_switch,
+    {NULL},
+};
+
+static int pytealet_module_export_capi(PyObject *m) {
+    PyObject *capsule;
+
+    capsule = PyCapsule_New((void *)&pytealet_capi_table, PYTEALET_CAPI_CAPSULE_NAME, NULL);
+    if (!capsule)
+        return -1;
+    if (PyModule_AddObject(m, "_C_API", capsule) < 0) {
+        Py_DECREF(capsule);
+        return -1;
+    }
+    if (PyModule_AddIntConstant(m, "C_API_ABI_VERSION", (long)PYTEALET_CAPI_ABI_VERSION) < 0)
+        return -1;
+
+    return 0;
+}
 
 static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     PyTealetModuleState *mstate;
@@ -463,6 +584,9 @@ static int pytealet_module_exec(PyObject *m) {
                                 PYTEALET_WITH_PENDING_FRAME_INTROSPECTION) < 0)
         return -1;
     if (PyModule_AddStringConstant(m, "__version__", PYTEALET_VERSION) < 0)
+        return -1;
+
+    if (pytealet_module_export_capi(m) < 0)
         return -1;
 
     return 0;

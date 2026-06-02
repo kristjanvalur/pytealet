@@ -1533,6 +1533,33 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     return result;
 }
 
+/* Minimal switch entrypoint for external C clients via the _tealet capsule API.
+ * This keeps validation and exception behavior aligned with the Python switch()
+ * method by reusing the same internal implementation.
+ */
+PyObject *PyTealet_SwitchCAPI(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *arg) {
+    PyObject *argv[1];
+
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    if (!target_obj) {
+        PyErr_SetString(PyExc_TypeError, "target must not be NULL");
+        return NULL;
+    }
+    if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
+        return NULL;
+    }
+
+    if (arg) {
+        argv[0] = arg;
+        return pytealet_switch(target_obj, Py_TYPE(target_obj), argv, 1, NULL);
+    }
+    return pytealet_switch(target_obj, Py_TYPE(target_obj), NULL, 0, NULL);
+}
+
 /* Inner C API for exception injection. This performs all validation and
  * token bookkeeping, while the Python API wrapper handles argument parsing.
  * target is required.
