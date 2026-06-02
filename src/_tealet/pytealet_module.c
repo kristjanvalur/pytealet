@@ -19,8 +19,8 @@ typedef struct PyTealetDomainLockObject {
 } PyTealetDomainLockObject;
 
 static void pytealet_domain_lock_obj_dealloc(PyObject *obj) {
-    PyTealetDomainLockObject *self = (PyTealetDomainLockObject *)obj;
 #if PYTEALET_FREE_THREADED
+    PyTealetDomainLockObject *self = (PyTealetDomainLockObject *)obj;
     if (self->lock) {
         PyThread_free_lock(self->lock);
         self->lock = NULL;

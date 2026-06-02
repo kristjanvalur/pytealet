@@ -426,7 +426,7 @@ void PyTealetTstate_Frame_Cleanup(PyThreadState *tstate, tealet_t *dustbin_teale
 #if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
     PyTealet_CLEAR(dustbin_tealet, tstate->curexc_type);
     PyTealet_CLEAR(dustbin_tealet, tstate->curexc_value);
-    PyTealet_CLEAR(dustbin_tealet, tstate->curexc_traceback
+    PyTealet_CLEAR(dustbin_tealet, tstate->curexc_traceback);
 #endif
     PyTealet_dustbin_push(dustbin_tealet, tstate->exc_state.exc_value);
     memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
