@@ -100,7 +100,6 @@ def install(force=True):
 
 tealetmap = weakref.WeakValueDictionary()
 _RUN_UNSET = object()
-_DEFERRED_PARENT_THROW = object()
 _garbage_process_guard = threading.local()
 _stub_tls = threading.local()
 _tracefunc = None
@@ -190,22 +189,6 @@ def _wrap_throw_for_trace(err, target_tealet):
     if trace_payload is None:
         return err
     return _TraceException(err, trace_payload)
-
-
-def _pack_deferred_parent_throw(err):
-    return (((_DEFERRED_PARENT_THROW, err),), {})
-
-
-def _unpack_deferred_parent_throw(payload):
-    args, kwds = payload
-    if kwds or len(args) != 1:
-        return None
-    marker = args[0]
-    if not (isinstance(marker, tuple) and len(marker) == 2):
-        return None
-    if marker[0] is not _DEFERRED_PARENT_THROW:
-        return None
-    return marker[1]
 
 
 def _pin_running(tealet, gr):
@@ -582,25 +565,21 @@ class greenlet(object):
                 self._is_running = True
                 try:
                     try:
-                        arg = tealet.run(self._greenlet_main, (run, payload, err))
-                    except _tealet.StateError:
-                        # A re-entrancy, caused by the getattr(self, "run") above 
-                        # can cause the above to tried twice.  if we fail with a local
-                        # state error, just do a normal switch or throw.
-                        if _tealet.error_was_remote():
-                            raise
-                        if tealet.state == _tealet.STATE_EXIT and err is not None:
-                            parent = self.parent
-                            if parent is not None and _is_unstarted_tealet(parent._tealet):
-                                # Child already exited, but raw runtime could not
-                                # switch into an unstarted parent. Deliver throw
-                                # by explicitly starting that parent.
-                                return parent._switch_or_throw(None, err)
-                        if err is not None:
-                            arg = tealet.throw(err)
-                        else:
-                            arg = tealet.switch(payload)
+                        try:
+                            arg = tealet.run(self._greenlet_main, (run, payload, err))
+                        except _tealet.StateError:
+                            # A re-entrancy, caused by the getattr(self, "run") above 
+                            # can cause the above to tried twice.  if we fail with a local
+                            # state error, just do a normal switch or throw.
+                            if _tealet.error_was_remote():
+                                raise
+                            if err is not None:
+                                arg = tealet.throw(err)
+                            else:
+                                arg = tealet.switch(payload)
                     except BaseException as run_exc:
+                        if not _tealet.error_was_remote():
+                            raise
                         if tealet.state == _tealet.STATE_EXIT and err is not None:
                             parent = self.parent
                             if parent is not None and _is_unstarted_tealet(parent._tealet):
@@ -629,9 +608,6 @@ class greenlet(object):
                             # decode before forwarding so parent receives the
                             # canonical (args, kwds) switch payload.
                             parent_payload = _unpack_switch_transport(arg)
-                            parent_throw = _unpack_deferred_parent_throw(parent_payload)
-                            if parent_throw is not None:
-                                return parent._switch_or_throw(None, parent_throw)
                             return parent._switch_or_throw(parent_payload, None)
             else:
                 if not self:
@@ -669,12 +645,6 @@ class greenlet(object):
         if arg is None:
             return None  # raw tealet switched back without a packed payload.
         arg = _unpack_switch_transport(arg)
-        deferred_parent_throw = _unpack_deferred_parent_throw(arg)
-        if deferred_parent_throw is not None:
-            parent = self.parent
-            if parent is None:
-                raise deferred_parent_throw
-            return parent._switch_or_throw(None, deferred_parent_throw)
         args, kwds = arg
         if args and kwds:
             return (args, kwds)
@@ -723,15 +693,8 @@ class greenlet(object):
                 if p is None:
                     p = current_wrapper._parent()
                 e = _wrap_throw_for_trace(e, p._tealet)
-                if _is_unstarted_tealet(p._tealet):
-                    # Raw set_exception() requires a running target. Return to
-                    # the current main and let caller route this into the
-                    # unstarted parent explicitly.
-                    arg = _pack_deferred_parent_throw(e)
-                    target_tealet = current_wrapper._main._tealet
-                else:
-                    p._tealet.set_exception(e)
-                    arg = None  # arg is ignored when 'e' is raised on other side.
+                p._tealet.set_exception(e)
+                arg = None  # arg is ignored when 'e' is raised on other side.
             finally:
                 e = None
         current_wrapper = current_wrapper or greenlet._get_or_create_wrapper(current)
