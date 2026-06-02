@@ -395,6 +395,10 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
 #endif
     memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
     tstate->exc_info = &tstate->exc_state;
+#if defined(PY_HAS_TSTATE_FRAME)
+    /* CPython treats tstate->frame as a borrowed reference from the active stack frame. */
+    tstate->frame = NULL;
+#endif
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
     /* A fresh execution branch starts without an active tier2/JIT executor. */
     assert(tstate->current_executor == NULL);
@@ -433,7 +437,8 @@ void PyTealetTstate_Frame_Cleanup(PyThreadState *tstate, tealet_t *dustbin_teale
     tstate->exc_info = &tstate->exc_state;
 
 #if defined(PY_HAS_TSTATE_FRAME)
-    PyTealet_CLEAR(dustbin_tealet, tstate->frame);
+    /* CPython treats tstate->frame as a borrowed reference (3.10); do not DECREF it. */
+    tstate->frame = NULL;
 #endif
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
     /* If a tealet exits while owning an active executor, release it. */
