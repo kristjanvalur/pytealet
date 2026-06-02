@@ -38,6 +38,42 @@ void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
 #if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
 static void PyTealetFrameInfo_ClearRewrites(PyTealetFrameInfo *info) { info->size = 0; }
 
+static int PyTealetFrameInfo_IsSafeForDormantChain(const _PyInterpreterFrame *iframe) {
+    if (!iframe) {
+        return 0;
+    }
+    return !_PyFrame_IsIncomplete((_PyInterpreterFrame *)iframe);
+}
+
+static int PyTealetFrameInfo_EnsureFrameObject(_PyInterpreterFrame *iframe) {
+    PyFrameObject dummy_frame;
+    _PyInterpreterFrame dummy_iframe;
+    PyFrameObject *back;
+
+    if (!iframe || _PyFrame_IsIncomplete(iframe) || iframe->frame_obj) {
+        return 0;
+    }
+
+    /* Force frame object creation through public API machinery. */
+    dummy_frame.f_back = NULL;
+    dummy_frame.f_frame = &dummy_iframe;
+#if defined(FRAME_OWNED_BY_GENERATOR)
+    dummy_iframe.owner = FRAME_OWNED_BY_GENERATOR;
+#elif defined(FRAME_OWNED_BY_THREAD)
+    dummy_iframe.owner = FRAME_OWNED_BY_THREAD;
+#else
+    return 0;
+#endif
+    dummy_iframe.previous = iframe;
+    back = PyFrame_GetBack(&dummy_frame);
+    Py_XDECREF(back);
+
+    if (!iframe->frame_obj) {
+        return -1;
+    }
+    return 0;
+}
+
 /* Rewrite-buffer strategy:
  * 1) Start with the inline fixed buffer (info->fixed_items).
  * 2) On overflow, move to heap storage and copy existing entries.
@@ -96,6 +132,7 @@ static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
     PyFrameObject *top_frame = info->frame;
     _PyInterpreterFrame **last_link;
     _PyInterpreterFrame *iframe;
+    int linked_safe_frame = 0;
 
     if (!top_frame) {
         return 0;
@@ -105,12 +142,18 @@ static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
     last_link = &top_frame->f_frame;
     iframe = top_frame->f_frame;
     while (iframe) {
-#if defined(PY315P)
-        if (!_PyFrame_IsIncomplete(iframe)) {
-#else
-        if (!_PyFrame_IsIncomplete(iframe) && iframe->owner != FRAME_OWNED_BY_CSTACK) {
-#endif
-            /* a complete frame. if the last link didn't point to it, rewrite. */
+        iframe = _PyFrame_GetFirstComplete(iframe);
+        if (!iframe) {
+            break;
+        }
+
+        if (PyTealetFrameInfo_IsSafeForDormantChain(iframe)) {
+            linked_safe_frame = 1;
+            if (PyTealetFrameInfo_EnsureFrameObject(iframe) < 0) {
+                /* Best-effort frame materialization for pending introspection. */
+                PyErr_Clear();
+            }
+            /* A complete, non-C-stack frame. If last_link did not already point to it, rewrite. */
             if (*last_link != iframe) {
                 if (PyTealetFrameInfo_RecordRewrite(info, last_link) < 0) {
                     PyTealetFrameInfo_ExposeFrames(info);
@@ -121,6 +164,15 @@ static int PyTealetFrameInfo_HideFrames(PyTealetFrameInfo *info) {
             last_link = &iframe->previous;
         }
         iframe = iframe->previous;
+    }
+
+    if (!linked_safe_frame) {
+        /* No safe frame chain is available. Undo any transient rewrites
+         * and drop captured introspection for this suspended stack.
+         */
+        PyTealetFrameInfo_ExposeFrames(info);
+        Py_CLEAR(info->frame);
+        return 0;
     }
 
     /* handle the last link */

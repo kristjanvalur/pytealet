@@ -97,9 +97,68 @@ class TestModule:
         finally:
             _tealet.frame_introspection(original)
 
+    def test_hide_frame_hides_callers(self):
+        def inner():
+            return [frame.name for frame in traceback.extract_stack()]
+
+        def wrapper_normal():
+            return inner()
+
+        def wrapper_hide():
+            return _tealet.hide_frame(inner)
+
+        normal_names = wrapper_normal()
+        hidden_names = wrapper_hide()
+
+        assert "wrapper_normal" in normal_names
+        assert "wrapper_hide" not in hidden_names
+
+    def test_hide_frame_accepts_none_kwargs(self):
+        def inner(*args, **kwargs):
+            return args, kwargs
+
+        result = _tealet.hide_frame(inner, (1, 2), None)
+        assert result == ((1, 2), {})
+
+    def test_hide_frame_rejects_non_dict_kwargs(self):
+        with pytest.raises(TypeError, match="kwargs must be a dict or None"):
+            _tealet.hide_frame(lambda: None, (), 42)
+
 
 class TestThreadCleanup:
     """Tests for thread cleanup semantics and edge cases."""
+
+    @staticmethod
+    def _count_dead_weakrefs():
+        gc.collect()
+        gc.collect()
+        return sum(1 for o in gc.get_objects() if isinstance(o, weakref.ReferenceType) and o() is None)
+
+    def test_run_tealets_do_not_accumulate_dead_weakrefs(self):
+        """Regression: exited non-main tealets must not strand weakrefs in lineage tracking."""
+
+        def worker(current, _arg):
+            return current.main()
+
+        def run_batch(rounds=5, batch_size=4):
+            for _ in range(rounds):
+                tealets = [_tealet.tealet() for _ in range(batch_size)]
+                for t in tealets:
+                    t.run(worker, None)
+                del tealets
+
+        before = self._count_dead_weakrefs()
+        run_batch()
+        after_first = self._count_dead_weakrefs()
+        run_batch()
+        after_second = self._count_dead_weakrefs()
+
+        growth_first = after_first - before
+        growth_second = after_second - after_first
+
+        # Prior leak behavior grew by ~4 per round (20 per batch).
+        # Keep a small tolerance for unrelated interpreter noise.
+        assert growth_second <= 4
 
     def test_thread_kill_then_thread_cleanup_is_empty(self):
         def parked(current, arg):
@@ -277,6 +336,7 @@ class TestThreadCleanup:
 
     def test_thread_cleanup_kills_run_tealets_before_force_cleanup(self):
         """Cleanup first kills active RUN tealets, so nerfed excludes them."""
+
         thread_main = _tealet.main()
         stub = _tealet.tealet()
         stub.stub()
