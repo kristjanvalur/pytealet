@@ -3,7 +3,33 @@ from pathlib import Path
 
 import pytest
 
+
+def _env_flag(name):
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+RUNNING_ON_CI = bool(
+    os.environ.get("GITHUB_ACTIONS")
+    or os.environ.get("TRAVIS")
+    or os.environ.get("APPVEYOR")
+    or os.environ.get("CI")
+)
+
 RUN_UPSTREAM = os.environ.get("PYTEALET_RUN_UPSTREAM_GREENLET_TESTS") == "1"
+
+_skip_long_greenlet_tests = _env_flag("PYTEALET_SKIP_LONG_GREENLET_TESTS")
+if _skip_long_greenlet_tests is None:
+    _skip_long_greenlet_tests = RUNNING_ON_CI
+
+LONG_RUNNING_TESTS = {
+    "tests/compat_greenlet/test_leaks.py::TestLeaks::test_untracked_memory_doesnt_increase_unfinished_thread_dealloc_in_main": (
+        "Skipped long-running compat leak test in CI. "
+        "Set PYTEALET_SKIP_LONG_GREENLET_TESTS=0 to run it."
+    ),
+}
 
 SKIP_FILES = {
     "test_cpp.py": "Requires the upstream C++ test extension (_test_extension_cpp).",
@@ -44,6 +70,10 @@ def pytest_collection_modifyitems(config, items):
         reason = skip_reasons.get(name)
         if reason:
             item.add_marker(pytest.mark.skip(reason=reason))
+        if _skip_long_greenlet_tests:
+            long_reason = LONG_RUNNING_TESTS.get(item.nodeid)
+            if long_reason:
+                item.add_marker(pytest.mark.skip(reason=long_reason))
 
 
 @pytest.fixture(autouse=True)

@@ -19,6 +19,13 @@ PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1
 If you enable them, you must also have `psutil` and `objgraph` installed or
 collection will be skipped.
 
+When upstream compat tests are enabled in CI, the known long-running leak test
+`test_leaks.py::TestLeaks::test_untracked_memory_doesnt_increase_unfinished_thread_dealloc_in_main`
+is skipped by default.
+
+- Force skip locally: `PYTEALET_SKIP_LONG_GREENLET_TESTS=1`
+- Force run in CI/local: `PYTEALET_SKIP_LONG_GREENLET_TESTS=0`
+
 ## Known skips
 
 Even when enabled, a small set of files are skipped because they depend on
