@@ -1,5 +1,6 @@
 # A greenlet emulation module using tealets
 import contextvars
+import gc
 import os
 import sys
 import threading
@@ -96,6 +97,7 @@ def install(force=True):
 
     sys.modules["greenlet"] = module
     sys.modules["greenlet._greenlet"] = _greenlet
+    _ensure_gc_callback_registered()
     return module
 
 tealetmap = weakref.WeakValueDictionary()
@@ -103,6 +105,7 @@ _RUN_UNSET = object()
 _garbage_process_guard = threading.local()
 _stub_tls = threading.local()
 _tracefunc = None
+_gc_state_tls = threading.local()
 
 # Keep a strong reference to wrappers while they are actively switching.
 # This guards dealloc/resurrection edge cases exercised by
@@ -210,6 +213,27 @@ def _unpin_running(tealet):
 
 def _thread_is_alive(thread_id):
     return any(t.ident == thread_id for t in threading.enumerate())
+
+
+def _gc_collecting_depth():
+    return getattr(_gc_state_tls, "collecting_depth", 0)
+
+
+def _gc_phase_callback(phase, info):
+    del info
+    depth = getattr(_gc_state_tls, "collecting_depth", 0)
+    if phase == "start":
+        _gc_state_tls.collecting_depth = depth + 1
+    elif phase == "stop":
+        _gc_state_tls.collecting_depth = max(0, depth - 1)
+
+
+def _ensure_gc_callback_registered():
+    if _gc_phase_callback not in gc.callbacks:
+        gc.callbacks.append(_gc_phase_callback)
+
+
+_ensure_gc_callback_registered()
 
 
 def _is_unstarted_tealet(tealet):
@@ -353,6 +377,15 @@ class greenlet(object):
         # must be careful during teardown when module may be half cleared.
         try:
             if tealet.state == _tealet.STATE_RUN:
+                if _gc_collecting_depth() > 0:
+                    # Avoid dealloc-time switches while GC is actively walking
+                    # temporary stack-local lists. Process this after GC.
+                    # Reason: during GC, objects are linked to lists that may be anchored in stack-local automatic
+                    # variables.  Unlinking objects from those lists on a different tealet may cause an attempt to modifu
+                    # a stack variable that may either crash locally, or that unlink will be undone when switched back.
+                    # This would not be a problem if python were to anchor GC lists in heap allocated objects.
+                    self._main._garbage.append(self)
+                    return
                 if _tealet.current() == tealet:
                     # Can't kill ourselves from here
                     return
