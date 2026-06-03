@@ -143,6 +143,11 @@ See `docs/ISSUES.md` for current bug tracking and status.
 
 ## Coding Guidelines
 
+### Segfault Policy
+- If a segfault (or abort from a debug-assertion crash) is encountered, immediately switch focus to crash investigation and root-cause analysis.
+- Do not modify Python tests to avoid, hide, or skip around segfaults unless explicitly instructed by the user.
+- Prefer reproducing in debug interpreters, collecting traces/backtraces, and fixing runtime/root causes before test expectation updates.
+
 ### Python Code Style
 - Follow **PEP 8** for Python code
 - Use type hints where appropriate (Python 3.10+ syntax)
