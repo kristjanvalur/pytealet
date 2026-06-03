@@ -111,17 +111,11 @@ static void PyTealetTstate_DecRef(PyTealetTstate *saved, tealet_t *dustbin_teale
         PyTealet_CLEAR(dustbin_tealet, saved->context);
 }
 
-/* Debug-only hygiene helper: clear active Python thread state slots. */
+/* Hygiene helper: clear active Python thread state slots.
+ * Enabled only when PYTEALET_ENABLE_TSTATE_HYGIENE is defined.
+ */
 static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
-#if defined(Py_DEBUG)
-#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
-    py_tstate->curexc_type = NULL;
-    py_tstate->curexc_value = NULL;
-    py_tstate->curexc_traceback = NULL;
-#endif
-    py_tstate->exc_info = NULL; /* use this as a sentinel, should never be null
-                                   in a valid situation */
-    py_tstate->exc_state.exc_value = NULL;
+#if defined(PYTEALET_ENABLE_TSTATE_HYGIENE)
 #if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
     py_tstate->recursion_depth = 0;
 #elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
@@ -142,11 +136,83 @@ static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
     py_tstate->trash_delete_nesting = 0;
 #endif
     py_tstate->context = NULL;
+
+    /* Delegate frame-related slots to the shared frame clear helper. */
     PyTealetTstate_ClearFrame(NULL, py_tstate);
-    /* Save/restore invariant: NULL marks the in-between (cleared) live tstate. */
-    py_tstate->exc_info = NULL;
 #else
     (void)py_tstate;
+#endif
+}
+
+/* Hygiene helper: clear frame-related state in either python's or our saved
+ * tstate struct. Enabled only when PYTEALET_ENABLE_TSTATE_HYGIENE is defined.
+ */
+static void PyTealetTstate_ClearFrame(PyTealetTstateFrame *ttstate, PyThreadState *tstate) {
+    /* assert exactly one of tstate and ttstate is non-null */
+    assert((tstate == NULL) != (ttstate == NULL));
+
+#if !defined(NDEBUG)
+    /* Save/restore invariant: NULL marks the in-between (cleared) live tstate. */
+    if (ttstate) {
+        ttstate->exc_info = NULL;
+    } else {
+        tstate->exc_info = NULL;
+    }
+#endif
+
+#if defined(PYTEALET_ENABLE_TSTATE_HYGIENE)
+    if (ttstate) {
+#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+        ttstate->curexc_type = NULL;
+        ttstate->curexc_value = NULL;
+        ttstate->curexc_traceback = NULL;
+#endif
+        memset(&ttstate->exc_state, 0, sizeof(ttstate->exc_state));
+        ttstate->exc_info = &ttstate->exc_state;
+#if defined(PY_HAS_TSTATE_FRAME)
+        ttstate->frame = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
+        ttstate->current_executor = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_DATASTACK)
+#if defined(PY_HAS_TSTATE_CFRAME)
+        ttstate->cframe = NULL;
+#else
+        ttstate->current_frame = NULL;
+#endif
+        ttstate->datastack_chunk = NULL;
+        ttstate->datastack_top = NULL;
+        ttstate->datastack_limit = NULL;
+#endif
+    } else {
+#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+        tstate->curexc_type = NULL;
+        tstate->curexc_value = NULL;
+        tstate->curexc_traceback = NULL;
+#endif
+        memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
+        tstate->exc_info = &tstate->exc_state;
+#if defined(PY_HAS_TSTATE_FRAME)
+        tstate->frame = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
+        tstate->current_executor = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_DATASTACK)
+#if defined(PY_HAS_TSTATE_CFRAME)
+        tstate->cframe = NULL;
+#else
+        tstate->current_frame = NULL;
+#endif
+        tstate->datastack_chunk = NULL;
+        tstate->datastack_top = NULL;
+        tstate->datastack_limit = NULL;
+#endif
+    }
+#else
+    (void)ttstate;
+    (void)tstate;
 #endif
 }
 
@@ -314,73 +380,6 @@ static void PyTealetTstate_PutFrame(const PyTealetTstateFrame *src, PyThreadStat
 #endif
 }
 
-/* clear the python frame related structures in either python's or our tstate struct.
- * This needs to be done when we create a new tstate, when spawning a tealet, since
- * they cannot be shared between tealets.  One of the tstates keeps the existing
- * settings, and the other is cleared.
- * Note, this is for hygiene only, and optional asserts.  At runtime we don't
- * depend on the fields being clear.
- */
-static void PyTealetTstate_ClearFrame(PyTealetTstateFrame *ttstate, PyThreadState *tstate) {
-    /* assert exactly one of tstate and ttstate is non-null */
-    assert((tstate == NULL) != (ttstate == NULL));
-#ifndef NDEBUG
-    if (ttstate) {
-#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
-        ttstate->curexc_type = NULL;
-        ttstate->curexc_value = NULL;
-        ttstate->curexc_traceback = NULL;
-#endif
-        memset(&ttstate->exc_state, 0, sizeof(ttstate->exc_state));
-        ttstate->exc_info = &ttstate->exc_state;
-#if defined(PY_HAS_TSTATE_FRAME)
-        ttstate->frame = NULL;
-#endif
-#if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
-        ttstate->current_executor = NULL;
-#endif
-#if defined(PY_HAS_TSTATE_DATASTACK)
-#if defined(PY_HAS_TSTATE_CFRAME)
-        ttstate->cframe = NULL;
-#else
-        ttstate->current_frame = NULL;
-#endif
-        ttstate->datastack_chunk = NULL;
-        ttstate->datastack_top = NULL;
-        ttstate->datastack_limit = NULL;
-#endif
-
-    } else {
-#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
-        tstate->curexc_type = NULL;
-        tstate->curexc_value = NULL;
-        tstate->curexc_traceback = NULL;
-#endif
-        memset(&tstate->exc_state, 0, sizeof(tstate->exc_state));
-        tstate->exc_info = &tstate->exc_state;
-#if defined(PY_HAS_TSTATE_FRAME)
-        tstate->frame = NULL;
-#endif
-#if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
-        tstate->current_executor = NULL;
-#endif
-#if defined(PY_HAS_TSTATE_DATASTACK)
-#if defined(PY_HAS_TSTATE_CFRAME)
-        tstate->cframe = NULL;
-#else
-        tstate->current_frame = NULL;
-#endif
-        tstate->datastack_chunk = NULL;
-        tstate->datastack_top = NULL;
-        tstate->datastack_limit = NULL;
-#endif
-    }
-#else /* NDEBUG */
-    (void)ttstate;
-    (void)tstate;
-#endif
-}
-
 /* Set up the frame state related fields in the tstate when a tealet starts running.
  * Note that the 'asserts' for current tstate fields are to verify that
  * PyTealetTestate_Frame_Clear() was properly called, which in debug builds
@@ -400,8 +399,12 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
     tstate->frame = NULL;
 #endif
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
-    /* A fresh execution branch starts without an active tier2/JIT executor. */
+    /* Hygiene check: copy/clear path should have detached any active executor. */
+#if defined(PYTEALET_ENABLE_TSTATE_HYGIENE)
     assert(tstate->current_executor == NULL);
+#endif
+    /* Runtime safety: do not inherit executor state across tealet branches. */
+    tstate->current_executor = NULL;
 #endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
 #if defined(PY_HAS_TSTATE_CFRAME)
@@ -409,7 +412,10 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
      * another C stack.  We copy the cframe into a local variable and reset it so that
      * it has no parents.
      */
+#if defined(PYTEALET_ENABLE_TSTATE_HYGIENE)
     assert(tstate->cframe == NULL);
+#endif
+    tstate->cframe = NULL;
     frame_data->top_cframe = tstate->root_cframe;
     frame_data->top_cframe.previous = &tstate->root_cframe;
     frame_data->top_cframe.current_frame = NULL;
@@ -418,10 +424,16 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
     tstate->current_frame = NULL;
 #endif
 
-    /* These should be NULL because we copied and then cleared frame state. */
+    /* Hygiene check: copy/clear path should already have detached datastack. */
+#if defined(PYTEALET_ENABLE_TSTATE_HYGIENE)
     assert(tstate->datastack_chunk == NULL);
     assert(tstate->datastack_top == NULL);
     assert(tstate->datastack_limit == NULL);
+#endif
+    /* Runtime safety: always start this branch with a detached datastack. */
+    tstate->datastack_chunk = NULL;
+    tstate->datastack_top = NULL;
+    tstate->datastack_limit = NULL;
 #endif
 }
 
