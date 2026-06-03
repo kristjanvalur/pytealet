@@ -3011,8 +3011,14 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
         /* set the tstate from our own copy.  This includes the context. */
         PyTealetTstate_Restore(&tealet->tstate, tstate);
+        /* and clear the frame for fresh execution context */
+        PyTealetTstate_Frame_Setup(&tealet->tstate, tstate);
     } else {
         assert(tealet->state == STATE_NEW);
+        /* set up initial frame data for the tealet.  This must happen before any allocations
+         * that can cause, e.g. via garbage collection, python code to run in this context.*/
+        PyTealetTstate_Frame_Setup(&tealet->tstate, tstate);
+        
         /* Publish wrapper<->tealet linkage under lineage lock. */
         pytealet_domain_lock(mdata);
         tealet->tealet = t_current;
@@ -3041,11 +3047,6 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
      * call-helper internals for argument lifetime guarantees.
      */
     Py_INCREF(tealet);
-
-    /* The tealet now has its own private Thread state and we can modify safely.
-     * initialize local python frame bookkeeping and memory arena
-     */
-    PyTealetTstate_Frame_Setup(&tealet->tstate, tstate);
 
     /* run the tealet function */
     tealet->state = STATE_RUN;
