@@ -34,8 +34,8 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #endif
-#include "internal/pycore_interpframe_structs.h"
 #include "internal/pycore_interpframe.h"
+#include "internal/pycore_interpframe_structs.h"
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif

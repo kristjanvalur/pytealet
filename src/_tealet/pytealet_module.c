@@ -166,13 +166,14 @@ static int panic_error_install_methods(PyObject *panic_error_type_obj) {
 
 /* helper to get module state.  During shutdown, the state may have been cleared
  */
-#define GET_MODULE_STATE(m, s) do { \
-    s = (PyTealetModuleState *)PyModule_GetState(m); \
-    if (!s) { \
-        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable"); \
-        return NULL; \
-    } \
-} while (0)
+#define GET_MODULE_STATE(m, s)                                                                                         \
+    do {                                                                                                               \
+        s = (PyTealetModuleState *)PyModule_GetState(m);                                                               \
+        if (!s) {                                                                                                      \
+            PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");                                   \
+            return NULL;                                                                                               \
+        }                                                                                                              \
+    } while (0)
 
 static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     PyTealetModuleState *mstate;
@@ -308,7 +309,7 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
     PyTealetModuleState *mstate;
     Py_ssize_t nargs;
     int enabled;
-    
+
     GET_MODULE_STATE(mod, mstate);
 
     nargs = args ? PyTuple_GET_SIZE(args) : 0;
