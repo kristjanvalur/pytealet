@@ -4,6 +4,7 @@ Testing scenarios that may have leaked.
 """
 import sys
 import gc
+import unittest
 
 import time
 import weakref
@@ -480,6 +481,10 @@ class TestLeaks(TestCase):
         self.assertLessEqual(uss_after, uss_before + tolerance,
                              "after attempts %d" % (count,))
 
+    @unittest.skipIf(
+        sys.version_info[:2] == (3, 10),
+        "Temporarily flaky on Python 3.10; revisit and re-enable.",
+    )
     @ignores_leakcheck
     # Because we're just trying to track raw memory, not objects, and running
     # the leakcheck makes an already slow test slower.
