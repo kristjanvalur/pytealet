@@ -11,11 +11,12 @@
 
 #include <stdint.h>
 
-#define PYTEALET_CAPI_ABI_VERSION 1u
+#define PYTEALET_CAPI_ABI_VERSION 2u
 #define PYTEALET_CAPI_CAPSULE_NAME "_tealet._C_API"
 
 /* Feature flags published in PyTealet_CAPI.feature_flags. */
 #define PYTEALET_CAPI_FEATURE_SWITCH (1ull << 0)
+#define PYTEALET_CAPI_FEATURE_RUN (1ull << 1)
 
 typedef struct PyTealet_CAPI_Context PyTealet_CAPI_Context;
 
@@ -24,7 +25,7 @@ typedef struct PyTealet_CAPI {
     uint32_t struct_size;
     uint64_t feature_flags;
 
-    /* Context lifetime is per-interpreter and requires the GIL. */
+    /* Context lifetime is per-interpreter and requires an attached thread state. */
     PyTealet_CAPI_Context *(*ctx_new)(void);
     void (*ctx_free)(PyTealet_CAPI_Context *ctx);
 
@@ -35,6 +36,9 @@ typedef struct PyTealet_CAPI {
 
     /* Returns 1 if obj is tealet-compatible, 0 if not, -1 on API misuse/error. */
     int (*check_tealet)(PyTealet_CAPI_Context *ctx, PyObject *obj);
+
+    /* Equivalent to target.run(function) or target.run(function, arg). */
+    PyObject *(*run_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function, PyObject *arg);
 
     /* Equivalent to target.switch(arg) if arg != NULL, else target.switch(). */
     PyObject *(*switch_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg);

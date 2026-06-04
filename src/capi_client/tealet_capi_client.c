@@ -69,6 +69,9 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
         goto error;
     if (PyDict_SetItemString(d, "feature_flags", PyLong_FromUnsignedLongLong(state->api->feature_flags)) < 0)
         goto error;
+    if (PyDict_SetItemString(d, "has_run",
+                             PyBool_FromLong((state->api->feature_flags & PYTEALET_CAPI_FEATURE_RUN) != 0)) < 0)
+        goto error;
     if (PyDict_SetItemString(d, "has_switch",
                              PyBool_FromLong((state->api->feature_flags & PYTEALET_CAPI_FEATURE_SWITCH) != 0)) < 0)
         goto error;
@@ -146,12 +149,40 @@ static PyObject *client_capi_switch(PyObject *module, PyObject *args) {
     return state->api->switch_(state->ctx, target, arg);
 }
 
+static PyObject *client_capi_run(PyObject *module, PyObject *args) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    Py_ssize_t nargs;
+    PyObject *target;
+    PyObject *func;
+    PyObject *arg = NULL;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    nargs = PyTuple_GET_SIZE(args);
+    if (nargs < 2 || nargs > 3) {
+        PyErr_SetString(PyExc_TypeError, "capi_run() takes 2 or 3 positional arguments");
+        return NULL;
+    }
+
+    target = PyTuple_GET_ITEM(args, 0);
+    func = PyTuple_GET_ITEM(args, 1);
+    if (nargs == 3)
+        arg = PyTuple_GET_ITEM(args, 2);
+
+    return state->api->run_(state->ctx, target, func, arg);
+}
+
 static PyMethodDef client_methods[] = {
     {"api_info", (PyCFunction)client_api_info, METH_NOARGS, "Return imported pytealet C API metadata."},
     {"current_is_main", (PyCFunction)client_current_is_main, METH_NOARGS,
      "Return whether C API current() and main() refer to the same object."},
     {"check_tealet", (PyCFunction)client_check_tealet, METH_O,
      "Return True if object is a _tealet.tealet instance according to C API."},
+    {"capi_run", (PyCFunction)client_capi_run, METH_VARARGS,
+     "Run a tealet using the imported C API."},
     {"capi_switch", (PyCFunction)client_capi_switch, METH_VARARGS,
      "Switch to a tealet using the imported C API."},
     {NULL, NULL, 0, NULL},
@@ -185,7 +216,7 @@ static int client_exec(PyObject *module) {
     }
 
     if (!state->api->ctx_new || !state->api->ctx_free || !state->api->current || !state->api->main ||
-        !state->api->thread_sweep || !state->api->check_tealet || !state->api->switch_) {
+        !state->api->thread_sweep || !state->api->check_tealet || !state->api->run_ || !state->api->switch_) {
         PyErr_SetString(PyExc_ImportError, "pytealet C API missing required functions");
         return -1;
     }

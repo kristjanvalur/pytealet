@@ -259,6 +259,13 @@ static int pytealet_capi_check_tealet(PyTealet_CAPI_Context *ctx, PyObject *obj)
     return PyObject_TypeCheck(obj, mstate->tealet_type) ? 1 : 0;
 }
 
+static PyObject *pytealet_capi_run(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *func, PyObject *arg) {
+    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealet_RunCAPI(mstate, target, func, arg);
+}
+
 static PyObject *pytealet_capi_switch(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg) {
     PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
     if (!mstate)
@@ -269,13 +276,14 @@ static PyObject *pytealet_capi_switch(PyTealet_CAPI_Context *ctx, PyObject *targ
 static const PyTealet_CAPI pytealet_capi_table = {
     PYTEALET_CAPI_ABI_VERSION,
     sizeof(PyTealet_CAPI),
-    PYTEALET_CAPI_FEATURE_SWITCH,
+    PYTEALET_CAPI_FEATURE_SWITCH | PYTEALET_CAPI_FEATURE_RUN,
     pytealet_capi_ctx_new,
     pytealet_capi_ctx_free,
     pytealet_capi_current,
     pytealet_capi_main,
     pytealet_capi_thread_sweep,
     pytealet_capi_check_tealet,
+    pytealet_capi_run,
     pytealet_capi_switch,
     {NULL},
 };

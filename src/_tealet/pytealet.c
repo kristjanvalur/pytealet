@@ -1023,6 +1023,41 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     return result;
 }
 
+/* Minimal run entrypoint for external C clients via the _tealet capsule API.
+ * This keeps validation and exception behavior aligned with the Python run()
+ * method by reusing the same internal implementation.
+ */
+PyObject *PyTealet_RunCAPI(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func, PyObject *arg) {
+    PyObject *argv[2];
+    Py_ssize_t nargs;
+
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    if (!target_obj) {
+        PyErr_SetString(PyExc_TypeError, "target must not be NULL");
+        return NULL;
+    }
+    if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
+        return NULL;
+    }
+    if (!func) {
+        PyErr_SetString(PyExc_TypeError, "function must not be NULL");
+        return NULL;
+    }
+
+    argv[0] = func;
+    nargs = 1;
+    if (arg) {
+        argv[1] = arg;
+        nargs = 2;
+    }
+
+    return pytealet_run(target_obj, Py_TYPE(target_obj), argv, nargs, NULL);
+}
+
 /* Minimal switch entrypoint for external C clients via the _tealet capsule API.
  * This keeps validation and exception behavior aligned with the Python switch()
  * method by reusing the same internal implementation.
