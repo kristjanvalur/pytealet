@@ -127,8 +127,17 @@ void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst);
 
 /* python frame state initialization and cleanup*/
 
-/* Set up the frame state object when a tealet starts running */
-void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate);
+/* Frame setup/clear helper:
+ * - ttstate must be non-NULL.
+ * - tstate must be non-NULL (used to initialize top_cframe from live root_cframe,
+ *   then normalize it into a standalone root frame).
+ * - target_is_tstate=0 clears saved ttstate frame slots.
+ * - target_is_tstate=1 clears live tstate frame slots.
+ * - On cframe+datastack builds (3.11+), ttstate->frame_data.cframe is wired to
+ *   ttstate->frame_data.top_cframe.
+ * - On cframe-only builds (3.10), saved cframe may be NULL.
+ */
+void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate, int target_is_tstate);
 
 /* clean up the frame state, including releasing the local frame stack */
 void PyTealetTstate_Frame_Cleanup(PyThreadState *tstate, tealet_t *dustbin_tealet);

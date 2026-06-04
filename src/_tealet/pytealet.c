@@ -1022,6 +1022,8 @@ static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyO
 
     /* Copy the tstate, but leave the currently set "context" intact */
     PyTealetTstate_Copy(&pytealet->tstate, tstate, 1, 0); /* dst (new) belongs to the new tealet */
+    /* Clear saved frame-like slots now; stub restore should not re-run frame setup. */
+    PyTealetTstate_Frame_Setup(&pytealet->tstate, tstate, 0);
 
     pytealet->tealet = tresult;
     pytealet->state = STATE_STUB;
@@ -3011,13 +3013,11 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
         /* set the tstate from our own copy.  This includes the context. */
         PyTealetTstate_Restore(&tealet->tstate, tstate);
-        /* and clear the frame for fresh execution context */
-        PyTealetTstate_Frame_Setup(&tealet->tstate, tstate);
     } else {
         assert(tealet->state == STATE_NEW);
         /* set up initial frame data for the tealet.  This must happen before any allocations
          * that can cause, e.g. via garbage collection, python code to run in this context.*/
-        PyTealetTstate_Frame_Setup(&tealet->tstate, tstate);
+        PyTealetTstate_Frame_Setup(&tealet->tstate, tstate, 1);
         
         /* Publish wrapper<->tealet linkage under lineage lock. */
         pytealet_domain_lock(mdata);
@@ -3129,7 +3129,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         exit_fail = tealet_exit(t_return, (void *)return_arg, exit_mode | TEALET_XFER_NOFAIL);
         if (exit_fail) {
             /* we have hit an impossible error. restore the frame for the machinery. */
-            PyTealetTstate_Frame_Setup(&tealet->tstate, tstate);
+            PyTealetTstate_Frame_Setup(&tealet->tstate, tstate, 1);
             PyTealet_TranslateTealetError(mstate, exit_fail, "tealet exit failed", NULL, NULL);
             PyErr_WriteUnraisable(NULL);
             abort();

@@ -137,11 +137,12 @@ static void PyTealetTstate_ClearPy(PyThreadState *py_tstate) {
 #endif
     py_tstate->context = NULL;
 
-    /* Delegate frame-related slots to the shared frame clear helper. */
-    PyTealetTstate_ClearFrame(NULL, py_tstate);
-#else
-    (void)py_tstate;
 #endif
+
+    /* Delegate frame-related slots to the shared frame clear helper.
+     * In !NDEBUG builds this also applies the exc_info sentinel used by Restore asserts.
+     */
+    PyTealetTstate_ClearFrame(NULL, py_tstate);
 }
 
 /* Hygiene helper: clear frame-related state in either python's or our saved
@@ -380,13 +381,60 @@ static void PyTealetTstate_PutFrame(const PyTealetTstateFrame *src, PyThreadStat
 #endif
 }
 
-/* Set up the frame state related fields in the tstate when a tealet starts running.
- * Note that the 'asserts' for current tstate fields are to verify that
- * PyTealetTestate_Frame_Clear() was properly called, which in debug builds
- * provides hygiene.
+/* Setup/clear frame-like state.
+ * - ttstate must be non-NULL.
+ * - tstate must be non-NULL.
+ * - target_is_tstate=0 clears saved ttstate frame slots.
+ * - target_is_tstate=1 clears live tstate frame slots.
+ * - For cframe+datastack builds, frame_data->top_cframe is initialized from
+ *   tstate->root_cframe, then normalized into a standalone root frame
+ *   (previous points to live root_cframe, current_frame is NULL).
+ *   frame_data->cframe and live tstate->cframe are then wired to top_cframe.
  */
-void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) {
-    PyTealetTstateFrame *frame_data = &ttstate->frame_data;
+void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate, int target_is_tstate) {
+    PyTealetTstateFrame *frame_data;
+
+    assert(tstate && ttstate);
+    frame_data = &ttstate->frame_data;
+
+#if defined(PY_HAS_TSTATE_CFRAME)
+#if PY311P
+    /* a cleared cframe can't be null, must be backed by a real frame */
+    frame_data->top_cframe = tstate->root_cframe;
+    frame_data->top_cframe.previous = &tstate->root_cframe;
+    frame_data->top_cframe.current_frame = NULL;
+    frame_data->cframe = &frame_data->top_cframe;
+#else
+    frame_data->cframe = NULL;
+#endif
+#endif
+
+    if (!target_is_tstate) {
+#if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
+        frame_data->curexc_type = NULL;
+        frame_data->curexc_value = NULL;
+        frame_data->curexc_traceback = NULL;
+#endif
+        memset(&frame_data->exc_state, 0, sizeof(frame_data->exc_state));
+        frame_data->exc_info = &frame_data->exc_state;
+#if defined(PY_HAS_TSTATE_FRAME)
+        frame_data->frame = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
+        frame_data->current_executor = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_DATASTACK)
+        frame_data->current_frame = NULL;
+#if defined(PY_HAS_TSTATE_CFRAME_USE_TRACING)
+        frame_data->cframe_use_tracing = 0;
+#endif
+        frame_data->datastack_chunk = NULL;
+        frame_data->datastack_top = NULL;
+        frame_data->datastack_limit = NULL;
+#endif
+        return;
+    }
+
 #if defined(PY_HAS_TSTATE_CUREXC_FIELDS)
     tstate->curexc_type = NULL;
     tstate->curexc_value = NULL;
@@ -406,24 +454,12 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate) 
     /* Runtime safety: do not inherit executor state across tealet branches. */
     tstate->current_executor = NULL;
 #endif
-#if defined(PY_HAS_TSTATE_DATASTACK)
+
 #if defined(PY_HAS_TSTATE_CFRAME)
-    /* Entering tealet code must not inherit parent eval/datastack links from
-     * another C stack.  We copy the cframe into a local variable and reset it so that
-     * it has no parents.
-     */
-#if defined(PYTEALET_ENABLE_TSTATE_HYGIENE)
-    assert(tstate->cframe == NULL);
-#endif
-    tstate->cframe = NULL;
-    frame_data->top_cframe = tstate->root_cframe;
-    frame_data->top_cframe.previous = &tstate->root_cframe;
-    frame_data->top_cframe.current_frame = NULL;
-    tstate->cframe = &frame_data->top_cframe;
-#else
-    tstate->current_frame = NULL;
+    tstate->cframe = frame_data->cframe;
 #endif
 
+#if defined(PY_HAS_TSTATE_DATASTACK)
     /* Hygiene check: copy/clear path should already have detached datastack. */
 #if defined(PYTEALET_ENABLE_TSTATE_HYGIENE)
     assert(tstate->datastack_chunk == NULL);
