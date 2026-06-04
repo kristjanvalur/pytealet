@@ -37,6 +37,12 @@ typedef struct PyTealet_CAPI {
     /* Returns 1 if obj is tealet-compatible, 0 if not, -1 on API misuse/error. */
     int (*check_tealet)(PyTealet_CAPI_Context *ctx, PyObject *obj);
 
+    /* Equivalent to target.stub(). */
+    PyObject *(*stub)(PyTealet_CAPI_Context *ctx, PyObject *target);
+
+    /* Equivalent to _tealet.tealet(source). */
+    PyObject *(*duplicate)(PyTealet_CAPI_Context *ctx, PyObject *source);
+
     /* Equivalent to target.run(function) or target.run(function, arg). */
     PyObject *(*run)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function, PyObject *arg);
 

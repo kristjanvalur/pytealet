@@ -26,6 +26,8 @@ PyObject *PyTealet_ThreadActive(PyTealetModuleState *mstate);
 PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
 int PyTealet_ThreadReapMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 int PyTealet_ErrorWasRemote(PyTealetModuleState *mstate);
+PyObject *PyTealetApi_Stub(PyTealetModuleState *mstate, PyObject *target_obj);
+PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_obj);
 PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func, PyObject *arg);
 PyObject *PyTealetApi_RunC(PyTealetModuleState *mstate, PyObject *target_obj, PyTealetApi_RunCFunc func,
                            PyObject *arg);

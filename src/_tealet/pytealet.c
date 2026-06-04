@@ -1037,6 +1037,46 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     return result;
 }
 
+/* Stub-creation entrypoint for external C clients via the _tealet capsule API.
+ * Equivalent to target.stub().
+ */
+PyObject *PyTealetApi_Stub(PyTealetModuleState *mstate, PyObject *target_obj) {
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    if (!target_obj) {
+        PyErr_SetString(PyExc_TypeError, "target must not be NULL");
+        return NULL;
+    }
+    if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
+        return NULL;
+    }
+
+    return pytealet_stub(target_obj, mstate->tealet_type, NULL, 0, NULL);
+}
+
+/* Duplication entrypoint for external C clients via the _tealet capsule API.
+ * Equivalent to _tealet.tealet(source).
+ */
+PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_obj) {
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    if (!source_obj) {
+        PyErr_SetString(PyExc_TypeError, "source must not be NULL");
+        return NULL;
+    }
+    if (!PyObject_TypeCheck(source_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "source must be a _tealet.tealet instance");
+        return NULL;
+    }
+
+    return PyObject_CallOneArg((PyObject *)mstate->tealet_type, source_obj);
+}
+
 /* Minimal run entrypoint for external C clients via the _tealet capsule API.
  * This keeps validation and exception behavior aligned with the Python run()
  * method by reusing the same internal implementation.

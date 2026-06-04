@@ -72,6 +72,12 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (PyDict_SetItemString(d, "has_base",
                              PyBool_FromLong((state->api->feature_flags & PYTEALET_CAPI_FEATURE_BASE) != 0)) < 0)
         goto error;
+    if (PyDict_SetItemString(d, "has_stub",
+                             PyBool_FromLong(state->api->stub != NULL)) < 0)
+        goto error;
+    if (PyDict_SetItemString(d, "has_duplicate",
+                             PyBool_FromLong(state->api->duplicate != NULL)) < 0)
+        goto error;
     if (PyDict_SetItemString(d, "has_run",
                              PyBool_FromLong(state->api->run != NULL)) < 0)
         goto error;
@@ -181,6 +187,28 @@ static PyObject *client_capi_run(PyObject *module, PyObject *args) {
     return state->api->run(state->ctx, target, func, arg);
 }
 
+static PyObject *client_capi_stub(PyObject *module, PyObject *target) {
+    PyTealetCapiClientState *state = client_get_state(module);
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    return state->api->stub(state->ctx, target);
+}
+
+static PyObject *client_capi_duplicate(PyObject *module, PyObject *source) {
+    PyTealetCapiClientState *state = client_get_state(module);
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    return state->api->duplicate(state->ctx, source);
+}
+
 static PyObject *client_run_c_callback(PyObject *current, PyObject *arg) {
     PyObject *main_method;
     PyObject *main;
@@ -252,6 +280,10 @@ static PyMethodDef client_methods[] = {
      "Return whether C API current() and main() refer to the same object."},
     {"check_tealet", (PyCFunction)client_check_tealet, METH_O,
      "Return True if object is a _tealet.tealet instance according to C API."},
+    {"capi_stub", (PyCFunction)client_capi_stub, METH_O,
+     "Stub a tealet using the imported C API."},
+    {"capi_duplicate", (PyCFunction)client_capi_duplicate, METH_O,
+     "Duplicate a tealet using the imported C API."},
     {"capi_run", (PyCFunction)client_capi_run, METH_VARARGS,
      "Run a tealet using the imported C API."},
     {"capi_run_c", (PyCFunction)client_capi_run_c, METH_VARARGS,
@@ -289,8 +321,8 @@ static int client_exec(PyObject *module) {
     }
 
     if (!state->api->ctx_new || !state->api->ctx_free || !state->api->current || !state->api->main ||
-        !state->api->thread_sweep || !state->api->check_tealet || !state->api->run || !state->api->run_c ||
-        !state->api->switch_) {
+        !state->api->thread_sweep || !state->api->check_tealet || !state->api->stub || !state->api->duplicate ||
+        !state->api->run || !state->api->run_c || !state->api->switch_) {
         PyErr_SetString(PyExc_ImportError, "pytealet C API missing required functions");
         return -1;
     }

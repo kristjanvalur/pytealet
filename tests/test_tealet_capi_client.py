@@ -9,6 +9,8 @@ def test_capi_client_api_info():
     assert info["struct_size"] >= 0
     assert info["feature_flags"] >= 0
     assert info["has_base"] is True
+    assert info["has_stub"] is True
+    assert info["has_duplicate"] is True
     assert info["has_run"] is True
     assert info["has_run_c"] is True
     assert info["has_switch"] is True
@@ -44,3 +46,22 @@ def test_capi_client_run_forwarding():
 def test_capi_client_run_c_forwarding():
     t = _tealet.tealet()
     assert _tealet_capi_client.capi_run_c(t, 456) == ("via-capi-run-c", 456)
+
+
+def test_capi_client_stub_creation():
+    t = _tealet.tealet()
+    out = _tealet_capi_client.capi_stub(t)
+
+    assert out is t
+    assert t.state == _tealet.STATE_STUB
+
+
+def test_capi_client_duplicate_stub():
+    t = _tealet.tealet()
+    t.stub()
+
+    dup = _tealet_capi_client.capi_duplicate(t)
+
+    assert dup is not t
+    assert dup.state == _tealet.STATE_STUB
+    assert dup.thread_id == t.thread_id
