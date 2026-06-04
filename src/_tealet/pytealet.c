@@ -1075,7 +1075,7 @@ int PyTealetApi_Stub(PyTealetModuleState *mstate, PyObject *target_obj) {
 }
 
 /* Duplication entrypoint for external C clients via the _tealet capsule API.
- * Equivalent to _tealet.tealet(source).
+ * Equivalent to source.duplicate().
  */
 PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_obj) {
     if (!mstate || !mstate->tealet_type) {
@@ -1091,7 +1091,7 @@ PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_ob
         return NULL;
     }
 
-    return PyObject_CallOneArg((PyObject *)mstate->tealet_type, source_obj);
+    return pytealet_duplicate(source_obj, mstate->tealet_type, NULL, 0, NULL);
 }
 
 /* Minimal run entrypoint for external C clients via the _tealet capsule API.

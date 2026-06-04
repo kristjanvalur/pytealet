@@ -42,7 +42,7 @@ typedef struct PyTealet_CAPI {
     /* Equivalent to _tealet.tealet(). */
     PyObject *(*create)(PyTealet_CAPI_Context *ctx);
 
-    /* Equivalent to _tealet.tealet(source). */
+    /* Equivalent to source.duplicate(). */
     PyObject *(*duplicate)(PyTealet_CAPI_Context *ctx, PyObject *source);
 
     /* Tealet-method style operations (conceptual target.method(...)). */
