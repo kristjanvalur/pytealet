@@ -386,7 +386,7 @@ static void PyTealetTstate_PutFrame(const PyTealetTstateFrame *src, PyThreadStat
  * - tstate must be non-NULL.
  * - target_is_tstate=0 clears saved ttstate frame slots.
  * - target_is_tstate=1 clears live tstate frame slots.
- * - For cframe+datastack builds, frame_data->top_cframe is initialized from
+ * - For cframe builds, frame_data->top_cframe is initialized from
  *   tstate->root_cframe, then normalized into a standalone root frame
  *   (previous points to live root_cframe, current_frame is NULL).
  *   frame_data->cframe and live tstate->cframe are then wired to top_cframe.
@@ -398,15 +398,13 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate, 
     frame_data = &ttstate->frame_data;
 
 #if defined(PY_HAS_TSTATE_CFRAME)
-#if PY311P
-    /* a cleared cframe can't be null, must be backed by a real frame */
+    /* A cleared cframe can't be NULL; anchor it in branch-local storage. */
     frame_data->top_cframe = tstate->root_cframe;
     frame_data->top_cframe.previous = &tstate->root_cframe;
+#if PY311P
     frame_data->top_cframe.current_frame = NULL;
-    frame_data->cframe = &frame_data->top_cframe;
-#else
-    frame_data->cframe = NULL;
 #endif
+    frame_data->cframe = &frame_data->top_cframe;
 #endif
 
     if (!target_is_tstate) {

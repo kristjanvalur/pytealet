@@ -47,11 +47,10 @@
          * Stack-slicing preserves the CFrame struct itself; we just save the
          * pointer */
         PyTealetCFrame *cframe;
+    /* Local cframe anchor for branch-local execution state. */
+    PyTealetCFrame top_cframe;
 #endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
-#if defined(PY_HAS_TSTATE_CFRAME)
-        PyTealetCFrame top_cframe;
-#endif
 #if defined(PY_HAS_TSTATE_CFRAME_USE_TRACING)
         int cframe_use_tracing; /* tracing flag from cframe */
 #endif
@@ -133,9 +132,8 @@ void PyTealetTstate_Restore(PyTealetTstate *src, PyThreadState *dst);
  *   then normalize it into a standalone root frame).
  * - target_is_tstate=0 clears saved ttstate frame slots.
  * - target_is_tstate=1 clears live tstate frame slots.
- * - On cframe+datastack builds (3.11+), ttstate->frame_data.cframe is wired to
+ * - On cframe builds (3.10-3.12), ttstate->frame_data.cframe is wired to
  *   ttstate->frame_data.top_cframe.
- * - On cframe-only builds (3.10), saved cframe may be NULL.
  */
 void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate, int target_is_tstate);
 
