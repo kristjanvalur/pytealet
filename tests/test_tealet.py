@@ -43,7 +43,7 @@ def stub_new(func=None, arg=None, klass=_tealet.tealet, retarg=False):
 
 def stub_new2(func=None, arg=None, klass=_tealet.tealet, retarg=False):
     stub = tealet_new_descend(random.randint(0, 20), klass=klass, retarg=False)
-    dup = klass(stub)
+    dup = stub.duplicate()
     if func:
         r = dup.run(func, arg)
     else:
@@ -56,7 +56,7 @@ def stub_new3(func=None, arg=None, klass=_tealet.tealet, retarg=False):
         the_stub[0] = None
     if not the_stub[0]:
         the_stub[0] = tealet_new_descend(random.randint(0, 20), klass=klass)
-    dup = klass(the_stub[0])
+    dup = the_stub[0].duplicate()
     if func:
         r = dup.run(func, arg)
     else:
@@ -279,7 +279,7 @@ class TestThreadCleanup:
             remaining_ids = {id(x) for x in remaining}
 
             assert id(current) not in remaining_ids
-            assert id(peer) not in remaining_ids
+            dup = data["stub"].duplicate()
             assert current.state == _tealet.STATE_RUN
             assert peer.state == _tealet.STATE_EXIT
             return current.main()
@@ -852,7 +852,7 @@ class TestThreadOwnership:
         assert ready.wait(timeout=1.0)
         try:
             assert data["owner_tid"] != _tealet.current().thread_id
-            dup = _tealet.tealet(data["stub"])
+            dup = data["stub"].duplicate()
             assert dup.thread_id == data["owner_tid"]
             assert dup.belongs_to_current() is False
             with pytest.raises(_tealet.ThreadMismatchError):

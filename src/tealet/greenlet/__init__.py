@@ -359,7 +359,7 @@ class greenlet(object):
             if stub is None:
                 self._tealet = _tealet.tealet()
             else:
-                self._tealet = _tealet.tealet(stub)
+                self._tealet = stub.duplicate()
             if parent is None:
                 parent = getcurrent()
             self.parent = parent

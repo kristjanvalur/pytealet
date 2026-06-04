@@ -133,6 +133,8 @@ static void pytealet_clear_pending_exception(PyTealetMainData *mdata);
 static PyObject *pytealet_maybe_raise_pending_throw(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result);
 static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
                                         PyTealetMainData *mdata, PyObject *exc, PyObject *fallback);
+static PyObject *pytealet_duplicate(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                    Py_ssize_t nargs, PyObject *kwnames);
 static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                 PyObject *kwnames);
 static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
@@ -873,7 +875,6 @@ static void *PyTealet_GetStackFar(const PyThreadState *py_tstate) {
 /* ===================================================================== */
 
 static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObject *kwds, int creating_main) {
-    PyTealetObject *src = NULL;
     PyTealetObject *result;
     PyTealetMainData *lineage_mdata = NULL;
     PyTealetModuleState *mstate = GetModuleStateFromClass(subtype);
@@ -888,17 +889,11 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     }
     current_tid = PyThread_get_thread_ident();
 
-    if (args && PyTuple_GET_SIZE(args) > 0) {
-        src = (PyTealetObject *)PyTuple_GET_ITEM(args, 0);
-        if (!PyTealet_Check((PyObject *)src, mstate)) {
-            PyErr_SetNone(PyExc_TypeError);
-            return NULL;
-        }
-        if (src->state != STATE_NEW && src->state != STATE_STUB) {
-            PyErr_SetString(mstate->state_error, "state must be new or stub");
-            return NULL;
-        }
+    if (!creating_main && ((args && PyTuple_GET_SIZE(args) > 0) || (kwds && PyDict_GET_SIZE(kwds) > 0))) {
+        PyErr_SetString(PyExc_TypeError, "tealet() takes no arguments");
+        return NULL;
     }
+
     result = (PyTealetObject *)PyType_GenericAlloc(subtype, 0);
     if (!result)
         return NULL;
@@ -914,36 +909,70 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     result->weakreflist = NULL;
 #endif
 
-    if (src) {
-        /* we can pass STUB and NEW tealets in, in both cases the
-         * result belongs to the same thread as the original.
-         */
-        if (src->state == STATE_STUB) {
-            /* duplicate the stub tealet and the tstate */
-            result->tealet = tealet_duplicate(src->tealet);
-            if (!result->tealet) {
-                Py_DECREF(result);
-                return PyErr_NoMemory();
-            }
-            TEALET_SET_PYOBJECT(result->tealet, result);
-            lineage_mdata = (PyTealetMainData *)*tealet_main_userpointer(result->tealet->main);
-            if (pytealet_track_wrapper(lineage_mdata, result, 0) < 0) {
-                TEALET_SET_PYOBJECT(result->tealet, NULL);
-                tealet_delete(result->tealet);
-                result->tealet = NULL;
-                Py_DECREF(result);
-                return NULL;
-            }
-            PyTealetTstate_Duplicate(&result->tstate, &src->tstate);
-            /* We don't capture frame info for stubs. */
-        }
-        result->state = src->state;
-        result->owner_tid = src->owner_tid;
-        if (src->domain_lock_obj)
-            result->domain_lock_obj = Py_NewRef(src->domain_lock_obj);
-    } else if (lineage_mdata && lineage_mdata->domain_lock_obj) {
+    if (lineage_mdata && lineage_mdata->domain_lock_obj) {
         result->domain_lock_obj = Py_NewRef(lineage_mdata->domain_lock_obj);
     }
+    return (PyObject *)result;
+}
+
+static PyObject *pytealet_duplicate(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                    Py_ssize_t nargs, PyObject *kwnames) {
+    PyTealetObject *src = (PyTealetObject *)self;
+    PyTealetObject *result;
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+
+    if (!mstate)
+        return NULL;
+    if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
+        PyErr_SetString(PyExc_TypeError, "duplicate() takes no arguments");
+        return NULL;
+    }
+    if (src->state != STATE_NEW && src->state != STATE_STUB) {
+        PyErr_SetString(mstate->state_error, "state must be new or stub");
+        return NULL;
+    }
+
+    result = (PyTealetObject *)PyType_GenericAlloc(Py_TYPE(src), 0);
+    if (!result)
+        return NULL;
+
+    result->state = STATE_NEW;
+    result->tealet = NULL;
+    result->owner_tid = src->owner_tid;
+    result->domain_lock_obj = NULL;
+    result->tracking_ref = NULL;
+    result->inflight_throw_token = 0;
+    PyTealetTstate_Init(&result->tstate);
+    PyTealetFrameInfo_Init(&result->frame_info);
+#if !defined(Py312P)
+    result->weakreflist = NULL;
+#endif
+
+    if (src->state == STATE_STUB) {
+        PyTealetMainData *lineage_mdata;
+
+        result->tealet = tealet_duplicate(src->tealet);
+        if (!result->tealet) {
+            Py_DECREF(result);
+            return PyErr_NoMemory();
+        }
+        TEALET_SET_PYOBJECT(result->tealet, result);
+        lineage_mdata = (PyTealetMainData *)*tealet_main_userpointer(result->tealet->main);
+        if (pytealet_track_wrapper(lineage_mdata, result, 0) < 0) {
+            TEALET_SET_PYOBJECT(result->tealet, NULL);
+            tealet_delete(result->tealet);
+            result->tealet = NULL;
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyTealetTstate_Duplicate(&result->tstate, &src->tstate);
+        /* We don't capture frame info for stubs. */
+    }
+
+    result->state = src->state;
+    if (src->domain_lock_obj)
+        result->domain_lock_obj = Py_NewRef(src->domain_lock_obj);
+
     return (PyObject *)result;
 }
 
@@ -1689,6 +1718,8 @@ static PyObject *pytealet_set_context(PyObject *self, PyObject *value) {
 
 static struct PyMethodDef pytealet_methods[] = {
     {"stub", (PyCFunction)(void (*)(void))pytealet_stub, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
+    {"duplicate", (PyCFunction)(void (*)(void))pytealet_duplicate, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+     ""},
     {"current", (PyCFunction)(void (*)(void))pytealet_current, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"previous", (PyCFunction)(void (*)(void))pytealet_previous, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"main", (PyCFunction)(void (*)(void))pytealet_main_method, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
