@@ -259,10 +259,17 @@ static int PyTealetApi_CheckTealet(PyTealet_CAPI_Context *ctx, PyObject *obj) {
     return PyObject_TypeCheck(obj, mstate->tealet_type) ? 1 : 0;
 }
 
-static PyObject *PyTealetApi_StubForward(PyTealet_CAPI_Context *ctx, PyObject *target) {
+static PyObject *PyTealetApi_CreateForward(PyTealet_CAPI_Context *ctx) {
     PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return NULL;
+    return PyTealetApi_Create(mstate);
+}
+
+static int PyTealetApi_StubForward(PyTealet_CAPI_Context *ctx, PyObject *target) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
     return PyTealetApi_Stub(mstate, target);
 }
 
@@ -305,8 +312,13 @@ static const PyTealet_CAPI pytealet_capi_table = {
     PyTealetApi_Main,
     PyTealetApi_ThreadSweep,
     PyTealetApi_CheckTealet,
-    PyTealetApi_StubForward,
+
+    /* Module-level creation helpers (append-only for future module ops). */
+    PyTealetApi_CreateForward,
     PyTealetApi_DuplicateForward,
+
+    /* Tealet-method style operations (append-only for future methods). */
+    PyTealetApi_StubForward,
     PyTealetApi_RunForward,
     PyTealetApi_RunCForward,
     PyTealetApi_SwitchForward,

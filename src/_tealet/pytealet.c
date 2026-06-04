@@ -1037,24 +1037,41 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     return result;
 }
 
-/* Stub-creation entrypoint for external C clients via the _tealet capsule API.
- * Equivalent to target.stub().
+/* Creation entrypoint for external C clients via the _tealet capsule API.
+ * Equivalent to _tealet.tealet().
  */
-PyObject *PyTealetApi_Stub(PyTealetModuleState *mstate, PyObject *target_obj) {
+PyObject *PyTealetApi_Create(PyTealetModuleState *mstate) {
     if (!mstate || !mstate->tealet_type) {
         PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
         return NULL;
     }
+    return PyObject_CallNoArgs((PyObject *)mstate->tealet_type);
+}
+
+/* Stub-creation entrypoint for external C clients via the _tealet capsule API.
+ * Equivalent to target.stub().
+ */
+int PyTealetApi_Stub(PyTealetModuleState *mstate, PyObject *target_obj) {
+    PyObject *result;
+
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return -1;
+    }
     if (!target_obj) {
         PyErr_SetString(PyExc_TypeError, "target must not be NULL");
-        return NULL;
+        return -1;
     }
     if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
         PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
-        return NULL;
+        return -1;
     }
 
-    return pytealet_stub(target_obj, mstate->tealet_type, NULL, 0, NULL);
+    result = pytealet_stub(target_obj, mstate->tealet_type, NULL, 0, NULL);
+    if (!result)
+        return -1;
+    Py_DECREF(result);
+    return 0;
 }
 
 /* Duplication entrypoint for external C clients via the _tealet capsule API.

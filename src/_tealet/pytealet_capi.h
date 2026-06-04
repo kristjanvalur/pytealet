@@ -29,6 +29,8 @@ typedef struct PyTealet_CAPI {
     PyTealet_CAPI_Context *(*ctx_new)(void);
     void (*ctx_free)(PyTealet_CAPI_Context *ctx);
 
+    /* Module-level operations (not bound to a specific tealet method call). */
+
     /* Return new references (or NULL with exception set on failure). */
     PyObject *(*current)(PyTealet_CAPI_Context *ctx);
     PyObject *(*main)(PyTealet_CAPI_Context *ctx);
@@ -37,11 +39,16 @@ typedef struct PyTealet_CAPI {
     /* Returns 1 if obj is tealet-compatible, 0 if not, -1 on API misuse/error. */
     int (*check_tealet)(PyTealet_CAPI_Context *ctx, PyObject *obj);
 
-    /* Equivalent to target.stub(). */
-    PyObject *(*stub)(PyTealet_CAPI_Context *ctx, PyObject *target);
+    /* Equivalent to _tealet.tealet(). */
+    PyObject *(*create)(PyTealet_CAPI_Context *ctx);
 
     /* Equivalent to _tealet.tealet(source). */
     PyObject *(*duplicate)(PyTealet_CAPI_Context *ctx, PyObject *source);
+
+    /* Tealet-method style operations (conceptual target.method(...)). */
+
+    /* Equivalent to target.stub(). */
+    int (*stub)(PyTealet_CAPI_Context *ctx, PyObject *target);
 
     /* Equivalent to target.run(function) or target.run(function, arg). */
     PyObject *(*run)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function, PyObject *arg);

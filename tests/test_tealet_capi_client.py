@@ -9,6 +9,7 @@ def test_capi_client_api_info():
     assert info["struct_size"] >= 0
     assert info["feature_flags"] >= 0
     assert info["has_base"] is True
+    assert info["has_create"] is True
     assert info["has_stub"] is True
     assert info["has_duplicate"] is True
     assert info["has_run"] is True
@@ -52,8 +53,16 @@ def test_capi_client_stub_creation():
     t = _tealet.tealet()
     out = _tealet_capi_client.capi_stub(t)
 
-    assert out is t
+    assert out is None
     assert t.state == _tealet.STATE_STUB
+
+
+def test_capi_client_create_new():
+    t = _tealet_capi_client.capi_create()
+
+    assert _tealet_capi_client.check_tealet(t) is True
+    assert t.state == _tealet.STATE_NEW
+    assert t.thread_id == _tealet.current().thread_id
 
 
 def test_capi_client_duplicate_stub():
