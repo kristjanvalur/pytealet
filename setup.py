@@ -277,7 +277,17 @@ _tealet_ext = Extension(
     language="c",
 )
 
+# Validation client extension that consumes the _tealet capsule C API.
+_tealet_capi_client_ext = Extension(
+    name="_tealet_capi_client",
+    sources=["src/_tealet/pytealet_capi_client.c"],
+    include_dirs=include_dirs,
+    extra_compile_args=extra_compile_args,
+    extra_link_args=extra_link_args,
+    language="c",
+)
+
 # Run setup
 setup(
-    ext_modules=[_tealet_ext],
+    ext_modules=[_tealet_ext, _tealet_capi_client_ext],
 )
