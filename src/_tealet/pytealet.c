@@ -3128,8 +3128,10 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         int exit_fail;
         exit_fail = tealet_exit(t_return, (void *)return_arg, exit_mode | TEALET_XFER_NOFAIL);
         if (exit_fail) {
+            /* we have hit an impossible error. restore the frame for the machinery. */
+            PyTealetTstate_Frame_Setup(&tealet->tstate, tstate);
             PyTealet_TranslateTealetError(mstate, exit_fail, "tealet exit failed", NULL, NULL);
-            PyErr_WriteUnraisable(func);
+            PyErr_WriteUnraisable(NULL);
             abort();
         }
     }
