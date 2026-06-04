@@ -458,6 +458,10 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate, 
 #endif
 
 #if defined(PY_HAS_TSTATE_DATASTACK)
+#if !defined(PY_HAS_TSTATE_CFRAME)
+    /* 3.13+: no cframe anchor exists; detach from any prior interpreter frame. */
+    tstate->current_frame = NULL;
+#endif
     /* Hygiene check: copy/clear path should already have detached datastack. */
 #if defined(PYTEALET_ENABLE_TSTATE_HYGIENE)
     assert(tstate->datastack_chunk == NULL);
