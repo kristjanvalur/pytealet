@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - development
+      - c-api
       - green-tealet
       - chore/libtealet-release-primary
       - main
