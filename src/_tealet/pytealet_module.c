@@ -180,7 +180,7 @@ struct PyTealet_CAPI_Context {
     PyObject *module;
 };
 
-static PyTealetModuleState *pytealet_capi_get_mstate(PyTealet_CAPI_Context *ctx) {
+static PyTealetModuleState *PyTealetApi_GetModuleState(PyTealet_CAPI_Context *ctx) {
     PyTealetModuleState *mstate;
 
     if (!ctx || !ctx->module) {
@@ -197,7 +197,7 @@ static PyTealetModuleState *pytealet_capi_get_mstate(PyTealet_CAPI_Context *ctx)
     return mstate;
 }
 
-static PyTealet_CAPI_Context *pytealet_capi_ctx_new(void) {
+static PyTealet_CAPI_Context *PyTealetApi_CtxNew(void) {
     PyTealet_CAPI_Context *ctx;
     PyObject *module;
 
@@ -216,36 +216,36 @@ static PyTealet_CAPI_Context *pytealet_capi_ctx_new(void) {
     return ctx;
 }
 
-static void pytealet_capi_ctx_free(PyTealet_CAPI_Context *ctx) {
+static void PyTealetApi_CtxFree(PyTealet_CAPI_Context *ctx) {
     if (!ctx)
         return;
     Py_XDECREF(ctx->module);
     PyMem_Free(ctx);
 }
 
-static PyObject *pytealet_capi_current(PyTealet_CAPI_Context *ctx) {
-    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+static PyObject *PyTealetApi_Current(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return NULL;
     return Py_XNewRef((PyObject *)PyTealet_GetOrCreateCurrent(mstate, NULL));
 }
 
-static PyObject *pytealet_capi_main(PyTealet_CAPI_Context *ctx) {
-    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+static PyObject *PyTealetApi_Main(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return NULL;
     return Py_XNewRef((PyObject *)PyTealet_GetOrCreateMain(mstate, NULL));
 }
 
-static PyObject *pytealet_capi_thread_sweep(PyTealet_CAPI_Context *ctx) {
-    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+static PyObject *PyTealetApi_ThreadSweep(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return NULL;
     return PyTealet_ThreadSweep(mstate);
 }
 
-static int pytealet_capi_check_tealet(PyTealet_CAPI_Context *ctx, PyObject *obj) {
-    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+static int PyTealetApi_CheckTealet(PyTealet_CAPI_Context *ctx, PyObject *obj) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return -1;
     if (!obj) {
@@ -259,32 +259,41 @@ static int pytealet_capi_check_tealet(PyTealet_CAPI_Context *ctx, PyObject *obj)
     return PyObject_TypeCheck(obj, mstate->tealet_type) ? 1 : 0;
 }
 
-static PyObject *pytealet_capi_run(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *func, PyObject *arg) {
-    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+static PyObject *PyTealetApi_RunForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *func, PyObject *arg) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return NULL;
-    return PyTealet_RunCAPI(mstate, target, func, arg);
+    return PyTealetApi_Run(mstate, target, func, arg);
 }
 
-static PyObject *pytealet_capi_switch(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg) {
-    PyTealetModuleState *mstate = pytealet_capi_get_mstate(ctx);
+static PyObject *PyTealetApi_RunCForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyTealetApi_RunCFunc func,
+                                         PyObject *arg) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return NULL;
-    return PyTealet_SwitchCAPI(mstate, target, arg);
+    return PyTealetApi_RunC(mstate, target, func, arg);
+}
+
+static PyObject *PyTealetApi_SwitchForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_Switch(mstate, target, arg);
 }
 
 static const PyTealet_CAPI pytealet_capi_table = {
     PYTEALET_CAPI_ABI_VERSION,
     sizeof(PyTealet_CAPI),
-    PYTEALET_CAPI_FEATURE_SWITCH | PYTEALET_CAPI_FEATURE_RUN,
-    pytealet_capi_ctx_new,
-    pytealet_capi_ctx_free,
-    pytealet_capi_current,
-    pytealet_capi_main,
-    pytealet_capi_thread_sweep,
-    pytealet_capi_check_tealet,
-    pytealet_capi_run,
-    pytealet_capi_switch,
+    PYTEALET_CAPI_FEATURE_BASE,
+    PyTealetApi_CtxNew,
+    PyTealetApi_CtxFree,
+    PyTealetApi_Current,
+    PyTealetApi_Main,
+    PyTealetApi_ThreadSweep,
+    PyTealetApi_CheckTealet,
+    PyTealetApi_RunForward,
+    PyTealetApi_RunCForward,
+    PyTealetApi_SwitchForward,
     {NULL},
 };
 

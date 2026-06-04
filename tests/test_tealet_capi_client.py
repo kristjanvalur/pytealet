@@ -8,7 +8,9 @@ def test_capi_client_api_info():
     assert info["abi_version"] == _tealet.C_API_ABI_VERSION
     assert info["struct_size"] >= 0
     assert info["feature_flags"] >= 0
+    assert info["has_base"] is True
     assert info["has_run"] is True
+    assert info["has_run_c"] is True
     assert info["has_switch"] is True
 
 
@@ -37,3 +39,8 @@ def test_capi_client_run_forwarding():
 
     t = _tealet.tealet()
     assert _tealet_capi_client.capi_run(t, worker, 123) == ("via-capi-run", 123)
+
+
+def test_capi_client_run_c_forwarding():
+    t = _tealet.tealet()
+    assert _tealet_capi_client.capi_run_c(t, 456) == ("via-capi-run-c", 456)

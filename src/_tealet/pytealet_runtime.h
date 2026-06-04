@@ -8,6 +8,7 @@
 #define PYTEALET_RUNTIME_H
 
 #include "frame_info.h"
+#include "pytealet_capi.h"
 #include "pytealet_module.h"
 #include "tstate_state.h"
 
@@ -17,6 +18,7 @@ typedef struct PyTealetNewArg {
     struct PyTealetObject *dest;
     PyTealetModuleState *mstate;
     PyObject *func;
+    PyTealetApi_RunCFunc cfunc;
     PyObject *arg;
 } PyTealetNewArg;
 

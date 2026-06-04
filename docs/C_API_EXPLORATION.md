@@ -239,6 +239,12 @@ Use explicit ABI policy from day one:
 
 Import-time checks should reject incompatible providers with clear ImportError.
 
+Pre-release development policy (current c-api branch):
+
+1. Keep abi_version pinned until first external release candidate.
+2. Use a single base feature bit for table presence instead of per-function flags.
+3. Treat table shape changes as in-flight branch evolution, then lock and version strictly before release.
+
 ## Suggested Implementation Plan
 
 Phase 1 (minimal viable C API):
@@ -249,9 +255,10 @@ Phase 1 (minimal viable C API):
 
 Phase 2 (operational API):
 
-1. Add exception routing APIs (set_exception/throw helpers).
-2. Add thread cleanup hooks needed by stress scenarios.
-3. Add explicit docs for thread ownership and safety contracts.
+1. Add native worker dispatch API for C callbacks (run_c) with the same (current, arg) and return semantics as Python run callables.
+2. Add exception routing APIs (set_exception/throw helpers).
+3. Add thread cleanup hooks needed by stress scenarios.
+4. Add explicit docs for thread ownership and safety contracts.
 
 Phase 3 (stackless integration):
 

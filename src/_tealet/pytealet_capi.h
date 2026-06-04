@@ -11,14 +11,14 @@
 
 #include <stdint.h>
 
-#define PYTEALET_CAPI_ABI_VERSION 2u
+#define PYTEALET_CAPI_ABI_VERSION 1u
 #define PYTEALET_CAPI_CAPSULE_NAME "_tealet._C_API"
 
 /* Feature flags published in PyTealet_CAPI.feature_flags. */
-#define PYTEALET_CAPI_FEATURE_SWITCH (1ull << 0)
-#define PYTEALET_CAPI_FEATURE_RUN (1ull << 1)
+#define PYTEALET_CAPI_FEATURE_BASE (1ull << 0)
 
 typedef struct PyTealet_CAPI_Context PyTealet_CAPI_Context;
+typedef PyObject *(*PyTealetApi_RunCFunc)(PyObject *current, PyObject *arg);
 
 typedef struct PyTealet_CAPI {
     uint32_t abi_version;
@@ -38,7 +38,10 @@ typedef struct PyTealet_CAPI {
     int (*check_tealet)(PyTealet_CAPI_Context *ctx, PyObject *obj);
 
     /* Equivalent to target.run(function) or target.run(function, arg). */
-    PyObject *(*run_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function, PyObject *arg);
+    PyObject *(*run)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function, PyObject *arg);
+
+    /* Equivalent to run but dispatches a native C callback instead of a Python callable. */
+    PyObject *(*run_c)(PyTealet_CAPI_Context *ctx, PyObject *target, PyTealetApi_RunCFunc function, PyObject *arg);
 
     /* Equivalent to target.switch(arg) if arg != NULL, else target.switch(). */
     PyObject *(*switch_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg);
@@ -47,7 +50,7 @@ typedef struct PyTealet_CAPI {
 } PyTealet_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */
-static inline const PyTealet_CAPI *PyTealet_ImportCAPI(void) {
+static inline const PyTealet_CAPI *PyTealetApi_Import(void) {
     return (const PyTealet_CAPI *)PyCapsule_Import(PYTEALET_CAPI_CAPSULE_NAME, 0);
 }
 

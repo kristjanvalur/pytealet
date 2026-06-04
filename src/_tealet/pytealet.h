@@ -7,6 +7,7 @@
 #ifndef PYTEALET_H
 #define PYTEALET_H
 
+#include "pytealet_capi.h"
 #include "pytealet_common.h"
 #include "tealet.h"
 
@@ -25,8 +26,10 @@ PyObject *PyTealet_ThreadActive(PyTealetModuleState *mstate);
 PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
 int PyTealet_ThreadReapMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 int PyTealet_ErrorWasRemote(PyTealetModuleState *mstate);
-PyObject *PyTealet_RunCAPI(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func, PyObject *arg);
-PyObject *PyTealet_SwitchCAPI(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *arg);
+PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func, PyObject *arg);
+PyObject *PyTealetApi_RunC(PyTealetModuleState *mstate, PyObject *target_obj, PyTealetApi_RunCFunc func,
+                           PyObject *arg);
+PyObject *PyTealetApi_Switch(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *arg);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);
 #endif
