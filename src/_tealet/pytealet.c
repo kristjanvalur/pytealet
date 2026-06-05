@@ -689,7 +689,7 @@ static int pytealet_current_error_contains(PyObject *needle) {
 }
 
 /* Helpers to get/set raised exception objects across Python versions. */
-static PyObject *pytealet_err_get_raised_exception() {
+static PyObject *pytealet_err_get_raised_exception(void) {
 #ifdef Py312P
     return PyErr_GetRaisedException();
 #else
