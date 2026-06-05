@@ -22,10 +22,10 @@ pytealet/
 ├── scripts/
 │   └── fast_build.sh
 ├── src/
+│   ├── greenlet_legacy.py   # Legacy greenlet compatibility shim (dev/test helper)
 │   ├── tealet/              # Pure Python package
 │   │   ├── __init__.py
 │   │   ├── greenlet.py
-│   │   └── tealet.py
 │   └── _tealet/             # C extension module
 │       ├── pytealet.c       # Core runtime for tealet objects
 │       ├── pytealet_module.c # CPython module lifecycle

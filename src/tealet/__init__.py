@@ -1,3 +1,2 @@
 from _tealet import *
-
-__version__ = "0.1.0"
+from _tealet import __version__

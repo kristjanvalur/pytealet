@@ -462,6 +462,8 @@ static int pytealet_module_exec(PyObject *m) {
     if (PyModule_AddIntConstant(m, "PYTEALET_WITH_PENDING_FRAME_INTROSPECTION",
                                 PYTEALET_WITH_PENDING_FRAME_INTROSPECTION) < 0)
         return -1;
+    if (PyModule_AddStringConstant(m, "__version__", PYTEALET_VERSION) < 0)
+        return -1;
 
     return 0;
 }

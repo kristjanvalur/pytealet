@@ -14,6 +14,10 @@
 #define STATE_RUN 2
 #define STATE_EXIT 3
 
+#ifndef PYTEALET_VERSION
+#define PYTEALET_VERSION "0.0.0+unknown"
+#endif
+
 /* Controls dormant-tealet frame introspection for Python versions that do not
  * expose tstate->frame directly. When set to 0, frame capture/rewriting is
  * disabled and behavior matches the 3.10-style no-pending-frame path.
