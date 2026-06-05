@@ -1,29 +1,25 @@
 # PyTealet Current Issues
 
-**Date:** November 30, 2025  
-**Status:** Code compiles but has runtime bugs preventing operation
+**Date:** June 5, 2026  
+**Status:** Operational baseline is healthy; this file tracks historical fixes plus remaining hardening items.
 
 ## Overview
 
-The pytealet C extension has been successfully modernized for Python 3.10+ but has critical runtime issues that prevent it from working correctly. This document tracks known issues and their fixes.
+The pytealet C extension has been modernized for Python 3.10+ and currently runs a stable core test baseline. This document tracks historical issues, resolved fixes, and remaining hardening work.
 
-## Recent Validation (March 31, 2026)
+## Recent Validation (June 5, 2026)
 
-- Debug rebuild succeeds with strict defaults (`-std=c17 -pedantic-errors`) via `./scripts/fast_build.sh debug`.
-- `_tealet` smoke import/creation checks in the fast build script pass.
-- `tests/test_tealet.py` passes fully with stub tests enabled:
-    - `PYTEALET_ENABLE_STUB_TESTS=1 uv run pytest tests/test_tealet.py -q`
-    - Result: `12 passed`.
-- Recent stabilization included:
-    - Including libtealet stub helper declarations (`tools.h`) in `pytealet.c`.
-    - Removing local `TEALET_EXTRA` macro redefinition in favor of upstream `TEALET_EXTRA(t, tp)`.
-    - Refactoring dustbin handling to a list-backed mechanism with preallocation intent and deferred tstate decref routing only on the `pytealet_main()` exit path.
+- Full in-repo test suite currently passes on the debug venv baseline:
+    - `.venv-cpython313-debug/bin/python -m pytest tests -q`
+    - Result: `93 passed, 1 skipped`.
+- Historical P0 runtime crashes documented below are fixed in current code.
+- Remaining items are mainly hardening and modernization follow-ups.
 
 ---
 
-## P0 - Critical (Prevents Operation)
+## P0 - Historical Critical Issues (Resolved)
 
-### 🔴 Issue #1: Segfault in pytealet_get_main()
+### ✅ Issue #1: Segfault in pytealet_get_main() (Resolved)
 
 **Location:** `src/_tealet/pytealet.c` line 438
 
@@ -71,7 +67,7 @@ pytealet_get_main(PyObject *_self, void *_closure)
 }
 ```
 
-**Impact:** Prevents basic usage - the test case immediately segfaults.
+**Impact:** Historical only. This no longer blocks normal usage.
 
 **Design Concern:**
 The NULL tealet pointer occurs in two scenarios:
@@ -82,7 +78,7 @@ Should review if lazy creation (STATE_NEW without tealet) is intentional design 
 
 ---
 
-### 🔴 Issue #2: Wrong tealet_exit() Flags
+### ✅ Issue #2: Wrong tealet_exit() Flags (Resolved)
 
 **Location:** `src/_tealet/pytealet.c` line 625
 
@@ -125,7 +121,7 @@ if (tealet_exit(t_return, (void*)return_arg, TEALET_EXIT_DELETE))
     tealet_exit(t_return->main, (void *)return_arg, TEALET_EXIT_DELETE);
 ```
 
-**Impact:** Memory leak - C-level tealet structures are not freed when functions return.
+**Impact:** Historical only. Current runtime uses corrected exit behavior.
 
 **Historical Context:** 
 Original code was written when libtealet's default behavior was to auto-delete. The API evolved to require explicit `TEALET_EXIT_DELETE` flag.
@@ -134,90 +130,63 @@ Original code was written when libtealet's default behavior was to auto-delete. 
 
 ## P1 - High (Incorrect Behavior)
 
-### ⚠️ Issue #3: Missing NULL Checks in Other Property Getters
+### ✅ Issue #3: Missing NULL Checks in Other Property Getters (Resolved)
 
 **Location:** `src/_tealet/pytealet.c` lines 460-480 (approximate)
 
-**Problem:**
-Similar to Issue #1, other property getters may also lack NULL checks for STATE_NEW tealets.
+**Problem (historical):**
+Similar to Issue #1, other property getters were suspected to lack NULL checks for STATE_NEW tealets.
 
 **Properties to Check:**
 - `pytealet_get_tid()` - Thread ID getter
 - `pytealet_get_frame()` - Frame getter (likely already handles NULL)
 
-**Fix Pattern:**
-Add defensive NULL checks similar to the `.main` property fix.
+**Current Status:**
+Audited against current code. Remaining property getters are safe for STATE_NEW/STATE_EXIT paths:
+- `thread_id` reads `owner_tid` only.
+- `frame` falls back to `None`/current frame and does not dereference a missing native tealet.
+- `context` uses running-state checks and stored tstate context with lock discipline.
 
-**Impact:** Potential segfaults when accessing properties on STATE_NEW tealets.
+**Impact:** Historical only; no active crash issue identified in current implementation.
 
 ---
 
 ## P2 - Medium (Enhancements)
 
-### 💡 Issue #4: Could Use tealet_create() API
+### ✅ Issue #4: tealet_create() Migration Target (Closed)
 
 **Location:** `src/_tealet/pytealet.c` line 40 (stub_new), line 344 (pytealet_run)
 
 **Current Approach:**
-Code uses `tealet_new()` which creates a tealet and immediately switches to it:
+Current wrapper uses supported libtealet APIs (`tealet_new`, `tealet_run`, `tealet_stub_new`, `tealet_stub_run`).
 
 ```c
-static tealet_t *stub_new(tealet_t *t) {
-    void *arg = (void*)tealet_current(t);
-    return tealet_new(t, stub_main, &arg);  // Creates and switches
-}
+/* current code paths use tealet_stub_new()/tealet_stub_run() helpers */
 ```
 
-**Status:** ✅ This works correctly - the immediate switch-back in `stub_main` is intentional.
+**Status:** Closed as not applicable.
 
-**Enhancement Opportunity:**
-`tealet_create()` was added to libtealet later and provides a cleaner API:
-
-```c
-static tealet_t *stub_new(tealet_t *t) {
-    tealet_t *stub = tealet_create(t, stub_main);
-    if (!stub) return NULL;
-    
-    // Now manually switch to initialize it
-    void *arg = (void*)tealet_current(t);
-    int err = tealet_switch(stub, &arg);
-    if (err) {
-        tealet_delete(stub);
-        return NULL;
-    }
-    return stub;
-}
-```
-
-**Benefits:**
-- More explicit about when switching happens
-- Better error handling between create and switch
-- Clearer code intent
-
-**Trade-offs:**
-- Current code works fine and is more concise
-- Migration requires testing
-- Negligible performance difference
-
-**Priority:** P2 (Enhancement) - not critical, improves code clarity.
+**Reason:**
+In the vendored libtealet version, `tealet_create()` is no longer a public migration target (see libtealet changelog notes about removal/rework of older `tealet_create()` flows). The wrapper already uses the current supported creation APIs.
 
 ---
 
-### 📝 Issue #5: Deprecated PyThread API
+### ✅ Issue #5: Deprecated PyThread TLS API (Resolved)
 
-**Location:** Throughout `src/_tealet/pytealet.c`
+**Location:** `src/_tealet/pytealet.c`, `src/_tealet/pytealet_module.c`
 
-**Problem:**
-Uses deprecated `PyThread_*` API for thread-local storage:
+**Problem (historical):**
+Older code used deprecated `PyThread_*` key-value TLS APIs:
 ```c
 static int tls_key;
 PyThread_get_key_value(tls_key);
 PyThread_set_key_value(tls_key, ...);
 ```
 
-**Impact:** Works but uses deprecated API (Python 3.7+).
+**Current Status:**
+TLS handling has been migrated to `PyThread_tss_*` APIs (`PyThread_tss_create/get/set/delete`).
 
-**Recommendation:** Consider migrating to modern Python threading API in future, but low priority since it still works.
+**Impact:** Resolved for TLS deprecation concern.
 
 ---
 
@@ -307,35 +276,35 @@ def test_thread_isolation():
 
 - [x] **P0-1:** Fix `pytealet_get_main()` segfault
 - [x] **P0-2:** Fix `tealet_exit()` flags (DEFAULT → DELETE)
-- [ ] **P1-3:** Add NULL checks to other property getters
-- [x] **Test:** Run full test suite (current baseline: 36 passed, 1 skipped)
-- [ ] **Test:** Fix segfault in TestRandom1 and TestRandom2
+- [x] **P1-3:** Add NULL checks to other property getters (audited/resolved)
+- [x] **Test:** Run full test suite (current baseline: 93 passed, 1 skipped)
+- [x] **Test:** Fix segfault in TestRandom1 and TestRandom2 (no longer reproducing in current suite)
 - [ ] **Test:** Verify no memory leaks with valgrind
 - [ ] **Test:** Multi-threaded stress test
-- [ ] **P2-4:** (Optional) Migrate to `tealet_create()` API
-- [ ] **P2-5:** (Optional) Migrate away from deprecated PyThread API
+- [x] **P2-4:** (Closed) `tealet_create()` migration target is not applicable in current vendored libtealet API
+- [x] **P2-5:** (Resolved) Migrated away from deprecated TLS key-value PyThread API to `PyThread_tss_*`
 
 **Test Results (current):**
 ```
-36 passed, 1 skipped
+93 passed, 1 skipped
 ```
 
 ---
 
 ## Resolution Status
 
-**Last Updated:** May 21, 2026
+**Last Updated:** June 5, 2026
 
 | Issue | Status | Assignee | Notes |
 |-------|--------|----------|-------|
 | #1 Segfault in get_main | ✅ Fixed | - | Committed |
 | #2 Wrong exit flags | ✅ Fixed | - | Committed |
-| #3 Other NULL checks | 🔴 Open | - | Needs investigation |
-| #4 tealet_create() | 💡 Enhancement | - | Low priority |
-| #5 PyThread API | 📝 Tracked | - | Low priority |
+| #3 Other NULL checks | ✅ Fixed | - | Audited current getters; no active NULL-deref issue |
+| #4 tealet_create() | ✅ Closed | - | Migration target not applicable for current vendored libtealet API |
+| #5 PyThread API | ✅ Fixed | - | TLS migrated to `PyThread_tss_*` APIs |
 
 ---
 
 ## Notes
 
-The code architecture is sound - these are primarily API evolution issues where libtealet changed behavior over the past 12 years. Once the P0 issues are fixed, the code should work correctly.
+The code architecture is sound. Current open items are primarily hardening and modernization tasks rather than release-blocking runtime failures.
