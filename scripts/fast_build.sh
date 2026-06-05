@@ -5,6 +5,7 @@ set -e  # Exit on error
 
 # Parse command line arguments
 BUILD_TYPE="optimized"
+LIBTEALET_MODE="release"
 if [[ "$1" == "debug" ]]; then
     BUILD_TYPE="debug"
     echo "=== Fast C Extension Build (uv) - DEBUG MODE ==="
@@ -12,11 +13,34 @@ elif [[ "$1" == "optimized" || "$1" == "" ]]; then
     BUILD_TYPE="optimized"
     echo "=== Fast C Extension Build (uv) - OPTIMIZED MODE ==="
 else
-    echo "Usage: $0 [debug|optimized]"
+    echo "Usage: $0 [debug|optimized] [release|source]"
     echo "  debug     - Build with -g -O0 -DDEBUG flags"
     echo "  optimized - Build with -O3 -DNDEBUG flags (default)"
+    echo "  release   - Link against vendored release archive (default)"
+    echo "  source    - Build libtealet from src/_tealet/libtealet-src"
     exit 1
 fi
+
+if [[ "$2" == "source" || "$2" == "release" ]]; then
+    LIBTEALET_MODE="$2"
+elif [[ "$2" != "" ]]; then
+    echo "Usage: $0 [debug|optimized] [release|source]"
+    exit 1
+fi
+
+BUILD_LIBTEALET_FROM_SOURCE="0"
+if [[ "$LIBTEALET_MODE" == "source" ]]; then
+    BUILD_LIBTEALET_FROM_SOURCE="1"
+fi
+
+PYTEALET_EXT_DEBUG="0"
+LIBTEALET_DEBUG="0"
+if [[ "$BUILD_TYPE" == "debug" ]]; then
+    PYTEALET_EXT_DEBUG="1"
+    LIBTEALET_DEBUG="1"
+fi
+
+echo "libtealet mode: $LIBTEALET_MODE"
 
 # Clean any existing build artifacts
 echo "Cleaning build artifacts..."
@@ -25,6 +49,9 @@ rm -f src/_tealet*.so
 
 # Rebuild the extension with uv
 echo "Building C extension with uv..."
+BUILD_LIBTEALET_FROM_SOURCE="$BUILD_LIBTEALET_FROM_SOURCE" \
+LIBTEALET_DEBUG="$LIBTEALET_DEBUG" \
+PYTEALET_EXT_DEBUG="$PYTEALET_EXT_DEBUG" \
 uv sync --active --reinstall-package tealet
 
 # Test if it worked

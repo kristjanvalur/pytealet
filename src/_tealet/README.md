@@ -4,44 +4,49 @@ This directory contains the C extension module for tealet.
 
 ## Structure
 
-- `_tealet.c` - Main C extension module implementation
-- `libtealet/` - Pre-built binary distribution of libtealet (currently v0.3.2)
-  - `lib/` - Pre-compiled libraries for various platforms/ABIs
-  - `tealet/` - Header files for libtealet
-  - `stackman/` - Header files for stackman (stack manipulation library)
+- `pytealet.c` - main runtime implementation
+- `pytealet_module.c` - CPython module lifecycle hooks
+- `frame_info.c` - frame capture/restore helpers
+- `tstate_state.c` - thread-state transfer helpers
+- `libtealet/` - vendored **release archive** (primary path)
+  - `lib/` - prebuilt libraries by ABI
+  - `tealet/` - libtealet public headers
+  - `stackman/` - bundled stackman headers/libs
+- `libtealet-src/` - local **source checkout** override (debug workflows only, gitignored)
 
-## Building
+## Build Modes
 
-The C extension is configured in `setup.py` and will be built automatically during installation. The build process:
+`setup.py` supports two modes:
 
-1. Detects the platform ABI using `make -C libtealet abiname`
-2. Links against the appropriate pre-built library in `libtealet/lib/<abi>/`
+1. **Release mode (default)**
+   - uses `src/_tealet/libtealet`
+   - links against `libtealet/lib/<abi>/libtealet.a`
+2. **Source mode (opt-in)**
+   - set `BUILD_LIBTEALET_FROM_SOURCE=1`
+   - expects local source checkout at `src/_tealet/libtealet-src`
+   - builds `bin/libtealet.a` from source before linking
 
-**Note:** The current `_tealet.c` code requires Python 3 compatibility updates before it will build.
+Example source-mode rebuild:
 
-## Updating libtealet
+```bash
+BUILD_LIBTEALET_FROM_SOURCE=1 uv sync --active --reinstall-package tealet
+```
 
-To update to a newer version of libtealet:
+## Updating Vendored Release Archive
 
-1. Download the **binary distribution** (not source) from the libtealet releases:
-   ```bash
-   cd src/_tealet
-   rm -rf libtealet
-   curl -L https://github.com/kristjanvalur/libtealet/releases/download/v0.3.2/libtealet-0.3.2.tar.gz | tar -xz
-   mv libtealet-0.3.2 libtealet
-   ```
+To refresh the primary vendored archive from libtealet releases:
 
-2. For a different version, replace `v0.3.2` and `libtealet-0.3.2` with the desired version.
+```bash
+cd src/_tealet
+rm -rf libtealet
+curl -L https://github.com/kristjanvalur/libtealet/releases/download/v0.7.2/libtealet-0.7.2.tar.gz | tar -xz
+mkdir -p libtealet
+mv LICENSE Makefile README.md lib stackman tealet libtealet/
+```
 
-3. Check available releases at: https://github.com/kristjanvalur/libtealet/releases
-
-4. Commit the changes:
-   ```bash
-   git add libtealet
-   git commit -m "Update libtealet to v0.3.2"
-   ```
+For a different version, replace `v0.7.2` and `libtealet-0.7.2` in the URL.
 
 ## Dependencies
 
-- **libtealet** - Core stack-slicing library for coroutines
-- **stackman** - Platform-specific stack manipulation (bundled with libtealet)
+- **libtealet** - core stack-slicing library for coroutines
+- **stackman** - platform-specific stack manipulation (bundled with libtealet)

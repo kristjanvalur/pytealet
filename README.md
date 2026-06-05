@@ -6,7 +6,7 @@ A Python wrapper for the [libtealet](https://github.com/kristjanvalur/libtealet)
 
 Tealet provides a greenlet-compatible interface for cooperative multitasking in Python. Unlike traditional coroutines that require `async`/`await` keywords throughout your code, tealet allows you to suspend and resume entire execution stacks, enabling cooperative multitasking without special language support.
 
-Built on libtealet v0.3.2, this library offers:
+Built on vendored libtealet release archives (currently v0.7.2), this library offers:
 - **Stack-slicing**: Efficient context switching without kernel involvement
 - **Low memory overhead**: ~2-16 KB per coroutine vs 1-8 MB for OS threads
 - **Fast context switches**: ~100-500 CPU cycles
@@ -16,6 +16,11 @@ Built on libtealet v0.3.2, this library offers:
 
 ```
 pytealet/
+├── docs/
+│   ├── ARCHITECTURE.md
+│   └── ISSUES.md
+├── scripts/
+│   └── fast_build.sh
 ├── src/
 │   ├── tealet/              # Pure Python package
 │   │   ├── __init__.py
@@ -24,35 +29,44 @@ pytealet/
 │   └── _tealet/             # C extension module
 │       ├── pytealet.c       # Core runtime for tealet objects
 │       ├── pytealet_module.c # CPython module lifecycle
-│       ├── pytealet_common.h # Shared compile-time feature/version macros
-│       ├── pytealet.h       # Shared internal API declarations
-│       ├── pytealet_module.h # Module-state layout shared by C files
-│       └── libtealet/       # libtealet v0.3.2 from GitHub
+│       ├── frame_info.c     # Frame capture/restore helpers
+│       ├── tstate_state.c   # Thread-state transfer helpers
+│       ├── libtealet/       # Vendored libtealet release archive (primary)
+│       └── libtealet-src/   # Optional local libtealet source checkout (gitignored)
 ├── tests/
 │   ├── test_tealet.py
-│   └── test_greenlet.py
+│   ├── test_greenlet_legacy.py
+│   └── compat_greenlet/
 ├── pyproject.toml
 └── README.md
 ```
 
-## Installation
+## Development
 
-This project uses `uv` for package management. To install:
+### Development Setup
+
+This project uses uv for dependency and environment management.
 
 ```bash
-# Install in development mode
-uv pip install -e .
+# Create and activate a local virtual environment
+uv venv --python 3.13
+source .venv/bin/activate
 
-# Install with development dependencies
-uv pip install -e ".[dev]"
+# Install project and development dependencies
+uv sync --dev --active
 ```
 
-## Development
+If you are using a custom debug CPython build, install via uv pip with an explicit interpreter:
+
+```bash
+uv venv --python /path/to/cpython-debug/python .venv-cpython313-debug
+uv pip install --python .venv-cpython313-debug/bin/python -e .[dev]
+```
 
 ### Running Tests
 
 ```bash
-pytest tests/
+uv run --active python -m pytest tests/
 ```
 
 ### Runtime Frame Introspection Toggle
@@ -70,9 +84,15 @@ Compile-time capability is exposed as `_tealet.PYTEALET_WITH_PENDING_FRAME_INTRO
 
 ### Building the C Extension
 
-The C extension (`_tealet`) links against pre-built libtealet libraries. It depends on:
-- **[libtealet](https://github.com/kristjanvalur/libtealet) v0.3.2** - Core stack-slicing library (pre-built binaries in `src/_tealet/libtealet/`)
+The C extension (`_tealet`) links against pre-built libtealet libraries from the vendored release archive. It depends on:
+- **[libtealet](https://github.com/kristjanvalur/libtealet) v0.7.2** - Core stack-slicing library (pre-built binaries in `src/_tealet/libtealet/lib/`)
 - **[stackman](https://github.com/stackless-dev/stackman)** - Platform-specific stack operations (bundled with libtealet)
+
+Default build mode is release-archive based. To use a local source checkout for debugging instead, place it at `src/_tealet/libtealet-src/` and enable source mode:
+
+```bash
+BUILD_LIBTEALET_FROM_SOURCE=1 uv sync --active --reinstall-package tealet
+```
 
 **Build Requirements:**
 - Python development headers (`python3.10-dev` or similar)
@@ -98,7 +118,3 @@ See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
 ## License
 
 MIT License - See [LICENSE](LICENSE) file for details
-
-## About
-
-This is a modernized version of the pytealet project, restructured to follow modern Python packaging standards with a src-layout and using uv for dependency management.

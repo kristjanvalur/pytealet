@@ -7,24 +7,28 @@ import sys
 from setuptools import Extension, setup
 
 # Paths to libtealet
-LIBTEALET_DIR = "src/_tealet/libtealet"
-LIBTEALET_BIN_DIR = "src/_tealet/libtealet-bin"  # Pre-built binaries fallback
-LIBTEALET_HEADERS = os.path.join(LIBTEALET_DIR, "src")
-STACKMAN_HEADERS = os.path.join(LIBTEALET_DIR, "stackman")
+LIBTEALET_RELEASE_DIR = "src/_tealet/libtealet"
+LIBTEALET_SOURCE_DIR = os.environ.get(
+    "LIBTEALET_SOURCE_DIR",
+    "src/_tealet/libtealet-src",
+)
+LIBTEALET_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "tealet")
+STACKMAN_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "stackman")
 PYTEALET_BUILD_CONFIG_HEADER = os.path.abspath("src/_tealet/pytealet_build_config.h")
 DEFAULT_C_STD_FLAGS = "-std=c17 -pedantic-errors"
 
-# Default to source builds, with fallback support for prebuilt binaries.
-BUILD_LIBTEALET_FROM_SOURCE = os.environ.get("BUILD_LIBTEALET_FROM_SOURCE", "1") == "1"
+# Default to release archive builds. Set BUILD_LIBTEALET_FROM_SOURCE=1 to use
+# a local source checkout in src/_tealet/libtealet-src.
+BUILD_LIBTEALET_FROM_SOURCE = os.environ.get("BUILD_LIBTEALET_FROM_SOURCE", "0") == "1"
 LIBTEALET_DEBUG = os.environ.get("LIBTEALET_DEBUG", "1") == "1"
 PYTEALET_EXT_DEBUG = os.environ.get("PYTEALET_EXT_DEBUG", "0") == "1"
 
-def get_abi_name():
+def get_abi_name(abiname_dir):
     """Determine the ABI name for pre-built libraries using libtealet's abiname utility."""
     # Use the Makefile's abiname target to detect platform
     try:
         result = subprocess.run(
-            ["make", "-C", LIBTEALET_DIR, "--no-print-directory", "abiname"],
+            ["make", "-C", abiname_dir, "--no-print-directory", "abiname"],
             capture_output=True,
             text=True,
             check=True
@@ -68,34 +72,35 @@ def get_abi_name():
 
 def build_libtealet_from_source():
     """Build libtealet from source with debug-friendly flags."""
-    if not os.path.exists(LIBTEALET_DIR):
+    if not os.path.exists(LIBTEALET_SOURCE_DIR):
         raise RuntimeError(
-            f"libtealet source not found at {LIBTEALET_DIR}\n"
-            "Clone it with: git clone --depth 1 --branch v0.3.2 "
-            "https://github.com/kristjanvalur/libtealet.git src/_tealet/libtealet"
+            f"libtealet source not found at {LIBTEALET_SOURCE_DIR}\n"
+            "Populate it with a local checkout for debugging, for example:\n"
+            "  git clone --depth 1 https://github.com/kristjanvalur/libtealet.git "
+            "src/_tealet/libtealet-src"
         )
 
-    print(f"Building libtealet from source in {LIBTEALET_DIR}...", file=sys.stderr)
+    print(f"Building libtealet from source in {LIBTEALET_SOURCE_DIR}...", file=sys.stderr)
     cflags = f"{DEFAULT_C_STD_FLAGS} -g -O0 -fPIC" if LIBTEALET_DEBUG else f"{DEFAULT_C_STD_FLAGS} -g -O2 -fPIC"
 
     # Force-include centralized build config for libtealet compilation units.
     if os.path.exists(PYTEALET_BUILD_CONFIG_HEADER):
         cflags += f" -include {PYTEALET_BUILD_CONFIG_HEADER}"
 
-    subprocess.run(["make", "-C", LIBTEALET_DIR, "clean"], check=True)
+    subprocess.run(["make", "-C", LIBTEALET_SOURCE_DIR, "clean"], check=True)
     subprocess.run(
-        ["make", "-C", LIBTEALET_DIR, f"CFLAGS={cflags}", "bin/libtealet.a"],
+        ["make", "-C", LIBTEALET_SOURCE_DIR, f"CFLAGS={cflags}", "bin/libtealet.a"],
         check=True,
     )
 
     abi_result = subprocess.run(
-        ["make", "-C", LIBTEALET_DIR, "--no-print-directory", "abiname"],
+        ["make", "-C", LIBTEALET_SOURCE_DIR, "--no-print-directory", "abiname"],
         capture_output=True,
         text=True,
         check=True,
     )
     abi = abi_result.stdout.strip()
-    src_lib = os.path.join(LIBTEALET_DIR, "bin", "libtealet.a")
+    src_lib = os.path.join(LIBTEALET_SOURCE_DIR, "bin", "libtealet.a")
     if not os.path.exists(src_lib):
         raise RuntimeError(f"Built library not found: {src_lib}")
     return src_lib, abi
@@ -104,9 +109,14 @@ def build_libtealet_from_source():
 # Get the ABI name and library path.
 if BUILD_LIBTEALET_FROM_SOURCE:
     libtealet_static, abi_name = build_libtealet_from_source()
+    LIBTEALET_HEADERS = os.path.join(LIBTEALET_SOURCE_DIR, "src")
+    STACKMAN_HEADERS = os.path.join(LIBTEALET_SOURCE_DIR, "stackman")
 else:
-    abi_name = get_abi_name()
-    lib_dir = os.path.join(LIBTEALET_BIN_DIR, "lib", abi_name)
+    if not os.path.exists(LIBTEALET_RELEASE_DIR):
+        raise RuntimeError(f"libtealet release archive not found at: {LIBTEALET_RELEASE_DIR}")
+
+    abi_name = get_abi_name(LIBTEALET_RELEASE_DIR)
+    lib_dir = os.path.join(LIBTEALET_RELEASE_DIR, "lib", abi_name)
     if not os.path.exists(lib_dir):
         raise RuntimeError(f"Pre-built libraries not found for ABI: {abi_name} at {lib_dir}")
 
@@ -114,9 +124,8 @@ else:
     if not os.path.exists(libtealet_static):
         raise RuntimeError(f"Static library not found: {libtealet_static}")
 
-    # Update header paths for pre-built binaries.
-    LIBTEALET_HEADERS = os.path.join(LIBTEALET_BIN_DIR, "tealet")
-    STACKMAN_HEADERS = os.path.join(LIBTEALET_BIN_DIR, "stackman")
+    LIBTEALET_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "tealet")
+    STACKMAN_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "stackman")
 
 print(f"Building for ABI: {abi_name}", file=sys.stderr)
 if BUILD_LIBTEALET_FROM_SOURCE:
