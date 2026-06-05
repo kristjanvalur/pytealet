@@ -4,7 +4,7 @@ import time
 import threading
 import unittest
 
-from tealet import greenlet_legacy as greenlet_module
+import greenlet_legacy as greenlet_module
 
 greenlet = greenlet_module.greenlet
 
