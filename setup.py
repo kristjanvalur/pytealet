@@ -2,8 +2,10 @@
 
 import os
 import platform
+import struct
 import subprocess
 import sys
+import sysconfig
 from setuptools import Extension, setup
 
 
@@ -46,6 +48,22 @@ PYTEALET_EXT_DEBUG = os.environ.get("PYTEALET_EXT_DEBUG", "0") == "1"
 
 def get_abi_name(abiname_dir):
     """Determine the ABI name for pre-built libraries using libtealet's abiname utility."""
+    system = platform.system()
+
+    # On Windows, prefer target-Python-driven detection over make/host probes.
+    # cibuildwheel can build 32-bit wheels on 64-bit hosts, and host probing may
+    # incorrectly select non-Windows or wrong-arch archives.
+    if system == "Windows":
+        plat = (sysconfig.get_platform() or "").lower().replace("_", "-")
+        machine = platform.machine().lower()
+        ptr_bits = struct.calcsize("P") * 8
+
+        if "arm64" in plat or machine in ("arm64", "aarch64"):
+            return "win_arm64"
+        if "win32" in plat or ptr_bits == 32:
+            return "win_x86"
+        return "win_x64"
+
     # Use the Makefile's abiname target to detect platform
     try:
         result = subprocess.run(
@@ -61,7 +79,6 @@ def get_abi_name(abiname_dir):
         pass
     
     # Fallback: manual detection
-    system = platform.system()
     machine = platform.machine().lower()
     
     if system == "Linux":
