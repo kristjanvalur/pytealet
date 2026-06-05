@@ -31,8 +31,7 @@ jobs:
     env:
       BUILD_LIBTEALET_FROM_SOURCE: "0"
       CIBW_ARCHS: ${{ matrix.archs }}
-      CIBW_ENABLE: "cpython-freethreading"
-      CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
+      CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-*"
       CIBW_SKIP: "pp* *-musllinux*"
       CIBW_TEST_COMMAND: "python -c \"import _tealet; import tealet.greenlet; print('wheel smoke ok')\""
     steps:
