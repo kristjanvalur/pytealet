@@ -49,12 +49,12 @@ PYTEALET_EXT_DEBUG = os.environ.get("PYTEALET_EXT_DEBUG", "0") == "1"
 def get_abi_name(abiname_dir):
     """Determine the ABI name for pre-built libraries using libtealet's abiname utility."""
     system = platform.system()
+    plat = (sysconfig.get_platform() or "").lower().replace("_", "-")
 
     # On Windows, prefer target-Python-driven detection over make/host probes.
     # cibuildwheel can build 32-bit wheels on 64-bit hosts, and host probing may
     # incorrectly select non-Windows or wrong-arch archives.
     if system == "Windows":
-        plat = (sysconfig.get_platform() or "").lower().replace("_", "-")
         machine = platform.machine().lower()
         ptr_bits = struct.calcsize("P") * 8
 
@@ -63,6 +63,16 @@ def get_abi_name(abiname_dir):
         if "win32" in plat or ptr_bits == 32:
             return "win_x86"
         return "win_x64"
+
+    # On macOS, also prefer target-Python detection to avoid host-arch mismatches
+    # when cross-building (e.g. x86_64 wheels on Apple Silicon runners).
+    if system == "Darwin":
+        archflags = os.environ.get("ARCHFLAGS", "").lower()
+
+        if "x86_64" in plat or "x86_64" in archflags:
+            return "darwin_x86_64"
+        if "arm64" in plat or "aarch64" in plat or "arm64" in archflags:
+            return "darwin_arm64"
 
     # Use the Makefile's abiname target to detect platform
     try:
