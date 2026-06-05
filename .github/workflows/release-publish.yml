@@ -22,10 +22,8 @@ jobs:
         include:
           - os: ubuntu-latest
             archs: "x86_64 i686 aarch64"
-          - os: macos-13
-            archs: "x86_64"
           - os: macos-14
-            archs: "arm64"
+            archs: "x86_64 arm64"
           - os: windows-latest
             archs: "AMD64 x86"
     env:
