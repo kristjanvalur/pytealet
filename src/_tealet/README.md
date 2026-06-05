@@ -40,12 +40,12 @@ To refresh the primary vendored archive from libtealet releases:
 ```bash
 cd src/_tealet
 rm -rf libtealet
-curl -L https://github.com/kristjanvalur/libtealet/releases/download/v0.7.3/libtealet-0.7.3.tar.gz | tar -xz
+curl -L https://github.com/kristjanvalur/libtealet/releases/download/v0.7.4/libtealet-0.7.4.tar.gz | tar -xz
 mkdir -p libtealet
 mv LICENSE Makefile README.md lib stackman tealet libtealet/
 ```
 
-For a different version, replace `v0.7.3` and `libtealet-0.7.3` in the URL.
+For a different version, replace `v0.7.4` and `libtealet-0.7.4` in the URL.
 
 ## Dependencies
 
