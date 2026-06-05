@@ -102,6 +102,7 @@ uv.lock
 
 # Build artifacts from libtealet
 src/_tealet/libtealet/stackman/tools/tmp/
+src/_tealet/libtealet-src/
 
 # Vendored stackman release artifacts required for libtealet source builds
 !src/_tealet/libtealet/stackman/lib/
