@@ -278,7 +278,7 @@ def test_state_transitions():
     assert t.state == _tealet.STATE_STUB
     
     # Should be able to duplicate
-    t2 = _tealet.tealet(t)
+    t2 = t.duplicate()
     assert t2.state == _tealet.STATE_STUB
 
 def test_thread_isolation():

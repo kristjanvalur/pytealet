@@ -1719,7 +1719,8 @@ static PyObject *pytealet_set_context(PyObject *self, PyObject *value) {
 static struct PyMethodDef pytealet_methods[] = {
     {"stub", (PyCFunction)(void (*)(void))pytealet_stub, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"duplicate", (PyCFunction)(void (*)(void))pytealet_duplicate, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
-     ""},
+    "duplicate() -> tealet\n\n"
+    "Create a duplicate wrapper from a NEW or STUB tealet."},
     {"current", (PyCFunction)(void (*)(void))pytealet_current, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"previous", (PyCFunction)(void (*)(void))pytealet_previous, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"main", (PyCFunction)(void (*)(void))pytealet_main_method, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},

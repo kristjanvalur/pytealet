@@ -19,7 +19,7 @@ Scope: Cross-thread ownership hardening for critical pytealet operations, plus r
   - `main()` from non-owner thread rejects with `InvalidError`.
   - `previous()` from non-owner thread rejects with `InvalidError`.
 - Cross-thread duplicate/dealloc are explicitly permitted:
-  - `_tealet.tealet(existing_stub)` can duplicate a foreign-thread stub.
+  - `existing_stub.duplicate()` can duplicate a foreign-thread stub.
   - foreign-thread `pytealet_dealloc()` can call `tealet_delete()`.
 - Documentation updated in `docs/ARCHITECTURE.md` with ownership model and constraints.
 - Free-threaded lock callback wiring in `GetMain()` uses `tealet_configure_set_locking(..., TEALET_LOCK_AUTO)`.
@@ -67,7 +67,7 @@ Scope: Cross-thread ownership hardening for critical pytealet operations, plus r
 - Owner-thread restricted:
   - `stub()`, `run()`, `switch()`, `current()`, `main()`, `previous()`.
 - Explicitly permitted cross-thread:
-  - duplicate via `_tealet.tealet(existing_tealet)` when source is `STATE_NEW` or `STATE_STUB`.
+  - duplicate via `existing_tealet.duplicate()` when source is `STATE_NEW` or `STATE_STUB`.
   - wrapper deallocation path (`pytealet_dealloc()` -> `tealet_delete()`).
 - Always-safe metadata/inspection:
   - `thread_id`, `state`, `belongs_to_current()`.

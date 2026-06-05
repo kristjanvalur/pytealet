@@ -32,9 +32,9 @@ Returns the main tealet for this thread (the root of the tealet tree).
 **Module-Level Classes:**
 
 ```python
-class _tealet.tealet([source_tealet])
+class _tealet.tealet()
 ```
-The core tealet class. If `source_tealet` is provided and is a STUB, creates a duplicate.
+The core tealet class. Creates a NEW tealet wrapper in the current lineage.
 
 **Tealet Object Methods:**
 

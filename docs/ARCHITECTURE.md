@@ -70,10 +70,9 @@ Behavior notes:
 **Module-Level Classes:**
 
 ```python
-class _tealet.tealet([source_tealet])
+class _tealet.tealet()
 ```
-The core tealet class. If `source_tealet` is provided and is in `STATE_NEW` or
-`STATE_STUB`, creates a duplicate wrapper in the same lineage.
+The core tealet class. Creates a NEW tealet wrapper in the current lineage.
 
 **Tealet Object Methods:**
 
@@ -193,7 +192,7 @@ Thread ownership rules enforced by the C API:
 - `stub()` is only allowed from the owning thread.
 - Volatile traversal methods (`current()`, `main()`, `previous()`) are only
     allowed from the owning thread.
-- Cross-thread duplication via `_tealet.tealet(existing_tealet)` is allowed
+- Cross-thread duplication via `existing_tealet.duplicate()` is allowed
     when `existing_tealet` is in `STATE_STUB` or `STATE_NEW`.
 - Duplicating a `STATE_STUB` tealet preserves the existing dormant/stub
     execution context for use by the new wrapper.
@@ -619,7 +618,7 @@ tealet_t *tealet_stub_new(tealet_t *t, void *stack_far) {
 The pytealet wrapper uses this API directly:
 - `pytealet_stub()` calls `tealet_stub_new(main->tealet, stack_far)` and marks the wrapper as `STATE_STUB`.
 - `pytealet_run()` uses `tealet_stub_run(target->tealet, pytealet_main, &switch_arg)` when the target is a stub.
-- Duplicating a stub wrapper (`_tealet.tealet(existing_stub)`) duplicates native state with `tealet_duplicate()` and duplicates saved thread state.
+- Duplicating a stub wrapper (`existing_stub.duplicate()`) duplicates native state with `tealet_duplicate()` and duplicates saved thread state.
 
 ### Flow:
 1. `tealet_stub_new()` creates a paused tealet using `tealet_create(..., _tealet_stub_main, ...)`.
