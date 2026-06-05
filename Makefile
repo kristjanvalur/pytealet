@@ -8,6 +8,7 @@ C_FORMAT_FILES ?= $(EXT_SRC_ALL)
 PYTHON ?= $(if $(VIRTUAL_ENV),$(VIRTUAL_ENV)/bin/python,python)
 TEST ?= tests/
 PYTEST_ARGS ?=
+LIBTEALET_MODE ?= release
 REBUILD_EXT ?= 0
 REBUILD_EXT_TRUE := 1 yes true TRUE
 PYTEST_REBUILD_FLAG := $(if $(filter $(REBUILD_EXT),$(REBUILD_EXT_TRUE)),--rebuild-ext,)
@@ -16,7 +17,11 @@ PY_CC := $(shell uv run python -c "import sysconfig; print((sysconfig.get_config
 PY_CFLAGS := $(shell uv run python -c "import sysconfig; print(sysconfig.get_config_var('CFLAGS') or '')")
 PY_INCLUDE_FLAGS := $(shell uv run python -c "import sysconfig; p=sysconfig.get_paths(); inc=[p.get('include'), p.get('platinclude')]; print(' '.join('-I'+x for x in inc if x))")
 
-EXT_INCLUDE_FLAGS := -Isrc/_tealet -Isrc/_tealet/libtealet/src -Isrc/_tealet/libtealet/stackman
+ifeq ($(LIBTEALET_MODE),source)
+EXT_INCLUDE_FLAGS := -Isrc/_tealet -Isrc/_tealet/libtealet-src/src -Isrc/_tealet/libtealet-src/stackman
+else
+EXT_INCLUDE_FLAGS := -Isrc/_tealet -Isrc/_tealet/libtealet/tealet -Isrc/_tealet/libtealet/stackman
+endif
 EXT_BASE_FLAGS := -std=c17 -pedantic-errors -Wall -Wno-unused-function -include $(abspath src/_tealet/pytealet_build_config.h)
 EXT_DEBUG_FLAGS := -g -O0 -UNDEBUG
 EXT_CI_FLAGS := -Werror

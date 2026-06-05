@@ -51,8 +51,9 @@ def pytest_sessionstart(session):
 	if not skip_rebuild and do_rebuild:
 		root = os.path.dirname(os.path.dirname(__file__))
 		env = os.environ.copy()
-		env.setdefault("BUILD_LIBTEALET_FROM_SOURCE", "1")
-		env.setdefault("LIBTEALET_DEBUG", "1")
+		env.setdefault("BUILD_LIBTEALET_FROM_SOURCE", "0")
+		if env.get("BUILD_LIBTEALET_FROM_SOURCE") == "1":
+			env.setdefault("LIBTEALET_DEBUG", "1")
 		env.setdefault("PYTEALET_EXT_DEBUG", "1")
 		env.setdefault("CFLAGS", "-g -O0 -UNDEBUG")
 		subprocess.run(
