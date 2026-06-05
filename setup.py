@@ -145,10 +145,13 @@ def build_libtealet_from_source():
 
 
 # Get the ABI name and library path.
+extra_objects = []
+
 if BUILD_LIBTEALET_FROM_SOURCE:
     libtealet_static, abi_name = build_libtealet_from_source()
     LIBTEALET_HEADERS = os.path.join(LIBTEALET_SOURCE_DIR, "src")
     STACKMAN_HEADERS = os.path.join(LIBTEALET_SOURCE_DIR, "stackman")
+    extra_objects = [libtealet_static]
 else:
     if not os.path.exists(LIBTEALET_RELEASE_DIR):
         raise RuntimeError(f"libtealet release archive not found at: {LIBTEALET_RELEASE_DIR}")
@@ -175,6 +178,16 @@ else:
             "No supported libtealet archive found in "
             f"{lib_dir}. Expected one of: {', '.join(release_lib_candidates)}"
         )
+
+    extra_objects = [libtealet_static]
+
+    # Windows static packaging currently provides stackman as a sibling archive.
+    # Link it explicitly when using tealet_static.lib.
+    if platform.system() == "Windows" and os.path.basename(libtealet_static).lower() == "tealet_static.lib":
+        stackman_static = os.path.join(LIBTEALET_RELEASE_DIR, "stackman", "lib", abi_name, "stackman.lib")
+        if not os.path.exists(stackman_static):
+            raise RuntimeError(f"Required stackman static library not found: {stackman_static}")
+        extra_objects.append(stackman_static)
 
     LIBTEALET_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "tealet")
     STACKMAN_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "stackman")
@@ -203,9 +216,6 @@ include_dirs = [
 # Compiler flags
 extra_compile_args = []
 extra_link_args = []
-
-# Link statically against libtealet
-extra_objects = [libtealet_static]
 
 if platform.system() != "Windows":
     # GCC/Clang flags
