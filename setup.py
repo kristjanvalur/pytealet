@@ -6,6 +6,26 @@ import subprocess
 import sys
 from setuptools import Extension, setup
 
+
+def read_project_version(pyproject_path="pyproject.toml"):
+    """Read [project].version from pyproject.toml without extra deps."""
+    in_project = False
+    with open(pyproject_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                in_project = line == "[project]"
+                continue
+            if in_project and line.startswith("version"):
+                _, value = line.split("=", 1)
+                version = value.strip().strip('"').strip("'")
+                if not version:
+                    raise RuntimeError("Empty project version in pyproject.toml")
+                return version
+    raise RuntimeError("Could not find [project].version in pyproject.toml")
+
 # Paths to libtealet
 LIBTEALET_RELEASE_DIR = "src/_tealet/libtealet"
 LIBTEALET_SOURCE_DIR = os.environ.get(
@@ -16,6 +36,7 @@ LIBTEALET_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "tealet")
 STACKMAN_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "stackman")
 PYTEALET_BUILD_CONFIG_HEADER = os.path.abspath("src/_tealet/pytealet_build_config.h")
 DEFAULT_C_STD_FLAGS = "-std=c17 -pedantic-errors"
+PROJECT_VERSION = read_project_version()
 
 # Default to release archive builds. Set BUILD_LIBTEALET_FROM_SOURCE=1 to use
 # a local source checkout in src/_tealet/libtealet-src.
@@ -197,6 +218,7 @@ _tealet_ext = Extension(
     name="_tealet",
     sources=sources,
     include_dirs=include_dirs,
+    define_macros=[("PYTEALET_VERSION", f'"{PROJECT_VERSION}"')],
     extra_objects=extra_objects,
     extra_compile_args=extra_compile_args,
     extra_link_args=extra_link_args,

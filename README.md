@@ -25,7 +25,7 @@ pytealet/
 │   ├── tealet/              # Pure Python package
 │   │   ├── __init__.py
 │   │   ├── greenlet.py
-│   │   └── tealet.py
+│   │   └── greenlet_legacy.py
 │   └── _tealet/             # C extension module
 │       ├── pytealet.c       # Core runtime for tealet objects
 │       ├── pytealet_module.c # CPython module lifecycle
