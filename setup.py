@@ -7,7 +7,6 @@ import subprocess
 import sys
 import sysconfig
 from setuptools import Extension, setup
-from setuptools.command.build_ext import build_ext
 
 
 def read_project_version(pyproject_path="pyproject.toml"):
@@ -146,8 +145,6 @@ def build_libtealet_from_source():
 
 
 # Get the ABI name and library path.
-runtime_dlls = []
-
 if BUILD_LIBTEALET_FROM_SOURCE:
     libtealet_static, abi_name = build_libtealet_from_source()
     LIBTEALET_HEADERS = os.path.join(LIBTEALET_SOURCE_DIR, "src")
@@ -162,11 +159,11 @@ else:
         raise RuntimeError(f"Pre-built libraries not found for ABI: {abi_name} at {lib_dir}")
 
     # Archive layouts differ by platform:
-    # - Unix-like: libtealet.a
-    # - Windows: tealet.lib
+    # - Unix-like static: libtealet.a
+    # - Windows static: tealet_static.lib
     release_lib_candidates = [
         os.path.join(lib_dir, "libtealet.a"),
-        os.path.join(lib_dir, "tealet.lib"),
+        os.path.join(lib_dir, "tealet_static.lib"),
     ]
     libtealet_static = None
     for candidate in release_lib_candidates:
@@ -179,13 +176,6 @@ else:
             f"{lib_dir}. Expected one of: {', '.join(release_lib_candidates)}"
         )
 
-    # On Windows, tealet.lib is an import library and requires tealet.dll at runtime.
-    if platform.system() == "Windows" and os.path.basename(libtealet_static).lower() == "tealet.lib":
-        tealet_dll = os.path.join(lib_dir, "tealet.dll")
-        if not os.path.exists(tealet_dll):
-            raise RuntimeError(f"Expected runtime DLL not found: {tealet_dll}")
-        runtime_dlls.append(tealet_dll)
-
     LIBTEALET_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "tealet")
     STACKMAN_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "stackman")
 
@@ -194,20 +184,6 @@ if BUILD_LIBTEALET_FROM_SOURCE:
     print(f"Using libtealet built from source: {libtealet_static}", file=sys.stderr)
 else:
     print(f"Using pre-built libtealet: {libtealet_static}", file=sys.stderr)
-
-
-class BuildExtWithRuntimeDLLs(build_ext):
-    """Build extension and copy required runtime DLLs into wheel output."""
-
-    def run(self):
-        super().run()
-        if platform.system() != "Windows" or not runtime_dlls:
-            return
-
-        os.makedirs(self.build_lib, exist_ok=True)
-        for dll_path in runtime_dlls:
-            dst = os.path.join(self.build_lib, os.path.basename(dll_path))
-            self.copy_file(dll_path, dst)
 
 # Source files for the extension (only pytealet.c, link against pre-built libtealet)
 sources = [
@@ -269,5 +245,4 @@ _tealet_ext = Extension(
 # Run setup
 setup(
     ext_modules=[_tealet_ext],
-    cmdclass={"build_ext": BuildExtWithRuntimeDLLs},
 )

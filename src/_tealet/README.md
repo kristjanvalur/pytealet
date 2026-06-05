@@ -20,7 +20,8 @@ This directory contains the C extension module for tealet.
 
 1. **Release mode (default)**
    - uses `src/_tealet/libtealet`
-   - links against `libtealet/lib/<abi>/libtealet.a`
+   - links against static archives from `libtealet/lib/<abi>/`
+   - archive names are `libtealet.a` on Unix-like ABIs and `tealet_static.lib` on Windows ABIs
 2. **Source mode (opt-in)**
    - set `BUILD_LIBTEALET_FROM_SOURCE=1`
    - expects local source checkout at `src/_tealet/libtealet-src`
@@ -39,12 +40,12 @@ To refresh the primary vendored archive from libtealet releases:
 ```bash
 cd src/_tealet
 rm -rf libtealet
-curl -L https://github.com/kristjanvalur/libtealet/releases/download/v0.7.2/libtealet-0.7.2.tar.gz | tar -xz
+curl -L https://github.com/kristjanvalur/libtealet/releases/download/v0.7.3/libtealet-0.7.3.tar.gz | tar -xz
 mkdir -p libtealet
 mv LICENSE Makefile README.md lib stackman tealet libtealet/
 ```
 
-For a different version, replace `v0.7.2` and `libtealet-0.7.2` in the URL.
+For a different version, replace `v0.7.3` and `libtealet-0.7.3` in the URL.
 
 ## Dependencies
 
