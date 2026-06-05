@@ -181,14 +181,6 @@ else:
 
     extra_objects = [libtealet_static]
 
-    # Windows static packaging currently provides stackman as a sibling archive.
-    # Link it explicitly when using tealet_static.lib.
-    if platform.system() == "Windows" and os.path.basename(libtealet_static).lower() == "tealet_static.lib":
-        stackman_static = os.path.join(LIBTEALET_RELEASE_DIR, "stackman", "lib", abi_name, "stackman.lib")
-        if not os.path.exists(stackman_static):
-            raise RuntimeError(f"Required stackman static library not found: {stackman_static}")
-        extra_objects.append(stackman_static)
-
     LIBTEALET_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "tealet")
     STACKMAN_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "stackman")
 
