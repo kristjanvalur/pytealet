@@ -120,9 +120,23 @@ else:
     if not os.path.exists(lib_dir):
         raise RuntimeError(f"Pre-built libraries not found for ABI: {abi_name} at {lib_dir}")
 
-    libtealet_static = os.path.join(lib_dir, "libtealet.a")
-    if not os.path.exists(libtealet_static):
-        raise RuntimeError(f"Static library not found: {libtealet_static}")
+    # Archive layouts differ by platform:
+    # - Unix-like: libtealet.a
+    # - Windows: tealet.lib
+    release_lib_candidates = [
+        os.path.join(lib_dir, "libtealet.a"),
+        os.path.join(lib_dir, "tealet.lib"),
+    ]
+    libtealet_static = None
+    for candidate in release_lib_candidates:
+        if os.path.exists(candidate):
+            libtealet_static = candidate
+            break
+    if libtealet_static is None:
+        raise RuntimeError(
+            "No supported libtealet archive found in "
+            f"{lib_dir}. Expected one of: {', '.join(release_lib_candidates)}"
+        )
 
     LIBTEALET_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "tealet")
     STACKMAN_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "stackman")
