@@ -24,6 +24,7 @@ void PyTealetFrameInfo_Init(PyTealetFrameInfo *info) {
 #endif
 }
 
+
 void PyTealetFrameInfo_Fini(PyTealetFrameInfo *info) {
 #if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
     if (info->items != info->fixed_items) {

@@ -29,6 +29,7 @@ int PyTealet_ErrorWasRemote(PyTealetModuleState *mstate);
 Py_ssize_t PyTealet_WeaklistOffset(void);
 #endif
 
+
 /* push an object into the tealet dustbin, to be decrefed later. */
 void PyTealet_dustbin_push(tealet_t *tealet, PyObject *obj);
 

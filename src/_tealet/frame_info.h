@@ -17,6 +17,7 @@
 #define PYTEALET_HAS_PENDING_FRAME_INTROSPECTION 1
 #endif
 
+
 #if defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION) && defined(PY312P)
 /*
  * Hack: CPython internal frame definitions are gated behind Py_BUILD_CORE,

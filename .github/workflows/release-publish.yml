@@ -32,7 +32,7 @@ jobs:
       BUILD_LIBTEALET_FROM_SOURCE: "0"
       CIBW_ARCHS: ${{ matrix.archs }}
       CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-*"
-      CIBW_SKIP: "pp* *-musllinux*"
+      CIBW_SKIP: "*-musllinux*"
       CIBW_TEST_COMMAND: "python -c \"import _tealet; import tealet.greenlet; print('wheel smoke ok')\""
     steps:
       - name: Check out repository
