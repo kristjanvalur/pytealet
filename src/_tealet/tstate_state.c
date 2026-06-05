@@ -28,6 +28,7 @@ static void PyTealetTstate_CleanupDatastack(_PyStackChunk **datastack_chunk, PyO
                                             PyObject ***datastack_limit);
 #endif
 
+
 /* Raw copy the tstate fields from PyThreadState to our local structure. */
 static void PyTealetTstate_Get(PyTealetTstate *dst, const PyThreadState *src, int with_context) {
 #if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
