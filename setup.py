@@ -55,6 +55,29 @@ def get_abi_name(abiname_dir):
     # cibuildwheel can build 32-bit wheels on 64-bit hosts, and host probing may
     # incorrectly select non-Windows or wrong-arch archives.
     if system == "Windows":
+        # Cross-compilation toolchains expose explicit target architecture
+        # variables (for example via VS developer command prompts).
+        target_arch = (
+            os.environ.get("VSCMD_ARG_TGT_ARCH", "")
+            or os.environ.get("Platform", "")
+        ).lower()
+
+        if target_arch in ("arm64", "aarch64"):
+            return "win_arm64"
+        if target_arch in ("x86", "win32"):
+            return "win_x86"
+        if target_arch in ("x64", "amd64"):
+            return "win_x64"
+
+        # cibuildwheel may expose the resolved build identifier for each wheel.
+        build_id = os.environ.get("CIBW_BUILD_IDENTIFIER", "").lower()
+        if "win_arm64" in build_id:
+            return "win_arm64"
+        if "win32" in build_id:
+            return "win_x86"
+        if "win_amd64" in build_id:
+            return "win_x64"
+
         machine = platform.machine().lower()
         ptr_bits = struct.calcsize("P") * 8
 
