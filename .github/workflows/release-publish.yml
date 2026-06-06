@@ -25,7 +25,9 @@ jobs:
           - os: macos-14
             archs: "x86_64 arm64"
           - os: windows-2022
-            archs: "AMD64 x86 ARM64"
+            archs: "AMD64 x86"
+          - os: windows-11-arm
+            archs: "ARM64"
     env:
       BUILD_LIBTEALET_FROM_SOURCE: "0"
       CIBW_ARCHS: ${{ matrix.archs }}
