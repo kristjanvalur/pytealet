@@ -130,6 +130,57 @@ class DeadlockError(RuntimeError):
 
     pass
 
+
+class InvalidStateError(RuntimeError):
+    """Raised when attempting to complete a Future more than once."""
+
+    pass
+
+
+class Future(Generic[T]):
+    """Minimal Future for scheduler tasks."""
+
+    def __init__(self) -> None:
+        self._done = False
+        self._result: T | None = None
+        self._exception: BaseException | None = None
+        self._event = Event()
+
+    def done(self) -> bool:
+        return self._done
+
+    def set_result(self, value: T) -> None:
+        if self._done:
+            raise InvalidStateError("Future already done")
+        self._result = value
+        self._done = True
+        self._event.set()
+
+    def set_exception(self, exc: BaseException) -> None:
+        if self._done:
+            raise InvalidStateError("Future already done")
+        if not isinstance(exc, BaseException):
+            raise TypeError("exc must be a BaseException instance")
+        self._exception = exc
+        self._done = True
+        self._event.set()
+
+    def _wait(self) -> None:
+        if self._done:
+            return
+
+        self._event.wait()
+
+    def result(self) -> T:
+        self._wait()
+        if self._exception is not None:
+            raise self._exception
+        return self._result
+
+    def exception(self) -> BaseException | None:
+        self._wait()
+        return self._exception
+
 class SimpleScheduler:
     """Very small cooperative scheduler for runnable tealets."""
 
@@ -139,15 +190,21 @@ class SimpleScheduler:
     def is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._tasks
 
-    def spawn(self, func: Callable[..., object], *args, **kwargs) -> None:
+    def spawn(self, func: Callable[..., T], *args, **kwargs) -> Future[T]:
+        future: Future[T] = Future()
+
         def task_main(current: tealet.tealet, _arg: object) -> tealet.tealet:
-            result = func(*args, **kwargs)
-            if isinstance(result, tealet.tealet):
-                return result
+            try:
+                result = func(*args, **kwargs)
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
             return current.main()
 
         t = ScheduledTealet().prepare(task_main)
         self.make_runnable(t)
+        return future
 
     def schedule(self) -> None:
         while self._tasks:
@@ -220,6 +277,28 @@ def demo_wait_for_event_start() -> list[str]:
     s.spawn(starter)
     s.run()
     return seen
+
+
+def demo_future_result() -> list[str]:
+    """Run a task via Future and consume it from another tealet."""
+
+    s = scheduler()
+    seen: list[str] = []
+
+    def producer() -> int:
+        seen.append("producer:start")
+        s.yield_()
+        seen.append("producer:done")
+        return 42
+
+    future = s.spawn(producer)
+
+    def consumer() -> None:
+        seen.append(f"consumer:result={future.result()}")
+
+    s.spawn(consumer)
+    s.run()
+    return seen
             
 
 def demo() -> None:
@@ -228,6 +307,7 @@ def demo() -> None:
 
     assert demo_scheduler_append_with_yield() == ["a0", "b0", "c0", "a1", "b1", "a2"]
     assert demo_wait_for_event_start() == ["waiter:waiting", "starter:set", "waiter:started"]
+    assert demo_future_result() == ["producer:start", "producer:done", "consumer:result=42"]
 
 
 if __name__ == "__main__":

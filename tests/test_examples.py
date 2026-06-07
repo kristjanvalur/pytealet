@@ -41,3 +41,34 @@ class TestSchedulerExamples:
     def test_wait_for_event_start_demo(self):
         seen = examples.demo_wait_for_event_start()
         assert seen == ["waiter:waiting", "starter:set", "waiter:started"]
+
+
+class TestFutureExamples:
+    def test_future_demo(self):
+        seen = examples.demo_future_result()
+        assert seen == ["producer:start", "producer:done", "consumer:result=42"]
+
+    def test_future_exception_propagates(self):
+        s = examples.scheduler()
+
+        def boom():
+            raise ValueError("boom")
+
+        future = s.spawn(boom)
+        s.run()
+
+        assert future.done()
+        with pytest.raises(ValueError, match="boom"):
+            future.result()
+        assert isinstance(future.exception(), ValueError)
+
+    def test_future_set_result_once(self):
+        future = examples.Future()
+        future.set_result(123)
+
+        assert future.done()
+        assert future.result() == 123
+        assert future.exception() is None
+
+        with pytest.raises(examples.InvalidStateError):
+            future.set_result(456)
