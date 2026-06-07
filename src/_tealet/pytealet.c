@@ -890,7 +890,11 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     }
     current_tid = PyThread_get_thread_ident();
 
-    if (!creating_main && ((args && PyTuple_GET_SIZE(args) > 0) || (kwds && PyDict_GET_SIZE(kwds) > 0))) {
+    /* Keep exact tealet() strict, but allow subclass constructors to accept
+     * custom arguments in Python __init__ without requiring __new__ override.
+     */
+    if (!creating_main && subtype == mstate->tealet_type &&
+        ((args && PyTuple_GET_SIZE(args) > 0) || (kwds && PyDict_GET_SIZE(kwds) > 0))) {
         PyErr_SetString(PyExc_TypeError, "tealet() takes no arguments");
         return NULL;
     }
@@ -1236,7 +1240,7 @@ static PyObject *pytealet_prepare(PyObject *self, PyTypeObject *defining_class, 
     }
 
     Py_XSETREF(target->prepared_func, Py_NewRef(func));
-    Py_RETURN_NONE;
+    return Py_NewRef(self);
 }
 
 /* run a tealet and optinonally run */
@@ -1833,7 +1837,7 @@ static struct PyMethodDef pytealet_methods[] = {
     {"belongs_to_current", (PyCFunction)(void (*)(void))pytealet_belongs_to_current,
      METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
-     "prepare(function) -> None\n\n"
+        "prepare(function) -> tealet\n\n"
      "Store a callable to be used by the first switch(arg) on this NEW/STUB tealet."},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"switch", (PyCFunction)(void (*)(void))pytealet_switch, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},

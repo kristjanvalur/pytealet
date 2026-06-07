@@ -992,6 +992,19 @@ class TestSimple:
 
 
 class TestPrepare:
+    def test_prepare_returns_self_for_chaining(self):
+        seen = []
+
+        def worker(current, arg):
+            seen.append(arg)
+            return current.main(), "done-chain"
+
+        t = _tealet.tealet().prepare(worker)
+        assert isinstance(t, _tealet.tealet)
+        assert t.switch("payload") == "done-chain"
+        assert seen == ["payload"]
+        assert t.state == _tealet.STATE_EXIT
+
     def test_prepare_new_first_switch_runs_callable(self):
         seen = []
 
@@ -1089,6 +1102,12 @@ class TestSubclass:
             return "<myrepr %r>"%super(TestSubclass.sc, self).__repr__()
         def __del__(self):
             self.dude[0] = 1
+
+    class scinit(_tealet.tealet):
+        def __init__(self, payload, *, label=None):
+            self.payload = payload
+            self.label = label
+
     def test_subclass(self):
         def foo(current, arg):
             arg.switch(current)
@@ -1100,6 +1119,19 @@ class TestSubclass:
         assert self.sc.dude[0] == 0
         del t
         assert self.sc.dude[0] == 1
+
+    def test_subclass_init_can_accept_custom_args(self):
+        payload = {"a": 1}
+        t = self.scinit(payload, label="demo")
+
+        assert isinstance(t, _tealet.tealet)
+        assert t.payload is payload
+        assert t.label == "demo"
+        assert t.state == _tealet.STATE_NEW
+
+    def test_exact_tealet_constructor_stays_no_args(self):
+        with pytest.raises(TypeError, match=r"tealet\(\) takes no arguments"):
+            _tealet.tealet(123)
 
 class TestSwitch:
     def test_switch_panic_keyword(self):
