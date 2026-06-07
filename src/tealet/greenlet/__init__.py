@@ -365,6 +365,8 @@ class greenlet(object):
             self.parent = parent
             self._main = parent._main
             self._main._process_garbage()
+            # First entry always goes through the same startup trampoline.
+            self._tealet.prepare(self._greenlet_main)
         tealetmap[self._tealet] = self
         return self._tealet
 
@@ -590,7 +592,8 @@ class greenlet(object):
                 err = _wrap_throw_for_trace(err, tealet)
 
             if is_unstarted:
-                # getting this attribute can have side effets and run code, including switching.
+                # Getting this attribute can have side effects and run code,
+                # including switching.
                 run = getattr(self, "run", _RUN_UNSET)
                 if run is _RUN_UNSET:
                     raise AttributeError("run")
@@ -599,11 +602,11 @@ class greenlet(object):
                 try:
                     try:
                         try:
-                            arg = tealet.run(self._greenlet_main, (run, payload, err))
+                            arg = tealet.switch((run, payload, err))
                         except _tealet.StateError:
-                            # A re-entrancy, caused by the getattr(self, "run") above 
-                            # can cause the above to tried twice.  if we fail with a local
-                            # state error, just do a normal switch or throw.
+                            # Re-entrancy from getattr(self, "run") above can race
+                            # startup. If this is a local state error, retry with the
+                            # normal switch/throw path.
                             if _tealet.error_was_remote():
                                 raise
                             if err is not None:
@@ -637,7 +640,7 @@ class greenlet(object):
                             # the same throw semantics.
                             return parent._switch_or_throw(None, err)
                         if arg is not None:
-                            # tealet.run() returns transport-shaped payload;
+                            # Startup switch returns transport-shaped payload.
                             # decode before forwarding so parent receives the
                             # canonical (args, kwds) switch payload.
                             parent_payload = _unpack_switch_transport(arg)
