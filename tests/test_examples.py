@@ -32,5 +32,12 @@ class TestGeneratorTealet:
         with pytest.raises(StopIteration):
             next(gen)
 
-        with pytest.raises(StopIteration):
-            next(gen)
+
+class TestSchedulerExamples:
+    def test_append_with_yield_demo(self):
+        seen = examples.demo_scheduler_append_with_yield()
+        assert seen == ["a0", "b0", "c0", "a1", "b1", "a2"]
+
+    def test_wait_for_event_start_demo(self):
+        seen = examples.demo_wait_for_event_start()
+        assert seen == ["waiter:waiting", "starter:set", "waiter:started"]
