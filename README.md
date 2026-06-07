@@ -23,9 +23,10 @@ pytealet/
 │   └── fast_build.sh
 ├── src/
 │   ├── greenlet_legacy.py   # Legacy greenlet compatibility shim (dev/test helper)
+│   ├── tealet_examples.py    # Development examples (generator/scheduler/event/future)
 │   ├── tealet/              # Pure Python package
 │   │   ├── __init__.py
-│   │   ├── greenlet.py
+│   │   └── greenlet/
 │   └── _tealet/             # C extension module
 │       ├── pytealet.c       # Core runtime for tealet objects
 │       ├── pytealet_module.c # CPython module lifecycle
@@ -67,6 +68,20 @@ uv pip install --python .venv-cpython313-debug/bin/python -e .[dev]
 
 ```bash
 uv run --active python -m pytest tests/
+```
+
+### Example Code
+
+The repository includes runnable development examples in `src/tealet_examples.py`.
+These show:
+- a simple tealet-backed generator
+- a minimal cooperative scheduler and event primitive
+- a minimal future implementation built on top of the scheduler/event model
+
+Run the module from a source checkout:
+
+```bash
+uv run --active python -m tealet_examples
 ```
 
 ### Runtime Frame Introspection Toggle
