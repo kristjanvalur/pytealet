@@ -73,7 +73,7 @@ def simple_generator(source: Iterable[T]) -> GeneratorTealet[T]:
 
 # a simple scheduler and event object.
 
-# a thread local sheduler
+# a thread local scheduler
 _scheduler = threading.local()
 def scheduler() -> SimpleScheduler:
     if not hasattr(_scheduler, "instance"):
