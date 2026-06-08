@@ -81,6 +81,24 @@ class TestModule:
     def test_main3(self):
         assert _tealet.main().state == _tealet.STATE_RUN
 
+    def test_previous_matches_method_previous_inside_running_tealet(self):
+        def run(current, arg):
+            return current.main(), (_tealet.previous(), current.previous())
+
+        module_prev, method_prev = _tealet.tealet().run(run, None)
+
+        assert module_prev == _tealet.main()
+        assert method_prev == _tealet.main()
+
+    def test_previous_on_main_after_switch_is_last_switcher(self):
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(parked, None) == "paused"
+        assert _tealet.previous() == t
+
     def test_frame_introspection_toggle(self):
         compiled = bool(getattr(_tealet, "PYTEALET_WITH_PENDING_FRAME_INTROSPECTION", 1))
         original = _tealet.frame_introspection()

@@ -37,6 +37,12 @@ _tealet.main() -> tealet
 Returns the main tealet for this thread (the root of the tealet tree).
 
 ```python
+_tealet.previous() -> tealet | None
+```
+Returns the tealet that most recently switched to the current tealet, or
+`None` when there is no previous tealet.
+
+```python
 _tealet.thread_reap() -> list[tealet]
 ```
 Explicitly tears down this thread's tealet lineage and returns wrappers whose

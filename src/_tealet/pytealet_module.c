@@ -356,6 +356,29 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return Py_XNewRef((PyObject *)PyTealet_GetOrCreateMain(mstate, NULL));
 }
 
+static PyObject *module_previous(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate;
+    PyObject *current_obj;
+    PyObject *previous_method;
+    PyObject *result;
+
+    GET_MODULE_STATE(mod, mstate);
+
+    /* Reuse tealet.previous() semantics so ownership/thread checks stay aligned. */
+    current_obj = Py_XNewRef((PyObject *)PyTealet_GetOrCreateCurrent(mstate, NULL));
+    if (!current_obj)
+        return NULL;
+
+    previous_method = PyObject_GetAttrString(current_obj, "previous");
+    Py_DECREF(current_obj);
+    if (!previous_method)
+        return NULL;
+
+    result = PyObject_CallNoArgs(previous_method);
+    Py_DECREF(previous_method);
+    return result;
+}
+
 static PyObject *module_thread_reap(PyObject *mod, PyObject *args) {
     PyTealetModuleState *mstate;
     GET_MODULE_STATE(mod, mstate);
@@ -505,6 +528,7 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
+    {"previous", (PyCFunction)module_previous, METH_NOARGS, ""},
     {"thread_reap", (PyCFunction)module_thread_reap, METH_VARARGS, ""},
     {"thread_sweep", (PyCFunction)module_thread_sweep, METH_NOARGS, ""},
     {"thread_active", (PyCFunction)module_thread_active, METH_NOARGS, ""},
