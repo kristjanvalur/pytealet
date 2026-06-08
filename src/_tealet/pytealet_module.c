@@ -296,11 +296,20 @@ static PyObject *PyTealetApi_RunForward(PyTealet_CAPI_Context *ctx, PyObject *ta
     return PyTealetApi_Run(mstate, target, func, cfunc, arg);
 }
 
-static PyObject *PyTealetApi_SwitchForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg) {
+static PyObject *PyTealetApi_SwitchForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg,
+                                           uint32_t flags) {
     PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return NULL;
-    return PyTealetApi_Switch(mstate, target, arg);
+    return PyTealetApi_Switch(mstate, target, arg, flags);
+}
+
+static PyObject *PyTealetApi_ThrowForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exc,
+                                          uint32_t flags) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_Throw(mstate, target, exc, flags);
 }
 
 static const PyTealet_CAPI pytealet_capi_table = {
@@ -323,6 +332,7 @@ static const PyTealet_CAPI pytealet_capi_table = {
     PyTealetApi_PrepareForward,
     PyTealetApi_RunForward,
     PyTealetApi_SwitchForward,
+    PyTealetApi_ThrowForward,
     {NULL},
 };
 

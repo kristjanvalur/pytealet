@@ -90,6 +90,9 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (PyDict_SetItemString(d, "has_switch",
                              PyBool_FromLong(state->api->switch_ != NULL)) < 0)
         goto error;
+    if (PyDict_SetItemString(d, "has_throw",
+                             PyBool_FromLong(state->api->throw_ != NULL)) < 0)
+        goto error;
 
     return d;
 
@@ -161,7 +164,7 @@ static PyObject *client_capi_switch(PyObject *module, PyObject *args) {
     if (nargs == 2)
         arg = PyTuple_GET_ITEM(args, 1);
 
-    return state->api->switch_(state->ctx, target, arg);
+    return state->api->switch_(state->ctx, target, arg, PYTEALET_SWITCH_FLAGS_DEFAULT);
 }
 
 static PyObject *client_capi_run(PyObject *module, PyObject *args) {
@@ -188,6 +191,80 @@ static PyObject *client_capi_run(PyObject *module, PyObject *args) {
         arg = PyTuple_GET_ITEM(args, 2);
 
     return state->api->run(state->ctx, target, func, NULL, arg);
+}
+
+static int client_parse_u32(PyObject *obj, const char *what, uint32_t *out) {
+    unsigned long v;
+
+    v = PyLong_AsUnsignedLong(obj);
+    if (v == (unsigned long)-1 && PyErr_Occurred())
+        return -1;
+    if (v > UINT32_MAX) {
+        PyErr_Format(PyExc_OverflowError, "%s does not fit in uint32", what);
+        return -1;
+    }
+
+    *out = (uint32_t)v;
+    return 0;
+}
+
+static PyObject *client_capi_switch_flags(PyObject *module, PyObject *args) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    Py_ssize_t nargs;
+    PyObject *target;
+    PyObject *flags_obj;
+    PyObject *arg = NULL;
+    uint32_t flags;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    nargs = PyTuple_GET_SIZE(args);
+    if (nargs != 2 && nargs != 3) {
+        PyErr_SetString(PyExc_TypeError, "capi_switch_flags() takes 2 or 3 positional arguments");
+        return NULL;
+    }
+
+    target = PyTuple_GET_ITEM(args, 0);
+    flags_obj = PyTuple_GET_ITEM(args, 1);
+    if (nargs == 3)
+        arg = PyTuple_GET_ITEM(args, 2);
+
+    if (client_parse_u32(flags_obj, "flags", &flags) < 0)
+        return NULL;
+
+    return state->api->switch_(state->ctx, target, arg, flags);
+}
+
+static PyObject *client_capi_throw(PyObject *module, PyObject *args) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    Py_ssize_t nargs;
+    PyObject *target;
+    PyObject *exc;
+    uint32_t flags = PYTEALET_THROW_FLAGS_DEFAULT;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    nargs = PyTuple_GET_SIZE(args);
+    if (nargs != 2 && nargs != 3) {
+        PyErr_SetString(PyExc_TypeError, "capi_throw() takes 2 or 3 positional arguments");
+        return NULL;
+    }
+
+    target = PyTuple_GET_ITEM(args, 0);
+    exc = PyTuple_GET_ITEM(args, 1);
+
+    if (nargs == 3) {
+        if (client_parse_u32(PyTuple_GET_ITEM(args, 2), "flags", &flags) < 0)
+            return NULL;
+    }
+
+    return state->api->throw_(state->ctx, target, exc, flags);
 }
 
 static PyObject *client_capi_prepare(PyObject *module, PyObject *args) {
@@ -356,6 +433,10 @@ static PyMethodDef client_methods[] = {
      "Run a tealet using a native C callback via the imported C API."},
     {"capi_switch", (PyCFunction)client_capi_switch, METH_VARARGS,
      "Switch to a tealet using the imported C API."},
+    {"capi_switch_flags", (PyCFunction)client_capi_switch_flags, METH_VARARGS,
+     "Switch to a tealet using the imported C API with explicit flags."},
+    {"capi_throw", (PyCFunction)client_capi_throw, METH_VARARGS,
+     "Throw into a tealet using the imported C API with optional flags."},
     {NULL, NULL, 0, NULL},
 };
 
@@ -388,10 +469,16 @@ static int client_exec(PyObject *module) {
 
     if (!state->api->ctx_new || !state->api->ctx_free || !state->api->current || !state->api->main ||
         !state->api->thread_sweep || !state->api->check_tealet || !state->api->create || !state->api->duplicate ||
-        !state->api->stub || !state->api->prepare || !state->api->run || !state->api->switch_) {
+        !state->api->stub || !state->api->prepare || !state->api->run || !state->api->switch_ ||
+        !state->api->throw_) {
         PyErr_SetString(PyExc_ImportError, "pytealet C API missing required functions");
         return -1;
     }
+
+    if (PyModule_AddIntConstant(module, "SWITCH_PANIC", (long)PYTEALET_SWITCH_PANIC) < 0)
+        return -1;
+    if (PyModule_AddIntConstant(module, "THROW_PANIC", (long)PYTEALET_THROW_PANIC) < 0)
+        return -1;
 
     state->ctx = state->api->ctx_new();
     if (!state->ctx)

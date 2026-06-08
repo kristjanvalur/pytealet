@@ -11,11 +11,20 @@
 
 #include <stdint.h>
 
-#define PYTEALET_CAPI_ABI_VERSION 2u
+#define PYTEALET_CAPI_ABI_VERSION 1u
 #define PYTEALET_CAPI_CAPSULE_NAME "_tealet._C_API"
 
 /* Feature flags published in PyTealet_CAPI.feature_flags. */
 #define PYTEALET_CAPI_FEATURE_BASE (1ull << 0)
+
+/* Transfer flags for switch_ and throw_.
+ * Bit values are intentionally aligned with libtealet transfer semantics.
+ */
+#define PYTEALET_SWITCH_FLAGS_DEFAULT 0u
+#define PYTEALET_SWITCH_PANIC (1u << 0)
+
+#define PYTEALET_THROW_FLAGS_DEFAULT 0u
+#define PYTEALET_THROW_PANIC (1u << 0)
 
 typedef struct PyTealet_CAPI_Context PyTealet_CAPI_Context;
 typedef PyObject *(*PyTealetApi_RunCFunc)(PyObject *current, PyObject *arg);
@@ -62,8 +71,11 @@ typedef struct PyTealet_CAPI {
     PyObject *(*run)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function_py,
                      PyTealetApi_RunCFunc function_c, PyObject *arg);
 
-    /* Equivalent to target.switch(arg) if arg != NULL, else target.switch(). */
-    PyObject *(*switch_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg);
+    /* Equivalent to target.switch(arg, panic=...) using C flags. */
+    PyObject *(*switch_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg, uint32_t flags);
+
+    /* Equivalent to target.throw(exception), with optional transfer flags. */
+    PyObject *(*throw_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, uint32_t flags);
 
     void *reserved[16];
 } PyTealet_CAPI;

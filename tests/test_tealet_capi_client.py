@@ -1,5 +1,6 @@
 import _tealet
 import _tealet_capi_client
+import pytest
 
 
 def test_capi_client_api_info():
@@ -15,6 +16,7 @@ def test_capi_client_api_info():
     assert info["has_duplicate"] is True
     assert info["has_run"] is True
     assert info["has_switch"] is True
+    assert info["has_throw"] is True
 
 
 def test_capi_client_current_is_main():
@@ -36,6 +38,19 @@ def test_capi_client_switch_roundtrip():
     assert _tealet_capi_client.capi_switch(t, "resumed") == "resumed"
 
 
+def test_capi_client_switch_flags_panic():
+    with pytest.raises(_tealet.PanicError) as exc:
+        _tealet_capi_client.capi_switch_flags(_tealet.current(), _tealet_capi_client.SWITCH_PANIC, "panic-value")
+
+    assert exc.value.result() == "panic-value"
+    assert exc.value.exception() is None
+
+
+def test_capi_client_switch_flags_unknown_bit_rejected():
+    with pytest.raises(ValueError, match="unsupported switch flags"):
+        _tealet_capi_client.capi_switch_flags(_tealet.current(), 0x80, "x")
+
+
 def test_capi_client_run_forwarding():
     def worker(current, arg):
         return current.main(), ("via-capi-run", arg)
@@ -51,6 +66,41 @@ def test_capi_client_prepare_forwarding():
     t = _tealet.tealet()
     assert _tealet_capi_client.capi_prepare(t, worker) is None
     assert _tealet_capi_client.capi_switch(t, 321) == ("via-capi-prepare", 321)
+
+
+def test_capi_client_throw_roundtrip():
+    def parked(current, _arg):
+        try:
+            current.main().switch("ready")
+        except RuntimeError as exc:
+            return current.main(), ("caught", str(exc))
+        return current.main(), "no-exception"
+
+    t = _tealet.tealet()
+    assert t.run(parked, None) == "ready"
+    assert _tealet_capi_client.capi_throw(t, RuntimeError("boom-throw")) == ("caught", "boom-throw")
+
+
+def test_capi_client_throw_panic_flag():
+    def parked(current, _arg):
+        try:
+            current.main().switch("ready")
+        except BaseException as exc:
+            return current.main(), ("caught", type(exc).__name__, str(exc))
+        return current.main(), "no-exception"
+
+    t = _tealet.tealet()
+    assert t.run(parked, None) == "ready"
+    assert _tealet_capi_client.capi_throw(t, RuntimeError("boom-panic"), _tealet_capi_client.THROW_PANIC) == (
+        "caught",
+        "PanicError",
+        "tealet switch failed",
+    )
+
+
+def test_capi_client_throw_flags_unknown_bit_rejected():
+    with pytest.raises(ValueError, match="unsupported throw flags"):
+        _tealet_capi_client.capi_throw(_tealet.current(), RuntimeError("boom"), 0x80)
 
 
 def test_capi_client_run_c_forwarding():
