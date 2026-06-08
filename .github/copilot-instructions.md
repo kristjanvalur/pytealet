@@ -2,314 +2,155 @@
 
 ## Project Overview
 
-**pytealet** is a Python wrapper for [libtealet](https://github.com/kristjanvalur/libtealet), providing efficient coroutine and stack-slicing capabilities to Python through a C extension. This project brings the power of cooperative multitasking to Python using the modern libtealet foundation, offering a greenlet-compatible interface.
+`pytealet` is a Python wrapper for
+[libtealet](https://github.com/kristjanvalur/libtealet), providing efficient
+stack-slicing coroutines to Python through a C extension.
 
-### Key Concepts
-- **Stack-slicing**: Technique coined by Christian Tismer for Stackless Python where parts of the C stack are saved/restored on the heap
-- **Tealets**: Coroutines that can suspend entire execution stacks without requiring `async`/`await` keywords
-- **Greenlet compatibility**: Drop-in replacement for greenlet-based code with similar API
-- **No compiler support needed**: Unlike async/await, works with any Python code
+Core intent:
+- Keep `_tealet` runtime semantics correct and memory-safe.
+- Provide a practical greenlet-compatible shim in `tealet.greenlet`.
+- Prioritize deterministic runtime behavior over broad parity claims.
 
-## Project Structure
+## Current Project Structure
 
 ```
 pytealet/
 ├── src/
-│   ├── tealet/              # Pure Python package
-│   │   ├── __init__.py      # Main tealet module (imports from _tealet)
-│   │   ├── greenlet.py      # Greenlet-compatible interface
-│   │   └── tealet.py        # Tealet-specific wrapper
-│   └── _tealet/             # C extension module
-│       ├── pytealet.c       # Core runtime logic for tealet objects
-│       ├── pytealet_module.c # CPython module lifecycle hooks
-│       ├── pytealet_common.h # Shared compile-time feature/version macros
-│       ├── pytealet.h       # Shared internal API declarations
-│       ├── pytealet_module.h # Module-state struct layout
-│       ├── libtealet/       # Pre-built libtealet v0.3.2
-│       │   ├── lib/         # Platform-specific pre-built libraries
-│       │   ├── tealet/      # libtealet headers
-│       │   └── stackman/    # Stack manipulation headers
-│       └── README.md        # C extension documentation
-├── tests/                   # Test suite (pytest)
-│   ├── test_tealet.py      # Tealet-specific tests (10/12 passing)
-│   └── test_greenlet.py    # Greenlet compatibility tests
-├── scripts/
-│   └── fast_build.sh       # Rapid C extension rebuild script
+│   ├── tealet/
+│   │   ├── __init__.py
+│   │   └── greenlet/
+│   │       ├── __init__.py
+│   │       └── _greenlet.py
+│   ├── _tealet/
+│   │   ├── pytealet.c
+│   │   ├── pytealet_module.c
+│   │   ├── tstate_state.c
+│   │   ├── frame_info.c
+│   │   ├── pytealet_common.h
+│   │   ├── pytealet.h
+│   │   ├── pytealet_module.h
+│   │   └── libtealet/    # vendored release archive (currently 0.7.5)
+│   └── tealet_examples.py
+├── tests/
+│   ├── test_tealet.py
+│   ├── test_greenlet_legacy.py
+│   ├── test_examples.py
+│   └── compat_greenlet/
 ├── docs/
-│   ├── ARCHITECTURE.md     # Design and architecture documentation
-│   └── ISSUES.md           # Current bugs and tracking
-├── setup.py                # Build configuration with ABI detection
-├── pyproject.toml          # Modern Python package configuration
-├── CHANGELOG.md            # Version history
-├── LICENSE                 # MIT License
-└── README.md               # Project documentation
+│   ├── ARCHITECTURE.md
+│   ├── ISSUES.md
+│   └── GREENLET_COMPATIBILITY_PLAN.md
+├── scripts/
+│   └── fast_build.sh
+├── pyproject.toml
+├── setup.py
+└── README.md
 ```
 
-## Development Workflow
+## Development Environment
 
-### Quick Setup
+Preferred tooling is `uv`.
+
+### Standard dev setup
+
 ```bash
-# Create virtual environment with uv
-uv venv --python 3.10
-
-# Install in development mode
-uv sync --dev
+uv venv --python 3.13
+source .venv/bin/activate
+uv sync --active --dev
 ```
 
-### Debug Interpreter Setup (CPython --with-pydebug)
-When using a custom debug CPython build (`python3.xd`), prefer `uv pip` workflows.
+### Debug CPython setup
 
-- `uv sync` may fail due package compatibility checks against debug ABI interpreters.
-- `pip` may also be unreliable in debug builds if optional modules like `_ssl` are missing.
-- Use `uv pip` with an explicit interpreter path instead.
+When using a debug interpreter (`python3.xd`), prefer explicit `uv pip`:
 
 ```bash
-# Create venv from debug interpreter
-uv venv --python /path/to/cpython-debug/python .venv-cpython310-debug
-
-# Install project and dev deps using uv pip (preferred for debug venvs)
-uv pip install --python .venv-cpython310-debug/bin/python -e .[dev]
-
-# Run tests with that interpreter
-PYTEALET_ENABLE_GREENLET_TESTS=1 \
-    .venv-cpython310-debug/bin/python -m pytest tests/test_greenlet.py -v
+uv venv --python /path/to/cpython-debug/python .venv-cpython313-debug
+uv pip install --python .venv-cpython313-debug/bin/python -e .[dev]
 ```
 
-Reminder: when using uv with an activated venv, prefer the `--active` flag to
-avoid environment mismatch warnings, for example:
+When the debug venv is activated, prefer `uv --active` forms.
+
+## Build Workflow
+
+Recommended rapid rebuild:
+
 ```bash
-source .venv-cpython310-debug/bin/activate
-PYTEALET_ENABLE_GREENLET_TESTS=1 uv run --active python -m pytest tests/test_greenlet.py -v
+./scripts/fast_build.sh
+./scripts/fast_build.sh debug
 ```
 
-### Building the C Extension
-**Use the fast build script for development (works with debug venvs too):**
-```bash
-./scripts/fast_build.sh          # Optimized build (default)
-./scripts/fast_build.sh debug    # Debug build with -g -O0
+Manual rebuild if needed:
 
-# The script automatically:
-# 1. Cleans build artifacts
-# 2. Rebuilds with uv sync --reinstall-package tealet
-# 3. Runs basic smoke tests
-```
-
-**Manual build (if needed):**
 ```bash
-# Clean rebuild
 rm -rf build/ src/_tealet*.so
-uv sync --reinstall-package tealet
+uv sync --active --reinstall-package tealet
 ```
 
-### Running Tests
+## Test Workflow
+
+Core suite:
+
 ```bash
-# All tests
-uv run pytest tests/
-
-# Specific test file
-uv run pytest tests/test_tealet.py -v
-
-# Specific test class
-uv run pytest tests/test_tealet.py::TestModule -v
-
-# Current status: 10/12 tests passing
-# TestRandom1 and TestRandom2 have segfaults (tracked in ISSUES.md)
+uv run --active python -m pytest tests/
 ```
 
-### Current Status
-- ✅ Modern project structure complete
-- ✅ Pre-built libtealet integration
-- ✅ Build infrastructure with ABI detection
-- ✅ Python 3.10+ compatibility complete (modernized from 2013 codebase)
-- ✅ P0 critical bugs fixed (segfault, exit flags)
-- ✅ 10/12 tests passing
-- ⚠️ 2 random stress tests have segfaults (likely missing NULL checks)
+Targeted examples:
 
-## Recent Fixes (November 2025)
+```bash
+uv run --active python -m pytest tests/test_tealet.py -v
+uv run --active python -m pytest tests/test_greenlet_legacy.py -v
+```
 
-### Completed
-1. **File renamed**: `_tealet.c` → `pytealet.c`
-2. **Python 3 API**: Updated PyInt→PyLong, exc_*→curexc_*, PyModuleDef
-3. **libtealet v0.3.2 API**: Updated tealet->data → tealet->extra
-4. **Type safety**: Created tealet_extra_t structure
-5. **Static linking**: Changed from dynamic to static libtealet.a
-6. **Critical bug #1**: Fixed pytealet_get_main() NULL pointer segfault
-7. **Critical bug #2**: Fixed tealet_exit() flags (TEALET_EXIT_DELETE)
-8. **Test modernization**: Converted from unittest to pytest
-9. **Build tooling**: Created scripts/fast_build.sh
+Upstream compat tests are opt-in and can be expensive:
 
-### Known Issues
-See `docs/ISSUES.md` for current bug tracking and status.
+```bash
+PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1 \
+  uv run --active python -m pytest tests/compat_greenlet -v
+```
+
+CI defaults to `PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=0`.
+
+## Current Status Snapshot
+
+- Core in-repo test baseline is healthy.
+- `_tealet` has active hardening around GC traversal/clear semantics.
+- Greenlet compatibility is functional for in-repo coverage, but upstream
+  parity is still an ongoing effort.
 
 ## Coding Guidelines
 
-### Segfault Policy
-- If a segfault (or abort from a debug-assertion crash) is encountered, immediately switch focus to crash investigation and root-cause analysis.
-- Do not modify Python tests to avoid, hide, or skip around segfaults unless explicitly instructed by the user.
-- Prefer reproducing in debug interpreters, collecting traces/backtraces, and fixing runtime/root causes before test expectation updates.
+### Runtime safety first
 
-### Python Code Style
-- Follow **PEP 8** for Python code
-- Use type hints where appropriate (Python 3.10+ syntax)
-- Keep greenlet API compatibility where possible
-- Document deviations from greenlet behavior
+- Treat segfaults, aborts, and debug-assert crashes as highest priority.
+- Do not hide runtime crashes by skipping tests unless explicitly requested.
+- Prefer root-cause fixes over behavioral workarounds.
 
-### C Extension Code
-The C extension has been modernized for Python 3.10+:
-- Uses Python 3 C API (PyLong_*, not PyInt_*)
-- Uses Python 3.7+ exception handling (curexc_*, not exc_*)
-- Uses PyModuleDef for module initialization
-- Follows libtealet v0.3.2 API (tealet->extra, not tealet->data)
-- Static linking against pre-built libtealet.a
-- Type-safe extra data via tealet_extra_t structure
+### C extension practices
 
-**When modifying C code:**
-- Test on multiple Python versions (3.10-3.14)
-- Use `./scripts/fast_build.sh` for rapid iteration
-- Run tests after each change: `uv run pytest tests/`
-- Check `docs/ARCHITECTURE.md` for design patterns
+- Preserve ownership and refcount invariants.
+- Keep changes narrow and localized.
+- Add tests for behavior changes when practical.
+- Use C89-style comments in C code.
 
-### libtealet Integration
-- Never modify files in `src/_tealet/libtealet/` - treat as vendored dependency
-- To update libtealet, follow instructions in `src/_tealet/README.md`
-- Link against pre-built libraries, don't build from source
-- Respect libtealet's MIT license
+### Vendored libtealet policy
 
-## Style Guide (from libtealet)
+- Do not modify `src/_tealet/libtealet/` unless explicitly asked.
+- Treat vendored contents as external dependency snapshots.
 
-### Documentation
-- Use clear, direct language
-- Include code examples for all public APIs
-- Explain "why" not just "what"
-- Use ⚠️ for warnings, ✅ for recommendations, ❌ for anti-patterns
+## Greenlet Compatibility Guidance
 
-### Code Comments
-- Explain intent and non-obvious behavior
-- Document memory ownership and lifecycle
-- Mark platform-specific code clearly
-- Use `/* C89 style comments */`
+- Keep `tealet.greenlet` behavior aligned with tests in this repo first.
+- Use `tests/compat_greenlet/` as opt-in parity tracking.
+- Maintain explicit skip reasons for unsupported upstream scenarios.
 
-### API Design Principles
-- **Safety first**: Make dangerous operations obvious
-- **Explicit over implicit**: Prefer clear APIs over magic behavior
-- **Memory discipline**: Clear ownership semantics for heap vs stack
-- **Platform-agnostic**: Hide platform details behind clean interfaces
+## Documentation and Change Hygiene
 
-## Common Patterns
+- Update `docs/ARCHITECTURE.md` when design or API contracts change.
+- Update `docs/ISSUES.md` for major resolved issues or active hardening work.
+- Keep `README.md` focused on accurate setup/run guidance.
 
-### Memory Safety
-Stack-allocated data becomes invalid when switching contexts:
+## References
 
-```python
-# ❌ WRONG - Stack data passed across switch
-def worker(t):
-    local_data = {"key": "value"}
-    tealet.switch(other, local_data)  # Dangerous!
-
-# ✅ CORRECT - Heap data or module-level
-shared_data = {"key": "value"}  # Module level
-def worker(t):
-    tealet.switch(other, shared_data)  # Safe
-```
-
-### Greenlet Compatibility
-```python
-from tealet import greenlet
-
-def worker():
-    print("Hello from tealet!")
-    greenlet.getcurrent().parent.switch()
-
-g = greenlet.greenlet(worker)
-g.switch()  # Should work like greenlet
-```
-
-### Tealet-Specific Usage
-```python
-import _tealet
-
-def worker(current, arg):
-    print(f"Received: {arg}")
-    return current.main  # Return to main
-
-main = _tealet.tealet()
-t = _tealet.tealet()
-t.run(worker, "hello")
-```
-
-## Development Workflow
-
-### Testing
-```bash
-# Run all tests with pytest
-uv run pytest tests/
-
-# Run specific test file
-uv run pytest tests/test_tealet.py -v
-
-# Run with coverage
-uv run pytest tests/ --cov=tealet --cov-report=html
-```
-
-### Building C Extension
-```bash
-# Fast rebuild (recommended for development)
-./scripts/fast_build.sh
-
-# Debug build with symbols
-./scripts/fast_build.sh debug
-
-# Manual clean build
-rm -rf build/ src/_tealet*.so
-uv sync --reinstall-package tealet
-```
-
-## Key Differences from greenlet
-
-- Built on libtealet instead of direct stackman integration
-- Does not use the external greenlet module at runtime
-- Uses an internal greenlet emulation layer
-- The internal greenlet emulation layer is currently not working and is disabled
-- May have different performance characteristics
-- Uses tealet's memory allocator interface
-- Supports custom allocators via `tealet_alloc_t`
-
-## Performance Characteristics
-
-From libtealet (targets for Python wrapper):
-- Context switch: ~100-500 CPU cycles (vs greenlet's similar performance)
-- Memory per coroutine: ~2-16 KB (incremental growth)
-- No kernel involvement (pure user-space)
-- Manual scheduling (deterministic)
-
-## Links and Resources
-
-- **libtealet**: https://github.com/kristjanvalur/libtealet
-  - API Reference: https://github.com/kristjanvalur/libtealet/blob/master/docs/API.md
-  - Getting Started: https://github.com/kristjanvalur/libtealet/blob/master/docs/GETTING_STARTED.md
-  - Architecture: https://github.com/kristjanvalur/libtealet/blob/master/docs/ARCHITECTURE.md
-- **stackman**: https://github.com/stackless-dev/stackman
-- **greenlet**: https://github.com/python-greenlet/greenlet (compatibility target)
-- **Stackless Python**: http://www.stackless.com (historical inspiration)
-
-## License
-
-MIT License - Same as libtealet for consistency.
-
-## Contributing
-
-When contributing:
-1. Maintain greenlet API compatibility where possible
-2. Document any behavioral differences
-3. Add tests for new functionality
-4. Update CHANGELOG.md
-5. Follow the coding style from libtealet project
-6. Test on multiple Python versions (3.10-3.14)
-
-## Next Steps / Current Priorities
-
-1. **Python 3 Compatibility**: Continue cross-version hardening in `pytealet.c` / `tstate_state.c` / `frame_info.c`
-2. **Build Verification**: Get extension building on Linux, macOS, Windows
-3. **Test Suite**: Ensure tests pass with modernized code
-4. **Documentation**: Add Python API docs based on greenlet compatibility
-5. **CI/CD**: Set up GitHub Actions for automated testing
+- libtealet: https://github.com/kristjanvalur/libtealet
+- greenlet: https://github.com/python-greenlet/greenlet
+- stackman: https://github.com/stackless-dev/stackman
