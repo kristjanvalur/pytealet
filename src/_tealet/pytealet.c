@@ -2417,7 +2417,7 @@ int PyTealetApi_IsForeign(PyTealetModuleState *mstate, PyObject *target_obj) {
     return target->owner_tid != PyThread_get_thread_ident();
 }
 
-int PyTealetApi_StateGet(PyTealetModuleState *mstate, PyObject *target_obj, int *state_out) {
+int PyTealetApi_StateGet(PyTealetModuleState *mstate, PyObject *target_obj, PyTealet_State *state_out) {
     PyTealetObject *target;
 
     if (!mstate || !mstate->tealet_type) {
@@ -2438,7 +2438,7 @@ int PyTealetApi_StateGet(PyTealetModuleState *mstate, PyObject *target_obj, int 
     }
 
     target = (PyTealetObject *)target_obj;
-    *state_out = target->state;
+    *state_out = (PyTealet_State)target->state;
     return 0;
 }
 

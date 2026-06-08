@@ -29,6 +29,14 @@
 typedef struct PyTealet_CAPI_Context PyTealet_CAPI_Context;
 typedef PyObject *(*PyTealetApi_RunCFunc)(PyObject *current, PyObject *arg);
 
+/* Public tealet state values mirrored from _tealet.STATE_* constants. */
+typedef enum PyTealet_State {
+    PYTEALET_STATE_NEW = 0,
+    PYTEALET_STATE_STUB = 1,
+    PYTEALET_STATE_RUN = 2,
+    PYTEALET_STATE_EXIT = 3,
+} PyTealet_State;
+
 typedef struct PyTealet_CAPI {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -97,7 +105,7 @@ typedef struct PyTealet_CAPI {
 
     /* Tealet metadata helpers. */
     int (*is_foreign)(PyTealet_CAPI_Context *ctx, PyObject *target);
-    int (*state_get)(PyTealet_CAPI_Context *ctx, PyObject *target, int *state_out);
+    int (*state_get)(PyTealet_CAPI_Context *ctx, PyObject *target, PyTealet_State *state_out);
     int (*thread_id_get)(PyTealet_CAPI_Context *ctx, PyObject *target, unsigned long *thread_id_out);
 
     void *reserved[16];

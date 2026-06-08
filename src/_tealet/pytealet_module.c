@@ -378,7 +378,7 @@ static int PyTealetApi_IsForeignForward(PyTealet_CAPI_Context *ctx, PyObject *ta
     return PyTealetApi_IsForeign(mstate, target);
 }
 
-static int PyTealetApi_StateGetForward(PyTealet_CAPI_Context *ctx, PyObject *target, int *state_out) {
+static int PyTealetApi_StateGetForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyTealet_State *state_out) {
     PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return -1;

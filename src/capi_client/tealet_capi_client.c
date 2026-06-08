@@ -452,7 +452,7 @@ static PyObject *client_capi_is_foreign(PyObject *module, PyObject *target) {
 
 static PyObject *client_capi_state(PyObject *module, PyObject *target) {
     PyTealetCapiClientState *state = client_get_state(module);
-    int value;
+    PyTealet_State value;
 
     if (!state)
         return NULL;
@@ -461,7 +461,7 @@ static PyObject *client_capi_state(PyObject *module, PyObject *target) {
 
     if (state->api->state_get(state->ctx, target, &value) < 0)
         return NULL;
-    return PyLong_FromLong(value);
+    return PyLong_FromLong((long)value);
 }
 
 static PyObject *client_capi_thread_id(PyObject *module, PyObject *target) {

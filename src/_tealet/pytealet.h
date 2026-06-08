@@ -44,7 +44,7 @@ PyObject *PyTealetApi_Previous(PyTealetModuleState *mstate);
 int PyTealetApi_FrameIntrospectionGet(PyTealetModuleState *mstate);
 int PyTealetApi_FrameIntrospectionSet(PyTealetModuleState *mstate, int enabled);
 int PyTealetApi_IsForeign(PyTealetModuleState *mstate, PyObject *target_obj);
-int PyTealetApi_StateGet(PyTealetModuleState *mstate, PyObject *target_obj, int *state_out);
+int PyTealetApi_StateGet(PyTealetModuleState *mstate, PyObject *target_obj, PyTealet_State *state_out);
 int PyTealetApi_ThreadIdGet(PyTealetModuleState *mstate, PyObject *target_obj, unsigned long *thread_id_out);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);
