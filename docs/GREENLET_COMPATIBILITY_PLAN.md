@@ -1,116 +1,53 @@
-# Greenlet Compatibility Plan
+# Greenlet Compatibility Status And Plan
 
 ## Goal
 
-Re-establish and verify the `tealet.greenlet` compatibility layer in two stages:
+Keep `tealet.greenlet` useful for in-repo compatibility coverage while
+incrementally improving parity with upstream greenlet behavior.
 
-1. Make legacy compatibility tests run on modern Python.
-2. Move toward parity with modern upstream greenlet behavior.
+## Current State (June 2026)
 
-## Intent And Rationale
+- The shim lives in `src/tealet/greenlet/__init__.py`.
+- Legacy compatibility tests live in `tests/test_greenlet_legacy.py`.
+- Upstream-ported compatibility tests live in `tests/compat_greenlet/`.
+- Upstream compat collection is opt-in and controlled by
+  `PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1` in `tests/compat_greenlet/conftest.py`.
+- CI keeps upstream compat disabled by default via
+  `PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=0` to keep runtime predictable.
 
-The intended architecture is intentionally layered:
+## Working Policy
 
-- `pytealet` itself stays minimal and focused on core tealet mechanics.
-- A greenlet-like interface should be buildable on top as a compatibility layer.
+1. Keep core `_tealet` runtime correctness first.
+2. Treat greenlet parity as an explicit compatibility layer concern.
+3. Keep compat expectations explicit with targeted skips where behavior is
+   intentionally different or currently unsupported.
 
-This enables a practical "greenlet monkeypatch" proof-of-concept:
+## Known Gap Areas
 
-- Provide a greenlet-compatible module surface that can be substituted for
-  libraries expecting greenlet semantics.
-- Validate whether tealet can serve as a drop-in backend for those libraries,
-  either as an experiment or as a potential performance-oriented variant.
+- `greenlet._greenlet` surface is only partially emulated.
+- `gr_context` behavior is incomplete compared to upstream.
+- Generator/Genlet edge semantics differ in some destruction/error paths.
+- Parent/dead state transitions still have mismatch cases.
+- Leak-sensitive tests in compat suites remain a hardening target.
+- C/C++ helper extension tests are skipped when helpers are unavailable.
 
-In short: keep core primitives small and robust, and make greenlet
-compatibility an explicit higher-level adapter.
+## How To Run Compatibility Suites
 
-## Current State
+Core legacy-style compat:
 
-- Compatibility shim exists in `src/tealet/greenlet.py` but contains Python 2 syntax.
-- Legacy greenlet tests exist in `tests/test_greenlet.py`.
-- Greenlet tests are disabled by default via `PYTEALET_ENABLE_GREENLET_TESTS` in `tests/conftest.py`.
-- Existing tests import `greenlet` directly, so they need to target the tealet shim explicitly for compatibility-layer validation.
-- Legacy greenlet module runs with the legacy tests; focus now shifts to contemporary upstream greenlet compatibility.
+```bash
+python -m pytest tests/test_greenlet_legacy.py -v
+```
 
-## Phase 1: Make Legacy Tests Work On Modern Python
+Upstream-ported compat subset (opt-in):
 
-### 1. Port shim to Python 3 syntax
+```bash
+PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1 python -m pytest tests/compat_greenlet -v
+```
 
-- Replace Python 2 exception raising forms.
-- Add `__bool__` (keep `__nonzero__` alias for intent).
-- Keep behavior unchanged except for syntax/runtime compatibility.
+## Near-Term Plan
 
-### 2. Point legacy tests at the tealet shim
-
-- In `tests/test_greenlet.py`, import from `tealet.greenlet` instead of external `greenlet` package.
-- Keep test semantics the same.
-
-### 3. Establish a baseline
-
-- Run `PYTEALET_ENABLE_GREENLET_TESTS=1 pytest tests/test_greenlet.py`.
-- Record failures by category:
-  - API mismatch
-  - exception propagation
-  - parent/dead semantics
-  - frame semantics
-  - cross-thread behavior
-
-## Phase 2: Incremental Behavior Fixes
-
-Prioritized order:
-
-1. `switch`/`throw` exception triplet handling and return-value normalization.
-2. Parent chain and dead/live truthiness semantics.
-3. `gr_frame` behavior.
-4. Cross-thread safety behavior and error typing.
-5. Exception state preservation.
-
-For each mismatch:
-
-- Fix shim logic.
-- Add or adjust tests.
-- Avoid broad refactors unless necessary.
-
-## Phase 3: Modern Upstream Greenlet Test Adoption
-
-After legacy suite is stable:
-
-1. Import a curated subset of modern upstream greenlet tests into a dedicated area (for example `tests/compat_greenlet/`).
-2. Keep explicit skip/xfail reasons for known differences.
-3. Expand subset incrementally as parity improves.
-
-## CI Plan
-
-1. Add a dedicated greenlet-compat job (separate from core tealet tests).
-2. Enable with `PYTEALET_ENABLE_GREENLET_TESTS=1`.
-3. Start with one Python version (3.14 or 3.15), then expand.
-4. Optionally add free-threaded matrix entries once baseline behavior is stable.
-
-## Immediate Next Steps
-
-1. Complete Python 3 shim port.
-2. Rewire legacy tests to use `tealet.greenlet`.
-3. Run legacy suite and categorize first failure set.
-
-## Upstream Compat Snapshot (2026-05-22)
-
-Ran `PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1 pytest tests/compat_greenlet` on
-Python 3.15a8 with the tealet shim. Result: 44 failed, 9 passed, run interrupted
-after ~83s.
-
-Primary gaps observed:
-
-- No real `greenlet._greenlet` surface; placeholder stubs required for
-  `get_pending_cleanup_count`/`get_total_main_greenlets`.
-- No `gr_context` support (contextvars propagation/assignment failures).
-- Generator/Genlet path assumes `run` attribute and safe `__del__`; current
-  implementation raises in `__del__` for subclasses without `_tealet` state.
-- Parent/dead semantics mismatches (switch/throw error paths, unstarted parent
-  behavior, reparenting after death).
-- Leakcheck failures across many tests (refcount deltas in switch/dealloc/frame
-  paths and threading cases).
-- Missing C/C++ test helpers (`_test_extension`, `_test_extension_cpp`), so
-  extension-based scenarios are skipped or fail to import.
-
-These failures suggest a dedicated emulation layer for `greenlet` and
-`greenlet._greenlet` will likely be needed before pursuing full upstream parity.
+1. Continue stabilizing `switch`/`throw` parity paths and parent/dead behavior.
+2. Improve `gr_context` semantics where feasible without regressing core runtime.
+3. Reduce leakcheck deltas with focused dealloc/refcount hardening.
+4. Expand upstream compat coverage only when runtime and CI cost stay acceptable.
