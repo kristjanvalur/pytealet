@@ -285,6 +285,35 @@ Greenlet-compatible wrapper around tealets.
 
 ## Core Architecture
 
+### API Layering Policy (Python and Capsule C API)
+
+The runtime follows a two-front-door pattern:
+- Python-bound methods (for example, tealet.run, tealet.prepare) are responsible for Python call-shape parsing and Python-facing argument errors.
+- Capsule C API entrypoints (for example, PyTealetApi_Run, PyTealetApi_Prepare) are responsible for C-facing validation at the exported boundary.
+- Shared runtime state transitions and execution behavior live in internal implementation helpers (for example, operation-specific impl/dispatch helpers).
+
+This keeps core semantics centralized while allowing each public boundary to retain its own contract and diagnostics.
+
+Practical rule:
+- Avoid implementing runtime behavior in both public entrypoints.
+- Keep boundary checks at the boundary, and keep stateful behavior in one shared internal path.
+
+### Physical Layout Guidance
+
+Preferred source layout is operation-local grouping, keeping related variants near each other.
+
+For a given operation, place code in this order when practical:
+1. Shared internal implementation helper (impl/dispatch).
+2. Python method wrapper.
+3. Capsule C API wrapper.
+
+Rationale:
+- Reduces navigation cost during review and debugging.
+- Makes it obvious which logic is shared vs boundary-specific.
+- Lowers regression risk when changing state transitions or refcount-sensitive behavior.
+
+Allow exceptions for very large helpers (for example, common dispatch used by several operations), but preserve clear references and naming so call flow remains easy to follow.
+
 ### Two-Level Object Structure
 
 **Design:**
