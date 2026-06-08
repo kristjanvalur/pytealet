@@ -79,4 +79,8 @@ int PyTealetFrameInfo_Capture(PyTealetFrameInfo *info, int rewrite_chain);
 PyObject *PyTealetFrameInfo_GetFrame(const PyTealetFrameInfo *info);
 void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet);
 
+/* GC helpers for captured dormant-frame references. */
+int PyTealetFrameInfo_Visit(const PyTealetFrameInfo *info, visitproc visit, void *arg);
+void PyTealetFrameInfo_ClearForGC(PyTealetFrameInfo *info);
+
 #endif

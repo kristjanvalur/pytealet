@@ -282,6 +282,15 @@ void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet, int with
     dst->has_state = 0;
 }
 
+int PyTealetTstate_Visit(const PyTealetTstate *saved, visitproc visit, void *arg) {
+    Py_VISIT(saved->context);
+#if defined(PY_HAS_TSTATE_DELETE_LATER)
+    if (saved->has_state)
+        Py_VISIT(saved->delete_later);
+#endif
+    return 0;
+}
+
 /* Move out the thread state to a saved struct before switch.
  * The caller restores it afterwards. */
 void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src) {

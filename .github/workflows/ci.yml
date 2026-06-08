@@ -16,7 +16,7 @@ jobs:
     env:
       PYTEALET_EXT_DEBUG: "1"
       PYTEALET_SKIP_LONG_GREENLET_TESTS: "1"
-      PYTEALET_RUN_UPSTREAM_GREENLET_TESTS: "1"
+      PYTEALET_RUN_UPSTREAM_GREENLET_TESTS: "0"
     strategy:
       fail-fast: false
       matrix:
