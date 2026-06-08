@@ -51,12 +51,32 @@ typedef struct PyTealet_CAPI {
     /* Return new references (or NULL with exception set on failure). */
     PyObject *(*current)(PyTealet_CAPI_Context *ctx);
     PyObject *(*main)(PyTealet_CAPI_Context *ctx);
+    PyObject *(*previous)(PyTealet_CAPI_Context *ctx);
+
+    /* Module thread control helpers. */
+    /* Snapshot active non-main tealets for the current thread. */
+    PyObject *(*thread_active)(PyTealet_CAPI_Context *ctx);
+
+    /* Cooperative cleanup: inject kill exception into active non-main tealets for the thread and return still-active wrappers. */
+    PyObject *(*thread_kill)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
+
+    /* Destructive cleanup for this thread: run kill passes, then force-reap remaining tealets for the thread; return forcibly invalidated wrappers. */
+    PyObject *(*thread_reap)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
 
     /* Global dead-thread sweep: reap wrappers owned by threads that are no longer alive. */
     PyObject *(*thread_sweep)(PyTealet_CAPI_Context *ctx);
 
+    /* Returns 0/1 for False/True, -1 on error. */
+    int (*error_was_remote)(PyTealet_CAPI_Context *ctx);
+
+    /* Frame introspection control: 0/1 for False/True, -1 on error. */
+    int (*frame_introspection_get)(PyTealet_CAPI_Context *ctx);
+    int (*frame_introspection_set)(PyTealet_CAPI_Context *ctx, int enabled);
+
     /* Returns 1 if obj is tealet-compatible, 0 if not, -1 on API misuse/error. */
     int (*check_tealet)(PyTealet_CAPI_Context *ctx, PyObject *obj);
+
+    /* Tealet operations (conceptual target.method(...) where applicable). */
 
     /* Equivalent to _tealet.tealet(). */
     PyObject *(*create)(PyTealet_CAPI_Context *ctx);
@@ -89,26 +109,6 @@ typedef struct PyTealet_CAPI {
 
     /* Equivalent to target.set_exception(exception, fallback). Returns 0 on success, -1 on error. */
     int (*set_exception)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, PyObject *fallback);
-
-    /* Module thread control helpers. */
-    /* Destructive cleanup for this thread: run kill passes, then force-reap remaining tealets for the thread; return forcibly invalidated wrappers. */
-    PyObject *(*thread_reap)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
-
-    /* Snapshot active non-main tealets for the current thread. */
-    PyObject *(*thread_active)(PyTealet_CAPI_Context *ctx);
-
-    /* Cooperative cleanup: inject kill exception into active non-main tealets for the thread and return still-active wrappers. */
-    PyObject *(*thread_kill)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
-
-    /* Returns 0/1 for False/True, -1 on error. */
-    int (*error_was_remote)(PyTealet_CAPI_Context *ctx);
-
-    /* Module-level traversal helper: equivalent to _tealet.previous(). */
-    PyObject *(*previous)(PyTealet_CAPI_Context *ctx);
-
-    /* Frame introspection control: 0/1 for False/True, -1 on error. */
-    int (*frame_introspection_get)(PyTealet_CAPI_Context *ctx);
-    int (*frame_introspection_set)(PyTealet_CAPI_Context *ctx, int enabled);
 
     /* Tealet metadata helpers. */
     int (*is_foreign)(PyTealet_CAPI_Context *ctx, PyObject *target);

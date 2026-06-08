@@ -398,29 +398,29 @@ static const PyTealet_CAPI pytealet_capi_table = {
     PYTEALET_CAPI_FEATURE_BASE,
     PyTealetApi_CtxNew,
     PyTealetApi_CtxFree,
+
+    /* Module-level operations. */
     PyTealetApi_Current,
     PyTealetApi_Main,
+    PyTealetApi_PreviousForward,
+    PyTealetApi_ThreadActiveForward,
+    PyTealetApi_ThreadKillForward,
+    PyTealetApi_ThreadReapForward,
     PyTealetApi_ThreadSweep,
+    PyTealetApi_ErrorWasRemoteForward,
+    PyTealetApi_FrameIntrospectionGetForward,
+    PyTealetApi_FrameIntrospectionSetForward,
     PyTealetApi_CheckTealet,
 
-    /* Module-level creation helpers (append-only for future module ops). */
+    /* Tealet operations. */
     PyTealetApi_CreateForward,
     PyTealetApi_DuplicateForward,
-
-    /* Tealet-method style operations (append-only for future methods). */
     PyTealetApi_StubForward,
     PyTealetApi_PrepareForward,
     PyTealetApi_RunForward,
     PyTealetApi_SwitchForward,
     PyTealetApi_ThrowForward,
     PyTealetApi_SetExceptionForward,
-    PyTealetApi_ThreadReapForward,
-    PyTealetApi_ThreadActiveForward,
-    PyTealetApi_ThreadKillForward,
-    PyTealetApi_ErrorWasRemoteForward,
-    PyTealetApi_PreviousForward,
-    PyTealetApi_FrameIntrospectionGetForward,
-    PyTealetApi_FrameIntrospectionSetForward,
     PyTealetApi_IsForeignForward,
     PyTealetApi_StateGetForward,
     PyTealetApi_ThreadIdGetForward,
