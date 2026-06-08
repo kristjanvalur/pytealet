@@ -408,6 +408,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     if (lineage_mdata && lineage_mdata->domain_lock_obj) {
         result->domain_lock_obj = Py_NewRef(lineage_mdata->domain_lock_obj);
     }
+    result->prepared_cfunc = NULL;
     return (PyObject *)result;
 }
 
@@ -471,6 +472,7 @@ static PyObject *pytealet_duplicate(PyObject *self, PyTypeObject *defining_class
         result->domain_lock_obj = Py_NewRef(src->domain_lock_obj);
     if (src->prepared_func)
         result->prepared_func = Py_NewRef(src->prepared_func);
+    result->prepared_cfunc = src->prepared_cfunc;
 
     return (PyObject *)result;
 }
@@ -500,6 +502,7 @@ static int pytealet_clear(PyObject *obj) {
     /* tracking-ref is cleared in the dealloc it isn't part of the GC cycle */
     PyTealetObject *tealet = (PyTealetObject *)obj;
     Py_CLEAR(tealet->prepared_func);
+    tealet->prepared_cfunc = NULL;
     PyTealetTstate_Drop(&tealet->tstate, NULL, 1);
     PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
     return 0;
@@ -692,6 +695,39 @@ static PyObject *pytealet_belongs_to_current(PyObject *self, PyTypeObject *defin
     return PyBool_FromLong(base->owner_tid == PyThread_get_thread_ident());
 }
 
+static int pytealet_prepare_dispatch(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
+                                     PyTealetMainData *mdata, PyObject *func, PyTealetApi_RunCFunc cfunc,
+                                     const char *operation) {
+    if (CheckTarget(mstate, target, current, operation))
+        return -1;
+
+    if (target->state != STATE_NEW && target->state != STATE_STUB) {
+        PyErr_SetString(mstate->state_error, "must be new or stub");
+        return -1;
+    }
+
+    if ((func == NULL) == (cfunc == NULL)) {
+        PyErr_SetString(PyExc_TypeError, "exactly one of python callable or C callable is required");
+        return -1;
+    }
+
+    if (func != NULL) {
+        if (!PyCallable_Check(func)) {
+            PyErr_SetString(PyExc_TypeError, "prepare() argument 'function' must be callable");
+            return -1;
+        }
+        Py_XSETREF(target->prepared_func, Py_NewRef(func));
+        target->prepared_cfunc = NULL;
+    } else {
+        Py_CLEAR(target->prepared_func);
+        target->prepared_cfunc = cfunc;
+    }
+
+    if (mdata)
+        mdata->last_error_remote = 0;
+    return 0;
+}
+
 static PyObject *pytealet_prepare(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                   Py_ssize_t nargs, PyObject *kwnames) {
     PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
@@ -704,17 +740,6 @@ static PyObject *pytealet_prepare(PyObject *self, PyTypeObject *defining_class, 
         return NULL;
 
     current = TryGetCurrent(mstate, &mdata);
-    if (mdata)
-        mdata->last_error_remote = 0;
-
-    if (CheckTarget(mstate, target, current, "prepare()"))
-        return NULL;
-
-    if (target->state != STATE_NEW && target->state != STATE_STUB) {
-        PyErr_SetString(mstate->state_error, "must be new or stub");
-        return NULL;
-    }
-
     if (nargs > 1) {
         PyErr_Format(PyExc_TypeError, "prepare() takes 1 argument (%zd given)", nargs);
         return NULL;
@@ -749,12 +774,9 @@ static PyObject *pytealet_prepare(PyObject *self, PyTypeObject *defining_class, 
         PyErr_SetString(PyExc_TypeError, "prepare() missing required argument 'function' (pos 1)");
         return NULL;
     }
-    if (!PyCallable_Check(func)) {
-        PyErr_SetString(PyExc_TypeError, "prepare() argument 'function' must be callable");
+    if (pytealet_prepare_dispatch(mstate, target, current, mdata, func, NULL, "prepare()") < 0)
         return NULL;
-    }
 
-    Py_XSETREF(target->prepared_func, Py_NewRef(func));
     return Py_NewRef(self);
 }
 
@@ -914,6 +936,7 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
 
     /* Any explicit run consumes a previously prepared callable. */
     Py_CLEAR(target->prepared_func);
+    target->prepared_cfunc = NULL;
 
     return pytealet_run_dispatch(mstate, target, current, mdata, func, farg, NULL);
 }
@@ -980,9 +1003,10 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     if (CheckTarget(mstate, target, current, "switch()"))
         return NULL;
 
-    if ((target->state == STATE_NEW || target->state == STATE_STUB) && target->prepared_func) {
+    if ((target->state == STATE_NEW || target->state == STATE_STUB) &&
+        (target->prepared_func || target->prepared_cfunc)) {
         PyObject *prepared_func;
-        PyObject *run_args[2];
+        PyTealetApi_RunCFunc prepared_cfunc;
         PyObject *run_result;
 
         if (switch_flags & TEALET_XFER_PANIC) {
@@ -991,13 +1015,17 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
         }
 
         prepared_func = target->prepared_func;
+        prepared_cfunc = target->prepared_cfunc;
         target->prepared_func = NULL; /* transfer ownership to the new tealet */
-        
-        run_args[0] = prepared_func;
-        run_args[1] = pyarg;
-        run_result = pytealet_run(self, defining_class, run_args, 2, NULL);
+        target->prepared_cfunc = NULL;
 
-        Py_DECREF(prepared_func);
+        if (prepared_func) {
+            run_result = pytealet_run_dispatch(mstate, target, current, mdata, prepared_func, pyarg, NULL);
+            Py_DECREF(prepared_func);
+        } else {
+            run_result = pytealet_run_dispatch(mstate, target, current, mdata, NULL, pyarg, prepared_cfunc);
+        }
+
         return run_result;
     }
 
@@ -1094,47 +1122,35 @@ PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_ob
     return pytealet_duplicate(source_obj, mstate->tealet_type, NULL, 0, NULL);
 }
 
-/* Minimal run entrypoint for external C clients via the _tealet capsule API.
- * This keeps validation and exception behavior aligned with the Python run()
- * method by reusing the same internal implementation.
- */
-PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func, PyObject *arg) {
-    PyObject *argv[2];
-    Py_ssize_t nargs;
+int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
+                        PyTealetApi_RunCFunc cfunc) {
+    PyTealetObject *target;
+    PyTealetObject *current;
+    PyTealetMainData *mdata;
 
     if (!mstate || !mstate->tealet_type) {
         PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
-        return NULL;
+        return -1;
     }
     if (!target_obj) {
         PyErr_SetString(PyExc_TypeError, "target must not be NULL");
-        return NULL;
+        return -1;
     }
     if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
         PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
-        return NULL;
-    }
-    if (!func) {
-        PyErr_SetString(PyExc_TypeError, "function must not be NULL");
-        return NULL;
+        return -1;
     }
 
-    argv[0] = func;
-    nargs = 1;
-    if (arg) {
-        argv[1] = arg;
-        nargs = 2;
-    }
-
-    return pytealet_run(target_obj, Py_TYPE(target_obj), argv, nargs, NULL);
+    target = (PyTealetObject *)target_obj;
+    current = TryGetCurrent(mstate, &mdata);
+    return pytealet_prepare_dispatch(mstate, target, current, mdata, func, cfunc, "prepare()");
 }
 
-/* Native C callback run entrypoint for external C clients.
- * The callback receives (current_tealet, arg) and returns the same worker
- * result contract as Python run callables.
+/* Unified run entrypoint for external C clients via the _tealet capsule API.
+ * Accepts exactly one callable mode: a Python callable or a native C callback.
  */
-PyObject *PyTealetApi_RunC(PyTealetModuleState *mstate, PyObject *target_obj, PyTealetApi_RunCFunc func,
-                           PyObject *arg) {
+PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
+                          PyTealetApi_RunCFunc cfunc, PyObject *arg) {
     PyTealetObject *target;
     PyTealetObject *current;
     PyTealetMainData *mdata;
@@ -1151,8 +1167,12 @@ PyObject *PyTealetApi_RunC(PyTealetModuleState *mstate, PyObject *target_obj, Py
         PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
         return NULL;
     }
-    if (!func) {
-        PyErr_SetString(PyExc_TypeError, "function must not be NULL");
+    if ((func == NULL) == (cfunc == NULL)) {
+        PyErr_SetString(PyExc_TypeError, "exactly one of python callable or C callable is required");
+        return NULL;
+    }
+    if (func != NULL && !PyCallable_Check(func)) {
+        PyErr_SetString(PyExc_TypeError, "function must be callable");
         return NULL;
     }
 
@@ -1160,7 +1180,7 @@ PyObject *PyTealetApi_RunC(PyTealetModuleState *mstate, PyObject *target_obj, Py
     current = TryGetCurrent(mstate, &mdata);
     if (mdata)
         mdata->last_error_remote = 0;
-    if (CheckTarget(mstate, target, current, "run_c()"))
+    if (CheckTarget(mstate, target, current, "run()"))
         return NULL;
 
     if (target->state != STATE_NEW && target->state != STATE_STUB) {
@@ -1171,7 +1191,11 @@ PyObject *PyTealetApi_RunC(PyTealetModuleState *mstate, PyObject *target_obj, Py
     if (!arg)
         arg = Py_None;
 
-    return pytealet_run_dispatch(mstate, target, current, mdata, NULL, arg, func);
+    /* Any explicit run consumes a previously prepared callable. */
+    Py_CLEAR(target->prepared_func);
+    target->prepared_cfunc = NULL;
+
+    return pytealet_run_dispatch(mstate, target, current, mdata, func, arg, cfunc);
 }
 
 /* Minimal switch entrypoint for external C clients via the _tealet capsule API.
@@ -1419,6 +1443,7 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
          * exception gets raised even before running it.
          */
         target->prepared_func = NULL;
+        target->prepared_cfunc = NULL;
         run_result = pytealet_run(self, defining_class, NULL, 0, NULL);
         Py_XDECREF(prepared_func);
         return run_result;

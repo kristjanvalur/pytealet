@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 
-#define PYTEALET_CAPI_ABI_VERSION 1u
+#define PYTEALET_CAPI_ABI_VERSION 2u
 #define PYTEALET_CAPI_CAPSULE_NAME "_tealet._C_API"
 
 /* Feature flags published in PyTealet_CAPI.feature_flags. */
@@ -50,11 +50,17 @@ typedef struct PyTealet_CAPI {
     /* Equivalent to target.stub(). */
     int (*stub)(PyTealet_CAPI_Context *ctx, PyObject *target);
 
-    /* Equivalent to target.run(function) or target.run(function, arg). */
-    PyObject *(*run)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function, PyObject *arg);
+    /* Equivalent to target.prepare(function), but accepts exactly one callable mode.
+     * Provide either function_py or function_c (not both). Returns 0 on success, -1 on error.
+     */
+    int (*prepare)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function_py,
+                   PyTealetApi_RunCFunc function_c);
 
-    /* Equivalent to run but dispatches a native C callback instead of a Python callable. */
-    PyObject *(*run_c)(PyTealet_CAPI_Context *ctx, PyObject *target, PyTealetApi_RunCFunc function, PyObject *arg);
+    /* Equivalent to target.run(...), with unified callable mode.
+     * Provide either function_py or function_c (not both).
+     */
+    PyObject *(*run)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function_py,
+                     PyTealetApi_RunCFunc function_c, PyObject *arg);
 
     /* Equivalent to target.switch(arg) if arg != NULL, else target.switch(). */
     PyObject *(*switch_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg);

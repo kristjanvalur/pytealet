@@ -78,14 +78,14 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (PyDict_SetItemString(d, "has_stub",
                              PyBool_FromLong(state->api->stub != NULL)) < 0)
         goto error;
+    if (PyDict_SetItemString(d, "has_prepare",
+                             PyBool_FromLong(state->api->prepare != NULL)) < 0)
+        goto error;
     if (PyDict_SetItemString(d, "has_duplicate",
                              PyBool_FromLong(state->api->duplicate != NULL)) < 0)
         goto error;
     if (PyDict_SetItemString(d, "has_run",
                              PyBool_FromLong(state->api->run != NULL)) < 0)
-        goto error;
-    if (PyDict_SetItemString(d, "has_run_c",
-                             PyBool_FromLong(state->api->run_c != NULL)) < 0)
         goto error;
     if (PyDict_SetItemString(d, "has_switch",
                              PyBool_FromLong(state->api->switch_ != NULL)) < 0)
@@ -187,7 +187,34 @@ static PyObject *client_capi_run(PyObject *module, PyObject *args) {
     if (nargs == 3)
         arg = PyTuple_GET_ITEM(args, 2);
 
-    return state->api->run(state->ctx, target, func, arg);
+    return state->api->run(state->ctx, target, func, NULL, arg);
+}
+
+static PyObject *client_capi_prepare(PyObject *module, PyObject *args) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    Py_ssize_t nargs;
+    PyObject *target;
+    PyObject *func;
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    nargs = PyTuple_GET_SIZE(args);
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError, "capi_prepare() takes exactly 2 positional arguments");
+        return NULL;
+    }
+
+    target = PyTuple_GET_ITEM(args, 0);
+    func = PyTuple_GET_ITEM(args, 1);
+
+    rc = state->api->prepare(state->ctx, target, func, NULL);
+    if (rc < 0)
+        return NULL;
+    Py_RETURN_NONE;
 }
 
 static PyObject *client_capi_stub(PyObject *module, PyObject *target) {
@@ -289,7 +316,22 @@ static PyObject *client_capi_run_c(PyObject *module, PyObject *args) {
     if (nargs == 2)
         arg = PyTuple_GET_ITEM(args, 1);
 
-    return state->api->run_c(state->ctx, target, client_run_c_callback, arg);
+    return state->api->run(state->ctx, target, NULL, client_run_c_callback, arg);
+}
+
+static PyObject *client_capi_prepare_c(PyObject *module, PyObject *target) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    rc = state->api->prepare(state->ctx, target, NULL, client_run_c_callback);
+    if (rc < 0)
+        return NULL;
+    Py_RETURN_NONE;
 }
 
 static PyMethodDef client_methods[] = {
@@ -304,6 +346,10 @@ static PyMethodDef client_methods[] = {
      "Stub a tealet using the imported C API."},
     {"capi_duplicate", (PyCFunction)client_capi_duplicate, METH_O,
      "Duplicate a tealet using the imported C API."},
+    {"capi_prepare", (PyCFunction)client_capi_prepare, METH_VARARGS,
+     "Prepare a tealet with a Python callable using the imported C API."},
+    {"capi_prepare_c", (PyCFunction)client_capi_prepare_c, METH_O,
+     "Prepare a tealet with a native C callback using the imported C API."},
     {"capi_run", (PyCFunction)client_capi_run, METH_VARARGS,
      "Run a tealet using the imported C API."},
     {"capi_run_c", (PyCFunction)client_capi_run_c, METH_VARARGS,
@@ -342,7 +388,7 @@ static int client_exec(PyObject *module) {
 
     if (!state->api->ctx_new || !state->api->ctx_free || !state->api->current || !state->api->main ||
         !state->api->thread_sweep || !state->api->check_tealet || !state->api->create || !state->api->duplicate ||
-        !state->api->stub || !state->api->run || !state->api->run_c || !state->api->switch_) {
+        !state->api->stub || !state->api->prepare || !state->api->run || !state->api->switch_) {
         PyErr_SetString(PyExc_ImportError, "pytealet C API missing required functions");
         return -1;
     }
