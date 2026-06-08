@@ -99,6 +99,9 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (PyDict_SetItemString(d, "has_thread_reap",
                              PyBool_FromLong(state->api->thread_reap != NULL)) < 0)
         goto error;
+    if (PyDict_SetItemString(d, "has_thread_sweep",
+                             PyBool_FromLong(state->api->thread_sweep != NULL)) < 0)
+        goto error;
     if (PyDict_SetItemString(d, "has_thread_active",
                              PyBool_FromLong(state->api->thread_active != NULL)) < 0)
         goto error;
@@ -344,6 +347,17 @@ static PyObject *client_capi_thread_reap(PyObject *module, PyObject *args) {
         return NULL;
 
     return state->api->thread_reap(state->ctx, cleanup_passes, kill_exc);
+}
+
+static PyObject *client_capi_thread_sweep(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetCapiClientState *state = client_get_state(module);
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    return state->api->thread_sweep(state->ctx);
 }
 
 static PyObject *client_capi_thread_active(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
@@ -652,6 +666,8 @@ static PyMethodDef client_methods[] = {
      "Set pending exception on a target tealet via imported C API."},
     {"capi_thread_reap", (PyCFunction)client_capi_thread_reap, METH_VARARGS,
      "Run thread_reap via imported C API."},
+    {"capi_thread_sweep", (PyCFunction)client_capi_thread_sweep, METH_NOARGS,
+     "Run thread_sweep via imported C API."},
     {"capi_thread_active", (PyCFunction)client_capi_thread_active, METH_NOARGS,
      "List active wrappers via imported C API."},
     {"capi_thread_kill", (PyCFunction)client_capi_thread_kill, METH_VARARGS,

@@ -48,44 +48,43 @@ Design a stable parallel C API architecture that tracks the meaningful Python AP
 - ctx_new/ctx_free
 - current
 - main
+- previous
+- thread_active
+- thread_kill
+- thread_reap
 - thread_sweep
+- error_was_remote
+- frame_introspection_get/frame_introspection_set
 - check_tealet
 - create
 - duplicate
 - stub
 - prepare (py or c callable mode)
 - run (py or c callable mode)
-- switch_ (arg only; planned to change to arg+flags with panic flag bit)
+- switch_(target, arg, flags)
+- throw_(target, exception, flags)
+- set_exception(target, exception, fallback)
+- is_foreign(target)
+- state_get(target, state_out)
+- thread_id_get(target, thread_id_out)
 
 ## Gap Analysis
 
-### Missing C API coverage (high confidence)
+### Closed parity gaps
 
-1. Thread lifecycle/control:
-- thread_reap
-- thread_active
-- thread_kill
+Implemented in current capsule API:
+- Thread lifecycle/control: thread_active/thread_kill/thread_reap/thread_sweep
+- Exception injection: set_exception and throw_ with flags
+- Diagnostics/control knobs: error_was_remote and frame_introspection get/set
+- Module traversal parity: previous()
+- Execution flags: switch_ now uses flags (including panic)
+- Metadata helpers: is_foreign/state_get/thread_id_get
 
-2. Exception-injection control plane:
-- set_exception
-- throw (flags-aware primitive)
+### Remaining intentional non-parity
 
-3. Diagnostics/control knobs:
-- error_was_remote
-- frame_introspection get/set
-
-4. Module-level traversal parity:
-- previous()
-
-5. Switch ABI shape mismatch:
-- Python switch supports panic keyword.
-- C API switch_ should move to a bitflags parameter (starting with panic) instead
-  of adding parallel entrypoints.
-
-6. Introspection helpers and object metadata:
-- is_foreign
-- state getter
-- thread_id getter
+- hide_frame remains Python-only.
+- Method-style tealet.current()/main()/previous() remain Python conveniences.
+- Frame/context property manipulation remains Python-level (direct C API surface deferred).
 
 Note:
 - Method-style tealet.current(), tealet.previous(), and tealet.main() are treated as
@@ -137,51 +136,18 @@ Rationale:
 
 ## Parity Strategy
 
-### Tier 1: Core control-plane parity (recommended next)
+### Implemented parity tiers
 
-Add to capsule API:
-- set_exception(target, exception, fallback)
-- throw(target, exception, flags)
-- thread_reap(cleanup_passes, kill_exc)
-- thread_active()
-- thread_kill(cleanup_passes, kill_exc)
-- error_was_remote()
+- Tier 1 (control plane) is implemented.
+- Tier 2 (switch flags) is implemented.
+- Tier 3 (metadata helpers) is implemented.
 
-Rationale:
-- These are operationally important.
-- They close major capability gaps for non-Python schedulers.
+### Current strategy focus
 
-### Tier 2: Execution option parity
-
-Change current switch_ C API to take bitflags:
-- switch_(target, arg, flags)
-
-Define the first flag now:
-- PYTEALET_SWITCH_PANIC = (1u << 0)
-
-Flag model/source:
-- Model switch_ flags on libtealet switch flags.
-- Keep naming and bit positions aligned where practical to reduce translation
-  friction and preserve conceptual parity with the underlying runtime.
-
-Rationale:
-- Preserves a single switching entrypoint.
-- Keeps ABI extensible without function proliferation.
-- Aligns cleanly with Python's panic keyword semantics.
-
-### Tier 3: Introspection and metadata
-
-Add optional helpers:
-- is_foreign(target)
-- get_state(target)
-- get_thread_id(target)
-
-Rationale:
-- Useful but less critical for scheduler correctness.
-
-Deferred:
-- Frame and context helpers are deferred from the C API for now; expected usage
-  is primarily through Python-level interfaces.
+- Keep Python and C wrappers aligned on shared dispatch/impl blocks.
+- Continue negative testing for unknown flags and type misuse.
+- Keep deferred frame/context C API exposure out of scope unless a concrete
+  downstream need appears.
 
 ## ABI and Layout Plan
 
@@ -189,8 +155,10 @@ Deferred:
 - Keep PYTEALET_CAPI_ABI_VERSION at 1 for now (pre-release; no external ABI
   commitment yet).
 - Reset any in-progress higher version markers back to 1.
-- Continue using append-only table growth and avoid slot reordering while we
-  converge on first-release shape.
+- Until 0.1.0 is published, ABI layout may evolve (including slot reordering)
+  while we converge on the first stable shape.
+- Once 0.1.0 is published, freeze slot order and use append-only table growth
+  for compatible ABI evolution.
 
 2. Runtime code layout policy:
 - Keep operation-local grouping in pytealet.c:
@@ -226,7 +194,9 @@ Implementation harmony checklist (per new API slice):
 1. Add or update shared impl/dispatch in pytealet.c first.
 2. Wire Python wrapper to that impl.
 3. Wire capsule C API wrapper/forwarder to the same impl.
-4. Update pytealet_capi.h signatures/constants and keep append-only table growth.
+4. Update pytealet_capi.h signatures/constants and keep header/table ordering in
+   lockstep.
+  (Pre-0.1.0: table/struct reordering is allowed while ABI is unreleased.)
 5. Add capi_client coverage and parity tests in the same change.
 6. Keep operation-local code grouping so each feature is reviewable end-to-end.
 
@@ -249,20 +219,17 @@ Practical review gates:
 - panic mode (after switch_ flags)
 3. Add negative tests for bad argument/type cases and remote-error flag semantics.
 
-## Open Decisions to Resolve Before Implementation
+## Open Decisions
 
-1. Confirm exact throw flags surface (e.g. throw-specific flags type vs shared switch-style flags typedef).
-2. Confirm the exact switch flags typedef/width (e.g. uint32_t) and constant naming in public headers.
-3. Should module-level helpers beyond thread_sweep be guaranteed stable in ABI, or gated by feature flags first?
-
-Resolved scope decisions:
+Resolved decisions:
+- Throw and switch use uint32_t flags with explicit public constants.
+- Module-level helpers beyond thread_sweep are part of the current pre-0.1.0
+  surface and may still evolve until release freeze.
 - No future need to expose method-style tealet.current()/main()/previous() in the C API.
 - Frame/context C API exposure is deferred.
 
-## Recommended Next Implementation Slice
+## Recommended Next Slice
 
-1. Add Tier 1 APIs (set_exception, thread_reap, thread_active, thread_kill, error_was_remote).
-2. Add throw(target, exception, flags) as a core primitive and document set_exception as return-path specific.
-3. Change switch_ to take libtealet-modeled flags and define PYTEALET_SWITCH_PANIC as the first bit.
-4. Update pytealet_capi.h, pytealet_module.c table forwarders, and capi client tests in one atomic change.
-5. Defer hide_frame and deep frame-introspection API to a separate design note.
+1. Keep parity tests in sync with every struct/table reorder (header + module table + capi client assertions).
+2. Expand thread_sweep behavior coverage with a dead-thread scenario fixture (not just availability/parity checks).
+3. Decide and document the 0.1.0 freeze criteria for C API ordering and feature guarantees.

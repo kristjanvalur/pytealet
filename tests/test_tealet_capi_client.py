@@ -19,6 +19,7 @@ def test_capi_client_api_info():
     assert info["has_throw"] is True
     assert info["has_set_exception"] is True
     assert info["has_thread_reap"] is True
+    assert info["has_thread_sweep"] is True
     assert info["has_thread_active"] is True
     assert info["has_thread_kill"] is True
     assert info["has_error_was_remote"] is True
@@ -149,6 +150,10 @@ def test_capi_client_thread_kill_empty_when_no_active():
 
 def test_capi_client_thread_reap_empty_idempotent():
     assert _tealet_capi_client.capi_thread_reap() == []
+
+
+def test_capi_client_thread_sweep_matches_module_api():
+    assert _tealet_capi_client.capi_thread_sweep() == _tealet.thread_sweep()
 
 
 def test_capi_client_error_was_remote_matches_module_flag():
