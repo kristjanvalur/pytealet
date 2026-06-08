@@ -97,6 +97,23 @@ _tealet.frame_introspection(False)           # disable dormant-frame capture
 
 Compile-time capability is exposed as `_tealet.PYTEALET_WITH_PENDING_FRAME_INTROSPECTION`.
 
+### Building Third-Party Extensions Against Tealet C API
+
+The package installs a public C API header and exposes an include-path helper:
+
+```python
+import tealet
+
+include_dir = tealet.get_include()
+```
+
+The public header is:
+
+- `pytealet_capi.h`
+
+Client extensions should include this header at build time and import the
+runtime capsule using `PyTealetApi_Import()`.
+
 ### Building the C Extension
 
 The C extension (`_tealet`) links against pre-built libtealet libraries from the vendored release archive. It depends on:
