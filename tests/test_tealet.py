@@ -1078,6 +1078,23 @@ class TestPrepare:
         assert seen == [("direct", "r")]
         assert t.state == _tealet.STATE_EXIT
 
+    def test_prepare_cycle_is_collectable_by_gc(self):
+        t = _tealet.tealet()
+
+        def worker(current, arg, _t=t):
+            return current.main(), arg
+
+        t.prepare(worker)
+        ref = weakref.ref(t)
+
+        del worker
+        del t
+
+        gc.collect()
+        gc.collect()
+
+        assert ref() is None
+
 class TestStatus:
     def test_status_run(self):
         t = _tealet.current()

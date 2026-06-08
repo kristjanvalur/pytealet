@@ -119,6 +119,9 @@ void PyTealetTstate_Duplicate(PyTealetTstate *dst, const PyTealetTstate *src);
 /* drop the thread state, e.g. on error or when cleaning up */
 void PyTealetTstate_Drop(PyTealetTstate *dst, tealet_t *dustbin_tealet, int with_context);
 
+/* Visit GC-relevant references held by saved thread state. */
+int PyTealetTstate_Visit(const PyTealetTstate *saved, visitproc visit, void *arg);
+
 /* save the current thread state into the tealet state */
 void PyTealetTstate_Save(PyTealetTstate *dst, PyThreadState *src);
 

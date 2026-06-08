@@ -989,8 +989,35 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
     return pytealet_new_impl(subtype, args, kwds, 0);
 }
 
+static int pytealet_traverse(PyObject *obj, visitproc visit, void *arg) {
+    PyTealetObject *tealet = (PyTealetObject *)obj;
+    int visit_rc;
+
+    Py_VISIT(tealet->domain_lock_obj);
+    Py_VISIT(tealet->tracking_ref);
+    Py_VISIT(tealet->prepared_func);
+
+    visit_rc = PyTealetTstate_Visit(&tealet->tstate, visit, arg);
+    if (visit_rc)
+        return visit_rc;
+    visit_rc = PyTealetFrameInfo_Visit(&tealet->frame_info, visit, arg);
+    if (visit_rc)
+        return visit_rc;
+    return 0;
+}
+
+static int pytealet_clear(PyObject *obj) {
+    /* tracking-ref is cleared in the dealloc it isn't part of the GC cycle */
+    PyTealetObject *tealet = (PyTealetObject *)obj;
+    Py_CLEAR(tealet->prepared_func);
+    PyTealetTstate_Drop(&tealet->tstate, NULL, 1);
+    PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
+    return 0;
+}
+
 static void pytealet_dealloc(PyObject *obj) {
     PyTealetObject *tealet = (PyTealetObject *)obj;
+    PyObject_GC_UnTrack(obj);
     /* warn if we have an active tealet that is not a stub */
     if (tealet->tealet && tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE && tealet->state != STATE_STUB) {
         int err = PyErr_WarnEx(PyExc_RuntimeWarning, "freeing an active tealet leaks memory", 1);
@@ -1001,14 +1028,12 @@ static void pytealet_dealloc(PyObject *obj) {
     pytealet_untrack_wrapper(tealet, 0);
     tealet->inflight_throw_token = 0;
     PyObject_ClearWeakRefs(obj);
-    /* Release any owned saved thread-state references */
-    PyTealetTstate_Drop(&tealet->tstate, NULL, 1);
-    PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
+    /* Release GC-managed references. */
+    (void)pytealet_clear(obj);
     PyTealetFrameInfo_Fini(&tealet->frame_info);
     if (tealet->tealet)
         tealet_delete(tealet->tealet);
     Py_CLEAR(tealet->domain_lock_obj);
-    Py_CLEAR(tealet->prepared_func);
     Py_TYPE(obj)->tp_free(obj);
 }
 
@@ -1947,6 +1972,8 @@ static struct PyGetSetDef pytealet_getset[] = {
 #pragma GCC diagnostic ignored "-Wpedantic"
 #endif
 static PyType_Slot pytealet_type_slots[] = {{Py_tp_dealloc, pytealet_dealloc},
+                                            {Py_tp_traverse, pytealet_traverse},
+                                            {Py_tp_clear, pytealet_clear},
                                             {Py_tp_methods, pytealet_methods},
                                             {Py_tp_getset, pytealet_getset},
                                             {Py_tp_new, pytealet_new},
@@ -1956,7 +1983,7 @@ static PyType_Slot pytealet_type_slots[] = {{Py_tp_dealloc, pytealet_dealloc},
 #endif
 
 PyType_Spec pytealet_type_spec = {"_tealet.tealet", sizeof(PyTealetObject), 0,
-                                  Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE
+                                  Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC
 #if defined(Py312P)
                                       | Py_TPFLAGS_MANAGED_WEAKREF
 #endif
