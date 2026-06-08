@@ -88,6 +88,13 @@ typedef struct PyTealet_CAPI {
     /* Returns 0/1 for False/True, -1 on error. */
     int (*error_was_remote)(PyTealet_CAPI_Context *ctx);
 
+    /* Module-level traversal helper: equivalent to _tealet.previous(). */
+    PyObject *(*previous)(PyTealet_CAPI_Context *ctx);
+
+    /* Frame introspection control: 0/1 for False/True, -1 on error. */
+    int (*frame_introspection_get)(PyTealet_CAPI_Context *ctx);
+    int (*frame_introspection_set)(PyTealet_CAPI_Context *ctx, int enabled);
+
     void *reserved[16];
 } PyTealet_CAPI;
 

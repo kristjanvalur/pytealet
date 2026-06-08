@@ -108,6 +108,15 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (PyDict_SetItemString(d, "has_error_was_remote",
                              PyBool_FromLong(state->api->error_was_remote != NULL)) < 0)
         goto error;
+    if (PyDict_SetItemString(d, "has_previous",
+                             PyBool_FromLong(state->api->previous != NULL)) < 0)
+        goto error;
+    if (PyDict_SetItemString(d, "has_frame_introspection_get",
+                             PyBool_FromLong(state->api->frame_introspection_get != NULL)) < 0)
+        goto error;
+    if (PyDict_SetItemString(d, "has_frame_introspection_set",
+                             PyBool_FromLong(state->api->frame_introspection_set != NULL)) < 0)
+        goto error;
 
     return d;
 
@@ -371,6 +380,52 @@ static PyObject *client_capi_error_was_remote(PyObject *module, PyObject *Py_UNU
     return PyBool_FromLong(rc != 0);
 }
 
+static PyObject *client_capi_previous(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetCapiClientState *state = client_get_state(module);
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    return state->api->previous(state->ctx);
+}
+
+static PyObject *client_capi_frame_introspection(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    rc = state->api->frame_introspection_get(state->ctx);
+    if (rc < 0)
+        return NULL;
+    return PyBool_FromLong(rc != 0);
+}
+
+static PyObject *client_capi_frame_introspection_set(PyObject *module, PyObject *enabled_obj) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    int enabled;
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    enabled = PyObject_IsTrue(enabled_obj);
+    if (enabled < 0)
+        return NULL;
+
+    rc = state->api->frame_introspection_set(state->ctx, enabled);
+    if (rc < 0)
+        return NULL;
+    return PyBool_FromLong(rc != 0);
+}
+
 static PyObject *client_capi_prepare(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
     Py_ssize_t nargs;
@@ -551,6 +606,12 @@ static PyMethodDef client_methods[] = {
      "Run thread_kill via imported C API."},
     {"capi_error_was_remote", (PyCFunction)client_capi_error_was_remote, METH_NOARGS,
      "Return error_was_remote via imported C API."},
+    {"capi_previous", (PyCFunction)client_capi_previous, METH_NOARGS,
+     "Return module-level previous() via imported C API."},
+    {"capi_frame_introspection", (PyCFunction)client_capi_frame_introspection, METH_NOARGS,
+     "Return frame introspection setting via imported C API."},
+    {"capi_frame_introspection_set", (PyCFunction)client_capi_frame_introspection_set, METH_O,
+     "Set frame introspection setting via imported C API."},
     {NULL, NULL, 0, NULL},
 };
 
@@ -585,7 +646,8 @@ static int client_exec(PyObject *module) {
         !state->api->thread_sweep || !state->api->check_tealet || !state->api->create || !state->api->duplicate ||
         !state->api->stub || !state->api->prepare || !state->api->run || !state->api->switch_ ||
         !state->api->throw_ || !state->api->set_exception || !state->api->thread_reap ||
-        !state->api->thread_active || !state->api->thread_kill || !state->api->error_was_remote) {
+        !state->api->thread_active || !state->api->thread_kill || !state->api->error_was_remote ||
+        !state->api->previous || !state->api->frame_introspection_get || !state->api->frame_introspection_set) {
         PyErr_SetString(PyExc_ImportError, "pytealet C API missing required functions");
         return -1;
     }

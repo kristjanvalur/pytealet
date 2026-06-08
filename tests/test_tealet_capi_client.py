@@ -22,6 +22,9 @@ def test_capi_client_api_info():
     assert info["has_thread_active"] is True
     assert info["has_thread_kill"] is True
     assert info["has_error_was_remote"] is True
+    assert info["has_previous"] is True
+    assert info["has_frame_introspection_get"] is True
+    assert info["has_frame_introspection_set"] is True
 
 
 def test_capi_client_current_is_main():
@@ -147,6 +150,36 @@ def test_capi_client_thread_reap_empty_idempotent():
 
 def test_capi_client_error_was_remote_matches_module_flag():
     assert _tealet_capi_client.capi_error_was_remote() is _tealet.error_was_remote()
+
+
+def test_capi_client_previous_matches_python_api():
+    def parked(current, _arg):
+        return current.main(), (_tealet.previous(), _tealet_capi_client.capi_previous(), current.previous())
+
+    module_prev, capi_prev, method_prev = _tealet.tealet().run(parked, None)
+
+    assert module_prev == _tealet.main()
+    assert capi_prev == _tealet.main()
+    assert method_prev == _tealet.main()
+
+
+def test_capi_client_frame_introspection_toggle():
+    compiled = bool(getattr(_tealet, "PYTEALET_WITH_PENDING_FRAME_INTROSPECTION", 1))
+    original = _tealet_capi_client.capi_frame_introspection()
+
+    assert isinstance(original, bool)
+
+    try:
+        assert _tealet_capi_client.capi_frame_introspection_set(False) is False
+        assert _tealet.frame_introspection() is False
+        if compiled:
+            assert _tealet_capi_client.capi_frame_introspection_set(True) is True
+            assert _tealet.frame_introspection() is True
+        else:
+            with pytest.raises(RuntimeError):
+                _tealet_capi_client.capi_frame_introspection_set(True)
+    finally:
+        _tealet_capi_client.capi_frame_introspection_set(original)
 
 
 def test_capi_client_run_c_forwarding():

@@ -40,6 +40,9 @@ PyObject *PyTealetApi_ThreadReap(PyTealetModuleState *mstate, Py_ssize_t cleanup
 PyObject *PyTealetApi_ThreadActive(PyTealetModuleState *mstate);
 PyObject *PyTealetApi_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
 int PyTealetApi_ErrorWasRemote(PyTealetModuleState *mstate);
+PyObject *PyTealetApi_Previous(PyTealetModuleState *mstate);
+int PyTealetApi_FrameIntrospectionGet(PyTealetModuleState *mstate);
+int PyTealetApi_FrameIntrospectionSet(PyTealetModuleState *mstate, int enabled);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);
 #endif

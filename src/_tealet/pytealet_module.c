@@ -350,6 +350,27 @@ static int PyTealetApi_ErrorWasRemoteForward(PyTealet_CAPI_Context *ctx) {
     return PyTealetApi_ErrorWasRemote(mstate);
 }
 
+static PyObject *PyTealetApi_PreviousForward(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_Previous(mstate);
+}
+
+static int PyTealetApi_FrameIntrospectionGetForward(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_FrameIntrospectionGet(mstate);
+}
+
+static int PyTealetApi_FrameIntrospectionSetForward(PyTealet_CAPI_Context *ctx, int enabled) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_FrameIntrospectionSet(mstate, enabled);
+}
+
 static const PyTealet_CAPI pytealet_capi_table = {
     PYTEALET_CAPI_ABI_VERSION,
     sizeof(PyTealet_CAPI),
@@ -376,6 +397,9 @@ static const PyTealet_CAPI pytealet_capi_table = {
     PyTealetApi_ThreadActiveForward,
     PyTealetApi_ThreadKillForward,
     PyTealetApi_ErrorWasRemoteForward,
+    PyTealetApi_PreviousForward,
+    PyTealetApi_FrameIntrospectionGetForward,
+    PyTealetApi_FrameIntrospectionSetForward,
     {NULL},
 };
 
@@ -411,25 +435,8 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
 
 static PyObject *module_previous(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     PyTealetModuleState *mstate;
-    PyObject *current_obj;
-    PyObject *previous_method;
-    PyObject *result;
-
     GET_MODULE_STATE(mod, mstate);
-
-    /* Reuse tealet.previous() semantics so ownership/thread checks stay aligned. */
-    current_obj = Py_XNewRef((PyObject *)PyTealet_GetOrCreateCurrent(mstate, NULL));
-    if (!current_obj)
-        return NULL;
-
-    previous_method = PyObject_GetAttrString(current_obj, "previous");
-    Py_DECREF(current_obj);
-    if (!previous_method)
-        return NULL;
-
-    result = PyObject_CallNoArgs(previous_method);
-    Py_DECREF(previous_method);
-    return result;
+    return PyTealetApi_Previous(mstate);
 }
 
 static PyObject *module_thread_reap(PyObject *mod, PyObject *args) {
@@ -552,12 +559,17 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
     PyTealetModuleState *mstate;
     Py_ssize_t nargs;
     int enabled;
+    int rc;
 
     GET_MODULE_STATE(mod, mstate);
 
     nargs = args ? PyTuple_GET_SIZE(args) : 0;
-    if (nargs == 0)
-        return PyBool_FromLong(mstate->frame_introspection_enabled != 0);
+    if (nargs == 0) {
+        rc = PyTealetApi_FrameIntrospectionGet(mstate);
+        if (rc < 0)
+            return NULL;
+        return PyBool_FromLong(rc != 0);
+    }
     if (nargs != 1) {
         PyErr_SetString(PyExc_TypeError, "frame_introspection() takes at most 1 argument");
         return NULL;
@@ -567,15 +579,10 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
     if (enabled < 0)
         return NULL;
 
-#if !PYTEALET_WITH_PENDING_FRAME_INTROSPECTION
-    if (enabled) {
-        PyErr_SetString(PyExc_RuntimeError, "pending frame introspection is compile-time disabled in this build");
+    rc = PyTealetApi_FrameIntrospectionSet(mstate, enabled);
+    if (rc < 0)
         return NULL;
-    }
-#endif
-
-    mstate->frame_introspection_enabled = enabled;
-    return PyBool_FromLong(mstate->frame_introspection_enabled != 0);
+    return PyBool_FromLong(rc != 0);
 }
 
 static PyMethodDef module_methods[] = {

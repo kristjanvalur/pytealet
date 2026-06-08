@@ -737,6 +737,21 @@ static PyObject *pytealet_previous(PyObject *self, PyTypeObject *defining_class,
     return prev;
 }
 
+PyObject *PyTealetApi_Previous(PyTealetModuleState *mstate) {
+    PyTealetObject *current;
+
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+
+    current = PyTealet_GetOrCreateCurrent(mstate, NULL);
+    if (!current)
+        return NULL;
+
+    return pytealet_previous((PyObject *)current, mstate->tealet_type, NULL, 0, NULL);
+}
+
 /* return the main tealet for this tealet lineage */
 static PyObject *pytealet_main_method(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                       Py_ssize_t nargs, PyObject *kwnames) {
@@ -2353,6 +2368,33 @@ int PyTealetApi_ErrorWasRemote(PyTealetModuleState *mstate) {
         return -1;
     }
     return PyTealet_ErrorWasRemote(mstate) ? 1 : 0;
+}
+
+int PyTealetApi_FrameIntrospectionGet(PyTealetModuleState *mstate) {
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return -1;
+    }
+    return mstate->frame_introspection_enabled != 0;
+}
+
+int PyTealetApi_FrameIntrospectionSet(PyTealetModuleState *mstate, int enabled) {
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return -1;
+    }
+
+    enabled = enabled ? 1 : 0;
+
+#if !PYTEALET_WITH_PENDING_FRAME_INTROSPECTION
+    if (enabled) {
+        PyErr_SetString(PyExc_RuntimeError, "pending frame introspection is compile-time disabled in this build");
+        return -1;
+    }
+#endif
+
+    mstate->frame_introspection_enabled = enabled;
+    return mstate->frame_introspection_enabled != 0;
 }
 
 /* Raise a structured thread-mismatch exception that includes owner metadata.
