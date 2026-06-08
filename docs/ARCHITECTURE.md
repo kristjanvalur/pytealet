@@ -131,7 +131,7 @@ Convenience API that combines injection and transfer.
     exception is delivered before worker-call dispatch.
 
 ```python
-tealet.belongs_to_current() -> bool
+tealet.is_foreign() -> bool
 ```
 Returns whether this tealet object belongs to the current thread.
 

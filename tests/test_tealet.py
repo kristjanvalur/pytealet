@@ -773,10 +773,10 @@ class TestTealetContext:
 
 
 class TestThreadOwnership:
-    def test_new_tealet_has_owner_tid_and_belongs(self):
+    def test_new_tealet_has_owner_tid_and_not_foreign(self):
         t = _tealet.tealet()
         assert t.thread_id == _tealet.current().thread_id
-        assert t.belongs_to_current() is True
+        assert t.is_foreign() is False
 
     def test_stub_rejected_from_foreign_thread(self):
         data = {}
@@ -872,7 +872,7 @@ class TestThreadOwnership:
             assert data["owner_tid"] != _tealet.current().thread_id
             dup = data["stub"].duplicate()
             assert dup.thread_id == data["owner_tid"]
-            assert dup.belongs_to_current() is False
+            assert dup.is_foreign() is True
             with pytest.raises(_tealet.ThreadMismatchError):
                 dup.run(lambda current, arg: current.main(), None)
         finally:

@@ -773,15 +773,15 @@ static PyObject *pytealet_main_method(PyObject *self, PyTypeObject *defining_cla
     }
 }
 
-static PyObject *pytealet_belongs_to_current(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-                                             Py_ssize_t nargs, PyObject *kwnames) {
+static PyObject *pytealet_is_foreign(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                     Py_ssize_t nargs, PyObject *kwnames) {
     PyTealetObject *base = (PyTealetObject *)self;
     (void)defining_class;
     if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
-        PyErr_SetString(PyExc_TypeError, "belongs_to_current() takes no arguments");
+        PyErr_SetString(PyExc_TypeError, "is_foreign() takes no arguments");
         return NULL;
     }
-    return PyBool_FromLong(base->owner_tid == PyThread_get_thread_ident());
+    return PyBool_FromLong(base->owner_tid != PyThread_get_thread_ident());
 }
 
 static int pytealet_prepare_dispatch(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
@@ -1673,7 +1673,7 @@ static struct PyMethodDef pytealet_methods[] = {
     {"current", (PyCFunction)(void (*)(void))pytealet_current, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"previous", (PyCFunction)(void (*)(void))pytealet_previous, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"main", (PyCFunction)(void (*)(void))pytealet_main_method, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
-    {"belongs_to_current", (PyCFunction)(void (*)(void))pytealet_belongs_to_current,
+    {"is_foreign", (PyCFunction)(void (*)(void))pytealet_is_foreign,
      METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
         "prepare(function) -> tealet\n\n"
@@ -2397,7 +2397,7 @@ int PyTealetApi_FrameIntrospectionSet(PyTealetModuleState *mstate, int enabled) 
     return mstate->frame_introspection_enabled != 0;
 }
 
-int PyTealetApi_BelongsToCurrent(PyTealetModuleState *mstate, PyObject *target_obj) {
+int PyTealetApi_IsForeign(PyTealetModuleState *mstate, PyObject *target_obj) {
     PyTealetObject *target;
 
     if (!mstate || !mstate->tealet_type) {
@@ -2414,7 +2414,7 @@ int PyTealetApi_BelongsToCurrent(PyTealetModuleState *mstate, PyObject *target_o
     }
 
     target = (PyTealetObject *)target_obj;
-    return target->owner_tid == PyThread_get_thread_ident();
+    return target->owner_tid != PyThread_get_thread_ident();
 }
 
 int PyTealetApi_StateGet(PyTealetModuleState *mstate, PyObject *target_obj, int *state_out) {

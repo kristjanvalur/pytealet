@@ -117,8 +117,8 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (PyDict_SetItemString(d, "has_frame_introspection_set",
                              PyBool_FromLong(state->api->frame_introspection_set != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_belongs_to_current",
-                             PyBool_FromLong(state->api->belongs_to_current != NULL)) < 0)
+    if (PyDict_SetItemString(d, "has_is_foreign",
+                             PyBool_FromLong(state->api->is_foreign != NULL)) < 0)
         goto error;
     if (PyDict_SetItemString(d, "has_state_get",
                              PyBool_FromLong(state->api->state_get != NULL)) < 0)
@@ -435,7 +435,7 @@ static PyObject *client_capi_frame_introspection_set(PyObject *module, PyObject 
     return PyBool_FromLong(rc != 0);
 }
 
-static PyObject *client_capi_belongs_to_current(PyObject *module, PyObject *target) {
+static PyObject *client_capi_is_foreign(PyObject *module, PyObject *target) {
     PyTealetCapiClientState *state = client_get_state(module);
     int rc;
 
@@ -444,7 +444,7 @@ static PyObject *client_capi_belongs_to_current(PyObject *module, PyObject *targ
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    rc = state->api->belongs_to_current(state->ctx, target);
+    rc = state->api->is_foreign(state->ctx, target);
     if (rc < 0)
         return NULL;
     return PyBool_FromLong(rc != 0);
@@ -664,8 +664,8 @@ static PyMethodDef client_methods[] = {
      "Return frame introspection setting via imported C API."},
     {"capi_frame_introspection_set", (PyCFunction)client_capi_frame_introspection_set, METH_O,
      "Set frame introspection setting via imported C API."},
-    {"capi_belongs_to_current", (PyCFunction)client_capi_belongs_to_current, METH_O,
-     "Return whether target belongs to current thread via imported C API."},
+    {"capi_is_foreign", (PyCFunction)client_capi_is_foreign, METH_O,
+     "Return whether target is foreign to current thread via imported C API."},
     {"capi_state", (PyCFunction)client_capi_state, METH_O,
      "Return target state via imported C API."},
     {"capi_thread_id", (PyCFunction)client_capi_thread_id, METH_O,
@@ -706,7 +706,7 @@ static int client_exec(PyObject *module) {
         !state->api->throw_ || !state->api->set_exception || !state->api->thread_reap ||
         !state->api->thread_active || !state->api->thread_kill || !state->api->error_was_remote ||
         !state->api->previous || !state->api->frame_introspection_get || !state->api->frame_introspection_set ||
-        !state->api->belongs_to_current || !state->api->state_get || !state->api->thread_id_get) {
+        !state->api->is_foreign || !state->api->state_get || !state->api->thread_id_get) {
         PyErr_SetString(PyExc_ImportError, "pytealet C API missing required functions");
         return -1;
     }

@@ -25,7 +25,7 @@ def test_capi_client_api_info():
     assert info["has_previous"] is True
     assert info["has_frame_introspection_get"] is True
     assert info["has_frame_introspection_set"] is True
-    assert info["has_belongs_to_current"] is True
+    assert info["has_is_foreign"] is True
     assert info["has_state_get"] is True
     assert info["has_thread_id_get"] is True
 
@@ -188,14 +188,14 @@ def test_capi_client_frame_introspection_toggle():
 def test_capi_client_metadata_helpers_match_python_properties():
     t = _tealet.tealet()
 
-    assert _tealet_capi_client.capi_belongs_to_current(t) is True
+    assert _tealet_capi_client.capi_is_foreign(t) is False
     assert _tealet_capi_client.capi_state(t) == t.state
     assert _tealet_capi_client.capi_thread_id(t) == t.thread_id
 
 
 def test_capi_client_metadata_helpers_reject_non_tealet():
     with pytest.raises(TypeError):
-        _tealet_capi_client.capi_belongs_to_current(object())
+        _tealet_capi_client.capi_is_foreign(object())
     with pytest.raises(TypeError):
         _tealet_capi_client.capi_state(object())
     with pytest.raises(TypeError):

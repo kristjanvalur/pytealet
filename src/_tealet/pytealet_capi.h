@@ -96,7 +96,7 @@ typedef struct PyTealet_CAPI {
     int (*frame_introspection_set)(PyTealet_CAPI_Context *ctx, int enabled);
 
     /* Tealet metadata helpers. */
-    int (*belongs_to_current)(PyTealet_CAPI_Context *ctx, PyObject *target);
+    int (*is_foreign)(PyTealet_CAPI_Context *ctx, PyObject *target);
     int (*state_get)(PyTealet_CAPI_Context *ctx, PyObject *target, int *state_out);
     int (*thread_id_get)(PyTealet_CAPI_Context *ctx, PyObject *target, unsigned long *thread_id_out);
 

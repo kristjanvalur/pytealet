@@ -29,7 +29,7 @@ Design a stable parallel C API architecture that tracks the meaningful Python AP
 - current()
 - previous()
 - main()
-- belongs_to_current()
+- is_foreign()
 - prepare(function)
 - run(function, arg=None)
 - switch(arg=None, panic=False)
@@ -83,7 +83,7 @@ Design a stable parallel C API architecture that tracks the meaningful Python AP
   of adding parallel entrypoints.
 
 6. Introspection helpers and object metadata:
-- belongs_to_current
+- is_foreign
 - state getter
 - thread_id getter
 
@@ -172,7 +172,7 @@ Rationale:
 ### Tier 3: Introspection and metadata
 
 Add optional helpers:
-- belongs_to_current(target)
+- is_foreign(target)
 - get_state(target)
 - get_thread_id(target)
 
