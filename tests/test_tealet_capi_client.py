@@ -152,8 +152,22 @@ def test_capi_client_thread_reap_empty_idempotent():
     assert _tealet_capi_client.capi_thread_reap() == []
 
 
-def test_capi_client_thread_sweep_matches_module_api():
-    assert _tealet_capi_client.capi_thread_sweep() == _tealet.thread_sweep()
+def test_capi_client_thread_sweep_is_cross_interface_idempotent():
+    # thread_sweep() is destructive: whichever interface calls it first may
+    # consume pending dead-thread wrappers.
+    capi_first = _tealet_capi_client.capi_thread_sweep()
+    module_after = _tealet.thread_sweep()
+
+    assert isinstance(capi_first, list)
+    assert isinstance(module_after, list)
+    assert module_after == []
+
+    module_first = _tealet.thread_sweep()
+    capi_after = _tealet_capi_client.capi_thread_sweep()
+
+    assert isinstance(module_first, list)
+    assert isinstance(capi_after, list)
+    assert capi_after == []
 
 
 def test_capi_client_error_was_remote_matches_module_flag():
