@@ -51,6 +51,8 @@ typedef struct PyTealet_CAPI {
     /* Return new references (or NULL with exception set on failure). */
     PyObject *(*current)(PyTealet_CAPI_Context *ctx);
     PyObject *(*main)(PyTealet_CAPI_Context *ctx);
+
+    /* Global dead-thread sweep: reap wrappers owned by threads that are no longer alive. */
     PyObject *(*thread_sweep)(PyTealet_CAPI_Context *ctx);
 
     /* Returns 1 if obj is tealet-compatible, 0 if not, -1 on API misuse/error. */
@@ -89,8 +91,13 @@ typedef struct PyTealet_CAPI {
     int (*set_exception)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, PyObject *fallback);
 
     /* Module thread control helpers. */
+    /* Destructive cleanup for this thread: run kill passes, then force-reap remaining tealets for the thread; return forcibly invalidated wrappers. */
     PyObject *(*thread_reap)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
+
+    /* Snapshot active non-main tealets for the current thread. */
     PyObject *(*thread_active)(PyTealet_CAPI_Context *ctx);
+
+    /* Cooperative cleanup: inject kill exception into active non-main tealets for the thread and return still-active wrappers. */
     PyObject *(*thread_kill)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
 
     /* Returns 0/1 for False/True, -1 on error. */
