@@ -93,6 +93,7 @@ struct PyTealetObject {
     unsigned long owner_tid;       /* thread that owns this tealet object */
     PyObject *domain_lock_obj;     /* strong ref to lineage lock object */
     PyObject *tracking_ref;        /* weakref object stored in main-lineage wrapper set */
+    PyObject *prepared_func;       /* callable stored by prepare(), consumed by first switch */
     uint64_t inflight_throw_token; /* non-zero only while fallback-aware throw is in flight */
 #if !defined(Py312P)
     PyObject *weakreflist; /* List of weak references */
@@ -889,7 +890,11 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     }
     current_tid = PyThread_get_thread_ident();
 
-    if (!creating_main && ((args && PyTuple_GET_SIZE(args) > 0) || (kwds && PyDict_GET_SIZE(kwds) > 0))) {
+    /* Keep exact tealet() strict, but allow subclass constructors to accept
+     * custom arguments in Python __init__ without requiring __new__ override.
+     */
+    if (!creating_main && subtype == mstate->tealet_type &&
+        ((args && PyTuple_GET_SIZE(args) > 0) || (kwds && PyDict_GET_SIZE(kwds) > 0))) {
         PyErr_SetString(PyExc_TypeError, "tealet() takes no arguments");
         return NULL;
     }
@@ -902,6 +907,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     result->owner_tid = current_tid;
     result->domain_lock_obj = NULL;
     result->tracking_ref = NULL;
+    result->prepared_func = NULL;
     result->inflight_throw_token = 0;
     PyTealetTstate_Init(&result->tstate);
     PyTealetFrameInfo_Init(&result->frame_info);
@@ -941,6 +947,7 @@ static PyObject *pytealet_duplicate(PyObject *self, PyTypeObject *defining_class
     result->owner_tid = src->owner_tid;
     result->domain_lock_obj = NULL;
     result->tracking_ref = NULL;
+    result->prepared_func = NULL;
     result->inflight_throw_token = 0;
     PyTealetTstate_Init(&result->tstate);
     PyTealetFrameInfo_Init(&result->frame_info);
@@ -972,6 +979,8 @@ static PyObject *pytealet_duplicate(PyObject *self, PyTypeObject *defining_class
     result->state = src->state;
     if (src->domain_lock_obj)
         result->domain_lock_obj = Py_NewRef(src->domain_lock_obj);
+    if (src->prepared_func)
+        result->prepared_func = Py_NewRef(src->prepared_func);
 
     return (PyObject *)result;
 }
@@ -980,8 +989,35 @@ static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *k
     return pytealet_new_impl(subtype, args, kwds, 0);
 }
 
+static int pytealet_traverse(PyObject *obj, visitproc visit, void *arg) {
+    PyTealetObject *tealet = (PyTealetObject *)obj;
+    int visit_rc;
+
+    Py_VISIT(tealet->domain_lock_obj);
+    Py_VISIT(tealet->tracking_ref);
+    Py_VISIT(tealet->prepared_func);
+
+    visit_rc = PyTealetTstate_Visit(&tealet->tstate, visit, arg);
+    if (visit_rc)
+        return visit_rc;
+    visit_rc = PyTealetFrameInfo_Visit(&tealet->frame_info, visit, arg);
+    if (visit_rc)
+        return visit_rc;
+    return 0;
+}
+
+static int pytealet_clear(PyObject *obj) {
+    /* tracking-ref is cleared in the dealloc it isn't part of the GC cycle */
+    PyTealetObject *tealet = (PyTealetObject *)obj;
+    Py_CLEAR(tealet->prepared_func);
+    PyTealetTstate_Drop(&tealet->tstate, NULL, 1);
+    PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
+    return 0;
+}
+
 static void pytealet_dealloc(PyObject *obj) {
     PyTealetObject *tealet = (PyTealetObject *)obj;
+    PyObject_GC_UnTrack(obj);
     /* warn if we have an active tealet that is not a stub */
     if (tealet->tealet && tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE && tealet->state != STATE_STUB) {
         int err = PyErr_WarnEx(PyExc_RuntimeWarning, "freeing an active tealet leaks memory", 1);
@@ -992,9 +1028,8 @@ static void pytealet_dealloc(PyObject *obj) {
     pytealet_untrack_wrapper(tealet, 0);
     tealet->inflight_throw_token = 0;
     PyObject_ClearWeakRefs(obj);
-    /* Release any owned saved thread-state references */
-    PyTealetTstate_Drop(&tealet->tstate, NULL, 1);
-    PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
+    /* Release GC-managed references. */
+    (void)pytealet_clear(obj);
     PyTealetFrameInfo_Fini(&tealet->frame_info);
     if (tealet->tealet)
         tealet_delete(tealet->tealet);
@@ -1167,6 +1202,72 @@ static PyObject *pytealet_belongs_to_current(PyObject *self, PyTypeObject *defin
     return PyBool_FromLong(base->owner_tid == PyThread_get_thread_ident());
 }
 
+static PyObject *pytealet_prepare(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                  Py_ssize_t nargs, PyObject *kwnames) {
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+    PyTealetObject *target = (PyTealetObject *)self;
+    PyTealetObject *current;
+    PyTealetMainData *mdata;
+    PyObject *func = NULL;
+
+    if (!mstate)
+        return NULL;
+
+    current = TryGetCurrent(mstate, &mdata);
+    if (mdata)
+        mdata->last_error_remote = 0;
+
+    if (CheckTarget(mstate, target, current, "prepare()"))
+        return NULL;
+
+    if (target->state != STATE_NEW && target->state != STATE_STUB) {
+        PyErr_SetString(mstate->state_error, "must be new or stub");
+        return NULL;
+    }
+
+    if (nargs > 1) {
+        PyErr_Format(PyExc_TypeError, "prepare() takes 1 argument (%zd given)", nargs);
+        return NULL;
+    }
+    if (nargs == 1)
+        func = args[0];
+
+    if (kwnames && PyTuple_GET_SIZE(kwnames) > 1) {
+        PyErr_SetString(PyExc_TypeError, "prepare() takes at most 1 keyword argument");
+        return NULL;
+    }
+    if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
+        PyObject *key = PyTuple_GET_ITEM(kwnames, 0);
+        PyObject *val = args[nargs];
+        if (!PyUnicode_Check(key)) {
+            PyErr_SetString(PyExc_TypeError, "prepare() keyword names must be strings");
+            return NULL;
+        }
+        if (PyUnicode_CompareWithASCIIString(key, "function") == 0) {
+            if (func != NULL) {
+                PyErr_SetString(PyExc_TypeError, "prepare() got multiple values for argument 'function'");
+                return NULL;
+            }
+            func = val;
+        } else {
+            PyErr_Format(PyExc_TypeError, "prepare() got an unexpected keyword argument '%U'", key);
+            return NULL;
+        }
+    }
+
+    if (func == NULL) {
+        PyErr_SetString(PyExc_TypeError, "prepare() missing required argument 'function' (pos 1)");
+        return NULL;
+    }
+    if (!PyCallable_Check(func)) {
+        PyErr_SetString(PyExc_TypeError, "prepare() argument 'function' must be callable");
+        return NULL;
+    }
+
+    Py_XSETREF(target->prepared_func, Py_NewRef(func));
+    return Py_NewRef(self);
+}
+
 /* run a tealet and optinonally run */
 static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                               PyObject *kwnames) {
@@ -1256,6 +1357,9 @@ static PyObject *pytealet_run(PyObject *self, PyTypeObject *defining_class, PyOb
     }
     if (farg == NULL)
         farg = Py_None;
+
+    /* Any explicit run consumes a previously prepared callable. */
+    Py_CLEAR(target->prepared_func);
 
     created_from_new = (target->state == STATE_NEW);
     ptarg = &mdata->new_arg;
@@ -1371,6 +1475,27 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
 
     if (CheckTarget(mstate, target, current, "switch()"))
         return NULL;
+
+    if ((target->state == STATE_NEW || target->state == STATE_STUB) && target->prepared_func) {
+        PyObject *prepared_func;
+        PyObject *run_args[2];
+        PyObject *run_result;
+
+        if (switch_flags & TEALET_XFER_PANIC) {
+            PyErr_SetString(PyExc_TypeError, "switch(panic=True) is not supported for prepared tealets");
+            return NULL;
+        }
+
+        prepared_func = target->prepared_func;
+        target->prepared_func = NULL; /* transfer ownership to the new tealet */
+        
+        run_args[0] = prepared_func;
+        run_args[1] = pyarg;
+        run_result = pytealet_run(self, defining_class, run_args, 2, NULL);
+
+        Py_DECREF(prepared_func);
+        return run_result;
+    }
 
     if (target->state != STATE_RUN) {
         PyErr_SetString(mstate->state_error, "must be active");
@@ -1614,9 +1739,19 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
     }
 
     if (target->state == STATE_NEW || target->state == STATE_STUB) {
+        PyObject *prepared_func = target->prepared_func;
+        PyObject *run_result;
+
         if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
             return NULL;
-        return pytealet_run(self, defining_class, NULL, 0, NULL);
+
+        /* consume the prepared func.  We don't actually need it because the
+         * exception gets raised even before running it.
+         */
+        target->prepared_func = NULL;
+        run_result = pytealet_run(self, defining_class, NULL, 0, NULL);
+        Py_XDECREF(prepared_func);
+        return run_result;
     }
 
     PyErr_SetString(mstate->state_error, "throw() target must be active, new, or stub");
@@ -1726,6 +1861,9 @@ static struct PyMethodDef pytealet_methods[] = {
     {"main", (PyCFunction)(void (*)(void))pytealet_main_method, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"belongs_to_current", (PyCFunction)(void (*)(void))pytealet_belongs_to_current,
      METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
+    {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+        "prepare(function) -> tealet\n\n"
+     "Store a callable to be used by the first switch(arg) on this NEW/STUB tealet."},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"switch", (PyCFunction)(void (*)(void))pytealet_switch, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"throw", (PyCFunction)(void (*)(void))pytealet_throw, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
@@ -1834,6 +1972,8 @@ static struct PyGetSetDef pytealet_getset[] = {
 #pragma GCC diagnostic ignored "-Wpedantic"
 #endif
 static PyType_Slot pytealet_type_slots[] = {{Py_tp_dealloc, pytealet_dealloc},
+                                            {Py_tp_traverse, pytealet_traverse},
+                                            {Py_tp_clear, pytealet_clear},
                                             {Py_tp_methods, pytealet_methods},
                                             {Py_tp_getset, pytealet_getset},
                                             {Py_tp_new, pytealet_new},
@@ -1843,7 +1983,7 @@ static PyType_Slot pytealet_type_slots[] = {{Py_tp_dealloc, pytealet_dealloc},
 #endif
 
 PyType_Spec pytealet_type_spec = {"_tealet.tealet", sizeof(PyTealetObject), 0,
-                                  Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE
+                                  Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC
 #if defined(Py312P)
                                       | Py_TPFLAGS_MANAGED_WEAKREF
 #endif

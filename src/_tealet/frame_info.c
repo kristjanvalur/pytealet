@@ -221,6 +221,25 @@ PyObject *PyTealetFrameInfo_GetFrame(const PyTealetFrameInfo *info) {
 #endif
 }
 
+int PyTealetFrameInfo_Visit(const PyTealetFrameInfo *info, visitproc visit, void *arg) {
+#if !defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION)
+    (void)info;
+    (void)visit;
+    (void)arg;
+#else
+    Py_VISIT(info->frame);
+#endif
+    return 0;
+}
+
+void PyTealetFrameInfo_ClearForGC(PyTealetFrameInfo *info) {
+#if !defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION)
+    (void)info;
+#else
+    Py_CLEAR(info->frame);
+#endif
+}
+
 void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet) {
 #if !defined(PYTEALET_HAS_PENDING_FRAME_INTROSPECTION)
     (void)info;
@@ -229,6 +248,9 @@ void PyTealetFrameInfo_Release(PyTealetFrameInfo *info, tealet_t *dustbin_tealet
 #if defined(PY312P)
     PyTealetFrameInfo_ExposeFrames(info);
 #endif
-    PyTealet_CLEAR(dustbin_tealet, info->frame);
+    if (dustbin_tealet)
+        PyTealet_CLEAR(dustbin_tealet, info->frame);
+    else
+        PyTealetFrameInfo_ClearForGC(info);
 #endif
 }

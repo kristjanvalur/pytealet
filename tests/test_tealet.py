@@ -990,6 +990,111 @@ class TestSimple:
             for u in seen
         )
 
+
+class TestPrepare:
+    def test_prepare_returns_self_for_chaining(self):
+        seen = []
+
+        def worker(current, arg):
+            seen.append(arg)
+            return current.main(), "done-chain"
+
+        t = _tealet.tealet().prepare(worker)
+        assert isinstance(t, _tealet.tealet)
+        assert t.switch("payload") == "done-chain"
+        assert seen == ["payload"]
+        assert t.state == _tealet.STATE_EXIT
+
+    def test_prepare_new_first_switch_runs_callable(self):
+        seen = []
+
+        def worker(current, arg):
+            seen.append(arg)
+            return current.main(), "done-new"
+
+        t = _tealet.tealet()
+        assert t.state == _tealet.STATE_NEW
+
+        t.prepare(worker)
+        assert t.switch("payload") == "done-new"
+        assert seen == ["payload"]
+        assert t.state == _tealet.STATE_EXIT
+
+    def test_prepare_stub_first_switch_runs_callable(self):
+        seen = []
+
+        def worker(current, arg):
+            seen.append(arg)
+            return current.main(), "done-stub"
+
+        t = _tealet.tealet()
+        t.stub()
+        assert t.state == _tealet.STATE_STUB
+
+        t.prepare(worker)
+        assert t.switch(123) == "done-stub"
+        assert seen == [123]
+        assert t.state == _tealet.STATE_EXIT
+
+    def test_prepare_requires_callable(self):
+        t = _tealet.tealet()
+        with pytest.raises(TypeError, match="must be callable"):
+            t.prepare(42)
+
+    def test_prepare_latest_callable_wins(self):
+        seen = []
+
+        def first(current, arg):
+            seen.append(("first", arg))
+            return current.main(), "first"
+
+        def second(current, arg):
+            seen.append(("second", arg))
+            return current.main(), "second"
+
+        t = _tealet.tealet()
+        t.prepare(first)
+        t.prepare(second)
+
+        assert t.switch("x") == "second"
+        assert seen == [("second", "x")]
+        assert t.state == _tealet.STATE_EXIT
+
+    def test_explicit_run_overrides_prepared_callable(self):
+        seen = []
+
+        def prepared(current, arg):
+            seen.append(("prepared", arg))
+            return current.main(), "prepared"
+
+        def direct(current, arg):
+            seen.append(("direct", arg))
+            return current.main(), "direct"
+
+        t = _tealet.tealet()
+        t.prepare(prepared)
+
+        assert t.run(direct, "r") == "direct"
+        assert seen == [("direct", "r")]
+        assert t.state == _tealet.STATE_EXIT
+
+    def test_prepare_cycle_is_collectable_by_gc(self):
+        t = _tealet.tealet()
+
+        def worker(current, arg, _t=t):
+            return current.main(), arg
+
+        t.prepare(worker)
+        ref = weakref.ref(t)
+
+        del worker
+        del t
+
+        gc.collect()
+        gc.collect()
+
+        assert ref() is None
+
 class TestStatus:
     def test_status_run(self):
         t = _tealet.current()
@@ -1014,6 +1119,12 @@ class TestSubclass:
             return "<myrepr %r>"%super(TestSubclass.sc, self).__repr__()
         def __del__(self):
             self.dude[0] = 1
+
+    class scinit(_tealet.tealet):
+        def __init__(self, payload, *, label=None):
+            self.payload = payload
+            self.label = label
+
     def test_subclass(self):
         def foo(current, arg):
             arg.switch(current)
@@ -1025,6 +1136,19 @@ class TestSubclass:
         assert self.sc.dude[0] == 0
         del t
         assert self.sc.dude[0] == 1
+
+    def test_subclass_init_can_accept_custom_args(self):
+        payload = {"a": 1}
+        t = self.scinit(payload, label="demo")
+
+        assert isinstance(t, _tealet.tealet)
+        assert t.payload is payload
+        assert t.label == "demo"
+        assert t.state == _tealet.STATE_NEW
+
+    def test_exact_tealet_constructor_stays_no_args(self):
+        with pytest.raises(TypeError, match=r"tealet\(\) takes no arguments"):
+            _tealet.tealet(123)
 
 class TestSwitch:
     def test_switch_panic_keyword(self):
@@ -1233,6 +1357,38 @@ class TestSetException:
         assert seen, "expected unraisable error for uncaught thrown exception"
         assert any(
             isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw-run"
+            for u in seen
+        )
+
+    def test_throw_on_prepared_target_behaves_like_set_exception_plus_run(self):
+        seen = []
+        called = []
+        original_hook = sys.unraisablehook
+
+        def worker(current, arg):
+            called.append(arg)
+            return current.main()
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            for make_stub in (False, True):
+                t = _tealet.tealet()
+                if make_stub:
+                    t.stub()
+                t.prepare(worker)
+                assert t.throw(RuntimeError("boom-prepared-throw")) is None
+                assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        # Delivery happens at run entry, so worker is not entered.
+        assert called == []
+        assert seen, "expected unraisable error for uncaught thrown exception"
+        assert any(
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-prepared-throw"
             for u in seen
         )
 
