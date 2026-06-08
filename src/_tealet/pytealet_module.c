@@ -371,6 +371,27 @@ static int PyTealetApi_FrameIntrospectionSetForward(PyTealet_CAPI_Context *ctx, 
     return PyTealetApi_FrameIntrospectionSet(mstate, enabled);
 }
 
+static int PyTealetApi_BelongsToCurrentForward(PyTealet_CAPI_Context *ctx, PyObject *target) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_BelongsToCurrent(mstate, target);
+}
+
+static int PyTealetApi_StateGetForward(PyTealet_CAPI_Context *ctx, PyObject *target, int *state_out) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_StateGet(mstate, target, state_out);
+}
+
+static int PyTealetApi_ThreadIdGetForward(PyTealet_CAPI_Context *ctx, PyObject *target, unsigned long *thread_id_out) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_ThreadIdGet(mstate, target, thread_id_out);
+}
+
 static const PyTealet_CAPI pytealet_capi_table = {
     PYTEALET_CAPI_ABI_VERSION,
     sizeof(PyTealet_CAPI),
@@ -400,6 +421,9 @@ static const PyTealet_CAPI pytealet_capi_table = {
     PyTealetApi_PreviousForward,
     PyTealetApi_FrameIntrospectionGetForward,
     PyTealetApi_FrameIntrospectionSetForward,
+    PyTealetApi_BelongsToCurrentForward,
+    PyTealetApi_StateGetForward,
+    PyTealetApi_ThreadIdGetForward,
     {NULL},
 };
 

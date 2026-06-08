@@ -2397,6 +2397,76 @@ int PyTealetApi_FrameIntrospectionSet(PyTealetModuleState *mstate, int enabled) 
     return mstate->frame_introspection_enabled != 0;
 }
 
+int PyTealetApi_BelongsToCurrent(PyTealetModuleState *mstate, PyObject *target_obj) {
+    PyTealetObject *target;
+
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return -1;
+    }
+    if (!target_obj) {
+        PyErr_SetString(PyExc_TypeError, "target must not be NULL");
+        return -1;
+    }
+    if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
+        return -1;
+    }
+
+    target = (PyTealetObject *)target_obj;
+    return target->owner_tid == PyThread_get_thread_ident();
+}
+
+int PyTealetApi_StateGet(PyTealetModuleState *mstate, PyObject *target_obj, int *state_out) {
+    PyTealetObject *target;
+
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return -1;
+    }
+    if (!target_obj) {
+        PyErr_SetString(PyExc_TypeError, "target must not be NULL");
+        return -1;
+    }
+    if (!state_out) {
+        PyErr_SetString(PyExc_TypeError, "state_out must not be NULL");
+        return -1;
+    }
+    if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
+        return -1;
+    }
+
+    target = (PyTealetObject *)target_obj;
+    *state_out = target->state;
+    return 0;
+}
+
+int PyTealetApi_ThreadIdGet(PyTealetModuleState *mstate, PyObject *target_obj, unsigned long *thread_id_out) {
+    PyTealetObject *target;
+
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return -1;
+    }
+    if (!target_obj) {
+        PyErr_SetString(PyExc_TypeError, "target must not be NULL");
+        return -1;
+    }
+    if (!thread_id_out) {
+        PyErr_SetString(PyExc_TypeError, "thread_id_out must not be NULL");
+        return -1;
+    }
+    if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
+        return -1;
+    }
+
+    target = (PyTealetObject *)target_obj;
+    *thread_id_out = target->owner_tid;
+    return 0;
+}
+
 /* Raise a structured thread-mismatch exception that includes owner metadata.
  * If exception construction fails, propagate the underlying failure.
  */
