@@ -35,6 +35,11 @@ PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyO
                           PyTealetApi_RunCFunc cfunc, PyObject *arg);
 PyObject *PyTealetApi_Switch(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *arg, uint32_t flags);
 PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc, uint32_t flags);
+int PyTealetApi_SetException(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc, PyObject *fallback);
+PyObject *PyTealetApi_ThreadReap(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
+PyObject *PyTealetApi_ThreadActive(PyTealetModuleState *mstate);
+PyObject *PyTealetApi_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
+int PyTealetApi_ErrorWasRemote(PyTealetModuleState *mstate);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);
 #endif

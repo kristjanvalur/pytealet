@@ -77,6 +77,17 @@ typedef struct PyTealet_CAPI {
     /* Equivalent to target.throw(exception), with optional transfer flags. */
     PyObject *(*throw_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, uint32_t flags);
 
+    /* Equivalent to target.set_exception(exception, fallback). Returns 0 on success, -1 on error. */
+    int (*set_exception)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, PyObject *fallback);
+
+    /* Module thread control helpers. */
+    PyObject *(*thread_reap)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
+    PyObject *(*thread_active)(PyTealet_CAPI_Context *ctx);
+    PyObject *(*thread_kill)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
+
+    /* Returns 0/1 for False/True, -1 on error. */
+    int (*error_was_remote)(PyTealet_CAPI_Context *ctx);
+
     void *reserved[16];
 } PyTealet_CAPI;
 

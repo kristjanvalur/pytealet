@@ -312,6 +312,44 @@ static PyObject *PyTealetApi_ThrowForward(PyTealet_CAPI_Context *ctx, PyObject *
     return PyTealetApi_Throw(mstate, target, exc, flags);
 }
 
+static int PyTealetApi_SetExceptionForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exc,
+                                           PyObject *fallback) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_SetException(mstate, target, exc, fallback);
+}
+
+static PyObject *PyTealetApi_ThreadReapForward(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes,
+                                               PyObject *kill_exc_spec) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_ThreadReap(mstate, cleanup_passes, kill_exc_spec);
+}
+
+static PyObject *PyTealetApi_ThreadActiveForward(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_ThreadActive(mstate);
+}
+
+static PyObject *PyTealetApi_ThreadKillForward(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes,
+                                               PyObject *kill_exc_spec) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_ThreadKill(mstate, cleanup_passes, kill_exc_spec);
+}
+
+static int PyTealetApi_ErrorWasRemoteForward(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_ErrorWasRemote(mstate);
+}
+
 static const PyTealet_CAPI pytealet_capi_table = {
     PYTEALET_CAPI_ABI_VERSION,
     sizeof(PyTealet_CAPI),
@@ -333,6 +371,11 @@ static const PyTealet_CAPI pytealet_capi_table = {
     PyTealetApi_RunForward,
     PyTealetApi_SwitchForward,
     PyTealetApi_ThrowForward,
+    PyTealetApi_SetExceptionForward,
+    PyTealetApi_ThreadReapForward,
+    PyTealetApi_ThreadActiveForward,
+    PyTealetApi_ThreadKillForward,
+    PyTealetApi_ErrorWasRemoteForward,
     {NULL},
 };
 

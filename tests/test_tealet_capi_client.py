@@ -17,6 +17,11 @@ def test_capi_client_api_info():
     assert info["has_run"] is True
     assert info["has_switch"] is True
     assert info["has_throw"] is True
+    assert info["has_set_exception"] is True
+    assert info["has_thread_reap"] is True
+    assert info["has_thread_active"] is True
+    assert info["has_thread_kill"] is True
+    assert info["has_error_was_remote"] is True
 
 
 def test_capi_client_current_is_main():
@@ -101,6 +106,47 @@ def test_capi_client_throw_panic_flag():
 def test_capi_client_throw_flags_unknown_bit_rejected():
     with pytest.raises(ValueError, match="unsupported throw flags"):
         _tealet_capi_client.capi_throw(_tealet.current(), RuntimeError("boom"), 0x80)
+
+
+def test_capi_client_set_exception_then_switch():
+    def parked(current, _arg):
+        try:
+            current.main().switch("ready")
+        except RuntimeError as exc:
+            return current.main(), ("caught", str(exc))
+        return current.main(), "no-exception"
+
+    t = _tealet.tealet()
+    assert t.run(parked, None) == "ready"
+
+    assert _tealet_capi_client.capi_set_exception(t, RuntimeError("boom-set")) is None
+    assert _tealet_capi_client.capi_switch(t) == ("caught", "boom-set")
+
+
+def test_capi_client_thread_active_lists_live_tealet():
+    def parked(current, _arg):
+        resumed = current.main().switch("ready")
+        return current.main(), resumed
+
+    t = _tealet.tealet()
+    assert t.run(parked, None) == "ready"
+
+    active = _tealet_capi_client.capi_thread_active()
+    assert t in active
+
+    assert _tealet_capi_client.capi_switch(t, "done") == "done"
+
+
+def test_capi_client_thread_kill_empty_when_no_active():
+    assert _tealet_capi_client.capi_thread_kill() == []
+
+
+def test_capi_client_thread_reap_empty_idempotent():
+    assert _tealet_capi_client.capi_thread_reap() == []
+
+
+def test_capi_client_error_was_remote_matches_module_flag():
+    assert _tealet_capi_client.capi_error_was_remote() is _tealet.error_was_remote()
 
 
 def test_capi_client_run_c_forwarding():

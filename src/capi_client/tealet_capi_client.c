@@ -93,6 +93,21 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (PyDict_SetItemString(d, "has_throw",
                              PyBool_FromLong(state->api->throw_ != NULL)) < 0)
         goto error;
+    if (PyDict_SetItemString(d, "has_set_exception",
+                             PyBool_FromLong(state->api->set_exception != NULL)) < 0)
+        goto error;
+    if (PyDict_SetItemString(d, "has_thread_reap",
+                             PyBool_FromLong(state->api->thread_reap != NULL)) < 0)
+        goto error;
+    if (PyDict_SetItemString(d, "has_thread_active",
+                             PyBool_FromLong(state->api->thread_active != NULL)) < 0)
+        goto error;
+    if (PyDict_SetItemString(d, "has_thread_kill",
+                             PyBool_FromLong(state->api->thread_kill != NULL)) < 0)
+        goto error;
+    if (PyDict_SetItemString(d, "has_error_was_remote",
+                             PyBool_FromLong(state->api->error_was_remote != NULL)) < 0)
+        goto error;
 
     return d;
 
@@ -267,6 +282,95 @@ static PyObject *client_capi_throw(PyObject *module, PyObject *args) {
     return state->api->throw_(state->ctx, target, exc, flags);
 }
 
+static PyObject *client_capi_set_exception(PyObject *module, PyObject *args) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    Py_ssize_t nargs;
+    PyObject *target;
+    PyObject *exc;
+    PyObject *fallback = Py_None;
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    nargs = PyTuple_GET_SIZE(args);
+    if (nargs != 2 && nargs != 3) {
+        PyErr_SetString(PyExc_TypeError, "capi_set_exception() takes 2 or 3 positional arguments");
+        return NULL;
+    }
+
+    target = PyTuple_GET_ITEM(args, 0);
+    exc = PyTuple_GET_ITEM(args, 1);
+    if (nargs == 3)
+        fallback = PyTuple_GET_ITEM(args, 2);
+
+    rc = state->api->set_exception(state->ctx, target, exc, fallback);
+    if (rc < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_capi_thread_reap(PyObject *module, PyObject *args) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    Py_ssize_t cleanup_passes = 3;
+    PyObject *kill_exc = Py_None;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    if (!PyArg_ParseTuple(args, "|nO:capi_thread_reap", &cleanup_passes, &kill_exc))
+        return NULL;
+
+    return state->api->thread_reap(state->ctx, cleanup_passes, kill_exc);
+}
+
+static PyObject *client_capi_thread_active(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetCapiClientState *state = client_get_state(module);
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    return state->api->thread_active(state->ctx);
+}
+
+static PyObject *client_capi_thread_kill(PyObject *module, PyObject *args) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    Py_ssize_t cleanup_passes = 3;
+    PyObject *kill_exc = Py_None;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    if (!PyArg_ParseTuple(args, "|nO:capi_thread_kill", &cleanup_passes, &kill_exc))
+        return NULL;
+
+    return state->api->thread_kill(state->ctx, cleanup_passes, kill_exc);
+}
+
+static PyObject *client_capi_error_was_remote(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    rc = state->api->error_was_remote(state->ctx);
+    if (rc < 0)
+        return NULL;
+
+    return PyBool_FromLong(rc != 0);
+}
+
 static PyObject *client_capi_prepare(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
     Py_ssize_t nargs;
@@ -437,6 +541,16 @@ static PyMethodDef client_methods[] = {
      "Switch to a tealet using the imported C API with explicit flags."},
     {"capi_throw", (PyCFunction)client_capi_throw, METH_VARARGS,
      "Throw into a tealet using the imported C API with optional flags."},
+    {"capi_set_exception", (PyCFunction)client_capi_set_exception, METH_VARARGS,
+     "Set pending exception on a target tealet via imported C API."},
+    {"capi_thread_reap", (PyCFunction)client_capi_thread_reap, METH_VARARGS,
+     "Run thread_reap via imported C API."},
+    {"capi_thread_active", (PyCFunction)client_capi_thread_active, METH_NOARGS,
+     "List active wrappers via imported C API."},
+    {"capi_thread_kill", (PyCFunction)client_capi_thread_kill, METH_VARARGS,
+     "Run thread_kill via imported C API."},
+    {"capi_error_was_remote", (PyCFunction)client_capi_error_was_remote, METH_NOARGS,
+     "Return error_was_remote via imported C API."},
     {NULL, NULL, 0, NULL},
 };
 
@@ -470,7 +584,8 @@ static int client_exec(PyObject *module) {
     if (!state->api->ctx_new || !state->api->ctx_free || !state->api->current || !state->api->main ||
         !state->api->thread_sweep || !state->api->check_tealet || !state->api->create || !state->api->duplicate ||
         !state->api->stub || !state->api->prepare || !state->api->run || !state->api->switch_ ||
-        !state->api->throw_) {
+        !state->api->throw_ || !state->api->set_exception || !state->api->thread_reap ||
+        !state->api->thread_active || !state->api->thread_kill || !state->api->error_was_remote) {
         PyErr_SetString(PyExc_ImportError, "pytealet C API missing required functions");
         return -1;
     }

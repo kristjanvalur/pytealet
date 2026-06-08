@@ -1401,6 +1401,43 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
     Py_RETURN_NONE;
 }
 
+int PyTealetApi_SetException(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc, PyObject *fallback) {
+    PyTealetObject *target;
+    PyTealetObject *current;
+    PyTealetMainData *mdata = NULL;
+
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return -1;
+    }
+    if (!target_obj) {
+        PyErr_SetString(PyExc_TypeError, "target must not be NULL");
+        return -1;
+    }
+    if (!exc) {
+        PyErr_SetString(PyExc_TypeError, "exception must not be NULL");
+        return -1;
+    }
+    if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
+        return -1;
+    }
+
+    target = (PyTealetObject *)target_obj;
+    current = TryGetCurrent(mstate, &mdata);
+    if (!current || !mdata) {
+        PyErr_SetString(PyExc_RuntimeError, "current tealet unavailable");
+        return -1;
+    }
+    if (!fallback)
+        fallback = Py_None;
+
+    if (CheckTarget(mstate, target, current, "set_exception()"))
+        return -1;
+
+    return pytealet_set_exception_inner(mstate, target, current, mdata, exc, fallback);
+}
+
 /* Convenience API: schedule exception for target and transfer immediately.
  * - RUN target: inject then switch.
  * - NEW/STUB target: inject then run.
@@ -2280,6 +2317,42 @@ PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_pa
     }
 
     return pytealet_thread_kill_inner(mstate, mdata, cleanup_passes, current, kill_exc_spec);
+}
+
+PyObject *PyTealetApi_ThreadReap(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec) {
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    if (!kill_exc_spec)
+        kill_exc_spec = Py_None;
+    return PyTealet_ThreadReap(mstate, cleanup_passes, kill_exc_spec);
+}
+
+PyObject *PyTealetApi_ThreadActive(PyTealetModuleState *mstate) {
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    return PyTealet_ThreadActive(mstate);
+}
+
+PyObject *PyTealetApi_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec) {
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    if (!kill_exc_spec)
+        kill_exc_spec = Py_None;
+    return PyTealet_ThreadKill(mstate, cleanup_passes, kill_exc_spec);
+}
+
+int PyTealetApi_ErrorWasRemote(PyTealetModuleState *mstate) {
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return -1;
+    }
+    return PyTealet_ErrorWasRemote(mstate) ? 1 : 0;
 }
 
 /* Raise a structured thread-mismatch exception that includes owner metadata.
