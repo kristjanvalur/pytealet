@@ -320,6 +320,34 @@ Rationale:
 
 Allow exceptions for very large helpers (for example, common dispatch used by several operations), but preserve clear references and naming so call flow remains easy to follow.
 
+### Capsule C API Policy
+
+The capsule C API is intended to be complementary to the Python API, with one
+shared behavioral core.
+
+Implementation ownership:
+- `src/_tealet/pytealet.c` owns canonical runtime behavior and shared dispatch/impl helpers.
+- `src/_tealet/pytealet_module.c` owns capsule export and thin forwarders only.
+- `src/tealet/include/pytealet_capi.h` defines the public ABI shape.
+
+Runtime consistency rules:
+- Avoid duplicated state-machine logic between Python wrappers and C API wrappers.
+- Wrapper-specific argument parsing and error wording may differ, but state
+    transitions and transfer behavior must match.
+- Features intentionally Python-only (for example, `hide_frame`) should remain
+    explicitly documented as non-parity scope.
+
+ABI policy:
+- Pre-0.1.0: `PYTEALET_CAPI_ABI_VERSION` remains `1`, and table layout can
+    evolve while the API is unreleased.
+- At and after 0.1.0 API freeze: preserve slot ordering and evolve with
+    append-only growth for compatible ABI updates.
+
+Review and validation gates:
+- Every new C API entrypoint should include capi-client coverage.
+- New flags should include negative tests for unknown bits.
+- Any table/struct reordering must update header and export table in lockstep.
+
 ### Two-Level Object Structure
 
 **Design:**

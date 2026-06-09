@@ -127,7 +127,6 @@ static PyObject *demo(PyObject *self, PyObject *noargs) {
 
 ## Related Design Notes
 
-For architecture and parity planning context:
+For architecture and runtime context:
 - `docs/ARCHITECTURE.md`
-- `docs/C_API_PARITY_PLAN.md`
-- `docs/C_API_EXPLORATION.md`
+- `docs/ISSUES.md`
