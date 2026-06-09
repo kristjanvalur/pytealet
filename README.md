@@ -126,8 +126,8 @@ runtime capsule using `PyTealetApi_Import()`.
 
 Detailed API references live in the `docs/` folder:
 
-- `docs/PYTHON_API.md` for the Python-level API (`tealet`, `_tealet`, and compatibility shim notes)
-- `docs/C_API.md` for the capsule-based C API (`pytealet_capi.h`)
+- [docs/PYTHON_API.md](docs/PYTHON_API.md) for the Python-level API (`tealet`, `_tealet`, and compatibility shim notes)
+- [docs/C_API.md](docs/C_API.md) for the capsule-based C API (`pytealet_capi.h`)
 
 ### Building the C Extension
 
