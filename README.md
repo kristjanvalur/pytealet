@@ -4,13 +4,17 @@ A Python wrapper for the [libtealet](https://github.com/kristjanvalur/libtealet)
 
 ## About
 
-Tealet provides a greenlet-compatible interface for cooperative multitasking in Python. Unlike traditional coroutines that require `async`/`await` keywords throughout your code, tealet allows you to suspend and resume entire execution stacks, enabling cooperative multitasking without special language support.
+Tealet provides low-level stack-switching primitives for cooperative multitasking in Python. Unlike traditional coroutines that require `async`/`await` keywords throughout your code, tealet lets you suspend and resume entire execution stacks.
+
+Tealet is intentionally a building-block library, not a full scheduler/runtime framework. It provides primitives (`switch`, `run`, `throw`, thread ownership/state checks, etc.) that higher-level schedulers and runtimes can build on.
 
 Built on vendored libtealet release archives (currently v0.7.5), this library offers:
 - **Stack-slicing**: Efficient context switching without kernel involvement
 - **Low memory overhead**: ~2-16 KB per coroutine vs 1-8 MB for OS threads
 - **Fast context switches**: ~100-500 CPU cycles
-- **Greenlet compatibility**: Drop-in replacement for greenlet-based code
+- **Composable primitives**: Intended to support custom schedulers and runtime policies
+
+The `tealet.greenlet` compatibility layer should be viewed as a proof-of-concept showing how richer APIs can be built on top of these primitives.
 
 ## Project Structure
 
@@ -18,6 +22,8 @@ Built on vendored libtealet release archives (currently v0.7.5), this library of
 pytealet/
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── PYTHON_API.md
+│   ├── C_API.md
 │   └── ISSUES.md
 ├── scripts/
 │   └── fast_build.sh
@@ -78,6 +84,8 @@ These show:
 - a minimal cooperative scheduler and event primitive
 - a minimal future implementation built on top of the scheduler/event model
 
+The scheduler example is intentionally simple and demonstrates how application- or framework-level scheduling can be implemented on top of tealet's core primitives.
+
 Run the module from a source checkout:
 
 ```bash
@@ -113,6 +121,13 @@ The public header is:
 
 Client extensions should include this header at build time and import the
 runtime capsule using `PyTealetApi_Import()`.
+
+## API Documentation
+
+Detailed API references live in the `docs/` folder:
+
+- `docs/PYTHON_API.md` for the Python-level API (`tealet`, `_tealet`, and compatibility shim notes)
+- `docs/C_API.md` for the capsule-based C API (`pytealet_capi.h`)
 
 ### Building the C Extension
 
