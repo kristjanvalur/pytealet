@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-06-05
 
+## [0.1.0rc1] - 2026-06-09
+
+### Added
+- Split pure pytealet runtime tests into domain-focused files and added tests layout documentation.
+
+### Changed
+- Consolidated obsolete planning docs into architecture guidance and removed stale docs references.
+- Refined C API and public header documentation links and organization.
+
+### Notes
+- Pre-release candidate for validating the end-to-end release and publication workflow before `0.1.0`.
+
 ### Highlights (last 6 months)
 - Vendored runtime updated from libtealet v0.3.2 to v0.7.2, with release archives as the primary integration path.
 - Build and packaging flow streamlined around the vendored release archive, while preserving an opt-in local source override path for deep debugging.
