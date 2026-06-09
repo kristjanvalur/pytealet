@@ -52,9 +52,7 @@ def test_capi_client_switch_roundtrip():
 
 def test_capi_client_switch_flags_panic():
     with pytest.raises(_tealet.PanicError) as exc:
-        _tealet_capi_client.capi_switch_flags(
-            _tealet.current(), _tealet_capi_client.SWITCH_PANIC, "panic-value"
-        )
+        _tealet_capi_client.capi_switch_flags(_tealet.current(), _tealet_capi_client.SWITCH_PANIC, "panic-value")
 
     assert exc.value.result() == "panic-value"
     assert exc.value.exception() is None
@@ -108,9 +106,7 @@ def test_capi_client_throw_panic_flag():
 
     t = _tealet.tealet()
     assert t.run(parked, None) == "ready"
-    assert _tealet_capi_client.capi_throw(
-        t, RuntimeError("boom-panic"), _tealet_capi_client.THROW_PANIC
-    ) == (
+    assert _tealet_capi_client.capi_throw(t, RuntimeError("boom-panic"), _tealet_capi_client.THROW_PANIC) == (
         "caught",
         "PanicError",
         "tealet switch failed",

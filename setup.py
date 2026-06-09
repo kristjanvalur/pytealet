@@ -28,6 +28,7 @@ def read_project_version(pyproject_path="pyproject.toml"):
                 return version
     raise RuntimeError("Could not find [project].version in pyproject.toml")
 
+
 # Paths to libtealet
 LIBTEALET_RELEASE_DIR = "src/_tealet/libtealet"
 LIBTEALET_SOURCE_DIR = os.environ.get(
@@ -46,6 +47,7 @@ BUILD_LIBTEALET_FROM_SOURCE = os.environ.get("BUILD_LIBTEALET_FROM_SOURCE", "0")
 LIBTEALET_DEBUG = os.environ.get("LIBTEALET_DEBUG", "1") == "1"
 PYTEALET_EXT_DEBUG = os.environ.get("PYTEALET_EXT_DEBUG", "0") == "1"
 
+
 def get_abi_name(abiname_dir):
     """Determine the ABI name for pre-built libraries using libtealet's abiname utility."""
     system = platform.system()
@@ -57,10 +59,7 @@ def get_abi_name(abiname_dir):
     if system == "Windows":
         # Cross-compilation toolchains expose explicit target architecture
         # variables (for example via VS developer command prompts).
-        target_arch = (
-            os.environ.get("VSCMD_ARG_TGT_ARCH", "")
-            or os.environ.get("Platform", "")
-        ).lower()
+        target_arch = (os.environ.get("VSCMD_ARG_TGT_ARCH", "") or os.environ.get("Platform", "")).lower()
 
         if target_arch in ("arm64", "aarch64"):
             return "win_arm64"
@@ -100,20 +99,17 @@ def get_abi_name(abiname_dir):
     # Use the Makefile's abiname target to detect platform
     try:
         result = subprocess.run(
-            ["make", "-C", abiname_dir, "--no-print-directory", "abiname"],
-            capture_output=True,
-            text=True,
-            check=True
+            ["make", "-C", abiname_dir, "--no-print-directory", "abiname"], capture_output=True, text=True, check=True
         )
         abi = result.stdout.strip()
         if abi:
             return abi
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
-    
+
     # Fallback: manual detection
     machine = platform.machine().lower()
-    
+
     if system == "Linux":
         if machine in ("x86_64", "amd64"):
             return "sysv_amd64"
@@ -137,7 +133,7 @@ def get_abi_name(abiname_dir):
             return "win_x86"
         elif machine in ("arm64", "aarch64"):
             return "win_arm64"
-    
+
     raise RuntimeError(f"Unsupported platform: {system} {machine}")
 
 
@@ -208,8 +204,7 @@ else:
             break
     if libtealet_static is None:
         raise RuntimeError(
-            "No supported libtealet archive found in "
-            f"{lib_dir}. Expected one of: {', '.join(release_lib_candidates)}"
+            f"No supported libtealet archive found in {lib_dir}. Expected one of: {', '.join(release_lib_candidates)}"
         )
 
     extra_objects = [libtealet_static]
@@ -246,26 +241,32 @@ extra_link_args = []
 
 if platform.system() != "Windows":
     # GCC/Clang flags
-    extra_compile_args.extend([
-        "-std=c17",
-        "-pedantic-errors",
-        "-Wall",
-        "-Wno-unused-function",
-    ])
+    extra_compile_args.extend(
+        [
+            "-std=c17",
+            "-pedantic-errors",
+            "-Wall",
+            "-Wno-unused-function",
+        ]
+    )
 
     # Force-include centralized build config for extension compilation.
     if os.path.exists(PYTEALET_BUILD_CONFIG_HEADER):
-        extra_compile_args.extend([
-            "-include",
-            PYTEALET_BUILD_CONFIG_HEADER,
-        ])
+        extra_compile_args.extend(
+            [
+                "-include",
+                PYTEALET_BUILD_CONFIG_HEADER,
+            ]
+        )
 
     if PYTEALET_EXT_DEBUG:
-        extra_compile_args.extend([
-            "-g",
-            "-O0",
-            "-UNDEBUG",
-        ])
+        extra_compile_args.extend(
+            [
+                "-g",
+                "-O0",
+                "-UNDEBUG",
+            ]
+        )
 
 # Define the extension
 _tealet_ext = Extension(

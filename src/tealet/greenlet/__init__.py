@@ -13,6 +13,8 @@ from . import _greenlet
 
 class error(Exception):
     pass
+
+
 class GreenletExit(BaseException):
     pass
 
@@ -28,6 +30,7 @@ class _TraceException(BaseException):
 
 class _ParentThreadError(ValueError):
     "Special version of ValueError for identification inside handlers"
+
     def __init__(self, current_tid, target_tid, is_alive):
         super().__init__("parent cannot be on a different thread")
         self.current_tid = current_tid
@@ -37,12 +40,9 @@ class _ParentThreadError(ValueError):
 
 def _cross_thread_switch_error_message(current_tid, target_tid, is_alive):
     if is_alive:
-        return (
-            "Cannot switch to a different thread\n"
-            f"\tCurrent:  {current_tid}\n"
-            f"\tExpected: {target_tid}"
-        )
+        return f"Cannot switch to a different thread\n\tCurrent:  {current_tid}\n\tExpected: {target_tid}"
     return "cannot switch to a different thread (which happens to have exited)"
+
 
 class ErrorWrapper(object):
     def __enter__(self):
@@ -75,10 +75,7 @@ class ErrorWrapper(object):
                 msg = str(val)
                 # Map backend thread-mismatch wording for pending exception routing
                 # to the compatibility message expected by greenlet tests.
-                if (
-                    "set_exception() not allowed from a different thread" in msg
-                    or msg.startswith("thread mismatch:")
-                ):
+                if "set_exception() not allowed from a different thread" in msg or msg.startswith("thread mismatch:"):
                     msg = "cannot switch to a different thread (which happens to have exited)"
                 raise error(msg).with_traceback(tb)
         finally:
@@ -99,6 +96,7 @@ def install(force=True):
     sys.modules["greenlet._greenlet"] = _greenlet
     _ensure_gc_callback_registered()
     return module
+
 
 tealetmap = weakref.WeakValueDictionary()
 _RUN_UNSET = object()
@@ -138,6 +136,7 @@ def set_stub(create=True):
 
 # tracing support.  Trace switch cargo and exceptions are wrapped so that a trace
 # event can be generated after the switch.
+
 
 def settrace(callback):
     if callback is not None and not callable(callback):
@@ -239,12 +238,14 @@ _ensure_gc_callback_registered()
 def _is_unstarted_tealet(tealet):
     return tealet is not None and tealet.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
 
+
 def getcurrent():
     gr = greenlet._get_or_create_wrapper(_tealet.current())
     # Drain per-main garbage when the owner thread re-enters greenlet APIs.
     if gr._main is gr and gr._garbage:
         gr._process_garbage()
     return gr
+
 
 class greenlet(object):
     # keep internal attributes out of the instance dict
@@ -318,9 +319,7 @@ class greenlet(object):
             raise AttributeError("cannot set the parent of a main greenlet")
 
         if not isinstance(value, greenlet):
-            raise TypeError(
-                f"GreenletChecker: Expected any type of greenlet, not {type(value).__name__}"
-            )
+            raise TypeError(f"GreenletChecker: Expected any type of greenlet, not {type(value).__name__}")
 
         tealet = getattr(self, "_tealet", None)
         parent_tealet = getattr(value, "_tealet", None)
@@ -346,7 +345,7 @@ class greenlet(object):
         if name == "parent":
             raise AttributeError("can't delete attribute")
         object.__delattr__(self, name)
- 
+
     def _bootstrap(self, parent=None):
         if isinstance(parent, _tealet.tealet):
             # main greenlet for this thread
@@ -432,10 +431,7 @@ class greenlet(object):
                 parts.append("main")
             state = " ".join(parts)
 
-        return (
-            f"<{self.__class__.__module__}.{self.__class__.__name__} "
-            f"object at 0x{id(self):x} {state}>"
-        )
+        return f"<{self.__class__.__module__}.{self.__class__.__name__} object at 0x{id(self):x} {state}>"
 
     def _process_garbage(self):
         if getattr(_garbage_process_guard, "active", False):
@@ -569,9 +565,7 @@ class greenlet(object):
             else:
                 exc = t(v)
         else:
-            raise TypeError(
-                "exceptions must be classes, or instances, not %s" % (type(t).__name__,)
-            )
+            raise TypeError("exceptions must be classes, or instances, not %s" % (type(t).__name__,))
 
         if tb is not None:
             exc = exc.with_traceback(tb)
@@ -601,7 +595,7 @@ class greenlet(object):
                         try:
                             arg = tealet.run(self._greenlet_main, (run, payload, err))
                         except _tealet.StateError:
-                            # A re-entrancy, caused by the getattr(self, "run") above 
+                            # A re-entrancy, caused by the getattr(self, "run") above
                             # can cause the above to tried twice.  if we fail with a local
                             # state error, just do a normal switch or throw.
                             if _tealet.error_was_remote():
@@ -661,7 +655,7 @@ class greenlet(object):
                             return err
                         return parent._switch_or_throw(None, err)
                     return parent._switch_or_throw(switch_payload, None)
-                
+
                 _pin_running(tealet, self)
                 self._is_running = True
                 try:

@@ -11,6 +11,7 @@ import gc
 import _tealet
 import contextvars
 import random
+
 random.seed(0)
 
 
@@ -18,10 +19,11 @@ def join_thread_or_fail(th, timeout=1.0):
     th.join(timeout=timeout)
     assert not th.is_alive(), "worker thread did not terminate in time"
 
+
 # Utility stuff for creating tealets
 def tealet_new_descend(descend, func=None, arg=None, klass=_tealet.tealet, retarg=False):
     while descend > 0:
-        return tealet_new_descend(descend-1, func, arg, klass=klass, retarg=retarg)
+        return tealet_new_descend(descend - 1, func, arg, klass=klass, retarg=retarg)
     t = klass()
     if func:
         r = t.run(func, arg)
@@ -30,8 +32,10 @@ def tealet_new_descend(descend, func=None, arg=None, klass=_tealet.tealet, retar
         r = None
     return (t, r) if retarg else t
 
+
 def tealet_new_rnd(func=None, arg=None, klass=_tealet.tealet, retarg=False):
     return tealet_new_descend(random.randint(0, 20), func, arg, klass, retarg)
+
 
 def stub_new(func=None, arg=None, klass=_tealet.tealet, retarg=False):
     stub = tealet_new_descend(random.randint(0, 20), klass=klass, retarg=False)
@@ -40,6 +44,7 @@ def stub_new(func=None, arg=None, klass=_tealet.tealet, retarg=False):
     else:
         r = None
     return (stub, r) if retarg else stub
+
 
 def stub_new2(func=None, arg=None, klass=_tealet.tealet, retarg=False):
     stub = tealet_new_descend(random.randint(0, 20), klass=klass, retarg=False)
@@ -50,9 +55,12 @@ def stub_new2(func=None, arg=None, klass=_tealet.tealet, retarg=False):
         r = None
     return (dup, r) if retarg else dup
 
-the_stub=[None]
+
+the_stub = [None]
+
+
 def stub_new3(func=None, arg=None, klass=_tealet.tealet, retarg=False):
-    if (random.randint(0, 10) == 0):
+    if random.randint(0, 10) == 0:
         the_stub[0] = None
     if not the_stub[0]:
         the_stub[0] = tealet_new_descend(random.randint(0, 20), klass=klass)
@@ -63,12 +71,15 @@ def stub_new3(func=None, arg=None, klass=_tealet.tealet, retarg=False):
         r = None
     return (dup, r) if retarg else dup
 
+
 newmode = 0
 newarray = [tealet_new_rnd, stub_new, stub_new2, stub_new3]
+
+
 def get_new():
     if newmode >= 0:
         return newarray[newmode]
-    return newarray(random.randint(0, len(newarray)-1))
+    return newarray(random.randint(0, len(newarray) - 1))
 
 
 class TestModule:
@@ -358,15 +369,15 @@ class TestThreadCleanup:
         thread_main = _tealet.main()
         stub = _tealet.tealet()
         stub.stub()
-        
+
         # Create a tealet that switches back to main and stays suspended in RUN.
         def switch_back(current, arg):
             # Switch back to main and return
             thread_main.switch()
-        
+
         t = _tealet.tealet()
         t.run(switch_back, None)  # t runs and switches back, stays suspended
-        
+
         nerfed = _tealet.thread_reap()
         nerfed_ids = {id(x) for x in nerfed}
 
@@ -392,6 +403,7 @@ class TestThreadCleanup:
 
     def test_cleanup_suspended_tealet_cannot_switch(self):
         """A suspended RUN tealet is killed by cleanup and cannot be switched."""
+
         def parked(current, arg):
             current.main().switch("paused")
             return current.main()
@@ -400,7 +412,7 @@ class TestThreadCleanup:
         assert t.run(parked, None) == "paused"
 
         nerfed = _tealet.thread_reap()
-        _tealet.tealet() # create a new lineage for this thread
+        _tealet.tealet()  # create a new lineage for this thread
         assert all(id(x) != id(t) for x in nerfed)
         assert t.state == _tealet.STATE_EXIT
 
@@ -422,15 +434,15 @@ class TestThreadCleanup:
         stub1.stub()
         stub2 = _tealet.tealet()
         stub2.stub()
-        
+
         nerfed = _tealet.thread_reap()
         nerfed_ids = {id(x) for x in nerfed}
-        
+
         # STUB tealets are not in nerfed (they can be safely garbage collected)
         assert id(stub1) not in nerfed_ids
         assert id(stub2) not in nerfed_ids
         assert nerfed == []
-        
+
         # Recreate main for subsequent tests
         assert _tealet.main().state == _tealet.STATE_RUN
 
@@ -451,26 +463,26 @@ class TestThreadCleanup:
         assert stub2.state == _tealet.STATE_STUB
         nerfed2 = _tealet.thread_reap()
         assert nerfed2 == []  # STUB not in nerfed
-        
+
         # Recreate main for subsequent tests
         assert _tealet.main().state == _tealet.STATE_RUN
 
     def test_cleanup_with_finished_tealets(self):
         """Finished tealets (not ACTIVE) are not included in nerfed."""
         _tealet.main()
-        
+
         def finish_work(current, arg):
             return current.main()
-        
+
         stub = _tealet.tealet()
         stub.stub()
         stub.run(finish_work, None)  # Run to completion, becomes inactive
-        
+
         nerfed = _tealet.thread_reap()
         # Finished tealet should not be in nerfed (not ACTIVE status)
         assert isinstance(nerfed, list)
         assert nerfed == []
-        
+
         # Recreate main for subsequent tests
         assert _tealet.main().state == _tealet.STATE_RUN
 
@@ -479,16 +491,16 @@ class TestThreadCleanup:
         _tealet.main()
         stub = _tealet.tealet()
         stub.stub()
-        
+
         # Delete local reference to stub to allow GC
         del stub
         gc.collect()
-        
+
         # Cleanup should handle dead weakrefs without crashing
         nerfed = _tealet.thread_reap()
         assert isinstance(nerfed, list)
         # The stub was GC'd and wasn't RUN anyway, so won't be in nerfed
-        
+
         # Recreate main for subsequent tests
         assert _tealet.main().state == _tealet.STATE_RUN
 
@@ -702,11 +714,11 @@ class TestTealetContext:
         _tealet.main()
         nerfed1 = _tealet.thread_reap()
         assert nerfed1 == []
-        
+
         # Second cleanup should be idempotent (no error, no main)
         nerfed2 = _tealet.thread_reap()
         assert nerfed2 == []
-        
+
         # Recreate main for subsequent tests
         assert _tealet.main().state == _tealet.STATE_RUN
 
@@ -949,7 +961,7 @@ class TestTealetTraversalMethods:
         seen = {}
 
         def run(current, arg):
-            seen["self_is_current"] = (current.current() == current)
+            seen["self_is_current"] = current.current() == current
             seen["main"] = current.main()
             seen["previous"] = current.previous()
             return _tealet.main()
@@ -960,7 +972,9 @@ class TestTealetTraversalMethods:
         assert seen["main"] == _tealet.main()
         assert seen["previous"] == _tealet.main()
 
-    @pytest.mark.skip(reason="Deferred-delete post-exit behavior is experimental; re-enable when PYTEALET_DEFER_DELETE is being exercised")
+    @pytest.mark.skip(
+        reason="Deferred-delete post-exit behavior is experimental; re-enable when PYTEALET_DEFER_DELETE is being exercised"
+    )
     def test_main_on_exited_tealet_depends_on_defer_delete_flag(self):
         def run_and_exit(current, arg):
             return _tealet.main()
@@ -975,12 +989,15 @@ class TestTealetTraversalMethods:
             with pytest.raises(_tealet.StateError):
                 t.main()
 
+
 class TestSimple:
     def test_simple(self):
         status = [0]
+
         def run(current, arg):
             status[0] = 1
             return arg
+
         get_new()(run, _tealet.current())
         assert status[0] == 1
 
@@ -1003,10 +1020,7 @@ class TestSimple:
             sys.unraisablehook = original_hook
 
         assert seen, "expected unraisable error for None return target"
-        assert any(
-            isinstance(u.exc_value, TypeError) and "tealet object expected" in str(u.exc_value)
-            for u in seen
-        )
+        assert any(isinstance(u.exc_value, TypeError) and "tealet object expected" in str(u.exc_value) for u in seen)
 
 
 class TestPrepare:
@@ -1113,6 +1127,7 @@ class TestPrepare:
 
         assert ref() is None
 
+
 class TestStatus:
     def test_status_run(self):
         t = _tealet.current()
@@ -1124,17 +1139,22 @@ class TestStatus:
         stub = get_new()()
         status = [None]
         assert stub.state == _tealet.STATE_STUB
+
         def run(current, arg):
             status[0] = current.state
             return arg
+
         stub.run(run, _tealet.current())
         assert status[0] == _tealet.STATE_RUN
+
 
 class TestSubclass:
     class sc(_tealet.tealet):
         dude = [0]
+
         def __repr__(self):
-            return "<myrepr %r>"%super(TestSubclass.sc, self).__repr__()
+            return "<myrepr %r>" % super(TestSubclass.sc, self).__repr__()
+
         def __del__(self):
             self.dude[0] = 1
 
@@ -1147,6 +1167,7 @@ class TestSubclass:
         def foo(current, arg):
             arg.switch(current)
             return arg
+
         t = get_new()(foo, _tealet.current(), klass=self.sc)
         assert repr(t)[:7] == "<myrepr"
         assert self.sc.dude[0] == 0
@@ -1167,6 +1188,7 @@ class TestSubclass:
     def test_exact_tealet_constructor_stays_no_args(self):
         with pytest.raises(TypeError, match=r"tealet\(\) takes no arguments"):
             _tealet.tealet(123)
+
 
 class TestSwitch:
     def test_switch_panic_keyword(self):
@@ -1208,6 +1230,7 @@ class TestSwitch:
     def test_switch(self):
         status = [0]
         t = [None, None]
+
         def t2(current, arg):
             assert current != _tealet.main()
             assert current != t[0]
@@ -1224,7 +1247,7 @@ class TestSwitch:
             status[0] = 6
             assert current == t[1]
             assert _tealet.current() == current
-            t[1].switch() #noop
+            t[1].switch()  # noop
             assert status[0] == 6
             status[0] = 7
             assert _tealet.current() == current
@@ -1249,7 +1272,6 @@ class TestSwitch:
         get_new()(t1)
         assert status[0] == 7
 
-
     @pytest.mark.stub
     def test_switch_new(self):
         # 1 is high on the stack.  We then create 2 lower on the stack
@@ -1265,7 +1287,7 @@ class TestSwitch:
 
         def new2(current, arg):
             # switch to tealet 1 to trample the stack
-            arg.switch();
+            arg.switch()
             # back to main
             return _tealet.main()
 
@@ -1273,7 +1295,7 @@ class TestSwitch:
         # the tealet is now running
         tealet2 = tealet_new_descend(4, new2, tealet1)
 
-        assert tealet2.state == _tealet.STATE_RUN;
+        assert tealet2.state == _tealet.STATE_RUN
         tealet2.switch()
 
     @pytest.mark.stub
@@ -1292,7 +1314,7 @@ class TestSwitch:
 
         def new2(current, arg):
             # switch to tealet 1 to trample the stack
-            r = arg.switch(4);
+            r = arg.switch(4)
             assert r == 6
             # back to main
             return _tealet.main(), 7
@@ -1303,7 +1325,7 @@ class TestSwitch:
         tealet2, r = tealet_new_descend(4, new2, tealet1, retarg=True)
         assert r == 5
 
-        assert tealet2.state == _tealet.STATE_RUN;
+        assert tealet2.state == _tealet.STATE_RUN
         r = tealet2.switch(6)
         assert r == 7
 
@@ -1352,10 +1374,7 @@ class TestSetException:
 
         assert result == [None]
         assert seen, "expected unraisable error for uncaught injected exception"
-        assert any(
-            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw"
-            for u in seen
-        )
+        assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw" for u in seen)
 
     def test_throw_on_new_target_injects_at_run_entry(self):
         seen = []
@@ -1373,10 +1392,7 @@ class TestSetException:
             sys.unraisablehook = original_hook
 
         assert seen, "expected unraisable error for uncaught thrown exception"
-        assert any(
-            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw-run"
-            for u in seen
-        )
+        assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw-run" for u in seen)
 
     def test_throw_on_prepared_target_behaves_like_set_exception_plus_run(self):
         seen = []
@@ -1405,10 +1421,7 @@ class TestSetException:
         # Delivery happens at run entry, so worker is not entered.
         assert called == []
         assert seen, "expected unraisable error for uncaught thrown exception"
-        assert any(
-            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-prepared-throw"
-            for u in seen
-        )
+        assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-prepared-throw" for u in seen)
 
     def test_run_allows_dummy_args_when_pending_exception_exists(self):
         seen = []
@@ -1427,10 +1440,7 @@ class TestSetException:
             sys.unraisablehook = original_hook
 
         assert seen, "expected unraisable error for uncaught injected exception"
-        assert any(
-            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-dummy-run"
-            for u in seen
-        )
+        assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-dummy-run" for u in seen)
 
     def test_set_exception_before_run_injects_at_run_entry(self):
         entered = []
@@ -1456,10 +1466,7 @@ class TestSetException:
 
         assert entered == []
         assert seen, "expected unraisable error for uncaught injected exception"
-        assert any(
-            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-before-run"
-            for u in seen
-        )
+        assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-before-run" for u in seen)
 
     def test_set_exception_delivers_on_next_switch(self):
         seen = []
@@ -1528,10 +1535,7 @@ class TestSetException:
             sys.unraisablehook = original_hook
 
         assert seen, "expected unraisable error for uncaught injected exception"
-        assert any(
-            isinstance(u.exc_value, ValueError) and str(u.exc_value) == "route"
-            for u in seen
-        )
+        assert any(isinstance(u.exc_value, ValueError) and str(u.exc_value) == "route" for u in seen)
 
     def test_set_exception_overwrites_inflight_token_after_catch(self):
         seen = []
@@ -1703,7 +1707,7 @@ class TestRandom1:
         cur = _tealet.current()
         while True:
             i = random.randint(0, len(self.tealets))
-            self.status += 1;
+            self.status += 1
             if i == len(self.tealets):
                 break
             prevstatus = self.status
@@ -1711,12 +1715,12 @@ class TestRandom1:
             if not self.tealets[i]:
                 if self.status >= self.max_status:
                     break
-                #print "new", i
+                # print "new", i
                 get_new()(self.randomTealet, i)
             else:
-                #print 'switch', i
+                # print 'switch', i
                 d = self.tealets[i].switch()
-                #assert d == math.sqrt(2344.2)
+                # assert d == math.sqrt(2344.2)
             assert self.status >= prevstatus
             assert _tealet.current() == cur
             assert self.tealets[index] == cur
@@ -1725,7 +1729,7 @@ class TestRandom1:
                 break
 
     def randomTealet(self, current, index):
-        i = self.got_index;
+        i = self.got_index
         assert _tealet.current() == current
         assert i == index
         assert i > 0 and i < len(self.tealets)
@@ -1734,16 +1738,16 @@ class TestRandom1:
         self.randomRun(i)
         self.tealets[i] = None
 
-        i = random.randint(0, len(self.tealets)-1)
+        i = random.randint(0, len(self.tealets) - 1)
         if not self.tealets[i]:
-            assert self.tealets[0];
+            assert self.tealets[0]
             i = 0
         self.got_index = i
-        #print "ret", i
+        # print "ret", i
         return self.tealets[i]
 
     def test_random(self):
-        self.tealets = [None]*127
+        self.tealets = [None] * 127
         self.status = 0
         self.tealets[0] = _tealet.current()
         while self.status < self.max_status:
@@ -1768,23 +1772,23 @@ class TestRandom2:
         self.tealets[index] = cur
         self.randomRun(index)
         self.tealets[index] = None
-        return self.tealets[0] # switch to main
+        return self.tealets[0]  # switch to main
 
     def randomRun(self, index):
         assert self.tealets[index] == None or self.tealets[index] == _tealet.current()
         self.tealets[index] = _tealet.current()
         for i in range(self.N_RUNS):
-            if self.randomDescend(index, random.randint(0, self.MAX_DESCEND+1)) == 0:
-                break;
+            if self.randomDescend(index, random.randint(0, self.MAX_DESCEND + 1)) == 0:
+                break
         self.tealets[index] = None
 
     def randomDescend(self, index, level):
         if level > 0:
-            return self.randomDescend(index, level-1)
+            return self.randomDescend(index, level - 1)
         # find target
-        target = random.randint(0, len(self.tealets)-1)
+        target = random.randint(0, len(self.tealets) - 1)
         if self.status < self.MAX_STATUS:
-            self.status += 1;
+            self.status += 1
             if not self.tealets[target]:
                 get_new()(self.randomTealet, target)
             else:
@@ -1795,7 +1799,7 @@ class TestRandom2:
             for j in range(len(self.tealets)):
                 k = (j + target) % len(self.tealets)
                 if k != index and self.tealets[k]:
-                    self.status += 1;
+                    self.status += 1
                     self.tealets[k].switch()
                     return 1
             return 0
@@ -1806,7 +1810,7 @@ class TestRandom2:
         self.tealets[0] = _tealet.current()
 
         while self.status < self.MAX_STATUS:
-            self.randomRun(0);
+            self.randomRun(0)
 
         # drain the system
         self.tealets[0] = _tealet.current()
@@ -1821,7 +1825,6 @@ class TestRandom2:
             if not found:
                 break
         self.tealets[0] = None
-
 
 
 # Tests can be run with: pytest tests/test_tealet.py

@@ -8,8 +8,10 @@ import greenlet_legacy as greenlet_module
 
 greenlet = greenlet_module.greenlet
 
+
 class SomeError(Exception):
     pass
+
 
 def fmain(seen):
     try:
@@ -19,21 +21,26 @@ def fmain(seen):
         raise
     raise SomeError
 
+
 def send_exception(g, exc):
     # note: send_exception(g, exc)  can be now done with  g.throw(exc).
     # the purpose of this test is to explicitely check the propagation rules.
     def crasher(exc):
         raise exc
+
     g1 = greenlet(crasher, parent=g)
     g1.switch(exc)
+
 
 class GreenletTests(unittest.TestCase):
     def test_simple(self):
         lst = []
+
         def f():
             lst.append(1)
             greenlet.getcurrent().parent.switch()
             lst.append(3)
+
         g = greenlet(f)
         lst.append(0)
         g.switch()
@@ -50,10 +57,12 @@ class GreenletTests(unittest.TestCase):
 
     def test_two_children(self):
         lst = []
+
         def f():
             lst.append(1)
             greenlet.getcurrent().parent.switch()
             lst.extend([1, 1])
+
         g = greenlet(f)
         h = greenlet(f)
         g.switch()
@@ -69,14 +78,17 @@ class GreenletTests(unittest.TestCase):
 
     def test_two_recursive_children(self):
         lst = []
+
         def f():
             lst.append(1)
             greenlet.getcurrent().parent.switch()
+
         def g():
             lst.append(1)
             g = greenlet(f)
             g.switch()
             lst.append(1)
+
         g = greenlet(g)
         g.switch()
         self.assertEqual(len(lst), 3)
@@ -88,9 +100,11 @@ class GreenletTests(unittest.TestCase):
 
     def test_threads(self):
         success = []
+
         def f():
             self.test_simple()
             success.append(True)
+
         ths = [threading.Thread(target=f) for i in range(10)]
         for th in ths:
             th.start()
@@ -136,7 +150,7 @@ class GreenletTests(unittest.TestCase):
         seen = []
         someref = []
         cv = threading.Condition()
-        state = {'step': 0, 'worker_error': None}
+        state = {"step": 0, "worker_error": None}
 
         def f():
             try:
@@ -147,27 +161,27 @@ class GreenletTests(unittest.TestCase):
                 gc.collect()
 
                 with cv:
-                    state['step'] = 1  # worker prepared g1 and dropped local ref
+                    state["step"] = 1  # worker prepared g1 and dropped local ref
                     cv.notify_all()
-                    cv.wait_for(lambda: state['step'] >= 2, timeout=1.0)
+                    cv.wait_for(lambda: state["step"] >= 2, timeout=1.0)
 
-                greenlet()   # trigger cross-thread pending release processing
+                greenlet()  # trigger cross-thread pending release processing
 
                 with cv:
-                    state['step'] = 3  # worker executed release trigger
+                    state["step"] = 3  # worker executed release trigger
                     cv.notify_all()
             except BaseException as exc:
                 with cv:
-                    state['worker_error'] = exc
+                    state["worker_error"] = exc
                     cv.notify_all()
 
         t = threading.Thread(target=f)
         t.start()
         try:
             with cv:
-                ready = cv.wait_for(lambda: state['step'] >= 1 or state['worker_error'] is not None, timeout=1.0)
-            self.assertTrue(ready, 'worker did not reach ready step in time')
-            self.assertIsNone(state['worker_error'], f'worker raised: {state["worker_error"]!r}')
+                ready = cv.wait_for(lambda: state["step"] >= 1 or state["worker_error"] is not None, timeout=1.0)
+            self.assertTrue(ready, "worker did not reach ready step in time")
+            self.assertIsNone(state["worker_error"], f"worker raised: {state['worker_error']!r}")
 
             self.assertEqual(seen, [])
             self.assertEqual(len(someref), 1)
@@ -177,15 +191,15 @@ class GreenletTests(unittest.TestCase):
             self.assertEqual(seen, [])
 
             with cv:
-                state['step'] = 2  # allow worker to run release trigger
+                state["step"] = 2  # allow worker to run release trigger
                 cv.notify_all()
-                triggered = cv.wait_for(lambda: state['step'] >= 3 or state['worker_error'] is not None, timeout=1.0)
-            self.assertTrue(triggered, 'worker did not execute release trigger in time')
-            self.assertIsNone(state['worker_error'], f'worker raised: {state["worker_error"]!r}')
+                triggered = cv.wait_for(lambda: state["step"] >= 3 or state["worker_error"] is not None, timeout=1.0)
+            self.assertTrue(triggered, "worker did not execute release trigger in time")
+            self.assertIsNone(state["worker_error"], f"worker raised: {state['worker_error']!r}")
 
             # Wait for worker to actually finish before checking final seen state.
             t.join(timeout=1.0)
-            self.assertFalse(t.is_alive(), 'worker thread did not exit in time')
+            self.assertFalse(t.is_alive(), "worker thread did not exit in time")
             self.assertEqual(seen, [greenlet.GreenletExit])
         finally:
             t.join(timeout=1.0)
@@ -196,19 +210,21 @@ class GreenletTests(unittest.TestCase):
             self.assertEqual(f.f_back, None)
             greenlet.getcurrent().parent.switch(f)
             return "meaning of life"
+
         g = greenlet(f1)
         frame = g.switch()
         self.assertTrue(frame is g.gr_frame)
         self.assertTrue(g)
         next = g.switch()
         self.assertFalse(g)
-        self.assertEqual(next, 'meaning of life')
+        self.assertEqual(next, "meaning of life")
         self.assertEqual(g.gr_frame, None)
 
     def test_thread_bug(self):
         def runner(x):
             g = greenlet(lambda: time.sleep(x))
             g.switch()
+
         t1 = threading.Thread(target=runner, args=(0.2,))
         t2 = threading.Thread(target=runner, args=(0.3,))
         t1.start()
@@ -220,16 +236,18 @@ class GreenletTests(unittest.TestCase):
         def foo(a, b):
             self.assertEqual(a, 4)
             self.assertEqual(b, 2)
+
         greenlet(foo).switch(a=4, b=2)
 
     def test_switch_kwargs_to_parent(self):
         def foo(x):
             greenlet.getcurrent().parent.switch(x=x)
             greenlet.getcurrent().parent.switch(2, x=3)
-            return x, x ** 2
+            return x, x**2
+
         g = greenlet(foo)
-        self.assertEqual({'x': 3}, g.switch(3))
-        self.assertEqual(((2,), {'x': 3}), g.switch())
+        self.assertEqual({"x": 3}, g.switch(3))
+        self.assertEqual(((2,), {"x": 3}), g.switch())
         self.assertEqual((3, 9), g.switch())
 
     def test_switch_to_another_thread(self):
@@ -237,26 +255,27 @@ class GreenletTests(unittest.TestCase):
         error = None
         created_event = threading.Event()
         done_event = threading.Event()
+
         def foo():
-            data['g'] = greenlet(lambda: None)
+            data["g"] = greenlet(lambda: None)
             created_event.set()
             done_event.wait()
+
         thread = threading.Thread(target=foo)
         thread.start()
         created_event.wait()
         try:
-            data['g'].switch()
+            data["g"].switch()
         except greenlet.error:
             error = sys.exc_info()[1]
         self.assertTrue(error != None, "greenlet.error was not raised!")
         done_event.set()
         thread.join()
 
-
     def test_exc_state(self):
         def f():
             try:
-                raise ValueError('fun')
+                raise ValueError("fun")
             except:
                 exc_info = sys.exc_info()
                 greenlet(h).switch()
@@ -268,8 +287,9 @@ class GreenletTests(unittest.TestCase):
         greenlet(f).switch()
 
     for k in list(locals().keys()):
-        if False and k.startswith('test') and "test_exception" not in k:
+        if False and k.startswith("test") and "test_exception" not in k:
             del locals()[k]
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

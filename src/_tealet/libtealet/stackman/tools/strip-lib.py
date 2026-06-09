@@ -300,9 +300,7 @@ def fix_coff_null_padding(coff):
                 sections[n] = namenew + s[8:]
                 modified = True
                 if verbose:
-                    print(
-                        "Fixed null padding of COFF section header name %r" % shortname
-                    )
+                    print("Fixed null padding of COFF section header name %r" % shortname)
     if modified:
         start = header + b"".join(sections)
         coff = start + coff[len(start) :]

@@ -7,8 +7,11 @@ import _tealet
 
 class error(Exception):
     pass
+
+
 class GreenletExit(BaseException):
     pass
+
 
 class ErrorWrapper(object):
     def __enter__(self):
@@ -23,6 +26,7 @@ ErrorWrapper = ErrorWrapper()  # stateless singleton
 
 tealetmap = weakref.WeakValueDictionary()
 
+
 def getcurrent():
     t = _tealet.current()
     try:
@@ -30,6 +34,7 @@ def getcurrent():
     except KeyError:
         assert _tealet.main() is t
         return greenlet(parent=t)
+
 
 class greenlet(object):
     def __init__(self, run=None, parent=None):
