@@ -133,7 +133,7 @@ Convenience API that combines injection and transfer.
 ```python
 tealet.is_foreign() -> bool
 ```
-Returns whether this tealet object belongs to the current thread.
+Returns whether this tealet object is owned by a different thread.
 
 **Tealet Object Properties:**
 

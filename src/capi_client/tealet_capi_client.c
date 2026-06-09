@@ -52,6 +52,17 @@ static int client_ensure_ctx(PyTealetCapiClientState *state) {
     return 0;
 }
 
+static int client_dict_set_owned(PyObject *d, const char *key, PyObject *value) {
+    int rc;
+
+    if (!value)
+        return -1;
+
+    rc = PyDict_SetItemString(d, key, value);
+    Py_DECREF(value);
+    return rc;
+}
+
 static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
     PyTealetCapiClientState *state = client_get_state(module);
     PyObject *d;
@@ -63,71 +74,71 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (!d)
         return NULL;
 
-    if (PyDict_SetItemString(d, "abi_version", PyLong_FromUnsignedLong(state->api->abi_version)) < 0)
+    if (client_dict_set_owned(d, "abi_version", PyLong_FromUnsignedLong(state->api->abi_version)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "struct_size", PyLong_FromUnsignedLong(state->api->struct_size)) < 0)
+    if (client_dict_set_owned(d, "struct_size", PyLong_FromUnsignedLong(state->api->struct_size)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "feature_flags", PyLong_FromUnsignedLongLong(state->api->feature_flags)) < 0)
+    if (client_dict_set_owned(d, "feature_flags", PyLong_FromUnsignedLongLong(state->api->feature_flags)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_base",
-                             PyBool_FromLong((state->api->feature_flags & PYTEALET_CAPI_FEATURE_BASE) != 0)) < 0)
+    if (client_dict_set_owned(d, "has_base",
+                              PyBool_FromLong((state->api->feature_flags & PYTEALET_CAPI_FEATURE_BASE) != 0)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_create",
-                             PyBool_FromLong(state->api->create != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_create",
+                              PyBool_FromLong(state->api->create != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_stub",
-                             PyBool_FromLong(state->api->stub != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_stub",
+                              PyBool_FromLong(state->api->stub != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_prepare",
-                             PyBool_FromLong(state->api->prepare != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_prepare",
+                              PyBool_FromLong(state->api->prepare != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_duplicate",
-                             PyBool_FromLong(state->api->duplicate != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_duplicate",
+                              PyBool_FromLong(state->api->duplicate != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_run",
-                             PyBool_FromLong(state->api->run != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_run",
+                              PyBool_FromLong(state->api->run != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_switch",
-                             PyBool_FromLong(state->api->switch_ != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_switch",
+                              PyBool_FromLong(state->api->switch_ != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_throw",
-                             PyBool_FromLong(state->api->throw_ != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_throw",
+                              PyBool_FromLong(state->api->throw_ != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_set_exception",
-                             PyBool_FromLong(state->api->set_exception != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_set_exception",
+                              PyBool_FromLong(state->api->set_exception != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_thread_reap",
-                             PyBool_FromLong(state->api->thread_reap != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_reap",
+                              PyBool_FromLong(state->api->thread_reap != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_thread_sweep",
-                             PyBool_FromLong(state->api->thread_sweep != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_sweep",
+                              PyBool_FromLong(state->api->thread_sweep != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_thread_active",
-                             PyBool_FromLong(state->api->thread_active != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_active",
+                              PyBool_FromLong(state->api->thread_active != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_thread_kill",
-                             PyBool_FromLong(state->api->thread_kill != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_kill",
+                              PyBool_FromLong(state->api->thread_kill != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_error_was_remote",
-                             PyBool_FromLong(state->api->error_was_remote != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_error_was_remote",
+                              PyBool_FromLong(state->api->error_was_remote != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_previous",
-                             PyBool_FromLong(state->api->previous != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_previous",
+                              PyBool_FromLong(state->api->previous != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_frame_introspection_get",
-                             PyBool_FromLong(state->api->frame_introspection_get != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_frame_introspection_get",
+                              PyBool_FromLong(state->api->frame_introspection_get != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_frame_introspection_set",
-                             PyBool_FromLong(state->api->frame_introspection_set != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_frame_introspection_set",
+                              PyBool_FromLong(state->api->frame_introspection_set != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_is_foreign",
-                             PyBool_FromLong(state->api->is_foreign != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_is_foreign",
+                              PyBool_FromLong(state->api->is_foreign != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_state_get",
-                             PyBool_FromLong(state->api->state_get != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_state_get",
+                              PyBool_FromLong(state->api->state_get != NULL)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "has_thread_id_get",
-                             PyBool_FromLong(state->api->thread_id_get != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_id_get",
+                              PyBool_FromLong(state->api->thread_id_get != NULL)) < 0)
         goto error;
 
     return d;

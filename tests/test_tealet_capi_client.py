@@ -52,7 +52,9 @@ def test_capi_client_switch_roundtrip():
 
 def test_capi_client_switch_flags_panic():
     with pytest.raises(_tealet.PanicError) as exc:
-        _tealet_capi_client.capi_switch_flags(_tealet.current(), _tealet_capi_client.SWITCH_PANIC, "panic-value")
+        _tealet_capi_client.capi_switch_flags(
+            _tealet.current(), _tealet_capi_client.SWITCH_PANIC, "panic-value"
+        )
 
     assert exc.value.result() == "panic-value"
     assert exc.value.exception() is None
@@ -90,7 +92,10 @@ def test_capi_client_throw_roundtrip():
 
     t = _tealet.tealet()
     assert t.run(parked, None) == "ready"
-    assert _tealet_capi_client.capi_throw(t, RuntimeError("boom-throw")) == ("caught", "boom-throw")
+    assert _tealet_capi_client.capi_throw(t, RuntimeError("boom-throw")) == (
+        "caught",
+        "boom-throw",
+    )
 
 
 def test_capi_client_throw_panic_flag():
@@ -103,7 +108,9 @@ def test_capi_client_throw_panic_flag():
 
     t = _tealet.tealet()
     assert t.run(parked, None) == "ready"
-    assert _tealet_capi_client.capi_throw(t, RuntimeError("boom-panic"), _tealet_capi_client.THROW_PANIC) == (
+    assert _tealet_capi_client.capi_throw(
+        t, RuntimeError("boom-panic"), _tealet_capi_client.THROW_PANIC
+    ) == (
         "caught",
         "PanicError",
         "tealet switch failed",
@@ -176,7 +183,11 @@ def test_capi_client_error_was_remote_matches_module_flag():
 
 def test_capi_client_previous_matches_python_api():
     def parked(current, _arg):
-        return current.main(), (_tealet.previous(), _tealet_capi_client.capi_previous(), current.previous())
+        return current.main(), (
+            _tealet.previous(),
+            _tealet_capi_client.capi_previous(),
+            current.previous(),
+        )
 
     module_prev, capi_prev, method_prev = _tealet.tealet().run(parked, None)
 
