@@ -41,6 +41,12 @@ where = ["src"]
 [tool.setuptools.package-data]
 tealet = ["include/*.h"]
 
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+exclude = ["tests/compat_greenlet/**"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

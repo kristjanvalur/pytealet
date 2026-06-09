@@ -75,10 +75,13 @@ def simple_generator(source: Iterable[T]) -> GeneratorTealet[T]:
 
 # a thread local scheduler
 _scheduler = threading.local()
+
+
 def scheduler() -> SimpleScheduler:
     if not hasattr(_scheduler, "instance"):
         _scheduler.instance = SimpleScheduler()
     return _scheduler.instance
+
 
 class ScheduledTealet(tealet.tealet):
     """Tealet wrapper that tracks scheduler/event placement."""
@@ -124,6 +127,7 @@ class Event:
 
     def clear(self) -> None:
         self._is_set = False
+
 
 class DeadlockError(RuntimeError):
     """Raised when the scheduler has no runnable tasks."""
@@ -181,11 +185,13 @@ class Future(Generic[T]):
         self._wait()
         return self._exception
 
+
 class SimpleScheduler:
     """Very small cooperative scheduler for runnable tealets."""
 
     def __init__(self) -> None:
         self._tasks: list[tealet.tealet] = []
+        self._runner = None
 
     def is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._tasks
@@ -200,44 +206,51 @@ class SimpleScheduler:
                 future.set_exception(exc)
             else:
                 future.set_result(result)
-            return current.main()
+            return scheduler().find_target(task_exit=True)
 
         t = ScheduledTealet().prepare(task_main)
         self.make_runnable(t)
         return future
 
     def schedule(self) -> None:
-        while self._tasks:
-            t = self._tasks.pop(0)
-            if t.state == tealet.STATE_EXIT:
-                continue
-            t.where = None
-            t.switch()
-            return
-        raise DeadlockError("No tasks to switch to")
+        self.find_target().switch()
 
     def yield_(self) -> None:
-        c = tealet.current()
-        c.where = self
-        try:
-            self._tasks.append(tealet.current())
-            self.schedule()
-        except DeadlockError:
-            del self._tasks[-1]  # remove the current task that we just added
-            c.where = None
-            raise
+        self.make_runnable(tealet.current())
+        self.schedule()
 
     def make_runnable(self, t: tealet.tealet) -> None:
-        if t.state == tealet.STATE_EXIT:
-            return
         if t in self._tasks:
             return
         t.where = self
         self._tasks.append(t)
 
+    def find_target(self, task_exit=False) -> tealet.tealet:
+        if self._tasks:
+            result = self._tasks.pop(0)
+        elif self._runner is not None:
+            result = self._runner
+        # fall back to main
+        elif not task_exit:
+            raise DeadlockError("No tasks to switch to")
+        else:
+            result = tealet.main()
+        try:
+            result.where = None
+        except AttributeError:
+            pass  # main tealet may not have a ``where`` attribute
+        return result
+
     def run(self) -> None:
-        while self._tasks:
-            self.schedule()
+        if self._runner is not None:
+            raise RuntimeError("Scheduler already running")
+        self._runner = tealet.current()
+        try:
+            while self._tasks:
+                self.find_target().switch()
+        finally:
+            self._runner = None
+
 
 def demo_scheduler_append_with_yield() -> list[str]:
     """Run a few tealets that append while yielding to each other."""
@@ -279,6 +292,29 @@ def demo_wait_for_event_start() -> list[str]:
     return seen
 
 
+def demo_wait_for_event_between_runs() -> list[str]:
+    """Run twice with external event wakeup between runs."""
+
+    s = scheduler()
+    evt = Event()
+    seen: list[str] = []
+
+    def waiter() -> None:
+        seen.append("waiter:waiting")
+        evt.wait()
+        seen.append("waiter:resumed")
+
+    s.spawn(waiter)
+    s.run()
+    seen.append("after:first-run")
+
+    evt.set()
+
+    s.run()
+    seen.append("after:second-run")
+    return seen
+
+
 def demo_future_result() -> list[str]:
     """Run a task via Future and consume it from another tealet."""
 
@@ -299,15 +335,29 @@ def demo_future_result() -> list[str]:
     s.spawn(consumer)
     s.run()
     return seen
-            
+
 
 def demo() -> None:
     values = list(GeneratorTealet([1, 2, 3]))
     assert values == [1, 2, 3]
 
     assert demo_scheduler_append_with_yield() == ["a0", "b0", "c0", "a1", "b1", "a2"]
-    assert demo_wait_for_event_start() == ["waiter:waiting", "starter:set", "waiter:started"]
-    assert demo_future_result() == ["producer:start", "producer:done", "consumer:result=42"]
+    assert demo_wait_for_event_start() == [
+        "waiter:waiting",
+        "starter:set",
+        "waiter:started",
+    ]
+    assert demo_wait_for_event_between_runs() == [
+        "waiter:waiting",
+        "after:first-run",
+        "waiter:resumed",
+        "after:second-run",
+    ]
+    assert demo_future_result() == [
+        "producer:start",
+        "producer:done",
+        "consumer:result=42",
+    ]
 
 
 if __name__ == "__main__":
