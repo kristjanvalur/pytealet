@@ -5,6 +5,7 @@
  */
 
 #include "pytealet_module.h"
+#include "pytealet_capi.h"
 
 #include "descrobject.h"
 
@@ -175,6 +176,273 @@ static int panic_error_install_methods(PyObject *panic_error_type_obj) {
         }                                                                                                              \
     } while (0)
 
+struct PyTealet_CAPI_Context {
+    PyObject *module;
+};
+
+static PyTealetModuleState *PyTealetApi_GetModuleState(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate;
+
+    if (!ctx || !ctx->module) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid pytealet C API context");
+        return NULL;
+    }
+
+    mstate = (PyTealetModuleState *)PyModule_GetState(ctx->module);
+    if (!mstate) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+
+    return mstate;
+}
+
+static PyTealet_CAPI_Context *PyTealetApi_CtxNew(void) {
+    PyTealet_CAPI_Context *ctx;
+    PyObject *module;
+
+    module = PyImport_ImportModule("_tealet");
+    if (!module)
+        return NULL;
+
+    ctx = (PyTealet_CAPI_Context *)PyMem_Calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        Py_DECREF(module);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    ctx->module = module;
+    return ctx;
+}
+
+static void PyTealetApi_CtxFree(PyTealet_CAPI_Context *ctx) {
+    if (!ctx)
+        return;
+    Py_XDECREF(ctx->module);
+    PyMem_Free(ctx);
+}
+
+static PyObject *PyTealetApi_Current(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return Py_XNewRef((PyObject *)PyTealet_GetOrCreateCurrent(mstate, NULL));
+}
+
+static PyObject *PyTealetApi_Main(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return Py_XNewRef((PyObject *)PyTealet_GetOrCreateMain(mstate, NULL));
+}
+
+static PyObject *PyTealetApi_ThreadSweep(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealet_ThreadSweep(mstate);
+}
+
+static int PyTealetApi_CheckTealet(PyTealet_CAPI_Context *ctx, PyObject *obj) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    if (!obj) {
+        PyErr_SetString(PyExc_TypeError, "obj must not be NULL");
+        return -1;
+    }
+    if (!mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet type unavailable");
+        return -1;
+    }
+    return PyObject_TypeCheck(obj, mstate->tealet_type) ? 1 : 0;
+}
+
+static PyObject *PyTealetApi_CreateForward(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_Create(mstate);
+}
+
+static int PyTealetApi_StubForward(PyTealet_CAPI_Context *ctx, PyObject *target) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_Stub(mstate, target);
+}
+
+static PyObject *PyTealetApi_DuplicateForward(PyTealet_CAPI_Context *ctx, PyObject *source) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_Duplicate(mstate, source);
+}
+
+static int PyTealetApi_PrepareForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *func,
+                                      PyTealetApi_RunCFunc cfunc) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_Prepare(mstate, target, func, cfunc);
+}
+
+static PyObject *PyTealetApi_RunForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *func,
+                                        PyTealetApi_RunCFunc cfunc, PyObject *arg) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_Run(mstate, target, func, cfunc, arg);
+}
+
+static PyObject *PyTealetApi_SwitchForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg,
+                                           uint32_t flags) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_Switch(mstate, target, arg, flags);
+}
+
+static PyObject *PyTealetApi_ThrowForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exc,
+                                          uint32_t flags) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_Throw(mstate, target, exc, flags);
+}
+
+static int PyTealetApi_SetExceptionForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exc,
+                                           PyObject *fallback) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_SetException(mstate, target, exc, fallback);
+}
+
+static PyObject *PyTealetApi_ThreadReapForward(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes,
+                                               PyObject *kill_exc_spec) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_ThreadReap(mstate, cleanup_passes, kill_exc_spec);
+}
+
+static PyObject *PyTealetApi_ThreadActiveForward(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_ThreadActive(mstate);
+}
+
+static PyObject *PyTealetApi_ThreadKillForward(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes,
+                                               PyObject *kill_exc_spec) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_ThreadKill(mstate, cleanup_passes, kill_exc_spec);
+}
+
+static int PyTealetApi_ErrorWasRemoteForward(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_ErrorWasRemote(mstate);
+}
+
+static PyObject *PyTealetApi_PreviousForward(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return NULL;
+    return PyTealetApi_Previous(mstate);
+}
+
+static int PyTealetApi_FrameIntrospectionGetForward(PyTealet_CAPI_Context *ctx) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_FrameIntrospectionGet(mstate);
+}
+
+static int PyTealetApi_FrameIntrospectionSetForward(PyTealet_CAPI_Context *ctx, int enabled) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_FrameIntrospectionSet(mstate, enabled);
+}
+
+static int PyTealetApi_IsForeignForward(PyTealet_CAPI_Context *ctx, PyObject *target) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_IsForeign(mstate, target);
+}
+
+static int PyTealetApi_StateGetForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyTealet_State *state_out) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_StateGet(mstate, target, state_out);
+}
+
+static int PyTealetApi_ThreadIdGetForward(PyTealet_CAPI_Context *ctx, PyObject *target, unsigned long *thread_id_out) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+    if (!mstate)
+        return -1;
+    return PyTealetApi_ThreadIdGet(mstate, target, thread_id_out);
+}
+
+static const PyTealet_CAPI pytealet_capi_table = {
+    PYTEALET_CAPI_ABI_VERSION,
+    sizeof(PyTealet_CAPI),
+    PYTEALET_CAPI_FEATURE_BASE,
+    PyTealetApi_CtxNew,
+    PyTealetApi_CtxFree,
+
+    /* Module-level operations. */
+    PyTealetApi_Current,
+    PyTealetApi_Main,
+    PyTealetApi_PreviousForward,
+    PyTealetApi_ThreadActiveForward,
+    PyTealetApi_ThreadKillForward,
+    PyTealetApi_ThreadReapForward,
+    PyTealetApi_ThreadSweep,
+    PyTealetApi_ErrorWasRemoteForward,
+    PyTealetApi_FrameIntrospectionGetForward,
+    PyTealetApi_FrameIntrospectionSetForward,
+    PyTealetApi_CheckTealet,
+
+    /* Tealet operations. */
+    PyTealetApi_CreateForward,
+    PyTealetApi_DuplicateForward,
+    PyTealetApi_StubForward,
+    PyTealetApi_PrepareForward,
+    PyTealetApi_RunForward,
+    PyTealetApi_SwitchForward,
+    PyTealetApi_ThrowForward,
+    PyTealetApi_SetExceptionForward,
+    PyTealetApi_IsForeignForward,
+    PyTealetApi_StateGetForward,
+    PyTealetApi_ThreadIdGetForward,
+    {NULL},
+};
+
+static int pytealet_module_export_capi(PyObject *m) {
+    PyObject *capsule;
+
+    capsule = PyCapsule_New((void *)&pytealet_capi_table, PYTEALET_CAPI_CAPSULE_NAME, NULL);
+    if (!capsule)
+        return -1;
+    if (PyModule_AddObject(m, "_C_API", capsule) < 0) {
+        Py_DECREF(capsule);
+        return -1;
+    }
+    if (PyModule_AddIntConstant(m, "C_API_ABI_VERSION", (long)PYTEALET_CAPI_ABI_VERSION) < 0)
+        return -1;
+
+    return 0;
+}
+
 static PyObject *module_current(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     PyTealetModuleState *mstate;
     GET_MODULE_STATE(mod, mstate);
@@ -187,6 +455,12 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     GET_MODULE_STATE(mod, mstate);
     /* create main if it doesn't already exist for this thread */
     return Py_XNewRef((PyObject *)PyTealet_GetOrCreateMain(mstate, NULL));
+}
+
+static PyObject *module_previous(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate;
+    GET_MODULE_STATE(mod, mstate);
+    return PyTealetApi_Previous(mstate);
 }
 
 static PyObject *module_thread_reap(PyObject *mod, PyObject *args) {
@@ -309,12 +583,17 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
     PyTealetModuleState *mstate;
     Py_ssize_t nargs;
     int enabled;
+    int rc;
 
     GET_MODULE_STATE(mod, mstate);
 
     nargs = args ? PyTuple_GET_SIZE(args) : 0;
-    if (nargs == 0)
-        return PyBool_FromLong(mstate->frame_introspection_enabled != 0);
+    if (nargs == 0) {
+        rc = PyTealetApi_FrameIntrospectionGet(mstate);
+        if (rc < 0)
+            return NULL;
+        return PyBool_FromLong(rc != 0);
+    }
     if (nargs != 1) {
         PyErr_SetString(PyExc_TypeError, "frame_introspection() takes at most 1 argument");
         return NULL;
@@ -324,20 +603,16 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args) {
     if (enabled < 0)
         return NULL;
 
-#if !PYTEALET_WITH_PENDING_FRAME_INTROSPECTION
-    if (enabled) {
-        PyErr_SetString(PyExc_RuntimeError, "pending frame introspection is compile-time disabled in this build");
+    rc = PyTealetApi_FrameIntrospectionSet(mstate, enabled);
+    if (rc < 0)
         return NULL;
-    }
-#endif
-
-    mstate->frame_introspection_enabled = enabled;
-    return PyBool_FromLong(mstate->frame_introspection_enabled != 0);
+    return PyBool_FromLong(rc != 0);
 }
 
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
+    {"previous", (PyCFunction)module_previous, METH_NOARGS, ""},
     {"thread_reap", (PyCFunction)module_thread_reap, METH_VARARGS, ""},
     {"thread_sweep", (PyCFunction)module_thread_sweep, METH_NOARGS, ""},
     {"thread_active", (PyCFunction)module_thread_active, METH_NOARGS, ""},
@@ -463,6 +738,9 @@ static int pytealet_module_exec(PyObject *m) {
                                 PYTEALET_WITH_PENDING_FRAME_INTROSPECTION) < 0)
         return -1;
     if (PyModule_AddStringConstant(m, "__version__", PYTEALET_VERSION) < 0)
+        return -1;
+
+    if (pytealet_module_export_capi(m) < 0)
         return -1;
 
     return 0;

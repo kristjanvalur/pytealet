@@ -81,6 +81,24 @@ class TestModule:
     def test_main3(self):
         assert _tealet.main().state == _tealet.STATE_RUN
 
+    def test_previous_matches_method_previous_inside_running_tealet(self):
+        def run(current, arg):
+            return current.main(), (_tealet.previous(), current.previous())
+
+        module_prev, method_prev = _tealet.tealet().run(run, None)
+
+        assert module_prev == _tealet.main()
+        assert method_prev == _tealet.main()
+
+    def test_previous_on_main_after_switch_is_last_switcher(self):
+        def parked(current, arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t = _tealet.tealet()
+        assert t.run(parked, None) == "paused"
+        assert _tealet.previous() == t
+
     def test_frame_introspection_toggle(self):
         compiled = bool(getattr(_tealet, "PYTEALET_WITH_PENDING_FRAME_INTROSPECTION", 1))
         original = _tealet.frame_introspection()
@@ -755,10 +773,10 @@ class TestTealetContext:
 
 
 class TestThreadOwnership:
-    def test_new_tealet_has_owner_tid_and_belongs(self):
+    def test_new_tealet_has_owner_tid_and_not_foreign(self):
         t = _tealet.tealet()
         assert t.thread_id == _tealet.current().thread_id
-        assert t.belongs_to_current() is True
+        assert t.is_foreign() is False
 
     def test_stub_rejected_from_foreign_thread(self):
         data = {}
@@ -854,7 +872,7 @@ class TestThreadOwnership:
             assert data["owner_tid"] != _tealet.current().thread_id
             dup = data["stub"].duplicate()
             assert dup.thread_id == data["owner_tid"]
-            assert dup.belongs_to_current() is False
+            assert dup.is_foreign() is True
             with pytest.raises(_tealet.ThreadMismatchError):
                 dup.run(lambda current, arg: current.main(), None)
         finally:

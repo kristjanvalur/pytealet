@@ -1,7 +1,7 @@
 # PyTealet Architecture Documentation
 
 **Original Code Date:** ~2013  
-**libtealet Version:** 0.3.2  
+**libtealet Version:** 0.7.5  
 **Python Version Target:** 3.10+
 
 ## Overview
@@ -35,6 +35,12 @@ Returns the currently executing tealet in this thread.
 _tealet.main() -> tealet
 ```
 Returns the main tealet for this thread (the root of the tealet tree).
+
+```python
+_tealet.previous() -> tealet | None
+```
+Returns the tealet that most recently switched to the current tealet, or
+`None` when there is no previous tealet.
 
 ```python
 _tealet.thread_reap() -> list[tealet]
@@ -125,9 +131,9 @@ Convenience API that combines injection and transfer.
     exception is delivered before worker-call dispatch.
 
 ```python
-tealet.belongs_to_current() -> bool
+tealet.is_foreign() -> bool
 ```
-Returns whether this tealet object belongs to the current thread.
+Returns whether this tealet object is owned by a different thread.
 
 **Tealet Object Properties:**
 
@@ -284,6 +290,35 @@ Greenlet-compatible wrapper around tealets.
 ---
 
 ## Core Architecture
+
+### API Layering Policy (Python and Capsule C API)
+
+The runtime follows a two-front-door pattern:
+- Python-bound methods (for example, tealet.run, tealet.prepare) are responsible for Python call-shape parsing and Python-facing argument errors.
+- Capsule C API entrypoints (for example, PyTealetApi_Run, PyTealetApi_Prepare) are responsible for C-facing validation at the exported boundary.
+- Shared runtime state transitions and execution behavior live in internal implementation helpers (for example, operation-specific impl/dispatch helpers).
+
+This keeps core semantics centralized while allowing each public boundary to retain its own contract and diagnostics.
+
+Practical rule:
+- Avoid implementing runtime behavior in both public entrypoints.
+- Keep boundary checks at the boundary, and keep stateful behavior in one shared internal path.
+
+### Physical Layout Guidance
+
+Preferred source layout is operation-local grouping, keeping related variants near each other.
+
+For a given operation, place code in this order when practical:
+1. Shared internal implementation helper (impl/dispatch).
+2. Python method wrapper.
+3. Capsule C API wrapper.
+
+Rationale:
+- Reduces navigation cost during review and debugging.
+- Makes it obvious which logic is shared vs boundary-specific.
+- Lowers regression risk when changing state transitions or refcount-sensitive behavior.
+
+Allow exceptions for very large helpers (for example, common dispatch used by several operations), but preserve clear references and naming so call flow remains easy to follow.
 
 ### Two-Level Object Structure
 

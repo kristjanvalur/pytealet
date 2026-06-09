@@ -226,6 +226,8 @@ else:
 # Source files for the extension (only pytealet.c, link against pre-built libtealet)
 sources = [
     "src/_tealet/pytealet.c",
+    "src/_tealet/pytealet_lineage.c",
+    "src/_tealet/pytealet_throw.c",
     "src/_tealet/pytealet_module.c",
     "src/_tealet/frame_info.c",
     "src/_tealet/tstate_state.c",
@@ -277,7 +279,17 @@ _tealet_ext = Extension(
     language="c",
 )
 
+# Validation client extension that consumes the _tealet capsule C API.
+_tealet_capi_client_ext = Extension(
+    name="_tealet_capi_client",
+    sources=["src/capi_client/tealet_capi_client.c"],
+    include_dirs=include_dirs,
+    extra_compile_args=extra_compile_args,
+    extra_link_args=extra_link_args,
+    language="c",
+)
+
 # Run setup
 setup(
-    ext_modules=[_tealet_ext],
+    ext_modules=[_tealet_ext, _tealet_capi_client_ext],
 )

@@ -7,6 +7,7 @@
 #ifndef PYTEALET_H
 #define PYTEALET_H
 
+#include "pytealet_capi.h"
 #include "pytealet_common.h"
 #include "tealet.h"
 
@@ -25,6 +26,26 @@ PyObject *PyTealet_ThreadActive(PyTealetModuleState *mstate);
 PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
 int PyTealet_ThreadReapMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata);
 int PyTealet_ErrorWasRemote(PyTealetModuleState *mstate);
+PyObject *PyTealetApi_Create(PyTealetModuleState *mstate);
+PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_obj);
+int PyTealetApi_Stub(PyTealetModuleState *mstate, PyObject *target_obj);
+int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
+                        PyTealetApi_RunCFunc cfunc);
+PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
+                          PyTealetApi_RunCFunc cfunc, PyObject *arg);
+PyObject *PyTealetApi_Switch(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *arg, uint32_t flags);
+PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc, uint32_t flags);
+int PyTealetApi_SetException(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc, PyObject *fallback);
+PyObject *PyTealetApi_ThreadReap(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
+PyObject *PyTealetApi_ThreadActive(PyTealetModuleState *mstate);
+PyObject *PyTealetApi_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
+int PyTealetApi_ErrorWasRemote(PyTealetModuleState *mstate);
+PyObject *PyTealetApi_Previous(PyTealetModuleState *mstate);
+int PyTealetApi_FrameIntrospectionGet(PyTealetModuleState *mstate);
+int PyTealetApi_FrameIntrospectionSet(PyTealetModuleState *mstate, int enabled);
+int PyTealetApi_IsForeign(PyTealetModuleState *mstate, PyObject *target_obj);
+int PyTealetApi_StateGet(PyTealetModuleState *mstate, PyObject *target_obj, PyTealet_State *state_out);
+int PyTealetApi_ThreadIdGet(PyTealetModuleState *mstate, PyObject *target_obj, unsigned long *thread_id_out);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);
 #endif

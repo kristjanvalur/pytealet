@@ -1,17 +1,17 @@
 # PyTealet Current Issues
 
-**Date:** June 5, 2026  
+**Date:** June 8, 2026  
 **Status:** Operational baseline is healthy; this file tracks historical fixes plus remaining hardening items.
 
 ## Overview
 
 The pytealet C extension has been modernized for Python 3.10+ and currently runs a stable core test baseline. This document tracks historical issues, resolved fixes, and remaining hardening work.
 
-## Recent Validation (June 5, 2026)
+## Recent Validation (June 8, 2026)
 
 - Full in-repo test suite currently passes on the debug venv baseline:
     - `.venv-cpython313-debug/bin/python -m pytest tests -q`
-    - Result: `93 passed, 1 skipped`.
+    - Result: `111 passed, 1 skipped`.
 - Historical P0 runtime crashes documented below are fixed in current code.
 - Remaining items are mainly hardening and modernization follow-ups.
 
@@ -26,7 +26,7 @@ The pytealet C extension has been modernized for Python 3.10+ and currently runs
 **Problem:** 
 When a new PyTealetObject is created (STATE_NEW), it has no underlying tealet (`tealet=NULL`). Accessing the `.main` property dereferences this NULL pointer, causing a segfault.
 
-**Current Code:**
+**Historical Code (pre-fix):**
 ```c
 static PyObject *
 pytealet_get_main(PyObject *_self, void *_closure)
@@ -85,7 +85,7 @@ Should review if lazy creation (STATE_NEW without tealet) is intentional design 
 **Problem:**
 Code expects libtealet to auto-delete the C-level tealet on exit (as evidenced by comment "will be auto-deleted on return" and setting `tealet->tealet = NULL`), but uses `TEALET_EXIT_DEFAULT` which means "don't delete".
 
-**Current Code:**
+**Historical Code (pre-fix):**
 ```c
 /* clear the old tealet */
 tealet->state = STATE_EXIT;
