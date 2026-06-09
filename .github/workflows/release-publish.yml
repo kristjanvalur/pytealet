@@ -85,6 +85,7 @@ jobs:
       - build_wheels
       - build_sdist
     runs-on: ubuntu-latest
+    environment: pypi
     if: github.event_name == 'release' && github.event.action == 'published'
     permissions:
       id-token: write
