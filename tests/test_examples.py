@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 import _tealet
@@ -85,6 +87,25 @@ class TestSchedulerExamples:
     def test_timeout_demo(self):
         seen = examples.demo_future_timeout_then_success()
         assert seen == ["timeout_waiter:False", "success_waiter:True"]
+
+    def test_arun_runs_inside_asyncio_task(self):
+        s = examples.SimpleScheduler()
+        seen: list[str] = []
+
+        # Keep arun() waiting so we can inject runnable work from asyncio.
+        s.call_later(0.01, lambda: seen.append("timer"))
+
+        async def orchestrate() -> None:
+            runner = asyncio.create_task(s.arun())
+            await asyncio.sleep(0)
+
+            s.spawn(lambda: seen.append("spawned"))
+
+            await runner
+
+        asyncio.run(orchestrate())
+
+        assert seen == ["spawned", "timer"]
 
 
 class TestFutureExamples:
