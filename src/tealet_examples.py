@@ -14,6 +14,7 @@ from typing import Callable, Generic, TypeVar
 
 import tealet
 import threading
+import asyncio
 
 T = TypeVar("T")
 
@@ -263,6 +264,8 @@ class SimpleScheduler:
         self._runner = None
         self._timers: list[tuple[float, int, TimerHandle]] = []
         self._timer_sequence = itertools.count()
+        self._wakeup = threading.Event()
+        self._awakeup = asyncio.Event()
 
     def time(self) -> float:
         return time.monotonic()
@@ -278,6 +281,7 @@ class SimpleScheduler:
     def call_at(self, when: float, callback: Callable[..., object], *args: object) -> TimerHandle:
         handle = TimerHandle(when, callback, args)
         heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
+        self.break_wait()
         return handle
 
     def _run_ready_timers(self) -> None:
@@ -330,6 +334,7 @@ class SimpleScheduler:
             return
         t.where = self
         self._tasks.append(t)
+        self.break_wait()
 
     def find_target(self, task_exit=False) -> tealet.tealet:
         if self._tasks:
@@ -347,25 +352,60 @@ class SimpleScheduler:
             pass  # main tealet may not have a ``where`` attribute
         return result
 
-    def run(self) -> None:
+    def pump(self, n=0) -> None:
         if self._runner is not None:
             raise RuntimeError("Scheduler already running")
+        if n == 0:
+            n = len(self._tasks)
+        pumped = 0
         self._runner = tealet.current()
         try:
-            while self._tasks or self._timers:
-                self._run_ready_timers()
-                if self._tasks:
-                    self.find_target().switch()
-                    continue
-
-                sleep_for = self._time_to_next_timer()
-                if sleep_for is None:
-                    break
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
+            self._run_ready_timers()                
+            while n != 0:
+                target = self.find_target()
+                if target is None:
+                    return pumped
+                pumped += 1
+                n -= 1
+                target.switch()
         finally:
             self._runner = None
 
+    def break_wait(self) -> None:
+        self._wakeup.set()
+        self._awakeup.set()
+
+    def wait_thead(self) -> None:
+        sleep_for = self._time_to_next_timer()
+        if sleep_for is not  None:
+            self._wakeup.wait(timeout=sleep_for)
+            self._wakeup.clear()
+
+    async def wait_async(self) -> None:
+        sleep_for = self._time_to_next_timer()
+        if sleep_for is not  None:
+            try:
+                async with asyncio.timeout(sleep_for):
+                    await self._awakeup.wait()
+            except TimeoutError:
+                # Timer expiry is a normal wake path for the scheduler loop.
+                pass
+            finally:
+                self._awakeup.clear()
+    
+
+    def run(self) -> None:
+        # run untile there are no tasks or timers left. This is a simple example of a scheduler main loop
+        while self._tasks or self._timers:
+            self.pump()
+            self.wait_thead()            
+
+    async def arun(self) -> None:
+        # async version of run, for use in async contexts. This is a simple example of how to integrate with an async event loop.
+        while self._tasks or self._timers:
+            self.pump()
+            await self.wait_async()
+                
 
 def demo_scheduler_append_with_yield() -> list[str]:
     """Run a few tealets that append while yielding to each other."""
