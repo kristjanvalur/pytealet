@@ -6,6 +6,9 @@ example code separate from runtime APIs.
 
 from __future__ import annotations
 
+import heapq
+import itertools
+import time
 from collections.abc import Iterable, Iterator
 from typing import Callable, Generic, TypeVar
 
@@ -107,17 +110,45 @@ class Event:
         self._waiters: list[tealet.tealet] = []
         self._is_set = False
 
-    def wait(self) -> None:
+    def _remove_waiter(self, waiter: tealet.tealet) -> None:
+        try:
+            self._waiters.remove(waiter)
+        except ValueError:
+            pass
+
+    def wait(self, timeout: float | None = None) -> bool:
         if self._is_set:
-            return
+            return True
+
+        if timeout is not None and timeout < 0:
+            timeout = 0.0
 
         current = tealet.current()
+        timed_out = False
+
+        timeout_handle: TimerHandle | None = None
+
+        if timeout is not None:
+
+            def _wake_timeout() -> None:
+                nonlocal timed_out
+                timed_out = True
+                self._remove_waiter(current)
+                scheduler().make_runnable(current)
+
+            timeout_handle = scheduler().call_later(timeout, _wake_timeout)
+
         current.where = self
         try:
             self._waiters.append(current)
             scheduler().schedule()
         finally:
+            if timeout_handle is not None:
+                timeout_handle.cancel()
+            self._remove_waiter(current)
             current.where = None
+
+        return not timed_out
 
     def set(self) -> None:
         self._is_set = True
@@ -139,6 +170,42 @@ class InvalidStateError(RuntimeError):
     """Raised when attempting to complete a Future more than once."""
 
     pass
+
+
+class TimerHandle:
+    """Cancellable callback scheduled to run in the future."""
+
+    def __init__(
+        self,
+        when: float,
+        callback: Callable[..., object],
+        args: tuple[object, ...]=(),
+    ) -> None:
+        self._when = when
+        self._callback = callback
+        self._args = args
+        self._cancelled = False
+
+    @property
+    def when(self) -> float:
+        return self._when
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def _run(self) -> None:
+        if self._cancelled:
+            return
+        self._callback(*self._args)
+
+    def __enter__(self) -> "TimerHandle":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.cancel()
 
 
 class Future(Generic[T]):
@@ -169,20 +236,22 @@ class Future(Generic[T]):
         self._done = True
         self._event.set()
 
-    def _wait(self) -> None:
+    def _wait(self, timeout: float | None = None) -> bool:
         if self._done:
-            return
+            return True
 
-        self._event.wait()
+        return self._event.wait(timeout=timeout)
 
-    def result(self) -> T:
-        self._wait()
+    def result(self, timeout: float | None = None) -> T:
+        if not self._wait(timeout=timeout):
+            raise TimeoutError("Future timed out")
         if self._exception is not None:
             raise self._exception
         return self._result
 
-    def exception(self) -> BaseException | None:
-        self._wait()
+    def exception(self, timeout: float | None = None) -> BaseException | None:
+        if not self._wait(timeout=timeout):
+            raise TimeoutError("Future timed out")
         return self._exception
 
 
@@ -192,6 +261,37 @@ class SimpleScheduler:
     def __init__(self) -> None:
         self._tasks: list[tealet.tealet] = []
         self._runner = None
+        self._timers: list[tuple[float, int, TimerHandle]] = []
+        self._timer_sequence = itertools.count()
+
+    def time(self) -> float:
+        return time.monotonic()
+
+    def call_soon(self, callback: Callable[..., object], *args: object) -> TimerHandle:
+        return self.call_at(self.time(), callback, *args)
+
+    def call_later(self, delay: float, callback: Callable[..., object], *args: object) -> TimerHandle:
+        if delay < 0:
+            delay = 0
+        return self.call_at(self.time() + delay, callback, *args)
+
+    def call_at(self, when: float, callback: Callable[..., object], *args: object) -> TimerHandle:
+        handle = TimerHandle(when, callback, args)
+        heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
+        return handle
+
+    def _run_ready_timers(self) -> None:
+        now = self.time()
+        while self._timers and self._timers[0][0] <= now:
+            _, _, handle = heapq.heappop(self._timers)
+            handle._run()
+
+    def _time_to_next_timer(self) -> float | None:
+        while self._timers and self._timers[0][2].cancelled():
+            heapq.heappop(self._timers)
+        if not self._timers:
+            return None
+        return max(0.0, self._timers[0][0] - self.time())
 
     def is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._tasks
@@ -213,11 +313,17 @@ class SimpleScheduler:
         return future
 
     def schedule(self) -> None:
+        self._run_ready_timers()
         self.find_target().switch()
 
     def yield_(self) -> None:
         self.make_runnable(tealet.current())
         self.schedule()
+
+    def sleep(self, delay: float) -> None:
+        evt = Event()
+        with self.call_later(delay, evt.set):
+            evt.wait()
 
     def make_runnable(self, t: tealet.tealet) -> None:
         if t in self._tasks:
@@ -246,8 +352,17 @@ class SimpleScheduler:
             raise RuntimeError("Scheduler already running")
         self._runner = tealet.current()
         try:
-            while self._tasks:
-                self.find_target().switch()
+            while self._tasks or self._timers:
+                self._run_ready_timers()
+                if self._tasks:
+                    self.find_target().switch()
+                    continue
+
+                sleep_for = self._time_to_next_timer()
+                if sleep_for is None:
+                    break
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
         finally:
             self._runner = None
 
@@ -337,6 +452,48 @@ def demo_future_result() -> list[str]:
     return seen
 
 
+def demo_sleep() -> list[str]:
+    """Run a tealet that sleeps and resumes via scheduled timer callback."""
+
+    s = scheduler()
+    seen: list[str] = []
+
+    def worker() -> None:
+        seen.append("before:sleep")
+        s.sleep(0.001)
+        seen.append("after:sleep")
+
+    s.spawn(worker)
+    s.run()
+    return seen
+
+
+def demo_future_timeout_then_success() -> list[str]:
+    """Show timeout then successful completion while cancelling timeout wait."""
+
+    s = scheduler()
+    evt = Event()
+    seen: list[str] = []
+
+    def timeout_waiter() -> None:
+        ok = evt.wait(timeout=0.001)
+        seen.append(f"timeout_waiter:{ok}")
+
+    def success_waiter() -> None:
+        ok = evt.wait(timeout=0.01)
+        seen.append(f"success_waiter:{ok}")
+
+    def setter() -> None:
+        s.sleep(0.002)
+        evt.set()
+
+    s.spawn(timeout_waiter)
+    s.spawn(success_waiter)
+    s.spawn(setter)
+    s.run()
+    return seen
+
+
 def demo() -> None:
     values = list(GeneratorTealet([1, 2, 3]))
     assert values == [1, 2, 3]
@@ -357,6 +514,11 @@ def demo() -> None:
         "producer:start",
         "producer:done",
         "consumer:result=42",
+    ]
+    assert demo_sleep() == ["before:sleep", "after:sleep"]
+    assert demo_future_timeout_then_success() == [
+        "timeout_waiter:False",
+        "success_waiter:True",
     ]
 
 
