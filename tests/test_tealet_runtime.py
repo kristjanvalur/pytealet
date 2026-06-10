@@ -99,8 +99,6 @@ class TestModule:
 
         assert _tealet.hide_frame(callable=inner, args=(1,), kwargs={"x": 2}) == ((1,), {"x": 2})
 
-
-
 class TestTealetTraversalMethods:
     def test_methods_fail_on_new_tealet(self):
         t = _tealet.tealet()
@@ -469,6 +467,35 @@ class TestPrepare:
 
             assert target.switch("finish") is None
             assert target.state == _tealet.STATE_EXIT
+
+    def test_prepare_first_throw_on_prepared_reports_unraisable_and_skips_worker(self):
+        called = []
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def worker(current, arg):
+            called.append(arg)
+            return current.main(), "done-prepared"
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        t = _tealet.tealet()
+        t.prepare(worker)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            assert t.throw(RuntimeError("boom-prepared-first-throw")) is None
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert called == []
+        assert t.state == _tealet.STATE_EXIT
+        assert seen, "expected unraisable error for uncaught thrown exception"
+        assert any(
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-prepared-first-throw"
+            for u in seen
+        )
 
     def test_prepare_requires_callable(self):
         t = _tealet.tealet()

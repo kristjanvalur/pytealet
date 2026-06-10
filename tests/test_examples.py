@@ -104,6 +104,83 @@ class TestSchedulerExamples:
 
         assert seen == ["spawned", "timer"]
 
+    def test_unlink_removes_waiting_tealet_from_event(self):
+        s = examples.scheduler()
+        evt = examples.Event()
+        seen: list[str] = []
+        waiter_ref: dict[str, examples.ScheduledTealet] = {}
+
+        def waiter() -> None:
+            waiter_ref["t"] = _tealet.current()
+            seen.append("waiter:waiting")
+            evt.wait()
+            seen.append("waiter:resumed")
+
+        def canceller() -> None:
+            waiter_ref["t"].unlink()
+            seen.append("canceller:unlinked")
+
+        s.spawn(waiter)
+        s.spawn(canceller)
+        s.run()
+
+        assert seen == ["waiter:waiting", "canceller:unlinked"]
+
+    def test_run_switches_immediately_to_target(self):
+        s = examples.scheduler()
+        evt = examples.Event()
+        seen: list[str] = []
+        target_ref: dict[str, examples.ScheduledTealet] = {}
+
+        def target_worker() -> None:
+            target_ref["t"] = _tealet.current()
+            seen.append("target:started")
+            evt.wait()
+            seen.append("target:resumed")
+
+        def caller() -> None:
+            seen.append("caller:before-run")
+            target_ref["t"].run()
+            seen.append("caller:after-run")
+
+        s.spawn(target_worker)
+        s.spawn(caller)
+        s.run()
+
+        assert seen == ["target:started", "caller:before-run", "target:resumed", "caller:after-run"]
+
+    def test_throw_switches_immediately_to_target(self):
+        s = examples.scheduler()
+        evt = examples.Event()
+        seen: list[str] = []
+        target_ref: dict[str, examples.ScheduledTealet] = {}
+
+        def target_worker() -> None:
+            target_ref["t"] = _tealet.current()
+            seen.append("target:started")
+            try:
+                evt.wait()
+            except ValueError as exc:
+                seen.append(f"target:caught:{exc}")
+            seen.append("target:finished")
+
+        def caller() -> None:
+            seen.append("caller:before-throw")
+            target_ref["t"].throw(ValueError("boom"))
+            seen.append("caller:after-throw")
+
+        s.spawn(target_worker)
+        s.spawn(caller)
+        s.run()
+
+        assert seen == [
+            "target:started",
+            "caller:before-throw",
+            "target:caught:boom",
+            "target:finished",
+            "caller:after-throw",
+        ]
+
 
 class TestFutureExamples:
     def test_future_demo(self):

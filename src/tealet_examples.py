@@ -103,7 +103,24 @@ class ScheduledTealet(tealet.tealet):
     def is_running(self):
         return tealet.current() is self
 
+    def unlink(self):
+        if self.link is not None:
+            self.link.unlink(self)
 
+    def run(self):
+        if self.is_running():
+            return
+        self.unlink()
+        scheduler().make_runnable(tealet.current())
+        self.switch()
+
+    def throw(self, exc: BaseException):
+        if self.is_running():
+            raise exc
+        self.unlink()
+        scheduler().make_runnable(tealet.current())
+        super().throw(exc)
+        
 class Event:
     """Minimal event primitive for scheduler-driven wait/wake."""
 
@@ -114,6 +131,12 @@ class Event:
     def _remove_waiter(self, waiter: tealet.tealet) -> None:
         try:
             self._waiters.remove(waiter)
+        except ValueError:
+            pass
+
+    def unlink(self, tealet: tealet.tealet) -> None:
+        try:
+            self._waiters.remove(tealet)
         except ValueError:
             pass
 
@@ -311,6 +334,12 @@ class SimpleScheduler:
     def is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._tasks
 
+    def unlink(self, t: tealet.tealet) -> None:
+        try:
+            self._tasks.remove(t)
+        except ValueError:
+            pass
+
     # create a tealet and place on the runnable queue
     def spawn(self, func: Callable[..., T], *args, **kwargs) -> Future[T]:
         future: Future[T] = Future()
@@ -363,6 +392,11 @@ class SimpleScheduler:
         if self._runner is not None and self._target_count is not None and self._n_scheduled >= self._target_count:
             # we've reached the target count for this run, switch back to the runner
             result = self._runner
+            try:
+                result.unlink()
+            except AttributeError:
+                self.unlink(result)  # main tealet may not have an ``unlink`` method, use scheduler's unlink as fallback
+            self.unlink(result)
             self._tasks.remove(result)
         elif self._tasks:
             result = self._tasks.pop(0)
