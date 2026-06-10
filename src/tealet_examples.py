@@ -257,7 +257,13 @@ class Future(Generic[T]):
 
 
 class SimpleScheduler:
-    """Very small cooperative scheduler for runnable tealets."""
+    """Very small cooperative scheduler for runnable tealets.
+    Scheduling is cooperative.  When a tealet yields, it places
+    itself on a queue and finds the next canditate to switch to.
+    Top level "run" commands are also cooperative in nature: The tealet
+    calling "run" will find a candidate, and place itself on the
+    run queue until woken up again.
+    """
 
     def __init__(self) -> None:
         self._tasks: list[tealet.tealet] = []
@@ -266,7 +272,10 @@ class SimpleScheduler:
         self._timer_sequence = itertools.count()
         self._wakeup = threading.Event()
         self._awakeup = asyncio.Event()
+        self._n_scheduled = 0
+        self._target_count = None
 
+    # functions for delayed scheduling of callbacks
     def time(self) -> float:
         return time.monotonic()
 
@@ -297,9 +306,12 @@ class SimpleScheduler:
             return None
         return max(0.0, self._timers[0][0] - self.time())
 
+    # check if a tealet is waiting to be scheduled
+
     def is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._tasks
 
+    # create a tealet and place on the runnable queue
     def spawn(self, func: Callable[..., T], *args, **kwargs) -> Future[T]:
         future: Future[T] = Future()
 
@@ -318,9 +330,14 @@ class SimpleScheduler:
 
     def schedule(self) -> None:
         self._run_ready_timers()
-        self.find_target().switch()
+        target = self.find_target()
+        self._n_scheduled += 1
+        target.switch()
 
     def yield_(self) -> None:
+        """ yield control of the current tealet, allowing other runnable tasks to run.
+        The yielding tealet is put at the tail of the runnable queue
+        """
         self.make_runnable(tealet.current())
         self.schedule()
 
@@ -332,15 +349,23 @@ class SimpleScheduler:
     def make_runnable(self, t: tealet.tealet) -> None:
         if t in self._tasks:
             return
-        t.where = self
+        try:
+            t.where = self
+        except AttributeError:
+            pass  # main tealet may not have a ``where`` attribute
         self._tasks.append(t)
         self.break_wait()
 
     def find_target(self, task_exit=False) -> tealet.tealet:
-        if self._tasks:
-            result = self._tasks.pop(0)
-        elif self._runner is not None:
+        """Find the next target to switch to. This is the core of the scheduling logic.
+        The target is unlinked from the runnable queue.
+        """
+        if self._runner is not None and self._target_count is not None and self._n_scheduled >= self._target_count:
+            # we've reached the target count for this run, switch back to the runner
             result = self._runner
+            self._tasks.remove(result)
+        elif self._tasks:
+            result = self._tasks.pop(0)
         # fall back to main
         elif not task_exit:
             raise DeadlockError("No tasks to switch to")
@@ -355,21 +380,16 @@ class SimpleScheduler:
     def pump(self, n=0) -> None:
         if self._runner is not None:
             raise RuntimeError("Scheduler already running")
-        if n == 0:
-            n = len(self._tasks)
-        pumped = 0
+        start_count = self._n_scheduled
+        if n > 0:
+            self._target_count = start_count + n
         self._runner = tealet.current()
         try:
-            self._run_ready_timers()                
-            while n != 0:
-                target = self.find_target()
-                if target is None:
-                    return pumped
-                pumped += 1
-                n -= 1
-                target.switch()
+            self.yield_()
+            return self._n_scheduled - start_count - 1  # don't count our switch back
         finally:
             self._runner = None
+            self._target_count = None
 
     def break_wait(self) -> None:
         self._wakeup.set()
