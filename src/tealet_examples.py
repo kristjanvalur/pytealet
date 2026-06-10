@@ -92,13 +92,13 @@ class ScheduledTealet(tealet.tealet):
 
     def __init__(self):
         super().__init__()
-        self.where = None
+        self.link = None
 
     def is_waiting(self):
-        return isinstance(self.where, Event)
+        return isinstance(self.link, Event)
 
     def is_runnable(self):
-        return isinstance(self.where, SimpleScheduler) and scheduler().is_runnable(self)
+        return isinstance(self.link, SimpleScheduler) and scheduler().is_runnable(self)
 
     def is_running(self):
         return tealet.current() is self
@@ -139,7 +139,7 @@ class Event:
 
             timeout_handle = scheduler().call_later(timeout, _wake_timeout)
 
-        current.where = self
+        current.link = self
         try:
             self._waiters.append(current)
             scheduler().schedule()
@@ -147,7 +147,7 @@ class Event:
             if timeout_handle is not None:
                 timeout_handle.cancel()
             self._remove_waiter(current)
-            current.where = None
+            current.link = None
 
         return not timed_out
 
@@ -350,9 +350,9 @@ class SimpleScheduler:
         if t in self._tasks:
             return
         try:
-            t.where = self
+            t.link = self
         except AttributeError:
-            pass  # main tealet may not have a ``where`` attribute
+            pass  # main tealet may not have a ``link`` attribute
         self._tasks.append(t)
         self.break_wait()
 
@@ -372,9 +372,9 @@ class SimpleScheduler:
         else:
             result = tealet.main()
         try:
-            result.where = None
+            result.link = None
         except AttributeError:
-            pass  # main tealet may not have a ``where`` attribute
+            pass  # main tealet may not have a ``link`` attribute
         return result
 
     def pump(self, n=0) -> None:
