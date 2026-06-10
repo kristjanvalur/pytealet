@@ -92,15 +92,12 @@ class TestSchedulerExamples:
         s = examples.SimpleScheduler()
         seen: list[str] = []
 
-        # Keep arun() waiting so we can inject runnable work from asyncio.
+        # Keep arun() active and inject runnable work while it is waiting.
+        s.call_later(0.001, lambda: s.spawn(lambda: seen.append("spawned")))
         s.call_later(0.01, lambda: seen.append("timer"))
 
         async def orchestrate() -> None:
             runner = asyncio.create_task(s.arun())
-            await asyncio.sleep(0)
-
-            s.spawn(lambda: seen.append("spawned"))
-
             await runner
 
         asyncio.run(orchestrate())
