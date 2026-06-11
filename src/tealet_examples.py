@@ -164,8 +164,7 @@ class Event:
 
         current.link = self
         try:
-            self._waiters.append(current)
-            scheduler().schedule()
+            scheduler().schedule(lambda: self._waiters.append(current))
         finally:
             if timeout_handle is not None:
                 timeout_handle.cancel()
@@ -278,6 +277,51 @@ class Future(Generic[T]):
             raise TimeoutError("Future timed out")
         return self._exception
 
+class RawTimeoutError(BaseException):
+    pass
+
+TimeoutError = asyncio.TimeoutError
+
+class Timeout:
+    def __init__(self, when: float):
+        self._when = when
+        self._handle: TimerHandle | None = None
+        self._exc = RawTimeoutError()
+        self._expired = False
+
+    def reschedule(self, when: float):
+        if not self._expired and self._handle is not None:
+            self._handle.cancel()
+            self._when = when
+            self._handle = scheduler().call_at(self._when, self._timeout, tealet.current())
+
+    def expired(self) -> bool:
+        # if we 
+        return self._expired
+
+    def __enter__(self) -> "Timeout":
+        self._handle = scheduler().call_at(self._when, self._timeout, tealet.current())
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+        if exc_val is self._exc:
+            assert self._expired is True
+            raise asyncio.TimeoutError("Operation timed out") from exc_val
+
+    def _timeout(self, target) -> None:
+        self._expired = True
+        target.throw(self._exc)
+
+def timeout(delay: float) -> Timeout:
+    """Context manager for timing out a block of code via scheduler timers."""
+    when = scheduler().time() + delay
+    return Timeout(when)
+
+def timeout_at(when: float) -> Timeout:
+    """Context manager for timing out a block of code at a specific time via scheduler timers."""
+    return Timeout(when)
 
 class SimpleScheduler:
     """Very small cooperative scheduler for runnable tealets.
@@ -351,14 +395,20 @@ class SimpleScheduler:
                 future.set_exception(exc)
             else:
                 future.set_result(result)
-            return scheduler().find_target(task_exit=True)
+            return self.find_target(task_exit=True)
 
         t = ScheduledTealet().prepare(task_main)
         self.make_runnable(t)
         return future
 
-    def schedule(self) -> None:
+    def schedule(self, enqueue=None) -> None:
+        """ pass in an enqueue lambda, so that enquing the current tealet happens
+        after possibly pumping the ready timers, thus ensuring atomicity betwen
+        enqueing and switching.
+        """
         self._run_ready_timers()
+        if enqueue is not None:
+            enqueue()
         target = self.find_target()
         self._n_scheduled += 1
         target.switch()
@@ -367,8 +417,7 @@ class SimpleScheduler:
         """ yield control of the current tealet, allowing other runnable tasks to run.
         The yielding tealet is put at the tail of the runnable queue
         """
-        self.make_runnable(tealet.current())
-        self.schedule()
+        self.schedule(lambda: self.make_runnable(tealet.current()))
 
     def sleep(self, delay: float) -> None:
         evt = Event()
@@ -397,7 +446,6 @@ class SimpleScheduler:
             except AttributeError:
                 self.unlink(result)  # main tealet may not have an ``unlink`` method, use scheduler's unlink as fallback
             self.unlink(result)
-            self._tasks.remove(result)
         elif self._tasks:
             result = self._tasks.pop(0)
         # fall back to main

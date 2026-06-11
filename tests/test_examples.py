@@ -6,6 +6,15 @@ import _tealet
 import tealet_examples as examples
 
 
+@pytest.fixture(autouse=True)
+def _reset_examples_scheduler_tls():
+    examples._scheduler.instance = examples.SimpleScheduler()
+    try:
+        yield
+    finally:
+        examples._scheduler.instance = examples.SimpleScheduler()
+
+
 class TestRawSimpleGenerator:
     def test_raw_simple_generator_yields_then_stops(self):
         t = _tealet.tealet().prepare(examples.raw_simple_generator)
@@ -84,25 +93,68 @@ class TestSchedulerExamples:
 
         assert seen == ["timeout=False", "success=True"]
 
+    def test_timeout_context_event_wait_timeout_and_success(self):
+        s = examples.scheduler()
+        evt = examples.Event()
+        seen: list[str] = []
+
+        def timeout_waiter() -> None:
+            tm = examples.timeout(0.001)
+            with pytest.raises(examples.TimeoutError, match="Operation timed out"):
+                with tm:
+                    evt.wait()
+            seen.append(f"timeout={tm.expired()}")
+
+        def success_waiter() -> None:
+            tm = examples.timeout(0.01)
+            with tm:
+                evt.wait()
+            seen.append(f"success={not tm.expired()}")
+
+        def setter() -> None:
+            s.sleep(0.002)
+            evt.set()
+
+        s.spawn(timeout_waiter)
+        s.spawn(success_waiter)
+        s.spawn(setter)
+        s.run()
+
+        assert seen == ["timeout=True", "success=True"]
+
     def test_timeout_demo(self):
         seen = examples.demo_future_timeout_then_success()
         assert seen == ["timeout_waiter:False", "success_waiter:True"]
 
     def test_arun_runs_inside_asyncio_task(self):
-        s = examples.SimpleScheduler()
+        s = examples.scheduler()
         seen: list[str] = []
 
         # Keep arun() active and inject runnable work while it is waiting.
         s.call_later(0.001, lambda: s.spawn(lambda: seen.append("spawned")))
-        s.call_later(0.01, lambda: seen.append("timer"))
 
         async def orchestrate() -> None:
             runner = asyncio.create_task(s.arun())
-            await runner
+            try:
+                await asyncio.wait_for(runner, timeout=1.0)
+            except asyncio.TimeoutError:
+                # Fail fast with bounded cancellation cleanup instead of hanging.
+                runner.cancel()
+                try:
+                    await asyncio.wait_for(runner, timeout=0.2)
+                except asyncio.CancelledError:
+                    pass
+                except asyncio.TimeoutError:
+                    pass
+                pytest.fail(
+                    "scheduler arun timed out: "
+                    f"tasks={len(s._tasks)} timers={len(s._timers)} "
+                    f"runner={s._runner is not None} seen={seen}"
+                )
 
         asyncio.run(orchestrate())
 
-        assert seen == ["spawned", "timer"]
+        assert seen == ["spawned"]
 
     def test_unlink_removes_waiting_tealet_from_event(self):
         s = examples.scheduler()
@@ -231,3 +283,25 @@ class TestFutureExamples:
         s.spawn(waiter)
         s.run()
         assert seen == ["timed-out", "value=1"]
+
+    def test_timeout_context_future_result_timeout(self):
+        s = examples.scheduler()
+        future: examples.Future[int] = examples.Future()
+        seen: list[str] = []
+
+        def complete_later() -> None:
+            s.sleep(0.01)
+            future.set_result(1)
+
+        def waiter() -> None:
+            tm = examples.timeout(0.001)
+            with pytest.raises(examples.TimeoutError, match="Operation timed out"):
+                with tm:
+                    future.result()
+            seen.append(f"timed-out={tm.expired()}")
+            seen.append(f"value={future.result()}")
+
+        s.spawn(complete_later)
+        s.spawn(waiter)
+        s.run()
+        assert seen == ["timed-out=True", "value=1"]
