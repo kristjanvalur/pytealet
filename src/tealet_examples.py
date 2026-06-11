@@ -9,6 +9,7 @@ from __future__ import annotations
 import heapq
 import itertools
 import time
+import inspect
 from collections.abc import Iterable, Iterator
 from typing import Callable, Generic, TypeVar
 
@@ -100,12 +101,16 @@ class ScheduledTealet(tealet.tealet):
     def is_runnable(self):
         return isinstance(self.link, SimpleScheduler) and scheduler()._is_runnable(self)
 
+    def is_blocked(self):
+        return scheduler()._is_blocked(self)
+
     def is_running(self):
         return tealet.current() is self
 
     def _unlink(self):
         if self.link is not None:
             self.link._unlink(self)
+        scheduler()._unlink_pending_async_wait(self)
 
     def run(self):
         scheduler()._target_run(self)
@@ -366,6 +371,8 @@ class SimpleScheduler:
     def __init__(self) -> None:
         self._tasks: list[tealet.tealet] = []
         self._runner = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._pending_async_waits: list[tealet.tealet] = []
         self._timers: list[tuple[float, int, TimerHandle]] = []
         self._timer_sequence = itertools.count()
         self._wakeup = threading.Event()
@@ -409,11 +416,32 @@ class SimpleScheduler:
     def _is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._tasks
 
-    def _unlink(self, t: tealet.tealet) -> None:
+    def _is_blocked(self, t: tealet.tealet) -> bool:
+        return t in self._pending_async_waits
+
+    def _unlink_pending_async_wait(self, t: tealet.tealet) -> None:
         try:
-            self._tasks.remove(t)
+            self._pending_async_waits.remove(t)
         except ValueError:
             pass
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        removed = False
+        try:
+            self._tasks.remove(t)
+            removed = True
+        except ValueError:
+            pass
+        try:
+            self._pending_async_waits.remove(t)
+            removed = True
+        except ValueError:
+            pass
+        if removed:
+            try:
+                t.link = None
+            except AttributeError:
+                pass
 
     # create a tealet and place on the runnable queue
     def spawn(self, func: Callable[..., T], *args, **kwargs) -> Future[T]:
@@ -456,6 +484,58 @@ class SimpleScheduler:
         evt = Event()
         with self.call_later(delay, evt.set):
             evt.wait()
+
+    def wait_async(self, awaitable):
+        """Wait for an asyncio awaitable from a tealet task and return its result."""
+        current = tealet.current()
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("wait_async requires scheduler.arun() with an active asyncio loop")
+
+        # Keep the zero-overhead fast path for already-complete asyncio futures/tasks.
+        if asyncio.isfuture(awaitable):
+            fut = awaitable
+            if fut.get_loop() is not loop:
+                raise RuntimeError("wait_async future is bound to a different event loop")
+        elif inspect.isawaitable(awaitable):
+            fut = loop.create_task(awaitable)
+        else:
+            raise TypeError("awaitable must be an awaitable, Future, or Task")
+
+        if fut.done():
+            return fut.result()
+
+        done_evt = Event()
+        if current not in self._pending_async_waits:
+            self._pending_async_waits.append(current)
+        state = {"active": True}
+
+        def _resume_waiter(_fut) -> None:
+            if not state["active"]:
+                return
+            state["active"] = False
+            try:
+                self._pending_async_waits.remove(current)
+            except ValueError:
+                pass
+            self._make_runnable(current)
+            done_evt.set()
+
+        fut.add_done_callback(_resume_waiter)
+        try:
+            done_evt.wait()
+        finally:
+            if state["active"]:
+                # We stopped waiting before completion (e.g. interruption); do not
+                # keep arun() alive on behalf of this waiter anymore.
+                state["active"] = False
+                try:
+                    self._pending_async_waits.remove(current)
+                except ValueError:
+                    pass
+            fut.remove_done_callback(_resume_waiter)
+
+        return fut.result()
 
     def _make_runnable(self, t: tealet.tealet) -> None:
         if t in self._tasks:
@@ -544,15 +624,21 @@ class SimpleScheduler:
 
     async def _wait_async(self) -> None:
         sleep_for = self._time_to_next_timer()
-        if sleep_for is not  None:
-            try:
-                async with asyncio.timeout(sleep_for):
-                    await self._awakeup.wait()
-            except TimeoutError:
-                # Timer expiry is a normal wake path for the scheduler loop.
-                pass
-            finally:
-                self._awakeup.clear()
+        if sleep_for is None:
+            # No scheduler timer is pending. We may still be alive because one or
+            # more tealets are blocked in wait_async() on external asyncio
+            # awaitables, so block until an explicit wakeup arrives.
+            await self._awakeup.wait()
+            self._awakeup.clear()
+            return
+        try:
+            async with asyncio.timeout(sleep_for):
+                await self._awakeup.wait()
+        except TimeoutError:
+            # Timer expiry is a normal wake path for the scheduler loop.
+            pass
+        finally:
+            self._awakeup.clear()
     
 
     def run(self) -> None:
@@ -563,9 +649,14 @@ class SimpleScheduler:
 
     async def arun(self) -> None:
         # async version of run, for use in async contexts. This is a simple example of how to integrate with an async event loop.
-        while self._tasks or self._timers:
-            self.pump()
-            await self._wait_async()
+        self._loop = asyncio.get_running_loop()
+        try:
+            while self._tasks or self._timers or self._pending_async_waits:
+                if self._tasks or self._timers:
+                    self.pump()
+                await self._wait_async()
+        finally:
+            self._loop = None
                 
 
 def demo_scheduler_append_with_yield() -> list[str]:
