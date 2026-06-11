@@ -163,6 +163,18 @@ class TestSchedulerExamples:
 
         assert seen == ["spawned"]
 
+    def test_event_async_wait_from_asyncio_task(self):
+        evt = examples.Event()
+
+        async def orchestrate() -> bool:
+            waiter = asyncio.create_task(evt.async_wait())
+            await asyncio.sleep(0)
+            assert not waiter.done()
+            evt.set()
+            return await asyncio.wait_for(waiter, timeout=1.0)
+
+        assert asyncio.run(orchestrate()) is True
+
     def test_run_switches_immediately_to_target(self):
         s = examples.scheduler()
         evt = examples.Event()
@@ -249,6 +261,14 @@ class TestFutureExamples:
         with pytest.raises(examples.InvalidStateError):
             future.set_result(456)
 
+    def test_future_result_and_exception_require_done(self):
+        future = examples.Future()
+
+        with pytest.raises(examples.InvalidStateError, match="Result is not ready"):
+            future.result()
+        with pytest.raises(examples.InvalidStateError, match="Exception is not set"):
+            future.exception()
+
     def test_future_result_timeout(self):
         s = examples.scheduler()
         future: examples.Future[int] = examples.Future()
@@ -262,8 +282,9 @@ class TestFutureExamples:
             tm = examples.timeout(0.001)
             with pytest.raises(examples.TimeoutError, match="Operation timed out"):
                 with tm:
-                    future.result()
+                    future.wait()
             seen.append(f"timed-out={tm.expired()}")
+            future.wait()
             seen.append(f"value={future.result()}")
 
         s.spawn(complete_later)
@@ -284,11 +305,61 @@ class TestFutureExamples:
             tm = examples.timeout(0.001)
             with pytest.raises(examples.TimeoutError, match="Operation timed out"):
                 with tm:
-                    future.result()
+                    future.wait()
             seen.append(f"timed-out={tm.expired()}")
+            future.wait()
             seen.append(f"value={future.result()}")
 
         s.spawn(complete_later)
         s.spawn(waiter)
         s.run()
         assert seen == ["timed-out=True", "value=1"]
+
+    def test_future_async_result(self):
+        s = examples.scheduler()
+        future: examples.Future[int] = examples.Future()
+
+        async def orchestrate() -> None:
+            s.call_later(0.001, future.set_result, 7)
+            runner = asyncio.create_task(s.arun())
+            try:
+                await asyncio.wait_for(future.async_wait(), timeout=1.0)
+                assert future.result() == 7
+            finally:
+                await asyncio.wait_for(runner, timeout=1.0)
+
+        asyncio.run(orchestrate())
+
+    def test_future_async_exception(self):
+        s = examples.scheduler()
+        future: examples.Future[int] = examples.Future()
+
+        async def orchestrate() -> None:
+            s.call_later(0.001, future.set_exception, ValueError("boom"))
+            runner = asyncio.create_task(s.arun())
+            try:
+                await asyncio.wait_for(future.async_wait(), timeout=1.0)
+                with pytest.raises(ValueError, match="boom"):
+                    future.result()
+                exc = future.exception()
+                assert isinstance(exc, ValueError)
+            finally:
+                await asyncio.wait_for(runner, timeout=1.0)
+
+        asyncio.run(orchestrate())
+
+    def test_future_is_awaitable(self):
+        s = examples.scheduler()
+        future: examples.Future[int] = examples.Future()
+
+        async def orchestrate() -> None:
+            s.call_later(0.001, future.set_result, 9)
+            runner = asyncio.create_task(s.arun())
+            try:
+                awaited = await asyncio.wait_for(future, timeout=1.0)
+                assert awaited is None
+                assert future.result() == 9
+            finally:
+                await asyncio.wait_for(runner, timeout=1.0)
+
+        asyncio.run(orchestrate())
