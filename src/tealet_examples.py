@@ -121,6 +121,7 @@ class Event:
 
     def __init__(self) -> None:
         self._waiters: list[tealet.tealet] = []
+        self._async_waiters: list[asyncio.Future[bool]] = []
         self._is_set = False
 
     def _link(self, tealet: tealet.tealet) -> None:
@@ -155,11 +156,30 @@ class Event:
 
         return True
 
+    async def async_wait(self) -> bool:
+        if self._is_set:
+            return True
+
+        waiter: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._async_waiters.append(waiter)
+        try:
+            return await waiter
+        finally:
+            try:
+                self._async_waiters.remove(waiter)
+            except ValueError:
+                pass
+
     def set(self) -> None:
         self._is_set = True
         for waiter in self._waiters:
             scheduler()._make_runnable(waiter)  # will reset the "link" attribute
         self._waiters.clear()
+        for waiter in self._async_waiters:
+            if not waiter.done():
+                # support cross thread wakeup
+                waiter.get_loop().call_soon_threadsafe(waiter.set_result, True)
+        self._async_waiters.clear()
 
     def clear(self) -> None:
         self._is_set = False
@@ -171,10 +191,7 @@ class DeadlockError(RuntimeError):
     pass
 
 
-class InvalidStateError(RuntimeError):
-    """Raised when attempting to complete a Future more than once."""
-
-    pass
+InvalidStateError = asyncio.InvalidStateError
 
 
 class TimerHandle:
@@ -247,14 +264,28 @@ class Future(Generic[T]):
 
         return self._event.wait()
 
-    def result(self) -> T:
+
+    def wait(self) -> None:
         self._wait()
+
+    async def async_wait(self) -> None:
+        if self._done:
+            return
+        await self._event.async_wait()
+
+    def __await__(self):
+        return self.async_wait().__await__()
+
+    def result(self) -> T:
+        if not self._done:
+            raise InvalidStateError("Result is not ready.")
         if self._exception is not None:
             raise self._exception
         return self._result
 
     def exception(self) -> BaseException | None:
-        self._wait()
+        if not self._done:
+            raise InvalidStateError("Exception is not set.")
         return self._exception
 
 class RawTimeoutError(BaseException):
@@ -593,6 +624,7 @@ def demo_future_result() -> list[str]:
     future = s.spawn(producer)
 
     def consumer() -> None:
+        future.wait()
         seen.append(f"consumer:result={future.result()}")
 
     s.spawn(consumer)
