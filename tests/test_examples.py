@@ -230,6 +230,64 @@ class TestSchedulerExamples:
             "caller:after-throw",
         ]
 
+    def test_wait_async_returns_result(self):
+        s = examples.scheduler()
+        seen: list[int] = []
+
+        async def compute() -> int:
+            await asyncio.sleep(0.001)
+            return 11
+
+        def worker() -> None:
+            seen.append(s.wait_async(compute()))
+
+        s.spawn(worker)
+        asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
+
+        assert seen == [11]
+
+    def test_wait_async_propagates_exception(self):
+        s = examples.scheduler()
+        seen: list[str] = []
+
+        async def boom() -> int:
+            await asyncio.sleep(0.001)
+            raise ValueError("boom")
+
+        def worker() -> None:
+            with pytest.raises(ValueError, match="boom"):
+                s.wait_async(boom())
+            seen.append("handled")
+
+        s.spawn(worker)
+        asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
+
+        assert seen == ["handled"]
+
+    def test_wait_async_marks_tealet_blocked(self):
+        s = examples.scheduler()
+        seen: list[tuple[str, bool, bool]] = []
+
+        async def compute() -> int:
+            await asyncio.sleep(0.001)
+            return 1
+
+        def worker() -> None:
+            current = _tealet.current()
+            seen.append(("before", current.is_blocked(), current.is_runnable()))
+            s.call_later(0.0, lambda: seen.append(("during", current.is_blocked(), current.is_runnable())))
+            s.wait_async(compute())
+            seen.append(("after", current.is_blocked(), current.is_runnable()))
+
+        s.spawn(worker)
+        asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
+
+        assert seen == [
+            ("before", False, False),
+            ("during", True, False),
+            ("after", False, False),
+        ]
+
 
 class TestFutureExamples:
     def test_future_demo(self):
