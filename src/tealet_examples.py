@@ -235,12 +235,24 @@ class Future(Generic[T]):
 
     def __init__(self) -> None:
         self._done = False
+        self._cancelled = False
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._event = Event()
 
     def done(self) -> bool:
         return self._done
+
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def cancel(self) -> bool:
+        if self._done:
+            return False
+        self._cancelled = True
+        self._done = True
+        self._event.set()
+        return True
 
     def set_result(self, value: T) -> None:
         if self._done:
@@ -267,11 +279,14 @@ class Future(Generic[T]):
 
     def wait(self) -> None:
         self._wait()
+        if self._cancelled:
+            raise CancelledError()
 
     async def async_wait(self) -> None:
-        if self._done:
-            return
-        await self._event.async_wait()
+        if not self._done:
+            await self._event.async_wait()
+        if self._cancelled:
+            raise CancelledError()
 
     def __await__(self):
         return self.async_wait().__await__()
@@ -279,6 +294,8 @@ class Future(Generic[T]):
     def result(self) -> T:
         if not self._done:
             raise InvalidStateError("Result is not ready.")
+        if self._cancelled:
+            raise CancelledError()
         if self._exception is not None:
             raise self._exception
         return self._result
@@ -286,12 +303,15 @@ class Future(Generic[T]):
     def exception(self) -> BaseException | None:
         if not self._done:
             raise InvalidStateError("Exception is not set.")
+        if self._cancelled:
+            raise CancelledError()
         return self._exception
 
 class RawTimeoutError(BaseException):
     pass
 
 TimeoutError = asyncio.TimeoutError
+CancelledError = asyncio.CancelledError
 
 class Timeout:
     def __init__(self, when: float):
@@ -403,9 +423,11 @@ class SimpleScheduler:
             try:
                 result = func(*args, **kwargs)
             except BaseException as exc:
-                future.set_exception(exc)
+                if not future.cancelled():
+                    future.set_exception(exc)
             else:
-                future.set_result(result)
+                if not future.cancelled():
+                    future.set_result(result)
             return self._find_target(task_exit=True)
 
         t = ScheduledTealet().prepare(task_main)

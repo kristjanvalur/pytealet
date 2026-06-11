@@ -269,6 +269,35 @@ class TestFutureExamples:
         with pytest.raises(examples.InvalidStateError, match="Exception is not set"):
             future.exception()
 
+    def test_future_cancel_marks_done_and_raises_cancelled(self):
+        future = examples.Future()
+
+        assert future.cancel() is True
+        assert future.done()
+        assert future.cancelled()
+        assert future.cancel() is False
+
+        with pytest.raises(examples.CancelledError):
+            future.result()
+        with pytest.raises(examples.CancelledError):
+            future.exception()
+
+    def test_future_wait_after_cancel_raises_cancelled(self):
+        future = examples.Future()
+        assert future.cancel() is True
+        with pytest.raises(examples.CancelledError):
+            future.wait()
+
+    def test_future_await_after_cancel_raises_cancelled(self):
+        future = examples.Future()
+        assert future.cancel() is True
+
+        async def orchestrate() -> None:
+            with pytest.raises(examples.CancelledError):
+                await future
+
+        asyncio.run(orchestrate())
+
     def test_future_result_timeout(self):
         s = examples.scheduler()
         future: examples.Future[int] = examples.Future()
