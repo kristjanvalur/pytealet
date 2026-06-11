@@ -140,38 +140,20 @@ class Event:
         except ValueError:
             pass
 
-    def wait(self, timeout: float | None = None) -> bool:
+    def wait(self) -> bool:
         if self._is_set:
             return True
 
-        if timeout is not None and timeout < 0:
-            timeout = 0.0
-
         current = tealet.current()
-        timed_out = False
-
-        timeout_handle: TimerHandle | None = None
-
-        if timeout is not None:
-
-            def _wake_timeout() -> None:
-                nonlocal timed_out
-                timed_out = True
-                self._remove_waiter(current)
-                scheduler().make_runnable(current)
-
-            timeout_handle = scheduler().call_later(timeout, _wake_timeout)
 
         current.link = self
         try:
             scheduler().schedule(lambda: self._waiters.append(current))
         finally:
-            if timeout_handle is not None:
-                timeout_handle.cancel()
             self._remove_waiter(current)
             current.link = None
 
-        return not timed_out
+        return True
 
     def set(self) -> None:
         self._is_set = True
@@ -259,22 +241,20 @@ class Future(Generic[T]):
         self._done = True
         self._event.set()
 
-    def _wait(self, timeout: float | None = None) -> bool:
+    def _wait(self) -> bool:
         if self._done:
             return True
 
-        return self._event.wait(timeout=timeout)
+        return self._event.wait()
 
-    def result(self, timeout: float | None = None) -> T:
-        if not self._wait(timeout=timeout):
-            raise TimeoutError("Future timed out")
+    def result(self) -> T:
+        self._wait()
         if self._exception is not None:
             raise self._exception
         return self._result
 
-    def exception(self, timeout: float | None = None) -> BaseException | None:
-        if not self._wait(timeout=timeout):
-            raise TimeoutError("Future timed out")
+    def exception(self) -> BaseException | None:
+        self._wait()
         return self._exception
 
 class RawTimeoutError(BaseException):
@@ -611,19 +591,26 @@ def demo_sleep() -> list[str]:
 
 
 def demo_future_timeout_then_success() -> list[str]:
-    """Show timeout then successful completion while cancelling timeout wait."""
+    """Show timeout then successful completion using timeout contexts."""
 
     s = scheduler()
     evt = Event()
     seen: list[str] = []
 
     def timeout_waiter() -> None:
-        ok = evt.wait(timeout=0.001)
-        seen.append(f"timeout_waiter:{ok}")
+        tm = timeout(0.001)
+        try:
+            with tm:
+                evt.wait()
+        except TimeoutError:
+            pass
+        seen.append(f"timeout_waiter:{not tm.expired()}")
 
     def success_waiter() -> None:
-        ok = evt.wait(timeout=0.01)
-        seen.append(f"success_waiter:{ok}")
+        tm = timeout(0.01)
+        with tm:
+            evt.wait()
+        seen.append(f"success_waiter:{not tm.expired()}")
 
     def setter() -> None:
         s.sleep(0.002)
