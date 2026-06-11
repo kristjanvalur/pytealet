@@ -103,22 +103,17 @@ class ScheduledTealet(tealet.tealet):
     def is_running(self):
         return tealet.current() is self
 
-    def unlink(self):
+    def _unlink(self):
         if self.link is not None:
-            self.link.unlink(self)
+            self.link._unlink(self)
 
     def run(self):
-        if self.is_running():
-            return
-        self.unlink()
-        scheduler().make_runnable(tealet.current())
-        self.switch()
+        scheduler().target_run(self)
 
     def throw(self, exc: BaseException):
-        if self.is_running():
-            raise exc
-        self.unlink()
-        scheduler().make_runnable(tealet.current())
+        scheduler().target_throw(self, exc)
+
+    def _throw_from_scheduler(self, exc: BaseException):
         super().throw(exc)
         
 class Event:
@@ -128,15 +123,22 @@ class Event:
         self._waiters: list[tealet.tealet] = []
         self._is_set = False
 
-    def _remove_waiter(self, waiter: tealet.tealet) -> None:
+    def _link(self, tealet: tealet.tealet) -> None:
+        assert (tealet.link is None)
+        assert tealet not in self._waiters
         try:
-            self._waiters.remove(waiter)
-        except ValueError:
-            pass
+            tealet.link = self
+        except AttributeError:
+            pass  # main tealet may not have a ``link`` attribute
+        self._waiters.append(tealet)
 
-    def unlink(self, tealet: tealet.tealet) -> None:
+    def _unlink(self, tealet: tealet.tealet) -> None:
         try:
             self._waiters.remove(tealet)
+            try:
+                tealet.link = None
+            except AttributeError:
+                pass  # main tealet may not have a ``link`` attribute
         except ValueError:
             pass
 
@@ -145,20 +147,18 @@ class Event:
             return True
 
         current = tealet.current()
-
-        current.link = self
         try:
-            scheduler().schedule(lambda: self._waiters.append(current))
-        finally:
-            self._remove_waiter(current)
-            current.link = None
+            scheduler().schedule(lambda: self._link(current))
+        except BaseException:
+            self._unlink(current)
+            raise
 
         return True
 
     def set(self) -> None:
         self._is_set = True
         for waiter in self._waiters:
-            scheduler().make_runnable(waiter)
+            scheduler().make_runnable(waiter)  # will reset the "link" attribute
         self._waiters.clear()
 
     def clear(self) -> None:
@@ -358,7 +358,7 @@ class SimpleScheduler:
     def is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._tasks
 
-    def unlink(self, t: tealet.tealet) -> None:
+    def _unlink(self, t: tealet.tealet) -> None:
         try:
             self._tasks.remove(t)
         except ValueError:
@@ -414,6 +414,32 @@ class SimpleScheduler:
         self._tasks.append(t)
         self.break_wait()
 
+    def target_run(self, target: tealet.tealet) -> None:
+        if target is tealet.current():
+            return
+        try:
+            target._unlink()
+        except AttributeError:
+            # unlink it from its current link (scheduler or event).
+            # We can't currently switch directly to the target because we can't reliably
+            # unlink it from its current link (scheduler or event).
+            raise RuntimeError(f"Cannot throw to this target: {target}") from None
+        self.make_runnable(tealet.current())
+        target.switch()
+
+    def target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
+        if target is tealet.current():
+            raise exc
+        try:
+            target._unlink()
+        except AttributeError:
+            raise RuntimeError(f"Cannot throw to this target: {target}") from None
+        self.make_runnable(tealet.current())
+        if isinstance(target, ScheduledTealet):
+            target._throw_from_scheduler(exc)
+        else:
+            target.throw(exc)
+
     def find_target(self, task_exit=False) -> tealet.tealet:
         """Find the next target to switch to. This is the core of the scheduling logic.
         The target is unlinked from the runnable queue.
@@ -422,10 +448,10 @@ class SimpleScheduler:
             # we've reached the target count for this run, switch back to the runner
             result = self._runner
             try:
-                result.unlink()
+                result._unlink()
             except AttributeError:
-                self.unlink(result)  # main tealet may not have an ``unlink`` method, use scheduler's unlink as fallback
-            self.unlink(result)
+                self._unlink(result)  # main tealet may not have an ``_unlink`` method, use scheduler fallback
+            self._unlink(result)
         elif self._tasks:
             result = self._tasks.pop(0)
         # fall back to main
@@ -457,7 +483,7 @@ class SimpleScheduler:
         self._wakeup.set()
         self._awakeup.set()
 
-    def wait_thead(self) -> None:
+    def wait_thread(self) -> None:
         sleep_for = self._time_to_next_timer()
         if sleep_for is not  None:
             self._wakeup.wait(timeout=sleep_for)
@@ -480,7 +506,7 @@ class SimpleScheduler:
         # run untile there are no tasks or timers left. This is a simple example of a scheduler main loop
         while self._tasks or self._timers:
             self.pump()
-            self.wait_thead()            
+            self.wait_thread()            
 
     async def arun(self) -> None:
         # async version of run, for use in async contexts. This is a simple example of how to integrate with an async event loop.

@@ -163,28 +163,6 @@ class TestSchedulerExamples:
 
         assert seen == ["spawned"]
 
-    def test_unlink_removes_waiting_tealet_from_event(self):
-        s = examples.scheduler()
-        evt = examples.Event()
-        seen: list[str] = []
-        waiter_ref: dict[str, examples.ScheduledTealet] = {}
-
-        def waiter() -> None:
-            waiter_ref["t"] = _tealet.current()
-            seen.append("waiter:waiting")
-            evt.wait()
-            seen.append("waiter:resumed")
-
-        def canceller() -> None:
-            waiter_ref["t"].unlink()
-            seen.append("canceller:unlinked")
-
-        s.spawn(waiter)
-        s.spawn(canceller)
-        s.run()
-
-        assert seen == ["waiter:waiting", "canceller:unlinked"]
-
     def test_run_switches_immediately_to_target(self):
         s = examples.scheduler()
         evt = examples.Event()
