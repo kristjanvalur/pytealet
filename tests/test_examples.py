@@ -77,10 +77,17 @@ class TestSchedulerExamples:
         seen: list[str] = []
 
         def timeout_waiter() -> None:
-            seen.append(f"timeout={evt.wait(timeout=0.001)}")
+            tm = examples.timeout(0.001)
+            with pytest.raises(examples.TimeoutError, match="Operation timed out"):
+                with tm:
+                    evt.wait()
+            seen.append(f"timeout={not tm.expired()}")
 
         def success_waiter() -> None:
-            seen.append(f"success={evt.wait(timeout=0.01)}")
+            tm = examples.timeout(0.01)
+            with tm:
+                evt.wait()
+            seen.append(f"success={not tm.expired()}")
 
         def setter() -> None:
             s.sleep(0.002)
@@ -274,15 +281,17 @@ class TestFutureExamples:
             future.set_result(1)
 
         def waiter() -> None:
-            with pytest.raises(TimeoutError, match="Future timed out"):
-                future.result(timeout=0.001)
-            seen.append("timed-out")
+            tm = examples.timeout(0.001)
+            with pytest.raises(examples.TimeoutError, match="Operation timed out"):
+                with tm:
+                    future.result()
+            seen.append(f"timed-out={tm.expired()}")
             seen.append(f"value={future.result()}")
 
         s.spawn(complete_later)
         s.spawn(waiter)
         s.run()
-        assert seen == ["timed-out", "value=1"]
+        assert seen == ["timed-out=True", "value=1"]
 
     def test_timeout_context_future_result_timeout(self):
         s = examples.scheduler()
