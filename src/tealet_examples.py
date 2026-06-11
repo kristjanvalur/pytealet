@@ -98,7 +98,7 @@ class ScheduledTealet(tealet.tealet):
         return isinstance(self.link, Event)
 
     def is_runnable(self):
-        return isinstance(self.link, SimpleScheduler) and scheduler().is_runnable(self)
+        return isinstance(self.link, SimpleScheduler) and scheduler()._is_runnable(self)
 
     def is_running(self):
         return tealet.current() is self
@@ -108,10 +108,10 @@ class ScheduledTealet(tealet.tealet):
             self.link._unlink(self)
 
     def run(self):
-        scheduler().target_run(self)
+        scheduler()._target_run(self)
 
     def throw(self, exc: BaseException):
-        scheduler().target_throw(self, exc)
+        scheduler()._target_throw(self, exc)
 
     def _throw_from_scheduler(self, exc: BaseException):
         super().throw(exc)
@@ -148,7 +148,7 @@ class Event:
 
         current = tealet.current()
         try:
-            scheduler().schedule(lambda: self._link(current))
+            scheduler()._schedule(lambda: self._link(current))
         except BaseException:
             self._unlink(current)
             raise
@@ -158,7 +158,7 @@ class Event:
     def set(self) -> None:
         self._is_set = True
         for waiter in self._waiters:
-            scheduler().make_runnable(waiter)  # will reset the "link" attribute
+            scheduler()._make_runnable(waiter)  # will reset the "link" attribute
         self._waiters.clear()
 
     def clear(self) -> None:
@@ -337,7 +337,7 @@ class SimpleScheduler:
     def call_at(self, when: float, callback: Callable[..., object], *args: object) -> TimerHandle:
         handle = TimerHandle(when, callback, args)
         heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
-        self.break_wait()
+        self._break_wait()
         return handle
 
     def _run_ready_timers(self) -> None:
@@ -355,7 +355,7 @@ class SimpleScheduler:
 
     # check if a tealet is waiting to be scheduled
 
-    def is_runnable(self, t: tealet.tealet) -> bool:
+    def _is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._tasks
 
     def _unlink(self, t: tealet.tealet) -> None:
@@ -375,13 +375,13 @@ class SimpleScheduler:
                 future.set_exception(exc)
             else:
                 future.set_result(result)
-            return self.find_target(task_exit=True)
+            return self._find_target(task_exit=True)
 
         t = ScheduledTealet().prepare(task_main)
-        self.make_runnable(t)
+        self._make_runnable(t)
         return future
 
-    def schedule(self, enqueue=None) -> None:
+    def _schedule(self, enqueue=None) -> None:
         """ pass in an enqueue lambda, so that enquing the current tealet happens
         after possibly pumping the ready timers, thus ensuring atomicity betwen
         enqueing and switching.
@@ -389,7 +389,7 @@ class SimpleScheduler:
         self._run_ready_timers()
         if enqueue is not None:
             enqueue()
-        target = self.find_target()
+        target = self._find_target()
         self._n_scheduled += 1
         target.switch()
 
@@ -397,14 +397,14 @@ class SimpleScheduler:
         """ yield control of the current tealet, allowing other runnable tasks to run.
         The yielding tealet is put at the tail of the runnable queue
         """
-        self.schedule(lambda: self.make_runnable(tealet.current()))
+        self._schedule(lambda: self._make_runnable(tealet.current()))
 
     def sleep(self, delay: float) -> None:
         evt = Event()
         with self.call_later(delay, evt.set):
             evt.wait()
 
-    def make_runnable(self, t: tealet.tealet) -> None:
+    def _make_runnable(self, t: tealet.tealet) -> None:
         if t in self._tasks:
             return
         try:
@@ -412,9 +412,9 @@ class SimpleScheduler:
         except AttributeError:
             pass  # main tealet may not have a ``link`` attribute
         self._tasks.append(t)
-        self.break_wait()
+        self._break_wait()
 
-    def target_run(self, target: tealet.tealet) -> None:
+    def _target_run(self, target: tealet.tealet) -> None:
         if target is tealet.current():
             return
         try:
@@ -424,23 +424,23 @@ class SimpleScheduler:
             # We can't currently switch directly to the target because we can't reliably
             # unlink it from its current link (scheduler or event).
             raise RuntimeError(f"Cannot throw to this target: {target}") from None
-        self.make_runnable(tealet.current())
+        self._make_runnable(tealet.current())
         target.switch()
 
-    def target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
+    def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
         if target is tealet.current():
             raise exc
         try:
             target._unlink()
         except AttributeError:
             raise RuntimeError(f"Cannot throw to this target: {target}") from None
-        self.make_runnable(tealet.current())
+        self._make_runnable(tealet.current())
         if isinstance(target, ScheduledTealet):
             target._throw_from_scheduler(exc)
         else:
             target.throw(exc)
 
-    def find_target(self, task_exit=False) -> tealet.tealet:
+    def _find_target(self, task_exit=False) -> tealet.tealet:
         """Find the next target to switch to. This is the core of the scheduling logic.
         The target is unlinked from the runnable queue.
         """
@@ -479,17 +479,17 @@ class SimpleScheduler:
             self._runner = None
             self._target_count = None
 
-    def break_wait(self) -> None:
+    def _break_wait(self) -> None:
         self._wakeup.set()
         self._awakeup.set()
 
-    def wait_thread(self) -> None:
+    def _wait_thread(self) -> None:
         sleep_for = self._time_to_next_timer()
         if sleep_for is not  None:
             self._wakeup.wait(timeout=sleep_for)
             self._wakeup.clear()
 
-    async def wait_async(self) -> None:
+    async def _wait_async(self) -> None:
         sleep_for = self._time_to_next_timer()
         if sleep_for is not  None:
             try:
@@ -506,13 +506,13 @@ class SimpleScheduler:
         # run untile there are no tasks or timers left. This is a simple example of a scheduler main loop
         while self._tasks or self._timers:
             self.pump()
-            self.wait_thread()            
+            self._wait_thread()            
 
     async def arun(self) -> None:
         # async version of run, for use in async contexts. This is a simple example of how to integrate with an async event loop.
         while self._tasks or self._timers:
             self.pump()
-            await self.wait_async()
+            await self._wait_async()
                 
 
 def demo_scheduler_append_with_yield() -> list[str]:
