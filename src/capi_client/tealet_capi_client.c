@@ -89,6 +89,9 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (client_dict_set_owned(d, "has_stub",
                               PyBool_FromLong(state->api->stub != NULL)) < 0)
         goto error;
+    if (client_dict_set_owned(d, "has_set_stub",
+                              PyBool_FromLong(state->api->set_stub != NULL)) < 0)
+        goto error;
     if (client_dict_set_owned(d, "has_prepare",
                               PyBool_FromLong(state->api->prepare != NULL)) < 0)
         goto error;
@@ -545,6 +548,33 @@ static PyObject *client_capi_stub(PyObject *module, PyObject *target) {
     Py_RETURN_NONE;
 }
 
+static PyObject *client_capi_set_stub(PyObject *module, PyObject *args) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    PyObject *target;
+    PyObject *source;
+    PyObject *duplicate_obj = Py_True;
+    int duplicate;
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    if (!PyArg_ParseTuple(args, "OO|O:capi_set_stub", &target, &source, &duplicate_obj))
+        return NULL;
+    if (!PyBool_Check(duplicate_obj)) {
+        PyErr_SetString(PyExc_TypeError, "duplicate must be a bool");
+        return NULL;
+    }
+    duplicate = (duplicate_obj == Py_True);
+
+    rc = state->api->set_stub(state->ctx, target, source, duplicate);
+    if (rc < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+
 static PyObject *client_capi_create(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
     PyTealetCapiClientState *state = client_get_state(module);
 
@@ -657,6 +687,8 @@ static PyMethodDef client_methods[] = {
      "Create a brand-new tealet using the imported C API."},
     {"capi_stub", (PyCFunction)client_capi_stub, METH_O,
      "Stub a tealet using the imported C API."},
+    {"capi_set_stub", (PyCFunction)client_capi_set_stub, METH_VARARGS,
+     "Attach a duplicated stub from source into target via imported C API."},
     {"capi_duplicate", (PyCFunction)client_capi_duplicate, METH_O,
      "Duplicate a tealet using the imported C API."},
     {"capi_prepare", (PyCFunction)client_capi_prepare, METH_VARARGS,

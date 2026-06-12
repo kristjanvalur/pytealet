@@ -319,6 +319,43 @@ class TestSubclass:
         assert t.label == "demo"
         assert t.state == _tealet.STATE_NEW
 
+    def test_subclass_init_then_set_stub(self):
+        payload = {"kind": "demo"}
+        source = _tealet.tealet()
+        source.stub()
+
+        t = self.scinit(payload, label="attached")
+        assert t.state == _tealet.STATE_NEW
+
+        out = t.set_stub(source)
+
+        assert out is t
+        assert isinstance(t, self.scinit)
+        assert t.payload is payload
+        assert t.label == "attached"
+        assert t.state == _tealet.STATE_STUB
+
+    def test_set_stub_requires_new_target_and_stub_source(self):
+        source = _tealet.tealet()
+        source.stub()
+        target = _tealet.tealet()
+
+        target.set_stub(source, duplicate=True)
+        assert target.state == _tealet.STATE_STUB
+
+        with pytest.raises(_tealet.StateError, match="target must be new"):
+            target.set_stub(source)
+
+        with pytest.raises(_tealet.StateError, match="source must be stub"):
+            _tealet.tealet().set_stub(_tealet.tealet())
+
+    def test_set_stub_duplicate_false_rejected(self):
+        source = _tealet.tealet()
+        source.stub()
+
+        with pytest.raises(ValueError, match="duplicate=False"):
+            _tealet.tealet().set_stub(source, duplicate=False)
+
     def test_exact_tealet_constructor_stays_no_args(self):
         with pytest.raises(TypeError, match=r"tealet\(\) takes no arguments"):
             _tealet.tealet(123)

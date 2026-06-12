@@ -70,6 +70,8 @@ static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObj
                                         PyTealetMainData *mdata, PyObject *exc, PyObject *fallback);
 static PyObject *pytealet_duplicate(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                     Py_ssize_t nargs, PyObject *kwnames);
+static PyObject *pytealet_set_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                   Py_ssize_t nargs, PyObject *kwnames);
 static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                 PyObject *kwnames);
 static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
@@ -471,6 +473,63 @@ static PyObject *pytealet_duplicate_impl(PyTealetModuleState *mstate, PyTealetOb
     return (PyObject *)result;
 }
 
+static int pytealet_set_stub_impl(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *source) {
+    PyObject *old_domain_lock_obj;
+    PyObject *old_prepared_func;
+    PyTealetMainData *lineage_mdata;
+    tealet_t *duplicated;
+
+    assert(mstate);
+    assert(target);
+    assert(source);
+
+    if (target->state != STATE_NEW) {
+        PyErr_SetString(mstate->state_error, "target must be new");
+        return -1;
+    }
+    if (source->state != STATE_STUB) {
+        PyErr_SetString(mstate->state_error, "source must be stub");
+        return -1;
+    }
+    if (target->tealet) {
+        PyErr_SetString(mstate->state_error, "target must be new");
+        return -1;
+    }
+
+    duplicated = tealet_duplicate(source->tealet);
+    if (!duplicated)
+        return PyErr_NoMemory(), -1;
+
+    target->tealet = duplicated;
+    TEALET_SET_PYOBJECT(duplicated, target);
+    lineage_mdata = (PyTealetMainData *)*tealet_main_userpointer(duplicated->main);
+    if (pytealet_track_wrapper(lineage_mdata, target, 0) < 0) {
+        TEALET_SET_PYOBJECT(duplicated, NULL);
+        target->tealet = NULL;
+        tealet_delete(duplicated);
+        return -1;
+    }
+
+    if (target->tstate.has_state)
+        PyTealetTstate_Drop(&target->tstate, NULL, 1);
+    PyTealetTstate_Duplicate(&target->tstate, &source->tstate);
+
+    target->state = STATE_STUB;
+    target->owner_tid = source->owner_tid;
+
+    old_domain_lock_obj = target->domain_lock_obj;
+    target->domain_lock_obj = source->domain_lock_obj ? Py_NewRef(source->domain_lock_obj) : NULL;
+    Py_XDECREF(old_domain_lock_obj);
+
+    old_prepared_func = target->prepared_func;
+    target->prepared_func = source->prepared_func ? Py_NewRef(source->prepared_func) : NULL;
+    target->prepared_cfunc = source->prepared_cfunc;
+    target->inflight_throw_token = 0;
+    Py_XDECREF(old_prepared_func);
+
+    return 0;
+}
+
 static PyObject *pytealet_duplicate(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                     Py_ssize_t nargs, PyObject *kwnames) {
     PyTealetObject *src = (PyTealetObject *)self;
@@ -504,6 +563,90 @@ PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_ob
     }
 
     return pytealet_duplicate_impl(mstate, (PyTealetObject *)source_obj);
+}
+
+static PyObject *pytealet_set_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+                                   Py_ssize_t nargs, PyObject *kwnames) {
+    PyTealetObject *target = (PyTealetObject *)self;
+    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+    PyObject *source_obj;
+    int duplicate = 1;
+
+    if (!mstate)
+        return NULL;
+    if (nargs < 1 || nargs > 2) {
+        PyErr_SetString(PyExc_TypeError, "set_stub() takes 1 or 2 positional arguments");
+        return NULL;
+    }
+    if (kwnames && PyTuple_GET_SIZE(kwnames) > 1) {
+        PyErr_SetString(PyExc_TypeError, "set_stub() got unexpected keyword arguments");
+        return NULL;
+    }
+
+    source_obj = args[0];
+    if (nargs == 2) {
+        if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
+            PyErr_SetString(PyExc_TypeError, "set_stub() got multiple values for argument 'duplicate'");
+            return NULL;
+        }
+        if (!PyBool_Check(args[1])) {
+            PyErr_SetString(PyExc_TypeError, "duplicate must be a bool");
+            return NULL;
+        }
+        duplicate = (args[1] == Py_True);
+    }
+    if (kwnames && PyTuple_GET_SIZE(kwnames) == 1) {
+        PyObject *kwname = PyTuple_GET_ITEM(kwnames, 0);
+        if (!PyUnicode_Check(kwname) || PyUnicode_CompareWithASCIIString(kwname, "duplicate") != 0) {
+            PyErr_SetString(PyExc_TypeError, "set_stub() got an unexpected keyword argument");
+            return NULL;
+        }
+        if (!PyBool_Check(args[nargs])) {
+            PyErr_SetString(PyExc_TypeError, "duplicate must be a bool");
+            return NULL;
+        }
+        duplicate = (args[nargs] == Py_True);
+    }
+
+    if (PyTealetApi_SetStub(mstate, (PyObject *)target, source_obj, duplicate) < 0)
+        return NULL;
+    return Py_NewRef(self);
+}
+
+/* Set-stub entrypoint for external C clients via the _tealet capsule API.
+ * Equivalent to target.set_stub(source).
+ */
+int PyTealetApi_SetStub(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *source_obj, int duplicate) {
+    if (!mstate || !mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return -1;
+    }
+    if (!target_obj) {
+        PyErr_SetString(PyExc_TypeError, "target must not be NULL");
+        return -1;
+    }
+    if (!source_obj) {
+        PyErr_SetString(PyExc_TypeError, "source must not be NULL");
+        return -1;
+    }
+    if (!PyObject_TypeCheck(target_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "target must be a _tealet.tealet instance");
+        return -1;
+    }
+    if (!PyObject_TypeCheck(source_obj, mstate->tealet_type)) {
+        PyErr_SetString(PyExc_TypeError, "source must be a _tealet.tealet instance");
+        return -1;
+    }
+    if (duplicate != 0 && duplicate != 1) {
+        PyErr_SetString(PyExc_ValueError, "duplicate must be 0 or 1");
+        return -1;
+    }
+    if (!duplicate) {
+        PyErr_SetString(PyExc_ValueError, "set_stub(..., duplicate=False) is not supported");
+        return -1;
+    }
+
+    return pytealet_set_stub_impl(mstate, (PyTealetObject *)target_obj, (PyTealetObject *)source_obj);
 }
 
 static PyObject *pytealet_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds) {
@@ -1667,6 +1810,9 @@ static PyObject *pytealet_set_context(PyObject *self, PyObject *value) {
 
 static struct PyMethodDef pytealet_methods[] = {
     {"stub", (PyCFunction)(void (*)(void))pytealet_stub, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
+    {"set_stub", (PyCFunction)(void (*)(void))pytealet_set_stub, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+    "set_stub(source, duplicate=True) -> tealet\n\n"
+    "Attach a duplicated STUB execution anchor from source into this NEW tealet."},
     {"duplicate", (PyCFunction)(void (*)(void))pytealet_duplicate, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
     "duplicate() -> tealet\n\n"
     "Create a duplicate wrapper from a NEW or STUB tealet."},

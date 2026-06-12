@@ -48,6 +48,7 @@ Constructor:
 
 Methods:
 - `stub() -> _tealet.tealet`
+- `set_stub(source, duplicate=True) -> _tealet.tealet`
 - `duplicate() -> _tealet.tealet`
 - `current() -> _tealet.tealet`
 - `previous() -> _tealet.tealet | None`

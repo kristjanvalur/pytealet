@@ -90,6 +90,16 @@ Converts a NEW tealet into a STUB (duplicatable template). Returns self.
 - **Effect:** Changes state to STATE_STUB, creates suspended tealet that can be duplicated
 
 ```python
+tealet.set_stub(source, duplicate=True) -> tealet
+```
+Attaches a duplicated STUB execution anchor from `source` to this NEW tealet and returns self.
+- **State requirement:** Target must be STATE_NEW and `source` must be STATE_STUB
+- **Parameters:**
+    - `source`: Existing STUB tealet to clone anchor state from
+    - `duplicate`: Must be `True` (the `False` mode is currently rejected)
+- **Effect:** Changes target state to STATE_STUB while preserving Python-level subclass fields on the target instance
+
+```python
 tealet.run(function, arg=None) -> result
 ```
 Executes a function in the tealet context.
@@ -200,6 +210,9 @@ Thread ownership rules enforced by the C API:
     allowed from the owning thread.
 - Cross-thread duplication via `existing_tealet.duplicate()` is allowed
     when `existing_tealet` is in `STATE_STUB` or `STATE_NEW`.
+- Cross-thread `target.set_stub(source, duplicate=True)` is allowed when
+    `target` is `STATE_NEW` and `source` is `STATE_STUB`; ownership is adopted
+    from `source` after the duplicated stub anchor is attached.
 - Duplicating a `STATE_STUB` tealet preserves the existing dormant/stub
     execution context for use by the new wrapper.
 - Duplicating a `STATE_NEW` tealet is also supported; it duplicates an
@@ -577,6 +590,19 @@ if (pytealet->state != STATE_NEW) {
 ```
 Can only create stub from NEW.
 
+**Attaching duplicated stubs (pytealet_set_stub):**
+```c
+if (target->state != STATE_NEW) {
+    PyErr_SetString(StateError, "target must be new");
+    return NULL;
+}
+if (source->state != STATE_STUB) {
+    PyErr_SetString(StateError, "source must be stub");
+    return NULL;
+}
+```
+Can only attach from STUB source to NEW target.
+
 **Running (pytealet_run):**
 ```c
 if (target->state != STATE_NEW && target->state != STATE_STUB) {
@@ -682,6 +708,7 @@ The pytealet wrapper uses this API directly:
 - `pytealet_stub()` calls `tealet_stub_new(main->tealet, stack_far)` and marks the wrapper as `STATE_STUB`.
 - `pytealet_run()` uses `tealet_stub_run(target->tealet, pytealet_main, &switch_arg)` when the target is a stub.
 - Duplicating a stub wrapper (`existing_stub.duplicate()`) duplicates native state with `tealet_duplicate()` and duplicates saved thread state.
+- `set_stub(source, duplicate=True)` duplicates native source-stub state and attaches it to an already-constructed NEW target wrapper.
 
 ### Flow:
 1. `tealet_stub_new()` creates a paused tealet using `tealet_create(..., _tealet_stub_main, ...)`.
