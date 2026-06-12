@@ -3,33 +3,54 @@ import asyncio
 import pytest
 
 import _tealet
-import tealet_examples as examples
+from tealet.scheduler import (
+    BoundedSemaphore,
+    CancelledError,
+    Event,
+    Future,
+    InvalidStateError,
+    Lock,
+    ScheduledTealet,
+    Semaphore,
+    SimpleScheduler,
+    TimeoutError,
+    _scheduler,
+    scheduler,
+    timeout,
+)
+from tealet_examples import (
+    demo_future_result,
+    demo_future_timeout_then_success,
+    demo_scheduler_append_with_yield,
+    demo_sleep,
+    demo_wait_for_event_start,
+)
 
 
 @pytest.fixture(autouse=True)
-def _reset_examples_scheduler_tls():
-    examples._scheduler.instance = examples.SimpleScheduler()
+def _reset_scheduler_tls():
+    _scheduler.instance = SimpleScheduler()
     try:
         yield
     finally:
-        examples._scheduler.instance = examples.SimpleScheduler()
+        _scheduler.instance = SimpleScheduler()
 
 
 class TestSchedulerExamples:
     def test_append_with_yield_demo(self):
-        seen = examples.demo_scheduler_append_with_yield()
+        seen = demo_scheduler_append_with_yield()
         assert seen == ["a0", "b0", "c0", "a1", "b1", "a2"]
 
     def test_wait_for_event_start_demo(self):
-        seen = examples.demo_wait_for_event_start()
+        seen = demo_wait_for_event_start()
         assert seen == ["waiter:waiting", "starter:set", "waiter:started"]
 
     def test_sleep_demo(self):
-        seen = examples.demo_sleep()
+        seen = demo_sleep()
         assert seen == ["before:sleep", "after:sleep"]
 
     def test_timer_handle_cancel(self):
-        s = examples.scheduler()
+        s = scheduler()
         seen: list[str] = []
 
         def mark() -> None:
@@ -43,19 +64,19 @@ class TestSchedulerExamples:
         assert seen == []
 
     def test_event_wait_timeout_and_success(self):
-        s = examples.scheduler()
-        evt = examples.Event()
+        s = scheduler()
+        evt = Event()
         seen: list[str] = []
 
         def timeout_waiter() -> None:
-            tm = examples.timeout(0.001)
-            with pytest.raises(examples.TimeoutError, match="Operation timed out"):
+            tm = timeout(0.001)
+            with pytest.raises(TimeoutError, match="Operation timed out"):
                 with tm:
                     evt.wait()
             seen.append(f"timeout={not tm.expired()}")
 
         def success_waiter() -> None:
-            tm = examples.timeout(0.01)
+            tm = timeout(0.01)
             with tm:
                 evt.wait()
             seen.append(f"success={not tm.expired()}")
@@ -72,19 +93,19 @@ class TestSchedulerExamples:
         assert seen == ["timeout=False", "success=True"]
 
     def test_timeout_context_event_wait_timeout_and_success(self):
-        s = examples.scheduler()
-        evt = examples.Event()
+        s = scheduler()
+        evt = Event()
         seen: list[str] = []
 
         def timeout_waiter() -> None:
-            tm = examples.timeout(0.001)
-            with pytest.raises(examples.TimeoutError, match="Operation timed out"):
+            tm = timeout(0.001)
+            with pytest.raises(TimeoutError, match="Operation timed out"):
                 with tm:
                     evt.wait()
             seen.append(f"timeout={tm.expired()}")
 
         def success_waiter() -> None:
-            tm = examples.timeout(0.01)
+            tm = timeout(0.01)
             with tm:
                 evt.wait()
             seen.append(f"success={not tm.expired()}")
@@ -101,11 +122,11 @@ class TestSchedulerExamples:
         assert seen == ["timeout=True", "success=True"]
 
     def test_timeout_demo(self):
-        seen = examples.demo_future_timeout_then_success()
+        seen = demo_future_timeout_then_success()
         assert seen == ["timeout_waiter:False", "success_waiter:True"]
 
     def test_arun_runs_inside_asyncio_task(self):
-        s = examples.scheduler()
+        s = scheduler()
         seen: list[str] = []
 
         # Keep arun() active and inject runnable work while it is waiting.
@@ -135,7 +156,7 @@ class TestSchedulerExamples:
         assert seen == ["spawned"]
 
     def test_event_async_wait_from_asyncio_task(self):
-        evt = examples.Event()
+        evt = Event()
 
         async def orchestrate() -> bool:
             waiter = asyncio.create_task(evt.async_wait())
@@ -147,10 +168,10 @@ class TestSchedulerExamples:
         assert asyncio.run(orchestrate()) is True
 
     def test_run_switches_immediately_to_target(self):
-        s = examples.scheduler()
-        evt = examples.Event()
+        s = scheduler()
+        evt = Event()
         seen: list[str] = []
-        target_ref: dict[str, examples.ScheduledTealet] = {}
+        target_ref: dict[str, ScheduledTealet] = {}
 
         def target_worker() -> None:
             target_ref["t"] = _tealet.current()
@@ -170,10 +191,10 @@ class TestSchedulerExamples:
         assert seen == ["target:started", "caller:before-run", "target:resumed", "caller:after-run"]
 
     def test_throw_switches_immediately_to_target(self):
-        s = examples.scheduler()
-        evt = examples.Event()
+        s = scheduler()
+        evt = Event()
         seen: list[str] = []
-        target_ref: dict[str, examples.ScheduledTealet] = {}
+        target_ref: dict[str, ScheduledTealet] = {}
 
         def target_worker() -> None:
             target_ref["t"] = _tealet.current()
@@ -202,7 +223,7 @@ class TestSchedulerExamples:
         ]
 
     def test_wait_async_returns_result(self):
-        s = examples.scheduler()
+        s = scheduler()
         seen: list[int] = []
 
         async def compute() -> int:
@@ -218,7 +239,7 @@ class TestSchedulerExamples:
         assert seen == [11]
 
     def test_wait_async_propagates_exception(self):
-        s = examples.scheduler()
+        s = scheduler()
         seen: list[str] = []
 
         async def boom() -> int:
@@ -236,7 +257,7 @@ class TestSchedulerExamples:
         assert seen == ["handled"]
 
     def test_wait_async_marks_tealet_blocked(self):
-        s = examples.scheduler()
+        s = scheduler()
         seen: list[tuple[str, bool, bool]] = []
 
         async def compute() -> int:
@@ -260,8 +281,8 @@ class TestSchedulerExamples:
         ]
 
     def test_lock_serializes_access(self):
-        s = examples.scheduler()
-        lock = examples.Lock()
+        s = scheduler()
+        lock = Lock()
         seen: list[str] = []
 
         def worker(name: str) -> None:
@@ -288,8 +309,8 @@ class TestSchedulerExamples:
         ]
 
     def test_semaphore_limits_concurrency(self):
-        s = examples.scheduler()
-        sem = examples.Semaphore(2)
+        s = scheduler()
+        sem = Semaphore(2)
         active = 0
         max_active = 0
         seen: list[str] = []
@@ -323,7 +344,7 @@ class TestSchedulerExamples:
         ]
 
     def test_bounded_semaphore_overrelease_raises(self):
-        sem = examples.BoundedSemaphore(1)
+        sem = BoundedSemaphore(1)
 
         sem.acquire()
         sem.release()
@@ -333,11 +354,11 @@ class TestSchedulerExamples:
 
 class TestFutureExamples:
     def test_future_demo(self):
-        seen = examples.demo_future_result()
+        seen = demo_future_result()
         assert seen == ["producer:start", "producer:done", "consumer:result=42"]
 
     def test_future_exception_propagates(self):
-        s = examples.scheduler()
+        s = scheduler()
 
         def boom():
             raise ValueError("boom")
@@ -351,56 +372,56 @@ class TestFutureExamples:
         assert isinstance(future.exception(), ValueError)
 
     def test_future_set_result_once(self):
-        future = examples.Future()
+        future = Future()
         future.set_result(123)
 
         assert future.done()
         assert future.result() == 123
         assert future.exception() is None
 
-        with pytest.raises(examples.InvalidStateError):
+        with pytest.raises(InvalidStateError):
             future.set_result(456)
 
     def test_future_result_and_exception_require_done(self):
-        future = examples.Future()
+        future = Future()
 
-        with pytest.raises(examples.InvalidStateError, match="Result is not ready"):
+        with pytest.raises(InvalidStateError, match="Result is not ready"):
             future.result()
-        with pytest.raises(examples.InvalidStateError, match="Exception is not set"):
+        with pytest.raises(InvalidStateError, match="Exception is not set"):
             future.exception()
 
     def test_future_cancel_marks_done_and_raises_cancelled(self):
-        future = examples.Future()
+        future = Future()
 
         assert future.cancel() is True
         assert future.done()
         assert future.cancelled()
         assert future.cancel() is False
 
-        with pytest.raises(examples.CancelledError):
+        with pytest.raises(CancelledError):
             future.result()
-        with pytest.raises(examples.CancelledError):
+        with pytest.raises(CancelledError):
             future.exception()
 
     def test_future_wait_after_cancel_raises_cancelled(self):
-        future = examples.Future()
+        future = Future()
         assert future.cancel() is True
-        with pytest.raises(examples.CancelledError):
+        with pytest.raises(CancelledError):
             future.wait()
 
     def test_future_await_after_cancel_raises_cancelled(self):
-        future = examples.Future()
+        future = Future()
         assert future.cancel() is True
 
         async def orchestrate() -> None:
-            with pytest.raises(examples.CancelledError):
+            with pytest.raises(CancelledError):
                 await future
 
         asyncio.run(orchestrate())
 
     def test_future_result_timeout(self):
-        s = examples.scheduler()
-        future: examples.Future[int] = examples.Future()
+        s = scheduler()
+        future: Future[int] = Future()
         seen: list[str] = []
 
         def complete_later() -> None:
@@ -408,8 +429,8 @@ class TestFutureExamples:
             future.set_result(1)
 
         def waiter() -> None:
-            tm = examples.timeout(0.001)
-            with pytest.raises(examples.TimeoutError, match="Operation timed out"):
+            tm = timeout(0.001)
+            with pytest.raises(TimeoutError, match="Operation timed out"):
                 with tm:
                     future.wait()
             seen.append(f"timed-out={tm.expired()}")
@@ -422,8 +443,8 @@ class TestFutureExamples:
         assert seen == ["timed-out=True", "value=1"]
 
     def test_timeout_context_future_result_timeout(self):
-        s = examples.scheduler()
-        future: examples.Future[int] = examples.Future()
+        s = scheduler()
+        future: Future[int] = Future()
         seen: list[str] = []
 
         def complete_later() -> None:
@@ -431,8 +452,8 @@ class TestFutureExamples:
             future.set_result(1)
 
         def waiter() -> None:
-            tm = examples.timeout(0.001)
-            with pytest.raises(examples.TimeoutError, match="Operation timed out"):
+            tm = timeout(0.001)
+            with pytest.raises(TimeoutError, match="Operation timed out"):
                 with tm:
                     future.wait()
             seen.append(f"timed-out={tm.expired()}")
@@ -445,8 +466,8 @@ class TestFutureExamples:
         assert seen == ["timed-out=True", "value=1"]
 
     def test_future_async_result(self):
-        s = examples.scheduler()
-        future: examples.Future[int] = examples.Future()
+        s = scheduler()
+        future: Future[int] = Future()
 
         async def orchestrate() -> None:
             s.call_later(0.001, future.set_result, 7)
@@ -460,8 +481,8 @@ class TestFutureExamples:
         asyncio.run(orchestrate())
 
     def test_future_async_exception(self):
-        s = examples.scheduler()
-        future: examples.Future[int] = examples.Future()
+        s = scheduler()
+        future: Future[int] = Future()
 
         async def orchestrate() -> None:
             s.call_later(0.001, future.set_exception, ValueError("boom"))
@@ -478,8 +499,8 @@ class TestFutureExamples:
         asyncio.run(orchestrate())
 
     def test_future_is_awaitable(self):
-        s = examples.scheduler()
-        future: examples.Future[int] = examples.Future()
+        s = scheduler()
+        future: Future[int] = Future()
 
         async def orchestrate() -> None:
             s.call_later(0.001, future.set_result, 9)
