@@ -69,6 +69,7 @@ static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTeale
 static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
                                         PyTealetMainData *mdata, PyObject *exc, PyObject *fallback);
 static PyObject *pytealet_duplicate(PyObject *self, PyObject *Py_UNUSED(_ignored));
+static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObject *kwargs);
 static PyObject *pytealet_set_stub(PyObject *self, PyObject *args, PyObject *kwargs);
 static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                 PyObject *kwnames);
@@ -862,6 +863,51 @@ static PyObject *pytealet_main_method(PyObject *self, PyObject *Py_UNUSED(_ignor
 static PyObject *pytealet_is_foreign(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
     PyTealetObject *base = (PyTealetObject *)self;
     return PyBool_FromLong(base->owner_tid != PyThread_get_thread_ident());
+}
+
+static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObject *kwargs) {
+    static char *kwlist[] = {"result", "exc", NULL};
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
+    PyTealetObject *current = (PyTealetObject *)self;
+    PyObject *result;
+    PyObject *exc;
+    PyObject *target_obj = NULL;
+    PyObject *arg_obj = Py_None;
+    PyTealetObject *main_t;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO:resolve_target", kwlist, &result, &exc))
+        return NULL;
+
+    if (!mstate)
+        return NULL;
+
+    if (exc != Py_None) {
+        main_t = TryGetMain(mstate, NULL);
+        assert(main_t);
+        return PyTuple_Pack(2, (PyObject *)main_t, Py_None);
+    }
+
+    if (PyTuple_Check(result)) {
+        if (PyTuple_GET_SIZE(result) > 0)
+            target_obj = PyTuple_GET_ITEM(result, 0);
+        if (PyTuple_GET_SIZE(result) > 1)
+            arg_obj = PyTuple_GET_ITEM(result, 1);
+    } else {
+        target_obj = result;
+    }
+
+    if (!target_obj || !PyTealet_Check(target_obj, mstate)) {
+        PyErr_SetString(PyExc_TypeError, "tealet object expected");
+        return NULL;
+    }
+    if (((PyTealetObject *)target_obj)->state != STATE_RUN) {
+        PyErr_SetString(mstate->state_error, "must be 'run'");
+        return NULL;
+    }
+    if (CheckTarget(mstate, (PyTealetObject *)target_obj, current, "return"))
+        return NULL;
+
+    return PyTuple_Pack(2, target_obj, arg_obj ? arg_obj : Py_None);
 }
 
 static int pytealet_prepare_dispatch(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
@@ -1726,6 +1772,9 @@ static struct PyMethodDef pytealet_methods[] = {
     {"previous", (PyCFunction)pytealet_previous, METH_NOARGS, ""},
     {"main", (PyCFunction)pytealet_main_method, METH_NOARGS, ""},
     {"is_foreign", (PyCFunction)pytealet_is_foreign, METH_NOARGS, ""},
+    {"resolve_target", (PyCFunction)(void (*)(void))pytealet_resolve_target, METH_VARARGS | METH_KEYWORDS,
+     "resolve_target(result, exc) -> None | tealet | (tealet, arg[, clear])\n\n"
+     "Hook for subclasses to override exit target routing from pytealet_main()."},
     {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_VARARGS | METH_KEYWORDS,
         "prepare(function) -> tealet\n\n"
      "Store a callable to be used by the first switch(arg) on this NEW/STUB tealet."},
@@ -2617,61 +2666,74 @@ mismatch:
 /* Core Runtime Switching Callback                                       */
 /* ===================================================================== */
 
-/* process return argument from callable and convert.  We unpack arguments
- * and validate, and treat validation errors as an exception
- * return new references to return_to and return_arg.
- * This runs before the exit-switch safety boundary, so direct DECREF is fine.
- */
-static void pytealet_process_return_arg(PyTealetModuleState *mstate, PyTealetObject *current, PyObject *result,
-                                        PyTealetObject **return_to, PyObject **return_arg, PyObject **return_exc) {
-    int err = 0;
-    *return_to = NULL;
-    *return_arg = NULL;
-    *return_exc = NULL;
-    if (result) {
-        if (PyTuple_Check(result)) {
-            /* arg and return_to are borrowed refs */
-            if (PyTuple_GET_SIZE(result) > 0)
-                *return_to = (PyTealetObject *)Py_NewRef(PyTuple_GET_ITEM(result, 0));
-            if (PyTuple_GET_SIZE(result) > 1)
-                *return_arg = Py_NewRef(PyTuple_GET_ITEM(result, 1));
-        } else {
-            *return_to = (PyTealetObject *)Py_NewRef(result);
-        }
+static void pytealet_apply_resolve_target(PyTealetModuleState *mstate, PyTealetObject *current, PyObject *result,
+                                          PyTealetObject **return_to_io, PyObject **return_arg_io,
+                                          PyObject **return_exc_io) {
+    PyObject *hook_result = NULL;
+    PyObject *result_arg;
+    PyObject *exc_arg;
+    PyObject *worker_exc = NULL;
+    PyObject *fallback_exc = NULL;
+    PyObject *arg_obj = NULL;
+    PyTealetObject *new_return_to;
+    PyObject *new_return_arg;
+    int clear_exc = 0;
 
-        /* perform sanity checks on the return_to target */
+    assert(mstate);
+    assert(current);
+    assert(return_to_io);
+    assert(return_arg_io);
+    assert(return_exc_io);
 
-        if (!*return_to) {
-            PyErr_SetString(PyExc_TypeError, "tealet object expected");
-            err = -1;
-        } else if (!PyTealet_Check((PyObject *)(*return_to), mstate)) {
-            PyErr_SetString(PyExc_TypeError, "tealet object expected");
-            err = -1;
-        } else if ((*return_to)->state != STATE_RUN) {
-            PyErr_SetString(mstate->state_error, "must be 'run'");
-            err = -1;
-        } else if (CheckTarget(mstate, *return_to, current, "return")) {
-            err = -1;
-        }
-        if (err) {
-            Py_XDECREF(*return_arg);
-            *return_arg = NULL;
-            Py_XDECREF((PyObject *)(*return_to));
-            *return_to = NULL;
-        }
-    } else {
-        err = -1;
+    *return_to_io = NULL;
+    *return_arg_io = NULL;
+    *return_exc_io = NULL;
+
+    /* if the worker raised an exception, capture it and pass to the hook. */
+    if (!result)
+        worker_exc = PyTealetThrow_GetRaisedException();
+
+    result_arg = result ? result : Py_None;
+    exc_arg = worker_exc ? worker_exc : Py_None;
+
+    hook_result = PyObject_CallMethod((PyObject *)current, "resolve_target", "OO", result_arg, exc_arg);
+    if (!hook_result)
+        goto err;
+
+    if (!PyArg_ParseTuple(hook_result, "O!O|p:resolve_target", mstate->tealet_type, &new_return_to, &arg_obj,
+                          &clear_exc))
+        goto err;
+
+    if (new_return_to->state != STATE_RUN) {
+        PyErr_SetString(mstate->state_error, "must be 'run'");
+        goto err;
     }
-    if (!*return_to) {
-        *return_to = (PyTealetObject *)Py_NewRef(TryGetMain(mstate, NULL));
-        assert(*return_to);
+    if (CheckTarget(mstate, new_return_to, current, "resolve_target") < 0)
+        goto err;
+    Py_XDECREF(hook_result);
+
+    Py_INCREF(new_return_to);
+    new_return_arg = Py_NewRef(arg_obj ? arg_obj : Py_None);
+
+    *return_to_io = new_return_to;
+    *return_arg_io = new_return_arg;
+    if (!clear_exc) {
+        *return_exc_io = worker_exc;
+        worker_exc = NULL;
     }
-    if (!*return_arg) {
-        *return_arg = Py_NewRef(Py_None);
-    }
-    if (err) {
-        *return_exc = PyTealetThrow_GetRaisedException();
-    }
+    Py_XDECREF(worker_exc);
+    return;
+
+err:
+    Py_XDECREF(hook_result);
+    fallback_exc = worker_exc;
+    worker_exc = NULL;
+    PyErr_WriteUnraisable((PyObject *)current);
+    PyErr_Clear();
+    *return_to_io = (PyTealetObject *)Py_NewRef(TryGetMain(mstate, NULL));
+    *return_arg_io = Py_NewRef(Py_None);
+    *return_exc_io = fallback_exc;
+    Py_XDECREF(worker_exc);
 }
 
 /* Handle uncaught top-level exceptions from a tealet worker.
@@ -2796,7 +2858,9 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         }
     }
 
-    pytealet_process_return_arg(mstate, tealet, result, &return_to, &return_arg, &return_exc);
+    pytealet_apply_resolve_target(mstate, tealet, result, &return_to, &return_arg, &return_exc);
+    assert(return_to != NULL);
+    assert(return_arg != NULL);
     Py_XDECREF(result);
 
     /* see if we should redirect the exit switch due to an exception, and clear up the pending token.

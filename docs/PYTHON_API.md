@@ -54,11 +54,21 @@ Methods:
 - `previous() -> _tealet.tealet | None`
 - `main() -> _tealet.tealet`
 - `is_foreign() -> bool`
+- `resolve_target(result, exc) -> None | _tealet.tealet | tuple[_tealet.tealet, object] | tuple[_tealet.tealet, object, bool]`
 - `prepare(function) -> _tealet.tealet`
 - `run(function, arg=None) -> object`
 - `switch(arg=None, panic=False) -> object`
 - `set_exception(exception, fallback=None) -> None`
 - `throw(exception) -> object`
+
+`resolve_target` is a class-level override hook for frameworks that need custom
+exit-target routing from the worker callback. Default implementation
+interprets worker return values using legacy semantics: `target`,
+`(target, arg)`, or `None`.
+Custom overrides receive the raw worker return value and worker exception
+(if any), before legacy tuple/target validation is applied.
+Returning a 3-tuple with `clear=True` clears any pending worker exception before
+default uncaught-exception handling.
 
 Properties:
 - `state: int`

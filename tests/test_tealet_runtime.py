@@ -177,6 +177,101 @@ class TestSimple:
         assert any(isinstance(u.exc_value, TypeError) and "tealet object expected" in str(u.exc_value) for u in seen)
 
 
+class TestResolveTargetHook:
+    def test_resolve_target_can_override_callable_result_semantics(self):
+        class RawResultTealet(_tealet.tealet):
+            def resolve_target(self, result, exc):
+                assert result == 123
+                assert exc is None
+                return _tealet.main(), "handled-raw"
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = RawResultTealet()
+            assert t.run(lambda current, arg: 123, None) == "handled-raw"
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen == []
+
+    def test_resolve_target_routes_none_return_when_clearing_error(self):
+        class RoutedTealet(_tealet.tealet):
+            def resolve_target(self, result, exc):
+                assert result is None
+                assert exc is None
+                return _tealet.main(), "routed", True
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = RoutedTealet()
+            assert t.run(lambda current, arg: None, None) == "routed"
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen == []
+
+    def test_resolve_target_can_clear_worker_exception(self):
+        class RoutedTealet(_tealet.tealet):
+            def resolve_target(self, result, exc):
+                assert result is None
+                assert isinstance(exc, ValueError)
+                return _tealet.main(), "cleared", True
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        def run(current, arg):
+            raise ValueError("worker exploded")
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = RoutedTealet()
+            assert t.run(run, None) == "cleared"
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen == []
+
+    def test_resolve_target_hook_failure_is_unraisable_and_falls_back(self):
+        class BrokenTealet(_tealet.tealet):
+            def resolve_target(self, result, exc):
+                raise RuntimeError("hook failed")
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = BrokenTealet()
+            assert t.run(lambda current, arg: None, None) is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert any(isinstance(u.exc_value, RuntimeError) and "hook failed" in str(u.exc_value) for u in seen)
+
+
 class TestPrepare:
     def test_prepare_returns_self_for_chaining(self):
         seen = []
