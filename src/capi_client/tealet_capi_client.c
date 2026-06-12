@@ -89,6 +89,9 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (client_dict_set_owned(d, "has_stub",
                               PyBool_FromLong(state->api->stub != NULL)) < 0)
         goto error;
+    if (client_dict_set_owned(d, "has_set_stub",
+                              PyBool_FromLong(state->api->set_stub != NULL)) < 0)
+        goto error;
     if (client_dict_set_owned(d, "has_prepare",
                               PyBool_FromLong(state->api->prepare != NULL)) < 0)
         goto error;
@@ -192,7 +195,6 @@ static PyObject *client_check_tealet(PyObject *module, PyObject *obj) {
 
 static PyObject *client_capi_switch(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
-    Py_ssize_t nargs;
     PyObject *target;
     PyObject *arg = NULL;
 
@@ -201,22 +203,14 @@ static PyObject *client_capi_switch(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    nargs = PyTuple_GET_SIZE(args);
-    if (nargs < 1 || nargs > 2) {
-        PyErr_SetString(PyExc_TypeError, "capi_switch() takes 1 or 2 positional arguments");
+    if (!PyArg_ParseTuple(args, "O|O:capi_switch", &target, &arg))
         return NULL;
-    }
-
-    target = PyTuple_GET_ITEM(args, 0);
-    if (nargs == 2)
-        arg = PyTuple_GET_ITEM(args, 1);
 
     return state->api->switch_(state->ctx, target, arg, PYTEALET_SWITCH_FLAGS_DEFAULT);
 }
 
 static PyObject *client_capi_run(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
-    Py_ssize_t nargs;
     PyObject *target;
     PyObject *func;
     PyObject *arg = NULL;
@@ -226,16 +220,8 @@ static PyObject *client_capi_run(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    nargs = PyTuple_GET_SIZE(args);
-    if (nargs < 2 || nargs > 3) {
-        PyErr_SetString(PyExc_TypeError, "capi_run() takes 2 or 3 positional arguments");
+    if (!PyArg_ParseTuple(args, "OO|O:capi_run", &target, &func, &arg))
         return NULL;
-    }
-
-    target = PyTuple_GET_ITEM(args, 0);
-    func = PyTuple_GET_ITEM(args, 1);
-    if (nargs == 3)
-        arg = PyTuple_GET_ITEM(args, 2);
 
     return state->api->run(state->ctx, target, func, NULL, arg);
 }
@@ -257,7 +243,6 @@ static int client_parse_u32(PyObject *obj, const char *what, uint32_t *out) {
 
 static PyObject *client_capi_switch_flags(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
-    Py_ssize_t nargs;
     PyObject *target;
     PyObject *flags_obj;
     PyObject *arg = NULL;
@@ -268,16 +253,8 @@ static PyObject *client_capi_switch_flags(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    nargs = PyTuple_GET_SIZE(args);
-    if (nargs != 2 && nargs != 3) {
-        PyErr_SetString(PyExc_TypeError, "capi_switch_flags() takes 2 or 3 positional arguments");
+    if (!PyArg_ParseTuple(args, "OO|O:capi_switch_flags", &target, &flags_obj, &arg))
         return NULL;
-    }
-
-    target = PyTuple_GET_ITEM(args, 0);
-    flags_obj = PyTuple_GET_ITEM(args, 1);
-    if (nargs == 3)
-        arg = PyTuple_GET_ITEM(args, 2);
 
     if (client_parse_u32(flags_obj, "flags", &flags) < 0)
         return NULL;
@@ -287,9 +264,9 @@ static PyObject *client_capi_switch_flags(PyObject *module, PyObject *args) {
 
 static PyObject *client_capi_throw(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
-    Py_ssize_t nargs;
     PyObject *target;
     PyObject *exc;
+    PyObject *flags_obj = NULL;
     uint32_t flags = PYTEALET_THROW_FLAGS_DEFAULT;
 
     if (!state)
@@ -297,17 +274,11 @@ static PyObject *client_capi_throw(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    nargs = PyTuple_GET_SIZE(args);
-    if (nargs != 2 && nargs != 3) {
-        PyErr_SetString(PyExc_TypeError, "capi_throw() takes 2 or 3 positional arguments");
+    if (!PyArg_ParseTuple(args, "OO|O:capi_throw", &target, &exc, &flags_obj))
         return NULL;
-    }
 
-    target = PyTuple_GET_ITEM(args, 0);
-    exc = PyTuple_GET_ITEM(args, 1);
-
-    if (nargs == 3) {
-        if (client_parse_u32(PyTuple_GET_ITEM(args, 2), "flags", &flags) < 0)
+    if (flags_obj != NULL) {
+        if (client_parse_u32(flags_obj, "flags", &flags) < 0)
             return NULL;
     }
 
@@ -316,7 +287,6 @@ static PyObject *client_capi_throw(PyObject *module, PyObject *args) {
 
 static PyObject *client_capi_set_exception(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
-    Py_ssize_t nargs;
     PyObject *target;
     PyObject *exc;
     PyObject *fallback = Py_None;
@@ -327,16 +297,8 @@ static PyObject *client_capi_set_exception(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    nargs = PyTuple_GET_SIZE(args);
-    if (nargs != 2 && nargs != 3) {
-        PyErr_SetString(PyExc_TypeError, "capi_set_exception() takes 2 or 3 positional arguments");
+    if (!PyArg_ParseTuple(args, "OO|O:capi_set_exception", &target, &exc, &fallback))
         return NULL;
-    }
-
-    target = PyTuple_GET_ITEM(args, 0);
-    exc = PyTuple_GET_ITEM(args, 1);
-    if (nargs == 3)
-        fallback = PyTuple_GET_ITEM(args, 2);
 
     rc = state->api->set_exception(state->ctx, target, exc, fallback);
     if (rc < 0)
@@ -505,7 +467,6 @@ static PyObject *client_capi_thread_id(PyObject *module, PyObject *target) {
 
 static PyObject *client_capi_prepare(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
-    Py_ssize_t nargs;
     PyObject *target;
     PyObject *func;
     int rc;
@@ -515,14 +476,8 @@ static PyObject *client_capi_prepare(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    nargs = PyTuple_GET_SIZE(args);
-    if (nargs != 2) {
-        PyErr_SetString(PyExc_TypeError, "capi_prepare() takes exactly 2 positional arguments");
+    if (!PyArg_ParseTuple(args, "OO:capi_prepare", &target, &func))
         return NULL;
-    }
-
-    target = PyTuple_GET_ITEM(args, 0);
-    func = PyTuple_GET_ITEM(args, 1);
 
     rc = state->api->prepare(state->ctx, target, func, NULL);
     if (rc < 0)
@@ -540,6 +495,27 @@ static PyObject *client_capi_stub(PyObject *module, PyObject *target) {
         return NULL;
 
     rc = state->api->stub(state->ctx, target);
+    if (rc < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_capi_set_stub(PyObject *module, PyObject *args) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    PyObject *target;
+    PyObject *source;
+    int duplicate = 1;
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+
+    if (!PyArg_ParseTuple(args, "OO|p:capi_set_stub", &target, &source, &duplicate))
+        return NULL;
+
+    rc = state->api->set_stub(state->ctx, target, source, duplicate);
     if (rc < 0)
         return NULL;
     Py_RETURN_NONE;
@@ -610,7 +586,6 @@ static PyObject *client_run_c_callback(PyObject *current, PyObject *arg) {
 
 static PyObject *client_capi_run_c(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
-    Py_ssize_t nargs;
     PyObject *target;
     PyObject *arg = NULL;
 
@@ -619,15 +594,8 @@ static PyObject *client_capi_run_c(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    nargs = PyTuple_GET_SIZE(args);
-    if (nargs < 1 || nargs > 2) {
-        PyErr_SetString(PyExc_TypeError, "capi_run_c() takes 1 or 2 positional arguments");
+    if (!PyArg_ParseTuple(args, "O|O:capi_run_c", &target, &arg))
         return NULL;
-    }
-
-    target = PyTuple_GET_ITEM(args, 0);
-    if (nargs == 2)
-        arg = PyTuple_GET_ITEM(args, 1);
 
     return state->api->run(state->ctx, target, NULL, client_run_c_callback, arg);
 }
@@ -657,6 +625,8 @@ static PyMethodDef client_methods[] = {
      "Create a brand-new tealet using the imported C API."},
     {"capi_stub", (PyCFunction)client_capi_stub, METH_O,
      "Stub a tealet using the imported C API."},
+    {"capi_set_stub", (PyCFunction)client_capi_set_stub, METH_VARARGS,
+     "Attach a duplicated stub from source into target via imported C API."},
     {"capi_duplicate", (PyCFunction)client_capi_duplicate, METH_O,
      "Duplicate a tealet using the imported C API."},
     {"capi_prepare", (PyCFunction)client_capi_prepare, METH_VARARGS,

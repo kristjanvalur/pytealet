@@ -31,7 +31,7 @@ Module-level functions:
 - `_tealet.thread_active() -> list[_tealet.tealet]`
 - `_tealet.thread_kill(cleanup_passes: int = 3, kill_exc = None) -> list[_tealet.tealet]`
 - `_tealet.error_was_remote() -> bool`
-- `_tealet.hide_frame(callable, args=(), kwargs=None) -> object`
+- `_tealet.hide_frame(callable, args=(), kwargs={...}) -> object` (when provided, `kwargs` must be a `dict`)
 - `_tealet.frame_introspection() -> bool`
 - `_tealet.frame_introspection(enabled) -> bool`
 
@@ -48,16 +48,30 @@ Constructor:
 
 Methods:
 - `stub() -> _tealet.tealet`
+- `set_stub(source, duplicate=True) -> _tealet.tealet`
 - `duplicate() -> _tealet.tealet`
 - `current() -> _tealet.tealet`
 - `previous() -> _tealet.tealet | None`
 - `main() -> _tealet.tealet`
 - `is_foreign() -> bool`
+- `resolve_target(result, exc) -> tuple[_tealet.tealet, object] | tuple[_tealet.tealet, object, bool]`
 - `prepare(function) -> _tealet.tealet`
 - `run(function, arg=None) -> object`
 - `switch(arg=None, panic=False) -> object`
 - `set_exception(exception, fallback=None) -> None`
 - `throw(exception) -> object`
+
+`resolve_target` is a class-level override hook for frameworks that need custom
+exit-target routing from the worker callback.
+Custom overrides receive the raw worker return value and worker exception
+(if any), and must return `(target, arg)` or `(target, arg, clear)`.
+`target` must be an active tealet in the same lineage. If `clear` is truthy,
+any captured worker exception is cleared before uncaught-exception handling.
+The default implementation maps successful worker return values from
+`target` or `(target, arg)` into `(target, arg, clear=False)`. When the worker
+raised, it routes to `(main, None, clear=False)`.
+If the hook raises or returns an invalid value (including `None`), the runtime
+reports it via `sys.unraisablehook` and falls back to `(main, None)`.
 
 Properties:
 - `state: int`

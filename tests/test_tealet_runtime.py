@@ -68,16 +68,36 @@ class TestModule:
         assert "wrapper_normal" in normal_names
         assert "wrapper_hide" not in hidden_names
 
-    def test_hide_frame_accepts_none_kwargs(self):
+    def test_hide_frame_without_kwargs_uses_empty_mapping(self):
         def inner(*args, **kwargs):
             return args, kwargs
 
-        result = _tealet.hide_frame(inner, (1, 2), None)
+        result = _tealet.hide_frame(inner, (1, 2))
         assert result == ((1, 2), {})
 
+    def test_hide_frame_rejects_none_kwargs(self):
+        with pytest.raises(TypeError, match="dict"):
+            _tealet.hide_frame(lambda: None, (), None)
+
     def test_hide_frame_rejects_non_dict_kwargs(self):
-        with pytest.raises(TypeError, match="kwargs must be a dict or None"):
+        with pytest.raises(TypeError, match="dict"):
             _tealet.hide_frame(lambda: None, (), 42)
+
+    def test_module_keyword_argument_forms(self):
+        original = _tealet.frame_introspection()
+
+        try:
+            assert _tealet.frame_introspection(enabled=False) is False
+        finally:
+            _tealet.frame_introspection(original)
+
+        assert _tealet.thread_kill(cleanup_passes=2, kill_exc=None) == []
+        assert _tealet.thread_reap(cleanup_passes=2, kill_exc=None) == []
+
+        def inner(*args, **kwargs):
+            return args, kwargs
+
+        assert _tealet.hide_frame(callable=inner, args=(1,), kwargs={"x": 2}) == ((1,), {"x": 2})
 
 
 
@@ -155,6 +175,101 @@ class TestSimple:
 
         assert seen, "expected unraisable error for None return target"
         assert any(isinstance(u.exc_value, TypeError) and "tealet object expected" in str(u.exc_value) for u in seen)
+
+
+class TestResolveTargetHook:
+    def test_resolve_target_can_override_callable_result_semantics(self):
+        class RawResultTealet(_tealet.tealet):
+            def resolve_target(self, result, exc):
+                assert result == 123
+                assert exc is None
+                return _tealet.main(), "handled-raw"
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = RawResultTealet()
+            assert t.run(lambda current, arg: 123, None) == "handled-raw"
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen == []
+
+    def test_resolve_target_routes_none_return_when_clearing_error(self):
+        class RoutedTealet(_tealet.tealet):
+            def resolve_target(self, result, exc):
+                assert result is None
+                assert exc is None
+                return _tealet.main(), "routed", True
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = RoutedTealet()
+            assert t.run(lambda current, arg: None, None) == "routed"
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen == []
+
+    def test_resolve_target_can_clear_worker_exception(self):
+        class RoutedTealet(_tealet.tealet):
+            def resolve_target(self, result, exc):
+                assert result is None
+                assert isinstance(exc, ValueError)
+                return _tealet.main(), "cleared", True
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        def run(current, arg):
+            raise ValueError("worker exploded")
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = RoutedTealet()
+            assert t.run(run, None) == "cleared"
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen == []
+
+    def test_resolve_target_hook_failure_is_unraisable_and_falls_back(self):
+        class BrokenTealet(_tealet.tealet):
+            def resolve_target(self, result, exc):
+                raise RuntimeError("hook failed")
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = BrokenTealet()
+            assert t.run(lambda current, arg: None, None) is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert any(isinstance(u.exc_value, RuntimeError) and "hook failed" in str(u.exc_value) for u in seen)
 
 
 class TestPrepare:
@@ -318,6 +433,53 @@ class TestSubclass:
         assert t.payload is payload
         assert t.label == "demo"
         assert t.state == _tealet.STATE_NEW
+
+    def test_subclass_init_then_set_stub(self):
+        payload = {"kind": "demo"}
+        source = _tealet.tealet()
+        source.stub()
+
+        t = self.scinit(payload, label="attached")
+        assert t.state == _tealet.STATE_NEW
+
+        out = t.set_stub(source)
+
+        assert out is t
+        assert isinstance(t, self.scinit)
+        assert t.payload is payload
+        assert t.label == "attached"
+        assert t.state == _tealet.STATE_STUB
+
+    def test_set_stub_requires_new_target_and_stub_source(self):
+        source = _tealet.tealet()
+        source.stub()
+        target = _tealet.tealet()
+
+        target.set_stub(source, duplicate=True)
+        assert target.state == _tealet.STATE_STUB
+
+        with pytest.raises(_tealet.StateError, match="target must be new"):
+            target.set_stub(source)
+
+        with pytest.raises(_tealet.StateError, match="source must be stub"):
+            _tealet.tealet().set_stub(_tealet.tealet())
+
+    def test_set_stub_duplicate_false_rejected(self):
+        source = _tealet.tealet()
+        source.stub()
+
+        with pytest.raises(ValueError, match="duplicate=False"):
+            _tealet.tealet().set_stub(source, duplicate=False)
+
+    def test_set_stub_duplicate_accepts_truthy_value(self):
+        source = _tealet.tealet()
+        source.stub()
+        target = _tealet.tealet()
+
+        out = target.set_stub(source, duplicate=1)
+
+        assert out is target
+        assert target.state == _tealet.STATE_STUB
 
     def test_exact_tealet_constructor_stays_no_args(self):
         with pytest.raises(TypeError, match=r"tealet\(\) takes no arguments"):

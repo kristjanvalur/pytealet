@@ -76,6 +76,7 @@ Tealet/object operations:
 - `create(ctx) -> PyObject *`
 - `duplicate(ctx, source) -> PyObject *`
 - `stub(ctx, target) -> int`
+- `set_stub(ctx, target, source, duplicate) -> int`
 - `prepare(ctx, target, function_py, function_c) -> int`
 - `run(ctx, target, function_py, function_c, arg) -> PyObject *`
 - `switch_(ctx, target, arg, flags) -> PyObject *`
