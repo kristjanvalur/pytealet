@@ -31,7 +31,7 @@ Module-level functions:
 - `_tealet.thread_active() -> list[_tealet.tealet]`
 - `_tealet.thread_kill(cleanup_passes: int = 3, kill_exc = None) -> list[_tealet.tealet]`
 - `_tealet.error_was_remote() -> bool`
-- `_tealet.hide_frame(callable, args=(), kwargs=None) -> object`
+- `_tealet.hide_frame(callable, args=(), kwargs={...}) -> object` (when provided, `kwargs` must be a `dict`)
 - `_tealet.frame_introspection() -> bool`
 - `_tealet.frame_introspection(enabled) -> bool`
 

@@ -540,7 +540,8 @@ static PyObject *module_hide_frame(PyObject *mod, PyObject *args, PyObject *kwar
      * frame linkage before returning, including when PyObject_Call fails and
      * propagates an exception.
      */
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO:hide_frame", kwlist, &func, &func_args, &kwds))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O!O!:hide_frame", kwlist, &func, &PyTuple_Type, &func_args,
+                                     &PyDict_Type, &kwds))
         return NULL;
 
     if (!func_args) {
@@ -548,18 +549,6 @@ static PyObject *module_hide_frame(PyObject *mod, PyObject *args, PyObject *kwar
         if (!func_args)
             return NULL;
         created_empty_args = 1;
-    } else if (!PyTuple_Check(func_args)) {
-        PyErr_SetString(PyExc_TypeError, "hide_frame() args must be a tuple");
-        return NULL;
-    }
-
-    if (kwds == Py_None) {
-        kwds = NULL;
-    } else if (kwds != NULL && !PyDict_Check(kwds)) {
-        PyErr_SetString(PyExc_TypeError, "hide_frame() kwargs must be a dict or None");
-        if (created_empty_args)
-            Py_DECREF(func_args);
-        return NULL;
     }
 
 #if defined(PY_HAS_TSTATE_FRAME)
@@ -596,25 +585,20 @@ static PyObject *module_hide_frame(PyObject *mod, PyObject *args, PyObject *kwar
 static PyObject *module_frame_introspection(PyObject *mod, PyObject *args, PyObject *kwargs) {
     static char *kwlist[] = {"enabled", NULL};
     PyTealetModuleState *mstate;
-    PyObject *enabled_obj = NULL;
-    int enabled;
+    int enabled = -1;
     int rc;
 
     GET_MODULE_STATE(mod, mstate);
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O:frame_introspection", kwlist, &enabled_obj))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|p:frame_introspection", kwlist, &enabled))
         return NULL;
 
-    if (enabled_obj == NULL) {
+    if (enabled < 0) {
         rc = PyTealetApi_FrameIntrospectionGet(mstate);
         if (rc < 0)
             return NULL;
         return PyBool_FromLong(rc != 0);
     }
-
-    enabled = PyObject_IsTrue(enabled_obj);
-    if (enabled < 0)
-        return NULL;
 
     rc = PyTealetApi_FrameIntrospectionSet(mstate, enabled);
     if (rc < 0)
