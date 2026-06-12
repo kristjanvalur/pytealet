@@ -1773,7 +1773,7 @@ static struct PyMethodDef pytealet_methods[] = {
     {"main", (PyCFunction)pytealet_main_method, METH_NOARGS, ""},
     {"is_foreign", (PyCFunction)pytealet_is_foreign, METH_NOARGS, ""},
     {"resolve_target", (PyCFunction)(void (*)(void))pytealet_resolve_target, METH_VARARGS | METH_KEYWORDS,
-     "resolve_target(result, exc) -> None | tealet | (tealet, arg[, clear])\n\n"
+     "resolve_target(result, exc) -> (tealet, arg) | (tealet, arg, clear)\n\n"
      "Hook for subclasses to override exit target routing from pytealet_main()."},
     {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_VARARGS | METH_KEYWORDS,
         "prepare(function) -> tealet\n\n"
