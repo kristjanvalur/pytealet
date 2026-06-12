@@ -356,6 +356,16 @@ class TestSubclass:
         with pytest.raises(ValueError, match="duplicate=False"):
             _tealet.tealet().set_stub(source, duplicate=False)
 
+    def test_set_stub_duplicate_accepts_truthy_value(self):
+        source = _tealet.tealet()
+        source.stub()
+        target = _tealet.tealet()
+
+        out = target.set_stub(source, duplicate=1)
+
+        assert out is target
+        assert target.state == _tealet.STATE_STUB
+
     def test_exact_tealet_constructor_stays_no_args(self):
         with pytest.raises(TypeError, match=r"tealet\(\) takes no arguments"):
             _tealet.tealet(123)

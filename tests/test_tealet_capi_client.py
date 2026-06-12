@@ -284,3 +284,14 @@ def test_capi_client_set_stub_duplicate_false_rejected():
 
     with pytest.raises(ValueError, match="duplicate=False"):
         _tealet_capi_client.capi_set_stub(_tealet.tealet(), source, False)
+
+
+def test_capi_client_set_stub_duplicate_accepts_truthy_value():
+    source = _tealet.tealet()
+    source.stub()
+    target = _tealet.tealet()
+
+    out = _tealet_capi_client.capi_set_stub(target, source, 1)
+
+    assert out is None
+    assert target.state == _tealet.STATE_STUB

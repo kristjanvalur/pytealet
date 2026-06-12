@@ -68,10 +68,8 @@ static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTeale
                                             Py_ssize_t cleanup_passes, PyTealetObject *caller, PyObject *kill_exc_spec);
 static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
                                         PyTealetMainData *mdata, PyObject *exc, PyObject *fallback);
-static PyObject *pytealet_duplicate(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-                                    Py_ssize_t nargs, PyObject *kwnames);
-static PyObject *pytealet_set_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-                                   Py_ssize_t nargs, PyObject *kwnames);
+static PyObject *pytealet_duplicate(PyObject *self, PyObject *Py_UNUSED(_ignored));
+static PyObject *pytealet_set_stub(PyObject *self, PyObject *args, PyObject *kwargs);
 static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                 PyObject *kwnames);
 static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
@@ -530,17 +528,12 @@ static int pytealet_set_stub_impl(PyTealetModuleState *mstate, PyTealetObject *t
     return 0;
 }
 
-static PyObject *pytealet_duplicate(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-                                    Py_ssize_t nargs, PyObject *kwnames) {
+static PyObject *pytealet_duplicate(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
     PyTealetObject *src = (PyTealetObject *)self;
-    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
 
     if (!mstate)
         return NULL;
-    if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
-        PyErr_SetString(PyExc_TypeError, "duplicate() takes no arguments");
-        return NULL;
-    }
 
     return pytealet_duplicate_impl(mstate, src);
 }
@@ -565,48 +558,18 @@ PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_ob
     return pytealet_duplicate_impl(mstate, (PyTealetObject *)source_obj);
 }
 
-static PyObject *pytealet_set_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-                                   Py_ssize_t nargs, PyObject *kwnames) {
+static PyObject *pytealet_set_stub(PyObject *self, PyObject *args, PyObject *kwargs) {
+    static char *kwlist[] = {"source", "duplicate", NULL};
     PyTealetObject *target = (PyTealetObject *)self;
-    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     PyObject *source_obj;
     int duplicate = 1;
 
     if (!mstate)
         return NULL;
-    if (nargs < 1 || nargs > 2) {
-        PyErr_SetString(PyExc_TypeError, "set_stub() takes 1 or 2 positional arguments");
-        return NULL;
-    }
-    if (kwnames && PyTuple_GET_SIZE(kwnames) > 1) {
-        PyErr_SetString(PyExc_TypeError, "set_stub() got unexpected keyword arguments");
-        return NULL;
-    }
 
-    source_obj = args[0];
-    if (nargs == 2) {
-        if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
-            PyErr_SetString(PyExc_TypeError, "set_stub() got multiple values for argument 'duplicate'");
-            return NULL;
-        }
-        if (!PyBool_Check(args[1])) {
-            PyErr_SetString(PyExc_TypeError, "duplicate must be a bool");
-            return NULL;
-        }
-        duplicate = (args[1] == Py_True);
-    }
-    if (kwnames && PyTuple_GET_SIZE(kwnames) == 1) {
-        PyObject *kwname = PyTuple_GET_ITEM(kwnames, 0);
-        if (!PyUnicode_Check(kwname) || PyUnicode_CompareWithASCIIString(kwname, "duplicate") != 0) {
-            PyErr_SetString(PyExc_TypeError, "set_stub() got an unexpected keyword argument");
-            return NULL;
-        }
-        if (!PyBool_Check(args[nargs])) {
-            PyErr_SetString(PyExc_TypeError, "duplicate must be a bool");
-            return NULL;
-        }
-        duplicate = (args[nargs] == Py_True);
-    }
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|p:set_stub", kwlist, &source_obj, &duplicate))
+        return NULL;
 
     if (PyTealetApi_SetStub(mstate, (PyObject *)target, source_obj, duplicate) < 0)
         return NULL;
@@ -785,17 +748,12 @@ out:
     return ok ? 0 : -1;
 }
 
-static PyObject *pytealet_stub(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
-                               PyObject *kwnames) {
+static PyObject *pytealet_stub(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
     PyTealetObject *pytealet = (PyTealetObject *)self;
-    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
 
     if (!mstate)
         return NULL;
-    if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
-        PyErr_SetString(PyExc_TypeError, "stub() takes no arguments");
-        return NULL;
-    }
 
     if (PyTealetApi_Stub(mstate, self) < 0)
         return NULL;
@@ -829,17 +787,12 @@ int PyTealetApi_Stub(PyTealetModuleState *mstate, PyObject *target_obj) {
  * we require it to be called from the owning thread.
  * if we wish to relax this, we could acquire the domain lock before getting the wrapper
  */
-static PyObject *pytealet_current(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
-                                  PyObject *kwnames) {
-    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+static PyObject *pytealet_current(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     PyTealetObject *current;
     PyTealetObject *base = (PyTealetObject *)self;
     if (!mstate)
         return NULL;
-    if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
-        PyErr_SetString(PyExc_TypeError, "current() takes no arguments");
-        return NULL;
-    }
     current = TryGetCurrent(mstate, NULL);
     if (CheckTarget(mstate, base, current, "current()"))
         return NULL;
@@ -852,19 +805,14 @@ static PyObject *pytealet_current(PyObject *self, PyTypeObject *defining_class, 
 }
 
 /* return the previous tealet (the one that switched to this tealet lineage) */
-static PyObject *pytealet_previous(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-                                   Py_ssize_t nargs, PyObject *kwnames) {
-    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+static PyObject *pytealet_previous(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     PyTealetObject *base = (PyTealetObject *)self;
     PyObject *prev;
     tealet_t *anchor;
     tealet_t *raw_prev;
     if (!mstate)
         return NULL;
-    if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
-        PyErr_SetString(PyExc_TypeError, "previous() takes no arguments");
-        return NULL;
-    }
     if (pytealet_require_owner_thread(mstate, base, "previous"))
         return NULL;
 
@@ -892,20 +840,15 @@ PyObject *PyTealetApi_Previous(PyTealetModuleState *mstate) {
     if (!current)
         return NULL;
 
-    return pytealet_previous((PyObject *)current, mstate->tealet_type, NULL, 0, NULL);
+    return pytealet_previous((PyObject *)current, NULL);
 }
 
 /* return the main tealet for this tealet lineage */
-static PyObject *pytealet_main_method(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-                                      Py_ssize_t nargs, PyObject *kwnames) {
-    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+static PyObject *pytealet_main_method(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     PyTealetObject *base = (PyTealetObject *)self;
     if (!mstate)
         return NULL;
-    if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
-        PyErr_SetString(PyExc_TypeError, "main() takes no arguments");
-        return NULL;
-    }
     if (pytealet_require_owner_thread(mstate, base, "main"))
         return NULL;
     if (!base->tealet) {
@@ -916,14 +859,8 @@ static PyObject *pytealet_main_method(PyObject *self, PyTypeObject *defining_cla
     }
 }
 
-static PyObject *pytealet_is_foreign(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-                                     Py_ssize_t nargs, PyObject *kwnames) {
+static PyObject *pytealet_is_foreign(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
     PyTealetObject *base = (PyTealetObject *)self;
-    (void)defining_class;
-    if (nargs != 0 || (kwnames && PyTuple_GET_SIZE(kwnames) > 0)) {
-        PyErr_SetString(PyExc_TypeError, "is_foreign() takes no arguments");
-        return NULL;
-    }
     return PyBool_FromLong(base->owner_tid != PyThread_get_thread_ident());
 }
 
@@ -960,48 +897,17 @@ static int pytealet_prepare_dispatch(PyTealetModuleState *mstate, PyTealetObject
     return 0;
 }
 
-static PyObject *pytealet_prepare(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
-                                  Py_ssize_t nargs, PyObject *kwnames) {
-    PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
+static PyObject *pytealet_prepare(PyObject *self, PyObject *args, PyObject *kwargs) {
+    static char *kwlist[] = {"function", NULL};
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     PyObject *func = NULL;
 
     if (!mstate)
         return NULL;
 
-    if (nargs > 1) {
-        PyErr_Format(PyExc_TypeError, "prepare() takes 1 argument (%zd given)", nargs);
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O:prepare", kwlist, &func))
         return NULL;
-    }
-    if (nargs == 1)
-        func = args[0];
 
-    if (kwnames && PyTuple_GET_SIZE(kwnames) > 1) {
-        PyErr_SetString(PyExc_TypeError, "prepare() takes at most 1 keyword argument");
-        return NULL;
-    }
-    if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
-        PyObject *key = PyTuple_GET_ITEM(kwnames, 0);
-        PyObject *val = args[nargs];
-        if (!PyUnicode_Check(key)) {
-            PyErr_SetString(PyExc_TypeError, "prepare() keyword names must be strings");
-            return NULL;
-        }
-        if (PyUnicode_CompareWithASCIIString(key, "function") == 0) {
-            if (func != NULL) {
-                PyErr_SetString(PyExc_TypeError, "prepare() got multiple values for argument 'function'");
-                return NULL;
-            }
-            func = val;
-        } else {
-            PyErr_Format(PyExc_TypeError, "prepare() got an unexpected keyword argument '%U'", key);
-            return NULL;
-        }
-    }
-
-    if (func == NULL) {
-        PyErr_SetString(PyExc_TypeError, "prepare() missing required argument 'function' (pos 1)");
-        return NULL;
-    }
     if (PyTealetApi_Prepare(mstate, self, func, NULL) < 0)
         return NULL;
 
@@ -1809,19 +1715,18 @@ static PyObject *pytealet_set_context(PyObject *self, PyObject *value) {
 }
 
 static struct PyMethodDef pytealet_methods[] = {
-    {"stub", (PyCFunction)(void (*)(void))pytealet_stub, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
-    {"set_stub", (PyCFunction)(void (*)(void))pytealet_set_stub, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+    {"stub", (PyCFunction)pytealet_stub, METH_NOARGS, ""},
+    {"set_stub", (PyCFunction)(void (*)(void))pytealet_set_stub, METH_VARARGS | METH_KEYWORDS,
     "set_stub(source, duplicate=True) -> tealet\n\n"
     "Attach a duplicated STUB execution anchor from source into this NEW tealet."},
-    {"duplicate", (PyCFunction)(void (*)(void))pytealet_duplicate, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+    {"duplicate", (PyCFunction)pytealet_duplicate, METH_NOARGS,
     "duplicate() -> tealet\n\n"
     "Create a duplicate wrapper from a NEW or STUB tealet."},
-    {"current", (PyCFunction)(void (*)(void))pytealet_current, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
-    {"previous", (PyCFunction)(void (*)(void))pytealet_previous, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
-    {"main", (PyCFunction)(void (*)(void))pytealet_main_method, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
-    {"is_foreign", (PyCFunction)(void (*)(void))pytealet_is_foreign,
-     METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
-    {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+    {"current", (PyCFunction)pytealet_current, METH_NOARGS, ""},
+    {"previous", (PyCFunction)pytealet_previous, METH_NOARGS, ""},
+    {"main", (PyCFunction)pytealet_main_method, METH_NOARGS, ""},
+    {"is_foreign", (PyCFunction)pytealet_is_foreign, METH_NOARGS, ""},
+    {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_VARARGS | METH_KEYWORDS,
         "prepare(function) -> tealet\n\n"
      "Store a callable to be used by the first switch(arg) on this NEW/STUB tealet."},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},

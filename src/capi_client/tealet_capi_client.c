@@ -552,8 +552,7 @@ static PyObject *client_capi_set_stub(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
     PyObject *target;
     PyObject *source;
-    PyObject *duplicate_obj = Py_True;
-    int duplicate;
+    int duplicate = 1;
     int rc;
 
     if (!state)
@@ -561,13 +560,8 @@ static PyObject *client_capi_set_stub(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    if (!PyArg_ParseTuple(args, "OO|O:capi_set_stub", &target, &source, &duplicate_obj))
+    if (!PyArg_ParseTuple(args, "OO|p:capi_set_stub", &target, &source, &duplicate))
         return NULL;
-    if (!PyBool_Check(duplicate_obj)) {
-        PyErr_SetString(PyExc_TypeError, "duplicate must be a bool");
-        return NULL;
-    }
-    duplicate = (duplicate_obj == Py_True);
 
     rc = state->api->set_stub(state->ctx, target, source, duplicate);
     if (rc < 0)
