@@ -509,10 +509,8 @@ static int pytealet_set_stub_impl(PyTealetModuleState *mstate, PyTealetObject *t
         return -1;
     }
 
-    if (target->tstate.has_state)
-        PyTealetTstate_Drop(&target->tstate, NULL, 1);
+    PyTealetTstate_Drop(&target->tstate, NULL, 1);
     PyTealetTstate_Duplicate(&target->tstate, &source->tstate);
-
     target->state = STATE_STUB;
     target->owner_tid = source->owner_tid;
 
