@@ -259,6 +259,77 @@ class TestSchedulerExamples:
             ("after", False, False),
         ]
 
+    def test_lock_serializes_access(self):
+        s = examples.scheduler()
+        lock = examples.Lock()
+        seen: list[str] = []
+
+        def worker(name: str) -> None:
+            seen.append(f"{name}:before")
+            with lock:
+                seen.append(f"{name}:acquired")
+                s.yield_()
+                seen.append(f"{name}:releasing")
+            seen.append(f"{name}:after")
+
+        s.spawn(worker, "a")
+        s.spawn(worker, "b")
+        s.run()
+
+        assert seen == [
+            "a:before",
+            "a:acquired",
+            "b:before",
+            "a:releasing",
+            "a:after",
+            "b:acquired",
+            "b:releasing",
+            "b:after",
+        ]
+
+    def test_semaphore_limits_concurrency(self):
+        s = examples.scheduler()
+        sem = examples.Semaphore(2)
+        active = 0
+        max_active = 0
+        seen: list[str] = []
+
+        def worker(name: str) -> None:
+            nonlocal active, max_active
+            sem.acquire()
+            try:
+                active += 1
+                max_active = max(max_active, active)
+                seen.append(f"{name}:entered")
+                s.yield_()
+            finally:
+                active -= 1
+                sem.release()
+                seen.append(f"{name}:left")
+
+        s.spawn(worker, "a")
+        s.spawn(worker, "b")
+        s.spawn(worker, "c")
+        s.run()
+
+        assert max_active == 2
+        assert seen == [
+            "a:entered",
+            "b:entered",
+            "a:left",
+            "b:left",
+            "c:entered",
+            "c:left",
+        ]
+
+    def test_bounded_semaphore_overrelease_raises(self):
+        sem = examples.BoundedSemaphore(1)
+
+        sem.acquire()
+        sem.release()
+        with pytest.raises(ValueError, match="released too many times"):
+            sem.release()
+
 
 class TestFutureExamples:
     def test_future_demo(self):
