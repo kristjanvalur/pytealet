@@ -14,13 +14,16 @@ from typing import Generic, TypeVar
 
 import tealet
 from tealet.scheduler import (
+    BoundedSemaphore,
     CancelledError,
     DeadlockError,
     Event,
     Future,
     InvalidStateError,
+    Lock,
     RawTimeoutError,
     ScheduledTealet,
+    Semaphore,
     SimpleScheduler,
     Timeout,
     TimeoutError,

@@ -6,6 +6,7 @@ import inspect
 import itertools
 import threading
 import time
+from collections import deque
 from typing import Callable, Generic, TypeVar
 
 import tealet
@@ -124,6 +125,112 @@ class Event:
 
     def clear(self) -> None:
         self._is_set = False
+
+
+class Lock:
+    """A tealet-compatible mutual exclusion lock."""
+
+    def __init__(self) -> None:
+        self._locked = False
+        self._waiters: deque[Event] = deque()
+
+    def locked(self) -> bool:
+        return self._locked
+
+    def acquire(self) -> bool:
+        if not self._locked:
+            self._locked = True
+            return True
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        try:
+            waiter.wait()
+        except BaseException:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise
+
+        self._locked = True
+        return True
+
+    def release(self) -> None:
+        if not self._locked:
+            raise RuntimeError("Lock is not acquired")
+
+        self._locked = False
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            waiter.set()
+            break
+
+    def __enter__(self) -> "Lock":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+
+class Semaphore:
+    """A tealet-compatible counting semaphore."""
+
+    def __init__(self, value: int = 1) -> None:
+        if value < 0:
+            raise ValueError("Semaphore initial value must be >= 0")
+        self._value = value
+        self._waiters: deque[Event] = deque()
+
+    def locked(self) -> bool:
+        return self._value == 0
+
+    def acquire(self) -> bool:
+        if self._value > 0:
+            self._value -= 1
+            return True
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        try:
+            waiter.wait()
+        except BaseException:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise
+
+        self._value -= 1
+        return True
+
+    def release(self) -> None:
+        self._value += 1
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            waiter.set()
+            break
+
+    def __enter__(self) -> "Semaphore":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+
+class BoundedSemaphore(Semaphore):
+    """A semaphore that cannot be released above its initial value."""
+
+    def __init__(self, value: int = 1) -> None:
+        super().__init__(value)
+        self._bound_value = value
+
+    def release(self) -> None:
+        if self._value >= self._bound_value:
+            raise ValueError("BoundedSemaphore released too many times")
+        super().release()
 
 
 class DeadlockError(RuntimeError):
