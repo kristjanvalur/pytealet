@@ -6,32 +6,15 @@ example code separate from runtime APIs.
 
 from __future__ import annotations
 
-import heapq
-import itertools
-import time
 from collections.abc import Iterable, Iterator
 from typing import Generic, TypeVar
 
 import tealet
 from tealet.scheduler import (
-    BoundedSemaphore,
-    CancelledError,
-    DeadlockError,
     Event,
-    Future,
-    InvalidStateError,
-    Lock,
-    RawTimeoutError,
-    ScheduledTealet,
-    Semaphore,
-    SimpleScheduler,
-    Timeout,
     TimeoutError,
-    TimerHandle,
-    _scheduler,
     scheduler,
     timeout,
-    timeout_at,
 )
 
 T = TypeVar("T")
