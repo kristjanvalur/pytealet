@@ -79,6 +79,22 @@ class TestModule:
         with pytest.raises(TypeError, match="kwargs must be a dict or None"):
             _tealet.hide_frame(lambda: None, (), 42)
 
+    def test_module_keyword_argument_forms(self):
+        original = _tealet.frame_introspection()
+
+        try:
+            assert _tealet.frame_introspection(enabled=False) is False
+        finally:
+            _tealet.frame_introspection(original)
+
+        assert _tealet.thread_kill(cleanup_passes=2, kill_exc=None) == []
+        assert _tealet.thread_reap(cleanup_passes=2, kill_exc=None) == []
+
+        def inner(*args, **kwargs):
+            return args, kwargs
+
+        assert _tealet.hide_frame(callable=inner, args=(1,), kwargs={"x": 2}) == ((1,), {"x": 2})
+
 
 
 class TestTealetTraversalMethods:
