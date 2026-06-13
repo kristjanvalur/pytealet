@@ -820,16 +820,16 @@ class TestQueueExamples:
         seen: list[str] = []
 
         def producer() -> None:
-            q.put(1)
+            q.sync_put(1)
             seen.append("put:1")
-            q.put(2)
+            q.sync_put(2)
             seen.append("put:2")
 
         def consumer() -> None:
             s.yield_()
-            seen.append(f"get:{q.get()}")
+            seen.append(f"get:{q.sync_get()}")
             s.yield_()
-            seen.append(f"get:{q.get()}")
+            seen.append(f"get:{q.sync_get()}")
 
         s.spawn(producer)
         s.spawn(consumer)
@@ -847,23 +847,23 @@ class TestQueueExamples:
             # Let other spawned tasks start so producer exit does not try
             # to hand off directly to an unstarted tealet.
             s.yield_()
-            q.put(1)
-            q.put(2)
+            q.sync_put(1)
+            q.sync_put(2)
             seen.append("produced")
             produced_evt.set()
 
         def consumer() -> None:
             s.yield_()
-            q.get()
+            q.sync_get()
             q.task_done()
             seen.append("done:1")
-            q.get()
+            q.sync_get()
             q.task_done()
             seen.append("done:2")
 
         def waiter() -> None:
             produced_evt.wait()
-            q.join()
+            q.sync_join()
             seen.append("joined")
 
         s.spawn(producer)
@@ -877,6 +877,57 @@ class TestQueueExamples:
         q: Queue[int] = Queue()
         with pytest.raises(ValueError, match=r"task_done\(\) called too many times"):
             q.task_done()
+
+    def test_queue_asyncio_put_get(self):
+        q: Queue[int] = Queue(maxsize=1)
+        seen: list[str] = []
+
+        async def producer() -> None:
+            await q.put(1)
+            seen.append("put:1")
+            await q.put(2)
+            seen.append("put:2")
+
+        async def consumer() -> None:
+            await asyncio.sleep(0)
+            seen.append(f"get:{await q.get()}")
+            await asyncio.sleep(0)
+            seen.append(f"get:{await q.get()}")
+
+        async def run() -> None:
+            await asyncio.gather(producer(), consumer())
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+        assert seen == ["put:1", "get:1", "put:2", "get:2"]
+
+    def test_queue_asyncio_join(self):
+        q: Queue[int] = Queue()
+        seen: list[str] = []
+
+        async def producer() -> None:
+            await q.put(1)
+            await q.put(2)
+            seen.append("produced")
+
+        async def consumer() -> None:
+            await asyncio.sleep(0)
+            await q.get()
+            q.task_done()
+            seen.append("done:1")
+            await asyncio.sleep(0)
+            await q.get()
+            q.task_done()
+            seen.append("done:2")
+
+        async def waiter() -> None:
+            await q.join()
+            seen.append("joined")
+
+        async def run() -> None:
+            await asyncio.gather(producer(), consumer(), waiter())
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+        assert seen == ["produced", "done:1", "done:2", "joined"]
 
     def test_priority_queue_order(self):
         q: PriorityQueue[tuple[int, str]] = PriorityQueue()

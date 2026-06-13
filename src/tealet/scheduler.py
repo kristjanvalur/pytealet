@@ -440,12 +440,25 @@ class Queue(Generic[T]):
         self._finished.clear()
         self._wakeup_next(self._getters)
 
-    def put(self, item: T) -> None:
+    def sync_put(self, item: T) -> None:
         while self.full():
             waiter = Event()
             self._putters.append(waiter)
             try:
                 waiter.wait()
+            finally:
+                try:
+                    self._putters.remove(waiter)
+                except ValueError:
+                    pass
+        self.put_nowait(item)
+
+    async def put(self, item: T) -> None:
+        while self.full():
+            waiter = Event()
+            self._putters.append(waiter)
+            try:
+                await waiter.async_wait()
             finally:
                 try:
                     self._putters.remove(waiter)
@@ -460,12 +473,25 @@ class Queue(Generic[T]):
         self._wakeup_next(self._putters)
         return item
 
-    def get(self) -> T:
+    def sync_get(self) -> T:
         while self.empty():
             waiter = Event()
             self._getters.append(waiter)
             try:
                 waiter.wait()
+            finally:
+                try:
+                    self._getters.remove(waiter)
+                except ValueError:
+                    pass
+        return self.get_nowait()
+
+    async def get(self) -> T:
+        while self.empty():
+            waiter = Event()
+            self._getters.append(waiter)
+            try:
+                await waiter.async_wait()
             finally:
                 try:
                     self._getters.remove(waiter)
@@ -480,9 +506,13 @@ class Queue(Generic[T]):
         if self._unfinished_tasks == 0:
             self._finished.set()
 
-    def join(self) -> None:
+    def sync_join(self) -> None:
         while self._unfinished_tasks:
             self._finished.wait()
+
+    async def join(self) -> None:
+        while self._unfinished_tasks:
+            await self._finished.async_wait()
 
 
 class PriorityQueue(Queue[T]):
