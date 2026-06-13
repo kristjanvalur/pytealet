@@ -151,7 +151,7 @@ class Lock:
     def locked(self) -> bool:
         return self._locked
 
-    def acquire(self) -> bool:
+    def sync_acquire(self) -> bool:
         if not self._locked:
             self._locked = True
             return True
@@ -160,6 +160,25 @@ class Lock:
         self._waiters.append(waiter)
         try:
             waiter.wait()
+        except BaseException:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise
+
+        self._locked = True
+        return True
+
+    async def acquire(self) -> bool:
+        if not self._locked:
+            self._locked = True
+            return True
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        try:
+            await waiter.async_wait()
         except BaseException:
             try:
                 self._waiters.remove(waiter)
@@ -181,10 +200,17 @@ class Lock:
             break
 
     def __enter__(self) -> "Lock":
-        self.acquire()
+        self.sync_acquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+    async def __aenter__(self) -> "Lock":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
 
 
@@ -198,13 +224,16 @@ class Condition:
     def locked(self) -> bool:
         return self._lock.locked()
 
-    def acquire(self) -> bool:
-        return self._lock.acquire()
+    def sync_acquire(self) -> bool:
+        return self._lock.sync_acquire()
+
+    async def acquire(self) -> bool:
+        return await self._lock.acquire()
 
     def release(self) -> None:
         self._lock.release()
 
-    def wait(self) -> bool:
+    def sync_wait(self) -> bool:
         if not self.locked():
             raise RuntimeError("cannot wait on un-acquired lock")
 
@@ -219,12 +248,36 @@ class Condition:
                 self._waiters.remove(waiter)
             except ValueError:
                 pass
-            self._lock.acquire()
+            self._lock.sync_acquire()
 
-    def wait_for(self, predicate: Callable[[], bool]) -> bool:
+    async def wait(self) -> bool:
+        if not self.locked():
+            raise RuntimeError("cannot wait on un-acquired lock")
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        self._lock.release()
+        try:
+            await waiter.async_wait()
+            return True
+        finally:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            await self._lock.acquire()
+
+    def sync_wait_for(self, predicate: Callable[[], bool]) -> bool:
         result = predicate()
         while not result:
-            self.wait()
+            self.sync_wait()
+            result = predicate()
+        return result
+
+    async def wait_for(self, predicate: Callable[[], bool]) -> bool:
+        result = predicate()
+        while not result:
+            await self.wait()
             result = predicate()
         return result
 
@@ -243,10 +296,17 @@ class Condition:
         self.notify(len(self._waiters))
 
     def __enter__(self) -> "Condition":
-        self.acquire()
+        self.sync_acquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+    async def __aenter__(self) -> "Condition":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
 
 
@@ -262,7 +322,7 @@ class Semaphore:
     def locked(self) -> bool:
         return self._value == 0
 
-    def acquire(self) -> bool:
+    def sync_acquire(self) -> bool:
         if self._value > 0:
             self._value -= 1
             return True
@@ -281,6 +341,25 @@ class Semaphore:
         self._value -= 1
         return True
 
+    async def acquire(self) -> bool:
+        if self._value > 0:
+            self._value -= 1
+            return True
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        try:
+            await waiter.async_wait()
+        except BaseException:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise
+
+        self._value -= 1
+        return True
+
     def release(self) -> None:
         self._value += 1
         while self._waiters:
@@ -289,10 +368,17 @@ class Semaphore:
             break
 
     def __enter__(self) -> "Semaphore":
-        self.acquire()
+        self.sync_acquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+    async def __aenter__(self) -> "Semaphore":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
 
 

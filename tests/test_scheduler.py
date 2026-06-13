@@ -314,6 +314,65 @@ class TestSchedulerExamples:
             "b:after",
         ]
 
+    def test_lock_asyncio_acquire_release(self):
+        lock = Lock()
+        seen: list[str] = []
+
+        async def worker(name: str) -> None:
+            seen.append(f"{name}:before")
+            await lock.acquire()
+            try:
+                seen.append(f"{name}:acquired")
+                await asyncio.sleep(0)
+            finally:
+                lock.release()
+                seen.append(f"{name}:released")
+
+        async def orchestrate() -> None:
+            await asyncio.gather(worker("a"), worker("b"))
+
+        asyncio.run(orchestrate())
+
+        assert seen == [
+            "a:before",
+            "a:acquired",
+            "b:before",
+            "a:released",
+            "b:acquired",
+            "b:released",
+        ]
+
+    def test_lock_release_unsets_locked_state(self):
+        lock = Lock()
+        assert lock.sync_acquire() is True
+        lock.release()
+        assert lock.locked() is False
+
+    def test_lock_asyncio_context_manager(self):
+        lock = Lock()
+        seen: list[str] = []
+
+        async def worker(name: str) -> None:
+            seen.append(f"{name}:before")
+            async with lock:
+                seen.append(f"{name}:inside")
+                await asyncio.sleep(0)
+            seen.append(f"{name}:after")
+
+        async def orchestrate() -> None:
+            await asyncio.gather(worker("x"), worker("y"))
+
+        asyncio.run(orchestrate())
+
+        assert seen == [
+            "x:before",
+            "x:inside",
+            "y:before",
+            "x:after",
+            "y:inside",
+            "y:after",
+        ]
+
     def test_semaphore_limits_concurrency(self):
         s = scheduler()
         sem = Semaphore(2)
@@ -323,7 +382,7 @@ class TestSchedulerExamples:
 
         def worker(name: str) -> None:
             nonlocal active, max_active
-            sem.acquire()
+            sem.sync_acquire()
             try:
                 active += 1
                 max_active = max(max_active, active)
@@ -352,10 +411,63 @@ class TestSchedulerExamples:
     def test_bounded_semaphore_overrelease_raises(self):
         sem = BoundedSemaphore(1)
 
-        sem.acquire()
+        sem.sync_acquire()
         sem.release()
         with pytest.raises(ValueError, match="released too many times"):
             sem.release()
+
+    def test_semaphore_asyncio_acquire_release(self):
+        sem = Semaphore(1)
+        seen: list[str] = []
+
+        async def worker(name: str) -> None:
+            seen.append(f"{name}:before")
+            await sem.acquire()
+            try:
+                seen.append(f"{name}:inside")
+                await asyncio.sleep(0)
+            finally:
+                sem.release()
+                seen.append(f"{name}:after")
+
+        async def run() -> None:
+            await asyncio.gather(worker("x"), worker("y"))
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+        assert seen == [
+            "x:before",
+            "x:inside",
+            "y:before",
+            "x:after",
+            "y:inside",
+            "y:after",
+        ]
+
+    def test_semaphore_asyncio_context_manager(self):
+        sem = Semaphore(1)
+        seen: list[str] = []
+
+        async def worker(name: str) -> None:
+            seen.append(f"{name}:before")
+            async with sem:
+                seen.append(f"{name}:inside")
+                await asyncio.sleep(0)
+            seen.append(f"{name}:after")
+
+        async def run() -> None:
+            await asyncio.gather(worker("x"), worker("y"))
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+        assert seen == [
+            "x:before",
+            "x:inside",
+            "y:before",
+            "x:after",
+            "y:inside",
+            "y:after",
+        ]
 
     def test_condition_wait_notify(self):
         s = scheduler()
@@ -365,7 +477,7 @@ class TestSchedulerExamples:
         def waiter(name: str) -> None:
             with cond:
                 seen.append(f"{name}:waiting")
-                cond.wait()
+                cond.sync_wait()
                 seen.append(f"{name}:resumed")
 
         def notifier() -> None:
@@ -400,7 +512,7 @@ class TestSchedulerExamples:
 
         def waiter() -> None:
             with cond:
-                cond.wait_for(lambda: state["ready"])
+                cond.sync_wait_for(lambda: state["ready"])
                 seen.append("waiter:done")
 
         def setter() -> None:
@@ -419,9 +531,75 @@ class TestSchedulerExamples:
         cond = Condition()
 
         with pytest.raises(RuntimeError, match="un-acquired lock"):
-            cond.wait()
+            cond.sync_wait()
         with pytest.raises(RuntimeError, match="un-acquired lock"):
             cond.notify()
+
+    def test_condition_asyncio_wait_notify(self):
+        cond = Condition()
+        seen: list[str] = []
+
+        async def waiter(name: str) -> None:
+            async with cond:
+                seen.append(f"{name}:waiting")
+                await cond.wait()
+                seen.append(f"{name}:resumed")
+
+        async def notifier() -> None:
+            await asyncio.sleep(0)
+            async with cond:
+                seen.append("notifier:notify")
+                cond.notify()
+            await asyncio.sleep(0)
+            async with cond:
+                seen.append("notifier:notify_all")
+                cond.notify_all()
+
+        async def run() -> None:
+            t1 = asyncio.create_task(waiter("a"))
+            t2 = asyncio.create_task(waiter("b"))
+            await notifier()
+            await asyncio.wait_for(asyncio.gather(t1, t2), timeout=1.0)
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+        assert set(seen) == {
+            "a:waiting",
+            "b:waiting",
+            "notifier:notify",
+            "notifier:notify_all",
+            "a:resumed",
+            "b:resumed",
+        }
+        notify_idx = seen.index("notifier:notify")
+        notify_all_idx = seen.index("notifier:notify_all")
+        assert notify_idx < seen.index("a:resumed")
+        assert notify_idx < seen.index("b:resumed")
+        assert notify_idx < notify_all_idx
+
+    def test_condition_asyncio_wait_for_predicate(self):
+        cond = Condition()
+        state = {"ready": False}
+        seen: list[str] = []
+
+        async def waiter() -> None:
+            async with cond:
+                await cond.wait_for(lambda: state["ready"])
+                seen.append("waiter:done")
+
+        async def setter() -> None:
+            await asyncio.sleep(0)
+            async with cond:
+                state["ready"] = True
+                cond.notify_all()
+
+        async def run() -> None:
+            t_waiter = asyncio.create_task(waiter())
+            t_setter = asyncio.create_task(setter())
+            await asyncio.wait_for(asyncio.gather(t_waiter, t_setter), timeout=1.0)
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+        assert seen == ["waiter:done"]
 
 
 class TestFutureExamples:
