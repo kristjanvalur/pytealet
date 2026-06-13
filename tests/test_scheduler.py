@@ -371,6 +371,35 @@ class TestFutureExamples:
             future.result()
         assert isinstance(future.exception(), ValueError)
 
+    def test_future_exception_before_task_main_starts(self):
+        s = scheduler()
+        gate = Event()
+        seen: list[str] = []
+
+        def blocked() -> int:
+            seen.append("blocked:start")
+            gate.wait()
+            seen.append("blocked:done")
+            return 1
+
+        future_blocked = s.spawn(blocked)
+
+        def thrower() -> None:
+            seen.append("thrower:start")
+            future_victim = s.spawn(lambda: 7)
+            victim = s._tasks[-1]
+            victim.throw(ValueError("pre-start"))
+            with pytest.raises(ValueError, match="pre-start"):
+                future_victim.result()
+            gate.set()
+            seen.append("thrower:done")
+
+        s.spawn(thrower)
+        s.run()
+
+        assert future_blocked.result() == 1
+        assert seen == ["blocked:start", "thrower:start", "thrower:done", "blocked:done"]
+
     def test_future_set_result_once(self):
         future = Future()
         future.set_result(123)
