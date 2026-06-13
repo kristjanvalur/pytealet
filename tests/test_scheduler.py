@@ -4,6 +4,7 @@ import pytest
 
 import _tealet
 from tealet.scheduler import (
+    Barrier,
     BoundedSemaphore,
     CancelledError,
     Condition,
@@ -600,6 +601,51 @@ class TestSchedulerExamples:
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
         assert seen == ["waiter:done"]
+
+    def test_barrier_sync_wait_releases_group(self):
+        s = scheduler()
+        barrier = Barrier(3)
+        seen: list[str] = []
+
+        def worker(name: str) -> None:
+            seen.append(f"{name}:before")
+            idx = barrier.sync_wait()
+            seen.append(f"{name}:after:{idx}")
+
+        s.spawn(worker, "a")
+        s.spawn(worker, "b")
+        s.spawn(worker, "c")
+        s.run()
+
+        assert seen[:3] == ["a:before", "b:before", "c:before"]
+        assert set(seen[3:]) == {"a:after:2", "b:after:1", "c:after:0"}
+
+    def test_barrier_async_wait_releases_group(self):
+        barrier = Barrier(3)
+        seen: list[str] = []
+
+        async def worker(name: str) -> None:
+            seen.append(f"{name}:before")
+            idx = await barrier.wait()
+            seen.append(f"{name}:after:{idx}")
+
+        async def run() -> None:
+            await asyncio.gather(worker("a"), worker("b"), worker("c"))
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+        assert set(seen) == {
+            "a:before",
+            "b:before",
+            "c:before",
+            "a:after:2",
+            "b:after:1",
+            "c:after:0",
+        }
+
+    def test_barrier_requires_positive_parties(self):
+        with pytest.raises(ValueError, match="parties must be > 0"):
+            Barrier(0)
 
 
 class TestFutureExamples:

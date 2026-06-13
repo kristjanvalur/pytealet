@@ -310,6 +310,71 @@ class Condition:
         self.release()
 
 
+class Barrier:
+    """A tealet-compatible barrier with sync and async waits."""
+
+    def __init__(self, parties: int) -> None:
+        if parties <= 0:
+            raise ValueError("parties must be > 0")
+        self.parties = parties
+        self._count = 0
+        self._generation = 0
+        self._waiters: deque[tuple[Event, int, int]] = deque()
+
+    @property
+    def n_waiting(self) -> int:
+        return self._count
+
+    def _arrive(self) -> tuple[int, Event | None, int]:
+        generation = self._generation
+        index = self.parties - self._count - 1
+        self._count += 1
+
+        if self._count == self.parties:
+            self._count = 0
+            self._generation += 1
+            while self._waiters:
+                waiter, _, _ = self._waiters.popleft()
+                waiter.set()
+            return 0, None, generation
+
+        waiter = Event()
+        self._waiters.append((waiter, index, generation))
+        return index, waiter, generation
+
+    def _cancel_waiter(self, waiter: Event, index: int, generation: int) -> None:
+        try:
+            self._waiters.remove((waiter, index, generation))
+            if generation == self._generation and self._count > 0:
+                self._count -= 1
+        except ValueError:
+            pass
+
+    def sync_wait(self) -> int:
+        index, waiter, generation = self._arrive()
+        if waiter is None:
+            return index
+
+        try:
+            waiter.wait()
+            return index
+        except BaseException:
+            self._cancel_waiter(waiter, index, generation)
+            raise
+
+    async def wait(self) -> int:
+        index, waiter, generation = self._arrive()
+        if waiter is None:
+            return index
+
+        try:
+            await waiter.async_wait()
+            return index
+        except BaseException:
+            self._cancel_waiter(waiter, index, generation)
+            raise
+
+
 class Semaphore:
     """A tealet-compatible counting semaphore."""
 
