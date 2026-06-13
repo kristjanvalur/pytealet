@@ -375,6 +375,128 @@ class Barrier:
             raise
 
 
+class Channel:
+    """A tealet-style rendezvous channel with Stackless-like balance/preference."""
+
+    def __init__(self, preference: int = -1) -> None:
+        self._waiters: deque[tealet.tealet] = deque()
+        self._balance = 0
+        self._packets: dict[tealet.tealet, tuple[bool, object]] = {}
+        self.preference = preference
+
+    @property
+    def balance(self) -> int:
+        return self._balance
+
+    @property
+    def preference(self) -> int:
+        return self._preference
+
+    @preference.setter
+    def preference(self, value: int) -> None:
+        if value not in (-1, 0, 1):
+            raise ValueError("preference must be -1, 0, or 1")
+        self._preference = value
+
+    def _deliver(self, packet: tuple[bool, object]) -> object:
+        is_exc, payload = packet
+        if is_exc:
+            raise payload
+        return payload
+
+    def _clear_link(self, t: tealet.tealet) -> None:
+        try:
+            t.link = None
+        except AttributeError:
+            pass
+
+    def _link_sender(self, t: tealet.tealet, packet: tuple[bool, object]) -> None:
+        self._packets[t] = packet
+        self._waiters.append(t)
+        self._balance += 1
+        try:
+            t.link = self
+        except AttributeError:
+            pass
+
+    def _link_receiver(self, t: tealet.tealet) -> None:
+        self._waiters.append(t)
+        self._balance -= 1
+        try:
+            t.link = self
+        except AttributeError:
+            pass
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        removed = False
+        self._packets.pop(t, None)
+        try:
+            self._waiters.remove(t)
+            removed = True
+        except ValueError:
+            pass
+        if removed:
+            if self._balance > 0:
+                self._balance -= 1
+            elif self._balance < 0:
+                self._balance += 1
+        self._clear_link(t)
+
+    def _send_packet(self, packet: tuple[bool, object]) -> None:
+        if self._balance < 0:
+            receiver = self._waiters.popleft()
+            self._balance += 1
+            self._clear_link(receiver)
+            self._packets[receiver] = packet
+            if self._preference < 0:
+                receiver.run()
+            else:
+                scheduler()._make_runnable(receiver)
+            return
+
+        current = tealet.current()
+        try:
+            scheduler()._schedule(lambda: self._link_sender(current, packet))
+        except BaseException:
+            self._unlink(current)
+            raise
+
+    def send(self, value: object) -> None:
+        self._send_packet((False, value))
+
+    def send_exception(self, klass: type[BaseException] | BaseException, *args: object) -> None:
+        if isinstance(klass, BaseException):
+            if args:
+                raise TypeError("args must be empty when sending an exception instance")
+            exc = klass
+        else:
+            if not isinstance(klass, type) or not issubclass(klass, BaseException):
+                raise TypeError("klass must be a BaseException instance or subclass")
+            exc = klass(*args)
+        self._send_packet((True, exc))
+
+    def receive(self) -> object:
+        if self._balance > 0:
+            sender = self._waiters.popleft()
+            self._balance -= 1
+            packet = self._packets.pop(sender)
+            self._clear_link(sender)
+            if self._preference > 0:
+                sender.run()
+            else:
+                scheduler()._make_runnable(sender)
+            return self._deliver(packet)
+
+        current = tealet.current()
+        try:
+            scheduler()._schedule(lambda: self._link_receiver(current))
+        except BaseException:
+            self._unlink(current)
+            raise
+
+        return self._deliver(self._packets.pop(current))
+
+
 class Semaphore:
     """A tealet-compatible counting semaphore."""
 

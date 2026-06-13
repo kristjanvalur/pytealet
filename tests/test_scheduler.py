@@ -7,6 +7,7 @@ from tealet.scheduler import (
     Barrier,
     BoundedSemaphore,
     CancelledError,
+    Channel,
     Condition,
     Event,
     Future,
@@ -994,3 +995,96 @@ class TestQueueExamples:
         assert q.get_nowait() == 3
         assert q.get_nowait() == 2
         assert q.get_nowait() == 1
+
+
+class TestChannelExamples:
+    def test_channel_balance_tracks_waiting_senders(self):
+        s = scheduler()
+        ch = Channel()
+        seen: list[str] = []
+
+        def sender() -> None:
+            seen.append("sender:before")
+            ch.send(7)
+            seen.append("sender:after")
+
+        s.spawn(sender)
+        s.pump(1)
+
+        assert ch.balance == 1
+
+        def receiver() -> None:
+            seen.append(f"receiver:{ch.receive()}")
+
+        s.spawn(receiver)
+        s.run()
+
+        assert ch.balance == 0
+        assert seen == ["sender:before", "receiver:7", "sender:after"]
+
+    def test_channel_balance_tracks_waiting_receivers(self):
+        s = scheduler()
+        ch = Channel()
+        seen: list[str] = []
+
+        def receiver() -> None:
+            seen.append("receiver:before")
+            seen.append(f"receiver:{ch.receive()}")
+
+        s.spawn(receiver)
+        s.pump(1)
+
+        assert ch.balance == -1
+
+        def sender() -> None:
+            ch.send(11)
+            seen.append("sender:after")
+
+        s.spawn(sender)
+        s.run()
+
+        assert ch.balance == 0
+        assert seen == ["receiver:before", "receiver:11", "sender:after"]
+
+    def test_channel_preference_sender(self):
+        s = scheduler()
+        ch = Channel(preference=1)
+        seen: list[str] = []
+
+        def receiver() -> None:
+            seen.append("receiver:before")
+            seen.append(f"receiver:{ch.receive()}")
+
+        def sender() -> None:
+            ch.send(3)
+            seen.append("sender:after")
+
+        s.spawn(receiver)
+        s.spawn(sender)
+        s.run()
+
+        assert seen == ["receiver:before", "sender:after", "receiver:3"]
+
+    def test_channel_preference_validation(self):
+        with pytest.raises(ValueError, match="preference must be -1, 0, or 1"):
+            Channel(preference=2)
+
+    def test_channel_send_exception(self):
+        s = scheduler()
+        ch = Channel()
+        seen: list[str] = []
+
+        def receiver() -> None:
+            try:
+                ch.receive()
+            except ValueError as exc:
+                seen.append(f"caught:{exc}")
+
+        def sender() -> None:
+            ch.send_exception(ValueError, "boom")
+
+        s.spawn(receiver)
+        s.spawn(sender)
+        s.run()
+
+        assert seen == ["caught:boom"]
