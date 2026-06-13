@@ -188,6 +188,68 @@ class Lock:
         self.release()
 
 
+class Condition:
+    """A tealet-compatible condition variable."""
+
+    def __init__(self, lock: Lock | None = None) -> None:
+        self._lock = lock if lock is not None else Lock()
+        self._waiters: deque[Event] = deque()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def acquire(self) -> bool:
+        return self._lock.acquire()
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def wait(self) -> bool:
+        if not self.locked():
+            raise RuntimeError("cannot wait on un-acquired lock")
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        self._lock.release()
+        try:
+            waiter.wait()
+            return True
+        finally:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            self._lock.acquire()
+
+    def wait_for(self, predicate: Callable[[], bool]) -> bool:
+        result = predicate()
+        while not result:
+            self.wait()
+            result = predicate()
+        return result
+
+    def notify(self, n: int = 1) -> None:
+        if not self.locked():
+            raise RuntimeError("cannot notify on un-acquired lock")
+        if n <= 0:
+            return
+
+        while self._waiters and n > 0:
+            waiter = self._waiters.popleft()
+            waiter.set()
+            n -= 1
+
+    def notify_all(self) -> None:
+        self.notify(len(self._waiters))
+
+    def __enter__(self) -> "Condition":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+
 class Semaphore:
     """A tealet-compatible counting semaphore."""
 
