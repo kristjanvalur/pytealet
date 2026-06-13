@@ -783,10 +783,11 @@ class SimpleScheduler:
     """Very small cooperative scheduler for runnable tealets."""
 
     def __init__(self) -> None:
-        self._tasks: list[tealet.tealet] = []
+        self._tasks: deque[tealet.tealet] = deque()
+        self._task_set: set[tealet.tealet] = set()
         self._runner = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._pending_async_waits: list[tealet.tealet] = []
+        self._pending_async_waits: set[tealet.tealet] = set()
         self._timers: list[tuple[float, int, TimerHandle]] = []
         self._timer_sequence = itertools.count()
         self._wakeup = threading.Event()
@@ -825,29 +826,26 @@ class SimpleScheduler:
         return max(0.0, self._timers[0][0] - self.time())
 
     def _is_runnable(self, t: tealet.tealet) -> bool:
-        return t in self._tasks
+        return t in self._task_set
 
     def _is_blocked(self, t: tealet.tealet) -> bool:
         return t in self._pending_async_waits
 
     def _unlink_pending_async_wait(self, t: tealet.tealet) -> None:
-        try:
-            self._pending_async_waits.remove(t)
-        except ValueError:
-            pass
+        self._pending_async_waits.discard(t)
 
     def _unlink(self, t: tealet.tealet) -> None:
         removed = False
-        try:
-            self._tasks.remove(t)
+        if t in self._task_set:
+            self._task_set.remove(t)
+            try:
+                self._tasks.remove(t)
+            except ValueError:
+                pass
             removed = True
-        except ValueError:
-            pass
-        try:
+        if t in self._pending_async_waits:
             self._pending_async_waits.remove(t)
             removed = True
-        except ValueError:
-            pass
         if removed:
             try:
                 t.link = None
@@ -902,18 +900,14 @@ class SimpleScheduler:
             return fut.result()
 
         done_evt = Event()
-        if current not in self._pending_async_waits:
-            self._pending_async_waits.append(current)
+        self._pending_async_waits.add(current)
         state = {"active": True}
 
         def _resume_waiter(_fut) -> None:
             if not state["active"]:
                 return
             state["active"] = False
-            try:
-                self._pending_async_waits.remove(current)
-            except ValueError:
-                pass
+            self._pending_async_waits.discard(current)
             self._make_runnable(current)
             done_evt.set()
 
@@ -923,22 +917,20 @@ class SimpleScheduler:
         finally:
             if state["active"]:
                 state["active"] = False
-                try:
-                    self._pending_async_waits.remove(current)
-                except ValueError:
-                    pass
+                self._pending_async_waits.discard(current)
             fut.remove_done_callback(_resume_waiter)
 
         return fut.result()
 
     def _make_runnable(self, t: tealet.tealet) -> None:
-        if t in self._tasks:
+        if t in self._task_set:
             return
         try:
             t.link = self
         except AttributeError:
             pass
         self._tasks.append(t)
+        self._task_set.add(t)
         self._break_wait()
 
     def _target_run(self, target: tealet.tealet) -> None:
@@ -973,7 +965,8 @@ class SimpleScheduler:
                 self._unlink(result)
             self._unlink(result)
         elif self._tasks:
-            result = self._tasks.pop(0)
+            result = self._tasks.popleft()
+            self._task_set.discard(result)
         elif not task_exit:
             raise DeadlockError("No tasks to switch to")
         else:
