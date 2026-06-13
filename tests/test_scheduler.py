@@ -10,7 +10,12 @@ from tealet.scheduler import (
     Event,
     Future,
     InvalidStateError,
+    LifoQueue,
     Lock,
+    PriorityQueue,
+    Queue,
+    QueueEmpty,
+    QueueFull,
     ScheduledTealet,
     Semaphore,
     SimpleScheduler,
@@ -609,3 +614,108 @@ class TestFutureExamples:
                 await asyncio.wait_for(runner, timeout=1.0)
 
         asyncio.run(orchestrate())
+
+
+class TestQueueExamples:
+    def test_queue_fifo_order(self):
+        q: Queue[int] = Queue()
+        q.put_nowait(1)
+        q.put_nowait(2)
+        q.put_nowait(3)
+
+        assert q.get_nowait() == 1
+        assert q.get_nowait() == 2
+        assert q.get_nowait() == 3
+
+    def test_queue_nowait_errors(self):
+        q: Queue[int] = Queue(maxsize=1)
+        with pytest.raises(QueueEmpty):
+            q.get_nowait()
+
+        q.put_nowait(1)
+        with pytest.raises(QueueFull):
+            q.put_nowait(2)
+
+    def test_queue_put_get_with_scheduler_blocking(self):
+        s = scheduler()
+        q: Queue[int] = Queue(maxsize=1)
+        seen: list[str] = []
+
+        def producer() -> None:
+            q.put(1)
+            seen.append("put:1")
+            q.put(2)
+            seen.append("put:2")
+
+        def consumer() -> None:
+            s.yield_()
+            seen.append(f"get:{q.get()}")
+            s.yield_()
+            seen.append(f"get:{q.get()}")
+
+        s.spawn(producer)
+        s.spawn(consumer)
+        s.run()
+
+        assert seen == ["put:1", "get:1", "put:2", "get:2"]
+
+    def test_queue_join_and_task_done(self):
+        s = scheduler()
+        q: Queue[int] = Queue()
+        produced_evt = Event()
+        seen: list[str] = []
+
+        def producer() -> None:
+            # Let other spawned tasks start so producer exit does not try
+            # to hand off directly to an unstarted tealet.
+            s.yield_()
+            q.put(1)
+            q.put(2)
+            seen.append("produced")
+            produced_evt.set()
+
+        def consumer() -> None:
+            s.yield_()
+            q.get()
+            q.task_done()
+            seen.append("done:1")
+            q.get()
+            q.task_done()
+            seen.append("done:2")
+
+        def waiter() -> None:
+            produced_evt.wait()
+            q.join()
+            seen.append("joined")
+
+        s.spawn(producer)
+        s.spawn(consumer)
+        s.spawn(waiter)
+        s.run()
+
+        assert seen == ["produced", "done:1", "done:2", "joined"]
+
+    def test_queue_task_done_underflow_raises(self):
+        q: Queue[int] = Queue()
+        with pytest.raises(ValueError, match=r"task_done\(\) called too many times"):
+            q.task_done()
+
+    def test_priority_queue_order(self):
+        q: PriorityQueue[tuple[int, str]] = PriorityQueue()
+        q.put_nowait((2, "b"))
+        q.put_nowait((1, "a"))
+        q.put_nowait((3, "c"))
+
+        assert q.get_nowait() == (1, "a")
+        assert q.get_nowait() == (2, "b")
+        assert q.get_nowait() == (3, "c")
+
+    def test_lifo_queue_order(self):
+        q: LifoQueue[int] = LifoQueue()
+        q.put_nowait(1)
+        q.put_nowait(2)
+        q.put_nowait(3)
+
+        assert q.get_nowait() == 3
+        assert q.get_nowait() == 2
+        assert q.get_nowait() == 1

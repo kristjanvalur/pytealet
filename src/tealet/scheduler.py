@@ -309,11 +309,129 @@ class BoundedSemaphore(Semaphore):
         super().release()
 
 
+class Queue(Generic[T]):
+    """A tealet-compatible FIFO queue modeled after asyncio.Queue."""
+
+    def __init__(self, maxsize: int = 0) -> None:
+        if maxsize < 0:
+            raise ValueError("maxsize must be >= 0")
+        self.maxsize = maxsize
+        self._getters: deque[Event] = deque()
+        self._putters: deque[Event] = deque()
+        self._unfinished_tasks = 0
+        self._finished = Event()
+        self._finished.set()
+        self._init(maxsize)
+
+    def _init(self, maxsize: int) -> None:
+        self._queue: deque[T] = deque()
+
+    def _put(self, item: T) -> None:
+        self._queue.append(item)
+
+    def _get(self) -> T:
+        return self._queue.popleft()
+
+    def qsize(self) -> int:
+        return len(self._queue)
+
+    def empty(self) -> bool:
+        return self.qsize() == 0
+
+    def full(self) -> bool:
+        return self.maxsize > 0 and self.qsize() >= self.maxsize
+
+    def _wakeup_next(self, waiters: deque[Event]) -> None:
+        while waiters:
+            waiters.popleft().set()
+            return
+
+    def put_nowait(self, item: T) -> None:
+        if self.full():
+            raise QueueFull
+        self._put(item)
+        self._unfinished_tasks += 1
+        self._finished.clear()
+        self._wakeup_next(self._getters)
+
+    def put(self, item: T) -> None:
+        while self.full():
+            waiter = Event()
+            self._putters.append(waiter)
+            try:
+                waiter.wait()
+            finally:
+                try:
+                    self._putters.remove(waiter)
+                except ValueError:
+                    pass
+        self.put_nowait(item)
+
+    def get_nowait(self) -> T:
+        if self.empty():
+            raise QueueEmpty
+        item = self._get()
+        self._wakeup_next(self._putters)
+        return item
+
+    def get(self) -> T:
+        while self.empty():
+            waiter = Event()
+            self._getters.append(waiter)
+            try:
+                waiter.wait()
+            finally:
+                try:
+                    self._getters.remove(waiter)
+                except ValueError:
+                    pass
+        return self.get_nowait()
+
+    def task_done(self) -> None:
+        if self._unfinished_tasks <= 0:
+            raise ValueError("task_done() called too many times")
+        self._unfinished_tasks -= 1
+        if self._unfinished_tasks == 0:
+            self._finished.set()
+
+    def join(self) -> None:
+        while self._unfinished_tasks:
+            self._finished.wait()
+
+
+class PriorityQueue(Queue[T]):
+    """A tealet-compatible priority queue."""
+
+    def _init(self, maxsize: int) -> None:
+        self._queue: list[T] = []
+
+    def _put(self, item: T) -> None:
+        heapq.heappush(self._queue, item)
+
+    def _get(self) -> T:
+        return heapq.heappop(self._queue)
+
+
+class LifoQueue(Queue[T]):
+    """A tealet-compatible LIFO queue."""
+
+    def _init(self, maxsize: int) -> None:
+        self._queue: list[T] = []
+
+    def _put(self, item: T) -> None:
+        self._queue.append(item)
+
+    def _get(self) -> T:
+        return self._queue.pop()
+
+
 class DeadlockError(RuntimeError):
     """Raised when the scheduler has no runnable tasks."""
 
 
 InvalidStateError = asyncio.InvalidStateError
+QueueEmpty = asyncio.QueueEmpty
+QueueFull = asyncio.QueueFull
 
 
 class TimerHandle:
