@@ -6,6 +6,7 @@ import _tealet
 from tealet.scheduler import (
     BoundedSemaphore,
     CancelledError,
+    Condition,
     Event,
     Future,
     InvalidStateError,
@@ -350,6 +351,72 @@ class TestSchedulerExamples:
         sem.release()
         with pytest.raises(ValueError, match="released too many times"):
             sem.release()
+
+    def test_condition_wait_notify(self):
+        s = scheduler()
+        cond = Condition()
+        seen: list[str] = []
+
+        def waiter(name: str) -> None:
+            with cond:
+                seen.append(f"{name}:waiting")
+                cond.wait()
+                seen.append(f"{name}:resumed")
+
+        def notifier() -> None:
+            s.yield_()
+            with cond:
+                seen.append("notifier:notify")
+                cond.notify()
+            s.yield_()
+            with cond:
+                seen.append("notifier:notify_all")
+                cond.notify_all()
+
+        s.spawn(waiter, "a")
+        s.spawn(waiter, "b")
+        s.spawn(notifier)
+        s.run()
+
+        assert seen == [
+            "a:waiting",
+            "b:waiting",
+            "notifier:notify",
+            "a:resumed",
+            "notifier:notify_all",
+            "b:resumed",
+        ]
+
+    def test_condition_wait_for_predicate(self):
+        s = scheduler()
+        cond = Condition()
+        state = {"ready": False}
+        seen: list[str] = []
+
+        def waiter() -> None:
+            with cond:
+                cond.wait_for(lambda: state["ready"])
+                seen.append("waiter:done")
+
+        def setter() -> None:
+            s.yield_()
+            with cond:
+                state["ready"] = True
+                cond.notify_all()
+
+        s.spawn(waiter)
+        s.spawn(setter)
+        s.run()
+
+        assert seen == ["waiter:done"]
+
+    def test_condition_wait_and_notify_require_lock(self):
+        cond = Condition()
+
+        with pytest.raises(RuntimeError, match="un-acquired lock"):
+            cond.wait()
+        with pytest.raises(RuntimeError, match="un-acquired lock"):
+            cond.notify()
 
 
 class TestFutureExamples:
