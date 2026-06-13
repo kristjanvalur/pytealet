@@ -30,6 +30,7 @@ class ScheduledTealet(tealet.tealet):
     def __init__(self):
         super().__init__()
         self.link = None
+        self._future: Future[object] | None = None
 
     def is_waiting(self):
         return isinstance(self.link, Event)
@@ -56,6 +57,19 @@ class ScheduledTealet(tealet.tealet):
 
     def _throw_from_scheduler(self, exc: BaseException):
         super().throw(exc)
+
+    def resolve_target(self, result, exc, exc_target):
+        clear = False
+        if self._future is not None and not self._future.done():
+            if exc is None:
+                self._future.set_result(result)
+            elif not self._future.cancelled():
+                self._future.set_exception(exc)
+                clear = True
+
+        # Scheduler-owned tasks always route via scheduler target selection,
+        # even if task startup immediately raises before user code returns.
+        return scheduler()._find_target(task_exit=True), None, clear
 
 
 class Event:
@@ -482,18 +496,12 @@ class SimpleScheduler:
     def spawn(self, func: Callable[..., T], *args, **kwargs) -> Future[T]:
         future: Future[T] = Future()
 
-        def task_main(current: tealet.tealet, _arg: object) -> tealet.tealet:
-            try:
-                result = func(*args, **kwargs)
-            except BaseException as exc:
-                if not future.cancelled():
-                    future.set_exception(exc)
-            else:
-                if not future.cancelled():
-                    future.set_result(result)
-            return self._find_target(task_exit=True)
+        def task_main(current: tealet.tealet, _arg: object):
+            return func(*args, **kwargs)
 
-        t = ScheduledTealet().prepare(task_main)
+        t = ScheduledTealet()
+        t._future = future
+        t.prepare(task_main)
         self._make_runnable(t)
         return future
 
