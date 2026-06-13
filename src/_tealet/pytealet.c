@@ -864,25 +864,26 @@ static PyObject *pytealet_is_foreign(PyObject *self, PyObject *Py_UNUSED(_ignore
 }
 
 static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObject *kwargs) {
-    static char *kwlist[] = {"result", "exc", NULL};
+    static char *kwlist[] = {"result", "exc", "exc_target", NULL};
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     PyTealetObject *current = (PyTealetObject *)self;
     PyObject *result;
     PyObject *exc;
+    PyObject *exc_target;
     PyObject *target_obj = NULL;
     PyObject *arg_obj = Py_None;
-    PyTealetObject *main_t;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO:resolve_target", kwlist, &result, &exc))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO:resolve_target", kwlist, &result, &exc, &exc_target))
         return NULL;
 
     if (!mstate)
         return NULL;
 
     if (exc != Py_None) {
-        main_t = TryGetMain(mstate, NULL);
-        assert(main_t);
-        return PyTuple_Pack(2, (PyObject *)main_t, Py_None);
+        target_obj = (exc_target != Py_None) ? exc_target : (PyObject *)TryGetMain(mstate, NULL);
+        if (!target_obj)
+            return NULL;
+        goto validate_target;
     }
 
     if (PyTuple_Check(result)) {
@@ -894,12 +895,17 @@ static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObjec
         target_obj = result;
     }
 
+validate_target:
     if (!target_obj || !PyTealet_Check(target_obj, mstate)) {
         PyErr_SetString(PyExc_TypeError, "tealet object expected");
         return NULL;
     }
     if (((PyTealetObject *)target_obj)->state != STATE_RUN) {
         PyErr_SetString(mstate->state_error, "must be 'run'");
+        return NULL;
+    }
+    if ((PyTealetObject *)target_obj == current) {
+        PyErr_SetString(mstate->invalid_error, "resolve_target target must not be current tealet");
         return NULL;
     }
     if (CheckTarget(mstate, (PyTealetObject *)target_obj, current, "return"))
@@ -1771,7 +1777,7 @@ static struct PyMethodDef pytealet_methods[] = {
     {"main", (PyCFunction)pytealet_main_method, METH_NOARGS, ""},
     {"is_foreign", (PyCFunction)pytealet_is_foreign, METH_NOARGS, ""},
     {"resolve_target", (PyCFunction)(void (*)(void))pytealet_resolve_target, METH_VARARGS | METH_KEYWORDS,
-     "resolve_target(result, exc) -> (tealet, arg) | (tealet, arg, clear)\n\n"
+     "resolve_target(result, exc, exc_target) -> (tealet, arg) | (tealet, arg, clear)\n\n"
      "Hook for subclasses to override exit target routing from pytealet_main()."},
     {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_VARARGS | METH_KEYWORDS,
         "prepare(function) -> tealet\n\n"
@@ -2664,20 +2670,24 @@ mismatch:
 /* Core Runtime Switching Callback                                       */
 /* ===================================================================== */
 
-static void pytealet_apply_resolve_target(PyTealetModuleState *mstate, PyTealetObject *current, PyObject *result,
-                                          PyTealetObject **return_to_io, PyObject **return_arg_io,
+static void pytealet_apply_resolve_target(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyTealetObject *current,
+                                          PyObject *result, PyTealetObject **return_to_io, PyObject **return_arg_io,
                                           PyObject **return_exc_io) {
     PyObject *hook_result = NULL;
     PyObject *result_arg;
     PyObject *exc_arg;
+    PyObject *exc_target_arg;
     PyObject *worker_exc = NULL;
+    PyTealetObject *exc_target = NULL;
     PyObject *fallback_exc = NULL;
     PyObject *arg_obj = NULL;
     PyTealetObject *new_return_to;
     PyObject *new_return_arg;
     int clear_exc = 0;
+    int redirect_rc;
 
     assert(mstate);
+    assert(mdata);
     assert(current);
     assert(return_to_io);
     assert(return_arg_io);
@@ -2691,10 +2701,18 @@ static void pytealet_apply_resolve_target(PyTealetModuleState *mstate, PyTealetO
     if (!result)
         worker_exc = PyTealetThrow_GetRaisedException();
 
+    if (worker_exc) {
+        redirect_rc = PyTealetThrow_TakeRedirectTarget(mstate, mdata, current, worker_exc, &exc_target);
+        if (redirect_rc < 0)
+            goto err;
+    }
+
     result_arg = result ? result : Py_None;
     exc_arg = worker_exc ? worker_exc : Py_None;
+    exc_target_arg = exc_target ? (PyObject *)exc_target : Py_None;
 
-    hook_result = PyObject_CallMethod((PyObject *)current, "resolve_target", "OO", result_arg, exc_arg);
+    hook_result = PyObject_CallMethod((PyObject *)current, "resolve_target", "OOO", result_arg, exc_arg,
+                                      exc_target_arg);
     if (!hook_result)
         goto err;
 
@@ -2704,6 +2722,10 @@ static void pytealet_apply_resolve_target(PyTealetModuleState *mstate, PyTealetO
 
     if (new_return_to->state != STATE_RUN) {
         PyErr_SetString(mstate->state_error, "must be 'run'");
+        goto err;
+    }
+    if (new_return_to == current) {
+        PyErr_SetString(mstate->invalid_error, "resolve_target target must not be current tealet");
         goto err;
     }
     if (CheckTarget(mstate, new_return_to, current, "resolve_target") < 0)
@@ -2719,11 +2741,13 @@ static void pytealet_apply_resolve_target(PyTealetModuleState *mstate, PyTealetO
         *return_exc_io = worker_exc;
         worker_exc = NULL;
     }
+    Py_XDECREF(exc_target);
     Py_XDECREF(worker_exc);
     return;
 
 err:
     Py_XDECREF(hook_result);
+    Py_XDECREF(exc_target);
     fallback_exc = worker_exc;
     worker_exc = NULL;
     PyErr_WriteUnraisable((PyObject *)current);
@@ -2856,16 +2880,10 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         }
     }
 
-    pytealet_apply_resolve_target(mstate, tealet, result, &return_to, &return_arg, &return_exc);
+    pytealet_apply_resolve_target(mstate, mdata, tealet, result, &return_to, &return_arg, &return_exc);
     assert(return_to != NULL);
     assert(return_arg != NULL);
     Py_XDECREF(result);
-
-    /* see if we should redirect the exit switch due to an exception, and clear up the pending token.
-     * return_to is null on entry if there was an exception, on exit we own an reference
-     * to the target, possibly main
-     */
-    (void)PyTealetThrow_RedirectUncaught(mstate, mdata, tealet, return_exc, &return_to);
 
     /* Classify top-level worker exceptions; fatal ones are deferred and
      * injected into the return target after this switch.

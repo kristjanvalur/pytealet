@@ -176,13 +176,35 @@ class TestSimple:
         assert seen, "expected unraisable error for None return target"
         assert any(isinstance(u.exc_value, TypeError) and "tealet object expected" in str(u.exc_value) for u in seen)
 
+    def test_return_current_is_invalid_exit_target(self):
+        def run(current, arg):
+            return current
+
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            t = _tealet.tealet()
+            assert t.run(run, None) is None
+            assert t.state == _tealet.STATE_EXIT
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert seen, "expected unraisable error for current return target"
+        assert any("current tealet" in str(u.exc_value) for u in seen)
+
 
 class TestResolveTargetHook:
     def test_resolve_target_can_override_callable_result_semantics(self):
         class RawResultTealet(_tealet.tealet):
-            def resolve_target(self, result, exc):
+            def resolve_target(self, result, exc, exc_target):
                 assert result == 123
                 assert exc is None
+                assert exc_target is None
                 return _tealet.main(), "handled-raw"
 
         seen = []
@@ -203,9 +225,10 @@ class TestResolveTargetHook:
 
     def test_resolve_target_routes_none_return_when_clearing_error(self):
         class RoutedTealet(_tealet.tealet):
-            def resolve_target(self, result, exc):
+            def resolve_target(self, result, exc, exc_target):
                 assert result is None
                 assert exc is None
+                assert exc_target is None
                 return _tealet.main(), "routed", True
 
         seen = []
@@ -226,9 +249,10 @@ class TestResolveTargetHook:
 
     def test_resolve_target_can_clear_worker_exception(self):
         class RoutedTealet(_tealet.tealet):
-            def resolve_target(self, result, exc):
+            def resolve_target(self, result, exc, exc_target):
                 assert result is None
                 assert isinstance(exc, ValueError)
+                assert exc_target is None
                 return _tealet.main(), "cleared", True
 
         seen = []
@@ -252,7 +276,7 @@ class TestResolveTargetHook:
 
     def test_resolve_target_hook_failure_is_unraisable_and_falls_back(self):
         class BrokenTealet(_tealet.tealet):
-            def resolve_target(self, result, exc):
+            def resolve_target(self, result, exc, exc_target):
                 raise RuntimeError("hook failed")
 
         seen = []
@@ -270,6 +294,62 @@ class TestResolveTargetHook:
             sys.unraisablehook = original_hook
 
         assert any(isinstance(u.exc_value, RuntimeError) and "hook failed" in str(u.exc_value) for u in seen)
+
+    def test_custom_resolver_target_is_not_overridden_by_uncaught_redirect(self):
+        class RoutedTealet(_tealet.tealet):
+            def __init__(self, target):
+                super().__init__()
+                self._target = target
+
+            def resolve_target(self, result, exc, exc_target):
+                if exc is not None:
+                    assert exc_target == _tealet.main()
+                    return self._target, "via-custom-resolver", True
+                return super().resolve_target(result, exc, exc_target)
+
+        def parked(current, _arg):
+            msg = current.main().switch("ready")
+            return current.main(), ("received", msg)
+
+        def worker(current, _arg):
+            current.main().switch("paused")
+            return current.main()
+
+        redirect = _tealet.tealet()
+        assert redirect.run(parked, None) == "ready"
+
+        t = RoutedTealet(redirect)
+        assert t.run(worker, None) == "paused"
+        t.set_exception(ValueError("route"), fallback=_tealet.main())
+
+        assert t.switch() == ("received", "via-custom-resolver")
+        assert t.state == _tealet.STATE_EXIT
+
+    def test_custom_resolver_receives_uncaught_redirect_target(self):
+        class QueryTealet(_tealet.tealet):
+            def resolve_target(self, result, exc, exc_target):
+                if exc is not None:
+                    if exc_target is not None:
+                        return exc_target, "via-query", True
+                return super().resolve_target(result, exc, exc_target)
+
+        def parked(current, _arg):
+            msg = current.main().switch("ready")
+            return current.main(), ("received", msg)
+
+        def worker(current, _arg):
+            current.main().switch("paused")
+            return current.main()
+
+        redirect = _tealet.tealet()
+        assert redirect.run(parked, None) == "ready"
+
+        t = QueryTealet()
+        assert t.run(worker, None) == "paused"
+        t.set_exception(ValueError("route"), fallback=redirect)
+
+        assert t.switch() == ("received", "via-query")
+        assert t.state == _tealet.STATE_EXIT
 
 
 class TestPrepare:

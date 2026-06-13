@@ -79,11 +79,8 @@ int PyTealetThrow_RegistryPop(PyTealetMainData *mdata, uint64_t token, PyObject 
     }
     Py_DECREF(key);
 
-    if (!PyTuple_Check(record) || PyTuple_GET_SIZE(record) != 2) {
-        Py_DECREF(record);
-        PyErr_SetString(PyExc_RuntimeError, "corrupt throw record");
-        return -1;
-    }
+    assert(PyTuple_Check(record));
+    assert(PyTuple_GET_SIZE(record) == 2);
 
     exc = PyTuple_GET_ITEM(record, 0);
     fallback = PyTuple_GET_ITEM(record, 1);
@@ -223,8 +220,8 @@ void PyTealetThrow_SetRaisedException(PyObject *exc) {
 #endif
 }
 
-int PyTealetThrow_RedirectUncaught(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyTealetObject *tealet,
-                                   PyObject *exception, PyTealetObject **return_to_io) {
+int PyTealetThrow_TakeRedirectTarget(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyTealetObject *tealet,
+                                     PyObject *exception, PyTealetObject **redirect_to_out) {
     uint64_t token;
     PyObject *throw_exc = NULL;
     PyObject *throw_fallback = NULL;
@@ -233,7 +230,9 @@ int PyTealetThrow_RedirectUncaught(PyTealetModuleState *mstate, PyTealetMainData
     assert(mstate);
     assert(mdata);
     assert(tealet);
-    assert(return_to_io && *return_to_io != NULL);
+    assert(redirect_to_out);
+
+    *redirect_to_out = NULL;
 
     if (tealet->inflight_throw_token == 0)
         return 0;
@@ -242,26 +241,53 @@ int PyTealetThrow_RedirectUncaught(PyTealetModuleState *mstate, PyTealetMainData
     tealet->inflight_throw_token = 0;
 
     pop_rc = PyTealetThrow_RegistryPop(mdata, token, &throw_exc, &throw_fallback);
-    if (pop_rc < 0) {
-        PyErr_WriteUnraisable(NULL);
-        PyErr_Clear();
-    } else if (pop_rc > 0 && exception && throw_fallback &&
-               PyTealetThrow_ExceptionChainContains(exception, throw_exc)) {
+    if (pop_rc < 0)
+        return -1;
+    if (pop_rc == 0)
+        return 0;
+
+    if (exception && throw_fallback && PyTealetThrow_ExceptionChainContains(exception, throw_exc)) {
         PyTealetObject *fallback_t = (PyTealetObject *)throw_fallback;
         assert(mstate->tealet_type);
         assert(PyObject_TypeCheck((PyObject *)fallback_t, mstate->tealet_type));
         assert(fallback_t->owner_tid == tealet->owner_tid);
         assert(fallback_t->tealet->main == tealet->tealet->main);
         if (fallback_t->state == STATE_RUN && fallback_t->tealet) {
-            /* transfer ownership of throw_fallback to *return_to_io */
-            Py_DECREF(*return_to_io);
-            *return_to_io = fallback_t;
+            *redirect_to_out = (PyTealetObject *)Py_NewRef((PyObject *)fallback_t);
             Py_DECREF(throw_exc);
+            Py_DECREF(throw_fallback);
             return 1;
         }
     }
+
     Py_XDECREF(throw_exc);
     Py_XDECREF(throw_fallback);
+    return 0;
+}
+
+int PyTealetThrow_RedirectUncaught(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyTealetObject *tealet,
+                                   PyObject *exception, PyTealetObject **return_to_io) {
+    PyTealetObject *redirect_to = NULL;
+    int take_rc;
+
+    assert(mstate);
+    assert(mdata);
+    assert(tealet);
+    assert(return_to_io && *return_to_io != NULL);
+
+    take_rc = PyTealetThrow_TakeRedirectTarget(mstate, mdata, tealet, exception, &redirect_to);
+    if (take_rc < 0) {
+        PyErr_WriteUnraisable(NULL);
+        PyErr_Clear();
+        return 0;
+    }
+
+    if (take_rc > 0 && redirect_to) {
+        Py_DECREF(*return_to_io);
+        *return_to_io = redirect_to;
+        return 1;
+    }
+
     return 0;
 }
 
