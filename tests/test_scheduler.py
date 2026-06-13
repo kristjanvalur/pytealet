@@ -1081,10 +1081,67 @@ class TestChannelExamples:
                 seen.append(f"caught:{exc}")
 
         def sender() -> None:
-            ch.send_exception(ValueError, "boom")
+            ch.send_exception(ValueError("boom"))
 
         s.spawn(receiver)
         s.spawn(sender)
         s.run()
 
         assert seen == ["caught:boom"]
+
+    def test_channel_send_exception_requires_instance(self):
+        ch = Channel()
+        with pytest.raises(TypeError, match="BaseException instance"):
+            ch.send_exception(ValueError)  # type: ignore[arg-type]
+
+    def test_channel_async_send_wakes_tealet_non_immediate(self):
+        s = scheduler()
+        ch = Channel(preference=-1)
+        seen: list[str] = []
+
+        def receiver() -> None:
+            seen.append("receiver:before")
+            seen.append(f"receiver:{ch.receive()}")
+
+        s.spawn(receiver)
+        s.pump(1)
+        assert ch.balance == -1
+
+        asyncio.run(asyncio.wait_for(ch.async_send(9), timeout=1.0))
+        assert seen == ["receiver:before"]
+
+        s.run()
+        assert seen == ["receiver:before", "receiver:9"]
+
+    def test_channel_async_receive_wakes_tealet_non_immediate(self):
+        s = scheduler()
+        ch = Channel(preference=1)
+        seen: list[str] = []
+
+        def sender() -> None:
+            seen.append("sender:before")
+            ch.send(4)
+            seen.append("sender:after")
+
+        s.spawn(sender)
+        s.pump(1)
+        assert ch.balance == 1
+
+        value = asyncio.run(asyncio.wait_for(ch.async_receive(), timeout=1.0))
+        assert value == 4
+        assert seen == ["sender:before"]
+
+        s.run()
+        assert seen == ["sender:before", "sender:after"]
+
+    def test_channel_async_sender_and_receiver_pair(self):
+        ch = Channel()
+
+        async def run() -> None:
+            recv_task = asyncio.create_task(ch.async_receive())
+            await asyncio.sleep(0)
+            await ch.async_send(12)
+            got = await asyncio.wait_for(recv_task, timeout=1.0)
+            assert got == 12
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
