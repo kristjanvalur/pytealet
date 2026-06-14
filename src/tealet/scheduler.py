@@ -6,6 +6,7 @@ import inspect
 import itertools
 import threading
 import time
+from abc import ABC, abstractmethod
 from collections import deque
 from typing import Callable, Generic, TypeVar
 
@@ -16,6 +17,56 @@ T = TypeVar("T")
 
 # a thread local scheduler
 _scheduler = threading.local()
+
+
+class Linkable(ABC):
+    """Base interface for objects that can be linked from a ScheduledTealet."""
+
+    @abstractmethod
+    def _unlink(self, t: tealet.tealet) -> None:
+        """Detach a tealet from this link target."""
+
+    def _query_waiting(self, t: tealet.tealet) -> bool:
+        return False
+
+    def _query_runnable(self, t: tealet.tealet) -> bool:
+        return False
+
+
+class BaseScheduler(Linkable, ABC):
+    """Base scheduler surface used for scheduler-aware type annotations."""
+
+    @abstractmethod
+    def _is_runnable(self, t: tealet.tealet) -> bool:
+        """Return whether the target tealet is currently runnable."""
+
+    @abstractmethod
+    def _is_blocked(self, t: tealet.tealet) -> bool:
+        """Return whether the target tealet is blocked on async wait."""
+
+    @abstractmethod
+    def _unlink_pending_async_wait(self, t: tealet.tealet) -> None:
+        """Remove pending async wait bookkeeping for a tealet."""
+
+    @abstractmethod
+    def _make_runnable(self, t: tealet.tealet) -> None:
+        """Queue a tealet to run."""
+
+    @abstractmethod
+    def _target_run(self, target: tealet.tealet) -> None:
+        """Run the target tealet from the scheduler context."""
+
+    @abstractmethod
+    def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
+        """Throw into the target tealet from the scheduler context."""
+
+    @abstractmethod
+    def _find_target(self, task_exit: bool = False) -> tealet.tealet:
+        """Find the next scheduling target."""
+
+    @abstractmethod
+    def call_soon_threadsafe(self, callback: Callable[..., object], *args: object) -> None:
+        """Schedule a callback from another scheduler/thread context."""
 
 
 def scheduler() -> SimpleScheduler:
@@ -31,11 +82,11 @@ def _current_scheduler() -> SimpleScheduler | None:
 class ScheduledTealet(tealet.tealet):
     """Tealet wrapper that tracks scheduler/event placement."""
 
-    def __init__(self, owning_scheduler: SimpleScheduler):
+    def __init__(self, owning_scheduler: BaseScheduler):
         super().__init__()
-        self.link = None
+        self.link: Linkable | None = None
         self._future: Future[object] | None = None
-        self._scheduler: SimpleScheduler = owning_scheduler
+        self._scheduler: BaseScheduler = owning_scheduler
 
     def is_waiting(self):
         if self.link is None:
@@ -53,7 +104,7 @@ class ScheduledTealet(tealet.tealet):
     def is_running(self):
         return tealet.current() is self
 
-    def get_scheduler(self) -> SimpleScheduler:
+    def get_scheduler(self) -> BaseScheduler:
         return self._scheduler
 
     def _unlink(self):
@@ -84,7 +135,7 @@ class ScheduledTealet(tealet.tealet):
         return self._scheduler._find_target(task_exit=True), None, clear
 
 
-class Event:
+class Event(Linkable):
     """Minimal event primitive for scheduler-driven wait/wake."""
 
     def __init__(self) -> None:
@@ -394,7 +445,7 @@ class Barrier:
             raise
 
 
-class Channel:
+class Channel(Linkable):
     """Rendezvous channel for sync tealet operations and optional async waits."""
 
     # Operation model:
@@ -444,12 +495,12 @@ class Channel:
         except AttributeError:
             pass
 
-    def _waiter_scheduler(self, waiter: tealet.tealet) -> SimpleScheduler:
+    def _waiter_scheduler(self, waiter: tealet.tealet) -> BaseScheduler:
         if isinstance(waiter, ScheduledTealet):
             return waiter.get_scheduler()
         return scheduler()
 
-    def _run_on_scheduler(self, owning: SimpleScheduler, callback: Callable[..., object], *args: object) -> None:
+    def _run_on_scheduler(self, owning: BaseScheduler, callback: Callable[..., object], *args: object) -> None:
         if _current_scheduler() is owning:
             callback(*args)
             return
@@ -1027,7 +1078,7 @@ def timeout_at(when: float) -> Timeout:
     return Timeout(when)
 
 
-class SimpleScheduler:
+class SimpleScheduler(BaseScheduler):
     """Very small cooperative scheduler for runnable tealets."""
 
     def __init__(self) -> None:
