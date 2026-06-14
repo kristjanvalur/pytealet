@@ -29,7 +29,7 @@ def raw_simple_generator(current: tealet.tealet, source: Iterable[T]) -> tealet.
     for value in source:
         previous.switch(value)
 
-    previous.set_exception(StopIteration())
+    previous.set_pending_exception(StopIteration())
     return previous
 
 
@@ -61,7 +61,7 @@ class GeneratorTealet(tealet.tealet, Iterator[T], Generic[T]):
     def _main(self, current: tealet.tealet, previous: tealet.tealet) -> tealet.tealet:
         for value in self._source:
             previous = previous.switch(value)
-        previous.set_exception(StopIteration())
+        previous.set_pending_exception(StopIteration())
         return previous
 
 

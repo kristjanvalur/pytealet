@@ -58,7 +58,7 @@ Methods:
 - `prepare(function) -> _tealet.tealet`
 - `run(function, arg=None) -> object`
 - `switch(arg=None, panic=False) -> object`
-- `set_exception(exception, fallback=None) -> None`
+- `set_pending_exception(exception, fallback=None) -> None`
 - `throw(exception) -> object`
 
 `resolve_target` is a class-level override hook for frameworks that need custom

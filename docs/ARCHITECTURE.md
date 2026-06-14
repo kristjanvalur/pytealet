@@ -65,7 +65,7 @@ _tealet.error_was_remote() -> bool
 ```
 Returns whether the most recently raised exception from this thread's switching
 APIs (`run()`, `switch()`, `throw()`) was remotely delivered through queued
-exception injection (`set_exception`/`throw`), rather than raised locally as an
+exception injection (`set_pending_exception`/`throw`), rather than raised locally as an
 operational/runtime error.
 
 Behavior notes:
@@ -121,7 +121,7 @@ Switches execution to this tealet, passing an optional argument.
 - **Thread-safe:** Only within same thread family
 
 ```python
-tealet.set_exception(exception, fallback=None) -> None
+tealet.set_pending_exception(exception, fallback=None) -> None
 ```
 Queues an exception instance to be delivered on the next switch boundary into
 this tealet lineage.
@@ -133,10 +133,10 @@ this tealet lineage.
 tealet.throw(exception) -> result
 ```
 Convenience API that combines injection and transfer.
-- `STATE_RUN` target: equivalent to `set_exception(exception, fallback=current)`
+- `STATE_RUN` target: equivalent to `set_pending_exception(exception, fallback=current)`
     followed by `switch()`.
 - `STATE_NEW`/`STATE_STUB` target: equivalent to
-    `set_exception(exception, fallback=current)` followed by `run()`.
+    `set_pending_exception(exception, fallback=current)` followed by `run()`.
 - `run()` accepts missing callable arguments in this case because the queued
     exception is delivered before worker-call dispatch.
 

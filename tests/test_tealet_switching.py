@@ -33,7 +33,7 @@ class TestSwitch:
     def test_switch_panic_carries_pending_throw_exception(self):
         pending = RuntimeError("boom-pending")
         t = _tealet.tealet()
-        t.set_exception(pending)
+        t.set_pending_exception(pending)
 
         with pytest.raises(_tealet.PanicError) as exc:
             _tealet.current().switch("panic", panic=True)
@@ -209,7 +209,7 @@ class TestSetException:
         assert seen, "expected unraisable error for uncaught thrown exception"
         assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw-run" for u in seen)
 
-    def test_throw_on_prepared_target_behaves_like_set_exception_plus_run(self):
+    def test_throw_on_prepared_target_behaves_like_set_pending_exception_plus_run(self):
         seen = []
         called = []
         original_hook = sys.unraisablehook
@@ -248,7 +248,7 @@ class TestSetException:
         sys.unraisablehook = capture_unraisable
         try:
             t = _tealet.tealet()
-            t.set_exception(RuntimeError("boom-dummy-run"))
+            t.set_pending_exception(RuntimeError("boom-dummy-run"))
             assert t.run("dummy-func", {"dummy": True}) is None
             assert t.state == _tealet.STATE_EXIT
         finally:
@@ -257,7 +257,7 @@ class TestSetException:
         assert seen, "expected unraisable error for uncaught injected exception"
         assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-dummy-run" for u in seen)
 
-    def test_set_exception_before_run_injects_at_run_entry(self):
+    def test_set_pending_exception_before_run_injects_at_run_entry(self):
         entered = []
         seen = []
         original_hook = sys.unraisablehook
@@ -273,7 +273,7 @@ class TestSetException:
         sys.unraisablehook = capture_unraisable
         try:
             t = _tealet.tealet()
-            t.set_exception(RuntimeError("boom-before-run"))
+            t.set_pending_exception(RuntimeError("boom-before-run"))
             assert t.run(worker, None) is None
             assert t.state == _tealet.STATE_EXIT
         finally:
@@ -283,7 +283,7 @@ class TestSetException:
         assert seen, "expected unraisable error for uncaught injected exception"
         assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-before-run" for u in seen)
 
-    def test_set_exception_delivers_on_next_switch(self):
+    def test_set_pending_exception_delivers_on_next_switch(self):
         seen = []
 
         def worker(current, _arg):
@@ -297,7 +297,7 @@ class TestSetException:
         t = _tealet.tealet()
         assert t.run(worker, None) == "paused"
 
-        t.set_exception(RuntimeError("boom"))
+        t.set_pending_exception(RuntimeError("boom"))
         assert t.switch() == "done"
         assert t.switch() is None
         assert t.state == _tealet.STATE_EXIT
@@ -307,7 +307,7 @@ class TestSetException:
         t = _tealet.tealet()
         assert _tealet.error_was_remote() is False
 
-        t.set_exception(RuntimeError("boom-remote-flag"))
+        t.set_pending_exception(RuntimeError("boom-remote-flag"))
         with pytest.raises(RuntimeError):
             _tealet.current().switch("resume")
         assert _tealet.error_was_remote() is True
@@ -319,7 +319,7 @@ class TestSetException:
     def test_error_was_remote_false_for_panic_with_pending_exception(self):
         t = _tealet.tealet()
         pending = RuntimeError("boom-panic-origin")
-        t.set_exception(pending)
+        t.set_pending_exception(pending)
 
         with pytest.raises(_tealet.PanicError) as exc:
             _tealet.current().switch("panic", panic=True)
@@ -327,7 +327,7 @@ class TestSetException:
         assert exc.value.exception() is pending
         assert _tealet.error_was_remote() is False
 
-    def test_set_exception_with_fallback_redirects_uncaught_unwind(self):
+    def test_set_pending_exception_with_fallback_redirects_uncaught_unwind(self):
         def worker(current, _arg):
             current.main().switch("paused")
             return current.main()
@@ -343,7 +343,7 @@ class TestSetException:
             t = _tealet.tealet()
             assert t.run(worker, None) == "paused"
 
-            t.set_exception(ValueError("route"), fallback=_tealet.main())
+            t.set_pending_exception(ValueError("route"), fallback=_tealet.main())
             assert t.switch() is None
             assert t.state == _tealet.STATE_EXIT
         finally:
@@ -352,7 +352,7 @@ class TestSetException:
         assert seen, "expected unraisable error for uncaught injected exception"
         assert any(isinstance(u.exc_value, ValueError) and str(u.exc_value) == "route" for u in seen)
 
-    def test_set_exception_overwrites_inflight_token_after_catch(self):
+    def test_set_pending_exception_overwrites_inflight_token_after_catch(self):
         seen = []
 
         def worker(current, _arg):
@@ -367,12 +367,12 @@ class TestSetException:
         t = _tealet.tealet()
         assert t.run(worker, None) == "paused-0"
 
-        t.set_exception(RuntimeError("boom-1"), fallback=_tealet.main())
+        t.set_pending_exception(RuntimeError("boom-1"), fallback=_tealet.main())
         assert t.switch() == "paused-1"
 
         # First injected exception was caught inside worker; next call should
         # overwrite prior inflight metadata rather than erroring.
-        t.set_exception(RuntimeError("boom-2"), fallback=_tealet.main())
+        t.set_pending_exception(RuntimeError("boom-2"), fallback=_tealet.main())
         assert t.switch() == "done"
         assert t.switch() is None
         assert t.state == _tealet.STATE_EXIT

@@ -320,7 +320,7 @@ class TestResolveTargetHook:
 
         t = RoutedTealet(redirect)
         assert t.run(worker, None) == "paused"
-        t.set_exception(ValueError("route"), fallback=_tealet.main())
+        t.set_pending_exception(ValueError("route"), fallback=_tealet.main())
 
         assert t.switch() == ("received", "via-custom-resolver")
         assert t.state == _tealet.STATE_EXIT
@@ -346,7 +346,7 @@ class TestResolveTargetHook:
 
         t = QueryTealet()
         assert t.run(worker, None) == "paused"
-        t.set_exception(ValueError("route"), fallback=redirect)
+        t.set_pending_exception(ValueError("route"), fallback=redirect)
 
         assert t.switch() == ("received", "via-query")
         assert t.state == _tealet.STATE_EXIT

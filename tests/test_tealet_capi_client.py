@@ -18,7 +18,7 @@ def test_capi_client_api_info():
     assert info["has_run"] is True
     assert info["has_switch"] is True
     assert info["has_throw"] is True
-    assert info["has_set_exception"] is True
+    assert info["has_set_pending_exception"] is True
     assert info["has_thread_reap"] is True
     assert info["has_thread_sweep"] is True
     assert info["has_thread_active"] is True
@@ -119,7 +119,7 @@ def test_capi_client_throw_flags_unknown_bit_rejected():
         _tealet_capi_client.capi_throw(_tealet.current(), RuntimeError("boom"), 0x80)
 
 
-def test_capi_client_set_exception_then_switch():
+def test_capi_client_set_pending_exception_then_switch():
     def parked(current, _arg):
         try:
             current.main().switch("ready")
@@ -130,7 +130,7 @@ def test_capi_client_set_exception_then_switch():
     t = _tealet.tealet()
     assert t.run(parked, None) == "ready"
 
-    assert _tealet_capi_client.capi_set_exception(t, RuntimeError("boom-set")) is None
+    assert _tealet_capi_client.capi_set_pending_exception(t, RuntimeError("boom-set")) is None
     assert _tealet_capi_client.capi_switch(t) == ("caught", "boom-set")
 
 

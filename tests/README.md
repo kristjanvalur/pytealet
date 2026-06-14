@@ -10,7 +10,7 @@ This directory contains two broad test scopes:
 - `test_tealet_runtime.py`: module-level behavior, lifecycle state, prepare/run basics, subclassing, and traversal APIs.
 - `test_tealet_threading.py`: thread ownership, cross-thread restrictions, and lineage cleanup semantics.
 - `test_tealet_context.py`: `contextvars` integration and cross-thread context access rules.
-- `test_tealet_switching.py`: switch/throw/set_exception semantics and panic/remote error handling.
+- `test_tealet_switching.py`: switch/throw/set_pending_exception semantics and panic/remote error handling.
 - `test_tealet_frames_random.py`: frame introspection behavior and randomized stress flows.
 - `_tealet_test_helpers.py`: shared helper constructors and utilities used by the split tealet tests.
 

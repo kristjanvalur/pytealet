@@ -81,7 +81,7 @@ Tealet/object operations:
 - `run(ctx, target, function_py, function_c, arg) -> PyObject *`
 - `switch_(ctx, target, arg, flags) -> PyObject *`
 - `throw_(ctx, target, exception, flags) -> PyObject *`
-- `set_exception(ctx, target, exception, fallback) -> int`
+- `set_pending_exception(ctx, target, exception, fallback) -> int`
 
 Metadata helpers:
 - `is_foreign(ctx, target) -> int`

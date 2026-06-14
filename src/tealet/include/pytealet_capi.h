@@ -110,8 +110,8 @@ typedef struct PyTealet_CAPI {
     /* Equivalent to target.throw(exception), with optional transfer flags. */
     PyObject *(*throw_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, uint32_t flags);
 
-    /* Equivalent to target.set_exception(exception, fallback). Returns 0 on success, -1 on error. */
-    int (*set_exception)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, PyObject *fallback);
+    /* Equivalent to target.set_pending_exception(exception, fallback). Returns 0 on success, -1 on error. */
+    int (*set_pending_exception)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, PyObject *fallback);
 
     /* Tealet metadata helpers. */
     int (*is_foreign)(PyTealet_CAPI_Context *ctx, PyObject *target);

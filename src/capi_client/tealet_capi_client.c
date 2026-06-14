@@ -107,8 +107,8 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (client_dict_set_owned(d, "has_throw",
                               PyBool_FromLong(state->api->throw_ != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_set_exception",
-                              PyBool_FromLong(state->api->set_exception != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_set_pending_exception",
+                              PyBool_FromLong(state->api->set_pending_exception != NULL)) < 0)
         goto error;
     if (client_dict_set_owned(d, "has_thread_reap",
                               PyBool_FromLong(state->api->thread_reap != NULL)) < 0)
@@ -285,7 +285,7 @@ static PyObject *client_capi_throw(PyObject *module, PyObject *args) {
     return state->api->throw_(state->ctx, target, exc, flags);
 }
 
-static PyObject *client_capi_set_exception(PyObject *module, PyObject *args) {
+static PyObject *client_capi_set_pending_exception(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
     PyObject *target;
     PyObject *exc;
@@ -297,10 +297,10 @@ static PyObject *client_capi_set_exception(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    if (!PyArg_ParseTuple(args, "OO|O:capi_set_exception", &target, &exc, &fallback))
+    if (!PyArg_ParseTuple(args, "OO|O:capi_set_pending_exception", &target, &exc, &fallback))
         return NULL;
 
-    rc = state->api->set_exception(state->ctx, target, exc, fallback);
+    rc = state->api->set_pending_exception(state->ctx, target, exc, fallback);
     if (rc < 0)
         return NULL;
     Py_RETURN_NONE;
@@ -643,7 +643,7 @@ static PyMethodDef client_methods[] = {
      "Switch to a tealet using the imported C API with explicit flags."},
     {"capi_throw", (PyCFunction)client_capi_throw, METH_VARARGS,
      "Throw into a tealet using the imported C API with optional flags."},
-    {"capi_set_exception", (PyCFunction)client_capi_set_exception, METH_VARARGS,
+    {"capi_set_pending_exception", (PyCFunction)client_capi_set_pending_exception, METH_VARARGS,
      "Set pending exception on a target tealet via imported C API."},
     {"capi_thread_reap", (PyCFunction)client_capi_thread_reap, METH_VARARGS,
      "Run thread_reap via imported C API."},
@@ -700,7 +700,7 @@ static int client_exec(PyObject *module) {
     if (!state->api->ctx_new || !state->api->ctx_free || !state->api->current || !state->api->main ||
         !state->api->thread_sweep || !state->api->check_tealet || !state->api->create || !state->api->duplicate ||
         !state->api->stub || !state->api->prepare || !state->api->run || !state->api->switch_ ||
-        !state->api->throw_ || !state->api->set_exception || !state->api->thread_reap ||
+        !state->api->throw_ || !state->api->set_pending_exception || !state->api->thread_reap ||
         !state->api->thread_active || !state->api->thread_kill || !state->api->error_was_remote ||
         !state->api->previous || !state->api->frame_introspection_get || !state->api->frame_introspection_set ||
         !state->api->is_foreign || !state->api->state_get || !state->api->thread_id_get) {

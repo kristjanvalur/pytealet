@@ -66,14 +66,14 @@ static int pytealet_collect_active_wrappers(PyTealetModuleState *mstate, PyTeale
                                             PyTealetObject *caller, unsigned int collect_flags);
 static PyObject *pytealet_thread_kill_inner(PyTealetModuleState *mstate, PyTealetMainData *mdata,
                                             Py_ssize_t cleanup_passes, PyTealetObject *caller, PyObject *kill_exc_spec);
-static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
+static int pytealet_set_pending_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
                                         PyTealetMainData *mdata, PyObject *exc, PyObject *fallback);
 static PyObject *pytealet_duplicate(PyObject *self, PyObject *Py_UNUSED(_ignored));
 static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObject *kwargs);
 static PyObject *pytealet_set_stub(PyObject *self, PyObject *args, PyObject *kwargs);
 static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                 PyObject *kwnames);
-static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+static PyObject *pytealet_set_pending_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                         Py_ssize_t nargs, PyObject *kwnames);
 
 enum {
@@ -1375,7 +1375,7 @@ PyObject *PyTealetApi_Switch(PyTealetModuleState *mstate, PyObject *target_obj, 
  * Callers should not assume any particular resume path once the exception is
  * delivered to the target: target code may catch and switch elsewhere.
  */
-static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
+static int pytealet_set_pending_exception_inner(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
                                         PyTealetMainData *mdata, PyObject *exc, PyObject *fallback) {
     uint64_t token;
 
@@ -1399,7 +1399,7 @@ static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObj
         PyErr_SetString(mstate->state_error, "target tealet must be active, new, or stub");
         return -1;
     }
-    if (CheckTarget(mstate, target, current, "set_exception()"))
+    if (CheckTarget(mstate, target, current, "set_pending_exception()"))
         return -1;
 
     if (!fallback)
@@ -1423,7 +1423,7 @@ static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObj
             PyErr_SetString(mstate->state_error, "fallback tealet must be active");
             return -1;
         }
-        if (CheckTarget(mstate, fallback_t, target, "set_exception(fallback)"))
+        if (CheckTarget(mstate, fallback_t, target, "set_pending_exception(fallback)"))
             return -1;
     }
 
@@ -1461,7 +1461,7 @@ static int pytealet_set_exception_inner(PyTealetModuleState *mstate, PyTealetObj
     return 0;
 }
 
-static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
+static PyObject *pytealet_set_pending_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                         Py_ssize_t nargs, PyObject *kwnames) {
     PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     PyTealetObject *target = (PyTealetObject *)self;
@@ -1474,7 +1474,7 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
         return NULL;
 
     if (nargs < 1 || nargs > 2) {
-        PyErr_Format(PyExc_TypeError, "set_exception() takes 1 or 2 arguments (%zd given)", nargs);
+        PyErr_Format(PyExc_TypeError, "set_pending_exception() takes 1 or 2 arguments (%zd given)", nargs);
         return NULL;
     }
     exc = args[0];
@@ -1487,7 +1487,7 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
             PyObject *key = PyTuple_GET_ITEM(kwnames, i);
             PyObject *val = args[nargs + i];
             if (!PyUnicode_Check(key)) {
-                PyErr_SetString(PyExc_TypeError, "set_exception() keyword names must be strings");
+                PyErr_SetString(PyExc_TypeError, "set_pending_exception() keyword names must be strings");
                 return NULL;
             }
             if (PyUnicode_CompareWithASCIIString(key, "exception") == 0) {
@@ -1495,22 +1495,22 @@ static PyObject *pytealet_set_exception(PyObject *self, PyTypeObject *defining_c
             } else if (PyUnicode_CompareWithASCIIString(key, "fallback") == 0) {
                 fallback = val;
             } else {
-                PyErr_Format(PyExc_TypeError, "set_exception() got an unexpected keyword argument '%U'", key);
+                PyErr_Format(PyExc_TypeError, "set_pending_exception() got an unexpected keyword argument '%U'", key);
                 return NULL;
             }
         }
     }
 
     if (!exc) {
-        PyErr_SetString(PyExc_TypeError, "set_exception() missing required argument 'exception'");
+        PyErr_SetString(PyExc_TypeError, "set_pending_exception() missing required argument 'exception'");
         return NULL;
     }
 
     current = TryGetCurrent(mstate, &mdata);
-    if (CheckTarget(mstate, target, current, "set_exception()"))
+    if (CheckTarget(mstate, target, current, "set_pending_exception()"))
         return NULL;
 
-    if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, fallback) < 0)
+    if (pytealet_set_pending_exception_inner(mstate, target, current, mdata, exc, fallback) < 0)
         return NULL;
     Py_RETURN_NONE;
 }
@@ -1546,10 +1546,10 @@ int PyTealetApi_SetException(PyTealetModuleState *mstate, PyObject *target_obj, 
     if (!fallback)
         fallback = Py_None;
 
-    if (CheckTarget(mstate, target, current, "set_exception()"))
+    if (CheckTarget(mstate, target, current, "set_pending_exception()"))
         return -1;
 
-    return pytealet_set_exception_inner(mstate, target, current, mdata, exc, fallback);
+    return pytealet_set_pending_exception_inner(mstate, target, current, mdata, exc, fallback);
 }
 
 /* Convenience API: schedule exception for target and transfer immediately.
@@ -1640,7 +1640,7 @@ PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, P
 
     if (target->state == STATE_RUN) {
         uint32_t switch_flags = (flags & PYTEALET_THROW_PANIC) ? PYTEALET_SWITCH_PANIC : PYTEALET_SWITCH_FLAGS_DEFAULT;
-        if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
+        if (pytealet_set_pending_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
             return NULL;
         return PyTealetApi_Switch(mstate, target_obj, NULL, switch_flags);
     }
@@ -1654,7 +1654,7 @@ PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, P
             return NULL;
         }
 
-        if (pytealet_set_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
+        if (pytealet_set_pending_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
             return NULL;
 
         /* consume the prepared func.  We don't actually need it because the
@@ -1788,8 +1788,8 @@ static struct PyMethodDef pytealet_methods[] = {
      "throw(exception) -> object\n\n"
      "Inject exception into target and switch to it.\n"
      "No guarantee the caller resumes: target may catch and switch elsewhere."},
-    {"set_exception", (PyCFunction)(void (*)(void))pytealet_set_exception, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
-     "set_exception(exception, fallback=None) -> None\n\n"
+    {"set_pending_exception", (PyCFunction)(void (*)(void))pytealet_set_pending_exception, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
+     "set_pending_exception(exception, fallback=None) -> None\n\n"
      "Queue exception for delivery when target next runs.\n"
      "No guarantee about which tealet runs after delivery; target may catch and switch elsewhere."},
     {NULL, NULL} /* sentinel */
@@ -2890,7 +2890,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
      */
     pytealet_handle_top_level_exception(mstate, &return_to, &return_exc);
     if (return_exc) {
-        if (pytealet_set_exception_inner(mstate, return_to, tealet, mdata, return_exc, Py_None) < 0) {
+        if (pytealet_set_pending_exception_inner(mstate, return_to, tealet, mdata, return_exc, Py_None) < 0) {
             /* If deferred delivery setup fails, at least report the original
              * fatal exception rather than dropping it silently.
              */
