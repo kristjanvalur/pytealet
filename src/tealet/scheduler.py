@@ -20,7 +20,7 @@ _scheduler = threading.local()
 
 
 class Linkable(ABC):
-    """Base interface for objects that can be linked from a ScheduledTealet."""
+    """Base interface for objects that can be linked from a TealetTask."""
 
     @abstractmethod
     def _unlink(self, t: tealet.tealet) -> None:
@@ -79,7 +79,7 @@ def _current_scheduler() -> SimpleScheduler | None:
     return getattr(_scheduler, "instance", None)
 
 
-class ScheduledTealet(tealet.tealet):
+class TealetTask(tealet.tealet):
     """Tealet wrapper that tracks scheduler/event placement."""
 
     def __init__(self, owning_scheduler: BaseScheduler):
@@ -198,7 +198,7 @@ class Event(Linkable):
     def set(self) -> None:
         self._is_set = True
         for waiter in self._waiters:
-            owning = waiter._scheduler if isinstance(waiter, ScheduledTealet) else scheduler()
+            owning = waiter._scheduler if isinstance(waiter, TealetTask) else scheduler()
             owning._make_runnable(waiter)
         self._waiters.clear()
         for waiter in self._async_waiters:
@@ -496,7 +496,7 @@ class Channel(Linkable):
             pass
 
     def _waiter_scheduler(self, waiter: tealet.tealet) -> BaseScheduler:
-        if isinstance(waiter, ScheduledTealet):
+        if isinstance(waiter, TealetTask):
             return waiter.get_scheduler()
         return scheduler()
 
@@ -1182,7 +1182,7 @@ class SimpleScheduler(BaseScheduler):
         def task_main(current: tealet.tealet, _arg: object):
             return func(*args, **kwargs)
 
-        t = ScheduledTealet(self)
+        t = TealetTask(self)
         t._future = future
         t.prepare(task_main)
         self._make_runnable(t)
@@ -1253,7 +1253,7 @@ class SimpleScheduler(BaseScheduler):
             t.link = self
         except AttributeError:
             pass
-        if isinstance(t, ScheduledTealet):
+        if isinstance(t, TealetTask):
             t._scheduler = self
         self._tasks.append(t)
         self._task_set.add(t)
@@ -1277,7 +1277,7 @@ class SimpleScheduler(BaseScheduler):
         except AttributeError:
             raise RuntimeError(f"Cannot throw to this target: {target}") from None
         self._make_runnable(tealet.current())
-        if isinstance(target, ScheduledTealet):
+        if isinstance(target, TealetTask):
             target._throw_from_scheduler(exc)
         else:
             target.throw(exc)

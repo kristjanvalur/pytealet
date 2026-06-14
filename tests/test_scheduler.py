@@ -18,7 +18,7 @@ from tealet.scheduler import (
     Queue,
     QueueEmpty,
     QueueFull,
-    ScheduledTealet,
+    TealetTask,
     Semaphore,
     SimpleScheduler,
     TimeoutError,
@@ -179,7 +179,7 @@ class TestSchedulerExamples:
         s = scheduler()
         evt = Event()
         seen: list[str] = []
-        target_ref: dict[str, ScheduledTealet] = {}
+        target_ref: dict[str, TealetTask] = {}
 
         def target_worker() -> None:
             target_ref["t"] = _tealet.current()
@@ -202,7 +202,7 @@ class TestSchedulerExamples:
         s = scheduler()
         evt = Event()
         seen: list[str] = []
-        target_ref: dict[str, ScheduledTealet] = {}
+        target_ref: dict[str, TealetTask] = {}
 
         def target_worker() -> None:
             target_ref["t"] = _tealet.current()
