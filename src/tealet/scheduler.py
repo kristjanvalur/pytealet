@@ -444,23 +444,34 @@ class Channel:
         except AttributeError:
             pass
 
+    def _waiter_scheduler(self, waiter: tealet.tealet) -> SimpleScheduler:
+        if isinstance(waiter, ScheduledTealet):
+            return waiter.get_scheduler()
+        return scheduler()
+
+    def _run_on_scheduler(self, owning: SimpleScheduler, callback: Callable[..., object], *args: object) -> None:
+        if _current_scheduler() is owning:
+            callback(*args)
+            return
+        owning.call_soon_threadsafe(callback, *args)
+
     def _wake_non_immediate(self, waiter: tealet.tealet | Event) -> None:
         if isinstance(waiter, Event):
             waiter.set()
             return
-        owning = waiter._scheduler if isinstance(waiter, ScheduledTealet) else scheduler()
-        owning._make_runnable(waiter)
+        owning = self._waiter_scheduler(waiter)
+        self._run_on_scheduler(owning, owning._make_runnable, waiter)
 
     def _wake_sync(self, waiter: tealet.tealet | Event, prefer_immediate: bool) -> None:
         if isinstance(waiter, Event):
             waiter.set()
             return
         current = _current_scheduler()
-        owning = waiter._scheduler if isinstance(waiter, ScheduledTealet) else scheduler()
+        owning = self._waiter_scheduler(waiter)
         if prefer_immediate and current is owning:
             waiter.run()
             return
-        owning._make_runnable(waiter)
+        self._run_on_scheduler(owning, owning._make_runnable, waiter)
 
     def _link_sender(self, waiter: tealet.tealet | Event, packet: tuple[bool, object]) -> None:
         self._packets[waiter] = packet
@@ -1185,9 +1196,6 @@ class SimpleScheduler:
         return fut.result()
 
     def _make_runnable(self, t: tealet.tealet) -> None:
-        if _current_scheduler() is not self:
-            self.call_soon_threadsafe(self._make_runnable, t)
-            return
         if t in self._task_set:
             return
         try:
