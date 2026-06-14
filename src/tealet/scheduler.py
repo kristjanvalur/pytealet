@@ -31,36 +31,41 @@ def _current_scheduler() -> SimpleScheduler | None:
 class ScheduledTealet(tealet.tealet):
     """Tealet wrapper that tracks scheduler/event placement."""
 
-    def __init__(self):
+    def __init__(self, owning_scheduler: SimpleScheduler):
         super().__init__()
         self.link = None
         self._future: Future[object] | None = None
-        self._scheduler: SimpleScheduler | None = None
+        self._scheduler: SimpleScheduler = owning_scheduler
 
     def is_waiting(self):
-        return isinstance(self.link, Event)
+        if self.link is None:
+            return False
+        return self.link._query_waiting(self)
 
     def is_runnable(self):
-        return isinstance(self.link, SimpleScheduler) and scheduler()._is_runnable(self)
+        if self.link is None:
+            return False
+        return self.link._query_runnable(self)
 
     def is_blocked(self):
-        return scheduler()._is_blocked(self)
+        return self._scheduler._is_blocked(self)
 
     def is_running(self):
         return tealet.current() is self
 
+    def get_scheduler(self) -> SimpleScheduler:
+        return self._scheduler
+
     def _unlink(self):
         if self.link is not None:
             self.link._unlink(self)
-        scheduler()._unlink_pending_async_wait(self)
+        self._scheduler._unlink_pending_async_wait(self)
 
     def run(self):
-        owning = self._scheduler if self._scheduler is not None else scheduler()
-        owning._target_run(self)
+        self._scheduler._target_run(self)
 
     def throw(self, exc: BaseException):
-        owning = self._scheduler if self._scheduler is not None else scheduler()
-        owning._target_throw(self, exc)
+        self._scheduler._target_throw(self, exc)
 
     def _throw_from_scheduler(self, exc: BaseException):
         super().throw(exc)
@@ -76,7 +81,7 @@ class ScheduledTealet(tealet.tealet):
 
         # Scheduler-owned tasks always route via scheduler target selection,
         # even if task startup immediately raises before user code returns.
-        return scheduler()._find_target(task_exit=True), None, clear
+        return self._scheduler._find_target(task_exit=True), None, clear
 
 
 class Event:
@@ -95,6 +100,12 @@ class Event:
         except AttributeError:
             pass  # main tealet may not have a ``link`` attribute
         self._waiters.append(t)
+
+    def _query_waiting(self, t: tealet.tealet) -> bool:
+        return t in self._waiters
+
+    def _query_runnable(self, t: tealet.tealet) -> bool:
+        return False
 
     def _unlink(self, t: tealet.tealet) -> None:
         try:
@@ -480,6 +491,12 @@ class Channel:
 
     def _unlink(self, t: tealet.tealet) -> None:
         self._unlink_waiter(t)
+
+    def _query_waiting(self, t: tealet.tealet) -> bool:
+        return t in self._waiters
+
+    def _query_runnable(self, t: tealet.tealet) -> bool:
+        return False
 
     def _send_packet(self, packet: tuple[bool, object]) -> None:
         if self._balance < 0:
@@ -1036,10 +1053,7 @@ class SimpleScheduler:
 
     def call_at(self, when: float, callback: Callable[..., object], *args: object) -> TimerHandle:
         handle = TimerHandle(when, callback, args)
-        if self._owner_thread_id is not None and not self._is_owner_thread():
-            self.call_soon_threadsafe(self._enqueue_timer, when, handle)
-        else:
-            self._enqueue_timer(when, handle)
+        self._enqueue_timer(when, handle)
         return handle
 
     def _enqueue_timer(self, when: float, handle: TimerHandle) -> None:
@@ -1074,6 +1088,12 @@ class SimpleScheduler:
     def _is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._task_set
 
+    def _query_runnable(self, t: tealet.tealet) -> bool:
+        return self._is_runnable(t)
+
+    def _query_waiting(self, t: tealet.tealet) -> bool:
+        return False
+
     def _is_blocked(self, t: tealet.tealet) -> bool:
         return t in self._pending_async_waits
 
@@ -1104,9 +1124,8 @@ class SimpleScheduler:
         def task_main(current: tealet.tealet, _arg: object):
             return func(*args, **kwargs)
 
-        t = ScheduledTealet()
+        t = ScheduledTealet(self)
         t._future = future
-        t._scheduler = self
         t.prepare(task_main)
         self._make_runnable(t)
         return future
