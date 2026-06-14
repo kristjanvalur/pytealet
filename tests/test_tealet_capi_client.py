@@ -119,6 +119,49 @@ def test_capi_client_throw_flags_unknown_bit_rejected():
         _tealet_capi_client.capi_throw(_tealet.current(), RuntimeError("boom"), 0x80)
 
 
+def test_capi_client_throw_with_return_target_none_omits_redirect_target():
+    class QueryTealet(_tealet.tealet):
+        def resolve_target(self, result, exc, exc_target):
+            if exc is not None:
+                assert exc_target is None
+                return _tealet.main(), "via-capi-none", True
+            return super().resolve_target(result, exc, exc_target)
+
+    def worker(current, _arg):
+        current.main().switch("paused")
+        return current.main()
+
+    t = QueryTealet()
+    assert t.run(worker, None) == "paused"
+    assert _tealet_capi_client.capi_throw(t, RuntimeError("boom-none"), 0, None) == "via-capi-none"
+
+
+def test_capi_client_throw_with_explicit_return_target_sets_redirect_target():
+    class QueryTealet(_tealet.tealet):
+        def resolve_target(self, result, exc, exc_target):
+            if exc is not None and exc_target is not None:
+                return exc_target, "via-capi-explicit", True
+            return super().resolve_target(result, exc, exc_target)
+
+    def parked(current, _arg):
+        msg = current.main().switch("ready")
+        return current.main(), ("received", msg)
+
+    def worker(current, _arg):
+        current.main().switch("paused")
+        return current.main()
+
+    redirect = _tealet.tealet()
+    assert redirect.run(parked, None) == "ready"
+
+    t = QueryTealet()
+    assert t.run(worker, None) == "paused"
+    assert _tealet_capi_client.capi_throw(t, RuntimeError("boom-explicit"), 0, redirect) == (
+        "received",
+        "via-capi-explicit",
+    )
+
+
 def test_capi_client_set_pending_exception_then_switch():
     def parked(current, _arg):
         try:

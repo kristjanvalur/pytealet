@@ -267,6 +267,7 @@ static PyObject *client_capi_throw(PyObject *module, PyObject *args) {
     PyObject *target;
     PyObject *exc;
     PyObject *flags_obj = NULL;
+    PyObject *return_target = NULL;
     uint32_t flags = PYTEALET_THROW_FLAGS_DEFAULT;
 
     if (!state)
@@ -274,7 +275,7 @@ static PyObject *client_capi_throw(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    if (!PyArg_ParseTuple(args, "OO|O:capi_throw", &target, &exc, &flags_obj))
+    if (!PyArg_ParseTuple(args, "OO|OO:capi_throw", &target, &exc, &flags_obj, &return_target))
         return NULL;
 
     if (flags_obj != NULL) {
@@ -282,7 +283,7 @@ static PyObject *client_capi_throw(PyObject *module, PyObject *args) {
             return NULL;
     }
 
-    return state->api->throw_(state->ctx, target, exc, flags);
+    return state->api->throw_(state->ctx, target, exc, return_target, flags);
 }
 
 static PyObject *client_capi_set_pending_exception(PyObject *module, PyObject *args) {

@@ -312,11 +312,11 @@ static PyObject *PyTealetApi_SwitchForward(PyTealet_CAPI_Context *ctx, PyObject 
 }
 
 static PyObject *PyTealetApi_ThrowForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exc,
-                                          uint32_t flags) {
+                                          PyObject *return_target, uint32_t flags) {
     PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return NULL;
-    return PyTealetApi_Throw(mstate, target, exc, flags);
+    return PyTealetApi_Throw(mstate, target, exc, return_target, flags);
 }
 
 static int PyTealetApi_SetExceptionForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exc,

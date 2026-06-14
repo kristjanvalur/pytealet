@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 
-#define PYTEALET_CAPI_ABI_VERSION 2u
+#define PYTEALET_CAPI_ABI_VERSION 3u
 #define PYTEALET_CAPI_CAPSULE_NAME "_tealet._C_API"
 
 /* Feature flags published in PyTealet_CAPI.feature_flags. */
@@ -107,8 +107,14 @@ typedef struct PyTealet_CAPI {
     /* Equivalent to target.switch(arg, panic=...) using C flags. */
     PyObject *(*switch_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *arg, uint32_t flags);
 
-    /* Equivalent to target.throw(exception), with optional transfer flags. */
-    PyObject *(*throw_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, uint32_t flags);
+    /* Equivalent to target.throw(exception, return_target=...), with optional transfer flags.
+     * return_target semantics:
+     * - NULL: use current tealet as default return target
+     * - Py_None: no default return target
+     * - tealet object: explicit default return target
+     */
+    PyObject *(*throw_)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, PyObject *return_target,
+                        uint32_t flags);
 
     /* Equivalent to target.set_pending_exception(exception, fallback). Returns 0 on success, -1 on error. */
     int (*set_pending_exception)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *exception, PyObject *fallback);

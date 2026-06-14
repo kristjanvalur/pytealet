@@ -351,6 +351,47 @@ class TestResolveTargetHook:
         assert t.switch() == ("received", "via-query")
         assert t.state == _tealet.STATE_EXIT
 
+    def test_throw_with_return_target_none_omits_uncaught_redirect_target(self):
+        class QueryTealet(_tealet.tealet):
+            def resolve_target(self, result, exc, exc_target):
+                if exc is not None:
+                    assert exc_target is None
+                    return _tealet.main(), "via-none", True
+                return super().resolve_target(result, exc, exc_target)
+
+        def worker(current, _arg):
+            current.main().switch("paused")
+            return current.main()
+
+        t = QueryTealet()
+        assert t.run(worker, None) == "paused"
+        assert t.throw(ValueError("route-none"), return_target=None) == "via-none"
+        assert t.state == _tealet.STATE_EXIT
+
+    def test_throw_with_explicit_return_target_sets_uncaught_redirect_target(self):
+        class QueryTealet(_tealet.tealet):
+            def resolve_target(self, result, exc, exc_target):
+                if exc is not None:
+                    if exc_target is not None:
+                        return exc_target, "via-explicit", True
+                return super().resolve_target(result, exc, exc_target)
+
+        def parked(current, _arg):
+            msg = current.main().switch("ready")
+            return current.main(), ("received", msg)
+
+        def worker(current, _arg):
+            current.main().switch("paused")
+            return current.main()
+
+        redirect = _tealet.tealet()
+        assert redirect.run(parked, None) == "ready"
+
+        t = QueryTealet()
+        assert t.run(worker, None) == "paused"
+        assert t.throw(ValueError("route-explicit"), return_target=redirect) == ("received", "via-explicit")
+        assert t.state == _tealet.STATE_EXIT
+
 
 class TestPrepare:
     def test_prepare_returns_self_for_chaining(self):

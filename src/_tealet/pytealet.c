@@ -1563,15 +1563,17 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
                                 PyObject *kwnames) {
     PyTealetModuleState *mstate = GetModuleStateFromClass(defining_class);
     PyObject *exc = NULL;
+    PyObject *return_target = NULL;
 
     if (!mstate)
         return NULL;
 
-    if (nargs != 1) {
-        PyErr_Format(PyExc_TypeError, "throw() takes 1 argument (%zd given)", nargs);
+    if (nargs > 1) {
+        PyErr_Format(PyExc_TypeError, "throw() takes at most 1 positional argument (%zd given)", nargs);
         return NULL;
     }
-    exc = args[0];
+    if (nargs == 1)
+        exc = args[0];
 
     if (kwnames && PyTuple_GET_SIZE(kwnames) > 0) {
         Py_ssize_t i;
@@ -1584,6 +1586,8 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
             }
             if (PyUnicode_CompareWithASCIIString(key, "exception") == 0) {
                 exc = val;
+            } else if (PyUnicode_CompareWithASCIIString(key, "return_target") == 0) {
+                return_target = val;
             } else {
                 PyErr_Format(PyExc_TypeError, "throw() got an unexpected keyword argument '%U'", key);
                 return NULL;
@@ -1596,17 +1600,19 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
         return NULL;
     }
 
-    return PyTealetApi_Throw(mstate, self, exc, PYTEALET_THROW_FLAGS_DEFAULT);
+    return PyTealetApi_Throw(mstate, self, exc, return_target, PYTEALET_THROW_FLAGS_DEFAULT);
 }
 
 /* C API throw primitive: inject exception and transfer immediately.
  * - RUN target: inject then switch (flags may request panic transfer).
  * - NEW/STUB target: inject then run (panic throw flag is not supported).
  */
-PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc, uint32_t flags) {
+PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc, PyObject *return_target,
+                            uint32_t flags) {
     PyTealetObject *target;
     PyTealetObject *current;
     PyTealetMainData *mdata = NULL;
+    PyObject *fallback;
     uint32_t unknown_flags = flags & ~(uint32_t)PYTEALET_THROW_PANIC;
 
     if (!mstate || !mstate->tealet_type) {
@@ -1638,9 +1644,25 @@ PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, P
     if (CheckTarget(mstate, target, current, "throw()"))
         return NULL;
 
+    if (!return_target) {
+        fallback = (PyObject *)current;
+    } else if (return_target == Py_None) {
+        fallback = Py_None;
+    } else {
+        PyTealetObject *fallback_target;
+        if (!PyObject_TypeCheck(return_target, mstate->tealet_type)) {
+            PyErr_SetString(PyExc_TypeError, "throw() return_target must be a _tealet.tealet instance or None");
+            return NULL;
+        }
+        fallback_target = (PyTealetObject *)return_target;
+        if (CheckTarget(mstate, fallback_target, current, "throw() return_target"))
+            return NULL;
+        fallback = return_target;
+    }
+
     if (target->state == STATE_RUN) {
         uint32_t switch_flags = (flags & PYTEALET_THROW_PANIC) ? PYTEALET_SWITCH_PANIC : PYTEALET_SWITCH_FLAGS_DEFAULT;
-        if (pytealet_set_pending_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
+        if (pytealet_set_pending_exception_inner(mstate, target, current, mdata, exc, fallback) < 0)
             return NULL;
         return PyTealetApi_Switch(mstate, target_obj, NULL, switch_flags);
     }
@@ -1654,7 +1676,7 @@ PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, P
             return NULL;
         }
 
-        if (pytealet_set_pending_exception_inner(mstate, target, current, mdata, exc, (PyObject *)current) < 0)
+        if (pytealet_set_pending_exception_inner(mstate, target, current, mdata, exc, fallback) < 0)
             return NULL;
 
         /* consume the prepared func.  We don't actually need it because the
@@ -1785,7 +1807,7 @@ static struct PyMethodDef pytealet_methods[] = {
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"switch", (PyCFunction)(void (*)(void))pytealet_switch, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"throw", (PyCFunction)(void (*)(void))pytealet_throw, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,
-     "throw(exception) -> object\n\n"
+        "throw(exception, *, return_target=current) -> object\n\n"
      "Inject exception into target and switch to it.\n"
      "No guarantee the caller resumes: target may catch and switch elsewhere."},
     {"set_pending_exception", (PyCFunction)(void (*)(void))pytealet_set_pending_exception, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,

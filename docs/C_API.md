@@ -80,8 +80,13 @@ Tealet/object operations:
 - `prepare(ctx, target, function_py, function_c) -> int`
 - `run(ctx, target, function_py, function_c, arg) -> PyObject *`
 - `switch_(ctx, target, arg, flags) -> PyObject *`
-- `throw_(ctx, target, exception, flags) -> PyObject *`
+- `throw_(ctx, target, exception, return_target, flags) -> PyObject *`
 - `set_pending_exception(ctx, target, exception, fallback) -> int`
+
+`throw_` return-target semantics:
+- `return_target == NULL`: use current tealet as default return target
+- `return_target == Py_None`: no default return target
+- `return_target` is tealet object: use that explicit default return target
 
 Metadata helpers:
 - `is_foreign(ctx, target) -> int`

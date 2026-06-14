@@ -59,7 +59,7 @@ Methods:
 - `run(function, arg=None) -> object`
 - `switch(arg=None, panic=False) -> object`
 - `set_pending_exception(exception, fallback=None) -> None`
-- `throw(exception) -> object`
+- `throw(exception, *, return_target=current) -> object`
 
 `resolve_target` is a class-level override hook for frameworks that need custom
 exit-target routing from the worker callback.

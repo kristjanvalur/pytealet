@@ -130,13 +130,17 @@ this tealet lineage.
     caught by the target flow.
 
 ```python
-tealet.throw(exception) -> result
+tealet.throw(exception, *, return_target=current) -> result
 ```
 Convenience API that combines injection and transfer.
-- `STATE_RUN` target: equivalent to `set_pending_exception(exception, fallback=current)`
-    followed by `switch()`.
+- `STATE_RUN` target: equivalent to
+    `set_pending_exception(exception, fallback=return_target)` followed by `switch()`.
 - `STATE_NEW`/`STATE_STUB` target: equivalent to
-    `set_pending_exception(exception, fallback=current)` followed by `run()`.
+    `set_pending_exception(exception, fallback=return_target)` followed by `run()`.
+- `return_target` tri-state:
+  - omitted: current tealet
+  - `None`: no fallback target
+  - tealet object: explicit fallback target
 - `run()` accepts missing callable arguments in this case because the queued
     exception is delivered before worker-call dispatch.
 
