@@ -457,7 +457,7 @@ class Channel:
             return
         current = _current_scheduler()
         owning = waiter._scheduler if isinstance(waiter, ScheduledTealet) else scheduler()
-        if prefer_immediate and current is owning and owning._is_owner_thread():
+        if prefer_immediate and current is owning:
             waiter.run()
             return
         owning._make_runnable(waiter)
@@ -1024,7 +1024,6 @@ class SimpleScheduler:
         self._task_set: set[tealet.tealet] = set()
         self._runner = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._owner_thread_id: int | None = None
         self._threadsafe_callbacks: deque[tuple[Callable[..., object], tuple[object, ...]]] = deque()
         self._threadsafe_lock = threading.Lock()
         self._pending_async_waits: set[tealet.tealet] = set()
@@ -1059,9 +1058,6 @@ class SimpleScheduler:
     def _enqueue_timer(self, when: float, handle: TimerHandle) -> None:
         heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
         self._break_wait()
-
-    def _is_owner_thread(self) -> bool:
-        return self._owner_thread_id is None or self._owner_thread_id == threading.get_ident()
 
     def _drain_threadsafe_callbacks(self) -> None:
         while True:
@@ -1189,7 +1185,7 @@ class SimpleScheduler:
         return fut.result()
 
     def _make_runnable(self, t: tealet.tealet) -> None:
-        if self._owner_thread_id is not None and not self._is_owner_thread():
+        if _current_scheduler() is not self:
             self.call_soon_threadsafe(self._make_runnable, t)
             return
         if t in self._task_set:
@@ -1267,7 +1263,7 @@ class SimpleScheduler:
         loop = self._loop
         if loop is not None:
             loop.call_soon_threadsafe(self._awakeup.set)
-        elif self._is_owner_thread():
+        elif _current_scheduler() is self:
             self._awakeup.set()
 
     def _wait_thread(self) -> None:
@@ -1294,22 +1290,16 @@ class SimpleScheduler:
             self._awakeup.clear()
 
     def run(self) -> None:
-        self._owner_thread_id = threading.get_ident()
-        try:
-            while self._tasks or self._timers:
-                self.pump()
-                self._wait_thread()
-        finally:
-            self._owner_thread_id = None
+        while self._tasks or self._timers:
+            self.pump()
+            self._wait_thread()
 
     async def arun(self) -> None:
         self._loop = asyncio.get_running_loop()
-        self._owner_thread_id = threading.get_ident()
         try:
             while self._tasks or self._timers or self._pending_async_waits:
                 if self._tasks or self._timers:
                     self.pump()
                 await self._wait_async()
         finally:
-            self._owner_thread_id = None
             self._loop = None
