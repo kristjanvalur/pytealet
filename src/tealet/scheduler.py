@@ -1016,10 +1016,16 @@ class TealetTask(tealet.tealet, Future[object]):
     def resolve_target(self, result, exc, exc_target):
         clear = False
         if exc is None:
-            Future.set_result(self, result)
+            self.set_result(result)
         else:
-            Future.set_exception(self, exc)
+            self.set_exception(exc)
             clear = True
+            if exc_target is not None:
+                try:
+                    exc_target._unlink()
+                except AttributeError:
+                    pass
+                return exc_target, None, clear
 
         # Scheduler-owned tasks always route via scheduler target selection,
         # even if task startup immediately raises before user code returns.
