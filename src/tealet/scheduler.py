@@ -79,62 +79,6 @@ def _current_scheduler() -> SimpleScheduler | None:
     return getattr(_scheduler, "instance", None)
 
 
-class TealetTask(tealet.tealet):
-    """Tealet wrapper that tracks scheduler/event placement."""
-
-    def __init__(self, owning_scheduler: BaseScheduler):
-        super().__init__()
-        self.link: Linkable | None = None
-        self._future: Future[object] | None = None
-        self._scheduler: BaseScheduler = owning_scheduler
-
-    def is_waiting(self):
-        if self.link is None:
-            return False
-        return self.link._query_waiting(self)
-
-    def is_runnable(self):
-        if self.link is None:
-            return False
-        return self.link._query_runnable(self)
-
-    def is_blocked(self):
-        return self._scheduler._is_blocked(self)
-
-    def is_running(self):
-        return tealet.current() is self
-
-    def get_scheduler(self) -> BaseScheduler:
-        return self._scheduler
-
-    def _unlink(self):
-        if self.link is not None:
-            self.link._unlink(self)
-        self._scheduler._unlink_pending_async_wait(self)
-
-    def run(self):
-        self._scheduler._target_run(self)
-
-    def throw(self, exc: BaseException):
-        self._scheduler._target_throw(self, exc)
-
-    def _throw_from_scheduler(self, exc: BaseException):
-        super().throw(exc)
-
-    def resolve_target(self, result, exc, exc_target):
-        clear = False
-        if self._future is not None and not self._future.done():
-            if exc is None:
-                self._future.set_result(result)
-            elif not self._future.cancelled():
-                self._future.set_exception(exc)
-                clear = True
-
-        # Scheduler-owned tasks always route via scheduler target selection,
-        # even if task startup immediately raises before user code returns.
-        return self._scheduler._find_target(task_exit=True), None, clear
-
-
 class Event(Linkable):
     """Minimal event primitive for scheduler-driven wait/wake."""
 
@@ -198,7 +142,7 @@ class Event(Linkable):
     def set(self) -> None:
         self._is_set = True
         for waiter in self._waiters:
-            owning = waiter._scheduler if isinstance(waiter, TealetTask) else scheduler()
+            owning = waiter.get_scheduler() if hasattr(waiter, "get_scheduler") else scheduler()
             owning._make_runnable(waiter)
         self._waiters.clear()
         for waiter in self._async_waiters:
@@ -1027,6 +971,62 @@ class Future(Generic[T]):
         return self._exception
 
 
+class TealetTask(tealet.tealet, Future[object]):
+    """Tealet task that is also a Future for its completion result."""
+
+    def __init__(self, owning_scheduler: BaseScheduler):
+        tealet.tealet.__init__(self)
+        Future.__init__(self)
+        self.link: Linkable | None = None
+        self._scheduler: BaseScheduler = owning_scheduler
+
+    def is_waiting(self):
+        if self.link is None:
+            return False
+        return self.link._query_waiting(self)
+
+    def is_runnable(self):
+        if self.link is None:
+            return False
+        return self.link._query_runnable(self)
+
+    def is_blocked(self):
+        return self._scheduler._is_blocked(self)
+
+    def is_running(self):
+        return tealet.current() is self
+
+    def get_scheduler(self) -> BaseScheduler:
+        return self._scheduler
+
+    def _unlink(self):
+        if self.link is not None:
+            self.link._unlink(self)
+        self._scheduler._unlink_pending_async_wait(self)
+
+    def run(self):
+        self._scheduler._target_run(self)
+
+    def throw(self, exc: BaseException):
+        self._scheduler._target_throw(self, exc)
+
+    def _throw_from_scheduler(self, exc: BaseException):
+        super().throw(exc)
+
+    def resolve_target(self, result, exc, exc_target):
+        clear = False
+        if not self.done():
+            if exc is None:
+                self.set_result(result)
+            elif not self.cancelled():
+                self.set_exception(exc)
+                clear = True
+
+        # Scheduler-owned tasks always route via scheduler target selection,
+        # even if task startup immediately raises before user code returns.
+        return self._scheduler._find_target(task_exit=True), None, clear
+
+
 class RawTimeoutError(BaseException):
     pass
 
@@ -1176,17 +1176,23 @@ class SimpleScheduler(BaseScheduler):
             except AttributeError:
                 pass
 
-    def spawn(self, func: Callable[..., T], *args, **kwargs) -> Future[T]:
-        future: Future[T] = Future()
+    def spawn(self, func: Callable[..., T], *args, **kwargs) -> TealetTask:
+        task_ref: dict[str, TealetTask] = {}
 
         def task_main(current: tealet.tealet, _arg: object):
-            return func(*args, **kwargs)
+            try:
+                return func(*args, **kwargs)
+            except BaseException as exc:
+                task = task_ref.get("task")
+                if task is not None and not task.done() and not task.cancelled():
+                    task.set_exception(exc)
+                return None
 
         t = TealetTask(self)
-        t._future = future
+        task_ref["task"] = t
         t.prepare(task_main)
         self._make_runnable(t)
-        return future
+        return t
 
     def _schedule(self, enqueue=None) -> None:
         self._run_ready_timers()
