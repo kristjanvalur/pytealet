@@ -24,6 +24,10 @@ def scheduler() -> SimpleScheduler:
     return _scheduler.instance
 
 
+def _current_scheduler() -> SimpleScheduler | None:
+    return getattr(_scheduler, "instance", None)
+
+
 class ScheduledTealet(tealet.tealet):
     """Tealet wrapper that tracks scheduler/event placement."""
 
@@ -31,6 +35,7 @@ class ScheduledTealet(tealet.tealet):
         super().__init__()
         self.link = None
         self._future: Future[object] | None = None
+        self._scheduler: SimpleScheduler | None = None
 
     def is_waiting(self):
         return isinstance(self.link, Event)
@@ -50,10 +55,12 @@ class ScheduledTealet(tealet.tealet):
         scheduler()._unlink_pending_async_wait(self)
 
     def run(self):
-        scheduler()._target_run(self)
+        owning = self._scheduler if self._scheduler is not None else scheduler()
+        owning._target_run(self)
 
     def throw(self, exc: BaseException):
-        scheduler()._target_throw(self, exc)
+        owning = self._scheduler if self._scheduler is not None else scheduler()
+        owning._target_throw(self, exc)
 
     def _throw_from_scheduler(self, exc: BaseException):
         super().throw(exc)
@@ -129,7 +136,8 @@ class Event:
     def set(self) -> None:
         self._is_set = True
         for waiter in self._waiters:
-            scheduler()._make_runnable(waiter)
+            owning = waiter._scheduler if isinstance(waiter, ScheduledTealet) else scheduler()
+            owning._make_runnable(waiter)
         self._waiters.clear()
         for waiter in self._async_waiters:
             if not waiter.done():
@@ -429,16 +437,19 @@ class Channel:
         if isinstance(waiter, Event):
             waiter.set()
             return
-        scheduler()._make_runnable(waiter)
+        owning = waiter._scheduler if isinstance(waiter, ScheduledTealet) else scheduler()
+        owning._make_runnable(waiter)
 
     def _wake_sync(self, waiter: tealet.tealet | Event, prefer_immediate: bool) -> None:
         if isinstance(waiter, Event):
             waiter.set()
             return
-        if prefer_immediate:
+        current = _current_scheduler()
+        owning = waiter._scheduler if isinstance(waiter, ScheduledTealet) else scheduler()
+        if prefer_immediate and current is owning and owning._is_owner_thread():
             waiter.run()
             return
-        scheduler()._make_runnable(waiter)
+        owning._make_runnable(waiter)
 
     def _link_sender(self, waiter: tealet.tealet | Event, packet: tuple[bool, object]) -> None:
         self._packets[waiter] = packet
@@ -996,6 +1007,9 @@ class SimpleScheduler:
         self._task_set: set[tealet.tealet] = set()
         self._runner = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._owner_thread_id: int | None = None
+        self._threadsafe_callbacks: deque[tuple[Callable[..., object], tuple[object, ...]]] = deque()
+        self._threadsafe_lock = threading.Lock()
         self._pending_async_waits: set[tealet.tealet] = set()
         self._timers: list[tuple[float, int, TimerHandle]] = []
         self._timer_sequence = itertools.count()
@@ -1010,6 +1024,11 @@ class SimpleScheduler:
     def call_soon(self, callback: Callable[..., object], *args: object) -> TimerHandle:
         return self.call_at(self.time(), callback, *args)
 
+    def call_soon_threadsafe(self, callback: Callable[..., object], *args: object) -> None:
+        with self._threadsafe_lock:
+            self._threadsafe_callbacks.append((callback, args))
+        self._break_wait()
+
     def call_later(self, delay: float, callback: Callable[..., object], *args: object) -> TimerHandle:
         if delay < 0:
             delay = 0
@@ -1017,11 +1036,29 @@ class SimpleScheduler:
 
     def call_at(self, when: float, callback: Callable[..., object], *args: object) -> TimerHandle:
         handle = TimerHandle(when, callback, args)
-        heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
-        self._break_wait()
+        if self._owner_thread_id is not None and not self._is_owner_thread():
+            self.call_soon_threadsafe(self._enqueue_timer, when, handle)
+        else:
+            self._enqueue_timer(when, handle)
         return handle
 
+    def _enqueue_timer(self, when: float, handle: TimerHandle) -> None:
+        heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
+        self._break_wait()
+
+    def _is_owner_thread(self) -> bool:
+        return self._owner_thread_id is None or self._owner_thread_id == threading.get_ident()
+
+    def _drain_threadsafe_callbacks(self) -> None:
+        while True:
+            with self._threadsafe_lock:
+                if not self._threadsafe_callbacks:
+                    return
+                callback, args = self._threadsafe_callbacks.popleft()
+            callback(*args)
+
     def _run_ready_timers(self) -> None:
+        self._drain_threadsafe_callbacks()
         now = self.time()
         while self._timers and self._timers[0][0] <= now:
             _, _, handle = heapq.heappop(self._timers)
@@ -1069,6 +1106,7 @@ class SimpleScheduler:
 
         t = ScheduledTealet()
         t._future = future
+        t._scheduler = self
         t.prepare(task_main)
         self._make_runnable(t)
         return future
@@ -1132,12 +1170,17 @@ class SimpleScheduler:
         return fut.result()
 
     def _make_runnable(self, t: tealet.tealet) -> None:
+        if self._owner_thread_id is not None and not self._is_owner_thread():
+            self.call_soon_threadsafe(self._make_runnable, t)
+            return
         if t in self._task_set:
             return
         try:
             t.link = self
         except AttributeError:
             pass
+        if isinstance(t, ScheduledTealet):
+            t._scheduler = self
         self._tasks.append(t)
         self._task_set.add(t)
         self._break_wait()
@@ -1202,7 +1245,11 @@ class SimpleScheduler:
 
     def _break_wait(self) -> None:
         self._wakeup.set()
-        self._awakeup.set()
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._awakeup.set)
+        elif self._is_owner_thread():
+            self._awakeup.set()
 
     def _wait_thread(self) -> None:
         sleep_for = self._time_to_next_timer()
@@ -1228,16 +1275,22 @@ class SimpleScheduler:
             self._awakeup.clear()
 
     def run(self) -> None:
-        while self._tasks or self._timers:
-            self.pump()
-            self._wait_thread()
+        self._owner_thread_id = threading.get_ident()
+        try:
+            while self._tasks or self._timers:
+                self.pump()
+                self._wait_thread()
+        finally:
+            self._owner_thread_id = None
 
     async def arun(self) -> None:
         self._loop = asyncio.get_running_loop()
+        self._owner_thread_id = threading.get_ident()
         try:
             while self._tasks or self._timers or self._pending_async_waits:
                 if self._tasks or self._timers:
                     self.pump()
                 await self._wait_async()
         finally:
+            self._owner_thread_id = None
             self._loop = None
