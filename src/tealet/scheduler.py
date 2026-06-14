@@ -1015,12 +1015,11 @@ class TealetTask(tealet.tealet, Future[object]):
 
     def resolve_target(self, result, exc, exc_target):
         clear = False
-        if not self.done():
-            if exc is None:
-                self.set_result(result)
-            elif not self.cancelled():
-                self.set_exception(exc)
-                clear = True
+        if exc is None:
+            Future.set_result(self, result)
+        else:
+            Future.set_exception(self, exc)
+            clear = True
 
         # Scheduler-owned tasks always route via scheduler target selection,
         # even if task startup immediately raises before user code returns.
@@ -1177,19 +1176,10 @@ class SimpleScheduler(BaseScheduler):
                 pass
 
     def spawn(self, func: Callable[..., T], *args, **kwargs) -> TealetTask:
-        task_ref: dict[str, TealetTask] = {}
-
         def task_main(current: tealet.tealet, _arg: object):
-            try:
-                return func(*args, **kwargs)
-            except BaseException as exc:
-                task = task_ref.get("task")
-                if task is not None and not task.done() and not task.cancelled():
-                    task.set_exception(exc)
-                return None
+            return func(*args, **kwargs)
 
         t = TealetTask(self)
-        task_ref["task"] = t
         t.prepare(task_main)
         self._make_runnable(t)
         return t
