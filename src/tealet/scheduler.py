@@ -147,8 +147,7 @@ class Event(Linkable):
         self._waiters.clear()
         for waiter in self._async_waiters:
             if not waiter.done():
-                # support cross thread wakeup
-                waiter.get_loop().call_soon_threadsafe(waiter.set_result, True)
+                waiter.set_result(True)
         self._async_waiters.clear()
 
     def clear(self) -> None:
@@ -1134,7 +1133,7 @@ class SimpleScheduler(BaseScheduler):
     def call_soon_threadsafe(self, callback: Callable[..., object], *args: object) -> None:
         with self._threadsafe_lock:
             self._threadsafe_callbacks.append((callback, args))
-        self._break_wait()
+        self._break_wait_threadsafe()
 
     def call_later(self, delay: float, callback: Callable[..., object], *args: object) -> TimerHandle:
         if delay < 0:
@@ -1148,7 +1147,7 @@ class SimpleScheduler(BaseScheduler):
 
     def _enqueue_timer(self, when: float, handle: TimerHandle) -> None:
         heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
-        self._break_wait()
+        self._break_wait_local()
 
     def _drain_threadsafe_callbacks(self) -> None:
         while True:
@@ -1283,7 +1282,7 @@ class SimpleScheduler(BaseScheduler):
             t._scheduler = self
         self._tasks.append(t)
         self._task_set.add(t)
-        self._break_wait()
+        self._break_wait_local()
 
     def _target_run(self, target: tealet.tealet) -> None:
         if target is tealet.current():
@@ -1343,13 +1342,24 @@ class SimpleScheduler(BaseScheduler):
             self._runner = None
             self._target_count = None
 
-    def _break_wait(self) -> None:
+    def _break_wait_threadsafe(self) -> None:
         self._wakeup.set()
         loop = self._loop
         if loop is not None:
             loop.call_soon_threadsafe(self._awakeup.set)
         elif _current_scheduler() is self:
             self._awakeup.set()
+
+    def _break_wait_local(self) -> None:
+        self._wakeup.set()
+        loop = self._loop
+        if loop is not None:
+            self._awakeup.set()
+        elif _current_scheduler() is self:
+            self._awakeup.set()
+
+    def _break_wait(self) -> None:
+        self._break_wait_local()
 
     def _wait_thread(self) -> None:
         sleep_for = self._time_to_next_timer()
