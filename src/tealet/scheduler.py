@@ -12,6 +12,8 @@ from typing import Callable, Generic, TypeVar
 
 import tealet
 
+from .locks import Event, InvalidStateError, set_scheduler_resolver
+
 T = TypeVar("T")
 
 
@@ -68,27 +70,13 @@ class BaseScheduler(Linkable, ABC):
     def call_soon_threadsafe(self, callback: Callable[..., object], *args: object) -> None:
         """Schedule a callback from another scheduler/thread context."""
 
-
-from .locks import (
-    Barrier,
-    BoundedSemaphore,
-    Condition,
-    Event,
-    InvalidStateError,
-    LifoQueue,
-    Lock,
-    PriorityQueue,
-    Queue,
-    QueueEmpty,
-    QueueFull,
-    Semaphore,
-)
-
-
 def scheduler() -> SimpleScheduler:
     if not hasattr(_scheduler, "instance"):
         _scheduler.instance = SimpleScheduler()
     return _scheduler.instance
+
+
+set_scheduler_resolver(scheduler)
 
 
 def _current_scheduler() -> SimpleScheduler | None:

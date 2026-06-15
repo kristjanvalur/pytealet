@@ -10,8 +10,8 @@ from collections.abc import Iterable, Iterator
 from typing import Generic, TypeVar
 
 import tealet
+from tealet.locks import Event
 from tealet.scheduler import (
-    Event,
     TimeoutError,
     scheduler,
     timeout,

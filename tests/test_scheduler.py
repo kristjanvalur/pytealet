@@ -3,14 +3,11 @@ import asyncio
 import pytest
 
 import _tealet
-from tealet.scheduler import (
+from tealet.locks import (
     Barrier,
     BoundedSemaphore,
-    CancelledError,
-    Channel,
     Condition,
     Event,
-    Future,
     InvalidStateError,
     LifoQueue,
     Lock,
@@ -18,9 +15,14 @@ from tealet.scheduler import (
     Queue,
     QueueEmpty,
     QueueFull,
+    Semaphore,
+)
+from tealet.scheduler import (
+    CancelledError,
+    Channel,
+    Future,
     TealetTask,
     RawTimeoutError,
-    Semaphore,
     SimpleScheduler,
     TimeoutError,
     _scheduler,

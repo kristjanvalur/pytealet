@@ -10,10 +10,18 @@ import tealet
 T = TypeVar("T")
 
 
-def _scheduler_module():
-    from . import scheduler as scheduler_module
+_get_current_scheduler: Callable[[], object] | None = None
 
-    return scheduler_module
+
+def set_scheduler_resolver(resolver: Callable[[], object]) -> None:
+    global _get_current_scheduler
+    _get_current_scheduler = resolver
+
+
+def _current_scheduler() -> object:
+    if _get_current_scheduler is None:
+        raise RuntimeError("tealet.locks scheduler resolver is not configured")
+    return _get_current_scheduler()
 
 
 class Event:
@@ -54,7 +62,7 @@ class Event:
             return True
 
         current = tealet.current()
-        sched = _scheduler_module().scheduler()
+        sched = _current_scheduler()
         try:
             sched._schedule(lambda: self._link(current))
         except BaseException:
@@ -79,9 +87,8 @@ class Event:
 
     def set(self) -> None:
         self._is_set = True
-        scheduler_fn = _scheduler_module().scheduler
         for waiter in self._waiters:
-            owning = waiter.get_scheduler() if hasattr(waiter, "get_scheduler") else scheduler_fn()
+            owning = waiter.get_scheduler() if hasattr(waiter, "get_scheduler") else _current_scheduler()
             owning._make_runnable(waiter)
         self._waiters.clear()
         for waiter in self._async_waiters:
