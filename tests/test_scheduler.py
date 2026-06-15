@@ -19,6 +19,7 @@ from tealet.scheduler import (
     QueueEmpty,
     QueueFull,
     TealetTask,
+    RawTimeoutError,
     Semaphore,
     SimpleScheduler,
     TimeoutError,
@@ -1146,3 +1147,132 @@ class TestChannelExamples:
             assert got == 12
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+    def test_channel_async_receive_cancelled_with_pending_packet_delivers(self):
+        ch = Channel()
+
+        async def run() -> None:
+            recv_task = asyncio.create_task(ch.async_receive())
+            await asyncio.sleep(0)
+
+            # Queue payload first, then cancel before receiver resumes.
+            await ch.async_send(None)
+            recv_task.cancel()
+
+            got = await asyncio.wait_for(recv_task, timeout=1.0)
+            assert got is None
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+    def test_channel_async_receive_cancelled_without_packet_propagates(self):
+        ch = Channel()
+
+        async def run() -> None:
+            recv_task = asyncio.create_task(ch.async_receive())
+            await asyncio.sleep(0)
+            recv_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await recv_task
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+    def test_channel_send_raw_timeout_suppressed_when_packet_already_consumed(self):
+        s = scheduler()
+        ch = Channel(preference=0)
+        seen: list[object] = []
+
+        def sender() -> None:
+            try:
+                ch.send(5)
+                seen.append("send:ok")
+            except BaseException as exc:
+                seen.append(type(exc).__name__)
+
+        sender_task = s.spawn(sender)
+        s.pump(1)
+        assert ch.balance == 1
+
+        # Receiver consumes the packet first; timeout throw races after.
+        s.call_soon(ch.receive)
+        s.call_soon(sender_task.throw, RawTimeoutError())
+        s.run()
+
+        assert seen == ["send:ok"]
+        assert ch.balance == 0
+
+    def test_channel_async_send_cancelled_with_consumed_packet_returns(self):
+        ch = Channel()
+
+        async def run() -> None:
+            send_task = asyncio.create_task(ch.async_send(None))
+            await asyncio.sleep(0)
+
+            # Consume payload first, then race cancellation against sender wake.
+            got = await ch.async_receive()
+            assert got is None
+            send_task.cancel()
+
+            await asyncio.wait_for(send_task, timeout=1.0)
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+    def test_channel_receive_external_exception_drops_pending_packet(self):
+        s = scheduler()
+        ch = Channel(preference=0)
+        seen: list[str] = []
+
+        def receiver() -> None:
+            try:
+                ch.receive()
+            except RuntimeError as exc:
+                seen.append(f"receiver:exc:{exc}")
+
+        receiver_task = s.spawn(receiver)
+        s.pump(1)
+        assert ch.balance == -1
+
+        s.call_soon(ch.send, 42)
+        s.call_soon(receiver_task.throw, RuntimeError("interrupt"))
+        s.run()
+
+        assert "receiver:exc:interrupt" in seen
+        assert ch.balance == 0
+
+        # The pending packet must have been discarded with the external wake.
+        got: list[int] = []
+
+        def receiver2() -> None:
+            got.append(ch.receive())
+
+        s.spawn(receiver2)
+        s.pump(1)
+        assert ch.balance == -1
+
+        s.spawn(lambda: ch.send(99))
+        s.run()
+        assert got == [99]
+
+    def test_channel_receive_raw_timeout_suppressed_when_packet_already_delivered(self):
+        s = scheduler()
+        ch = Channel(preference=0)
+        seen: list[object] = []
+
+        def receiver() -> None:
+            try:
+                seen.append(ch.receive())
+            except BaseException as exc:
+                seen.append(type(exc).__name__)
+
+        receiver_task = s.spawn(receiver)
+        s.pump(1)
+        assert ch.balance == -1
+
+        # Sender callback runs first and delivers packet; timeout throw races after.
+        # Use None payload to ensure packet existence check does not treat None
+        # as "missing".
+        s.call_soon(ch.send, None)
+        s.call_soon(receiver_task.throw, RawTimeoutError())
+        s.run()
+
+        assert seen == [None]
+        assert ch.balance == 0

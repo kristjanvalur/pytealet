@@ -517,8 +517,14 @@ class Channel(Linkable):
         current = tealet.current()
         try:
             scheduler()._schedule(lambda: self._link_sender(current, packet))
-        except BaseException:
+        except BaseException as exc:
+            missing = object()
+            pending = self._packets.pop(current, missing)
             self._unlink_waiter(current)
+            if pending is missing and isinstance(exc, RawTimeoutError):
+                # Timeout-vs-delivery race: if receiver already consumed packet,
+                # treat send as successful and suppress timeout.
+                return
             raise
 
     async def async_send(self, value: object) -> None:
@@ -542,8 +548,12 @@ class Channel(Linkable):
         self._link_sender(waiter, packet)
         try:
             await waiter.async_wait()
-        except BaseException:
+        except BaseException as exc:
+            missing = object()
+            pending = self._packets.pop(waiter, missing)
             self._unlink_waiter(waiter)
+            if pending is missing and isinstance(exc, CancelledError):
+                return
             raise
 
     def send(self, value: object) -> None:
@@ -585,8 +595,14 @@ class Channel(Linkable):
         current = tealet.current()
         try:
             scheduler()._schedule(lambda: self._link_receiver(current))
-        except BaseException:
+        except BaseException as exc:
+            missing = object()
+            packet = self._packets.pop(current, missing)
             self._unlink_waiter(current)
+            if packet is not missing and isinstance(exc, RawTimeoutError):
+                # Timeout-vs-delivery race: if a packet was already delivered,
+                # consume the packet and suppress the timeout.
+                return self._deliver(packet)
             raise
 
         return self._deliver(self._packets.pop(current))
@@ -611,8 +627,16 @@ class Channel(Linkable):
         self._link_receiver(waiter)
         try:
             await waiter.async_wait()
-        except BaseException:
+        except BaseException as exc:
+            # Async timeouts surface as cancellation at this await point.
+            # We cannot reliably distinguish timeout cancellation from an
+            # explicit task cancellation here. If a packet is already queued,
+            # prefer delivering data over propagating cancellation.
+            missing = object()
+            packet = self._packets.pop(waiter, missing)
             self._unlink_waiter(waiter)
+            if packet is not missing and isinstance(exc, CancelledError):
+                return self._deliver(packet)
             raise
 
         return self._deliver(self._packets.pop(waiter))
