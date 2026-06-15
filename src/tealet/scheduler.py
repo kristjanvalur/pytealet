@@ -1106,6 +1106,56 @@ def timeout_at(when: float) -> Timeout:
     return Timeout(when)
 
 
+class _ThreadIdleWaiter:
+    def __init__(self, scheduler: SimpleScheduler) -> None:
+        self._scheduler = scheduler
+        self._wakeup = threading.Event()
+
+    def break_local(self) -> None:
+        self._wakeup.set()
+
+    def break_threadsafe(self) -> None:
+        self._wakeup.set()
+
+    def wait_for(self, timeout: float | None) -> None:
+        if timeout is None:
+            return
+        self._wakeup.wait(timeout=timeout)
+        self._wakeup.clear()
+
+
+class _AsyncIdleWaiter:
+    def __init__(self, scheduler: SimpleScheduler) -> None:
+        self._scheduler = scheduler
+        self._awakeup = asyncio.Event()
+
+    def break_local(self) -> None:
+        self._awakeup.set()
+
+    def break_threadsafe(self) -> None:
+        loop = self._scheduler._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._awakeup.set)
+        elif _current_scheduler() is self._scheduler:
+            self._awakeup.set()
+
+    async def wait_for(self, timeout: float | None) -> None:
+        if timeout is None:
+            # No scheduler timer is pending. We may still be alive because one or
+            # more tealets are blocked in wait_async() on external asyncio
+            # awaitables, so block until an explicit wakeup arrives.
+            await self._awakeup.wait()
+            self._awakeup.clear()
+            return
+        try:
+            async with asyncio.timeout(timeout):
+                await self._awakeup.wait()
+        except TimeoutError:
+            pass
+        finally:
+            self._awakeup.clear()
+
+
 class SimpleScheduler(BaseScheduler):
     """Very small cooperative scheduler for runnable tealets."""
 
@@ -1119,10 +1169,11 @@ class SimpleScheduler(BaseScheduler):
         self._pending_async_waits: set[tealet.tealet] = set()
         self._timers: list[tuple[float, int, TimerHandle]] = []
         self._timer_sequence = itertools.count()
-        self._wakeup = threading.Event()
-        self._awakeup = asyncio.Event()
         self._n_scheduled = 0
         self._target_count = None
+        self._thread_idle_waiter = _ThreadIdleWaiter(self)
+        self._async_idle_waiter = _AsyncIdleWaiter(self)
+        self._idle_waiter: _ThreadIdleWaiter | _AsyncIdleWaiter = self._thread_idle_waiter
 
     def time(self) -> float:
         return time.monotonic()
@@ -1343,53 +1394,33 @@ class SimpleScheduler(BaseScheduler):
             self._target_count = None
 
     def _break_wait_threadsafe(self) -> None:
-        self._wakeup.set()
-        loop = self._loop
-        if loop is not None:
-            loop.call_soon_threadsafe(self._awakeup.set)
-        elif _current_scheduler() is self:
-            self._awakeup.set()
+        self._idle_waiter.break_threadsafe()
 
     def _break_wait_local(self) -> None:
-        self._wakeup.set()
-        loop = self._loop
-        if loop is not None:
-            self._awakeup.set()
-        elif _current_scheduler() is self:
-            self._awakeup.set()
+        self._idle_waiter.break_local()
 
     def _break_wait(self) -> None:
         self._break_wait_local()
 
     def _wait_thread(self) -> None:
-        sleep_for = self._time_to_next_timer()
-        if sleep_for is not None:
-            self._wakeup.wait(timeout=sleep_for)
-            self._wakeup.clear()
+        self._thread_idle_waiter.wait_for(self._time_to_next_timer())
 
     async def _wait_async(self) -> None:
-        sleep_for = self._time_to_next_timer()
-        if sleep_for is None:
-            # No scheduler timer is pending. We may still be alive because one or
-            # more tealets are blocked in wait_async() on external asyncio
-            # awaitables, so block until an explicit wakeup arrives.
-            await self._awakeup.wait()
-            self._awakeup.clear()
-            return
-        try:
-            async with asyncio.timeout(sleep_for):
-                await self._awakeup.wait()
-        except TimeoutError:
-            pass
-        finally:
-            self._awakeup.clear()
+        await self._async_idle_waiter.wait_for(self._time_to_next_timer())
 
     def run(self) -> None:
-        while self._tasks or self._timers:
-            self.pump()
-            self._wait_thread()
+        previous_idle_waiter = self._idle_waiter
+        self._idle_waiter = self._thread_idle_waiter
+        try:
+            while self._tasks or self._timers:
+                self.pump()
+                self._wait_thread()
+        finally:
+            self._idle_waiter = previous_idle_waiter
 
     async def arun(self) -> None:
+        previous_idle_waiter = self._idle_waiter
+        self._idle_waiter = self._async_idle_waiter
         self._loop = asyncio.get_running_loop()
         try:
             while self._tasks or self._timers or self._pending_async_waits:
@@ -1398,3 +1429,4 @@ class SimpleScheduler(BaseScheduler):
                 await self._wait_async()
         finally:
             self._loop = None
+            self._idle_waiter = previous_idle_waiter
