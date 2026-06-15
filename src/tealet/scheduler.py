@@ -451,6 +451,7 @@ class Future(Generic[T]):
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._event = Event()
+        self._done_callbacks: list[Callable[[Future[T]], object]] = []
 
     def done(self) -> bool:
         return self._done
@@ -464,6 +465,7 @@ class Future(Generic[T]):
         self._cancelled = True
         self._done = True
         self._event.set()
+        self._run_done_callbacks()
         return True
 
     def set_result(self, value: T) -> None:
@@ -472,6 +474,7 @@ class Future(Generic[T]):
         self._result = value
         self._done = True
         self._event.set()
+        self._run_done_callbacks()
 
     def set_exception(self, exc: BaseException) -> None:
         if self._done:
@@ -481,6 +484,29 @@ class Future(Generic[T]):
         self._exception = exc
         self._done = True
         self._event.set()
+        self._run_done_callbacks()
+
+    def add_done_callback(self, callback: Callable[[Future[T]], object]) -> None:
+        if self._done:
+            callback(self)
+            return
+        self._done_callbacks.append(callback)
+
+    def remove_done_callback(self, callback: Callable[[Future[T]], object]) -> int:
+        removed = 0
+        while True:
+            try:
+                self._done_callbacks.remove(callback)
+            except ValueError:
+                break
+            removed += 1
+        return removed
+
+    def _run_done_callbacks(self) -> None:
+        callbacks = self._done_callbacks[:]
+        self._done_callbacks.clear()
+        for callback in callbacks:
+            callback(self)
 
     def _wait(self) -> bool:
         if self._done:

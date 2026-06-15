@@ -808,6 +808,50 @@ class TestFutureExamples:
         with pytest.raises(InvalidStateError):
             future.set_result(456)
 
+    def test_future_done_callback_runs_on_completion(self):
+        future: Future[int] = Future()
+        seen: list[str] = []
+
+        def on_done(done: Future[int]) -> None:
+            seen.append(f"done={done.result()}")
+
+        future.add_done_callback(on_done)
+        future.set_result(5)
+
+        assert seen == ["done=5"]
+
+    def test_future_done_callback_runs_immediately_when_already_done(self):
+        future: Future[int] = Future()
+        future.set_result(7)
+        seen: list[str] = []
+
+        def on_done(done: Future[int]) -> None:
+            seen.append(f"done={done.result()}")
+
+        future.add_done_callback(on_done)
+
+        assert seen == ["done=7"]
+
+    def test_future_remove_done_callback(self):
+        future: Future[int] = Future()
+        seen: list[str] = []
+
+        def cb_one(_done: Future[int]) -> None:
+            seen.append("one")
+
+        def cb_two(_done: Future[int]) -> None:
+            seen.append("two")
+
+        future.add_done_callback(cb_one)
+        future.add_done_callback(cb_one)
+        future.add_done_callback(cb_two)
+
+        assert future.remove_done_callback(cb_one) == 2
+
+        future.set_result(1)
+
+        assert seen == ["two"]
+
     def test_future_result_and_exception_require_done(self):
         future = Future()
 
