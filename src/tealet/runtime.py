@@ -9,7 +9,7 @@ from typing import Any
 from . import scheduler as scheduler_module
 
 
-class Runner:
+class AsyncRunner:
     """Run a scheduler inside an existing asyncio loop as a background task."""
 
     def __init__(
@@ -25,8 +25,7 @@ class Runner:
         self._pump_task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
 
-    @property
-    def scheduler(self) -> scheduler_module.SimpleScheduler | None:
+    def get_scheduler(self) -> scheduler_module.SimpleScheduler | None:
         return self._scheduler
 
     @property
@@ -90,13 +89,59 @@ class Runner:
 
 
 async def run_async(entry, /, *args: Any, scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None, **kwargs: Any):
-    """Convenience helper that runs one entry under a temporary Runner."""
+    """Convenience helper that runs one entry under a temporary AsyncRunner."""
 
-    runner = Runner(scheduler_factory=scheduler_factory)
+    runner = AsyncRunner(scheduler_factory=scheduler_factory)
     try:
         return await runner.run(entry, *args, **kwargs)
     finally:
         await runner.close()
+
+
+class Runner:
+    """Run scheduler-backed entries from synchronous code without asyncio."""
+
+    def __init__(
+        self,
+        *,
+        scheduler: scheduler_module.SimpleScheduler | None = None,
+        scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None,
+    ) -> None:
+        if scheduler is not None and scheduler_factory is not None:
+            raise ValueError("provide either scheduler or scheduler_factory, not both")
+        self._scheduler = scheduler
+        self._scheduler_factory = scheduler_factory
+
+    def get_scheduler(self) -> scheduler_module.SimpleScheduler | None:
+        return self._scheduler
+
+    def run(self, entry, /, *args: Any, **kwargs: Any):
+        scheduler = self._scheduler or self._create_scheduler()
+        self._scheduler = scheduler
+        previous = scheduler_module._current_scheduler()
+        scheduler_module.set_scheduler(scheduler)
+        try:
+            result = _invoke_sync_entry(entry, *args, **kwargs)
+            scheduler.run()
+            return result
+        finally:
+            scheduler_module.set_scheduler(previous)
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> "Runner":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def _create_scheduler(self) -> scheduler_module.SimpleScheduler:
+        factory = self._scheduler_factory or scheduler_module.get_default_scheduler_factory()
+        created = factory()
+        if not isinstance(created, scheduler_module.SimpleScheduler):
+            raise TypeError("scheduler factory must return a SimpleScheduler instance")
+        return created
 
 
 async def _invoke_entry(entry, /, *args: Any, **kwargs: Any):
@@ -114,3 +159,20 @@ async def _invoke_entry(entry, /, *args: Any, **kwargs: Any):
         return result
 
     raise TypeError("entry must be a callable or awaitable")
+
+
+def _invoke_sync_entry(entry, /, *args: Any, **kwargs: Any):
+    if inspect.isawaitable(entry):
+        if inspect.iscoroutine(entry):
+            entry.close()
+        raise TypeError("sync runner entry must be synchronous")
+
+    if callable(entry):
+        result = entry(*args, **kwargs)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("sync runner entry must be synchronous")
+        return result
+
+    raise TypeError("entry must be a callable")
