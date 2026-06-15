@@ -19,6 +19,7 @@ T = TypeVar("T")
 
 # a thread local scheduler
 _scheduler = threading.local()
+_default_scheduler_factory: Callable[[], SimpleScheduler] = lambda: SimpleScheduler()
 
 
 class Linkable(ABC):
@@ -71,12 +72,77 @@ class BaseScheduler(Linkable, ABC):
         """Schedule a callback from another scheduler/thread context."""
 
 def scheduler() -> SimpleScheduler:
-    if not hasattr(_scheduler, "instance"):
-        _scheduler.instance = SimpleScheduler()
-    return _scheduler.instance
+    return get_scheduler()
 
 
-set_scheduler_resolver(scheduler)
+def new_scheduler() -> SimpleScheduler:
+    created = _default_scheduler_factory()
+    if not isinstance(created, SimpleScheduler):
+        raise TypeError("scheduler factory must return a SimpleScheduler instance")
+    return created
+
+
+def set_default_scheduler_factory(factory: Callable[[], SimpleScheduler] | None) -> None:
+    global _default_scheduler_factory
+    if factory is None:
+        _default_scheduler_factory = lambda: SimpleScheduler()
+        return
+    _default_scheduler_factory = factory
+
+
+def get_default_scheduler_factory() -> Callable[[], SimpleScheduler]:
+    return _default_scheduler_factory
+
+
+def set_scheduler(value: SimpleScheduler | None) -> None:
+    if value is None:
+        if hasattr(_scheduler, "instance"):
+            del _scheduler.instance
+        return
+    _scheduler.instance = value
+
+
+def get_scheduler() -> SimpleScheduler:
+    current = getattr(_scheduler, "instance", None)
+    if current is None:
+        current = new_scheduler()
+        _scheduler.instance = current
+    return current
+
+
+def _running_scheduler_stack() -> list[SimpleScheduler]:
+    stack = getattr(_scheduler, "running_stack", None)
+    if stack is None:
+        stack = []
+        _scheduler.running_stack = stack
+    return stack
+
+
+def _push_running_scheduler(value: SimpleScheduler) -> None:
+    _running_scheduler_stack().append(value)
+
+
+def _pop_running_scheduler(value: SimpleScheduler) -> None:
+    stack = _running_scheduler_stack()
+    if not stack:
+        return
+    if stack[-1] is value:
+        stack.pop()
+        return
+    try:
+        stack.remove(value)
+    except ValueError:
+        pass
+
+
+def get_running_scheduler() -> SimpleScheduler:
+    stack = getattr(_scheduler, "running_stack", None)
+    if stack:
+        return stack[-1]
+    raise RuntimeError("no running scheduler")
+
+
+set_scheduler_resolver(get_scheduler)
 
 
 def _current_scheduler() -> SimpleScheduler | None:
@@ -870,22 +936,26 @@ class SimpleScheduler(BaseScheduler):
     def run(self) -> None:
         previous_idle_waiter = self._idle_waiter
         self._idle_waiter = self._thread_idle_waiter
+        _push_running_scheduler(self)
         try:
             while self._tasks or self._timers:
                 self.pump()
                 self._wait_thread()
         finally:
+            _pop_running_scheduler(self)
             self._idle_waiter = previous_idle_waiter
 
     async def arun(self) -> None:
         previous_idle_waiter = self._idle_waiter
         self._idle_waiter = self._async_idle_waiter
         self._loop = asyncio.get_running_loop()
+        _push_running_scheduler(self)
         try:
             while self._tasks or self._timers or self._pending_async_waits:
                 if self._tasks or self._timers:
                     self.pump()
                 await self._wait_async()
         finally:
+            _pop_running_scheduler(self)
             self._loop = None
             self._idle_waiter = previous_idle_waiter

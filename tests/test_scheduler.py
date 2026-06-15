@@ -21,6 +21,12 @@ from tealet.scheduler import (
     CancelledError,
     Channel,
     Future,
+    get_default_scheduler_factory,
+    get_running_scheduler,
+    get_scheduler,
+    new_scheduler,
+    set_default_scheduler_factory,
+    set_scheduler,
     TealetTask,
     RawTimeoutError,
     SimpleScheduler,
@@ -41,10 +47,100 @@ from tealet_examples import (
 @pytest.fixture(autouse=True)
 def _reset_scheduler_tls():
     _scheduler.instance = SimpleScheduler()
+    set_default_scheduler_factory(None)
+    if hasattr(_scheduler, "running_stack"):
+        _scheduler.running_stack = []
     try:
         yield
     finally:
         _scheduler.instance = SimpleScheduler()
+        set_default_scheduler_factory(None)
+        if hasattr(_scheduler, "running_stack"):
+            _scheduler.running_stack = []
+
+
+class TestSchedulerAccessors:
+    def test_default_scheduler_factory_is_callable(self):
+        factory = get_default_scheduler_factory()
+        assert callable(factory)
+
+    def test_set_default_scheduler_factory_used_by_new_scheduler(self):
+        custom = SimpleScheduler()
+
+        def factory() -> SimpleScheduler:
+            return custom
+
+        set_default_scheduler_factory(factory)
+        assert new_scheduler() is custom
+
+    def test_set_default_scheduler_factory_used_by_get_scheduler(self):
+        custom = SimpleScheduler()
+
+        def factory() -> SimpleScheduler:
+            return custom
+
+        set_default_scheduler_factory(factory)
+        set_scheduler(None)
+
+        assert get_scheduler() is custom
+        assert get_scheduler() is custom
+
+    def test_default_scheduler_factory_must_return_simple_scheduler(self):
+        def bad_factory():
+            return object()
+
+        set_default_scheduler_factory(bad_factory)
+        with pytest.raises(TypeError, match="scheduler factory must return"):
+            new_scheduler()
+
+    def test_new_scheduler_returns_unbound_instance(self):
+        s = new_scheduler()
+        assert isinstance(s, SimpleScheduler)
+        assert s is not get_scheduler()
+
+    def test_set_and_get_scheduler(self):
+        s = new_scheduler()
+        set_scheduler(s)
+        assert get_scheduler() is s
+
+    def test_get_scheduler_creates_when_unbound(self):
+        set_scheduler(None)
+        s = get_scheduler()
+        assert isinstance(s, SimpleScheduler)
+        assert get_scheduler() is s
+
+    def test_get_running_scheduler_raises_when_not_running(self):
+        with pytest.raises(RuntimeError, match="no running scheduler"):
+            get_running_scheduler()
+
+    def test_get_running_scheduler_during_run(self):
+        s = new_scheduler()
+        set_scheduler(s)
+        seen: list[SimpleScheduler] = []
+
+        def check_running() -> None:
+            seen.append(get_running_scheduler())
+
+        s.spawn(check_running)
+        s.run()
+
+        assert seen == [s]
+
+    def test_get_running_scheduler_during_arun(self):
+        s = new_scheduler()
+        set_scheduler(s)
+        seen: list[SimpleScheduler] = []
+
+        def check_running() -> None:
+            seen.append(get_running_scheduler())
+
+        async def run() -> None:
+            s.spawn(check_running)
+            await s.arun()
+
+        asyncio.run(run())
+
+        assert seen == [s]
 
 
 class TestSchedulerExamples:
