@@ -517,16 +517,14 @@ class Future(Generic[T]):
 
         return self._event.wait()
 
-    def wait(self) -> None:
+    def wait(self) -> T:
         self._wait()
-        if self._cancelled:
-            raise CancelledError()
+        return self.result()
 
-    async def async_wait(self) -> None:
+    async def async_wait(self) -> T:
         if not self._done:
             await self._event.async_wait()
-        if self._cancelled:
-            raise CancelledError()
+        return self.result()
 
     def __await__(self):
         return self.async_wait().__await__()
@@ -855,16 +853,17 @@ class SimpleScheduler(BaseScheduler):
 
     def spawn(
         self,
-        func: Callable[..., T],
-        *args,
+        func: Callable[[], T],
+        kwargs: dict[str, object] | None = None,
         context: contextvars.Context | None = None,
-        **kwargs,
     ) -> TealetTask:
         if context is None:
             context = contextvars.copy_context()
+        if kwargs is not None:
+            raise TypeError("spawn() does not accept callable kwargs")
 
         def task_main(current: tealet.tealet, _arg: object):
-            return context.run(func, *args, **kwargs)
+            return context.run(func)
 
         t = TealetTask(self)
         t.prepare(task_main)
@@ -1075,9 +1074,7 @@ class SimpleScheduler(BaseScheduler):
 
     def run_until_complete(
         self,
-        future: Future[T] | Callable[..., T],
-        *args: object,
-        **kwargs: object,
+        future: Future[T] | Callable[[], T],
     ) -> T:
         self._verify_current_scheduler()
         if isinstance(future, Future):
@@ -1085,7 +1082,7 @@ class SimpleScheduler(BaseScheduler):
             if isinstance(target, TealetTask) and target.get_scheduler() is not self:
                 raise RuntimeError("Future is bound to a different scheduler")
         elif callable(future):
-            target = self.spawn(future, *args, **kwargs)
+            target = self.spawn(future)
         else:
             raise TypeError("future must be a Future or callable")
 

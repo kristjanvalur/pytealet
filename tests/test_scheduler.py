@@ -204,10 +204,23 @@ class TestSchedulerAccessors:
         s = new_scheduler()
         set_scheduler(s)
 
-        def worker(x: int, y: int) -> int:
-            return x + y
+        def worker() -> int:
+            return 42
 
-        assert s.run_until_complete(worker, 20, 22) == 42
+        assert s.run_until_complete(worker) == 42
+
+    def test_run_until_complete_rejects_callable_args(self):
+        s = new_scheduler()
+        set_scheduler(s)
+
+        def worker() -> int:
+            return 42
+
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            s.run_until_complete(worker, x=20, y=22)
+
+        with pytest.raises(TypeError, match="takes 2 positional arguments but 4 were given"):
+            s.run_until_complete(worker, 20, 22)
 
     def test_run_until_complete_rejects_non_future_non_callable(self):
         s = new_scheduler()
@@ -1021,6 +1034,7 @@ class TestFutureExamples:
         future.set_result(123)
 
         assert future.done()
+        assert future.wait() == 123
         assert future.result() == 123
         assert future.exception() is None
 
@@ -1199,7 +1213,7 @@ class TestFutureExamples:
             s.call_later(0.001, future.set_result, 7)
             runner = asyncio.create_task(s.arun())
             try:
-                await asyncio.wait_for(future.async_wait(), timeout=1.0)
+                assert await asyncio.wait_for(future.async_wait(), timeout=1.0) == 7
                 assert future.result() == 7
             finally:
                 await asyncio.wait_for(runner, timeout=1.0)
@@ -1214,7 +1228,8 @@ class TestFutureExamples:
             s.call_later(0.001, future.set_exception, ValueError("boom"))
             runner = asyncio.create_task(s.arun())
             try:
-                await asyncio.wait_for(future.async_wait(), timeout=1.0)
+                with pytest.raises(ValueError, match="boom"):
+                    await asyncio.wait_for(future.async_wait(), timeout=1.0)
                 with pytest.raises(ValueError, match="boom"):
                     future.result()
                 exc = future.exception()
@@ -1233,7 +1248,7 @@ class TestFutureExamples:
             runner = asyncio.create_task(s.arun())
             try:
                 awaited = await asyncio.wait_for(future, timeout=1.0)
-                assert awaited is None
+                assert awaited == 9
                 assert future.result() == 9
             finally:
                 await asyncio.wait_for(runner, timeout=1.0)

@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from tealet.runtime import AsyncRunner, Runner, run_async
-from tealet.scheduler import SimpleScheduler, get_scheduler
+from tealet.runtime import AsyncRunner, Runner, run, run_async
+from tealet.scheduler import SimpleScheduler, get_scheduler, set_scheduler
 
 
 class TestAsyncRunner:
@@ -89,6 +89,12 @@ class TestAsyncRunner:
 
 
 class TestRunner:
+    def test_get_scheduler_lazy_init(self):
+        runner = Runner()
+        scheduler = runner.get_scheduler()
+        assert isinstance(scheduler, SimpleScheduler)
+        assert runner.get_scheduler() is scheduler
+
     def test_run_sync_callable(self):
         runner = Runner()
         try:
@@ -113,18 +119,136 @@ class TestRunner:
         finally:
             runner.close()
 
-    def test_run_async_callable_raises(self):
+    def test_run_awaitable_entry_raises(self):
         async def entry() -> str:
             await asyncio.sleep(0)
             return "done"
 
+        coro = entry()
         runner = Runner()
         try:
-            with pytest.raises(TypeError, match="sync runner entry must be synchronous"):
-                runner.run(entry)
+            with pytest.raises(TypeError, match="entry must be a callable or Future"):
+                runner.run(coro)
         finally:
+            coro.close()
             runner.close()
 
     def test_context_manager(self):
         with Runner() as runner:
             assert runner.run(lambda: 7) == 7
+
+    def test_run_multiple_times_reuses_scheduler(self):
+        runner = Runner()
+        try:
+            first = runner.run(lambda: get_scheduler())
+            second = runner.run(lambda: get_scheduler())
+            assert first is second
+            assert first is runner.get_scheduler()
+        finally:
+            runner.close()
+
+    def test_run_uses_runner_creation_context(self):
+        import contextvars
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        marker.set("ambient")
+        ctx = contextvars.copy_context()
+        ctx.run(marker.set, "runner-context")
+
+        runner = Runner(context=ctx)
+        try:
+            assert runner.run(lambda: marker.get()) == "runner-context"
+        finally:
+            runner.close()
+
+    def test_run_context_override_uses_explicit_context(self):
+        import contextvars
+
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        marker.set("ambient")
+
+        runner_ctx = contextvars.copy_context()
+        runner_ctx.run(marker.set, "runner-context")
+
+        override_ctx = contextvars.copy_context()
+        override_ctx.run(marker.set, "override-context")
+
+        runner = Runner(context=runner_ctx)
+        try:
+            assert runner.run(lambda: marker.get()) == "runner-context"
+            assert runner.run(lambda: marker.get(), context=override_ctx) == "override-context"
+        finally:
+            runner.close()
+
+    def test_run_future_entry_waits(self):
+        from tealet.scheduler import Future
+
+        runner = Runner()
+        try:
+            future: Future[int] = Future()
+            scheduler = runner.get_scheduler()
+            scheduler.call_soon(future.set_result, 123)
+
+            # Runner future-entry path wraps future.wait(), which returns the result.
+            assert runner.run(future) == 123
+            assert future.done() is True
+            assert future.result() == 123
+        finally:
+            runner.close()
+
+    def test_close_prevents_reuse(self):
+        runner = Runner()
+        runner.close()
+        with pytest.raises(RuntimeError, match="runner is closed"):
+            runner.run(lambda: None)
+        with pytest.raises(RuntimeError, match="runner is closed"):
+            runner.get_scheduler()
+
+    def test_lazy_init_installs_and_restores_current_scheduler(self):
+        previous = SimpleScheduler()
+        set_scheduler(previous)
+
+        runner = Runner()
+        installed = runner.get_scheduler()
+        assert get_scheduler() is installed
+
+        runner.close()
+        assert get_scheduler() is previous
+
+        set_scheduler(None)
+
+    def test_lazy_init_rejects_when_running_scheduler_exists(self):
+        running = SimpleScheduler()
+        running._running = True
+        set_scheduler(running)
+
+        runner = Runner()
+        try:
+            with pytest.raises(RuntimeError, match="another scheduler is running"):
+                runner.get_scheduler()
+        finally:
+            running._running = False
+            set_scheduler(None)
+
+
+class TestRunHelper:
+    def test_run_helper_runs_callable(self):
+        assert run(lambda: 42) == 42
+
+    def test_run_helper_uses_context_override(self):
+        import contextvars
+
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        marker.set("ambient")
+        ctx = contextvars.copy_context()
+        ctx.run(marker.set, "helper-context")
+
+        assert run(lambda: marker.get(), context=ctx) == "helper-context"
+
+    def test_run_helper_restores_previous_scheduler(self):
+        previous = SimpleScheduler()
+        set_scheduler(previous)
+        try:
+            assert run(lambda: "ok") == "ok"
+            assert get_scheduler() is previous
+        finally:
+            set_scheduler(None)

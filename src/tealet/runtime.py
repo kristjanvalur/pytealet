@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -98,6 +99,22 @@ async def run_async(entry, /, *args: Any, scheduler_factory: Callable[[], schedu
         await runner.close()
 
 
+def run(
+    entry,
+    /,
+    *,
+    context: contextvars.Context | None = None,
+    scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None,
+):
+    """Convenience helper that runs one entry under a temporary Runner."""
+
+    runner = Runner(scheduler_factory=scheduler_factory)
+    try:
+        return runner.run(entry, context=context)
+    finally:
+        runner.close()
+
+
 class Runner:
     """Run scheduler-backed entries from synchronous code without asyncio."""
 
@@ -106,11 +123,13 @@ class Runner:
         *,
         scheduler: scheduler_module.SimpleScheduler | None = None,
         scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None,
+        context: contextvars.Context | None = None,
     ) -> None:
         if scheduler is not None and scheduler_factory is not None:
             raise ValueError("provide either scheduler or scheduler_factory, not both")
         self._scheduler = scheduler
         self._scheduler_factory = scheduler_factory
+        self._context = context
         self._closed = False
         self._initialized = False
         self._previous_scheduler: scheduler_module.SimpleScheduler | None = None
@@ -121,13 +140,24 @@ class Runner:
         assert scheduler is not None
         return scheduler
 
-    def run(self, entry, /, *args: Any, **kwargs: Any):
+    def run(self, entry, /, *, context: contextvars.Context | None = None):
         self._lazy_init()
         scheduler = self._scheduler
         assert scheduler is not None
-        result = _invoke_sync_entry(entry, *args, **kwargs)
-        scheduler.run()
-        return result
+        runner_context = self._context
+        assert runner_context is not None
+        run_context = context if context is not None else runner_context
+
+        if isinstance(entry, scheduler_module.Future):
+            def wait_for_future() -> Any:
+                return entry.wait()
+
+            task = scheduler.spawn(wait_for_future, context=run_context)
+        elif callable(entry):
+            task = scheduler.spawn(entry, context=run_context)
+        else:
+            raise TypeError("entry must be a callable or Future")
+        return scheduler.run_until_complete(task)
 
     def close(self) -> None:
         if self._closed:
@@ -165,6 +195,8 @@ class Runner:
 
         if self._scheduler is None:
             self._scheduler = self._create_scheduler()
+        if self._context is None:
+            self._context = contextvars.copy_context()
 
         self._previous_scheduler = current
         scheduler_module.set_scheduler(self._scheduler)
@@ -187,19 +219,3 @@ async def _invoke_entry(entry, /, *args: Any, **kwargs: Any):
 
     raise TypeError("entry must be a callable or awaitable")
 
-
-def _invoke_sync_entry(entry, /, *args: Any, **kwargs: Any):
-    if inspect.isawaitable(entry):
-        if inspect.iscoroutine(entry):
-            entry.close()
-        raise TypeError("sync runner entry must be synchronous")
-
-    if callable(entry):
-        result = entry(*args, **kwargs)
-        if inspect.isawaitable(result):
-            if inspect.iscoroutine(result):
-                result.close()
-            raise TypeError("sync runner entry must be synchronous")
-        return result
-
-    raise TypeError("entry must be a callable")
