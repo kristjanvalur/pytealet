@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 import pytest
 
@@ -48,15 +49,11 @@ from tealet_examples import (
 def _reset_scheduler_tls():
     _scheduler.instance = SimpleScheduler()
     set_default_scheduler_factory(None)
-    if hasattr(_scheduler, "running_stack"):
-        _scheduler.running_stack = []
     try:
         yield
     finally:
         _scheduler.instance = SimpleScheduler()
         set_default_scheduler_factory(None)
-        if hasattr(_scheduler, "running_stack"):
-            _scheduler.running_stack = []
 
 
 class TestSchedulerAccessors:
@@ -142,8 +139,110 @@ class TestSchedulerAccessors:
 
         assert seen == [s]
 
+    def test_run_requires_scheduler_to_be_current(self):
+        s = new_scheduler()
+        set_scheduler(new_scheduler())
+        with pytest.raises(RuntimeError, match="current scheduler"):
+            s.run()
+
+    def test_pump_requires_scheduler_to_be_current(self):
+        s = new_scheduler()
+        set_scheduler(new_scheduler())
+        with pytest.raises(RuntimeError, match="current scheduler"):
+            s.pump()
+
+    def test_arun_requires_scheduler_to_be_current(self):
+        s = new_scheduler()
+        set_scheduler(new_scheduler())
+
+        async def run() -> None:
+            with pytest.raises(RuntimeError, match="current scheduler"):
+                await s.arun()
+
+        asyncio.run(run())
+
 
 class TestSchedulerExamples:
+    def test_scheduler_is_running_for_run_only(self):
+        s = scheduler()
+        seen: list[bool] = []
+
+        def check() -> None:
+            seen.append(s.is_running())
+
+        assert s.is_running() is False
+        s.spawn(check)
+        s.run()
+        assert seen == [True]
+        assert s.is_running() is False
+
+    def test_scheduler_is_running_for_arun_only(self):
+        s = scheduler()
+        seen: list[bool] = []
+
+        def check() -> None:
+            seen.append(s.is_running())
+
+        async def orchestrate() -> None:
+            assert s.is_running() is False
+            s.spawn(check)
+            await s.arun()
+            assert s.is_running() is False
+
+        asyncio.run(orchestrate())
+        assert seen == [True]
+
+    def test_scheduler_is_running_set_during_pump_only(self):
+        s = scheduler()
+        seen: list[bool] = []
+
+        def check() -> None:
+            seen.append(s.is_running())
+
+        assert s.is_running() is False
+        s.spawn(check)
+        s.pump(1)
+        assert seen == [True]
+        assert s.is_running() is False
+
+    def test_run_forever_stops_when_stop_called(self):
+        s = scheduler()
+        seen: list[str] = []
+
+        def worker() -> None:
+            seen.append("ran")
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+
+        assert seen == ["ran"]
+        assert s.is_running() is False
+
+    def test_stop_breaks_sleep_in_run_forever_via_call_soon_threadsafe(self):
+        s = scheduler()
+        started = threading.Event()
+
+        # Ensure run_forever enters a long timed wait after startup.
+        s.call_later(60.0, lambda: None)
+        s.call_soon(started.set)
+
+        def run_forever_in_thread() -> None:
+            set_scheduler(s)
+            s.run_forever()
+
+        t = threading.Thread(target=run_forever_in_thread)
+        t.start()
+        try:
+            assert started.wait(timeout=1.0)
+            s.call_soon_threadsafe(s.stop)
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+            assert s.is_running() is False
+        finally:
+            s.call_soon_threadsafe(s.stop)
+            t.join(timeout=1.0)
+
     def test_append_with_yield_demo(self):
         seen = demo_scheduler_append_with_yield()
         assert seen == ["a0", "b0", "c0", "a1", "b1", "a2"]

@@ -110,35 +110,10 @@ def get_scheduler() -> SimpleScheduler:
     return current
 
 
-def _running_scheduler_stack() -> list[SimpleScheduler]:
-    stack = getattr(_scheduler, "running_stack", None)
-    if stack is None:
-        stack = []
-        _scheduler.running_stack = stack
-    return stack
-
-
-def _push_running_scheduler(value: SimpleScheduler) -> None:
-    _running_scheduler_stack().append(value)
-
-
-def _pop_running_scheduler(value: SimpleScheduler) -> None:
-    stack = _running_scheduler_stack()
-    if not stack:
-        return
-    if stack[-1] is value:
-        stack.pop()
-        return
-    try:
-        stack.remove(value)
-    except ValueError:
-        pass
-
-
 def get_running_scheduler() -> SimpleScheduler:
-    stack = getattr(_scheduler, "running_stack", None)
-    if stack:
-        return stack[-1]
+    current = _current_scheduler()
+    if current is not None and current.is_running():
+        return current
     raise RuntimeError("no running scheduler")
 
 
@@ -669,8 +644,6 @@ class _ThreadIdleWaiter:
         self._wakeup.set()
 
     def wait_for(self, timeout: float | None) -> None:
-        if timeout is None:
-            return
         self._wakeup.wait(timeout=timeout)
         self._wakeup.clear()
 
@@ -714,6 +687,8 @@ class SimpleScheduler(BaseScheduler):
         self._tasks: deque[tealet.tealet] = deque()
         self._task_set: set[tealet.tealet] = set()
         self._runner = None
+        self._running = False
+        self._stopping = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._threadsafe_callbacks: deque[tuple[Callable[..., object], tuple[object, ...]]] = deque()
         self._threadsafe_lock = threading.Lock()
@@ -728,6 +703,19 @@ class SimpleScheduler(BaseScheduler):
 
     def time(self) -> float:
         return time.monotonic()
+
+    def is_running(self) -> bool:
+        return self._running
+
+    def _verify_current_scheduler(self) -> None:
+        if _current_scheduler() is not self:
+            raise RuntimeError("operation requires this scheduler to be the current scheduler")
+        if self._running:
+            raise RuntimeError("Scheduler already running")
+
+    def stop(self) -> None:
+        self._stopping = True
+        self._break_wait_local()
 
     def call_soon(self, callback: Callable[..., object], *args: object) -> TimerHandle:
         return self.call_at(self.time(), callback, *args)
@@ -827,9 +815,17 @@ class SimpleScheduler(BaseScheduler):
         self._schedule(lambda: self._make_runnable(tealet.current()))
 
     def sleep(self, delay: float) -> None:
-        evt = Event()
-        with self.call_later(delay, evt.set):
-            evt.wait()
+        current = tealet.current()
+        awakened = False
+
+        def wake() -> None:
+            nonlocal awakened
+            awakened = True
+            self._make_runnable(current)
+
+        with self.call_later(delay, wake):
+            if not awakened:
+                self._schedule()
 
     def wait_async(self, awaitable):
         """Wait for an asyncio awaitable from a tealet task and return its result."""
@@ -930,7 +926,7 @@ class SimpleScheduler(BaseScheduler):
             pass
         return result
 
-    def pump(self, n=0) -> None:
+    def _pump(self, n=0) -> None:
         if self._runner is not None:
             raise RuntimeError("Scheduler already running")
         start_count = self._n_scheduled
@@ -943,6 +939,14 @@ class SimpleScheduler(BaseScheduler):
         finally:
             self._runner = None
             self._target_count = None
+
+    def pump(self, n=0) -> None:
+        self._verify_current_scheduler()
+        self._running = True
+        try:
+            return self._pump(n)
+        finally:
+            self._running = False
 
     def _break_wait_threadsafe(self) -> None:
         self._idle_waiter.break_threadsafe()
@@ -960,28 +964,59 @@ class SimpleScheduler(BaseScheduler):
         await self._async_idle_waiter.wait_for(self._time_to_next_timer())
 
     def run(self) -> None:
+        """Run scheduler synchronously until no runnable tasks or timers remain.
+        This method is intended for single threaded context with no
+        asyncio loop interaction.
+
+        This sync runner only considers local runnable state (`_tasks`) and
+        scheduled timer callbacks (`_timers`). Tealets blocked in
+        `wait_async()` are not progressed here; use `arun()` for that mode.
+        """
+        self._verify_current_scheduler()
         previous_idle_waiter = self._idle_waiter
         self._idle_waiter = self._thread_idle_waiter
-        _push_running_scheduler(self)
+        self._running = True
         try:
             while self._tasks or self._timers:
-                self.pump()
+                self._run_ready_timers()
+                if self._tasks:
+                    self._pump()
+                if self._tasks or self._timers:
+                    self._wait_thread()
+        finally:
+            self._running = False
+            self._idle_waiter = previous_idle_waiter
+
+    def run_forever(self) -> None:
+        self._verify_current_scheduler()
+        previous_idle_waiter = self._idle_waiter
+        self._idle_waiter = self._thread_idle_waiter
+        self._stopping = False
+        self._running = True
+        try:
+            while not self._stopping:
+                self._run_ready_timers()
+                if self._tasks:
+                    self._pump()
+                    continue
                 self._wait_thread()
         finally:
-            _pop_running_scheduler(self)
+            self._running = False
+            self._stopping = False
             self._idle_waiter = previous_idle_waiter
 
     async def arun(self) -> None:
+        self._verify_current_scheduler()
         previous_idle_waiter = self._idle_waiter
         self._idle_waiter = self._async_idle_waiter
         self._loop = asyncio.get_running_loop()
-        _push_running_scheduler(self)
+        self._running = True
         try:
             while self._tasks or self._timers or self._pending_async_waits:
                 if self._tasks or self._timers:
-                    self.pump()
+                    self._pump()
                 await self._wait_async()
         finally:
-            _pop_running_scheduler(self)
+            self._running = False
             self._loop = None
             self._idle_waiter = previous_idle_waiter
