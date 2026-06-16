@@ -20,6 +20,7 @@ from tealet.locks import (
     Semaphore,
 )
 from tealet.scheduler import (
+    AsyncScheduler,
     CancelledError,
     Channel,
     Future,
@@ -35,6 +36,7 @@ from tealet.scheduler import (
     TimeoutError,
     _scheduler,
     scheduler,
+    SyncScheduler,
     timeout,
 )
 from tealet_examples import (
@@ -106,6 +108,20 @@ class TestSchedulerAccessors:
         s = get_scheduler()
         assert isinstance(s, SimpleScheduler)
         assert get_scheduler() is s
+
+    def test_sync_scheduler_rejects_async_driving_api(self):
+        s = SyncScheduler()
+
+        async def run() -> None:
+            with pytest.raises(RuntimeError, match="does not support async driving"):
+                await s.arun()
+
+        asyncio.run(run())
+
+    def test_async_scheduler_rejects_sync_driving_api(self):
+        s = AsyncScheduler()
+        with pytest.raises(RuntimeError, match="does not support sync driving"):
+            s.run()
 
     def test_get_running_scheduler_raises_when_not_running(self):
         with pytest.raises(RuntimeError, match="no running scheduler"):

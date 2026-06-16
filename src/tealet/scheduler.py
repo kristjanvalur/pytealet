@@ -77,6 +77,41 @@ class BaseScheduler(Linkable, ABC):
     ) -> None:
         """Schedule a callback from another scheduler/thread context."""
 
+class SyncDrivingScheduler(ABC):
+    @abstractmethod
+    def stop(self) -> None:
+        """Stop a currently running sync driver."""
+
+    @abstractmethod
+    def run(self) -> None:
+        """Run until no local runnable tasks or timers remain."""
+
+    @abstractmethod
+    def run_forever(self) -> None:
+        """Run until stop() is called."""
+
+    @abstractmethod
+    def run_until_complete(self, future: "Future[T] | Callable[[], T]") -> T:
+        """Run until a target future/callable completes."""
+
+
+class AsyncDrivingScheduler(ABC):
+    @abstractmethod
+    def stop(self) -> None:
+        """Stop a currently running async driver."""
+
+    @abstractmethod
+    async def arun(self) -> None:
+        """Run async scheduler loop until idle."""
+
+    @abstractmethod
+    async def arun_forever(self) -> None:
+        """Run async scheduler loop until stop() is called."""
+
+    @abstractmethod
+    async def arun_until_complete(self, future: "Future[T] | Callable[[], T]") -> T:
+        """Run async scheduler loop until a target future/callable completes."""
+
 def scheduler() -> SimpleScheduler:
     return get_scheduler()
 
@@ -706,7 +741,7 @@ class _AsyncIdleWaiter:
             self._awakeup.clear()
 
 
-class SimpleScheduler(BaseScheduler):
+class SimpleScheduler(BaseScheduler, SyncDrivingScheduler, AsyncDrivingScheduler):
     """Very small cooperative scheduler for runnable tealets."""
 
     def __init__(self) -> None:
@@ -1184,3 +1219,28 @@ class SimpleScheduler(BaseScheduler):
             self._running = False
             self._loop = None
             self._idle_waiter = previous_idle_waiter
+
+class SyncScheduler(SimpleScheduler, SyncDrivingScheduler):
+    """Scheduler specialization exposing only sync driving operations."""
+
+    async def arun(self) -> None:  # pragma: no cover - defensive API guard
+        raise RuntimeError("SyncScheduler does not support async driving APIs")
+
+    async def arun_forever(self) -> None:  # pragma: no cover - defensive API guard
+        raise RuntimeError("SyncScheduler does not support async driving APIs")
+
+    async def arun_until_complete(self, future: Future[T] | Callable[[], T]) -> T:  # pragma: no cover - defensive API guard
+        raise RuntimeError("SyncScheduler does not support async driving APIs")
+
+
+class AsyncScheduler(SimpleScheduler, AsyncDrivingScheduler):
+    """Scheduler specialization exposing only async driving operations."""
+
+    def run(self) -> None:  # pragma: no cover - defensive API guard
+        raise RuntimeError("AsyncScheduler does not support sync driving APIs")
+
+    def run_forever(self) -> None:  # pragma: no cover - defensive API guard
+        raise RuntimeError("AsyncScheduler does not support sync driving APIs")
+
+    def run_until_complete(self, future: Future[T] | Callable[[], T]) -> T:  # pragma: no cover - defensive API guard
+        raise RuntimeError("AsyncScheduler does not support sync driving APIs")
