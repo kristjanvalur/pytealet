@@ -14,11 +14,11 @@ class AsyncRunner:
     def __init__(
         self,
         *,
-        scheduler_factory: Callable[[], scheduler_module.AsyncDrivingScheduler] | None = None,
+        scheduler_factory: Callable[[], scheduler_module.AsyncSchedulerDrivingAPI] | None = None,
         context: contextvars.Context | None = None,
         debug: bool | None = None,
     ) -> None:
-        self._scheduler: scheduler_module.AsyncDrivingScheduler | None = None
+        self._scheduler: scheduler_module.AsyncSchedulerDrivingAPI | None = None
         self._scheduler_factory = scheduler_factory
         self._context = context
         self._debug = debug
@@ -26,14 +26,14 @@ class AsyncRunner:
         self._initialized = False
         self._previous_scheduler: scheduler_module.BaseScheduler | None = None
 
-    def get_scheduler(self) -> scheduler_module.AsyncDrivingScheduler | None:
+    def get_scheduler(self) -> scheduler_module.AsyncSchedulerDrivingAPI | None:
         return self._scheduler
 
     @property
     def task(self) -> asyncio.Task[None] | None:
         return None
 
-    async def start(self) -> scheduler_module.AsyncDrivingScheduler:
+    async def start(self) -> scheduler_module.AsyncSchedulerDrivingAPI:
         self._lazy_init()
         return self._require_scheduler()
 
@@ -61,14 +61,14 @@ class AsyncRunner:
             raise TypeError("entry must be a callable or Future")
         return await scheduler.arun_until_complete(target)
 
-    def _create_scheduler(self) -> scheduler_module.AsyncDrivingScheduler:
+    def _create_scheduler(self) -> scheduler_module.AsyncSchedulerDrivingAPI:
         factory = self._scheduler_factory or (lambda: scheduler_module.AsyncScheduler())
         created = factory()
-        if not isinstance(created, scheduler_module.AsyncDrivingScheduler):
-            raise TypeError("scheduler factory must return an AsyncDrivingScheduler instance")
+        if not isinstance(created, scheduler_module.AsyncSchedulerDrivingAPI):
+            raise TypeError("scheduler factory must return an AsyncSchedulerDrivingAPI instance")
         return created
 
-    def _require_scheduler(self) -> scheduler_module.AsyncDrivingScheduler:
+    def _require_scheduler(self) -> scheduler_module.AsyncSchedulerDrivingAPI:
         if self._scheduler is None:
             raise RuntimeError("runner has no scheduler")
         return self._scheduler
@@ -99,7 +99,7 @@ async def run_async(
     /,
     *,
     context: contextvars.Context | None = None,
-    scheduler_factory: Callable[[], scheduler_module.AsyncDrivingScheduler] | None = None,
+    scheduler_factory: Callable[[], scheduler_module.AsyncSchedulerDrivingAPI] | None = None,
     debug: bool | None = None,
 ):
     """Convenience helper that runs one entry under a temporary AsyncRunner."""
@@ -116,7 +116,7 @@ def run(
     /,
     *,
     context: contextvars.Context | None = None,
-    scheduler_factory: Callable[[], scheduler_module.SyncDrivingScheduler] | None = None,
+    scheduler_factory: Callable[[], scheduler_module.SyncSchedulerDrivingAPI] | None = None,
     debug: bool | None = None,
 ):
     """Convenience helper that runs one entry under a temporary Runner."""
@@ -134,11 +134,11 @@ class Runner:
     def __init__(
         self,
         *,
-        scheduler_factory: Callable[[], scheduler_module.SyncDrivingScheduler] | None = None,
+        scheduler_factory: Callable[[], scheduler_module.SyncSchedulerDrivingAPI] | None = None,
         context: contextvars.Context | None = None,
         debug: bool | None = None,
     ) -> None:
-        self._scheduler: scheduler_module.SyncDrivingScheduler | None = None
+        self._scheduler: scheduler_module.SyncSchedulerDrivingAPI | None = None
         self._scheduler_factory = scheduler_factory
         self._context = context
         self._debug = debug
@@ -146,7 +146,7 @@ class Runner:
         self._initialized = False
         self._previous_scheduler: scheduler_module.BaseScheduler | None = None
 
-    def get_scheduler(self) -> scheduler_module.SyncDrivingScheduler:
+    def get_scheduler(self) -> scheduler_module.SyncSchedulerDrivingAPI:
         self._lazy_init()
         scheduler = self._scheduler
         assert scheduler is not None
@@ -188,11 +188,11 @@ class Runner:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
-    def _create_scheduler(self) -> scheduler_module.SyncDrivingScheduler:
+    def _create_scheduler(self) -> scheduler_module.SyncSchedulerDrivingAPI:
         factory = self._scheduler_factory or (lambda: scheduler_module.SyncScheduler())
         created = factory()
-        if not isinstance(created, scheduler_module.SyncDrivingScheduler):
-            raise TypeError("scheduler factory must return a SyncDrivingScheduler instance")
+        if not isinstance(created, scheduler_module.SyncSchedulerDrivingAPI):
+            raise TypeError("scheduler factory must return a SyncSchedulerDrivingAPI instance")
         return created
 
     def _lazy_init(self) -> None:

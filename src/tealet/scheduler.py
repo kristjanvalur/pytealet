@@ -77,7 +77,30 @@ class BaseScheduler(Linkable, ABC):
     ) -> None:
         """Schedule a callback from another scheduler/thread context."""
 
-class SyncDrivingScheduler(ABC):
+class CoreSchedulerDrivingAPI(ABC):
+    @abstractmethod
+    def is_running(self) -> bool:
+        """Return whether this scheduler is currently driving."""
+
+    @abstractmethod
+    def set_debug(self, enabled: bool) -> None:
+        """Set scheduler debug mode flag."""
+
+    @abstractmethod
+    def get_debug(self) -> bool:
+        """Return scheduler debug mode flag."""
+
+    @abstractmethod
+    def spawn(
+        self,
+        func: Callable[[], T],
+        kwargs: dict[str, object] | None = None,
+        context: contextvars.Context | None = None,
+    ) -> "TealetTask":
+        """Spawn a scheduler-managed task from a zero-arg callable."""
+
+
+class SyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
     @abstractmethod
     def stop(self) -> None:
         """Stop a currently running sync driver."""
@@ -95,7 +118,7 @@ class SyncDrivingScheduler(ABC):
         """Run until a target future/callable completes."""
 
 
-class AsyncDrivingScheduler(ABC):
+class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
     @abstractmethod
     def stop(self) -> None:
         """Stop a currently running async driver."""
@@ -741,7 +764,7 @@ class _AsyncIdleWaiter:
             self._awakeup.clear()
 
 
-class SimpleScheduler(BaseScheduler, SyncDrivingScheduler, AsyncDrivingScheduler):
+class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDrivingAPI):
     """Very small cooperative scheduler for runnable tealets."""
 
     def __init__(self) -> None:
@@ -1220,7 +1243,7 @@ class SimpleScheduler(BaseScheduler, SyncDrivingScheduler, AsyncDrivingScheduler
             self._loop = None
             self._idle_waiter = previous_idle_waiter
 
-class SyncScheduler(SimpleScheduler, SyncDrivingScheduler):
+class SyncScheduler(SimpleScheduler, SyncSchedulerDrivingAPI):
     """Scheduler specialization exposing only sync driving operations."""
 
     async def arun(self) -> None:  # pragma: no cover - defensive API guard
@@ -1233,7 +1256,7 @@ class SyncScheduler(SimpleScheduler, SyncDrivingScheduler):
         raise RuntimeError("SyncScheduler does not support async driving APIs")
 
 
-class AsyncScheduler(SimpleScheduler, AsyncDrivingScheduler):
+class AsyncScheduler(SimpleScheduler, AsyncSchedulerDrivingAPI):
     """Scheduler specialization exposing only async driving operations."""
 
     def run(self) -> None:  # pragma: no cover - defensive API guard
