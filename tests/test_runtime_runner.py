@@ -60,6 +60,32 @@ class TestAsyncRunner:
 
         asyncio.run(run())
 
+    def test_async_runner_debug_sets_and_restores_loop_debug(self):
+        async def run_case() -> None:
+            loop = asyncio.get_running_loop()
+            previous = loop.get_debug()
+            runner = AsyncRunner(debug=not previous)
+            try:
+                await runner.start()
+                assert loop.get_debug() is (not previous)
+            finally:
+                await runner.close()
+            assert loop.get_debug() is previous
+
+        asyncio.run(run_case())
+
+    def test_async_runner_debug_sets_scheduler_debug_flag(self):
+        async def run_case() -> None:
+            custom = SimpleScheduler()
+            runner = AsyncRunner(scheduler_factory=lambda: custom, debug=True)
+            try:
+                await runner.start()
+                assert custom.get_debug() is True
+            finally:
+                await runner.close()
+
+        asyncio.run(run_case())
+
     def test_invalid_factory_return_type(self):
         async def run() -> None:
             runner = AsyncRunner(scheduler_factory=lambda: object())
@@ -94,6 +120,13 @@ class TestRunner:
         scheduler = runner.get_scheduler()
         assert isinstance(scheduler, SimpleScheduler)
         assert runner.get_scheduler() is scheduler
+
+    def test_runner_debug_sets_scheduler_debug_flag(self):
+        runner = Runner(debug=True)
+        try:
+            assert runner.get_scheduler().get_debug() is True
+        finally:
+            runner.close()
 
     def test_run_sync_callable(self):
         runner = Runner()
@@ -252,3 +285,7 @@ class TestRunHelper:
             assert get_scheduler() is previous
         finally:
             set_scheduler(None)
+
+    def test_run_helper_sets_scheduler_debug_flag(self):
+        custom = SimpleScheduler()
+        assert run(lambda: custom.get_debug(), scheduler_factory=lambda: custom, debug=True) is True

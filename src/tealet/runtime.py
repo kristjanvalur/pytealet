@@ -18,11 +18,15 @@ class AsyncRunner:
         *,
         scheduler: scheduler_module.SimpleScheduler | None = None,
         scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None,
+        debug: bool | None = None,
     ) -> None:
         if scheduler is not None and scheduler_factory is not None:
             raise ValueError("provide either scheduler or scheduler_factory, not both")
         self._scheduler = scheduler
         self._scheduler_factory = scheduler_factory
+        self._debug = debug
+        self._debug_loop: asyncio.AbstractEventLoop | None = None
+        self._previous_loop_debug: bool | None = None
         self._pump_task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
 
@@ -38,6 +42,12 @@ class AsyncRunner:
             return self._require_scheduler()
 
         self._scheduler = self._scheduler or self._create_scheduler()
+        if self._debug is not None:
+            self._scheduler.set_debug(self._debug)
+            loop = asyncio.get_running_loop()
+            self._debug_loop = loop
+            self._previous_loop_debug = loop.get_debug()
+            loop.set_debug(self._debug)
         self._stop_event = asyncio.Event()
         self._pump_task = asyncio.create_task(self._pump_loop())
         await asyncio.sleep(0)
@@ -52,6 +62,11 @@ class AsyncRunner:
 
         with suppress(asyncio.CancelledError):
             await self._pump_task
+
+        if self._debug_loop is not None and self._previous_loop_debug is not None:
+            self._debug_loop.set_debug(self._previous_loop_debug)
+            self._debug_loop = None
+            self._previous_loop_debug = None
 
         self._pump_task = None
         self._stop_event = None
@@ -89,10 +104,17 @@ class AsyncRunner:
             await asyncio.sleep(0.001)
 
 
-async def run_async(entry, /, *args: Any, scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None, **kwargs: Any):
+async def run_async(
+    entry,
+    /,
+    *args: Any,
+    scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None,
+    debug: bool | None = None,
+    **kwargs: Any,
+):
     """Convenience helper that runs one entry under a temporary AsyncRunner."""
 
-    runner = AsyncRunner(scheduler_factory=scheduler_factory)
+    runner = AsyncRunner(scheduler_factory=scheduler_factory, debug=debug)
     try:
         return await runner.run(entry, *args, **kwargs)
     finally:
@@ -105,10 +127,11 @@ def run(
     *,
     context: contextvars.Context | None = None,
     scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None,
+    debug: bool | None = None,
 ):
     """Convenience helper that runs one entry under a temporary Runner."""
 
-    runner = Runner(scheduler_factory=scheduler_factory)
+    runner = Runner(scheduler_factory=scheduler_factory, debug=debug)
     try:
         return runner.run(entry, context=context)
     finally:
@@ -124,12 +147,14 @@ class Runner:
         scheduler: scheduler_module.SimpleScheduler | None = None,
         scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None,
         context: contextvars.Context | None = None,
+        debug: bool | None = None,
     ) -> None:
         if scheduler is not None and scheduler_factory is not None:
             raise ValueError("provide either scheduler or scheduler_factory, not both")
         self._scheduler = scheduler
         self._scheduler_factory = scheduler_factory
         self._context = context
+        self._debug = debug
         self._closed = False
         self._initialized = False
         self._previous_scheduler: scheduler_module.SimpleScheduler | None = None
@@ -195,6 +220,8 @@ class Runner:
 
         if self._scheduler is None:
             self._scheduler = self._create_scheduler()
+        if self._debug is not None:
+            self._scheduler.set_debug(self._debug)
         if self._context is None:
             self._context = contextvars.copy_context()
 

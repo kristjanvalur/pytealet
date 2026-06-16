@@ -714,6 +714,7 @@ class SimpleScheduler(BaseScheduler):
         self._task_set: set[tealet.tealet] = set()
         self._runner = None
         self._running = False
+        self._debug = False
         self._stopping = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._threadsafe_callbacks: deque[
@@ -734,6 +735,12 @@ class SimpleScheduler(BaseScheduler):
 
     def is_running(self) -> bool:
         return self._running
+
+    def set_debug(self, enabled: bool) -> None:
+        self._debug = bool(enabled)
+
+    def get_debug(self) -> bool:
+        return self._debug
 
     def _verify_current_scheduler(self) -> None:
         if _current_scheduler() is not self:
