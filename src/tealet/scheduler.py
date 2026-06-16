@@ -1005,6 +1005,42 @@ class SimpleScheduler(BaseScheduler):
             self._stopping = False
             self._idle_waiter = previous_idle_waiter
 
+    def run_until_complete(
+        self,
+        future: Future[T] | Callable[..., T],
+        *args: object,
+        **kwargs: object,
+    ) -> T:
+        self._verify_current_scheduler()
+        if isinstance(future, Future):
+            target: Future[T] = future
+            if isinstance(target, TealetTask) and target.get_scheduler() is not self:
+                raise RuntimeError("Future is bound to a different scheduler")
+        elif callable(future):
+            target = self.spawn(future, *args, **kwargs)
+        else:
+            raise TypeError("future must be a Future or callable")
+
+        previous_idle_waiter = self._idle_waiter
+        self._idle_waiter = self._thread_idle_waiter
+        self._stopping = False
+        self._running = True
+        try:
+            while not target.done() and not self._stopping:
+                self._run_ready_timers()
+                if self._tasks:
+                    self._pump()
+                if not target.done() and not self._stopping:
+                    self._wait_thread()
+        finally:
+            self._running = False
+            self._stopping = False
+            self._idle_waiter = previous_idle_waiter
+
+        if not target.done():
+            raise RuntimeError("Scheduler stopped before Future completed.")
+        return target.result()
+
     async def arun(self) -> None:
         self._verify_current_scheduler()
         previous_idle_waiter = self._idle_waiter

@@ -161,6 +161,59 @@ class TestSchedulerAccessors:
 
         asyncio.run(run())
 
+    def test_run_until_complete_returns_result(self):
+        s = new_scheduler()
+        set_scheduler(s)
+
+        def worker() -> int:
+            s.yield_()
+            return 42
+
+        fut = s.spawn(worker)
+        assert s.run_until_complete(fut) == 42
+
+    def test_run_until_complete_propagates_exception(self):
+        s = new_scheduler()
+        set_scheduler(s)
+
+        def worker() -> None:
+            raise ValueError("boom")
+
+        fut = s.spawn(worker)
+        with pytest.raises(ValueError, match="boom"):
+            s.run_until_complete(fut)
+
+    def test_run_until_complete_rejects_foreign_task(self):
+        s1 = new_scheduler()
+        s2 = new_scheduler()
+        set_scheduler(s1)
+        fut = s2.spawn(lambda: 1)
+        with pytest.raises(RuntimeError, match="different scheduler"):
+            s1.run_until_complete(fut)
+
+    def test_run_until_complete_raises_if_stopped_early(self):
+        s = new_scheduler()
+        set_scheduler(s)
+        fut: Future[int] = Future()
+        s.call_soon(s.stop)
+        with pytest.raises(RuntimeError, match="stopped before Future completed"):
+            s.run_until_complete(fut)
+
+    def test_run_until_complete_accepts_callable(self):
+        s = new_scheduler()
+        set_scheduler(s)
+
+        def worker(x: int, y: int) -> int:
+            return x + y
+
+        assert s.run_until_complete(worker, 20, 22) == 42
+
+    def test_run_until_complete_rejects_non_future_non_callable(self):
+        s = new_scheduler()
+        set_scheduler(s)
+        with pytest.raises(TypeError, match="Future or callable"):
+            s.run_until_complete(object())
+
 
 class TestSchedulerExamples:
     def test_scheduler_is_running_for_run_only(self):
