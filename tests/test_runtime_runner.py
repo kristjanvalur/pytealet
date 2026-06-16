@@ -12,8 +12,7 @@ class TestAsyncRunner:
             runner = AsyncRunner()
             scheduler = await runner.start()
             assert isinstance(scheduler, SimpleScheduler)
-            assert runner.task is not None
-            assert not runner.task.done()
+            assert runner.task is None
             await runner.close()
             assert runner.task is None
 
@@ -36,17 +35,17 @@ class TestAsyncRunner:
 
         asyncio.run(run())
 
-    def test_run_async_callable(self):
+    def test_run_rejects_awaitable_entry(self):
         async def run() -> None:
             runner = AsyncRunner()
 
-            async def entry() -> str:
-                await asyncio.sleep(0)
-                return "done"
-
-            result = await runner.run(entry)
-            assert result == "done"
-            await runner.close()
+            coro = asyncio.sleep(0)
+            try:
+                with pytest.raises(TypeError, match="entry must be a callable or Future"):
+                    await runner.run(coro)
+            finally:
+                coro.close()
+                await runner.close()
 
         asyncio.run(run())
 
@@ -60,14 +59,14 @@ class TestAsyncRunner:
 
         asyncio.run(run())
 
-    def test_async_runner_debug_sets_and_restores_loop_debug(self):
+    def test_async_runner_debug_does_not_mutate_loop_debug(self):
         async def run_case() -> None:
             loop = asyncio.get_running_loop()
             previous = loop.get_debug()
             runner = AsyncRunner(debug=not previous)
             try:
                 await runner.start()
-                assert loop.get_debug() is (not previous)
+                assert loop.get_debug() is previous
             finally:
                 await runner.close()
             assert loop.get_debug() is previous
@@ -94,17 +93,58 @@ class TestAsyncRunner:
 
         asyncio.run(run())
 
-    def test_awaitable_entry_rejects_args(self):
+    def test_close_prevents_reuse(self):
         async def run() -> None:
             runner = AsyncRunner()
-            with pytest.raises(TypeError, match="args/kwargs are not allowed"):
-                await runner.run(asyncio.sleep(0), 1)
             await runner.close()
+            with pytest.raises(RuntimeError, match="runner is closed"):
+                await runner.run(lambda: None)
+            with pytest.raises(RuntimeError, match="runner is closed"):
+                await runner.start()
+
+        asyncio.run(run())
+
+    def test_run_context_override_uses_explicit_context(self):
+        async def run() -> None:
+            import contextvars
+
+            marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+            marker.set("ambient")
+
+            runner_ctx = contextvars.copy_context()
+            runner_ctx.run(marker.set, "runner-context")
+
+            override_ctx = contextvars.copy_context()
+            override_ctx.run(marker.set, "override-context")
+
+            runner = AsyncRunner(context=runner_ctx)
+            try:
+                assert await runner.run(lambda: marker.get()) == "runner-context"
+                assert await runner.run(lambda: marker.get(), context=override_ctx) == "override-context"
+            finally:
+                await runner.close()
+
+        asyncio.run(run())
+
+    def test_run_future_entry_waits(self):
+        async def run() -> None:
+            from tealet.scheduler import Future
+
+            runner = AsyncRunner()
+            try:
+                future: Future[int] = Future()
+                scheduler = await runner.start()
+                scheduler.call_soon(future.set_result, 123)
+                assert await runner.run(future) == 123
+                assert future.done() is True
+                assert future.result() == 123
+            finally:
+                await runner.close()
 
         asyncio.run(run())
 
     def test_run_async_helper(self):
-        async def entry() -> int:
+        def entry() -> int:
             return 42
 
         async def run() -> None:

@@ -162,6 +162,52 @@ class TestSchedulerAccessors:
 
         asyncio.run(run())
 
+    def test_arun_until_complete_returns_result(self):
+        s = new_scheduler()
+        set_scheduler(s)
+
+        def worker() -> int:
+            s.yield_()
+            return 42
+
+        async def run() -> None:
+            assert await s.arun_until_complete(worker) == 42
+
+        asyncio.run(run())
+
+    def test_arun_until_complete_accepts_future(self):
+        s = new_scheduler()
+        set_scheduler(s)
+
+        future: Future[int] = Future()
+
+        async def complete_later() -> None:
+            await asyncio.sleep(0)
+            s.call_soon(future.set_result, 7)
+
+        async def run() -> None:
+            trigger = asyncio.create_task(complete_later())
+            try:
+                assert await s.arun_until_complete(future) == 7
+            finally:
+                await trigger
+
+        asyncio.run(run())
+
+    def test_arun_forever_stops(self):
+        s = new_scheduler()
+        set_scheduler(s)
+
+        def stop_soon() -> None:
+            s.call_soon(s.stop)
+
+        s.spawn(stop_soon)
+
+        async def run() -> None:
+            await s.arun_forever()
+
+        asyncio.run(run())
+
     def test_run_until_complete_returns_result(self):
         s = new_scheduler()
         set_scheduler(s)

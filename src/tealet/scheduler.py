@@ -1079,6 +1079,26 @@ class SimpleScheduler(BaseScheduler):
             self._stopping = False
             self._idle_waiter = previous_idle_waiter
 
+    async def arun_forever(self) -> None:
+        self._verify_current_scheduler()
+        previous_idle_waiter = self._idle_waiter
+        self._idle_waiter = self._async_idle_waiter
+        self._loop = asyncio.get_running_loop()
+        self._stopping = False
+        self._running = True
+        try:
+            while not self._stopping:
+                self._run_ready_timers()
+                if self._tasks:
+                    self._pump()
+                    continue
+                await self._wait_async()
+        finally:
+            self._running = False
+            self._stopping = False
+            self._loop = None
+            self._idle_waiter = previous_idle_waiter
+
     def run_until_complete(
         self,
         future: Future[T] | Callable[[], T],
@@ -1107,6 +1127,42 @@ class SimpleScheduler(BaseScheduler):
         finally:
             self._running = False
             self._stopping = False
+            self._idle_waiter = previous_idle_waiter
+
+        if not target.done():
+            raise RuntimeError("Scheduler stopped before Future completed.")
+        return target.result()
+
+    async def arun_until_complete(
+        self,
+        future: Future[T] | Callable[[], T],
+    ) -> T:
+        self._verify_current_scheduler()
+        if isinstance(future, Future):
+            target: Future[T] = future
+            if isinstance(target, TealetTask) and target.get_scheduler() is not self:
+                raise RuntimeError("Future is bound to a different scheduler")
+        elif callable(future):
+            target = self.spawn(future)
+        else:
+            raise TypeError("future must be a Future or callable")
+
+        previous_idle_waiter = self._idle_waiter
+        self._idle_waiter = self._async_idle_waiter
+        self._loop = asyncio.get_running_loop()
+        self._stopping = False
+        self._running = True
+        try:
+            while not target.done() and not self._stopping:
+                self._run_ready_timers()
+                if self._tasks:
+                    self._pump()
+                if not target.done() and not self._stopping:
+                    await self._wait_async()
+        finally:
+            self._running = False
+            self._stopping = False
+            self._loop = None
             self._idle_waiter = previous_idle_waiter
 
         if not target.done():
