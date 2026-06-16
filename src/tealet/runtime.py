@@ -111,26 +111,36 @@ class Runner:
             raise ValueError("provide either scheduler or scheduler_factory, not both")
         self._scheduler = scheduler
         self._scheduler_factory = scheduler_factory
+        self._closed = False
+        self._initialized = False
+        self._previous_scheduler: scheduler_module.SimpleScheduler | None = None
 
-    def get_scheduler(self) -> scheduler_module.SimpleScheduler | None:
-        return self._scheduler
+    def get_scheduler(self) -> scheduler_module.SimpleScheduler:
+        self._lazy_init()
+        scheduler = self._scheduler
+        assert scheduler is not None
+        return scheduler
 
     def run(self, entry, /, *args: Any, **kwargs: Any):
-        scheduler = self._scheduler or self._create_scheduler()
-        self._scheduler = scheduler
-        previous = scheduler_module._current_scheduler()
-        scheduler_module.set_scheduler(scheduler)
-        try:
-            result = _invoke_sync_entry(entry, *args, **kwargs)
-            scheduler.run()
-            return result
-        finally:
-            scheduler_module.set_scheduler(previous)
+        self._lazy_init()
+        scheduler = self._scheduler
+        assert scheduler is not None
+        result = _invoke_sync_entry(entry, *args, **kwargs)
+        scheduler.run()
+        return result
 
     def close(self) -> None:
-        return None
+        if self._closed:
+            return
+        self._closed = True
+        if self._initialized:
+            scheduler_module.set_scheduler(self._previous_scheduler)
+            self._previous_scheduler = None
+            self._initialized = False
+        self._scheduler = None
 
     def __enter__(self) -> "Runner":
+        self._lazy_init()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -142,6 +152,23 @@ class Runner:
         if not isinstance(created, scheduler_module.SimpleScheduler):
             raise TypeError("scheduler factory must return a SimpleScheduler instance")
         return created
+
+    def _lazy_init(self) -> None:
+        if self._closed:
+            raise RuntimeError("runner is closed")
+        if self._initialized:
+            return
+
+        current = scheduler_module._current_scheduler()
+        if current is not None and current.is_running():
+            raise RuntimeError("cannot initialize runner while another scheduler is running")
+
+        if self._scheduler is None:
+            self._scheduler = self._create_scheduler()
+
+        self._previous_scheduler = current
+        scheduler_module.set_scheduler(self._scheduler)
+        self._initialized = True
 
 
 async def _invoke_entry(entry, /, *args: Any, **kwargs: Any):
