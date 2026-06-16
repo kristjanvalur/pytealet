@@ -14,14 +14,11 @@ class AsyncRunner:
     def __init__(
         self,
         *,
-        scheduler: scheduler_module.AsyncDrivingScheduler | None = None,
         scheduler_factory: Callable[[], scheduler_module.AsyncDrivingScheduler] | None = None,
         context: contextvars.Context | None = None,
         debug: bool | None = None,
     ) -> None:
-        if scheduler is not None and scheduler_factory is not None:
-            raise ValueError("provide either scheduler or scheduler_factory, not both")
-        self._scheduler = scheduler
+        self._scheduler: scheduler_module.AsyncDrivingScheduler | None = None
         self._scheduler_factory = scheduler_factory
         self._context = context
         self._debug = debug
@@ -86,8 +83,7 @@ class AsyncRunner:
         if current is not None and current.is_running():
             raise RuntimeError("cannot initialize runner while another scheduler is running")
 
-        if self._scheduler is None:
-            self._scheduler = self._create_scheduler()
+        self._scheduler = self._create_scheduler()
         if self._debug is not None:
             self._scheduler.set_debug(self._debug)
         if self._context is None:
@@ -120,7 +116,7 @@ def run(
     /,
     *,
     context: contextvars.Context | None = None,
-    scheduler_factory: Callable[[], scheduler_module.SimpleScheduler] | None = None,
+    scheduler_factory: Callable[[], scheduler_module.SyncDrivingScheduler] | None = None,
     debug: bool | None = None,
 ):
     """Convenience helper that runs one entry under a temporary Runner."""
@@ -138,14 +134,11 @@ class Runner:
     def __init__(
         self,
         *,
-        scheduler: scheduler_module.SyncDrivingScheduler | None = None,
         scheduler_factory: Callable[[], scheduler_module.SyncDrivingScheduler] | None = None,
         context: contextvars.Context | None = None,
         debug: bool | None = None,
     ) -> None:
-        if scheduler is not None and scheduler_factory is not None:
-            raise ValueError("provide either scheduler or scheduler_factory, not both")
-        self._scheduler = scheduler
+        self._scheduler: scheduler_module.SyncDrivingScheduler | None = None
         self._scheduler_factory = scheduler_factory
         self._context = context
         self._debug = debug
@@ -212,8 +205,7 @@ class Runner:
         if current is not None and current.is_running():
             raise RuntimeError("cannot initialize runner while another scheduler is running")
 
-        if self._scheduler is None:
-            self._scheduler = self._create_scheduler()
+        self._scheduler = self._create_scheduler()
         if self._debug is not None:
             self._scheduler.set_debug(self._debug)
         if self._context is None:
