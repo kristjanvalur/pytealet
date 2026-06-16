@@ -853,9 +853,18 @@ class SimpleScheduler(BaseScheduler):
             except AttributeError:
                 pass
 
-    def spawn(self, func: Callable[..., T], *args, **kwargs) -> TealetTask:
+    def spawn(
+        self,
+        func: Callable[..., T],
+        *args,
+        context: contextvars.Context | None = None,
+        **kwargs,
+    ) -> TealetTask:
+        if context is None:
+            context = contextvars.copy_context()
+
         def task_main(current: tealet.tealet, _arg: object):
-            return func(*args, **kwargs)
+            return context.run(func, *args, **kwargs)
 
         t = TealetTask(self)
         t.prepare(task_main)

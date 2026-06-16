@@ -360,6 +360,35 @@ class TestSchedulerExamples:
 
         assert seen == ["explicit"]
 
+    def test_spawn_captures_current_context(self):
+        s = scheduler()
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        seen: list[str] = []
+
+        marker.set("scheduled")
+        s.spawn(lambda: seen.append(marker.get()))
+        marker.set("after-schedule")
+
+        s.run()
+
+        assert seen == ["scheduled"]
+
+    def test_spawn_uses_explicit_context(self):
+        s = scheduler()
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        seen: list[str] = []
+
+        marker.set("ambient")
+        ctx = contextvars.copy_context()
+        ctx.run(marker.set, "explicit")
+
+        s.spawn(lambda: seen.append(marker.get()), context=ctx)
+        marker.set("after-schedule")
+
+        s.run()
+
+        assert seen == ["explicit"]
+
     def test_event_wait_timeout_and_success(self):
         s = scheduler()
         evt = Event()
