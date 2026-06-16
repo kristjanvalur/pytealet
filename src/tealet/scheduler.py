@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import heapq
 import inspect
 import itertools
@@ -68,7 +69,12 @@ class BaseScheduler(Linkable, ABC):
         """Find the next scheduling target."""
 
     @abstractmethod
-    def call_soon_threadsafe(self, callback: Callable[..., object], *args: object) -> None:
+    def call_soon_threadsafe(
+        self,
+        callback: Callable[..., object],
+        *args: object,
+        context: contextvars.Context | None = None,
+    ) -> None:
         """Schedule a callback from another scheduler/thread context."""
 
 def scheduler() -> SimpleScheduler:
@@ -389,10 +395,12 @@ class TimerHandle:
         when: float,
         callback: Callable[..., object],
         args: tuple[object, ...] = (),
+        context: contextvars.Context | None = None,
     ) -> None:
         self._when = when
         self._callback = callback
         self._args = args
+        self._context = context
         self._cancelled = False
 
     @property
@@ -408,7 +416,10 @@ class TimerHandle:
     def _run(self) -> None:
         if self._cancelled:
             return
-        self._callback(*self._args)
+        if self._context is None:
+            self._callback(*self._args)
+            return
+        self._context.run(self._callback, *self._args)
 
     def __enter__(self) -> "TimerHandle":
         return self
@@ -426,7 +437,9 @@ class Future(Generic[T]):
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._event = Event()
-        self._done_callbacks: list[Callable[[Future[T]], object]] = []
+        self._done_callbacks: list[
+            tuple[Callable[[Future[T]], object], contextvars.Context | None]
+        ] = []
 
     def done(self) -> bool:
         return self._done
@@ -461,27 +474,42 @@ class Future(Generic[T]):
         self._event.set()
         self._run_done_callbacks()
 
-    def add_done_callback(self, callback: Callable[[Future[T]], object]) -> None:
+    def add_done_callback(
+        self,
+        callback: Callable[[Future[T]], object],
+        *,
+        context: contextvars.Context | None = None,
+    ) -> None:
         if self._done:
-            callback(self)
+            loop = asyncio.get_running_loop()
+            if context is None:
+                loop.call_soon(callback, self)
+            else:
+                loop.call_soon(callback, self, context=context)
             return
-        self._done_callbacks.append(callback)
+        if context is None:
+            context = contextvars.copy_context()
+        self._done_callbacks.append((callback, context))
 
     def remove_done_callback(self, callback: Callable[[Future[T]], object]) -> int:
         removed = 0
-        while True:
-            try:
-                self._done_callbacks.remove(callback)
-            except ValueError:
-                break
-            removed += 1
+        kept: list[tuple[Callable[[Future[T]], object], contextvars.Context | None]] = []
+        for stored_callback, context in self._done_callbacks:
+            if stored_callback is callback:
+                removed += 1
+            else:
+                kept.append((stored_callback, context))
+        self._done_callbacks = kept
         return removed
 
     def _run_done_callbacks(self) -> None:
         callbacks = self._done_callbacks[:]
         self._done_callbacks.clear()
-        for callback in callbacks:
-            callback(self)
+        for callback, context in callbacks:
+            if context is None:
+                callback(self)
+            else:
+                context.run(callback, self)
 
     def _wait(self) -> bool:
         if self._done:
@@ -690,7 +718,9 @@ class SimpleScheduler(BaseScheduler):
         self._running = False
         self._stopping = False
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._threadsafe_callbacks: deque[tuple[Callable[..., object], tuple[object, ...]]] = deque()
+        self._threadsafe_callbacks: deque[
+            tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
+        ] = deque()
         self._threadsafe_lock = threading.Lock()
         self._pending_async_waits: set[tealet.tealet] = set()
         self._timers: list[tuple[float, int, TimerHandle]] = []
@@ -717,21 +747,47 @@ class SimpleScheduler(BaseScheduler):
         self._stopping = True
         self._break_wait_local()
 
-    def call_soon(self, callback: Callable[..., object], *args: object) -> TimerHandle:
-        return self.call_at(self.time(), callback, *args)
+    def call_soon(
+        self,
+        callback: Callable[..., object],
+        *args: object,
+        context: contextvars.Context | None = None,
+    ) -> TimerHandle:
+        return self.call_at(self.time(), callback, *args, context=context)
 
-    def call_soon_threadsafe(self, callback: Callable[..., object], *args: object) -> None:
+    def call_soon_threadsafe(
+        self,
+        callback: Callable[..., object],
+        *args: object,
+        context: contextvars.Context | None = None,
+    ) -> None:
+        if context is None:
+            context = contextvars.copy_context()
         with self._threadsafe_lock:
-            self._threadsafe_callbacks.append((callback, args))
+            self._threadsafe_callbacks.append((callback, args, context))
         self._break_wait_threadsafe()
 
-    def call_later(self, delay: float, callback: Callable[..., object], *args: object) -> TimerHandle:
+    def call_later(
+        self,
+        delay: float,
+        callback: Callable[..., object],
+        *args: object,
+        context: contextvars.Context | None = None,
+    ) -> TimerHandle:
         if delay < 0:
             delay = 0
-        return self.call_at(self.time() + delay, callback, *args)
+        return self.call_at(self.time() + delay, callback, *args, context=context)
 
-    def call_at(self, when: float, callback: Callable[..., object], *args: object) -> TimerHandle:
-        handle = TimerHandle(when, callback, args)
+    def call_at(
+        self,
+        when: float,
+        callback: Callable[..., object],
+        *args: object,
+        context: contextvars.Context | None = None,
+    ) -> TimerHandle:
+        if context is None:
+            context = contextvars.copy_context()
+        handle = TimerHandle(when, callback, args, context=context)
         self._enqueue_timer(when, handle)
         return handle
 
@@ -744,8 +800,11 @@ class SimpleScheduler(BaseScheduler):
             with self._threadsafe_lock:
                 if not self._threadsafe_callbacks:
                     return
-                callback, args = self._threadsafe_callbacks.popleft()
-            callback(*args)
+                callback, args, context = self._threadsafe_callbacks.popleft()
+            if context is None:
+                callback(*args)
+            else:
+                context.run(callback, *args)
 
     def _run_ready_timers(self) -> None:
         self._drain_threadsafe_callbacks()

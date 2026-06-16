@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import threading
 
 import pytest
@@ -321,6 +322,43 @@ class TestSchedulerExamples:
 
         assert handle.cancelled()
         assert seen == []
+
+    def test_call_later_captures_current_context(self):
+        s = scheduler()
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        seen: list[str] = []
+
+        marker.set("scheduled")
+
+        def mark() -> None:
+            seen.append(marker.get())
+
+        s.call_later(0, mark)
+        marker.set("after-schedule")
+
+        s.run()
+
+        assert seen == ["scheduled"]
+
+    def test_call_later_uses_explicit_context(self):
+        s = scheduler()
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        seen: list[str] = []
+
+        marker.set("ambient")
+
+        def mark() -> None:
+            seen.append(marker.get())
+
+        ctx = contextvars.copy_context()
+        ctx.run(marker.set, "explicit")
+
+        s.call_later(0, mark, context=ctx)
+        marker.set("after-schedule")
+
+        s.run()
+
+        assert seen == ["explicit"]
 
     def test_event_wait_timeout_and_success(self):
         s = scheduler()
@@ -972,17 +1010,54 @@ class TestFutureExamples:
 
         assert seen == ["done=5"]
 
-    def test_future_done_callback_runs_immediately_when_already_done(self):
+    def test_future_done_callback_is_scheduled_when_already_done(self):
+        async def case() -> None:
+            future: Future[int] = Future()
+            future.set_result(7)
+            seen: list[str] = []
+
+            def on_done(done: Future[int]) -> None:
+                seen.append(f"done={done.result()}")
+
+            future.add_done_callback(on_done)
+
+            assert seen == []
+            await asyncio.sleep(0)
+            assert seen == ["done=7"]
+
+        asyncio.run(case())
+
+    def test_future_done_callback_uses_context(self):
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
         future: Future[int] = Future()
-        future.set_result(7)
         seen: list[str] = []
 
-        def on_done(done: Future[int]) -> None:
-            seen.append(f"done={done.result()}")
+        def on_done(_done: Future[int]) -> None:
+            seen.append(marker.get())
+
+        ctx = contextvars.copy_context()
+        ctx.run(marker.set, "callback-context")
+
+        future.add_done_callback(on_done, context=ctx)
+        future.set_result(1)
+
+        assert seen == ["callback-context"]
+
+    def test_future_done_callback_captures_current_context_by_default(self):
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        future: Future[int] = Future()
+        seen: list[str] = []
+
+        marker.set("registered")
+
+        def on_done(_done: Future[int]) -> None:
+            seen.append(marker.get())
 
         future.add_done_callback(on_done)
+        marker.set("after-register")
+        future.set_result(1)
 
-        assert seen == ["done=7"]
+        assert seen == ["registered"]
 
     def test_future_remove_done_callback(self):
         future: Future[int] = Future()
