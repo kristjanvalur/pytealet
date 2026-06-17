@@ -7,10 +7,10 @@ from tealet.scheduler import SimpleScheduler, get_scheduler, set_scheduler
 
 
 class TestAsyncRunner:
-    def test_start_and_close_lifecycle(self):
+    def test_get_scheduler_lazy_init_and_close_lifecycle(self):
         async def run() -> None:
             runner = AsyncRunner()
-            scheduler = await runner.start()
+            scheduler = runner.get_scheduler()
             assert isinstance(scheduler, SimpleScheduler)
             assert runner.task is None
             await runner.close()
@@ -53,7 +53,7 @@ class TestAsyncRunner:
         async def run() -> None:
             custom = SimpleScheduler()
             runner = AsyncRunner(scheduler_factory=lambda: custom)
-            started = await runner.start()
+            started = runner.get_scheduler()
             assert started is custom
             await runner.close()
 
@@ -65,7 +65,7 @@ class TestAsyncRunner:
             previous = loop.get_debug()
             runner = AsyncRunner(debug=not previous)
             try:
-                await runner.start()
+                runner.get_scheduler()
                 assert loop.get_debug() is previous
             finally:
                 await runner.close()
@@ -78,7 +78,7 @@ class TestAsyncRunner:
             custom = SimpleScheduler()
             runner = AsyncRunner(scheduler_factory=lambda: custom, debug=True)
             try:
-                await runner.start()
+                runner.get_scheduler()
                 assert custom.get_debug() is True
             finally:
                 await runner.close()
@@ -88,8 +88,13 @@ class TestAsyncRunner:
     def test_invalid_factory_return_type(self):
         async def run() -> None:
             runner = AsyncRunner(scheduler_factory=lambda: object())
-            with pytest.raises(TypeError, match="scheduler factory must return"):
-                await runner.start()
+            try:
+                scheduler = runner.get_scheduler()
+                with pytest.raises(AttributeError):
+                    await scheduler.arun_until_complete(lambda: None)
+            finally:
+                await runner.close()
+                set_scheduler(None)
 
         asyncio.run(run())
 
@@ -100,7 +105,7 @@ class TestAsyncRunner:
             with pytest.raises(RuntimeError, match="runner is closed"):
                 await runner.run(lambda: None)
             with pytest.raises(RuntimeError, match="runner is closed"):
-                await runner.start()
+                runner.get_scheduler()
 
         asyncio.run(run())
 
@@ -133,7 +138,7 @@ class TestAsyncRunner:
             runner = AsyncRunner()
             try:
                 future: Future[int] = Future()
-                scheduler = await runner.start()
+                scheduler = runner.get_scheduler()
                 scheduler.call_soon(future.set_result, 123)
                 assert await runner.run(future) == 123
                 assert future.done() is True
@@ -329,3 +334,32 @@ class TestRunHelper:
     def test_run_helper_sets_scheduler_debug_flag(self):
         custom = SimpleScheduler()
         assert run(lambda: custom.get_debug(), scheduler_factory=lambda: custom, debug=True) is True
+
+
+class TestRunnerDefaultFactoryOverride:
+    def test_runner_subclass_default_factory_is_used(self):
+        custom = SimpleScheduler()
+
+        class CustomRunner(Runner):
+            default_factory = staticmethod(lambda: custom)
+
+        runner = CustomRunner()
+        try:
+            assert runner.get_scheduler() is custom
+        finally:
+            runner.close()
+
+    def test_async_runner_subclass_default_factory_is_used(self):
+        custom = SimpleScheduler()
+
+        class CustomAsyncRunner(AsyncRunner):
+            default_factory = staticmethod(lambda: custom)
+
+        async def run_case() -> None:
+            runner = CustomAsyncRunner()
+            try:
+                assert runner.get_scheduler() is custom
+            finally:
+                await runner.close()
+
+        asyncio.run(run_case())
