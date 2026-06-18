@@ -39,7 +39,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-tealet = ["include/*.h"]
+tealet = ["include/*.h", "py.typed"]
 
 [tool.ruff]
 line-length = 120

@@ -1,0 +1,2 @@
+include src/_tealet.pyi
+include src/tealet/py.typed

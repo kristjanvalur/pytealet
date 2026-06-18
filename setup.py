@@ -7,6 +7,7 @@ import subprocess
 import sys
 import sysconfig
 from setuptools import Extension, setup
+from setuptools.command.build_py import build_py as _build_py
 
 
 def read_project_version(pyproject_path="pyproject.toml"):
@@ -40,6 +41,14 @@ STACKMAN_HEADERS = os.path.join(LIBTEALET_RELEASE_DIR, "stackman")
 PYTEALET_BUILD_CONFIG_HEADER = os.path.abspath("src/_tealet/pytealet_build_config.h")
 DEFAULT_C_STD_FLAGS = "-std=c17 -pedantic-errors"
 PROJECT_VERSION = read_project_version()
+
+
+class build_py(_build_py):
+    """Include top-level extension module stubs in built wheels."""
+
+    def run(self):
+        super().run()
+        self.copy_file("src/_tealet.pyi", os.path.join(self.build_lib, "_tealet.pyi"))
 
 # Default to release archive builds. Set BUILD_LIBTEALET_FROM_SOURCE=1 to use
 # a local source checkout in src/_tealet/libtealet-src.
@@ -293,4 +302,5 @@ _tealet_capi_client_ext = Extension(
 # Run setup
 setup(
     ext_modules=[_tealet_ext, _tealet_capi_client_ext],
+    cmdclass={"build_py": build_py},
 )
