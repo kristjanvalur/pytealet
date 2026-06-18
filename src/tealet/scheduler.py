@@ -9,7 +9,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Callable, Generic, TypeVar
+from typing import Callable, Generic, TypeVar, cast
 
 import tealet
 
@@ -20,7 +20,13 @@ T = TypeVar("T")
 
 # a thread local scheduler
 _scheduler = threading.local()
-_default_scheduler_factory: Callable[[], SimpleScheduler] = lambda: SimpleScheduler()
+
+
+def _new_default_scheduler() -> Scheduler:
+    return Scheduler()
+
+
+_default_scheduler_factory: Callable[[], Scheduler] = _new_default_scheduler
 
 
 class Linkable(ABC):
@@ -36,46 +42,6 @@ class Linkable(ABC):
     def _query_runnable(self, t: tealet.tealet) -> bool:
         return False
 
-
-class BaseScheduler(Linkable, ABC):
-    """Base scheduler surface used for scheduler-aware type annotations."""
-
-    @abstractmethod
-    def _is_runnable(self, t: tealet.tealet) -> bool:
-        """Return whether the target tealet is currently runnable."""
-
-    @abstractmethod
-    def _is_blocked(self, t: tealet.tealet) -> bool:
-        """Return whether the target tealet is blocked on async wait."""
-
-    @abstractmethod
-    def _unlink_pending_async_wait(self, t: tealet.tealet) -> None:
-        """Remove pending async wait bookkeeping for a tealet."""
-
-    @abstractmethod
-    def _make_runnable(self, t: tealet.tealet) -> None:
-        """Queue a tealet to run."""
-
-    @abstractmethod
-    def _target_run(self, target: tealet.tealet) -> None:
-        """Run the target tealet from the scheduler context."""
-
-    @abstractmethod
-    def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
-        """Throw into the target tealet from the scheduler context."""
-
-    @abstractmethod
-    def _find_target(self, task_exit: bool = False) -> tealet.tealet:
-        """Find the next scheduling target."""
-
-    @abstractmethod
-    def call_soon_threadsafe(
-        self,
-        callback: Callable[..., object],
-        *args: object,
-        context: contextvars.Context | None = None,
-    ) -> None:
-        """Schedule a callback from another scheduler/thread context."""
 
 class CoreSchedulerDrivingAPI(ABC):
     @abstractmethod
@@ -135,30 +101,27 @@ class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
     async def arun_until_complete(self, future: "Future[T] | Callable[[], T]") -> T:
         """Run async scheduler loop until a target future/callable completes."""
 
-def scheduler() -> SimpleScheduler:
+def scheduler() -> Scheduler:
     return get_scheduler()
 
 
-def new_scheduler() -> SimpleScheduler:
-    created = _default_scheduler_factory()
-    if not isinstance(created, SimpleScheduler):
-        raise TypeError("scheduler factory must return a SimpleScheduler instance")
-    return created
+def new_scheduler() -> Scheduler:
+    return _default_scheduler_factory()
 
 
-def set_default_scheduler_factory(factory: Callable[[], SimpleScheduler] | None) -> None:
+def set_default_scheduler_factory(factory: Callable[[], Scheduler] | None) -> None:
     global _default_scheduler_factory
     if factory is None:
-        _default_scheduler_factory = lambda: SimpleScheduler()
+        _default_scheduler_factory = _new_default_scheduler
         return
     _default_scheduler_factory = factory
 
 
-def get_default_scheduler_factory() -> Callable[[], SimpleScheduler]:
+def get_default_scheduler_factory() -> Callable[[], Scheduler]:
     return _default_scheduler_factory
 
 
-def set_scheduler(value: SimpleScheduler | None) -> None:
+def set_scheduler(value: "BaseScheduler | None") -> None:
     if value is None:
         if hasattr(_scheduler, "instance"):
             del _scheduler.instance
@@ -166,15 +129,15 @@ def set_scheduler(value: SimpleScheduler | None) -> None:
     _scheduler.instance = value
 
 
-def get_scheduler() -> SimpleScheduler:
+def get_scheduler() -> Scheduler:
     current = getattr(_scheduler, "instance", None)
     if current is None:
         current = new_scheduler()
         _scheduler.instance = current
-    return current
+    return cast(Scheduler, current)
 
 
-def get_running_scheduler() -> SimpleScheduler:
+def get_running_scheduler() -> "BaseScheduler":
     current = _current_scheduler()
     if current is not None and current.is_running():
         return current
@@ -184,7 +147,7 @@ def get_running_scheduler() -> SimpleScheduler:
 set_scheduler_resolver(get_scheduler)
 
 
-def _current_scheduler() -> SimpleScheduler | None:
+def _current_scheduler() -> "BaseScheduler | None":
     return getattr(_scheduler, "instance", None)
 
 
@@ -718,56 +681,8 @@ def timeout_at(when: float) -> Timeout:
     return Timeout(when)
 
 
-class _ThreadIdleWaiter:
-    def __init__(self, scheduler: SimpleScheduler) -> None:
-        self._scheduler = scheduler
-        self._wakeup = threading.Event()
-
-    def break_local(self) -> None:
-        self._wakeup.set()
-
-    def break_threadsafe(self) -> None:
-        self._wakeup.set()
-
-    def wait_for(self, timeout: float | None) -> None:
-        self._wakeup.wait(timeout=timeout)
-        self._wakeup.clear()
-
-
-class _AsyncIdleWaiter:
-    def __init__(self, scheduler: SimpleScheduler) -> None:
-        self._scheduler = scheduler
-        self._awakeup = asyncio.Event()
-
-    def break_local(self) -> None:
-        self._awakeup.set()
-
-    def break_threadsafe(self) -> None:
-        loop = self._scheduler._loop
-        if loop is not None:
-            loop.call_soon_threadsafe(self._awakeup.set)
-        elif _current_scheduler() is self._scheduler:
-            self._awakeup.set()
-
-    async def wait_for(self, timeout: float | None) -> None:
-        if timeout is None:
-            # No scheduler timer is pending. We may still be alive because one or
-            # more tealets are blocked in wait_async() on external asyncio
-            # awaitables, so block until an explicit wakeup arrives.
-            await self._awakeup.wait()
-            self._awakeup.clear()
-            return
-        try:
-            async with asyncio.timeout(timeout):
-                await self._awakeup.wait()
-        except TimeoutError:
-            pass
-        finally:
-            self._awakeup.clear()
-
-
-class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDrivingAPI):
-    """Very small cooperative scheduler for runnable tealets."""
+class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
+    """Shared cooperative scheduler mechanics for concrete drivers."""
 
     def __init__(self) -> None:
         self._tasks: deque[tealet.tealet] = deque()
@@ -786,9 +701,6 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
         self._timer_sequence = itertools.count()
         self._n_scheduled = 0
         self._target_count = None
-        self._thread_idle_waiter = _ThreadIdleWaiter(self)
-        self._async_idle_waiter = _AsyncIdleWaiter(self)
-        self._idle_waiter: _ThreadIdleWaiter | _AsyncIdleWaiter = self._thread_idle_waiter
 
     def time(self) -> float:
         return time.monotonic()
@@ -1082,20 +994,34 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
         finally:
             self._running = False
 
+    @abstractmethod
     def _break_wait_threadsafe(self) -> None:
-        self._idle_waiter.break_threadsafe()
+        """Wake a concrete driver from another thread or scheduler context."""
 
+    @abstractmethod
     def _break_wait_local(self) -> None:
-        self._idle_waiter.break_local()
+        """Wake a concrete driver from its owning context."""
 
     def _break_wait(self) -> None:
         self._break_wait_local()
 
-    def _wait_thread(self) -> None:
-        self._thread_idle_waiter.wait_for(self._time_to_next_timer())
 
-    async def _wait_async(self) -> None:
-        await self._async_idle_waiter.wait_for(self._time_to_next_timer())
+class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
+    """Cooperative scheduler for synchronous driving."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._wakeup = threading.Event()
+
+    def _break_wait_threadsafe(self) -> None:
+        self._wakeup.set()
+
+    def _break_wait_local(self) -> None:
+        self._wakeup.set()
+
+    def _wait_thread(self) -> None:
+        self._wakeup.wait(timeout=self._time_to_next_timer())
+        self._wakeup.clear()
 
     def run(self) -> None:
         """Run scheduler synchronously until no runnable tasks or timers remain.
@@ -1107,8 +1033,6 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
         `wait_async()` are not progressed here; use `arun()` for that mode.
         """
         self._verify_current_scheduler()
-        previous_idle_waiter = self._idle_waiter
-        self._idle_waiter = self._thread_idle_waiter
         self._running = True
         try:
             while self._tasks or self._timers:
@@ -1119,12 +1043,9 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
                     self._wait_thread()
         finally:
             self._running = False
-            self._idle_waiter = previous_idle_waiter
 
     def run_forever(self) -> None:
         self._verify_current_scheduler()
-        previous_idle_waiter = self._idle_waiter
-        self._idle_waiter = self._thread_idle_waiter
         self._stopping = False
         self._running = True
         try:
@@ -1137,27 +1058,6 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
         finally:
             self._running = False
             self._stopping = False
-            self._idle_waiter = previous_idle_waiter
-
-    async def arun_forever(self) -> None:
-        self._verify_current_scheduler()
-        previous_idle_waiter = self._idle_waiter
-        self._idle_waiter = self._async_idle_waiter
-        self._loop = asyncio.get_running_loop()
-        self._stopping = False
-        self._running = True
-        try:
-            while not self._stopping:
-                self._run_ready_timers()
-                if self._tasks:
-                    self._pump()
-                    continue
-                await self._wait_async()
-        finally:
-            self._running = False
-            self._stopping = False
-            self._loop = None
-            self._idle_waiter = previous_idle_waiter
 
     def run_until_complete(
         self,
@@ -1173,8 +1073,6 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
         else:
             raise TypeError("future must be a Future or callable")
 
-        previous_idle_waiter = self._idle_waiter
-        self._idle_waiter = self._thread_idle_waiter
         self._stopping = False
         self._running = True
         try:
@@ -1187,11 +1085,68 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
         finally:
             self._running = False
             self._stopping = False
-            self._idle_waiter = previous_idle_waiter
 
         if not target.done():
             raise RuntimeError("Scheduler stopped before Future completed.")
         return target.result()
+
+
+class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
+    """Cooperative scheduler for asyncio-hosted driving."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._wakeup: asyncio.Event | None = None
+
+    def _break_wait_threadsafe(self) -> None:
+        loop = self._loop
+        wakeup = self._wakeup
+        if loop is not None and wakeup is not None:
+            loop.call_soon_threadsafe(wakeup.set)
+        elif _current_scheduler() is self:
+            self._break_wait_local()
+
+    def _break_wait_local(self) -> None:
+        if self._wakeup is not None:
+            self._wakeup.set()
+
+    async def _wait_async(self) -> None:
+        wakeup = self._wakeup
+        assert wakeup is not None
+        timeout = self._time_to_next_timer()
+        if timeout is None:
+            # No scheduler timer is pending. We may still be alive because one or
+            # more tealets are blocked in wait_async() on external asyncio
+            # awaitables, so block until an explicit wakeup arrives.
+            await wakeup.wait()
+            wakeup.clear()
+            return
+        try:
+            async with asyncio.timeout(timeout):
+                await wakeup.wait()
+        except TimeoutError:
+            pass
+        finally:
+            wakeup.clear()
+
+    async def arun_forever(self) -> None:
+        self._verify_current_scheduler()
+        self._loop = asyncio.get_running_loop()
+        self._wakeup = asyncio.Event()
+        self._stopping = False
+        self._running = True
+        try:
+            while not self._stopping:
+                self._run_ready_timers()
+                if self._tasks:
+                    self._pump()
+                    continue
+                await self._wait_async()
+        finally:
+            self._running = False
+            self._stopping = False
+            self._wakeup = None
+            self._loop = None
 
     async def arun_until_complete(
         self,
@@ -1207,9 +1162,8 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
         else:
             raise TypeError("future must be a Future or callable")
 
-        previous_idle_waiter = self._idle_waiter
-        self._idle_waiter = self._async_idle_waiter
         self._loop = asyncio.get_running_loop()
+        self._wakeup = asyncio.Event()
         self._stopping = False
         self._running = True
         try:
@@ -1222,8 +1176,8 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
         finally:
             self._running = False
             self._stopping = False
+            self._wakeup = None
             self._loop = None
-            self._idle_waiter = previous_idle_waiter
 
         if not target.done():
             raise RuntimeError("Scheduler stopped before Future completed.")
@@ -1231,9 +1185,8 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
 
     async def arun(self) -> None:
         self._verify_current_scheduler()
-        previous_idle_waiter = self._idle_waiter
-        self._idle_waiter = self._async_idle_waiter
         self._loop = asyncio.get_running_loop()
+        self._wakeup = asyncio.Event()
         self._running = True
         try:
             while self._tasks or self._timers or self._pending_async_waits:
@@ -1242,30 +1195,5 @@ class SimpleScheduler(BaseScheduler, SyncSchedulerDrivingAPI, AsyncSchedulerDriv
                 await self._wait_async()
         finally:
             self._running = False
+            self._wakeup = None
             self._loop = None
-            self._idle_waiter = previous_idle_waiter
-
-class SyncScheduler(SimpleScheduler, SyncSchedulerDrivingAPI):
-    """Scheduler specialization exposing only sync driving operations."""
-
-    async def arun(self) -> None:  # pragma: no cover - defensive API guard
-        raise RuntimeError("SyncScheduler does not support async driving APIs")
-
-    async def arun_forever(self) -> None:  # pragma: no cover - defensive API guard
-        raise RuntimeError("SyncScheduler does not support async driving APIs")
-
-    async def arun_until_complete(self, future: Future[T] | Callable[[], T]) -> T:  # pragma: no cover - defensive API guard
-        raise RuntimeError("SyncScheduler does not support async driving APIs")
-
-
-class AsyncScheduler(SimpleScheduler, AsyncSchedulerDrivingAPI):
-    """Scheduler specialization exposing only async driving operations."""
-
-    def run(self) -> None:  # pragma: no cover - defensive API guard
-        raise RuntimeError("AsyncScheduler does not support sync driving APIs")
-
-    def run_forever(self) -> None:  # pragma: no cover - defensive API guard
-        raise RuntimeError("AsyncScheduler does not support sync driving APIs")
-
-    def run_until_complete(self, future: Future[T] | Callable[[], T]) -> T:  # pragma: no cover - defensive API guard
-        raise RuntimeError("AsyncScheduler does not support sync driving APIs")

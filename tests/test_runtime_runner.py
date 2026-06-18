@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from tealet.runtime import AsyncRunner, Runner, run, run_async
-from tealet.scheduler import SimpleScheduler, get_scheduler, set_scheduler
+from tealet.scheduler import AsyncScheduler, Scheduler, get_scheduler, set_scheduler
 
 
 class TestAsyncRunner:
@@ -11,7 +11,7 @@ class TestAsyncRunner:
         async def run() -> None:
             runner = AsyncRunner()
             scheduler = runner.get_scheduler()
-            assert isinstance(scheduler, SimpleScheduler)
+            assert isinstance(scheduler, AsyncScheduler)
             assert runner.task is None
             await runner.close()
             assert runner.task is None
@@ -51,7 +51,7 @@ class TestAsyncRunner:
 
     def test_scheduler_factory_is_used(self):
         async def run() -> None:
-            custom = SimpleScheduler()
+            custom = Scheduler()
             runner = AsyncRunner(scheduler_factory=lambda: custom)
             started = runner.get_scheduler()
             assert started is custom
@@ -75,7 +75,7 @@ class TestAsyncRunner:
 
     def test_async_runner_debug_sets_scheduler_debug_flag(self):
         async def run_case() -> None:
-            custom = SimpleScheduler()
+            custom = Scheduler()
             runner = AsyncRunner(scheduler_factory=lambda: custom, debug=True)
             try:
                 runner.get_scheduler()
@@ -163,7 +163,7 @@ class TestRunner:
     def test_get_scheduler_lazy_init(self):
         runner = Runner()
         scheduler = runner.get_scheduler()
-        assert isinstance(scheduler, SimpleScheduler)
+        assert isinstance(scheduler, Scheduler)
         assert runner.get_scheduler() is scheduler
 
     def test_runner_debug_sets_scheduler_debug_flag(self):
@@ -282,7 +282,7 @@ class TestRunner:
             runner.get_scheduler()
 
     def test_lazy_init_installs_and_restores_current_scheduler(self):
-        previous = SimpleScheduler()
+        previous = Scheduler()
         set_scheduler(previous)
 
         runner = Runner()
@@ -295,7 +295,7 @@ class TestRunner:
         set_scheduler(None)
 
     def test_lazy_init_rejects_when_running_scheduler_exists(self):
-        running = SimpleScheduler()
+        running = Scheduler()
         running._running = True
         set_scheduler(running)
 
@@ -323,7 +323,7 @@ class TestRunHelper:
         assert run(lambda: marker.get(), context=ctx) == "helper-context"
 
     def test_run_helper_restores_previous_scheduler(self):
-        previous = SimpleScheduler()
+        previous = Scheduler()
         set_scheduler(previous)
         try:
             assert run(lambda: "ok") == "ok"
@@ -332,13 +332,13 @@ class TestRunHelper:
             set_scheduler(None)
 
     def test_run_helper_sets_scheduler_debug_flag(self):
-        custom = SimpleScheduler()
+        custom = Scheduler()
         assert run(lambda: custom.get_debug(), scheduler_factory=lambda: custom, debug=True) is True
 
 
 class TestRunnerDefaultFactoryOverride:
     def test_runner_subclass_default_factory_is_used(self):
-        custom = SimpleScheduler()
+        custom = Scheduler()
 
         class CustomRunner(Runner):
             default_factory = staticmethod(lambda: custom)
@@ -350,7 +350,7 @@ class TestRunnerDefaultFactoryOverride:
             runner.close()
 
     def test_async_runner_subclass_default_factory_is_used(self):
-        custom = SimpleScheduler()
+        custom = Scheduler()
 
         class CustomAsyncRunner(AsyncRunner):
             default_factory = staticmethod(lambda: custom)

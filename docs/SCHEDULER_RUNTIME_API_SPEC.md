@@ -17,9 +17,18 @@ Implemented:
   - `AsyncRunner` drives async scheduler execution inside an existing asyncio task.
 - Shared runner lifecycle has been consolidated in a generic `BaseRunner`.
 - Runner factories use per-runner defaults and factory-only construction.
+  - `Runner` uses `Scheduler` as its default factory.
+  - `AsyncRunner` uses `AsyncScheduler` as its default factory.
+  - Custom factories are duck typed; runtime does not validate returned objects.
 - Top-level convenience helpers exist:
   - `run(...)`
   - `run_async(...)`
+- `BaseScheduler` contains shared cooperative scheduling mechanics.
+- `Scheduler` is the concrete synchronous scheduler implementation.
+- `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
+- `Scheduler` and `AsyncScheduler` can be used directly as factories. They share
+  the common scheduler/task/timer APIs from `BaseScheduler`, while implementing
+  different driving APIs.
 - Scheduler driving APIs include both sync and async run entry points:
   - `run_until_complete(...)`
   - `run_forever(...)`
@@ -64,10 +73,10 @@ Not implemented yet from this proposal:
 ### Scheduler Access Functions
 
 ```python
-def new_scheduler() -> SimpleScheduler: ...
-def set_scheduler(scheduler: SimpleScheduler | None) -> None: ...
-def get_scheduler() -> SimpleScheduler: ...
-def get_running_scheduler() -> SimpleScheduler: ...
+def new_scheduler() -> Scheduler: ...
+def set_scheduler(scheduler: Scheduler | None) -> None: ...
+def get_scheduler() -> Scheduler: ...
+def get_running_scheduler() -> Scheduler: ...
 ```
 
 Semantics:
@@ -94,7 +103,7 @@ Semantics:
 from collections.abc import Callable
 
 LoopFactory = Callable[[], asyncio.AbstractEventLoop]
-SchedulerFactory = Callable[[], SimpleScheduler]
+SchedulerFactory = Callable[[], Scheduler]
 ```
 
 ### High-Level Runtime API
@@ -174,17 +183,22 @@ Return behavior:
 - `run_async(...)` outside running asyncio loop:
   - `RuntimeError` consistent with asyncio wording/style
 - invalid factory return values:
-  - `TypeError` with clear expected type message
+  - Factories are duck typed; failures surface naturally when required scheduler
+    operations are used.
 
 ## Backward Compatibility
 
 - Keep existing `scheduler()` helper as compatibility alias for `get_scheduler()`.
-- Keep existing scheduler class names and primitives unchanged in this phase.
-- Existing direct `SimpleScheduler` usage remains valid.
+- Use `Scheduler` as the primary scheduler class name.
+- Use `Scheduler` and `AsyncScheduler` classes directly as runner factories; do
+  not add separate `new_sync_scheduler()` / `new_async_scheduler()` helpers
+  unless a later API decision requires them.
+- Existing direct `Scheduler` and `AsyncScheduler` usage remains valid.
 
 ## Asyncio Mapping Table
 
-- `asyncio.new_event_loop()` -> `new_scheduler()`
+- `asyncio.new_event_loop()` -> `Scheduler` or `AsyncScheduler` used directly as
+  a factory
 - `asyncio.get_running_loop()` -> `get_running_scheduler()`
 - `asyncio.get_event_loop()` legacy pattern -> `get_scheduler()`
 - `asyncio.run(..., loop_factory=...)` -> `run(..., loop_factory=..., scheduler_factory=...)`
@@ -229,8 +243,11 @@ Status: In progress.
 2. Finalize accessor naming and behavior (`get_scheduler` vs
   `get_running_scheduler`) and codify strict error semantics.
 3. Add explicit nested scope tests for mixed sync/async runner composition.
-4. Document final cancellation and shutdown guarantees for runner exit paths.
-5. Add a short migration section mapping old helper usage to current runner
+4. Add runner-level KeyboardInterrupt handling comparable to asyncio runners.
+5. Decide whether cancellation propagates across `Future` boundaries, or whether
+  cancellation of a waiter only detaches that waiter by default.
+6. Document final cancellation and shutdown guarantees for runner exit paths.
+7. Add a short migration section mapping old helper usage to current runner
   and top-level helper APIs.
 
 ## Next Alignment Backlog (Asyncio Parity)
@@ -264,6 +281,13 @@ Status: In progress.
 - Route `KeyboardInterrupt` to the active user "main task" created by runner,
   distinct from the process main tealet/main thread.
 
+6. Future Boundary Cancellation Policy
+
+- Decide whether cancellation of an asyncio waiter on a tealet `Future` should
+  propagate into the underlying tealet task, or only detach the waiter.
+- Decide whether tealet task cancellation should propagate into awaited asyncio
+  futures/tasks from `wait_async(...)`.
+
 ## Open Design Questions
 
 - Should default scheduler factory be overridable globally for tests, or only per
@@ -281,7 +305,7 @@ Status: In progress.
 result = tealet.scheduler.run(
     main,
     loop_factory=asyncio.new_event_loop,
-    scheduler_factory=tealet.scheduler.new_scheduler,
+    scheduler_factory=tealet.scheduler.Scheduler,
 )
 
 # async entry inside existing loop

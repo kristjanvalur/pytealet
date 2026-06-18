@@ -32,11 +32,10 @@ from tealet.scheduler import (
     set_scheduler,
     TealetTask,
     RawTimeoutError,
-    SimpleScheduler,
+    Scheduler,
     TimeoutError,
     _scheduler,
     scheduler,
-    SyncScheduler,
     timeout,
 )
 from tealet_examples import (
@@ -50,12 +49,12 @@ from tealet_examples import (
 
 @pytest.fixture(autouse=True)
 def _reset_scheduler_tls():
-    _scheduler.instance = SimpleScheduler()
+    _scheduler.instance = Scheduler()
     set_default_scheduler_factory(None)
     try:
         yield
     finally:
-        _scheduler.instance = SimpleScheduler()
+        _scheduler.instance = Scheduler()
         set_default_scheduler_factory(None)
 
 
@@ -65,18 +64,18 @@ class TestSchedulerAccessors:
         assert callable(factory)
 
     def test_set_default_scheduler_factory_used_by_new_scheduler(self):
-        custom = SimpleScheduler()
+        custom = Scheduler()
 
-        def factory() -> SimpleScheduler:
+        def factory() -> Scheduler:
             return custom
 
         set_default_scheduler_factory(factory)
         assert new_scheduler() is custom
 
     def test_set_default_scheduler_factory_used_by_get_scheduler(self):
-        custom = SimpleScheduler()
+        custom = Scheduler()
 
-        def factory() -> SimpleScheduler:
+        def factory() -> Scheduler:
             return custom
 
         set_default_scheduler_factory(factory)
@@ -85,17 +84,9 @@ class TestSchedulerAccessors:
         assert get_scheduler() is custom
         assert get_scheduler() is custom
 
-    def test_default_scheduler_factory_must_return_simple_scheduler(self):
-        def bad_factory():
-            return object()
-
-        set_default_scheduler_factory(bad_factory)
-        with pytest.raises(TypeError, match="scheduler factory must return"):
-            new_scheduler()
-
     def test_new_scheduler_returns_unbound_instance(self):
         s = new_scheduler()
-        assert isinstance(s, SimpleScheduler)
+        assert isinstance(s, Scheduler)
         assert s is not get_scheduler()
 
     def test_set_and_get_scheduler(self):
@@ -106,22 +97,25 @@ class TestSchedulerAccessors:
     def test_get_scheduler_creates_when_unbound(self):
         set_scheduler(None)
         s = get_scheduler()
-        assert isinstance(s, SimpleScheduler)
+        assert isinstance(s, Scheduler)
         assert get_scheduler() is s
 
-    def test_sync_scheduler_rejects_async_driving_api(self):
-        s = SyncScheduler()
+    def test_base_and_concrete_scheduler_api_surfaces_are_split(self):
+        sync = Scheduler()
+        async_ = AsyncScheduler()
 
-        async def run() -> None:
-            with pytest.raises(RuntimeError, match="does not support async driving"):
-                await s.arun()
-
-        asyncio.run(run())
-
-    def test_async_scheduler_rejects_sync_driving_api(self):
-        s = AsyncScheduler()
-        with pytest.raises(RuntimeError, match="does not support sync driving"):
-            s.run()
+        for name in (
+            "spawn",
+            "wait_async",
+        ):
+            assert callable(getattr(sync, name))
+            assert callable(getattr(async_, name))
+        for name in ("run", "run_forever", "run_until_complete"):
+            assert callable(getattr(sync, name))
+            assert not hasattr(async_, name)
+        for name in ("arun", "arun_forever", "arun_until_complete"):
+            assert not hasattr(sync, name)
+            assert callable(getattr(async_, name))
 
     def test_get_running_scheduler_raises_when_not_running(self):
         with pytest.raises(RuntimeError, match="no running scheduler"):
@@ -130,7 +124,7 @@ class TestSchedulerAccessors:
     def test_get_running_scheduler_during_run(self):
         s = new_scheduler()
         set_scheduler(s)
-        seen: list[SimpleScheduler] = []
+        seen: list[Scheduler] = []
 
         def check_running() -> None:
             seen.append(get_running_scheduler())
@@ -141,9 +135,9 @@ class TestSchedulerAccessors:
         assert seen == [s]
 
     def test_get_running_scheduler_during_arun(self):
-        s = new_scheduler()
+        s = AsyncScheduler()
         set_scheduler(s)
-        seen: list[SimpleScheduler] = []
+        seen: list[AsyncScheduler] = []
 
         def check_running() -> None:
             seen.append(get_running_scheduler())
@@ -169,7 +163,7 @@ class TestSchedulerAccessors:
             s.pump()
 
     def test_arun_requires_scheduler_to_be_current(self):
-        s = new_scheduler()
+        s = AsyncScheduler()
         set_scheduler(new_scheduler())
 
         async def run() -> None:
@@ -179,7 +173,7 @@ class TestSchedulerAccessors:
         asyncio.run(run())
 
     def test_arun_until_complete_returns_result(self):
-        s = new_scheduler()
+        s = AsyncScheduler()
         set_scheduler(s)
 
         def worker() -> int:
@@ -192,7 +186,7 @@ class TestSchedulerAccessors:
         asyncio.run(run())
 
     def test_arun_until_complete_accepts_future(self):
-        s = new_scheduler()
+        s = AsyncScheduler()
         set_scheduler(s)
 
         future: Future[int] = Future()
@@ -211,7 +205,7 @@ class TestSchedulerAccessors:
         asyncio.run(run())
 
     def test_arun_forever_stops(self):
-        s = new_scheduler()
+        s = AsyncScheduler()
         set_scheduler(s)
 
         def stop_soon() -> None:
@@ -293,16 +287,16 @@ class TestSchedulerAccessors:
             return 42
 
         with pytest.raises(TypeError, match="unexpected keyword argument"):
-            s.run_until_complete(worker, x=20, y=22)
+            s.run_until_complete(worker, x=20, y=22)  # type: ignore[call-arg]
 
         with pytest.raises(TypeError, match="takes 2 positional arguments but 4 were given"):
-            s.run_until_complete(worker, 20, 22)
+            s.run_until_complete(worker, 20, 22)  # type: ignore[call-arg]
 
     def test_run_until_complete_rejects_non_future_non_callable(self):
         s = new_scheduler()
         set_scheduler(s)
         with pytest.raises(TypeError, match="Future or callable"):
-            s.run_until_complete(object())
+            s.run_until_complete(object())  # type: ignore[arg-type]
 
 
 class TestSchedulerExamples:
@@ -320,7 +314,8 @@ class TestSchedulerExamples:
         assert s.is_running() is False
 
     def test_scheduler_is_running_for_arun_only(self):
-        s = scheduler()
+        s = AsyncScheduler()
+        set_scheduler(s)
         seen: list[bool] = []
 
         def check() -> None:
@@ -541,7 +536,8 @@ class TestSchedulerExamples:
         assert seen == ["timeout_waiter:False", "success_waiter:True"]
 
     def test_arun_runs_inside_asyncio_task(self):
-        s = scheduler()
+        s = AsyncScheduler()
+        set_scheduler(s)
         seen: list[str] = []
 
         # Keep arun() active and inject runnable work while it is waiting.
@@ -638,7 +634,8 @@ class TestSchedulerExamples:
         ]
 
     def test_wait_async_returns_result(self):
-        s = scheduler()
+        s = AsyncScheduler()
+        set_scheduler(s)
         seen: list[int] = []
 
         async def compute() -> int:
@@ -654,7 +651,8 @@ class TestSchedulerExamples:
         assert seen == [11]
 
     def test_wait_async_propagates_exception(self):
-        s = scheduler()
+        s = AsyncScheduler()
+        set_scheduler(s)
         seen: list[str] = []
 
         async def boom() -> int:
@@ -672,7 +670,8 @@ class TestSchedulerExamples:
         assert seen == ["handled"]
 
     def test_wait_async_marks_tealet_blocked(self):
-        s = scheduler()
+        s = AsyncScheduler()
+        set_scheduler(s)
         seen: list[tuple[str, bool, bool]] = []
 
         async def compute() -> int:
@@ -1282,7 +1281,8 @@ class TestFutureExamples:
         assert seen == ["timed-out=True", "value=1"]
 
     def test_future_async_result(self):
-        s = scheduler()
+        s = AsyncScheduler()
+        set_scheduler(s)
         future: Future[int] = Future()
 
         async def orchestrate() -> None:
@@ -1297,7 +1297,8 @@ class TestFutureExamples:
         asyncio.run(orchestrate())
 
     def test_future_async_exception(self):
-        s = scheduler()
+        s = AsyncScheduler()
+        set_scheduler(s)
         future: Future[int] = Future()
 
         async def orchestrate() -> None:
@@ -1316,7 +1317,8 @@ class TestFutureExamples:
         asyncio.run(orchestrate())
 
     def test_future_is_awaitable(self):
-        s = scheduler()
+        s = AsyncScheduler()
+        set_scheduler(s)
         future: Future[int] = Future()
 
         async def orchestrate() -> None:
@@ -1731,7 +1733,9 @@ class TestChannelExamples:
         got: list[int] = []
 
         def receiver2() -> None:
-            got.append(ch.receive())
+            value = ch.receive()
+            assert isinstance(value, int)
+            got.append(value)
 
         s.spawn(receiver2)
         s.pump(1)

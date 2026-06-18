@@ -14,7 +14,7 @@ This is design reasoning, not a committed public API.
 
 The scheduler in `src/tealet_examples.py` is intentionally small:
 
-- `SimpleScheduler` owns a runnable queue of tealets.
+- `Scheduler` owns a runnable queue of tealets.
 - `Event.wait()` blocks the current tealet by recording it as a waiter and
   switching to another runnable tealet.
 - `Event.set()` marks the event set and moves blocked tealets back to the

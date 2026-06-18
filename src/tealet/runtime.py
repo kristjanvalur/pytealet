@@ -13,6 +13,10 @@ SchedulerT = TypeVar("SchedulerT", bound=scheduler_module.CoreSchedulerDrivingAP
 
 class BaseRunner(Generic[SchedulerT]):
     default_factory: ClassVar[Callable[[], SchedulerT]]
+    # TODO: Install KeyboardInterrupt handlers comparable to asyncio runners,
+    # routing interrupts through the active user task rather than process main.
+    # TODO: Decide whether cancellation should propagate across Future
+    # boundaries, or whether waiting cancellation should only detach waiters.
 
     def __init__(
         self,
@@ -145,7 +149,7 @@ def run(
 class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
     """Run scheduler-backed entries from synchronous code without asyncio."""
 
-    default_factory: ClassVar[Callable[[], scheduler_module.SyncSchedulerDrivingAPI]] = scheduler_module.SyncScheduler
+    default_factory: ClassVar[Callable[[], scheduler_module.SyncSchedulerDrivingAPI]] = scheduler_module.Scheduler
 
     def run(self, entry, /, *, context: contextvars.Context | None = None):
         self._lazy_init()
