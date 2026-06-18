@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from collections.abc import Callable
-from typing import Any, ClassVar, Generic, TypeVar
+from typing import ClassVar, Generic, TypeVar, cast
 
 from . import scheduler as scheduler_module
 
@@ -12,7 +12,7 @@ SchedulerT = TypeVar("SchedulerT", bound=scheduler_module.CoreSchedulerDrivingAP
 
 
 class BaseRunner(Generic[SchedulerT]):
-    default_factory: ClassVar[Callable[[], SchedulerT]]
+    default_factory: ClassVar[object]
     # TODO: Install KeyboardInterrupt handlers comparable to asyncio runners,
     # routing interrupts through the active user task rather than process main.
     # TODO: Decide whether cancellation should propagate across Future
@@ -39,7 +39,7 @@ class BaseRunner(Generic[SchedulerT]):
         assert scheduler is not None
         return scheduler
 
-    def close(self) -> None:
+    def _close(self) -> None:
         if self._closed:
             return
         self._closed = True
@@ -50,7 +50,9 @@ class BaseRunner(Generic[SchedulerT]):
         self._scheduler = None
 
     def _create_scheduler(self) -> SchedulerT:
-        factory = self._scheduler_factory or self.default_factory
+        factory = self._scheduler_factory
+        if factory is None:
+            factory = cast(Callable[[], SchedulerT], type(self).default_factory)
         return factory()
 
     def _require_scheduler(self) -> SchedulerT:
@@ -88,21 +90,21 @@ class BaseRunner(Generic[SchedulerT]):
             self._context = contextvars.copy_context()
 
         self._previous_scheduler = current
-        scheduler_module.set_scheduler(self._scheduler)
+        scheduler_module.set_scheduler(cast(scheduler_module.BaseScheduler, self._scheduler))
         self._initialized = True
 
 
 class AsyncRunner(BaseRunner[scheduler_module.AsyncSchedulerDrivingAPI]):
     """Run scheduler-backed entries from within an existing asyncio task."""
 
-    default_factory: ClassVar[Callable[[], scheduler_module.AsyncSchedulerDrivingAPI]] = scheduler_module.AsyncScheduler
+    default_factory = scheduler_module.AsyncScheduler
 
     @property
     def task(self) -> asyncio.Task[None] | None:
         return None
 
     async def close(self) -> None:
-        super().close()
+        self._close()
 
     async def run(self, entry, /, *, context: contextvars.Context | None = None):
         self._lazy_init()
@@ -129,6 +131,25 @@ async def run_async(
         await runner.close()
 
 
+def run_in_asyncio(
+    entry,
+    /,
+    *,
+    context: contextvars.Context | None = None,
+    scheduler_factory: Callable[[], scheduler_module.AsyncSchedulerDrivingAPI] | None = None,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
+    debug: bool | None = None,
+):
+    """Run one entry under an AsyncRunner owned by a temporary asyncio.Runner."""
+
+    asyncio_runner_type = getattr(asyncio, "Runner", None)
+    if asyncio_runner_type is None:
+        raise RuntimeError("run_in_asyncio requires asyncio.Runner, available in Python 3.11+")
+
+    with asyncio_runner_type(loop_factory=loop_factory) as asyncio_runner:
+        return asyncio_runner.run(run_async(entry, context=context, scheduler_factory=scheduler_factory, debug=debug))
+
+
 def run(
     entry,
     /,
@@ -149,7 +170,10 @@ def run(
 class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
     """Run scheduler-backed entries from synchronous code without asyncio."""
 
-    default_factory: ClassVar[Callable[[], scheduler_module.SyncSchedulerDrivingAPI]] = scheduler_module.Scheduler
+    default_factory = scheduler_module.Scheduler
+
+    def close(self) -> None:
+        self._close()
 
     def run(self, entry, /, *, context: contextvars.Context | None = None):
         self._lazy_init()

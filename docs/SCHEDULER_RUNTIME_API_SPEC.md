@@ -23,6 +23,7 @@ Implemented:
 - Top-level convenience helpers exist:
   - `run(...)`
   - `run_async(...)`
+  - `run_in_asyncio(...)`
 - `BaseScheduler` contains shared cooperative scheduling mechanics.
 - `Scheduler` is the concrete synchronous scheduler implementation.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
@@ -117,13 +118,17 @@ And convenience functions:
 
 ```python
 def run(entry, /, *args,
-        loop_factory: LoopFactory | None = None,
         scheduler_factory: SchedulerFactory | None = None,
         **kwargs): ...
 
 async def run_async(entry, /, *args,
                     scheduler_factory: SchedulerFactory | None = None,
                     **kwargs): ...
+
+def run_in_asyncio(entry, /, *args,
+       loop_factory: LoopFactory | None = None,
+       scheduler_factory: SchedulerFactory | None = None,
+       **kwargs): ...
 ```
 
 `entry` accepted forms:
@@ -159,6 +164,14 @@ Return behavior:
 - Restores prior scheduler binding after completion.
 - Does not close the ambient asyncio loop.
 
+### run_in_asyncio(...)
+
+- Creates a temporary `asyncio.Runner`, using `loop_factory` when provided.
+- Creates a temporary `AsyncRunner` inside that asyncio runner.
+- Runs the entry to completion through `AsyncRunner.run(...)`.
+- Restores prior scheduler binding after completion.
+- Lets `asyncio.Runner` handle loop shutdown and closure.
+
 ## Context and Scope Rules
 
 - Current scheduler binding should be context-local for async tasks.
@@ -174,6 +187,8 @@ Return behavior:
   - `RuntimeError("no running scheduler")`
 - `run_async(...)` outside running asyncio loop:
   - `RuntimeError` consistent with asyncio wording/style
+- `run_in_asyncio(...)` on Python versions without `asyncio.Runner`:
+  - `RuntimeError` indicating Python 3.11+ is required
 - invalid factory return values:
   - Factories are duck typed; failures surface naturally when required scheduler
     operations are used.

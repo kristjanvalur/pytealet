@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from tealet.runtime import AsyncRunner, Runner, run, run_async
+from tealet.runtime import AsyncRunner, Runner, run, run_async, run_in_asyncio
 from tealet.scheduler import AsyncScheduler, Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
 
 
@@ -334,6 +334,46 @@ class TestRunHelper:
     def test_run_helper_sets_scheduler_debug_flag(self):
         custom = Scheduler()
         assert run(lambda: custom.get_debug(), scheduler_factory=lambda: custom, debug=True) is True
+
+    def test_run_in_asyncio_helper_runs_callable(self):
+        assert run_in_asyncio(lambda: 42) == 42
+
+    def test_run_in_asyncio_helper_uses_context_override(self):
+        import contextvars
+
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        marker.set("ambient")
+        ctx = contextvars.copy_context()
+        ctx.run(marker.set, "helper-context")
+
+        assert run_in_asyncio(lambda: marker.get(), context=ctx) == "helper-context"
+
+    def test_run_in_asyncio_helper_restores_previous_scheduler(self):
+        previous = Scheduler()
+        set_scheduler(previous)
+        try:
+            assert run_in_asyncio(lambda: "ok") == "ok"
+            assert _current_scheduler() is previous
+        finally:
+            set_scheduler(None)
+
+    def test_run_in_asyncio_helper_sets_scheduler_debug_flag(self):
+        custom = AsyncScheduler()
+        assert run_in_asyncio(lambda: custom.get_debug(), scheduler_factory=lambda: custom, debug=True) is True
+
+    def test_run_in_asyncio_helper_uses_loop_factory(self):
+        loops: list[asyncio.AbstractEventLoop] = []
+
+        def loop_factory() -> asyncio.AbstractEventLoop:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loops.append(loop)
+            return loop
+
+        seen_loop = run_in_asyncio(asyncio.get_running_loop, loop_factory=loop_factory)
+
+        assert seen_loop is loops[0]
+        assert loops[0].is_closed() is True
 
 
 class TestRunnerDefaultFactoryOverride:
