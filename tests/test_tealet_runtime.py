@@ -223,7 +223,7 @@ class TestResolveTargetHook:
 
         assert seen == []
 
-    def test_resolve_target_routes_none_return_when_clearing_error(self):
+    def test_resolve_target_routes_none_return_when_suppressing_error(self):
         class RoutedTealet(_tealet.tealet):
             def resolve_target(self, result, exc, exc_target):
                 assert result is None
@@ -247,13 +247,13 @@ class TestResolveTargetHook:
 
         assert seen == []
 
-    def test_resolve_target_can_clear_worker_exception(self):
+    def test_resolve_target_can_suppress_worker_exception(self):
         class RoutedTealet(_tealet.tealet):
             def resolve_target(self, result, exc, exc_target):
                 assert result is None
                 assert isinstance(exc, ValueError)
                 assert exc_target is None
-                return _tealet.main(), "cleared", True
+                return _tealet.main(), "suppressed", True
 
         seen = []
         original_hook = sys.unraisablehook
@@ -267,7 +267,7 @@ class TestResolveTargetHook:
         sys.unraisablehook = capture_unraisable
         try:
             t = RoutedTealet()
-            assert t.run(run, None) == "cleared"
+            assert t.run(run, None) == "suppressed"
             assert t.state == _tealet.STATE_EXIT
         finally:
             sys.unraisablehook = original_hook

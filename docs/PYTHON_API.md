@@ -62,20 +62,26 @@ Methods:
 - `throw(exception, *, return_target=current) -> object`
 
 `resolve_target` is a class-level override hook for frameworks that need custom
-exit-target routing from the worker callback.
+exit-target routing or exception disposition from the worker callback.
 Custom overrides receive the raw worker return value, worker exception
 (if any), and `exc_target`.
 `exc_target` is `None` unless the worker exception matches the current
 in-flight injected exception token and that token has a valid fallback target.
 When populated, it is the redirect fallback target for that uncaught exception.
-Overrides must return `(target, arg)` or `(target, arg, clear)`.
-`target` must be an active tealet in the same lineage. If `clear` is truthy,
-any captured worker exception is cleared before uncaught-exception handling.
+Overrides must return `(target, arg)` or `(target, arg, suppress)`.
+`target` must be an active tealet in the same lineage. If `suppress` is truthy,
+any captured worker exception is suppressed before uncaught-exception handling.
 The default implementation maps successful worker return values from
-`target` or `(target, arg)` into `(target, arg, clear=False)`. When the worker
-raised, it routes to `(main, None, clear=False)`.
+`target` or `(target, arg)` into `(target, arg, suppress=False)`. When the worker
+raises `_tealet.TealetExit`, the default implementation routes to `exc_target`
+or main and suppresses the exception. When the worker raises `SystemExit` or
+`KeyboardInterrupt`, the default implementation queues that exception on main,
+routes to main, and suppresses the original worker exception. Other worker
+exceptions route to `exc_target` or main with `suppress=False`; any exception left
+unsuppressed after the resolver returns is reported via `sys.unraisablehook`.
 If the hook raises or returns an invalid value (including `None`), the runtime
-reports it via `sys.unraisablehook` and falls back to `(main, None)`.
+reports it via `sys.unraisablehook` and falls back to `(main, None)`; any
+original worker exception left unsuppressed by that fallback is also unraisable.
 
 Properties:
 - `state: int`

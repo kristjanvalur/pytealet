@@ -872,6 +872,9 @@ static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObjec
     PyObject *exc_target;
     PyObject *target_obj = NULL;
     PyObject *arg_obj = Py_None;
+    PyTealetMainData *mdata = NULL;
+    int queue_exc_on_target = 0;
+    int suppress_exc = 0;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO:resolve_target", kwlist, &result, &exc, &exc_target))
         return NULL;
@@ -880,9 +883,23 @@ static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObjec
         return NULL;
 
     if (exc != Py_None) {
-        target_obj = (exc_target != Py_None) ? exc_target : (PyObject *)TryGetMain(mstate, NULL);
-        if (!target_obj)
-            return NULL;
+        PyTealetObject *main_t = TryGetMain(mstate, &mdata);
+        assert(main_t);
+        assert(mdata);
+
+        /* by default, select exc_target or main */
+        target_obj = exc_target != Py_None ? exc_target : (PyObject *)main_t;
+        if (mstate->tealet_exit_error && PyErr_GivenExceptionMatches(exc, mstate->tealet_exit_error)) {
+            /* suppress top-level TealetExit */
+            suppress_exc = 1;
+        } else if (PyErr_GivenExceptionMatches(exc, PyExc_SystemExit) ||
+            PyErr_GivenExceptionMatches(exc, PyExc_KeyboardInterrupt)) {
+            /* redirect to main tealet */
+            target_obj = (PyObject *)main_t;
+            queue_exc_on_target = 1;
+            suppress_exc = 1;
+        }
+
         goto validate_target;
     }
 
@@ -911,7 +928,15 @@ validate_target:
     if (CheckTarget(mstate, (PyTealetObject *)target_obj, current, "return"))
         return NULL;
 
-    return PyTuple_Pack(2, target_obj, arg_obj ? arg_obj : Py_None);
+    if (queue_exc_on_target) {
+        assert(mdata);
+        assert(exc);
+        if (pytealet_set_pending_exception_inner(mstate, (PyTealetObject *)target_obj, current,
+                                                                    mdata, exc, Py_None) < 0)
+            return NULL;
+    }
+
+    return PyTuple_Pack(3, target_obj, arg_obj ? arg_obj : Py_None, suppress_exc ? Py_True : Py_False);
 }
 
 static int pytealet_prepare_dispatch(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
@@ -1799,8 +1824,8 @@ static struct PyMethodDef pytealet_methods[] = {
     {"main", (PyCFunction)pytealet_main_method, METH_NOARGS, ""},
     {"is_foreign", (PyCFunction)pytealet_is_foreign, METH_NOARGS, ""},
     {"resolve_target", (PyCFunction)(void (*)(void))pytealet_resolve_target, METH_VARARGS | METH_KEYWORDS,
-     "resolve_target(result, exc, exc_target) -> (tealet, arg) | (tealet, arg, clear)\n\n"
-     "Hook for subclasses to override exit target routing from pytealet_main()."},
+         "resolve_target(result, exc, exc_target) -> (tealet, arg) | (tealet, arg, suppress)\n\n"
+         "Hook for subclasses to resolve exit target routing and exception disposition from pytealet_main()."},
     {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_VARARGS | METH_KEYWORDS,
         "prepare(function) -> tealet\n\n"
      "Store a callable to be used by the first switch(arg) on this NEW/STUB tealet."},
@@ -2705,7 +2730,7 @@ static void pytealet_apply_resolve_target(PyTealetModuleState *mstate, PyTealetM
     PyObject *arg_obj = NULL;
     PyTealetObject *new_return_to;
     PyObject *new_return_arg;
-    int clear_exc = 0;
+    int suppress_exc = 0;
     int redirect_rc;
 
     assert(mstate);
@@ -2739,7 +2764,7 @@ static void pytealet_apply_resolve_target(PyTealetModuleState *mstate, PyTealetM
         goto err;
 
     if (!PyArg_ParseTuple(hook_result, "O!O|p:resolve_target", mstate->tealet_type, &new_return_to, &arg_obj,
-                          &clear_exc))
+                          &suppress_exc))
         goto err;
 
     if (new_return_to->state != STATE_RUN) {
@@ -2759,7 +2784,7 @@ static void pytealet_apply_resolve_target(PyTealetModuleState *mstate, PyTealetM
 
     *return_to_io = new_return_to;
     *return_arg_io = new_return_arg;
-    if (!clear_exc) {
+    if (!suppress_exc) {
         *return_exc_io = worker_exc;
         worker_exc = NULL;
     }
@@ -2780,41 +2805,14 @@ err:
     Py_XDECREF(worker_exc);
 }
 
-/* Handle uncaught top-level exceptions from a tealet worker.
- * - TealetExit is swallowed.
- * - SystemExit/KeyboardInterrupt are redirected to main and left in *exc_io
- *   so caller can schedule deferred re-raise after switch.
- * - all other exceptions are reported as unhandled.
- */
-static void pytealet_handle_top_level_exception(PyTealetModuleState *mstate, PyTealetObject **return_to_io,
-                                                PyObject **exc_io) {
+/* Report any worker exception left unsuppressed by resolve_target(). */
+static void pytealet_report_unsuppressed_exception(PyObject **exc_io) {
     PyObject *exc;
-    assert(mstate);
-    assert(return_to_io && *return_to_io != NULL);
     assert(exc_io);
 
     exc = *exc_io;
     if (!exc)
         return;
-
-    if (mstate->tealet_exit_error && PyErr_GivenExceptionMatches(exc, mstate->tealet_exit_error)) {
-        Py_DECREF(exc);
-        *exc_io = NULL;
-        return;
-    }
-
-    if (PyErr_GivenExceptionMatches(exc, PyExc_SystemExit) ||
-        PyErr_GivenExceptionMatches(exc, PyExc_KeyboardInterrupt)) {
-        PyTealetObject *main_t;
-
-        main_t = TryGetMain(mstate, NULL);
-        assert(main_t);
-        if (*return_to_io != main_t) {
-            Py_DECREF(*return_to_io);
-            *return_to_io = (PyTealetObject *)Py_NewRef((PyObject *)main_t);
-        }
-        return;
-    }
 
     PyTealetThrow_SetRaisedException(exc);
     *exc_io = NULL;
@@ -2907,23 +2905,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     assert(return_arg != NULL);
     Py_XDECREF(result);
 
-    /* Classify top-level worker exceptions; fatal ones are deferred and
-     * injected into the return target after this switch.
-     */
-    pytealet_handle_top_level_exception(mstate, &return_to, &return_exc);
-    if (return_exc) {
-        if (pytealet_set_pending_exception_inner(mstate, return_to, tealet, mdata, return_exc, Py_None) < 0) {
-            /* If deferred delivery setup fails, at least report the original
-             * fatal exception rather than dropping it silently.
-             */
-            PyErr_Clear();
-            PyTealetThrow_SetRaisedException(return_exc);
-            PyErr_WriteUnraisable(NULL);
-            PyErr_Clear();
-        }
-        Py_DECREF(return_exc);
-        return_exc = NULL;
-    }
+    pytealet_report_unsuppressed_exception(&return_exc);
 
     /* Now we have started the exit process, already possibly setting an exception on the target.
      * we must be careful not to do anything that might cause arbitrary control flow, such as
