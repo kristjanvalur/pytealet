@@ -51,6 +51,16 @@ Implemented:
     `CancelledError` through the tealet/asyncio boundary
   - shielding prevents waiter cancellation from propagating into the shielded
     underlying future, matching `asyncio.shield(...)`
+- Runner-level SIGINT handling is implemented for Python 3.11+, following
+  `asyncio.Runner` policy:
+  - the runner installs a temporary SIGINT handler while driving the main
+    tealet task
+  - the first interrupt schedules cancellation of that main task through the
+    active scheduler and converts the resulting `CancelledError` into
+    `KeyboardInterrupt`
+  - a second interrupt raises `KeyboardInterrupt` immediately
+  - nested asyncio runner handlers are temporarily overridden and restored
+    after the inner runner exits
 
 Not implemented yet from this proposal:
 
@@ -58,7 +68,7 @@ Not implemented yet from this proposal:
   in one object.
 - Scheduler access has been narrowed to explicit construction plus
   `get_running_scheduler()`.
-- Finalized shutdown policy wording and KeyboardInterrupt policy parity notes.
+- Finalized shutdown policy wording.
 
 ## Goals
 
@@ -263,9 +273,8 @@ Status: In progress.
 1. Decide whether to keep introducing a `Runtime` class, or adopt
   `Runner`/`AsyncRunner` as the primary public runtime surface.
 2. Add explicit nested scope tests for mixed sync/async runner composition.
-3. Add runner-level KeyboardInterrupt handling comparable to asyncio runners.
-4. Document final shutdown guarantees for runner exit paths.
-5. Add a short migration section mapping old helper usage to current runner
+3. Document final shutdown guarantees for runner exit paths.
+4. Add a short migration section mapping old helper usage to current runner
   and top-level helper APIs.
 
 ## Next Alignment Backlog (Asyncio Parity)
@@ -294,6 +303,8 @@ Status: In progress.
   stepping/pump, stop/run state) similarly to asyncio's loop low-level surface.
 
 5. KeyboardInterrupt Handling Parity
+
+Status: Implemented for Python 3.11+.
 
 - Define interrupt policy comparable to asyncio runner behavior.
 - Route `KeyboardInterrupt` to the active user "main task" created by runner,

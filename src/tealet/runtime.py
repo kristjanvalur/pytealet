@@ -2,21 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
+import signal
+import sys
+import threading
 from collections.abc import Callable
-from typing import ClassVar, Generic, TypeVar, cast
+from types import FrameType
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 
 from . import scheduler as scheduler_module
 
 
 SchedulerT = TypeVar("SchedulerT", bound=scheduler_module.CoreSchedulerDrivingAPI)
+SignalHandler: TypeAlias = signal.Handlers | int | Callable[[int, FrameType | None], Any] | None
 
 
 class BaseRunner(Generic[SchedulerT]):
     default_factory: ClassVar[object]
-    # TODO: Install KeyboardInterrupt handlers comparable to asyncio runners,
-    # routing interrupts through the active user task rather than process main.
-    # TODO: Decide whether cancellation should propagate across Future
-    # boundaries, or whether waiting cancellation should only detach waiters.
 
     def __init__(
         self,
@@ -32,6 +34,7 @@ class BaseRunner(Generic[SchedulerT]):
         self._closed = False
         self._initialized = False
         self._previous_scheduler: scheduler_module.BaseScheduler | None = None
+        self._interrupt_count = 0
 
     def get_scheduler(self) -> SchedulerT:
         self._lazy_init()
@@ -93,6 +96,60 @@ class BaseRunner(Generic[SchedulerT]):
         scheduler_module.set_scheduler(cast(scheduler_module.BaseScheduler, self._scheduler))
         self._initialized = True
 
+    def _is_asyncio_runner_sigint_handler(self, handler: SignalHandler) -> bool:
+        if not isinstance(handler, functools.partial):
+            return False
+        return getattr(handler.func, "__name__", None) == "_on_sigint"
+
+    def _can_install_sigint_handler(self) -> bool:
+        if sys.version_info < (3, 11):
+            return False
+        if threading.current_thread() is not threading.main_thread():
+            return False
+        handler = signal.getsignal(signal.SIGINT)
+        return handler is signal.default_int_handler or self._is_asyncio_runner_sigint_handler(handler)
+
+    def _install_sigint_handler(
+        self,
+        main_task: scheduler_module.Future[object],
+        scheduler: scheduler_module.BaseScheduler,
+    ) -> tuple[object, SignalHandler] | None:
+        if not self._can_install_sigint_handler():
+            return None
+        handler = functools.partial(self._on_sigint, main_task=main_task, scheduler=scheduler)
+        try:
+            previous = signal.signal(signal.SIGINT, handler)
+        except ValueError:
+            return None
+        return handler, previous
+
+    def _restore_sigint_handler(
+        self,
+        installed: tuple[object, SignalHandler] | None,
+    ) -> None:
+        if installed is None:
+            return
+        handler, previous = installed
+        if signal.getsignal(signal.SIGINT) is handler:
+            signal.signal(signal.SIGINT, previous)
+
+    def _on_sigint(
+        self,
+        signum: int,
+        frame: FrameType | None,
+        main_task: scheduler_module.Future[object],
+        scheduler: scheduler_module.BaseScheduler,
+    ) -> None:
+        self._interrupt_count += 1
+        if self._interrupt_count == 1 and not main_task.done():
+            scheduler.call_soon_threadsafe(main_task.cancel)
+            return
+        raise KeyboardInterrupt()
+
+    def _raise_keyboard_interrupt_if_requested(self) -> None:
+        if self._interrupt_count > 0:
+            raise KeyboardInterrupt()
+
 
 class AsyncRunner(BaseRunner[scheduler_module.AsyncSchedulerDrivingAPI]):
     """Run scheduler-backed entries from within an existing asyncio task."""
@@ -111,7 +168,16 @@ class AsyncRunner(BaseRunner[scheduler_module.AsyncSchedulerDrivingAPI]):
         scheduler = self._require_scheduler()
         run_context = self._resolve_context(context)
         target = self._target_from_entry(entry, run_context)
-        return await scheduler.arun_until_complete(target)
+        sigint_handler = self._install_sigint_handler(target, cast(scheduler_module.BaseScheduler, scheduler))
+        self._interrupt_count = 0
+        try:
+            try:
+                return await scheduler.arun_until_complete(target)
+            except scheduler_module.CancelledError:
+                self._raise_keyboard_interrupt_if_requested()
+                raise
+        finally:
+            self._restore_sigint_handler(sigint_handler)
 
 
 async def run_async(
@@ -181,7 +247,16 @@ class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
         assert scheduler is not None
         run_context = self._resolve_context(context)
         target = self._target_from_entry(entry, run_context)
-        return scheduler.run_until_complete(target)
+        sigint_handler = self._install_sigint_handler(target, cast(scheduler_module.BaseScheduler, scheduler))
+        self._interrupt_count = 0
+        try:
+            try:
+                return scheduler.run_until_complete(target)
+            except scheduler_module.CancelledError:
+                self._raise_keyboard_interrupt_if_requested()
+                raise
+        finally:
+            self._restore_sigint_handler(sigint_handler)
 
     def __enter__(self) -> "Runner":
         self._lazy_init()

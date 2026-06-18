@@ -1,9 +1,36 @@
 import asyncio
+import signal
+import sys
 
 import pytest
 
 from tealet.runtime import AsyncRunner, Runner, run, run_async, run_in_asyncio
 from tealet.scheduler import AsyncScheduler, Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
+
+
+requires_runner_sigint = pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="Runner SIGINT parity follows asyncio.Runner, available in Python 3.11+",
+)
+
+
+class FakeSignals:
+    def __init__(self, monkeypatch, initial_handler=signal.default_int_handler) -> None:
+        self.handler = initial_handler
+        self.installed: list[object] = []
+        monkeypatch.setattr(signal, "getsignal", self.getsignal)
+        monkeypatch.setattr(signal, "signal", self.signal)
+
+    def getsignal(self, signum: int):
+        assert signum == signal.SIGINT
+        return self.handler
+
+    def signal(self, signum: int, handler):
+        assert signum == signal.SIGINT
+        previous = self.handler
+        self.handler = handler
+        self.installed.append(handler)
+        return previous
 
 
 class TestAsyncRunner:
@@ -158,6 +185,74 @@ class TestAsyncRunner:
 
         asyncio.run(run())
 
+    @requires_runner_sigint
+    def test_sigint_cancels_main_task_and_raises_keyboard_interrupt(self, monkeypatch):
+        signals = FakeSignals(monkeypatch)
+        seen: list[str] = []
+
+        def entry() -> None:
+            seen.append("start")
+            signals.handler(signal.SIGINT, None)
+            try:
+                get_running_scheduler().yield_()
+            except asyncio.CancelledError:
+                seen.append("cancelled")
+                raise
+
+        async def run_case() -> None:
+            runner = AsyncRunner()
+            try:
+                with pytest.raises(KeyboardInterrupt):
+                    await runner.run(entry)
+            finally:
+                await runner.close()
+
+        asyncio.run(run_case())
+
+        assert seen == ["start", "cancelled"]
+        assert signals.handler is signal.default_int_handler
+
+    @requires_runner_sigint
+    def test_sigint_second_interrupt_raises_immediately(self, monkeypatch):
+        signals = FakeSignals(monkeypatch)
+        seen: list[str] = []
+
+        def entry() -> None:
+            seen.append("start")
+            handler = signals.handler
+            handler(signal.SIGINT, None)
+            handler(signal.SIGINT, None)
+
+        async def run_case() -> None:
+            runner = AsyncRunner()
+            try:
+                with pytest.raises(KeyboardInterrupt):
+                    await runner.run(entry)
+            finally:
+                await runner.close()
+
+        asyncio.run(run_case())
+
+        assert seen == ["start"]
+        assert signals.handler is signal.default_int_handler
+
+    @requires_runner_sigint
+    def test_sigint_overrides_and_restores_outer_asyncio_runner_handler(self, monkeypatch):
+        signals = FakeSignals(monkeypatch)
+
+        async def run_case() -> None:
+            outer_handler = signals.handler
+            runner = AsyncRunner()
+            try:
+                assert await runner.run(lambda: signals.handler) is not outer_handler
+                assert signals.handler is outer_handler
+            finally:
+                await runner.close()
+
+        asyncio.run(run_case())
+
+        assert signals.handler is signal.default_int_handler
+
 
 class TestRunner:
     def test_get_scheduler_lazy_init(self):
@@ -306,6 +401,51 @@ class TestRunner:
         finally:
             running._running = False
             set_scheduler(None)
+
+    @requires_runner_sigint
+    def test_sigint_cancels_main_task_and_raises_keyboard_interrupt(self, monkeypatch):
+        signals = FakeSignals(monkeypatch)
+        seen: list[str] = []
+
+        def entry() -> None:
+            seen.append("start")
+            signals.handler(signal.SIGINT, None)
+            try:
+                get_running_scheduler().yield_()
+            except asyncio.CancelledError:
+                seen.append("cancelled")
+                raise
+
+        runner = Runner()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                runner.run(entry)
+        finally:
+            runner.close()
+
+        assert seen == ["start", "cancelled"]
+        assert signals.handler is signal.default_int_handler
+
+    @requires_runner_sigint
+    def test_sigint_second_interrupt_raises_immediately(self, monkeypatch):
+        signals = FakeSignals(monkeypatch)
+        seen: list[str] = []
+
+        def entry() -> None:
+            seen.append("start")
+            handler = signals.handler
+            handler(signal.SIGINT, None)
+            handler(signal.SIGINT, None)
+
+        runner = Runner()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                runner.run(entry)
+        finally:
+            runner.close()
+
+        assert seen == ["start"]
+        assert signals.handler is signal.default_int_handler
 
 
 class TestRunHelper:
