@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from tealet.runtime import AsyncRunner, Runner, run, run_async
-from tealet.scheduler import AsyncScheduler, Scheduler, get_scheduler, set_scheduler
+from tealet.scheduler import AsyncScheduler, Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
 
 
 class TestAsyncRunner:
@@ -24,7 +24,7 @@ class TestAsyncRunner:
             seen = []
 
             def entry() -> str:
-                seen.append(get_scheduler())
+                seen.append(get_running_scheduler())
                 return "ok"
 
             result = await runner.run(entry)
@@ -185,7 +185,7 @@ class TestRunner:
         seen = []
 
         def entry() -> str:
-            seen.append(get_scheduler())
+            seen.append(get_running_scheduler())
             return "ok"
 
         runner = Runner()
@@ -218,8 +218,8 @@ class TestRunner:
     def test_run_multiple_times_reuses_scheduler(self):
         runner = Runner()
         try:
-            first = runner.run(lambda: get_scheduler())
-            second = runner.run(lambda: get_scheduler())
+            first = runner.run(lambda: get_running_scheduler())
+            second = runner.run(lambda: get_running_scheduler())
             assert first is second
             assert first is runner.get_scheduler()
         finally:
@@ -287,10 +287,10 @@ class TestRunner:
 
         runner = Runner()
         installed = runner.get_scheduler()
-        assert get_scheduler() is installed
+        assert _current_scheduler() is installed
 
         runner.close()
-        assert get_scheduler() is previous
+        assert _current_scheduler() is previous
 
         set_scheduler(None)
 
@@ -327,7 +327,7 @@ class TestRunHelper:
         set_scheduler(previous)
         try:
             assert run(lambda: "ok") == "ok"
-            assert get_scheduler() is previous
+            assert _current_scheduler() is previous
         finally:
             set_scheduler(None)
 

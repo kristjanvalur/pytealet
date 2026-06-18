@@ -9,7 +9,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Callable, Generic, TypeVar, cast
+from typing import Callable, Generic, TypeVar
 
 import tealet
 
@@ -20,13 +20,6 @@ T = TypeVar("T")
 
 # a thread local scheduler
 _scheduler = threading.local()
-
-
-def _new_default_scheduler() -> Scheduler:
-    return Scheduler()
-
-
-_default_scheduler_factory: Callable[[], Scheduler] = _new_default_scheduler
 
 
 class Linkable(ABC):
@@ -101,40 +94,12 @@ class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
     async def arun_until_complete(self, future: "Future[T] | Callable[[], T]") -> T:
         """Run async scheduler loop until a target future/callable completes."""
 
-def scheduler() -> Scheduler:
-    return get_scheduler()
-
-
-def new_scheduler() -> Scheduler:
-    return _default_scheduler_factory()
-
-
-def set_default_scheduler_factory(factory: Callable[[], Scheduler] | None) -> None:
-    global _default_scheduler_factory
-    if factory is None:
-        _default_scheduler_factory = _new_default_scheduler
-        return
-    _default_scheduler_factory = factory
-
-
-def get_default_scheduler_factory() -> Callable[[], Scheduler]:
-    return _default_scheduler_factory
-
-
 def set_scheduler(value: "BaseScheduler | None") -> None:
     if value is None:
         if hasattr(_scheduler, "instance"):
             del _scheduler.instance
         return
     _scheduler.instance = value
-
-
-def get_scheduler() -> Scheduler:
-    current = getattr(_scheduler, "instance", None)
-    if current is None:
-        current = new_scheduler()
-        _scheduler.instance = current
-    return cast(Scheduler, current)
 
 
 def get_running_scheduler() -> "BaseScheduler":
@@ -144,7 +109,7 @@ def get_running_scheduler() -> "BaseScheduler":
     raise RuntimeError("no running scheduler")
 
 
-set_scheduler_resolver(get_scheduler)
+set_scheduler_resolver(get_running_scheduler)
 
 
 def _current_scheduler() -> "BaseScheduler | None":
@@ -204,7 +169,7 @@ class Channel(Linkable):
     def _waiter_scheduler(self, waiter: tealet.tealet) -> BaseScheduler:
         if isinstance(waiter, TealetTask):
             return waiter.get_scheduler()
-        return scheduler()
+        return get_running_scheduler()
 
     def _run_on_scheduler(self, owning: BaseScheduler, callback: Callable[..., object], *args: object) -> None:
         if _current_scheduler() is owning:
@@ -278,7 +243,7 @@ class Channel(Linkable):
 
         current = tealet.current()
         try:
-            scheduler()._schedule(lambda: self._link_sender(current, packet))
+            get_running_scheduler()._schedule(lambda: self._link_sender(current, packet))
         except BaseException as exc:
             missing = object()
             pending = self._packets.pop(current, missing)
@@ -356,7 +321,7 @@ class Channel(Linkable):
 
         current = tealet.current()
         try:
-            scheduler()._schedule(lambda: self._link_receiver(current))
+            get_running_scheduler()._schedule(lambda: self._link_receiver(current))
         except BaseException as exc:
             missing = object()
             packet = self._packets.pop(current, missing)
@@ -649,13 +614,13 @@ class Timeout:
         if not self._expired and self._handle is not None:
             self._handle.cancel()
             self._when = when
-            self._handle = scheduler().call_at(self._when, self._timeout, tealet.current())
+            self._handle = get_running_scheduler().call_at(self._when, self._timeout, tealet.current())
 
     def expired(self) -> bool:
         return self._expired
 
     def __enter__(self) -> "Timeout":
-        self._handle = scheduler().call_at(self._when, self._timeout, tealet.current())
+        self._handle = get_running_scheduler().call_at(self._when, self._timeout, tealet.current())
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -672,7 +637,7 @@ class Timeout:
 
 def timeout(delay: float) -> Timeout:
     """Context manager for timing out a block of code via scheduler timers."""
-    when = scheduler().time() + delay
+    when = get_running_scheduler().time() + delay
     return Timeout(when)
 
 

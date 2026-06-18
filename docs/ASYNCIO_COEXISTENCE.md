@@ -92,7 +92,7 @@ an asyncio awaitable:
 
 ```python
 def worker() -> bytes:
-    response = scheduler().wait_async(fetch_bytes(url))
+  response = get_running_scheduler().wait_async(fetch_bytes(url))
     return parse_response(response)
 ```
 
@@ -125,7 +125,7 @@ The proposed spelling might be:
 
 ```python
 def worker() -> bytes:
-    data = scheduler().await_(fetch_bytes(url))
+  data = get_running_scheduler().await_(fetch_bytes(url))
     return data
 ```
 
@@ -146,9 +146,10 @@ returns, raises, or yields a blocking object. `asynkit.await_sync()` then treats
 "the coroutine yielded" as failure, because a purely synchronous caller has no
 scheduler available to finish the operation.
 
-Tealet changes that last step. If the coroutine yields, `scheduler().await_()`
-does not need to fail. It can interpret the yielded value as a wait request,
-park the current tealet, and resume the await iterator later.
+Tealet changes that last step. If the coroutine yields,
+`get_running_scheduler().await_()` does not need to fail. It can interpret the
+yielded value as a wait request, park the current tealet, and resume the await
+iterator later.
 
 Conceptually:
 
@@ -209,8 +210,8 @@ That gives tealet an interesting depth-first execution model:
 
 ```python
 def service_request() -> Response:
-    user = scheduler().await_(load_user())
-    permissions = scheduler().await_(load_acl())
+  user = get_running_scheduler().await_(load_user())
+  permissions = get_running_scheduler().await_(load_acl())
     return render(user, permissions)
 ```
 
@@ -249,8 +250,8 @@ whether to:
 
 The safest first API should make those policies explicit.
 
-The promising conclusion is that `scheduler().await_(awaitable)` is not only
-possible, it may be the most tealet-native bridge. It is essentially
+The promising conclusion is that `get_running_scheduler().await_(awaitable)` is
+not only possible, it may be the most tealet-native bridge. It is essentially
 `await_sync()` plus a cooperative scheduler. The hard part is not driving
 `__await__`; the hard part is defining which yielded scheduler tokens tealet
 understands, and when it falls back to asyncio's Task machinery.
@@ -309,7 +310,7 @@ The shape would be something like this:
 def asyncio_pump(loop: asyncio.AbstractEventLoop) -> None:
     while not shutting_down:
         run_one_asyncio_iteration(loop)
-        scheduler().yield_()
+    get_running_scheduler().yield_()
 
 
 def main() -> None:
@@ -324,7 +325,7 @@ Then tealet tasks could still block on asyncio awaitables:
 
 ```python
 def stackful_worker() -> None:
-    data = scheduler().wait_async(fetch_bytes(url))
+  data = get_running_scheduler().wait_async(fetch_bytes(url))
     process(data)
 ```
 
@@ -368,7 +369,7 @@ The strongest version of this design is not a periodically ticked loop. It is a
 tealet-aware selector used by an asyncio selector event loop:
 
 ```python
-selector = TealetSelector(scheduler())
+selector = TealetSelector(get_running_scheduler())
 loop = asyncio.SelectorEventLoop(selector)
 ```
 

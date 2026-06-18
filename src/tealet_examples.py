@@ -12,12 +12,19 @@ from typing import Generic, TypeVar
 import tealet
 from tealet.locks import Event
 from tealet.scheduler import (
+    Scheduler,
     TimeoutError,
-    scheduler,
+    set_scheduler,
     timeout,
 )
 
 T = TypeVar("T")
+
+
+def _new_scheduler() -> Scheduler:
+    scheduler = Scheduler()
+    set_scheduler(scheduler)
+    return scheduler
 
 
 def raw_simple_generator(current: tealet.tealet, source: Iterable[T]) -> tealet.tealet:
@@ -79,7 +86,7 @@ def simple_generator(source: Iterable[T]) -> GeneratorTealet[T]:
 def demo_scheduler_append_with_yield() -> list[str]:
     """Run a few tealets that append while yielding to each other."""
 
-    s = scheduler()
+    s = _new_scheduler()
     seen: list[str] = []
 
     def worker(name: str, count: int) -> None:
@@ -97,7 +104,7 @@ def demo_scheduler_append_with_yield() -> list[str]:
 def demo_wait_for_event_start() -> list[str]:
     """Run one tealet that waits on an event until another starts it."""
 
-    s = scheduler()
+    s = _new_scheduler()
     evt = Event()
     seen: list[str] = []
 
@@ -119,7 +126,7 @@ def demo_wait_for_event_start() -> list[str]:
 def demo_wait_for_event_between_runs() -> list[str]:
     """Run twice with external event wakeup between runs."""
 
-    s = scheduler()
+    s = _new_scheduler()
     evt = Event()
     seen: list[str] = []
 
@@ -142,7 +149,7 @@ def demo_wait_for_event_between_runs() -> list[str]:
 def demo_future_result() -> list[str]:
     """Run a task via Future and consume it from another tealet."""
 
-    s = scheduler()
+    s = _new_scheduler()
     seen: list[str] = []
 
     def producer() -> int:
@@ -165,7 +172,7 @@ def demo_future_result() -> list[str]:
 def demo_sleep() -> list[str]:
     """Run a tealet that sleeps and resumes via scheduled timer callback."""
 
-    s = scheduler()
+    s = _new_scheduler()
     seen: list[str] = []
 
     def worker() -> None:
@@ -181,7 +188,7 @@ def demo_sleep() -> list[str]:
 def demo_future_timeout_then_success() -> list[str]:
     """Show timeout then successful completion using timeout contexts."""
 
-    s = scheduler()
+    s = _new_scheduler()
     evt = Event()
     seen: list[str] = []
 

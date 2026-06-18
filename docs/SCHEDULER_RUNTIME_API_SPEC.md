@@ -40,8 +40,8 @@ Not implemented yet from this proposal:
 
 - A top-level `Runtime` wrapper class coordinating loop and scheduler factories
   in one object.
-- Public accessor quartet exactly as specified (`new_scheduler`,
-  `get_running_scheduler`, and finalized alias behavior for `get_scheduler`).
+- Scheduler access has been narrowed to explicit construction plus
+  `get_running_scheduler()`.
 - Finalized shutdown/cancellation policy wording and KeyboardInterrupt policy
   parity notes.
 
@@ -53,7 +53,8 @@ Not implemented yet from this proposal:
 - Keep tealet naming explicit: scheduler, not loop.
 - Offer high-level run-until-done entry points for sync and async use cases.
 - Mirror modern asyncio direction (explicit factories, not global policy).
-- Keep backward compatibility for existing scheduler helper usage where possible.
+- Prefer explicit scheduler construction and runner factories over global helper
+  creation.
 
 ## Non-goals
 
@@ -73,29 +74,20 @@ Not implemented yet from this proposal:
 ### Scheduler Access Functions
 
 ```python
-def new_scheduler() -> Scheduler: ...
-def set_scheduler(scheduler: Scheduler | None) -> None: ...
-def get_scheduler() -> Scheduler: ...
-def get_running_scheduler() -> Scheduler: ...
+def set_scheduler(scheduler: BaseScheduler | None) -> None: ...
+def get_running_scheduler() -> BaseScheduler: ...
 ```
 
 Semantics:
-
-- `new_scheduler()`:
-  - Returns a new scheduler instance.
-  - Does not install it as current.
 
 - `set_scheduler(scheduler)`:
   - Installs scheduler as current in the active context.
   - If argument is `None`, clears current scheduler binding.
 
-- `get_scheduler()`:
-  - Returns current scheduler if bound.
-  - If none is bound, creates one with the active scheduler factory and binds it.
-
 - `get_running_scheduler()`:
   - Returns the scheduler currently running in this execution context.
   - Raises `RuntimeError` if no running scheduler exists.
+  - Never creates or installs a scheduler.
 
 ### Runtime Factory Types
 
@@ -188,7 +180,6 @@ Return behavior:
 
 ## Backward Compatibility
 
-- Keep existing `scheduler()` helper as compatibility alias for `get_scheduler()`.
 - Use `Scheduler` as the primary scheduler class name.
 - Use `Scheduler` and `AsyncScheduler` classes directly as runner factories; do
   not add separate `new_sync_scheduler()` / `new_async_scheduler()` helpers
@@ -200,7 +191,8 @@ Return behavior:
 - `asyncio.new_event_loop()` -> `Scheduler` or `AsyncScheduler` used directly as
   a factory
 - `asyncio.get_running_loop()` -> `get_running_scheduler()`
-- `asyncio.get_event_loop()` legacy pattern -> `get_scheduler()`
+- `asyncio.get_event_loop()` legacy pattern -> no direct equivalent; create a
+  scheduler explicitly or use a runner factory.
 - `asyncio.run(..., loop_factory=...)` -> `run(..., loop_factory=..., scheduler_factory=...)`
 - `asyncio.Runner(...)` -> `Runtime(...)`
 
@@ -208,11 +200,12 @@ Return behavior:
 
 Phase 1: Accessor Semantics
 
-Status: In progress.
+Status: Implemented with strict running-scheduler lookup.
 
-- Add `new_scheduler`, `set_scheduler`, `get_scheduler`, `get_running_scheduler`.
-- Preserve `scheduler()` as alias.
-- Add tests for running vs get-or-create behavior.
+- Keep explicit `Scheduler` / `AsyncScheduler` construction.
+- Keep `set_scheduler` for runner/manual binding.
+- Add `get_running_scheduler` and ensure it never creates schedulers.
+- Remove global default scheduler factory and lazy `get_scheduler` behavior.
 
 Phase 2: Runtime Wrapper
 
@@ -240,14 +233,12 @@ Status: In progress.
 
 1. Decide whether to keep introducing a `Runtime` class, or adopt
   `Runner`/`AsyncRunner` as the primary public runtime surface.
-2. Finalize accessor naming and behavior (`get_scheduler` vs
-  `get_running_scheduler`) and codify strict error semantics.
-3. Add explicit nested scope tests for mixed sync/async runner composition.
-4. Add runner-level KeyboardInterrupt handling comparable to asyncio runners.
-5. Decide whether cancellation propagates across `Future` boundaries, or whether
+2. Add explicit nested scope tests for mixed sync/async runner composition.
+3. Add runner-level KeyboardInterrupt handling comparable to asyncio runners.
+4. Decide whether cancellation propagates across `Future` boundaries, or whether
   cancellation of a waiter only detaches that waiter by default.
-6. Document final cancellation and shutdown guarantees for runner exit paths.
-7. Add a short migration section mapping old helper usage to current runner
+5. Document final cancellation and shutdown guarantees for runner exit paths.
+6. Add a short migration section mapping old helper usage to current runner
   and top-level helper APIs.
 
 ## Next Alignment Backlog (Asyncio Parity)
@@ -290,8 +281,6 @@ Status: In progress.
 
 ## Open Design Questions
 
-- Should default scheduler factory be overridable globally for tests, or only per
-  runtime call?
 - Should `run_async` permit reusing an already running scheduler, or always create
   an inner scope scheduler by default?
 - What is the exact cancellation policy for scheduler-blocked tasks during runtime
@@ -312,6 +301,7 @@ result = tealet.scheduler.run(
 async def app_main():
     return await tealet.scheduler.run_async(async_entry)
 
-# low-level direct access
-s = tealet.scheduler.get_scheduler()
+# low-level direct construction
+s = tealet.scheduler.Scheduler()
+tealet.scheduler.set_scheduler(s)
 ```
