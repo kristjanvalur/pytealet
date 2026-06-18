@@ -210,6 +210,27 @@ TLS handling has been migrated to `PyThread_tss_*` APIs (`PyThread_tss_create/ge
 
 ---
 
+### TODO: Source Distribution Missing Vendored libtealet Archives
+
+**Location:** `MANIFEST.in`, `src/_tealet/libtealet/`, source-distribution build flow
+
+**Problem:**
+Building an sdist currently includes Python sources, tests, and typing files, but not the vendored prebuilt `libtealet` archives required by the default build path. A wheel built directly from the workspace succeeds, but a wheel built from the generated sdist fails because `setup.py` cannot find `src/_tealet/libtealet/lib/<abi>/libtealet.a`.
+
+**Observed Failure:**
+```text
+RuntimeError: Pre-built libraries not found for ABI: sysv_amd64 at src/_tealet/libtealet/lib/sysv_amd64
+```
+
+**Follow-up:**
+- Decide whether sdists should include the vendored prebuilt `libtealet` archives or require `BUILD_LIBTEALET_FROM_SOURCE=1` with bundled/source-available libtealet inputs.
+- Update `MANIFEST.in` and build documentation accordingly.
+- Validate with `uv build` from a clean checkout and confirm both sdist and wheel paths work.
+
+**Priority:** Open packaging follow-up
+
+---
+
 ## Testing Recommendations
 
 ### Critical Path Tests (Must Pass Before Release)
