@@ -344,6 +344,35 @@ class TestSchedulerExamples:
             s.call_soon_threadsafe(s.stop)
             t.join(timeout=1.0)
 
+    def test_arun_forever_stops_from_thread_via_call_soon_threadsafe(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        started = threading.Event()
+
+        s.call_soon(started.set)
+
+        def stop_from_thread() -> None:
+            assert started.wait(timeout=1.0)
+
+            async def request_stop() -> None:
+                s.call_soon_threadsafe(s.stop)
+
+            asyncio.run(request_stop())
+
+        async def orchestrate() -> None:
+            t = threading.Thread(target=stop_from_thread)
+            t.start()
+            try:
+                await asyncio.wait_for(s.arun_forever(), timeout=1.0)
+                t.join(timeout=1.0)
+                assert not t.is_alive()
+                assert s.is_running() is False
+            finally:
+                s.call_soon_threadsafe(s.stop)
+                t.join(timeout=1.0)
+
+        asyncio.run(orchestrate())
+
     def test_append_with_yield_demo(self):
         seen = demo_scheduler_append_with_yield()
         assert seen == ["a0", "b0", "c0", "a1", "b1", "a2"]

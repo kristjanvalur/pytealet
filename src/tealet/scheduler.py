@@ -656,7 +656,6 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         self._running = False
         self._debug = False
         self._stopping = False
-        self._loop: asyncio.AbstractEventLoop | None = None
         self._threadsafe_callbacks: deque[
             tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
         ] = deque()
@@ -687,7 +686,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
     def stop(self) -> None:
         self._stopping = True
-        self._break_wait_local()
+        self._break_wait()
 
     def call_soon(
         self,
@@ -735,7 +734,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
     def _enqueue_timer(self, when: float, handle: TimerHandle) -> None:
         heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
-        self._break_wait_local()
+        self._break_wait()
 
     def _drain_threadsafe_callbacks(self) -> None:
         while True:
@@ -841,9 +840,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
     def wait_async(self, awaitable):
         """Wait for an asyncio awaitable from a tealet task and return its result."""
         current = tealet.current()
-        loop = self._loop
-        if loop is None:
-            raise RuntimeError("wait_async requires scheduler.arun() with an active asyncio loop")
+        loop = asyncio.get_running_loop()
 
         if asyncio.isfuture(awaitable):
             fut = awaitable
@@ -891,7 +888,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
             t._scheduler = self
         self._tasks.append(t)
         self._task_set.add(t)
-        self._break_wait_local()
+        self._break_wait()
 
     def _target_run(self, target: tealet.tealet) -> None:
         if target is tealet.current():
@@ -964,11 +961,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         """Wake a concrete driver from another thread or scheduler context."""
 
     @abstractmethod
-    def _break_wait_local(self) -> None:
-        """Wake a concrete driver from its owning context."""
-
     def _break_wait(self) -> None:
-        self._break_wait_local()
+        """Wake a concrete driver from its owning context."""
 
 
 class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
@@ -981,7 +975,7 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
     def _break_wait_threadsafe(self) -> None:
         self._wakeup.set()
 
-    def _break_wait_local(self) -> None:
+    def _break_wait(self) -> None:
         self._wakeup.set()
 
     def _wait_thread(self) -> None:
@@ -1061,23 +1055,32 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
     def __init__(self) -> None:
         super().__init__()
-        self._wakeup: asyncio.Event | None = None
+        self._wakeup = asyncio.Event()
+        self._wakeup_loop: asyncio.AbstractEventLoop | None = None
 
     def _break_wait_threadsafe(self) -> None:
-        loop = self._loop
-        wakeup = self._wakeup
-        if loop is not None and wakeup is not None:
-            loop.call_soon_threadsafe(wakeup.set)
-        elif _current_scheduler() is self:
-            self._break_wait_local()
+        loop = self._wakeup_loop
+        if loop is None:
+            return
+        try:
+            if asyncio.get_running_loop() is loop:
+                self._wakeup.set()
+                return
+        except RuntimeError:
+            pass
+        loop.call_soon_threadsafe(self._wakeup.set)
 
-    def _break_wait_local(self) -> None:
-        if self._wakeup is not None:
-            self._wakeup.set()
+    def _break_wait(self) -> None:
+        """Primarily used from async code.  if the Scheduler is Sleeping, then no tealet code is running, but
+        Asyncio code can still wake up the Scheduler.
+        """
+        self._wakeup.set()
 
     async def _wait_async(self) -> None:
         wakeup = self._wakeup
-        assert wakeup is not None
+        if wakeup.is_set():
+            wakeup.clear()
+            return
         timeout = self._time_to_next_timer()
         if timeout is None:
             # No scheduler timer is pending. We may still be alive because one or
@@ -1096,8 +1099,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
     async def arun_forever(self) -> None:
         self._verify_current_scheduler()
-        self._loop = asyncio.get_running_loop()
-        self._wakeup = asyncio.Event()
+        self._wakeup_loop = asyncio.get_running_loop()
         self._stopping = False
         self._running = True
         try:
@@ -1110,8 +1112,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         finally:
             self._running = False
             self._stopping = False
-            self._wakeup = None
-            self._loop = None
+            self._wakeup_loop = None
 
     async def arun_until_complete(
         self,
@@ -1127,8 +1128,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         else:
             raise TypeError("future must be a Future or callable")
 
-        self._loop = asyncio.get_running_loop()
-        self._wakeup = asyncio.Event()
+        self._wakeup_loop = asyncio.get_running_loop()
         self._stopping = False
         self._running = True
         try:
@@ -1141,8 +1141,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         finally:
             self._running = False
             self._stopping = False
-            self._wakeup = None
-            self._loop = None
+            self._wakeup_loop = None
 
         if not target.done():
             raise RuntimeError("Scheduler stopped before Future completed.")
@@ -1150,8 +1149,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
     async def arun(self) -> None:
         self._verify_current_scheduler()
-        self._loop = asyncio.get_running_loop()
-        self._wakeup = asyncio.Event()
+        self._wakeup_loop = asyncio.get_running_loop()
         self._running = True
         try:
             while self._tasks or self._timers or self._pending_async_waits:
@@ -1160,5 +1158,4 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
                 await self._wait_async()
         finally:
             self._running = False
-            self._wakeup = None
-            self._loop = None
+            self._wakeup_loop = None
