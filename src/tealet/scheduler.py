@@ -419,7 +419,6 @@ class Future(Generic[T]):
 
     def __init__(self) -> None:
         self._done = False
-        self._cancelled = False
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._event = Event()
@@ -431,15 +430,12 @@ class Future(Generic[T]):
         return self._done
 
     def cancelled(self) -> bool:
-        return self._cancelled
+        return isinstance(self._exception, CancelledError)
 
     def cancel(self) -> bool:
         if self._done:
             return False
-        self._cancelled = True
-        self._done = True
-        self._event.set()
-        self._run_done_callbacks()
+        self.set_exception(CancelledError())
         return True
 
     def set_result(self, value: T) -> None:
@@ -504,12 +500,20 @@ class Future(Generic[T]):
         return self._event.wait()
 
     def wait(self) -> T:
-        self._wait()
+        try:
+            self._wait()
+        except CancelledError:
+            get_running_scheduler().call_soon(self.cancel)
+            raise
         return self.result()
 
     async def async_wait(self) -> T:
         if not self._done:
-            await self._event.async_wait()
+            try:
+                await self._event.async_wait()
+            except CancelledError:
+                get_running_scheduler().call_soon(self.cancel)
+                raise
         return self.result()
 
     def __await__(self):
@@ -518,8 +522,9 @@ class Future(Generic[T]):
     def result(self) -> T:
         if not self._done:
             raise InvalidStateError("Result is not ready.")
-        if self._cancelled:
-            raise CancelledError()
+        if self.cancelled():
+            assert self._exception is not None
+            raise self._exception
         if self._exception is not None:
             raise self._exception
         return self._result
@@ -527,9 +532,23 @@ class Future(Generic[T]):
     def exception(self) -> BaseException | None:
         if not self._done:
             raise InvalidStateError("Exception is not set.")
-        if self._cancelled:
-            raise CancelledError()
+        if self.cancelled():
+            assert self._exception is not None
+            raise self._exception
         return self._exception
+
+
+class Shield(Generic[T]):
+    def __init__(self, future: Future[T]) -> None:
+        self._future = future
+
+    def wait(self) -> T:
+        self._future._wait()
+        return self._future.result()
+
+
+def shield(future: Future[T]) -> Shield[T]:
+    return Shield(future)
 
 
 class TealetTask(tealet.tealet, Future[object]):
@@ -574,11 +593,18 @@ class TealetTask(tealet.tealet, Future[object]):
     def _throw_from_scheduler(self, exc: BaseException):
         super().throw(exc)
 
+    def cancel(self) -> bool:
+        if self.done():
+            return False
+        self.throw(CancelledError())
+        return True
+
     def resolve_target(self, result, exc, exc_target):
         suppress = False
         if exc is None:
             self.set_result(result)
         elif isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            self.set_exception(exc)
             return super().resolve_target(result, exc, exc_target)
         else:
             self.set_exception(exc)
@@ -868,7 +894,11 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
         fut.add_done_callback(_resume_waiter)
         try:
-            done_evt.wait()
+            try:
+                done_evt.wait()
+            except CancelledError:
+                loop.call_soon(fut.cancel)
+                raise
         finally:
             if state["active"]:
                 state["active"] = False

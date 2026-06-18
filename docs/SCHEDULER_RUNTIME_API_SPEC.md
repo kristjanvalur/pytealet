@@ -36,6 +36,21 @@ Implemented:
   - `arun_until_complete(...)`
   - `arun_forever(...)`
 - Future waiting semantics are aligned so wait paths return final results.
+- Cancellation is represented by `asyncio.CancelledError`, matching asyncio
+  `Future`/`Task` behavior. A stored `CancelledError` is the cancellation state
+  indicator for scheduler futures and tealet tasks.
+- Cancellation propagates across scheduler boundaries in an asyncio-compatible
+  way:
+  - cancelling an asyncio waiter on a tealet `Future` schedules cancellation of
+    the underlying tealet future/task through the running scheduler
+  - cancelling a tealet task waiting on a tealet `Future` schedules cancellation
+    of the awaited future/task through the running scheduler
+  - cancelling a tealet task waiting in `wait_async(...)` schedules cancellation
+    of the awaited asyncio future/task with `loop.call_soon(...)`
+  - awaiting an already-cancelled tealet or asyncio future raises the same
+    `CancelledError` through the tealet/asyncio boundary
+  - shielding prevents waiter cancellation from propagating into the shielded
+    underlying future, matching `asyncio.shield(...)`
 
 Not implemented yet from this proposal:
 
@@ -43,8 +58,7 @@ Not implemented yet from this proposal:
   in one object.
 - Scheduler access has been narrowed to explicit construction plus
   `get_running_scheduler()`.
-- Finalized shutdown/cancellation policy wording and KeyboardInterrupt policy
-  parity notes.
+- Finalized shutdown policy wording and KeyboardInterrupt policy parity notes.
 
 ## Goals
 
@@ -250,10 +264,8 @@ Status: In progress.
   `Runner`/`AsyncRunner` as the primary public runtime surface.
 2. Add explicit nested scope tests for mixed sync/async runner composition.
 3. Add runner-level KeyboardInterrupt handling comparable to asyncio runners.
-4. Decide whether cancellation propagates across `Future` boundaries, or whether
-  cancellation of a waiter only detaches that waiter by default.
-5. Document final cancellation and shutdown guarantees for runner exit paths.
-6. Add a short migration section mapping old helper usage to current runner
+4. Document final shutdown guarantees for runner exit paths.
+5. Add a short migration section mapping old helper usage to current runner
   and top-level helper APIs.
 
 ## Next Alignment Backlog (Asyncio Parity)
@@ -286,13 +298,6 @@ Status: In progress.
 - Define interrupt policy comparable to asyncio runner behavior.
 - Route `KeyboardInterrupt` to the active user "main task" created by runner,
   distinct from the process main tealet/main thread.
-
-6. Future Boundary Cancellation Policy
-
-- Decide whether cancellation of an asyncio waiter on a tealet `Future` should
-  propagate into the underlying tealet task, or only detach the waiter.
-- Decide whether tealet task cancellation should propagate into awaited asyncio
-  futures/tasks from `wait_async(...)`.
 
 ## Open Design Questions
 
