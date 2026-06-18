@@ -87,9 +87,9 @@ def demo_scheduler_append_with_yield() -> list[str]:
             seen.append(f"{name}{i}")
             s.yield_()
 
-    s.spawn(worker, "a", 3)
-    s.spawn(worker, "b", 2)
-    s.spawn(worker, "c", 1)
+    s.spawn(lambda: worker("a", 3))
+    s.spawn(lambda: worker("b", 2))
+    s.spawn(lambda: worker("c", 1))
     s.run()
     return seen
 

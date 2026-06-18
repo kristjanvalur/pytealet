@@ -647,22 +647,24 @@ class TealetTask(tealet.tealet, Future[object]):
         super().throw(exc)
 
     def resolve_target(self, result, exc, exc_target):
-        clear = False
+        suppress = False
         if exc is None:
             self.set_result(result)
+        elif isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            return super().resolve_target(result, exc, exc_target)
         else:
             self.set_exception(exc)
-            clear = True
+            suppress = True
             if exc_target is not None:
                 try:
                     exc_target._unlink()
                 except AttributeError:
                     pass
-                return exc_target, None, clear
+                return exc_target, None, suppress
 
         # Scheduler-owned tasks always route via scheduler target selection,
         # even if task startup immediately raises before user code returns.
-        return self._scheduler._find_target(task_exit=True), None, clear
+        return self._scheduler._find_target(task_exit=True), None, suppress
 
 
 class RawTimeoutError(BaseException):

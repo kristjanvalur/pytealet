@@ -246,6 +246,20 @@ class TestSchedulerAccessors:
         with pytest.raises(ValueError, match="boom"):
             s.run_until_complete(fut)
 
+    @pytest.mark.parametrize("exc", [SystemExit("bye"), KeyboardInterrupt("stop")])
+    def test_run_until_complete_does_not_store_fatal_baseexceptions(self, exc):
+        s = new_scheduler()
+        set_scheduler(s)
+
+        def worker() -> None:
+            raise exc
+
+        fut = s.spawn(worker)
+        with pytest.raises(type(exc)) as raised:
+            s.run_until_complete(fut)
+        assert str(raised.value) == str(exc)
+        assert not fut.done()
+
     def test_run_until_complete_rejects_foreign_task(self):
         s1 = new_scheduler()
         s2 = new_scheduler()
@@ -694,8 +708,8 @@ class TestSchedulerExamples:
                 seen.append(f"{name}:releasing")
             seen.append(f"{name}:after")
 
-        s.spawn(worker, "a")
-        s.spawn(worker, "b")
+        s.spawn(lambda: worker("a"))
+        s.spawn(lambda: worker("b"))
         s.run()
 
         assert seen == [
@@ -788,9 +802,9 @@ class TestSchedulerExamples:
                 sem.release()
                 seen.append(f"{name}:left")
 
-        s.spawn(worker, "a")
-        s.spawn(worker, "b")
-        s.spawn(worker, "c")
+        s.spawn(lambda: worker("a"))
+        s.spawn(lambda: worker("b"))
+        s.spawn(lambda: worker("c"))
         s.run()
 
         assert max_active == 2
@@ -885,8 +899,8 @@ class TestSchedulerExamples:
                 seen.append("notifier:notify_all")
                 cond.notify_all()
 
-        s.spawn(waiter, "a")
-        s.spawn(waiter, "b")
+        s.spawn(lambda: waiter("a"))
+        s.spawn(lambda: waiter("b"))
         s.spawn(notifier)
         s.run()
 
@@ -1006,9 +1020,9 @@ class TestSchedulerExamples:
             idx = barrier.sync_wait()
             seen.append(f"{name}:after:{idx}")
 
-        s.spawn(worker, "a")
-        s.spawn(worker, "b")
-        s.spawn(worker, "c")
+        s.spawn(lambda: worker("a"))
+        s.spawn(lambda: worker("b"))
+        s.spawn(lambda: worker("c"))
         s.run()
 
         assert seen[:3] == ["a:before", "b:before", "c:before"]
