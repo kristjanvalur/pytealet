@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import contextvars
 import threading
 
@@ -32,6 +33,7 @@ from tealet.scheduler import (
     Scheduler,
     TimeoutError,
     _scheduler,
+    to_thread,
     timeout,
 )
 from tealet_examples import (
@@ -113,6 +115,109 @@ class TestSchedulerAccessors:
         asyncio.run(run())
 
         assert seen == [s]
+
+    def test_run_in_executor_waits_for_result(self):
+        s = _new_scheduler()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            def entry() -> int:
+                future = get_running_scheduler().run_in_executor(pool, lambda: 42)
+                return future.wait()
+
+            task = s.spawn(entry)
+            s.run_until_complete(task)
+
+        assert task.result() == 42
+
+    def test_run_in_executor_propagates_exception(self):
+        s = _new_scheduler()
+
+        def fail() -> None:
+            raise ValueError("boom")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            def entry() -> None:
+                future = get_running_scheduler().run_in_executor(pool, fail)
+                with pytest.raises(ValueError, match="boom"):
+                    future.wait()
+
+            task = s.spawn(entry)
+            s.run_until_complete(task)
+
+        assert task.done() is True
+        assert task.result() is None
+
+    def test_run_in_executor_ignores_late_result_after_cancel(self):
+        s = _new_scheduler()
+        release = threading.Event()
+        worker_started = threading.Event()
+
+        def worker() -> str:
+            worker_started.set()
+            release.wait(timeout=1.0)
+            return "late"
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+        def entry() -> None:
+            future = s.run_in_executor(pool, worker)
+            assert worker_started.wait(timeout=1.0) is True
+            assert future.cancel() is True
+            release.set()
+            pool.shutdown(wait=True)
+            get_running_scheduler().yield_()
+
+            assert future.cancelled() is True
+            with pytest.raises(CancelledError):
+                future.result()
+
+        task = s.spawn(entry)
+        s.run_until_complete(task)
+
+        assert task.result() is None
+
+    def test_to_thread_waits_and_preserves_context(self):
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        s = _new_scheduler()
+
+        def entry() -> str:
+            marker.set("tealet-context")
+            return to_thread(marker.get)
+
+        task = s.spawn(entry)
+        s.run()
+
+        assert task.result() == "tealet-context"
+
+    def test_run_in_executor_works_with_async_scheduler_driver(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+
+        async def run_case() -> None:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                def entry() -> int:
+                    future = get_running_scheduler().run_in_executor(pool, lambda: 7)
+                    return future.wait()
+
+                task = s.spawn(entry)
+                assert await s.arun_until_complete(task) == 7
+
+        asyncio.run(run_case())
+
+    def test_event_wait_handles_set_during_schedule_before_link(self):
+        s = _new_scheduler()
+        event = Event()
+        seen: list[str] = []
+
+        def entry() -> None:
+            s.call_soon(event.set)
+            assert event.wait() is True
+            seen.append("resumed")
+
+        task = s.spawn(entry)
+        s.run_until_complete(task)
+
+        assert seen == ["resumed"]
 
     def test_run_requires_scheduler_to_be_current(self):
         s = _new_scheduler()

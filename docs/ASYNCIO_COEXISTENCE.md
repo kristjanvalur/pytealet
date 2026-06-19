@@ -398,6 +398,116 @@ It is a reasonable experiment target, especially for a same-thread prototype,
 but it should be treated as more scheduler-engineering work than the
 asyncio-hosted model.
 
+### Unix-First Selector Scheduler Experiment
+
+The current synchronous `Scheduler` has no IO reactor. Its blocking point is a
+timer-oriented wait: when no tealet is runnable, it sleeps until the next
+scheduler timer or an explicit scheduler wakeup. A Unix-first IO experiment can
+preserve this scheduler as the no-IO baseline and introduce a selector-backed
+subclass with the same runnable/task semantics plus file-descriptor readiness.
+
+The class shape could be:
+
+```python
+class BaseScheduler:
+    # runnable queue, timers, callbacks, task/future mechanics
+    ...
+
+
+class Scheduler(BaseScheduler):
+    # current no-IO scheduler; waits on a thread event plus timers
+    ...
+
+
+class SelectorScheduler(BaseScheduler):
+    # Unix-first scheduler; waits on selectors plus timers plus wakeups
+    ...
+```
+
+In the selector subclass, `sleep(delay)` should stop being only a thread-event
+timeout. It should become one case of the central reactor wait: register a
+timer, park the current tealet, and let the scheduler wait in
+`selector.select(timeout)` when there is no runnable tealet work. When the timer
+expires, the sleeping tealet is made runnable. The same wait machinery can be
+used for IO readiness.
+
+The scheduler-owned wait state might look like:
+
+```python
+class SelectorScheduler(BaseScheduler):
+    _selector: selectors.BaseSelector
+    _read_waiters: dict[int, TealetTask]
+    _write_waiters: dict[int, TealetTask]
+
+    def wait_readable(self, fileobj) -> None: ...
+    def wait_writable(self, fileobj) -> None: ...
+```
+
+The driver loop would run ready tealets first. Only when no tealet is runnable
+would it compute the next timer deadline and block in `selector.select(timeout)`.
+Any ready fd events would move the associated tealets back to the runnable
+queue, and then normal tealet pumping would continue.
+
+This gives ordinary sync-looking IO helpers a natural shape:
+
+```python
+def read_some(sock: socket.socket, max_bytes: int = 65536) -> bytes:
+    sock.setblocking(False)
+    while True:
+        try:
+            return sock.recv(max_bytes)
+        except BlockingIOError:
+            get_running_scheduler().wait_readable(sock)
+
+
+def write_all(sock: socket.socket, data: bytes) -> None:
+    sock.setblocking(False)
+    view = memoryview(data)
+    while view:
+        try:
+            sent = sock.send(view)
+            view = view[sent:]
+        except BlockingIOError:
+            get_running_scheduler().wait_writable(sock)
+```
+
+File reads are different from socket reads. Regular disk files are usually
+always reported as ready by POSIX selectors, and a blocking disk read can still
+block the whole OS thread. For a first IO layer, the selector scheduler should
+focus on sockets, pipes, and other selectable nonblocking descriptors. Regular
+file IO should either remain explicitly blocking, use a worker thread, or be
+handled later by a platform-specific async-file layer.
+
+The selector scheduler also gives a concrete way to host asyncio as a guest. A
+single shared selector object, or a selector adapter owned by the tealet
+scheduler, can make both tealet IO handles and asyncio's selector-loop handles
+participate in the same blocking wait. If a tealet-owned fd becomes readable,
+the host loop wakes even if asyncio was otherwise waiting for its own timeout.
+If asyncio registers a wakeup fd for `call_soon_threadsafe()`, that fd must also
+be part of the same wait set so external asyncio callbacks wake the tealet host.
+
+This leads to three coexistence modes worth keeping distinct:
+
+- Selector loop: most promising Unix prototype. Asyncio's selector wait can be
+  backed by a tealet-aware selector or coordinated with the scheduler's selector
+  wait. Timers, sockets, pipes, and wakeup fds can share one blocking point.
+- Proactor loop: a different integration problem. Windows proactor loops are
+  completion-port based rather than selector-timeout based, so the Unix selector
+  design does not transfer directly. A proactor bridge would need to park the
+  asyncio-pump tealet until IOCP completions or scheduled callbacks arrive.
+- uv loop: future research target. `uvloop`/libuv already owns a portable IO
+  reactor. A tealet integration could either host tealet work as callbacks on
+  the uv loop, or build a scheduler driver around libuv handles. That is likely
+  cleaner than reproducing proactor details, but it makes uv/libuv an optional
+  dependency and a separate event-loop family.
+
+The concrete first experiment should therefore be narrow: implement a standalone
+Unix `SelectorScheduler`, add `wait_readable()` and `wait_writable()`, then build
+small socket helpers around nonblocking `recv()` and `send()`. Once that works,
+the next experiment is a tealet-aware selector adapter for `asyncio.SelectorEventLoop`
+so asyncio timers and tealet IO waits share the same host scheduler blocking
+point.
+
 ## Feasibility Comparison
 
 | Topic | Asyncio-hosted tealet scheduler | Tealet-hosted asyncio pump |

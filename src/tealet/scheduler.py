@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextvars
+import functools
 import heapq
 import inspect
 import itertools
@@ -672,6 +674,14 @@ def timeout_at(when: float) -> Timeout:
     return Timeout(when)
 
 
+def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
+    """Run a callable in the scheduler default thread pool and wait for its result."""
+
+    context = contextvars.copy_context()
+    call = functools.partial(context.run, func, *args, **kwargs)
+    return get_running_scheduler().run_in_executor(None, call).wait()
+
+
 class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduler mechanics for concrete drivers."""
 
@@ -691,6 +701,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         self._timer_sequence = itertools.count()
         self._n_scheduled = 0
         self._target_count = None
+        self._default_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
     def time(self) -> float:
         return time.monotonic()
@@ -703,6 +714,38 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
     def get_debug(self) -> bool:
         return self._debug
+
+    def run_in_executor(
+        self,
+        executor: concurrent.futures.Executor | None,
+        func: Callable[..., T],
+        *args: object,
+    ) -> Future[T]:
+        if executor is None:
+            if self._default_executor is None:
+                self._default_executor = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="tealet")
+            executor = self._default_executor
+
+        future: Future[T] = Future()
+
+        def complete_result(value: T) -> None:
+            if not future.done():
+                future.set_result(value)
+
+        def complete_exception(exc: BaseException) -> None:
+            if not future.done():
+                future.set_exception(exc)
+
+        def worker() -> None:
+            try:
+                result = func(*args)
+            except BaseException as exc:
+                self.call_soon_threadsafe(complete_exception, exc)
+            else:
+                self.call_soon_threadsafe(complete_result, result)
+
+        executor.submit(worker)
+        return future
 
     def _verify_current_scheduler(self) -> None:
         if _current_scheduler() is not self:
@@ -840,9 +883,9 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         return t
 
     def _schedule(self, enqueue=None) -> None:
-        self._run_ready_timers()
         if enqueue is not None:
             enqueue()
+        self._run_ready_timers()
         target = self._find_target()
         self._n_scheduled += 1
         target.switch()
