@@ -349,8 +349,16 @@ IO-manager adapters.
 
 6. Tealet-Hosted Asyncio Loop Experiment
 
+Status: Initial Unix selector prototype implemented.
+
 - A tealet-hosted asyncio loop may be feasible if the asyncio loop's raw
   blocking points can be delegated to the outer tealet scheduler.
+- `TealetSelectorEventLoop` is an experimental `asyncio.SelectorEventLoop`
+  subclass hosted by `SelectorScheduler`.
+- The implementation uses a selector adapter whose fd registration is backed by
+  `SelectorScheduler.add_reader(...)` and `add_writer(...)`; when asyncio's
+  selector would block, the pump tealet parks on a scheduler `Event` and wakes
+  from fd readiness, a scheduler timer, or asyncio's self-pipe.
 - The critical hook is file-descriptor readiness. Asyncio selector loops use
   reader and writer callbacks as their low-level IO surface, so a
   tealet-aware selector or selector-style `SchedulerLoop` would need correct

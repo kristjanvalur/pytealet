@@ -501,12 +501,11 @@ This leads to three coexistence modes worth keeping distinct:
   cleaner than reproducing proactor details, but it makes uv/libuv an optional
   dependency and a separate event-loop family.
 
-The concrete first experiment should therefore be narrow: implement a standalone
-Unix `SelectorScheduler`, add `wait_readable()` and `wait_writable()`, then build
-small socket helpers around nonblocking `recv()` and `send()`. Once that works,
-the next experiment is a tealet-aware selector adapter for `asyncio.SelectorEventLoop`
-so asyncio timers and tealet IO waits share the same host scheduler blocking
-point.
+The concrete first experiment is now narrow and Unix-first: `SelectorScheduler`
+provides selector-backed readiness callbacks and socket helpers, and
+`TealetSelectorEventLoop` provides an experimental tealet-aware selector adapter
+for `asyncio.SelectorEventLoop`. Asyncio timers, self-pipe wakeups, and socket
+readiness can share the host scheduler's blocking point.
 
 ## Feasibility Comparison
 

@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar, cast
@@ -1557,6 +1558,130 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
 
 class SelectorScheduler(SelectorMixin, Scheduler):
     """Synchronous scheduler with selector-backed fd readiness waits."""
+
+
+class _SchedulerSelectorAdapter(selectors.BaseSelector):
+    def __init__(self, scheduler: SelectorScheduler) -> None:
+        self._scheduler = scheduler
+        self._keys: dict[int, selectors.SelectorKey] = {}
+        self._ready_masks: dict[int, int] = {}
+        self._ready = Event()
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for fd in list(self._keys):
+            self.unregister(fd)
+
+    def get_map(self) -> Mapping[Any, selectors.SelectorKey]:
+        return self._keys
+
+    def get_key(self, fileobj: object) -> selectors.SelectorKey:
+        fd = self._fileobj_to_fd(fileobj)
+        try:
+            return self._keys[fd]
+        except KeyError:
+            raise KeyError(f"{fileobj!r} is not registered") from None
+
+    def register(self, fileobj: object, events: int, data: object = None) -> selectors.SelectorKey:
+        fd = self._fileobj_to_fd(fileobj)
+        if fd in self._keys:
+            raise KeyError(f"{fileobj!r} is already registered")
+        self._validate_events(events)
+        key = selectors.SelectorKey(cast(Any, fileobj), fd, events, data)
+        self._keys[fd] = key
+        try:
+            self._sync_scheduler_registration(fd, 0, events)
+        except Exception:
+            del self._keys[fd]
+            raise
+        return key
+
+    def unregister(self, fileobj: object) -> selectors.SelectorKey:
+        key = self.get_key(fileobj)
+        del self._keys[key.fd]
+        self._ready_masks.pop(key.fd, None)
+        self._sync_scheduler_registration(key.fd, key.events, 0)
+        return key
+
+    def modify(self, fileobj: object, events: int, data: object = None) -> selectors.SelectorKey:
+        old_key = self.get_key(fileobj)
+        self._validate_events(events)
+        new_key = selectors.SelectorKey(old_key.fileobj, old_key.fd, events, data)
+        self._sync_scheduler_registration(old_key.fd, old_key.events, events)
+        self._keys[old_key.fd] = new_key
+        return new_key
+
+    def select(self, timeout: float | None = None) -> list[tuple[selectors.SelectorKey, int]]:
+        if timeout is not None and timeout <= 0:
+            return self._drain_ready()
+
+        if not self._ready_masks:
+            self._ready.clear()
+            if timeout is None:
+                self._ready.wait()
+            else:
+                handle = self._scheduler.call_later(timeout, self._ready.set)
+                try:
+                    self._ready.wait()
+                finally:
+                    handle.cancel()
+
+        return self._drain_ready()
+
+    def _fileobj_to_fd(self, fileobj: object) -> int:
+        return self._scheduler._fileobj_to_fd(fileobj)
+
+    def _validate_events(self, events: int) -> None:
+        valid = selectors.EVENT_READ | selectors.EVENT_WRITE
+        if not events or events & ~valid:
+            raise ValueError("Invalid events")
+
+    def _sync_scheduler_registration(self, fd: int, old_events: int, new_events: int) -> None:
+        if old_events & selectors.EVENT_READ and not new_events & selectors.EVENT_READ:
+            self._scheduler.remove_reader(fd)
+        if old_events & selectors.EVENT_WRITE and not new_events & selectors.EVENT_WRITE:
+            self._scheduler.remove_writer(fd)
+        if new_events & selectors.EVENT_READ and not old_events & selectors.EVENT_READ:
+            self._scheduler.add_reader(fd, self._mark_ready, fd, selectors.EVENT_READ)
+        if new_events & selectors.EVENT_WRITE and not old_events & selectors.EVENT_WRITE:
+            self._scheduler.add_writer(fd, self._mark_ready, fd, selectors.EVENT_WRITE)
+
+    def _mark_ready(self, fd: int, event: int) -> None:
+        key = self._keys.get(fd)
+        if key is None or not key.events & event:
+            return
+        self._ready_masks[fd] = self._ready_masks.get(fd, 0) | event
+        self._ready.set()
+
+    def _drain_ready(self) -> list[tuple[selectors.SelectorKey, int]]:
+        events = []
+        ready_masks = self._ready_masks
+        self._ready_masks = {}
+        self._ready.clear()
+        for fd, mask in ready_masks.items():
+            key = self._keys.get(fd)
+            if key is None:
+                continue
+            mask &= key.events
+            if mask:
+                events.append((key, mask))
+        return events
+
+
+class TealetSelectorEventLoop(asyncio.SelectorEventLoop):
+    """Asyncio selector loop hosted by a SelectorScheduler."""
+
+    def __init__(self, scheduler: SelectorScheduler | None = None) -> None:
+        if scheduler is None:
+            current = _current_scheduler()
+            if not isinstance(current, SelectorScheduler):
+                raise RuntimeError("TealetSelectorEventLoop requires a current SelectorScheduler")
+            scheduler = current
+        self._tealet_scheduler = scheduler
+        super().__init__(selector=_SchedulerSelectorAdapter(scheduler))
 
 
 class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
