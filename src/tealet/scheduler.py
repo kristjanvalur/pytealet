@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextvars
+import errno
 import functools
 import heapq
 import inspect
@@ -13,7 +14,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Callable, Generic, TypeVar, cast
+from typing import Any, Callable, Generic, TypeVar, cast
 
 import tealet
 
@@ -749,6 +750,30 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         executor.submit(worker)
         return future
 
+    def sock_recv(self, sock: socket.socket, n: int) -> bytes:
+        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+
+    def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
+        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+
+    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
+        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+
+    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
+        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+
+    def sock_sendall(self, sock: socket.socket, data: Any) -> None:
+        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+
+    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
+        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+
+    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+
+    def sock_connect(self, sock: socket.socket, address: Any) -> None:
+        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+
     def _verify_current_scheduler(self) -> None:
         if _current_scheduler() is not self:
             raise RuntimeError("operation requires this scheduler to be the current scheduler")
@@ -1154,6 +1179,96 @@ class SelectorMixin:
         """Block the current tealet until a file descriptor is writable."""
 
         self._wait_selector(fileobj, selectors.EVENT_WRITE)
+
+    def sock_recv(self, sock: socket.socket, n: int) -> bytes:
+        self._check_socket(sock)
+        while True:
+            try:
+                return sock.recv(n)
+            except (BlockingIOError, InterruptedError):
+                self.wait_readable(sock)
+
+    def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
+        self._check_socket(sock)
+        while True:
+            try:
+                return sock.recv_into(buf)
+            except (BlockingIOError, InterruptedError):
+                self.wait_readable(sock)
+
+    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
+        self._check_socket(sock)
+        while True:
+            try:
+                return sock.recvfrom(bufsize)
+            except (BlockingIOError, InterruptedError):
+                self.wait_readable(sock)
+
+    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
+        self._check_socket(sock)
+        while True:
+            try:
+                if nbytes:
+                    return sock.recvfrom_into(buf, nbytes)
+                return sock.recvfrom_into(buf)
+            except (BlockingIOError, InterruptedError):
+                self.wait_readable(sock)
+
+    def sock_sendall(self, sock: socket.socket, data: Any) -> None:
+        self._check_socket(sock)
+        view = memoryview(data)
+        total = 0
+        while total < len(view):
+            try:
+                sent = sock.send(view[total:])
+                if sent == 0:
+                    self.wait_writable(sock)
+                    continue
+                total += sent
+            except (BlockingIOError, InterruptedError):
+                self.wait_writable(sock)
+
+    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
+        self._check_socket(sock)
+        while True:
+            try:
+                return sock.sendto(data, address)
+            except (BlockingIOError, InterruptedError):
+                self.wait_writable(sock)
+
+    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+        self._check_socket(sock)
+        while True:
+            try:
+                conn, address = sock.accept()
+                conn.setblocking(False)
+                return conn, address
+            except (BlockingIOError, InterruptedError):
+                self.wait_readable(sock)
+
+    def sock_connect(self, sock: socket.socket, address: Any) -> None:
+        self._check_socket(sock)
+        try:
+            sock.connect(address)
+            return
+        except (BlockingIOError, InterruptedError):
+            pass
+        except OSError as exc:
+            if exc.errno not in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+                raise
+
+        while True:
+            self.wait_writable(sock)
+            err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err == 0:
+                return
+            if err in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+                continue
+            raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
+
+    def _check_socket(self, sock: socket.socket) -> None:
+        if sock.getblocking():
+            raise ValueError("socket must be non-blocking")
 
     def _fileobj_to_fd(self, fileobj: object) -> int:
         if isinstance(fileobj, int):
