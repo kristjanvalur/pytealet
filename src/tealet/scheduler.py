@@ -42,6 +42,8 @@ class Linkable(ABC):
 
 
 class CoreSchedulerDrivingAPI(ABC):
+    """Common control surface shared by sync and async scheduler drivers."""
+
     @abstractmethod
     def is_running(self) -> bool:
         """Return whether this scheduler is currently driving."""
@@ -65,6 +67,8 @@ class CoreSchedulerDrivingAPI(ABC):
 
 
 class SyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
+    """Synchronous scheduler driver API."""
+
     @abstractmethod
     def stop(self) -> None:
         """Stop a currently running sync driver."""
@@ -83,6 +87,8 @@ class SyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
 
 
 class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
+    """Asyncio-hosted scheduler driver API."""
+
     @abstractmethod
     def stop(self) -> None:
         """Stop a currently running async driver."""
@@ -121,6 +127,35 @@ def _current_scheduler() -> "BaseScheduler | None":
     return getattr(_scheduler, "instance", None)
 
 
+class RawTimeoutError(BaseException):
+    """Internal timeout sentinel thrown into tealets by Timeout."""
+
+    pass
+
+
+TimeoutError = asyncio.TimeoutError
+CancelledError = asyncio.CancelledError
+
+
+def timeout(delay: float) -> "Timeout":
+    """Context manager for timing out a block of code via scheduler timers."""
+    when = get_running_scheduler().time() + delay
+    return Timeout(when)
+
+
+def timeout_at(when: float) -> "Timeout":
+    """Context manager for timing out a block of code at a specific time via scheduler timers."""
+    return Timeout(when)
+
+
+def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
+    """Run a callable in the scheduler default thread pool and wait for its result."""
+
+    context = contextvars.copy_context()
+    call = functools.partial(context.run, func, *args, **kwargs)
+    return get_running_scheduler().run_in_executor(None, call).wait()
+
+
 class Channel(Linkable):
     """Rendezvous channel for sync tealet operations and optional async waits."""
 
@@ -135,6 +170,8 @@ class Channel(Linkable):
         self._balance = 0
         self._packets: dict[tealet.tealet | Event, tuple[bool, object]] = {}
         self.preference = preference
+
+    # -- Configuration -------------------------------------------------
 
     @property
     def balance(self) -> int:
@@ -155,6 +192,8 @@ class Channel(Linkable):
         if is_exc:
             raise payload
         return payload
+
+    # -- Waiter bookkeeping -------------------------------------------
 
     def _clear_link(self, t: tealet.tealet) -> None:
         try:
@@ -236,6 +275,8 @@ class Channel(Linkable):
     def _query_runnable(self, t: tealet.tealet) -> bool:
         return False
 
+    # -- Synchronous operations ---------------------------------------
+
     def _send_packet(self, packet: tuple[bool, object]) -> None:
         if self._balance < 0:
             receiver = self._waiters.popleft()
@@ -256,35 +297,6 @@ class Channel(Linkable):
             if pending is missing and isinstance(exc, RawTimeoutError):
                 # Timeout-vs-delivery race: if receiver already consumed packet,
                 # treat send as successful and suppress timeout.
-                return
-            raise
-
-    async def async_send(self, value: object) -> None:
-        """Send one value from async code without immediate task transfer.
-
-        Async operations always use non-immediate wake semantics. When matching
-        a waiting tealet receiver, it is only made runnable. When matching an
-        Event waiter, the Event is set.
-        """
-        packet = (False, value)
-        if self._balance < 0:
-            receiver = self._waiters.popleft()
-            self._balance += 1
-            if isinstance(receiver, tealet.tealet):
-                self._clear_link(receiver)
-            self._packets[receiver] = packet
-            self._wake_non_immediate(receiver)
-            return
-
-        waiter = Event()
-        self._link_sender(waiter, packet)
-        try:
-            await waiter.async_wait()
-        except BaseException as exc:
-            missing = object()
-            pending = self._packets.pop(waiter, missing)
-            self._unlink_waiter(waiter)
-            if pending is missing and isinstance(exc, CancelledError):
                 return
             raise
 
@@ -338,6 +350,37 @@ class Channel(Linkable):
             raise
 
         return self._deliver(self._packets.pop(current))
+
+    # -- Async operations ---------------------------------------------
+
+    async def async_send(self, value: object) -> None:
+        """Send one value from async code without immediate task transfer.
+
+        Async operations always use non-immediate wake semantics. When matching
+        a waiting tealet receiver, it is only made runnable. When matching an
+        Event waiter, the Event is set.
+        """
+        packet = (False, value)
+        if self._balance < 0:
+            receiver = self._waiters.popleft()
+            self._balance += 1
+            if isinstance(receiver, tealet.tealet):
+                self._clear_link(receiver)
+            self._packets[receiver] = packet
+            self._wake_non_immediate(receiver)
+            return
+
+        waiter = Event()
+        self._link_sender(waiter, packet)
+        try:
+            await waiter.async_wait()
+        except BaseException as exc:
+            missing = object()
+            pending = self._packets.pop(waiter, missing)
+            self._unlink_waiter(waiter)
+            if pending is missing and isinstance(exc, CancelledError):
+                return
+            raise
 
     async def async_receive(self) -> object:
         """Receive one packet from async code without immediate task transfer.
@@ -394,6 +437,8 @@ class TimerHandle:
         self._context = context
         self._cancelled = False
 
+    # -- Public state --------------------------------------------------
+
     @property
     def when(self) -> float:
         return self._when
@@ -403,6 +448,8 @@ class TimerHandle:
 
     def cancelled(self) -> bool:
         return self._cancelled
+
+    # -- Execution -----------------------------------------------------
 
     def _run(self) -> None:
         if self._cancelled:
@@ -431,6 +478,8 @@ class Future(Generic[T]):
             tuple[Callable[[Future[T]], object], contextvars.Context | None]
         ] = []
 
+    # -- State ---------------------------------------------------------
+
     def done(self) -> bool:
         return self._done
 
@@ -442,6 +491,8 @@ class Future(Generic[T]):
             return False
         self.set_exception(CancelledError())
         return True
+
+    # -- Completion ----------------------------------------------------
 
     def set_result(self, value: T) -> None:
         if self._done:
@@ -460,6 +511,8 @@ class Future(Generic[T]):
         self._done = True
         self._event.set()
         self._run_done_callbacks()
+
+    # -- Done callbacks -----------------------------------------------
 
     def add_done_callback(
         self,
@@ -497,6 +550,8 @@ class Future(Generic[T]):
                 callback(self)
             else:
                 context.run(callback, self)
+
+    # -- Waiting and results ------------------------------------------
 
     def _wait(self) -> bool:
         if self._done:
@@ -544,6 +599,8 @@ class Future(Generic[T]):
 
 
 class Shield(Generic[T]):
+    """Wait wrapper that avoids cancelling the wrapped future."""
+
     def __init__(self, future: Future[T]) -> None:
         self._future = future
 
@@ -565,6 +622,8 @@ class TealetTask(tealet.tealet, Future[object]):
         self.link: Linkable | None = None
         self._scheduler: BaseScheduler = owning_scheduler
 
+    # -- Runtime state -------------------------------------------------
+
     def is_waiting(self):
         if self.link is None:
             return False
@@ -583,6 +642,8 @@ class TealetTask(tealet.tealet, Future[object]):
 
     def get_scheduler(self) -> BaseScheduler:
         return self._scheduler
+
+    # -- Scheduler transfer -------------------------------------------
 
     def _unlink(self):
         if self.link is not None:
@@ -603,6 +664,8 @@ class TealetTask(tealet.tealet, Future[object]):
             return False
         self.throw(CancelledError())
         return True
+
+    # -- Target completion --------------------------------------------
 
     def resolve_target(self, result, exc, exc_target):
         suppress = False
@@ -626,20 +689,16 @@ class TealetTask(tealet.tealet, Future[object]):
         return self._scheduler._find_target(task_exit=True), None, suppress
 
 
-class RawTimeoutError(BaseException):
-    pass
-
-
-TimeoutError = asyncio.TimeoutError
-CancelledError = asyncio.CancelledError
-
-
 class Timeout:
+    """Timer-backed synchronous timeout context manager."""
+
     def __init__(self, when: float):
         self._when = when
         self._handle: TimerHandle | None = None
         self._exc = RawTimeoutError()
         self._expired = False
+
+    # -- Public state --------------------------------------------------
 
     def reschedule(self, when: float):
         if not self._expired and self._handle is not None:
@@ -649,6 +708,8 @@ class Timeout:
 
     def expired(self) -> bool:
         return self._expired
+
+    # -- Context manager ----------------------------------------------
 
     def __enter__(self) -> "Timeout":
         self._handle = get_running_scheduler().call_at(self._when, self._timeout, tealet.current())
@@ -664,25 +725,6 @@ class Timeout:
     def _timeout(self, target) -> None:
         self._expired = True
         target.throw(self._exc)
-
-
-def timeout(delay: float) -> Timeout:
-    """Context manager for timing out a block of code via scheduler timers."""
-    when = get_running_scheduler().time() + delay
-    return Timeout(when)
-
-
-def timeout_at(when: float) -> Timeout:
-    """Context manager for timing out a block of code at a specific time via scheduler timers."""
-    return Timeout(when)
-
-
-def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
-    """Run a callable in the scheduler default thread pool and wait for its result."""
-
-    context = contextvars.copy_context()
-    call = functools.partial(context.run, func, *args, **kwargs)
-    return get_running_scheduler().run_in_executor(None, call).wait()
 
 
 class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
@@ -706,6 +748,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         self._target_count = None
         self._default_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
+    # -- Basic state ---------------------------------------------------
+
     def time(self) -> float:
         return time.monotonic()
 
@@ -717,6 +761,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
     def get_debug(self) -> bool:
         return self._debug
+
+    # -- External integration APIs ------------------------------------
 
     def run_in_executor(
         self,
@@ -774,6 +820,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
     def sock_connect(self, sock: socket.socket, address: Any) -> None:
         raise NotImplementedError("socket helpers require a selector-backed scheduler")
 
+    # -- Driver state --------------------------------------------------
+
     def _verify_current_scheduler(self) -> None:
         if _current_scheduler() is not self:
             raise RuntimeError("operation requires this scheduler to be the current scheduler")
@@ -783,6 +831,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
     def stop(self) -> None:
         self._stopping = True
         self._break_wait()
+
+    # -- Callback and timer scheduling --------------------------------
 
     def call_soon(
         self,
@@ -860,6 +910,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
     def _has_pending_driver_work(self) -> bool:
         return False
 
+    # -- Link and runnable state --------------------------------------
+
     def _is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._task_set
 
@@ -892,6 +944,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
                 t.link = None
             except AttributeError:
                 pass
+
+    # -- Task creation and cooperative operations ---------------------
 
     def spawn(
         self,
@@ -980,6 +1034,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
         return fut.result()
 
+    # -- Scheduler-owned transfer -------------------------------------
+
     def _make_runnable(self, t: tealet.tealet) -> None:
         if t in self._task_set:
             return
@@ -1059,6 +1115,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         finally:
             self._running = False
 
+    # -- Concrete driver hooks ----------------------------------------
+
     @abstractmethod
     def _break_wait_threadsafe(self) -> None:
         """Wake a concrete driver from another thread or scheduler context."""
@@ -1076,6 +1134,8 @@ class _SelectorWaitLink(Linkable):
         self._read_waiters: dict[int, tealet.tealet] = {}
         self._write_waiters: dict[int, tealet.tealet] = {}
         self._task_waits: dict[tealet.tealet, tuple[int, int]] = {}
+
+    # -- Waiter maps ---------------------------------------------------
 
     def _waiters(self, event: int) -> dict[int, tealet.tealet]:
         if event == selectors.EVENT_READ:
@@ -1131,6 +1191,8 @@ class _SelectorWaitLink(Linkable):
             pass
         return task
 
+    # -- State queries -------------------------------------------------
+
     def _mask_for_fd(self, fd: int) -> int:
         mask = 0
         if fd in self._read_waiters:
@@ -1165,10 +1227,14 @@ class SelectorMixin:
             self._selector_wakeup_reader.fileno(),
         )
 
+    # -- Lifecycle -----------------------------------------------------
+
     def close(self) -> None:
         self._selector.close()
         self._selector_wakeup_reader.close()
         self._selector_wakeup_writer.close()
+
+    # -- Readiness waits -----------------------------------------------
 
     def wait_readable(self, fileobj: object) -> None:
         """Block the current tealet until a file descriptor is readable."""
@@ -1179,6 +1245,8 @@ class SelectorMixin:
         """Block the current tealet until a file descriptor is writable."""
 
         self._wait_selector(fileobj, selectors.EVENT_WRITE)
+
+    # -- Asyncio-style socket helpers ---------------------------------
 
     def sock_recv(self, sock: socket.socket, n: int) -> bytes:
         self._check_socket(sock)
@@ -1270,6 +1338,8 @@ class SelectorMixin:
         if sock.getblocking():
             raise ValueError("socket must be non-blocking")
 
+    # -- File descriptor registration ---------------------------------
+
     def _fileobj_to_fd(self, fileobj: object) -> int:
         if isinstance(fileobj, int):
             fd = fileobj
@@ -1317,6 +1387,8 @@ class SelectorMixin:
 
     def _release_ready_selector_waiter(self, fd: int, event: int) -> tealet.tealet | None:
         return self._selector_link._release_ready_waiter(fd, event)
+
+    # -- Driver wakeup and polling ------------------------------------
 
     def _drain_selector_wakeup(self) -> None:
         while True:
@@ -1376,6 +1448,8 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         super().__init__()
         self._wakeup = threading.Event()
 
+    # -- Driver wakeup -------------------------------------------------
+
     def _break_wait_threadsafe(self) -> None:
         self._wakeup.set()
 
@@ -1385,6 +1459,8 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
     def _wait_thread(self) -> None:
         self._wakeup.wait(timeout=self._time_to_next_timer())
         self._wakeup.clear()
+
+    # -- Sync run entry points ----------------------------------------
 
     def run(self) -> None:
         """Run scheduler synchronously until no runnable tasks or timers remain.
@@ -1466,6 +1542,8 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         self._wakeup = asyncio.Event()
         self._wakeup_loop: asyncio.AbstractEventLoop | None = None
 
+    # -- Driver wakeup -------------------------------------------------
+
     def _break_wait_threadsafe(self) -> None:
         loop = self._wakeup_loop
         if loop is None:
@@ -1483,6 +1561,8 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         Asyncio code can still wake up the Scheduler.
         """
         self._wakeup.set()
+
+    # -- Async waiting -------------------------------------------------
 
     async def _wait_async(self) -> None:
         wakeup = self._wakeup
@@ -1504,6 +1584,21 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
             pass
         finally:
             wakeup.clear()
+
+    # -- Async run entry points ---------------------------------------
+
+    async def arun(self) -> None:
+        self._verify_current_scheduler()
+        self._wakeup_loop = asyncio.get_running_loop()
+        self._running = True
+        try:
+            while self._tasks or self._timers or self._pending_async_waits:
+                if self._tasks or self._timers:
+                    self._pump()
+                await self._wait_async()
+        finally:
+            self._running = False
+            self._wakeup_loop = None
 
     async def arun_forever(self) -> None:
         self._verify_current_scheduler()
@@ -1554,16 +1649,3 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         if not target.done():
             raise RuntimeError("Scheduler stopped before Future completed.")
         return target.result()
-
-    async def arun(self) -> None:
-        self._verify_current_scheduler()
-        self._wakeup_loop = asyncio.get_running_loop()
-        self._running = True
-        try:
-            while self._tasks or self._timers or self._pending_async_waits:
-                if self._tasks or self._timers:
-                    self._pump()
-                await self._wait_async()
-        finally:
-            self._running = False
-            self._wakeup_loop = None
