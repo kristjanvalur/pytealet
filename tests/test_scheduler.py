@@ -21,8 +21,11 @@ from tealet.locks import (
     QueueFull,
     Semaphore,
 )
-from tealet.scheduler import (
+from tealet.asyncio import (
     AsyncScheduler,
+    TealetSelectorEventLoop,
+)
+from tealet.scheduler import (
     CancelledError,
     Channel,
     Future,
@@ -32,13 +35,12 @@ from tealet.scheduler import (
     TealetTask,
     RawTimeoutError,
     Scheduler,
-    SelectorScheduler,
-    TealetSelectorEventLoop,
     TimeoutError,
     _scheduler,
     to_thread,
     timeout,
 )
+from tealet.selector import SelectorScheduler
 from tealet_examples import (
     demo_future_result,
     demo_future_timeout_then_success,

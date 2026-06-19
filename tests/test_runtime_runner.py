@@ -4,8 +4,9 @@ import sys
 
 import pytest
 
-from tealet.runtime import AsyncRunner, Runner, run, run_async, run_in_asyncio
-from tealet.scheduler import AsyncScheduler, Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
+from tealet.asyncio import AsyncRunner, AsyncScheduler, run_async, run_in_asyncio
+from tealet.runtime import Runner, run
+from tealet.scheduler import Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
 
 
 requires_runner_sigint = pytest.mark.skipif(

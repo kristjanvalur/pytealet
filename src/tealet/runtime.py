@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import functools
 import signal
@@ -149,71 +148,6 @@ class BaseRunner(Generic[SchedulerT]):
     def _raise_keyboard_interrupt_if_requested(self) -> None:
         if self._interrupt_count > 0:
             raise KeyboardInterrupt()
-
-
-class AsyncRunner(BaseRunner[scheduler_module.AsyncSchedulerDrivingAPI]):
-    """Run scheduler-backed entries from within an existing asyncio task."""
-
-    default_factory = scheduler_module.AsyncScheduler
-
-    @property
-    def task(self) -> asyncio.Task[None] | None:
-        return None
-
-    async def close(self) -> None:
-        self._close()
-
-    async def run(self, entry, /, *, context: contextvars.Context | None = None):
-        self._lazy_init()
-        scheduler = self._require_scheduler()
-        run_context = self._resolve_context(context)
-        target = self._target_from_entry(entry, run_context)
-        sigint_handler = self._install_sigint_handler(target, cast(scheduler_module.BaseScheduler, scheduler))
-        self._interrupt_count = 0
-        try:
-            try:
-                return await scheduler.arun_until_complete(target)
-            except scheduler_module.CancelledError:
-                self._raise_keyboard_interrupt_if_requested()
-                raise
-        finally:
-            self._restore_sigint_handler(sigint_handler)
-
-
-async def run_async(
-    entry,
-    /,
-    *,
-    context: contextvars.Context | None = None,
-    scheduler_factory: Callable[[], scheduler_module.AsyncSchedulerDrivingAPI] | None = None,
-    debug: bool | None = None,
-):
-    """Convenience helper that runs one entry under a temporary AsyncRunner."""
-
-    runner = AsyncRunner(scheduler_factory=scheduler_factory, context=context, debug=debug)
-    try:
-        return await runner.run(entry)
-    finally:
-        await runner.close()
-
-
-def run_in_asyncio(
-    entry,
-    /,
-    *,
-    context: contextvars.Context | None = None,
-    scheduler_factory: Callable[[], scheduler_module.AsyncSchedulerDrivingAPI] | None = None,
-    loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
-    debug: bool | None = None,
-):
-    """Run one entry under an AsyncRunner owned by a temporary asyncio.Runner."""
-
-    asyncio_runner_type = getattr(asyncio, "Runner", None)
-    if asyncio_runner_type is None:
-        raise RuntimeError("run_in_asyncio requires asyncio.Runner, available in Python 3.11+")
-
-    with asyncio_runner_type(loop_factory=loop_factory) as asyncio_runner:
-        return asyncio_runner.run(run_async(entry, context=context, scheduler_factory=scheduler_factory, debug=debug))
 
 
 def run(
