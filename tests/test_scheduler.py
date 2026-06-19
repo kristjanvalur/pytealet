@@ -420,7 +420,9 @@ class TestSchedulerAccessors:
             receive_bytes_task = s.spawn(receive_bytes)
             send_bytes_task = s.spawn(send_bytes)
 
-            data, address = s.run_until_complete(receive_bytes_task)
+            result = s.run_until_complete(receive_bytes_task)
+            assert isinstance(result, tuple)
+            data, address = result
             assert data == b"again"
             assert address[1] == sender.getsockname()[1]
             assert send_bytes_task.result() == 5
@@ -434,11 +436,154 @@ class TestSchedulerAccessors:
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            with pytest.raises(NotImplementedError, match="selector-backed scheduler"):
+            with pytest.raises(NotImplementedError, match="IO-capable scheduler"):
                 s.sock_recv(reader, 1)
         finally:
             reader.close()
             _writer.close()
+
+    def test_async_scheduler_sock_recv_and_sendall(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+
+        async def run_case() -> None:
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+
+                def receive() -> bytes:
+                    return s.sock_recv(reader, 5)
+
+                def send() -> None:
+                    s.sleep(0.001)
+                    s.sock_sendall(writer, b"hello")
+
+                task = s.spawn(receive)
+                s.spawn(send)
+
+                assert await s.arun_until_complete(task) == b"hello"
+            finally:
+                reader.close()
+                writer.close()
+
+        asyncio.run(run_case())
+
+    def test_async_scheduler_sock_recv_into(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+
+        async def run_case() -> None:
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+                buf = bytearray(5)
+
+                def receive() -> int:
+                    return s.sock_recv_into(reader, buf)
+
+                def send() -> None:
+                    s.sleep(0.001)
+                    s.sock_sendall(writer, b"world")
+
+                task = s.spawn(receive)
+                s.spawn(send)
+
+                assert await s.arun_until_complete(task) == 5
+                assert bytes(buf) == b"world"
+            finally:
+                reader.close()
+                writer.close()
+
+        asyncio.run(run_case())
+
+    def test_async_scheduler_sock_accept_connect(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+
+        async def run_case() -> None:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                server.setblocking(False)
+                client.setblocking(False)
+                server.bind(("127.0.0.1", 0))
+                server.listen()
+
+                def accept_and_read() -> bytes:
+                    conn, _address = s.sock_accept(server)
+                    try:
+                        return s.sock_recv(conn, 4)
+                    finally:
+                        conn.close()
+
+                def connect_and_send() -> None:
+                    s.sock_connect(client, server.getsockname())
+                    s.sock_sendall(client, b"ping")
+
+                task = s.spawn(accept_and_read)
+                s.spawn(connect_and_send)
+
+                assert await s.arun_until_complete(task) == b"ping"
+            finally:
+                client.close()
+                server.close()
+
+        asyncio.run(run_case())
+
+    def test_async_scheduler_sock_datagram_helpers(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+
+        async def run_case() -> None:
+            receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                receiver.setblocking(False)
+                sender.setblocking(False)
+                receiver.bind(("127.0.0.1", 0))
+                buf = bytearray(5)
+
+                def receive() -> tuple[int, object]:
+                    return s.sock_recvfrom_into(receiver, buf)
+
+                def send() -> int:
+                    s.sleep(0.001)
+                    return s.sock_sendto(sender, b"hello", receiver.getsockname())
+
+                receive_task = s.spawn(receive)
+                send_task = s.spawn(send)
+
+                result = await s.arun_until_complete(receive_task)
+                assert isinstance(result, tuple)
+                count, address = result
+                assert count == 5
+                assert bytes(buf) == b"hello"
+                assert address[1] == sender.getsockname()[1]
+                assert send_task.result() == 5
+
+                def receive_bytes() -> tuple[bytes, object]:
+                    return s.sock_recvfrom(receiver, 5)
+
+                def send_bytes() -> int:
+                    s.sleep(0.001)
+                    return s.sock_sendto(sender, b"again", receiver.getsockname())
+
+                receive_bytes_task = s.spawn(receive_bytes)
+                send_bytes_task = s.spawn(send_bytes)
+
+                result = await s.arun_until_complete(receive_bytes_task)
+                assert isinstance(result, tuple)
+                data, address = result
+                assert data == b"again"
+                assert address[1] == sender.getsockname()[1]
+                assert send_bytes_task.result() == 5
+            finally:
+                sender.close()
+                receiver.close()
+
+        asyncio.run(run_case())
 
     def test_run_requires_scheduler_to_be_current(self):
         s = _new_scheduler()

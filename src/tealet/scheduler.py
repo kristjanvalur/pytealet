@@ -797,28 +797,28 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         return future
 
     def sock_recv(self, sock: socket.socket, n: int) -> bytes:
-        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
-        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
-        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
-        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_sendall(self, sock: socket.socket, data: Any) -> None:
-        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
-        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
-        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_connect(self, sock: socket.socket, address: Any) -> None:
-        raise NotImplementedError("socket helpers require a selector-backed scheduler")
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     # -- Driver state --------------------------------------------------
 
@@ -1561,6 +1561,42 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         Asyncio code can still wake up the Scheduler.
         """
         self._wakeup.set()
+
+    # -- Asyncio socket helpers --------------------------------------
+
+    def sock_recv(self, sock: socket.socket, n: int) -> bytes:
+        loop = asyncio.get_running_loop()
+        return self.wait_async(loop.sock_recv(sock, n))
+
+    def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
+        loop = asyncio.get_running_loop()
+        return self.wait_async(loop.sock_recv_into(sock, buf))
+
+    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
+        loop = asyncio.get_running_loop()
+        return self.wait_async(loop.sock_recvfrom(sock, bufsize))
+
+    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
+        loop = asyncio.get_running_loop()
+        if nbytes:
+            return self.wait_async(loop.sock_recvfrom_into(sock, buf, nbytes))
+        return self.wait_async(loop.sock_recvfrom_into(sock, buf))
+
+    def sock_sendall(self, sock: socket.socket, data: Any) -> None:
+        loop = asyncio.get_running_loop()
+        return self.wait_async(loop.sock_sendall(sock, data))
+
+    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
+        loop = asyncio.get_running_loop()
+        return self.wait_async(loop.sock_sendto(sock, data, address))
+
+    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+        loop = asyncio.get_running_loop()
+        return self.wait_async(loop.sock_accept(sock))
+
+    def sock_connect(self, sock: socket.socket, address: Any) -> None:
+        loop = asyncio.get_running_loop()
+        return self.wait_async(loop.sock_connect(sock, address))
 
     # -- Async waiting -------------------------------------------------
 
