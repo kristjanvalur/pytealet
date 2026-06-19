@@ -296,6 +296,29 @@ class TestSchedulerAccessors:
             writer.close()
             s.close()
 
+    def test_selector_scheduler_wait_readable_timeout_removes_callback(self):
+        s = SelectorScheduler()
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def wait_with_timeout() -> bool:
+                with pytest.raises(TimeoutError):
+                    with timeout(0.001):
+                        s.wait_readable(reader)
+                return s.remove_reader(reader.fileno())
+
+            task = s.spawn(wait_with_timeout)
+
+            assert s.run_until_complete(task) is False
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
     def test_selector_scheduler_sock_recv_and_sendall(self):
         s = SelectorScheduler()
         set_scheduler(s)
@@ -442,6 +465,89 @@ class TestSchedulerAccessors:
             reader.close()
             _writer.close()
 
+    def test_scheduler_io_callbacks_require_io_capable_scheduler(self):
+        s = _new_scheduler()
+        reader, _writer = socket.socketpair()
+        try:
+            with pytest.raises(NotImplementedError, match="reader callbacks"):
+                s.add_reader(reader.fileno(), lambda: None)
+            with pytest.raises(NotImplementedError, match="reader callbacks"):
+                s.remove_reader(reader.fileno())
+            with pytest.raises(NotImplementedError, match="writer callbacks"):
+                s.add_writer(reader.fileno(), lambda: None)
+            with pytest.raises(NotImplementedError, match="writer callbacks"):
+                s.remove_writer(reader.fileno())
+        finally:
+            reader.close()
+            _writer.close()
+
+    def test_selector_scheduler_reader_writer_callbacks(self):
+        s = SelectorScheduler()
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            readable = Future[bytes]()
+            writable = Future[str]()
+
+            def on_readable() -> None:
+                assert s.remove_reader(reader.fileno()) is True
+                readable.set_result(reader.recv(5))
+
+            def on_writable() -> None:
+                assert s.remove_writer(writer.fileno()) is True
+                writable.set_result("writable")
+
+            def send_later() -> None:
+                s.sleep(0.001)
+                writer.send(b"hello")
+
+            s.add_reader(reader.fileno(), on_readable)
+            s.spawn(send_later)
+            assert s.run_until_complete(readable) == b"hello"
+
+            s.add_writer(writer.fileno(), on_writable)
+            assert s.run_until_complete(writable) == "writable"
+            assert s.remove_reader(reader.fileno()) is False
+            assert s.remove_writer(writer.fileno()) is False
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_selector_scheduler_reader_writer_callbacks_share_fd_entry(self):
+        s = SelectorScheduler()
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            seen: list[str] = []
+
+            def on_writable() -> None:
+                seen.append("writable")
+                assert s.remove_writer(reader.fileno()) is True
+                s.stop()
+
+            s.add_reader(reader.fileno(), lambda: seen.append("readable"))
+            s.add_writer(reader.fileno(), on_writable)
+
+            assert s.remove_reader(reader.fileno()) is True
+            assert s.remove_reader(reader.fileno()) is False
+
+            writer.send(b"x")
+            s.run_forever()
+
+            assert seen == ["writable"]
+            assert s.remove_writer(reader.fileno()) is False
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
     def test_async_scheduler_sock_recv_and_sendall(self):
         s = AsyncScheduler()
         set_scheduler(s)
@@ -582,6 +688,45 @@ class TestSchedulerAccessors:
             finally:
                 sender.close()
                 receiver.close()
+
+        asyncio.run(run_case())
+
+    def test_async_scheduler_reader_writer_callbacks(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+
+        async def run_case() -> None:
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+                readable = asyncio.Event()
+                writable = asyncio.Event()
+                seen: list[object] = []
+
+                def on_readable() -> None:
+                    seen.append(reader.recv(5))
+                    assert s.remove_reader(reader.fileno()) is True
+                    readable.set()
+
+                def on_writable() -> None:
+                    seen.append("writable")
+                    assert s.remove_writer(writer.fileno()) is True
+                    writable.set()
+
+                s.add_reader(reader.fileno(), on_readable)
+                writer.send(b"hello")
+                await asyncio.wait_for(readable.wait(), timeout=1.0)
+
+                s.add_writer(writer.fileno(), on_writable)
+                await asyncio.wait_for(writable.wait(), timeout=1.0)
+
+                assert seen == [b"hello", "writable"]
+                assert s.remove_reader(reader.fileno()) is False
+                assert s.remove_writer(writer.fileno()) is False
+            finally:
+                reader.close()
+                writer.close()
 
         asyncio.run(run_case())
 

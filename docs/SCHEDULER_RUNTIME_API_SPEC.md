@@ -30,6 +30,16 @@ Implemented:
 - `Scheduler` and `AsyncScheduler` can be used directly as factories. They share
   the common scheduler/task/timer APIs from `BaseScheduler`, while implementing
   different driving APIs.
+- Low-level IO callback hooks are exposed on the scheduler surface:
+  - `add_reader(...)`
+  - `remove_reader(...)`
+  - `add_writer(...)`
+  - `remove_writer(...)`
+  `AsyncScheduler` delegates these hooks to the running asyncio loop.
+  `SelectorScheduler` implements them through its native selector reactor.
+  Selector readiness waits (`wait_readable(...)` and `wait_writable(...)`) are
+  layered on top of one-shot reader/writer callbacks that wake tealet `Event`
+  waiters.
 - Scheduler driving APIs include both sync and async run entry points:
   - `run_until_complete(...)`
   - `run_forever(...)`
@@ -277,7 +287,12 @@ Status: In progress.
 4. Add a short migration section mapping old helper usage to current runner
   and top-level helper APIs.
 
-## Next Alignment Backlog (Asyncio Parity)
+## Next Alignment Backlog (Asyncio Interop)
+
+This backlog is not a goal of broad functional parity with asyncio. The near
+term goal is low-level IO support: expose the callback hooks and readiness
+building blocks needed to build tealet-native streams, transports, and external
+IO-manager adapters.
 
 1. Running-State API
 
@@ -299,10 +314,68 @@ Status: In progress.
 
 4. Low-Level Scheduler Surface
 
-- Define and document the scheduler's low-level APIs (timers, callback enqueue,
-  stepping/pump, stop/run state) similarly to asyncio's loop low-level surface.
+- Continue defining and documenting the scheduler's low-level APIs (timers,
+  callback enqueue, fd reader/writer callbacks, stepping/pump, stop/run state)
+  similarly to asyncio's loop low-level surface.
+- Treat `add_reader`, `remove_reader`, `add_writer`, and `remove_writer` as the
+  portable low-level IO seam. They are useful for selector loops, and also map
+  well to completion-oriented or external IO managers that wake callbacks when
+  operations become ready or complete.
+- Keep blocking convenience waits such as `wait_readable(...)` and
+  `wait_writable(...)` layered over that callback seam, rather than maintaining
+  a separate readiness-wait registration path.
 
-5. KeyboardInterrupt Handling Parity
+5. Asyncio Transport/Protocol Stream Surface
+
+- Consider a tealet-native stream layer built on asyncio transports and
+  protocols. This is the faster asyncio socket path for performance-sensitive
+  stream IO, compared with the `loop.sock_*` helper methods, which are useful
+  but intentionally convenience-oriented.
+- The likely first shape is a custom `asyncio.Protocol` implementation created
+  by special protocol factories passed to `loop.create_connection(...)` and
+  `loop.create_server(...)`.
+- The protocol would receive normal asyncio callbacks such as
+  `connection_made`, `data_received`, `eof_received`, `pause_writing`,
+  `resume_writing`, and `connection_lost`, then translate those callbacks into
+  tealet-compatible blocking methods such as `read(...)`, `readexactly(...)`,
+  `readline(...)`, `write(...)`, `drain()`, `close()`, and `wait_closed()`.
+- Prefer implementing a tealet protocol or protocol-owned stream facade over
+  subclassing `asyncio.StreamReaderProtocol` initially. The latter is tied to
+  asyncio's stream machinery and may bring private assumptions that do not match
+  tealet blocking semantics.
+- `asyncio.BufferedProtocol` is a possible later optimization once the plain
+  `Protocol` semantics are proven. It may reduce copies for inbound data but
+  requires more careful buffer ownership.
+
+6. Tealet-Hosted Asyncio Loop Experiment
+
+- A tealet-hosted asyncio loop may be feasible if the asyncio loop's raw
+  blocking points can be delegated to the outer tealet scheduler.
+- The critical hook is file-descriptor readiness. Asyncio selector loops use
+  reader and writer callbacks as their low-level IO surface, so a
+  tealet-aware selector or selector-style `SchedulerLoop` would need correct
+  `add_reader`, `remove_reader`, `add_writer`, and `remove_writer` behavior.
+- The loop's sleep/block/wakeup behavior must also delegate to the outer
+  scheduler. When asyncio would block in its selector, the pump tealet should
+  park until the outer scheduler observes fd readiness, a timer deadline, or an
+  explicit wakeup.
+- Many higher-level asyncio mechanisms can then remain delegated to their
+  existing implementations: socket transports/protocols, `loop.sock_*` helpers,
+  DNS helpers that use threads, `run_in_executor`, and callback scheduling.
+- Areas that need special audit before claiming broad compatibility:
+  - subprocess support, especially child watchers, process-exit notifications,
+    and pipe transports
+  - signal handling, which is main-thread and event-loop specific
+  - SSL/TLS transports, because they combine socket readiness, buffering,
+    handshake state, and flow control
+  - async generator shutdown, default-executor shutdown, and loop-close cleanup
+  - exception-handler/debug hooks and task/future factory behavior
+  - cross-thread wakeups through `call_soon_threadsafe(...)`
+- The most promising Unix-first experiment remains a selector-compatible outer
+  scheduler. Proactor loops and uv/libuv loops are separate reactor families and
+  should be treated as later designs rather than extensions of the same adapter.
+
+7. KeyboardInterrupt Handling Parity
 
 Status: Implemented for Python 3.11+.
 

@@ -13,7 +13,8 @@ import socket
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections import deque
+from collections import defaultdict, deque
+from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar, cast
 
 import tealet
@@ -21,6 +22,16 @@ import tealet
 from .locks import Event, InvalidStateError, set_scheduler_resolver
 
 T = TypeVar("T")
+_FdCallback = tuple[Callable[..., object], tuple[object, ...], contextvars.Context]
+
+
+@dataclass
+class _FdCallbacks:
+    reader: _FdCallback | None = None
+    writer: _FdCallback | None = None
+
+    def empty(self) -> bool:
+        return self.reader is None and self.writer is None
 
 
 # a thread local scheduler
@@ -796,6 +807,18 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         executor.submit(worker)
         return future
 
+    def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        raise NotImplementedError("reader callbacks require an IO-capable scheduler")
+
+    def remove_reader(self, fd: int) -> bool:
+        raise NotImplementedError("reader callbacks require an IO-capable scheduler")
+
+    def add_writer(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        raise NotImplementedError("writer callbacks require an IO-capable scheduler")
+
+    def remove_writer(self, fd: int) -> bool:
+        raise NotImplementedError("writer callbacks require an IO-capable scheduler")
+
     def sock_recv(self, sock: socket.socket, n: int) -> bytes:
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
@@ -1126,98 +1149,13 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         """Wake a concrete driver from its owning context."""
 
 
-class _SelectorWaitLink(Linkable):
-    """Link target for tealets parked on selector readiness."""
-
-    def __init__(self, scheduler: "SelectorMixin") -> None:
-        self._scheduler = scheduler
-        self._read_waiters: dict[int, tealet.tealet] = {}
-        self._write_waiters: dict[int, tealet.tealet] = {}
-        self._task_waits: dict[tealet.tealet, tuple[int, int]] = {}
-
-    # -- Waiter maps ---------------------------------------------------
-
-    def _waiters(self, event: int) -> dict[int, tealet.tealet]:
-        if event == selectors.EVENT_READ:
-            return self._read_waiters
-        if event == selectors.EVENT_WRITE:
-            return self._write_waiters
-        raise ValueError("unsupported selector event")
-
-    def _link_waiter(self, fd: int, event: int, task: tealet.tealet) -> None:
-        waiters = self._waiters(event)
-        if fd in waiters:
-            raise RuntimeError("another task is already waiting on this file descriptor")
-        if task in self._task_waits:
-            raise RuntimeError("task is already waiting on selector readiness")
-
-        waiters[fd] = task
-        self._task_waits[task] = (fd, event)
-        try:
-            task.link = self
-        except AttributeError:
-            pass
-        try:
-            self._scheduler._update_selector_registration(fd)
-        except BaseException:
-            waiters.pop(fd, None)
-            self._task_waits.pop(task, None)
-            try:
-                task.link = None
-            except AttributeError:
-                pass
-            raise
-
-    def _unlink(self, t: tealet.tealet) -> None:
-        wait = self._task_waits.pop(t, None)
-        if wait is None:
-            return
-        fd, event = wait
-        self._waiters(event).pop(fd, None)
-        try:
-            t.link = None
-        except AttributeError:
-            pass
-        self._scheduler._update_selector_registration(fd)
-
-    def _release_ready_waiter(self, fd: int, event: int) -> tealet.tealet | None:
-        task = self._waiters(event).pop(fd, None)
-        if task is None:
-            return None
-        self._task_waits.pop(task, None)
-        try:
-            task.link = None
-        except AttributeError:
-            pass
-        return task
-
-    # -- State queries -------------------------------------------------
-
-    def _mask_for_fd(self, fd: int) -> int:
-        mask = 0
-        if fd in self._read_waiters:
-            mask |= selectors.EVENT_READ
-        if fd in self._write_waiters:
-            mask |= selectors.EVENT_WRITE
-        return mask
-
-    def _has_waiters(self) -> bool:
-        return bool(self._task_waits)
-
-    def _query_waiting(self, t: tealet.tealet) -> bool:
-        return t in self._task_waits
-
-    def _query_runnable(self, t: tealet.tealet) -> bool:
-        return cast(BaseScheduler, self._scheduler)._is_runnable(t)
-
-
 class SelectorMixin:
     """Selector-backed readiness waits for synchronous schedulers."""
 
     def __init__(self) -> None:
         super().__init__()
         self._selector = selectors.DefaultSelector()
-        self._selector_link = _SelectorWaitLink(self)
+        self._fd_callbacks: defaultdict[int, _FdCallbacks] = defaultdict(_FdCallbacks)
         self._selector_wakeup_reader, self._selector_wakeup_writer = socket.socketpair()
         self._selector_wakeup_reader.setblocking(False)
         self._selector_wakeup_writer.setblocking(False)
@@ -1239,12 +1177,104 @@ class SelectorMixin:
     def wait_readable(self, fileobj: object) -> None:
         """Block the current tealet until a file descriptor is readable."""
 
-        self._wait_selector(fileobj, selectors.EVENT_READ)
+        fd = self._fileobj_to_fd(fileobj)
+        ready = Event()
+        active = True
+
+        def wake() -> None:
+            nonlocal active
+            if not active:
+                return
+            active = False
+            self.remove_reader(fd)
+            ready.set()
+
+        self.add_reader(fd, wake)
+
+        try:
+            ready.wait()
+        finally:
+            if active:
+                active = False
+                self.remove_reader(fd)
 
     def wait_writable(self, fileobj: object) -> None:
         """Block the current tealet until a file descriptor is writable."""
 
-        self._wait_selector(fileobj, selectors.EVENT_WRITE)
+        fd = self._fileobj_to_fd(fileobj)
+        ready = Event()
+        active = True
+
+        def wake() -> None:
+            nonlocal active
+            if not active:
+                return
+            active = False
+            self.remove_writer(fd)
+            ready.set()
+
+        self.add_writer(fd, wake)
+
+        try:
+            ready.wait()
+        finally:
+            if active:
+                active = False
+                self.remove_writer(fd)
+
+    # -- File descriptor callbacks -----------------------------------
+
+    def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        fd = self._fileobj_to_fd(fd)
+        entry = self._fd_callbacks[fd]
+        previous = entry.reader
+        entry.reader = (callback, args, contextvars.copy_context())
+        try:
+            self._update_selector_registration(fd)
+        except Exception:
+            entry.reader = previous
+            if entry.empty():
+                del self._fd_callbacks[fd]
+            self._update_selector_registration(fd)
+            raise
+        self._wake_selector()
+
+    def remove_reader(self, fd: int) -> bool:
+        fd = self._fileobj_to_fd(fd)
+        entry = self._fd_callbacks.get(fd)
+        if entry is None or entry.reader is None:
+            return False
+        entry.reader = None
+        if entry.empty():
+            del self._fd_callbacks[fd]
+        self._update_selector_registration(fd)
+        return True
+
+    def add_writer(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        fd = self._fileobj_to_fd(fd)
+        entry = self._fd_callbacks[fd]
+        previous = entry.writer
+        entry.writer = (callback, args, contextvars.copy_context())
+        try:
+            self._update_selector_registration(fd)
+        except Exception:
+            entry.writer = previous
+            if entry.empty():
+                del self._fd_callbacks[fd]
+            self._update_selector_registration(fd)
+            raise
+        self._wake_selector()
+
+    def remove_writer(self, fd: int) -> bool:
+        fd = self._fileobj_to_fd(fd)
+        entry = self._fd_callbacks.get(fd)
+        if entry is None or entry.writer is None:
+            return False
+        entry.writer = None
+        if entry.empty():
+            del self._fd_callbacks[fd]
+        self._update_selector_registration(fd)
+        return True
 
     # -- Asyncio-style socket helpers ---------------------------------
 
@@ -1352,21 +1382,16 @@ class SelectorMixin:
             raise ValueError("invalid file descriptor")
         return fd
 
-    def _wait_selector(self, fileobj: object, event: int) -> None:
-        fd = self._fileobj_to_fd(fileobj)
-        current = tealet.current()
-        scheduler = cast(BaseScheduler, self)
-        try:
-            scheduler._schedule(lambda: self._link_selector_waiter(fd, event, current))
-        except BaseException:
-            self._selector_link._unlink(current)
-            raise
-
-    def _link_selector_waiter(self, fd: int, event: int, task: tealet.tealet) -> None:
-        self._selector_link._link_waiter(fd, event, task)
-
     def _selector_mask_for_fd(self, fd: int) -> int:
-        return self._selector_link._mask_for_fd(fd)
+        mask = 0
+        entry = self._fd_callbacks.get(fd)
+        if entry is None:
+            return mask
+        if entry.reader is not None:
+            mask |= selectors.EVENT_READ
+        if entry.writer is not None:
+            mask |= selectors.EVENT_WRITE
+        return mask
 
     def _update_selector_registration(self, fd: int) -> None:
         mask = self._selector_mask_for_fd(fd)
@@ -1385,8 +1410,16 @@ class SelectorMixin:
         except (KeyError, ValueError, OSError):
             pass
 
-    def _release_ready_selector_waiter(self, fd: int, event: int) -> tealet.tealet | None:
-        return self._selector_link._release_ready_waiter(fd, event)
+    def _schedule_fd_callback(self, fd: int, event: int) -> None:
+        callbacks = self._fd_callbacks.get(fd)
+        if callbacks is None:
+            return
+        assert event in (selectors.EVENT_READ, selectors.EVENT_WRITE)
+        entry = callbacks.reader if event == selectors.EVENT_READ else callbacks.writer
+        if entry is None:
+            return
+        callback, args, context = entry
+        cast(BaseScheduler, self).call_soon(callback, *args, context=context)
 
     # -- Driver wakeup and polling ------------------------------------
 
@@ -1417,7 +1450,6 @@ class SelectorMixin:
     def _wait_thread(self) -> None:
         scheduler = cast(BaseScheduler, self)
         events = self._selector.select(timeout=scheduler._time_to_next_timer())
-        ready: list[tealet.tealet] = []
         wakeup_fd = self._selector_wakeup_reader.fileno()
         for key, mask in events:
             fd = key.fd
@@ -1425,20 +1457,13 @@ class SelectorMixin:
                 self._drain_selector_wakeup()
                 continue
             if mask & selectors.EVENT_READ:
-                task = self._release_ready_selector_waiter(fd, selectors.EVENT_READ)
-                if task is not None:
-                    ready.append(task)
+                self._schedule_fd_callback(fd, selectors.EVENT_READ)
             if mask & selectors.EVENT_WRITE:
-                task = self._release_ready_selector_waiter(fd, selectors.EVENT_WRITE)
-                if task is not None:
-                    ready.append(task)
+                self._schedule_fd_callback(fd, selectors.EVENT_WRITE)
             self._update_selector_registration(fd)
 
-        for task in ready:
-            scheduler._make_runnable(task)
-
     def _has_pending_driver_work(self) -> bool:
-        return self._selector_link._has_waiters()
+        return bool(self._fd_callbacks)
 
 
 class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
@@ -1561,6 +1586,24 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         Asyncio code can still wake up the Scheduler.
         """
         self._wakeup.set()
+
+    # -- Asyncio fd callbacks ----------------------------------------
+
+    def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        loop = asyncio.get_running_loop()
+        loop.add_reader(fd, callback, *args)
+
+    def remove_reader(self, fd: int) -> bool:
+        loop = asyncio.get_running_loop()
+        return loop.remove_reader(fd)
+
+    def add_writer(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        loop = asyncio.get_running_loop()
+        loop.add_writer(fd, callback, *args)
+
+    def remove_writer(self, fd: int) -> bool:
+        loop = asyncio.get_running_loop()
+        return loop.remove_writer(fd)
 
     # -- Asyncio socket helpers --------------------------------------
 
