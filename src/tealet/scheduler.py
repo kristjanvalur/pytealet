@@ -7,11 +7,13 @@ import functools
 import heapq
 import inspect
 import itertools
+import selectors
+import socket
 import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Callable, Generic, TypeVar
+from typing import Callable, Generic, TypeVar, cast
 
 import tealet
 
@@ -830,6 +832,9 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
             return None
         return max(0.0, self._timers[0][0] - self.time())
 
+    def _has_pending_driver_work(self) -> bool:
+        return False
+
     def _is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._task_set
 
@@ -1038,6 +1043,217 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         """Wake a concrete driver from its owning context."""
 
 
+class _SelectorWaitLink(Linkable):
+    """Link target for tealets parked on selector readiness."""
+
+    def __init__(self, scheduler: "SelectorMixin") -> None:
+        self._scheduler = scheduler
+        self._read_waiters: dict[int, tealet.tealet] = {}
+        self._write_waiters: dict[int, tealet.tealet] = {}
+        self._task_waits: dict[tealet.tealet, tuple[int, int]] = {}
+
+    def _waiters(self, event: int) -> dict[int, tealet.tealet]:
+        if event == selectors.EVENT_READ:
+            return self._read_waiters
+        if event == selectors.EVENT_WRITE:
+            return self._write_waiters
+        raise ValueError("unsupported selector event")
+
+    def _link_waiter(self, fd: int, event: int, task: tealet.tealet) -> None:
+        waiters = self._waiters(event)
+        if fd in waiters:
+            raise RuntimeError("another task is already waiting on this file descriptor")
+        if task in self._task_waits:
+            raise RuntimeError("task is already waiting on selector readiness")
+
+        waiters[fd] = task
+        self._task_waits[task] = (fd, event)
+        try:
+            task.link = self
+        except AttributeError:
+            pass
+        try:
+            self._scheduler._update_selector_registration(fd)
+        except BaseException:
+            waiters.pop(fd, None)
+            self._task_waits.pop(task, None)
+            try:
+                task.link = None
+            except AttributeError:
+                pass
+            raise
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        wait = self._task_waits.pop(t, None)
+        if wait is None:
+            return
+        fd, event = wait
+        self._waiters(event).pop(fd, None)
+        try:
+            t.link = None
+        except AttributeError:
+            pass
+        self._scheduler._update_selector_registration(fd)
+
+    def _release_ready_waiter(self, fd: int, event: int) -> tealet.tealet | None:
+        task = self._waiters(event).pop(fd, None)
+        if task is None:
+            return None
+        self._task_waits.pop(task, None)
+        try:
+            task.link = None
+        except AttributeError:
+            pass
+        return task
+
+    def _mask_for_fd(self, fd: int) -> int:
+        mask = 0
+        if fd in self._read_waiters:
+            mask |= selectors.EVENT_READ
+        if fd in self._write_waiters:
+            mask |= selectors.EVENT_WRITE
+        return mask
+
+    def _has_waiters(self) -> bool:
+        return bool(self._task_waits)
+
+    def _query_waiting(self, t: tealet.tealet) -> bool:
+        return t in self._task_waits
+
+    def _query_runnable(self, t: tealet.tealet) -> bool:
+        return cast(BaseScheduler, self._scheduler)._is_runnable(t)
+
+
+class SelectorMixin:
+    """Selector-backed readiness waits for synchronous schedulers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._selector = selectors.DefaultSelector()
+        self._selector_link = _SelectorWaitLink(self)
+        self._selector_wakeup_reader, self._selector_wakeup_writer = socket.socketpair()
+        self._selector_wakeup_reader.setblocking(False)
+        self._selector_wakeup_writer.setblocking(False)
+        self._selector.register(
+            self._selector_wakeup_reader.fileno(),
+            selectors.EVENT_READ,
+            self._selector_wakeup_reader.fileno(),
+        )
+
+    def close(self) -> None:
+        self._selector.close()
+        self._selector_wakeup_reader.close()
+        self._selector_wakeup_writer.close()
+
+    def wait_readable(self, fileobj: object) -> None:
+        """Block the current tealet until a file descriptor is readable."""
+
+        self._wait_selector(fileobj, selectors.EVENT_READ)
+
+    def wait_writable(self, fileobj: object) -> None:
+        """Block the current tealet until a file descriptor is writable."""
+
+        self._wait_selector(fileobj, selectors.EVENT_WRITE)
+
+    def _fileobj_to_fd(self, fileobj: object) -> int:
+        if isinstance(fileobj, int):
+            fd = fileobj
+        else:
+            fileno = getattr(fileobj, "fileno", None)
+            if fileno is None:
+                raise ValueError("file object must be an fd or have fileno()")
+            fd = fileno()
+        if not isinstance(fd, int) or fd < 0:
+            raise ValueError("invalid file descriptor")
+        return fd
+
+    def _wait_selector(self, fileobj: object, event: int) -> None:
+        fd = self._fileobj_to_fd(fileobj)
+        current = tealet.current()
+        scheduler = cast(BaseScheduler, self)
+        try:
+            scheduler._schedule(lambda: self._link_selector_waiter(fd, event, current))
+        except BaseException:
+            self._selector_link._unlink(current)
+            raise
+
+    def _link_selector_waiter(self, fd: int, event: int, task: tealet.tealet) -> None:
+        self._selector_link._link_waiter(fd, event, task)
+
+    def _selector_mask_for_fd(self, fd: int) -> int:
+        return self._selector_link._mask_for_fd(fd)
+
+    def _update_selector_registration(self, fd: int) -> None:
+        mask = self._selector_mask_for_fd(fd)
+        try:
+            self._selector.get_key(fd)
+        except KeyError:
+            if mask:
+                self._selector.register(fd, mask, fd)
+            return
+
+        if mask:
+            self._selector.modify(fd, mask, fd)
+            return
+        try:
+            self._selector.unregister(fd)
+        except (KeyError, ValueError, OSError):
+            pass
+
+    def _release_ready_selector_waiter(self, fd: int, event: int) -> tealet.tealet | None:
+        return self._selector_link._release_ready_waiter(fd, event)
+
+    def _drain_selector_wakeup(self) -> None:
+        while True:
+            try:
+                if not self._selector_wakeup_reader.recv(4096):
+                    return
+            except BlockingIOError:
+                return
+            except OSError:
+                return
+
+    def _wake_selector(self) -> None:
+        try:
+            self._selector_wakeup_writer.send(b"\0")
+        except BlockingIOError:
+            pass
+        except OSError:
+            pass
+
+    def _break_wait_threadsafe(self) -> None:
+        self._wake_selector()
+
+    def _break_wait(self) -> None:
+        self._wake_selector()
+
+    def _wait_thread(self) -> None:
+        scheduler = cast(BaseScheduler, self)
+        events = self._selector.select(timeout=scheduler._time_to_next_timer())
+        ready: list[tealet.tealet] = []
+        wakeup_fd = self._selector_wakeup_reader.fileno()
+        for key, mask in events:
+            fd = key.fd
+            if fd == wakeup_fd:
+                self._drain_selector_wakeup()
+                continue
+            if mask & selectors.EVENT_READ:
+                task = self._release_ready_selector_waiter(fd, selectors.EVENT_READ)
+                if task is not None:
+                    ready.append(task)
+            if mask & selectors.EVENT_WRITE:
+                task = self._release_ready_selector_waiter(fd, selectors.EVENT_WRITE)
+                if task is not None:
+                    ready.append(task)
+            self._update_selector_registration(fd)
+
+        for task in ready:
+            scheduler._make_runnable(task)
+
+    def _has_pending_driver_work(self) -> bool:
+        return self._selector_link._has_waiters()
+
+
 class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
     """Cooperative scheduler for synchronous driving."""
 
@@ -1067,11 +1283,11 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         self._verify_current_scheduler()
         self._running = True
         try:
-            while self._tasks or self._timers:
+            while self._tasks or self._timers or self._has_pending_driver_work():
                 self._run_ready_timers()
                 if self._tasks:
                     self._pump()
-                if self._tasks or self._timers:
+                if self._tasks or self._timers or self._has_pending_driver_work():
                     self._wait_thread()
         finally:
             self._running = False
@@ -1121,6 +1337,10 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         if not target.done():
             raise RuntimeError("Scheduler stopped before Future completed.")
         return target.result()
+
+
+class SelectorScheduler(SelectorMixin, Scheduler):
+    """Synchronous scheduler with selector-backed fd readiness waits."""
 
 
 class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):

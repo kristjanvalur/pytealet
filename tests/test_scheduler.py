@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import contextvars
+import socket
 import threading
 
 import pytest
@@ -31,6 +32,7 @@ from tealet.scheduler import (
     TealetTask,
     RawTimeoutError,
     Scheduler,
+    SelectorScheduler,
     TimeoutError,
     _scheduler,
     to_thread,
@@ -218,6 +220,81 @@ class TestSchedulerAccessors:
         s.run_until_complete(task)
 
         assert seen == ["resumed"]
+
+    def test_selector_scheduler_wait_readable(self):
+        s = SelectorScheduler()
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            states: list[tuple[str, bool, bool]] = []
+
+            def read_one() -> bytes:
+                states.append(("before", task.is_waiting(), task.is_runnable()))
+                s.wait_readable(reader)
+                states.append(("after", task.is_waiting(), task.is_runnable()))
+                return reader.recv(1)
+
+            def write_one() -> None:
+                s.sleep(0.001)
+                assert task.link is not None
+                assert task.link is not s
+                states.append(("during", task.is_waiting(), task.is_runnable()))
+                writer.send(b"x")
+
+            task = s.spawn(read_one)
+            s.spawn(write_one)
+
+            assert s.run_until_complete(task) == b"x"
+            assert states == [
+                ("before", False, False),
+                ("during", True, False),
+                ("after", False, False),
+            ]
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_selector_scheduler_wait_writable(self):
+        s = SelectorScheduler()
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            payload = b"x" * 4096
+            while True:
+                try:
+                    writer.send(payload)
+                except BlockingIOError:
+                    break
+
+            def write_when_ready() -> int:
+                s.wait_writable(writer)
+                return writer.send(b"z")
+
+            def drain() -> None:
+                s.sleep(0.001)
+                while True:
+                    try:
+                        if not reader.recv(65536):
+                            return
+                    except BlockingIOError:
+                        return
+
+            task = s.spawn(write_when_ready)
+            s.spawn(drain)
+
+            assert s.run_until_complete(task) == 1
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
 
     def test_run_requires_scheduler_to_be_current(self):
         s = _new_scheduler()
