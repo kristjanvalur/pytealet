@@ -19,6 +19,7 @@ from .scheduler import (
     CancelledError,
 )
 from .runtime import BaseRunner
+from .runtime import Runner as TealetRunner
 from .selector import SelectorScheduler
 
 T = TypeVar("T")
@@ -313,7 +314,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
             if isinstance(target, TealetTask) and target.get_scheduler() is not self:
                 raise RuntimeError("Future is bound to a different scheduler")
         elif callable(future):
-            target = self.spawn(future)
+            target = cast(Future[T], self.spawn(future))
         else:
             raise TypeError("future must be a Future or callable")
 
@@ -334,7 +335,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
         if not target.done():
             raise RuntimeError("Scheduler stopped before Future completed.")
-        return target.result()
+        return cast(T, target.result())
 
 
 class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
@@ -346,8 +347,8 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
     def task(self) -> _asyncio.Task[None] | None:
         return None
 
-    async def close(self) -> None:
-        self._close()
+    def close(self) -> None:
+        super().close()
 
     async def run(self, entry, /, *, context: contextvars.Context | None = None):
         self._lazy_init()
@@ -373,14 +374,20 @@ async def run_async(
     context: contextvars.Context | None = None,
     scheduler_factory: Callable[[], AsyncSchedulerDrivingAPI] | None = None,
     debug: bool | None = None,
+    handle_sigint: bool = True,
 ):
     """Convenience helper that runs one entry under a temporary AsyncRunner."""
 
-    runner = AsyncRunner(scheduler_factory=scheduler_factory, context=context, debug=debug)
+    runner = AsyncRunner(
+        scheduler_factory=scheduler_factory,
+        context=context,
+        debug=debug,
+        handle_sigint=handle_sigint,
+    )
     try:
         return await runner.run(entry)
     finally:
-        await runner.close()
+        runner.close()
 
 
 def run_in_asyncio(
@@ -391,6 +398,7 @@ def run_in_asyncio(
     scheduler_factory: Callable[[], AsyncSchedulerDrivingAPI] | None = None,
     loop_factory: Callable[[], _asyncio.AbstractEventLoop] | None = None,
     debug: bool | None = None,
+    handle_sigint: bool = True,
 ):
     """Run one entry under an AsyncRunner owned by a temporary asyncio.Runner."""
 
@@ -398,5 +406,54 @@ def run_in_asyncio(
     if asyncio_runner_type is None:
         raise RuntimeError("run_in_asyncio requires asyncio.Runner, available in Python 3.11+")
 
-    with asyncio_runner_type(loop_factory=loop_factory) as asyncio_runner:
-        return asyncio_runner.run(run_async(entry, context=context, scheduler_factory=scheduler_factory, debug=debug))
+    with asyncio_runner_type(loop_factory=loop_factory, debug=debug) as asyncio_runner:
+        return asyncio_runner.run(
+            run_async(
+                entry,
+                context=context,
+                scheduler_factory=scheduler_factory,
+                debug=debug,
+                handle_sigint=handle_sigint,
+            )
+        )
+
+
+def run_asyncio_in_tealet(
+    entry,
+    /,
+    *,
+    context: contextvars.Context | None = None,
+    scheduler_factory: Callable[[], SelectorScheduler] | None = None,
+    loop_factory: Callable[[], _asyncio.AbstractEventLoop] | None = None,
+    debug: bool | None = None,
+    handle_sigint: bool = False,
+):
+    """Run one asyncio entry under a temporary SelectorScheduler-owned tealet runner."""
+
+    asyncio_runner_type = getattr(_asyncio, "Runner", None)
+    if asyncio_runner_type is None:
+        raise RuntimeError("run_asyncio_in_tealet requires asyncio.Runner, available in Python 3.11+")
+
+    tealet_runner = TealetRunner(
+        scheduler_factory=scheduler_factory or SelectorScheduler,
+        debug=debug,
+        handle_sigint=handle_sigint,
+    )
+
+    def run_inside_tealet():
+        tealet_runner.get_scheduler()
+
+        def tealet_loop_factory() -> _asyncio.AbstractEventLoop:
+            if loop_factory is not None:
+                return loop_factory()
+            loop = TealetSelectorEventLoop()
+            _asyncio.set_event_loop(loop)
+            return loop
+
+        with asyncio_runner_type(loop_factory=tealet_loop_factory, debug=debug) as asyncio_runner:
+            return asyncio_runner.run(entry, context=context)
+
+    try:
+        return tealet_runner.run(run_inside_tealet)
+    finally:
+        tealet_runner.close()

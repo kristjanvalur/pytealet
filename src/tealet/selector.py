@@ -45,6 +45,7 @@ class SelectorMixin:
         self._selector.close()
         self._selector_wakeup_reader.close()
         self._selector_wakeup_writer.close()
+        super().close()
 
     # -- Readiness waits -----------------------------------------------
 

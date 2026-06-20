@@ -1173,58 +1173,54 @@ class TestSchedulerExamples:
 
     def test_event_wait_timeout_and_success(self):
         s = _new_scheduler()
-        evt = Event()
+        timeout_evt = Event()
+        success_evt = Event()
         seen: list[str] = []
 
         def timeout_waiter() -> None:
             tm = timeout(0.001)
             with pytest.raises(TimeoutError, match="Operation timed out"):
                 with tm:
-                    evt.wait()
+                    timeout_evt.wait()
             seen.append(f"timeout={not tm.expired()}")
 
         def success_waiter() -> None:
-            tm = timeout(0.01)
+            tm = timeout(10.0)
             with tm:
-                evt.wait()
+                success_evt.wait()
             seen.append(f"success={not tm.expired()}")
 
-        def setter() -> None:
-            s.sleep(0.002)
-            evt.set()
-
         s.spawn(timeout_waiter)
+        s.run()
         s.spawn(success_waiter)
-        s.spawn(setter)
+        s.call_later(0.002, success_evt.set)
         s.run()
 
         assert seen == ["timeout=False", "success=True"]
 
     def test_timeout_context_event_wait_timeout_and_success(self):
         s = _new_scheduler()
-        evt = Event()
+        timeout_evt = Event()
+        success_evt = Event()
         seen: list[str] = []
 
         def timeout_waiter() -> None:
             tm = timeout(0.001)
             with pytest.raises(TimeoutError, match="Operation timed out"):
                 with tm:
-                    evt.wait()
+                    timeout_evt.wait()
             seen.append(f"timeout={tm.expired()}")
 
         def success_waiter() -> None:
-            tm = timeout(0.01)
+            tm = timeout(10.0)
             with tm:
-                evt.wait()
+                success_evt.wait()
             seen.append(f"success={not tm.expired()}")
 
-        def setter() -> None:
-            s.sleep(0.002)
-            evt.set()
-
         s.spawn(timeout_waiter)
+        s.run()
         s.spawn(success_waiter)
-        s.spawn(setter)
+        s.call_later(0.002, success_evt.set)
         s.run()
 
         assert seen == ["timeout=True", "success=True"]

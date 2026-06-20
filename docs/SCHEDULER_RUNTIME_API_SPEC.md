@@ -24,6 +24,7 @@ Implemented:
   - `tealet.runtime.run(...)`
   - `tealet.asyncio.run_async(...)`
   - `tealet.asyncio.run_in_asyncio(...)`
+  - `tealet.asyncio.run_asyncio_in_tealet(...)`
 - `BaseScheduler` contains shared cooperative scheduling mechanics.
 - `Scheduler` is the concrete synchronous scheduler implementation.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
@@ -71,6 +72,8 @@ Implemented:
   - a second interrupt raises `KeyboardInterrupt` immediately
   - nested asyncio runner handlers are temporarily overridden and restored
     after the inner runner exits
+  - runner construction accepts `handle_sigint=False` for embedding scenarios
+    where an inner runner should own interrupt handling
 
 Not implemented yet from this proposal:
 
@@ -163,6 +166,11 @@ def run_in_asyncio(entry, /, *args,
        loop_factory: LoopFactory | None = None,
        scheduler_factory: SchedulerFactory | None = None,
        **kwargs): ...
+
+def run_asyncio_in_tealet(entry, /, *args,
+  loop_factory: LoopFactory | None = None,
+  scheduler_factory: SchedulerFactory | None = None,
+  **kwargs): ...
 ```
 
 `entry` accepted forms:
@@ -206,6 +214,20 @@ Return behavior:
 - Restores prior scheduler binding after completion.
 - Lets `asyncio.Runner` handle loop shutdown and closure.
 
+### tealet.asyncio.run_asyncio_in_tealet(...)
+
+- Creates a temporary `tealet.runtime.Runner` with a
+  `tealet.selector.SelectorScheduler` by default.
+- Disables the outer tealet runner's SIGINT handler by default so the inner
+  `asyncio.Runner` can install its normal interrupt handler.
+- Creates a temporary `asyncio.Runner` whose default loop is
+  `tealet.asyncio.TealetSelectorEventLoop` hosted by the active selector
+  scheduler.
+- Runs the coroutine/awaitable using the same entry semantics as
+  `asyncio.Runner.run(...)` inside the tealet-hosted asyncio loop.
+- Restores prior scheduler binding after completion and closes the default
+  selector scheduler created by the helper.
+
 ## Context and Scope Rules
 
 - Current scheduler binding should be context-local for async tasks.
@@ -223,6 +245,11 @@ Return behavior:
   - `RuntimeError` consistent with asyncio wording/style
 - `tealet.asyncio.run_in_asyncio(...)` on Python versions without `asyncio.Runner`:
   - `RuntimeError` indicating Python 3.11+ is required
+- `tealet.asyncio.run_asyncio_in_tealet(...)` without `asyncio.Runner`:
+  - `RuntimeError` indicating Python 3.11+ is required
+- `tealet.asyncio.run_asyncio_in_tealet(...)` with a non-selector scheduler and
+  no custom loop factory:
+  - `RuntimeError` indicating that a `SelectorScheduler` is required
 - invalid factory return values:
   - Factories are duck typed; failures surface naturally when required scheduler
     operations are used.
@@ -244,6 +271,7 @@ Return behavior:
 - `asyncio.get_event_loop()` legacy pattern -> no direct equivalent; create a
   scheduler explicitly or use a runner factory.
 - `asyncio.run(..., loop_factory=...)` -> `run(..., loop_factory=..., scheduler_factory=...)`
+- `asyncio.run(...)` inside tealet -> `tealet.asyncio.run_asyncio_in_tealet(...)`
 - `asyncio.Runner(...)` -> `Runtime(...)`
 
 ## Suggested Phase Plan
@@ -412,6 +440,9 @@ result = tealet.runtime.run(
 # async entry inside existing loop
 async def app_main():
   return await tealet.asyncio.run_async(async_entry)
+
+# asyncio entry inside a tealet selector scheduler
+result = tealet.asyncio.run_asyncio_in_tealet(async_entry())
 
 # low-level direct construction
 s = tealet.scheduler.Scheduler()

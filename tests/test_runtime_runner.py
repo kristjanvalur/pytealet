@@ -4,9 +4,17 @@ import sys
 
 import pytest
 
-from tealet.asyncio import AsyncRunner, AsyncScheduler, run_async, run_in_asyncio
+from tealet.asyncio import (
+    AsyncRunner,
+    AsyncScheduler,
+    TealetSelectorEventLoop,
+    run_async,
+    run_asyncio_in_tealet,
+    run_in_asyncio,
+)
 from tealet.runtime import Runner, run
 from tealet.scheduler import Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
+from tealet.selector import SelectorScheduler
 
 
 requires_runner_sigint = pytest.mark.skipif(
@@ -41,7 +49,7 @@ class TestAsyncRunner:
             scheduler = runner.get_scheduler()
             assert isinstance(scheduler, AsyncScheduler)
             assert runner.task is None
-            await runner.close()
+            runner.close()
             assert runner.task is None
 
         asyncio.run(run())
@@ -59,7 +67,7 @@ class TestAsyncRunner:
             assert result == "ok"
             assert runner.get_scheduler() is not None
             assert seen == [runner.get_scheduler()]
-            await runner.close()
+            runner.close()
 
         asyncio.run(run())
 
@@ -73,7 +81,7 @@ class TestAsyncRunner:
                     await runner.run(coro)
             finally:
                 coro.close()
-                await runner.close()
+                runner.close()
 
         asyncio.run(run())
 
@@ -83,7 +91,7 @@ class TestAsyncRunner:
             runner = AsyncRunner(scheduler_factory=lambda: custom)
             started = runner.get_scheduler()
             assert started is custom
-            await runner.close()
+            runner.close()
 
         asyncio.run(run())
 
@@ -96,7 +104,7 @@ class TestAsyncRunner:
                 runner.get_scheduler()
                 assert loop.get_debug() is previous
             finally:
-                await runner.close()
+                runner.close()
             assert loop.get_debug() is previous
 
         asyncio.run(run_case())
@@ -109,19 +117,23 @@ class TestAsyncRunner:
                 runner.get_scheduler()
                 assert custom.get_debug() is True
             finally:
-                await runner.close()
+                runner.close()
 
         asyncio.run(run_case())
 
     def test_invalid_factory_return_type(self):
         async def run() -> None:
-            runner = AsyncRunner(scheduler_factory=lambda: object())
+            class InvalidScheduler:
+                def close(self) -> None:
+                    pass
+
+            runner = AsyncRunner(scheduler_factory=InvalidScheduler)
             try:
                 scheduler = runner.get_scheduler()
                 with pytest.raises(AttributeError):
                     await scheduler.arun_until_complete(lambda: None)
             finally:
-                await runner.close()
+                runner.close()
                 set_scheduler(None)
 
         asyncio.run(run())
@@ -129,7 +141,7 @@ class TestAsyncRunner:
     def test_close_prevents_reuse(self):
         async def run() -> None:
             runner = AsyncRunner()
-            await runner.close()
+            runner.close()
             with pytest.raises(RuntimeError, match="runner is closed"):
                 await runner.run(lambda: None)
             with pytest.raises(RuntimeError, match="runner is closed"):
@@ -155,7 +167,7 @@ class TestAsyncRunner:
                 assert await runner.run(lambda: marker.get()) == "runner-context"
                 assert await runner.run(lambda: marker.get(), context=override_ctx) == "override-context"
             finally:
-                await runner.close()
+                runner.close()
 
         asyncio.run(run())
 
@@ -172,7 +184,7 @@ class TestAsyncRunner:
                 assert future.done() is True
                 assert future.result() == 123
             finally:
-                await runner.close()
+                runner.close()
 
         asyncio.run(run())
 
@@ -206,7 +218,7 @@ class TestAsyncRunner:
                 with pytest.raises(KeyboardInterrupt):
                     await runner.run(entry)
             finally:
-                await runner.close()
+                runner.close()
 
         asyncio.run(run_case())
 
@@ -230,7 +242,7 @@ class TestAsyncRunner:
                 with pytest.raises(KeyboardInterrupt):
                     await runner.run(entry)
             finally:
-                await runner.close()
+                runner.close()
 
         asyncio.run(run_case())
 
@@ -248,7 +260,24 @@ class TestAsyncRunner:
                 assert await runner.run(lambda: signals.handler) is not outer_handler
                 assert signals.handler is outer_handler
             finally:
-                await runner.close()
+                runner.close()
+
+        asyncio.run(run_case())
+
+        assert signals.handler is signal.default_int_handler
+
+    @requires_runner_sigint
+    def test_handle_sigint_false_does_not_install_handler(self, monkeypatch):
+        signals = FakeSignals(monkeypatch)
+
+        async def run_case() -> None:
+            outer_handler = signals.handler
+            runner = AsyncRunner(handle_sigint=False)
+            try:
+                assert await runner.run(lambda: signals.handler) is outer_handler
+                assert signals.handler is outer_handler
+            finally:
+                runner.close()
 
         asyncio.run(run_case())
 
@@ -268,6 +297,21 @@ class TestRunner:
             assert runner.get_scheduler().get_debug() is True
         finally:
             runner.close()
+
+    def test_close_closes_factory_scheduler_resources(self):
+        closed = False
+
+        class ClosingScheduler(Scheduler):
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+
+        runner = Runner(scheduler_factory=ClosingScheduler)
+        runner.get_scheduler()
+
+        runner.close()
+
+        assert closed is True
 
     def test_run_sync_callable(self):
         runner = Runner()
@@ -448,6 +492,19 @@ class TestRunner:
         assert seen == ["start"]
         assert signals.handler is signal.default_int_handler
 
+    @requires_runner_sigint
+    def test_handle_sigint_false_does_not_install_handler(self, monkeypatch):
+        signals = FakeSignals(monkeypatch)
+
+        runner = Runner(handle_sigint=False)
+        try:
+            assert runner.run(lambda: signals.handler) is signal.default_int_handler
+        finally:
+            runner.close()
+
+        assert signals.installed == []
+        assert signals.handler is signal.default_int_handler
+
 
 class TestRunHelper:
     def test_run_helper_runs_callable(self):
@@ -502,6 +559,9 @@ class TestRunHelper:
         custom = AsyncScheduler()
         assert run_in_asyncio(lambda: custom.get_debug(), scheduler_factory=lambda: custom, debug=True) is True
 
+    def test_run_in_asyncio_helper_sets_loop_debug_flag(self):
+        assert run_in_asyncio(lambda: asyncio.get_running_loop().get_debug(), debug=True) is True
+
     def test_run_in_asyncio_helper_uses_loop_factory(self):
         loops: list[asyncio.AbstractEventLoop] = []
 
@@ -515,6 +575,76 @@ class TestRunHelper:
 
         assert seen_loop is loops[0]
         assert loops[0].is_closed() is True
+
+    def test_run_asyncio_in_tealet_helper_runs_async_callable(self):
+        async def entry() -> str:
+            await asyncio.sleep(0.001)
+            return "done"
+
+        assert run_asyncio_in_tealet(entry()) == "done"
+
+    def test_run_asyncio_in_tealet_helper_uses_tealet_selector_loop(self):
+        async def entry() -> asyncio.AbstractEventLoop:
+            return asyncio.get_running_loop()
+
+        loop = run_asyncio_in_tealet(entry())
+
+        assert isinstance(loop, TealetSelectorEventLoop)
+        assert loop.is_closed() is True
+
+    def test_run_asyncio_in_tealet_helper_sets_loop_debug_flag(self):
+        async def entry() -> bool:
+            return asyncio.get_running_loop().get_debug()
+
+        assert run_asyncio_in_tealet(entry(), debug=True) is True
+
+    def test_run_asyncio_in_tealet_helper_uses_context_override(self):
+        import contextvars
+
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
+        marker.set("ambient")
+        ctx = contextvars.copy_context()
+        ctx.run(marker.set, "helper-context")
+
+        async def entry() -> str:
+            return marker.get()
+
+        assert run_asyncio_in_tealet(entry(), context=ctx) == "helper-context"
+
+    def test_run_asyncio_in_tealet_closes_factory_scheduler(self):
+        closed = False
+
+        class ClosingSelectorScheduler(SelectorScheduler):
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+                super().close()
+
+        async def entry() -> str:
+            return "done"
+
+        assert run_asyncio_in_tealet(entry(), scheduler_factory=ClosingSelectorScheduler) == "done"
+        assert closed is True
+
+    @requires_runner_sigint
+    def test_run_asyncio_in_tealet_leaves_sigint_for_asyncio_runner(self, monkeypatch):
+        signals = FakeSignals(monkeypatch)
+        seen: list[str] = []
+
+        async def entry() -> None:
+            seen.append("start")
+            signals.handler(signal.SIGINT, None)
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                seen.append("cancelled")
+                raise
+
+        with pytest.raises(KeyboardInterrupt):
+            run_asyncio_in_tealet(entry())
+
+        assert seen == ["start", "cancelled"]
+        assert signals.handler is signal.default_int_handler
 
 
 class TestRunnerDefaultFactoryOverride:
@@ -541,6 +671,6 @@ class TestRunnerDefaultFactoryOverride:
             try:
                 assert runner.get_scheduler() is custom
             finally:
-                await runner.close()
+                runner.close()
 
         asyncio.run(run_case())

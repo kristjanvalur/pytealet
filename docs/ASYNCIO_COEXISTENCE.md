@@ -506,7 +506,9 @@ The concrete first experiment is now narrow and Unix-first:
 and socket helpers, and `tealet.asyncio.TealetSelectorEventLoop` provides an
 experimental tealet-aware selector adapter for `asyncio.SelectorEventLoop`.
 Asyncio timers, self-pipe wakeups, and socket readiness can share the host
-scheduler's blocking point.
+scheduler's blocking point. `tealet.asyncio.run_asyncio_in_tealet(...)` wraps
+that setup in a temporary selector scheduler and lets the inner `asyncio.Runner`
+own SIGINT handling.
 
 ## Feasibility Comparison
 

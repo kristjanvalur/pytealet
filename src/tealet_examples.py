@@ -189,31 +189,29 @@ def demo_future_timeout_then_success() -> list[str]:
     """Show timeout then successful completion using timeout contexts."""
 
     s = _new_scheduler()
-    evt = Event()
+    timeout_evt = Event()
+    success_evt = Event()
     seen: list[str] = []
 
     def timeout_waiter() -> None:
         tm = timeout(0.001)
         try:
             with tm:
-                evt.wait()
+                timeout_evt.wait()
         except TimeoutError:
             pass
         seen.append(f"timeout_waiter:{not tm.expired()}")
 
     def success_waiter() -> None:
-        tm = timeout(0.01)
+        tm = timeout(10.0)
         with tm:
-            evt.wait()
+            success_evt.wait()
         seen.append(f"success_waiter:{not tm.expired()}")
 
-    def setter() -> None:
-        s.sleep(0.002)
-        evt.set()
-
     s.spawn(timeout_waiter)
+    s.run()
     s.spawn(success_waiter)
-    s.spawn(setter)
+    s.call_later(0.002, success_evt.set)
     s.run()
     return seen
 

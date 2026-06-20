@@ -25,11 +25,13 @@ class BaseRunner(Generic[SchedulerT]):
         scheduler_factory: Callable[[], SchedulerT] | None = None,
         context: contextvars.Context | None = None,
         debug: bool | None = None,
+        handle_sigint: bool = True,
     ) -> None:
         self._scheduler: SchedulerT | None = None
         self._scheduler_factory = scheduler_factory
         self._context = context
         self._debug = debug
+        self._handle_sigint = handle_sigint
         self._closed = False
         self._initialized = False
         self._previous_scheduler: scheduler_module.BaseScheduler | None = None
@@ -41,15 +43,18 @@ class BaseRunner(Generic[SchedulerT]):
         assert scheduler is not None
         return scheduler
 
-    def _close(self) -> None:
+    def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        scheduler = self._scheduler
         if self._initialized:
             scheduler_module.set_scheduler(self._previous_scheduler)
             self._previous_scheduler = None
             self._initialized = False
         self._scheduler = None
+        if scheduler is not None:
+            scheduler.close()
 
     def _create_scheduler(self) -> SchedulerT:
         factory = self._scheduler_factory
@@ -101,6 +106,8 @@ class BaseRunner(Generic[SchedulerT]):
         return getattr(handler.func, "__name__", None) == "_on_sigint"
 
     def _can_install_sigint_handler(self) -> bool:
+        if not self._handle_sigint:
+            return False
         if sys.version_info < (3, 11):
             return False
         if threading.current_thread() is not threading.main_thread():
@@ -157,10 +164,11 @@ def run(
     context: contextvars.Context | None = None,
     scheduler_factory: Callable[[], scheduler_module.SyncSchedulerDrivingAPI] | None = None,
     debug: bool | None = None,
+    handle_sigint: bool = True,
 ):
     """Convenience helper that runs one entry under a temporary Runner."""
 
-    runner = Runner(scheduler_factory=scheduler_factory, debug=debug)
+    runner = Runner(scheduler_factory=scheduler_factory, debug=debug, handle_sigint=handle_sigint)
     try:
         return runner.run(entry, context=context)
     finally:
@@ -171,9 +179,6 @@ class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
     """Run scheduler-backed entries from synchronous code without asyncio."""
 
     default_factory = scheduler_module.Scheduler
-
-    def close(self) -> None:
-        self._close()
 
     def run(self, entry, /, *, context: contextvars.Context | None = None):
         self._lazy_init()

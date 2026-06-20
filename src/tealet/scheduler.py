@@ -55,6 +55,10 @@ class CoreSchedulerDrivingAPI(ABC):
         """Return scheduler debug mode flag."""
 
     @abstractmethod
+    def close(self) -> None:
+        """Release scheduler-owned resources."""
+
+    @abstractmethod
     def spawn(
         self,
         func: Callable[[], T],
@@ -740,6 +744,12 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
     def get_debug(self) -> bool:
         return self._debug
+
+    def close(self) -> None:
+        executor = self._default_executor
+        if executor is not None:
+            self._default_executor = None
+            executor.shutdown(wait=False)
 
     # -- External integration APIs ------------------------------------
 
