@@ -8,13 +8,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any, Callable, TypeVar, cast
 
-from .locks import Event
+from .locks import Event, TimeoutError
 from .scheduler import (
     BaseScheduler,
     CoreSchedulerDrivingAPI,
     Future,
     TealetTask,
-    TimeoutError,
     _current_scheduler,
     CancelledError,
 )

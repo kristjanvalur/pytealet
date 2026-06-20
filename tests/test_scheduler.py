@@ -19,7 +19,11 @@ from tealet.locks import (
     Queue,
     QueueEmpty,
     QueueFull,
+    RawTimeoutError,
     Semaphore,
+    TimeoutError,
+    timeout,
+    timeout_at,
 )
 from tealet.asyncio import (
     AsyncScheduler,
@@ -33,12 +37,9 @@ from tealet.scheduler import (
     set_scheduler,
     shield,
     TealetTask,
-    RawTimeoutError,
     Scheduler,
-    TimeoutError,
     _scheduler,
     to_thread,
-    timeout,
 )
 from tealet.selector import SelectorScheduler
 from tealet_examples import (
@@ -1224,6 +1225,36 @@ class TestSchedulerExamples:
         s.run()
 
         assert seen == ["timeout=True", "success=True"]
+
+    def test_event_wait_suppresses_overdue_timeout_when_event_already_set(self):
+        class FakeTimeScheduler(Scheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.now = 0.0
+
+            def time(self) -> float:
+                return self.now
+
+        s = FakeTimeScheduler()
+        set_scheduler(s)
+        evt = Event()
+        seen: list[str] = []
+
+        def waiter() -> None:
+            tm = timeout_at(10.0)
+            with tm:
+                evt.wait()
+            seen.append(f"resumed={tm.expired()}")
+
+        s.spawn(waiter)
+        s.pump(1)
+        assert evt._waiters
+
+        s.call_at(9.0, evt.set)
+        s.now = 11.0
+        s.run()
+
+        assert seen == ["resumed=True"]
 
     def test_timeout_demo(self):
         seen = demo_future_timeout_then_success()

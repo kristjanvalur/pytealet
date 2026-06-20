@@ -16,7 +16,12 @@ from typing import Any, Callable, Generic, TypeVar
 
 import tealet
 
-from .locks import Event, InvalidStateError, set_scheduler_resolver
+from .locks import (
+    Event,
+    InvalidStateError,
+    RawTimeoutError,
+    set_scheduler_resolver,
+)
 
 T = TypeVar("T")
 
@@ -110,25 +115,7 @@ def _current_scheduler() -> "BaseScheduler | None":
     return getattr(_scheduler, "instance", None)
 
 
-class RawTimeoutError(BaseException):
-    """Internal timeout sentinel thrown into tealets by Timeout."""
-
-    pass
-
-
-TimeoutError = asyncio.TimeoutError
 CancelledError = asyncio.CancelledError
-
-
-def timeout(delay: float) -> "Timeout":
-    """Context manager for timing out a block of code via scheduler timers."""
-    when = get_running_scheduler().time() + delay
-    return Timeout(when)
-
-
-def timeout_at(when: float) -> "Timeout":
-    """Context manager for timing out a block of code at a specific time via scheduler timers."""
-    return Timeout(when)
 
 
 def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
@@ -670,44 +657,6 @@ class TealetTask(tealet.tealet, Future[object]):
         # Scheduler-owned tasks always route via scheduler target selection,
         # even if task startup immediately raises before user code returns.
         return self._scheduler._find_target(task_exit=True), None, suppress
-
-
-class Timeout:
-    """Timer-backed synchronous timeout context manager."""
-
-    def __init__(self, when: float):
-        self._when = when
-        self._handle: TimerHandle | None = None
-        self._exc = RawTimeoutError()
-        self._expired = False
-
-    # -- Public state --------------------------------------------------
-
-    def reschedule(self, when: float):
-        if not self._expired and self._handle is not None:
-            self._handle.cancel()
-            self._when = when
-            self._handle = get_running_scheduler().call_at(self._when, self._timeout, tealet.current())
-
-    def expired(self) -> bool:
-        return self._expired
-
-    # -- Context manager ----------------------------------------------
-
-    def __enter__(self) -> "Timeout":
-        self._handle = get_running_scheduler().call_at(self._when, self._timeout, tealet.current())
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        if self._handle is not None:
-            self._handle.cancel()
-        if exc_val is self._exc:
-            assert self._expired is True
-            raise asyncio.TimeoutError("Operation timed out") from exc_val
-
-    def _timeout(self, target) -> None:
-        self._expired = True
-        target.throw(self._exc)
 
 
 class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):

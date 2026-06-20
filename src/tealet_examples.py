@@ -10,12 +10,10 @@ from collections.abc import Iterable, Iterator
 from typing import Generic, TypeVar
 
 import tealet
-from tealet.locks import Event
+from tealet.locks import Event, TimeoutError, timeout
 from tealet.scheduler import (
     Scheduler,
-    TimeoutError,
     set_scheduler,
-    timeout,
 )
 
 T = TypeVar("T")
