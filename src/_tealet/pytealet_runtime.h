@@ -57,8 +57,8 @@ struct PyTealetObject {
     unsigned long owner_tid;       /* thread that owns this tealet object */
     PyObject *domain_lock_obj;     /* strong ref to lineage lock object */
     PyObject *tracking_ref;        /* weakref object stored in main-lineage wrapper set */
-    PyObject *prepared_func;       /* callable stored by prepare(), consumed by first switch */
-    PyTealetApi_RunCFunc prepared_cfunc; /* native callback stored by C-API prepare(), consumed by first switch */
+    PyObject *prepared_func;       /* callable stored by prepare(), consumed by first prepared entry */
+    PyTealetApi_RunCFunc prepared_cfunc; /* native callback stored by C-API prepare(), consumed by first entry */
     uint64_t inflight_throw_token; /* non-zero only while fallback-aware throw is in flight */
 #if !defined(Py312P)
     PyObject *weakreflist; /* List of weak references */

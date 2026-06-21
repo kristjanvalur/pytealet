@@ -83,6 +83,10 @@ Tealet/object operations:
 - `throw_(ctx, target, exception, return_target, flags) -> PyObject *`
 - `set_pending_exception(ctx, target, exception, fallback) -> int`
 
+`prepare()` primes the target immediately and leaves it in active `RUN` state;
+subsequent `switch_()`/`throw_()` and Python `resolve_target()` exit routing use
+the normal active-target path.
+
 `throw_` return-target semantics:
 - `return_target == NULL`: use current tealet as default return target
 - `return_target == Py_None`: no default return target

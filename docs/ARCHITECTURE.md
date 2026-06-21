@@ -111,6 +111,19 @@ Executes a function in the tealet context.
 - **Effect:** Changes state to STATE_RUN, executes function
 
 ```python
+tealet.prepare(function) -> tealet
+```
+Primes a tealet with a function without transferring control immediately.
+- **State requirement:** Must be STATE_NEW or STATE_STUB
+- **Parameters:**
+    - `function`: Callable that receives `(current_tealet, arg)` on first entry
+- **Returns:** The prepared tealet
+- **Effect:** Captures native start state immediately with
+    `TEALET_START_DEFAULT` and changes state to STATE_RUN. Later `switch()` or
+    `throw()` use the normal active-target path, and the prepared tealet can also
+    be used as an exit target from `resolve_target()`.
+
+```python
 tealet.switch(arg=None) -> result
 ```
 Switches execution to this tealet, passing an optional argument.

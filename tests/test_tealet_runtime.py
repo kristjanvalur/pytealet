@@ -403,6 +403,7 @@ class TestPrepare:
 
         t = _tealet.tealet().prepare(worker)
         assert isinstance(t, _tealet.tealet)
+        assert t.state == _tealet.STATE_RUN
         assert t.switch("payload") == "done-chain"
         assert seen == ["payload"]
         assert t.state == _tealet.STATE_EXIT
@@ -418,6 +419,7 @@ class TestPrepare:
         assert t.state == _tealet.STATE_NEW
 
         t.prepare(worker)
+        assert t.state == _tealet.STATE_RUN
         assert t.switch("payload") == "done-new"
         assert seen == ["payload"]
         assert t.state == _tealet.STATE_EXIT
@@ -434,9 +436,39 @@ class TestPrepare:
         assert t.state == _tealet.STATE_STUB
 
         t.prepare(worker)
+        assert t.state == _tealet.STATE_RUN
+        assert seen == []
         assert t.switch(123) == "done-stub"
         assert seen == [123]
         assert t.state == _tealet.STATE_EXIT
+
+    def test_prepare_target_can_be_exit_target(self):
+        for state_name, make_target in [
+            ("new-prepared", _tealet.tealet),
+            ("stub-prepared", lambda: _tealet.tealet().stub()),
+        ]:
+            target = make_target()
+
+            def target_func(current, arg, state_name=state_name):
+                current.main().switch((state_name, arg))
+                return current.main()
+
+            target.prepare(target_func)
+
+            class Routed(_tealet.tealet):
+                def resolve_target(self, result, exc, exc_target):
+                    assert result == "done"
+                    assert exc is None
+                    assert exc_target is None
+                    return target, state_name, True
+
+            source = Routed()
+            assert source.run(lambda current, arg: "done", None) == (state_name, state_name)
+            assert target.state == _tealet.STATE_RUN
+            assert source.state == _tealet.STATE_EXIT
+
+            assert target.switch("finish") is None
+            assert target.state == _tealet.STATE_EXIT
 
     def test_prepare_requires_callable(self):
         t = _tealet.tealet()
@@ -456,13 +488,14 @@ class TestPrepare:
 
         t = _tealet.tealet()
         t.prepare(first)
-        t.prepare(second)
+        with pytest.raises(_tealet.StateError, match="must be new or stub"):
+            t.prepare(second)
 
-        assert t.switch("x") == "second"
-        assert seen == [("second", "x")]
+        assert t.switch("x") == "first"
+        assert seen == [("first", "x")]
         assert t.state == _tealet.STATE_EXIT
 
-    def test_explicit_run_overrides_prepared_callable(self):
+    def test_explicit_run_after_prepare_requires_new_or_stub(self):
         seen = []
 
         def prepared(current, arg):
@@ -476,8 +509,11 @@ class TestPrepare:
         t = _tealet.tealet()
         t.prepare(prepared)
 
-        assert t.run(direct, "r") == "direct"
-        assert seen == [("direct", "r")]
+        with pytest.raises(_tealet.StateError, match="must be new or stub"):
+            t.run(direct, "r")
+
+        assert t.switch("p") == "prepared"
+        assert seen == [("prepared", "p")]
         assert t.state == _tealet.STATE_EXIT
 
     def test_prepare_cycle_is_collectable_by_gc(self):
