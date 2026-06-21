@@ -26,9 +26,9 @@ class _FdCallbacks:
 class SelectorMixin:
     """Selector-backed readiness waits for synchronous schedulers."""
 
-    def __init__(self) -> None:
+    def __init__(self, selector: selectors.BaseSelector | None = None) -> None:
         super().__init__()
-        self._selector = selectors.DefaultSelector()
+        self._selector = selector if selector is not None else selectors.DefaultSelector()
         self._fd_callbacks: defaultdict[int, _FdCallbacks] = defaultdict(_FdCallbacks)
         self._selector_wakeup_reader, self._selector_wakeup_writer = socket.socketpair()
         self._selector_wakeup_reader.setblocking(False)
@@ -45,7 +45,7 @@ class SelectorMixin:
         self._selector.close()
         self._selector_wakeup_reader.close()
         self._selector_wakeup_writer.close()
-        super().close()
+        BaseScheduler.close(cast(BaseScheduler, self))
 
     # -- Readiness waits -----------------------------------------------
 
@@ -343,3 +343,6 @@ class SelectorMixin:
 
 class SelectorScheduler(SelectorMixin, Scheduler):
     """Synchronous scheduler with selector-backed fd readiness waits."""
+
+    def __init__(self, selector: selectors.BaseSelector | None = None) -> None:
+        super().__init__(selector=selector)

@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import contextvars
+import selectors
 import socket
 import threading
 
@@ -49,6 +50,19 @@ from tealet_examples import (
     demo_sleep,
     demo_wait_for_event_start,
 )
+
+
+_SELECTOR_TYPES = [
+    pytest.param(selector_type, id=name)
+    for name in (
+        "SelectSelector",
+        "PollSelector",
+        "EpollSelector",
+        "KqueueSelector",
+        "DevpollSelector",
+    )
+    if (selector_type := getattr(selectors, name, None)) is not None
+]
 
 
 @pytest.fixture(autouse=True)
@@ -516,6 +530,107 @@ class TestSchedulerAccessors:
             assert s.run_until_complete(writable) == "writable"
             assert s.remove_reader(reader.fileno()) is False
             assert s.remove_writer(writer.fileno()) is False
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    @pytest.mark.parametrize("selector_type", _SELECTOR_TYPES)
+    def test_selector_scheduler_waits_for_socket_io_with_selector_type(self, selector_type):
+        selector = selector_type()
+        s = SelectorScheduler(selector=selector)
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def receive() -> bytes:
+                s.wait_readable(reader)
+                return reader.recv(5)
+
+            def send_later() -> int:
+                s.sleep(0.001)
+                return writer.send(b"hello")
+
+            receive_task = s.spawn(receive)
+            send_task = s.spawn(send_later)
+            assert s.run_until_complete(receive_task) == b"hello"
+            assert send_task.result() == 5
+
+            def write_when_ready() -> int:
+                s.wait_writable(writer)
+                return writer.send(b"x")
+
+            write_task = s.spawn(write_when_ready)
+            assert s.run_until_complete(write_task) == 1
+            assert reader.recv(1) == b"x"
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    @pytest.mark.parametrize("selector_type", _SELECTOR_TYPES)
+    def test_selector_scheduler_callbacks_handle_socket_io_with_selector_type(self, selector_type):
+        selector = selector_type()
+        s = SelectorScheduler(selector=selector)
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            readable = Future[bytes]()
+            writable = Future[int]()
+
+            def on_readable() -> None:
+                assert s.remove_reader(reader.fileno()) is True
+                readable.set_result(reader.recv(5))
+
+            def on_writable() -> None:
+                assert s.remove_writer(writer.fileno()) is True
+                writable.set_result(writer.send(b"x"))
+
+            def send_later() -> int:
+                s.sleep(0.001)
+                return writer.send(b"hello")
+
+            s.add_reader(reader.fileno(), on_readable)
+            send_task = s.spawn(send_later)
+            assert s.run_until_complete(readable) == b"hello"
+            assert send_task.result() == 5
+
+            s.add_writer(writer.fileno(), on_writable)
+            assert s.run_until_complete(writable) == 1
+            assert reader.recv(1) == b"x"
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_selector_scheduler_uses_provided_selector(self):
+        selector = selectors.SelectSelector()
+        s = SelectorScheduler(selector=selector)
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            s.add_reader(reader.fileno(), lambda: None)
+            assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
+
+            s.add_writer(reader.fileno(), lambda: None)
+            assert selector.get_key(reader.fileno()).events == (selectors.EVENT_READ | selectors.EVENT_WRITE)
+
+            assert s.remove_reader(reader.fileno()) is True
+            assert selector.get_key(reader.fileno()).events == selectors.EVENT_WRITE
+
+            assert s.remove_writer(reader.fileno()) is True
+            with pytest.raises(KeyError):
+                selector.get_key(reader.fileno())
         finally:
             reader.close()
             writer.close()
