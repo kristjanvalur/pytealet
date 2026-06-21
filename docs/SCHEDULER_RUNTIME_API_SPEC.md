@@ -50,6 +50,9 @@ Implemented:
 - Cancellation is represented by `asyncio.CancelledError`, matching asyncio
   `Future`/`Task` behavior. A stored `CancelledError` is the cancellation state
   indicator for scheduler futures and tealet tasks.
+- Scheduler task introspection includes `BaseScheduler.all_tasks()`, which
+  returns unfinished scheduler-owned tealet tasks without keeping those tasks
+  alive solely for introspection.
 - Cancellation propagates across scheduler boundaries in an asyncio-compatible
   way:
   - cancelling an asyncio waiter on a tealet `Future` schedules cancellation of

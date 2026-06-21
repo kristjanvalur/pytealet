@@ -10,6 +10,7 @@ import itertools
 import socket
 import threading
 import time
+import weakref
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import Any, Callable, Generic, TypeVar
@@ -665,6 +666,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
     def __init__(self) -> None:
         self._tasks: deque[tealet.tealet] = deque()
         self._task_set: set[tealet.tealet] = set()
+        self._all_tasks: weakref.WeakSet[TealetTask] = weakref.WeakSet()
         self._runner = None
         self._running = False
         self._debug = False
@@ -693,6 +695,11 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
     def get_debug(self) -> bool:
         return self._debug
+
+    def all_tasks(self) -> set[TealetTask]:
+        """Return unfinished scheduler-owned tasks."""
+
+        return {task for task in self._all_tasks if not task.done()}
 
     def close(self) -> None:
         executor = self._default_executor
@@ -913,6 +920,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
         t = TealetTask(self)
         t.prepare(task_main)
+        self._all_tasks.add(t)
         self._make_runnable(t)
         return t
 

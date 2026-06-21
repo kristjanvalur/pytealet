@@ -1,9 +1,11 @@
 import asyncio
 import concurrent.futures
 import contextvars
+import gc
 import selectors
 import socket
 import threading
+import weakref
 
 import pytest
 
@@ -1012,6 +1014,35 @@ class TestSchedulerAccessors:
 
         fut = s.spawn(worker)
         assert s.run_until_complete(fut) == 42
+
+    def test_all_tasks_returns_unfinished_tealet_tasks(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        event = Event()
+
+        def worker() -> str:
+            event.wait()
+            return "done"
+
+        task = s.spawn(worker)
+        assert s.all_tasks() == {task}
+
+        s.call_soon(event.set)
+        assert s.run_until_complete(task) == "done"
+        assert s.all_tasks() == set()
+
+    def test_all_tasks_does_not_keep_completed_tasks_alive(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        task = s.spawn(lambda: "done")
+        task_ref = weakref.ref(task)
+        assert s.run_until_complete(task) == "done"
+        assert s.all_tasks() == set()
+
+        del task
+        gc.collect()
+        assert task_ref() is None
 
     def test_run_until_complete_propagates_exception(self):
         s = _new_scheduler()
