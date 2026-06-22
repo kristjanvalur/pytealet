@@ -14,42 +14,38 @@ import warnings
 import weakref
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Callable, TypeVar
 
-import _tealet
 import tealet
 
 from .locks import (
     Event,
-    InvalidStateError,
     RawTimeoutError,
     TimeoutError,
     set_scheduler_resolver,
     timeout as scheduler_timeout,
 )
+from . import tasks as _tasks
 
 T = TypeVar("T")
 
 
 DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
 
+__all__ = [
+    "Channel",
+    "DeadlockError",
+    "Scheduler",
+    "TimerHandle",
+    "gather",
+    "get_running_scheduler",
+    "set_scheduler",
+    "to_thread",
+]
+
 
 # a thread local scheduler
 _scheduler = threading.local()
-
-
-class Linkable(ABC):
-    """Base interface for objects that can be linked from a TealetTask."""
-
-    @abstractmethod
-    def _unlink(self, t: tealet.tealet) -> None:
-        """Detach a tealet from this link target."""
-
-    def _query_waiting(self, t: tealet.tealet) -> bool:
-        return False
-
-    def _query_runnable(self, t: tealet.tealet) -> bool:
-        return False
 
 
 class CoreSchedulerDrivingAPI(ABC):
@@ -75,7 +71,7 @@ class CoreSchedulerDrivingAPI(ABC):
     def shutdown_default_executor(
         self,
         timeout: float | None = DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT,
-    ) -> "Future[Any]":
+    ) -> "_tasks.Future[Any]":
         """Return a future that completes after the default executor shuts down."""
 
     @abstractmethod
@@ -84,7 +80,7 @@ class CoreSchedulerDrivingAPI(ABC):
         func: Callable[[], T],
         kwargs: dict[str, object] | None = None,
         context: contextvars.Context | None = None,
-    ) -> "TealetTask":
+    ) -> "_tasks.TealetTask":
         """Spawn a scheduler-managed task from a zero-arg callable."""
 
 
@@ -104,7 +100,7 @@ class SyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
         """Run until stop() is called."""
 
     @abstractmethod
-    def run_until_complete(self, future: "Future[T] | Callable[[], T]") -> T:
+    def run_until_complete(self, future: "_tasks.Future[T] | Callable[[], T]") -> T:
         """Run until a target future/callable completes."""
 
 
@@ -130,9 +126,6 @@ def _current_scheduler() -> "BaseScheduler | None":
     return getattr(_scheduler, "instance", None)
 
 
-CancelledError = asyncio.CancelledError
-
-
 def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
     """Run a callable in the scheduler default thread pool and wait for its result."""
 
@@ -141,7 +134,7 @@ def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
     return get_running_scheduler().run_in_executor(None, call).wait()
 
 
-class Channel(Linkable):
+class Channel(_tasks.Linkable):
     """Rendezvous channel for sync tealet operations and optional async waits."""
 
     # Operation model:
@@ -196,7 +189,7 @@ class Channel(Linkable):
             pass
 
     def _waiter_scheduler(self, waiter: tealet.tealet) -> BaseScheduler:
-        if isinstance(waiter, TealetTask):
+        if isinstance(waiter, _tasks.TealetTask):
             return waiter.get_scheduler()
         return get_running_scheduler()
 
@@ -363,7 +356,7 @@ class Channel(Linkable):
             missing = object()
             pending = self._packets.pop(waiter, missing)
             self._unlink_waiter(waiter)
-            if pending is missing and isinstance(exc, CancelledError):
+            if pending is missing and isinstance(exc, _tasks.CancelledError):
                 return
             raise
 
@@ -395,7 +388,7 @@ class Channel(Linkable):
             missing = object()
             packet = self._packets.pop(waiter, missing)
             self._unlink_waiter(waiter)
-            if packet is not missing and isinstance(exc, CancelledError):
+            if packet is not missing and isinstance(exc, _tasks.CancelledError):
                 return self._deliver(packet)
             raise
 
@@ -451,155 +444,8 @@ class TimerHandle:
         self.cancel()
 
 
-class Future(Generic[T]):
-    """Minimal Future for scheduler tasks."""
-
-    def __init__(self) -> None:
-        self._done = False
-        self._result: T | None = None
-        self._exception: BaseException | None = None
-        self._event = Event()
-        self._done_callbacks: list[
-            tuple[Callable[[Future[T]], object], contextvars.Context | None]
-        ] = []
-
-    # -- State ---------------------------------------------------------
-
-    def done(self) -> bool:
-        return self._done
-
-    def cancelled(self) -> bool:
-        return isinstance(self._exception, CancelledError)
-
-    def cancel(self) -> bool:
-        if self._done:
-            return False
-        self.set_exception(CancelledError())
-        return True
-
-    # -- Completion ----------------------------------------------------
-
-    def set_result(self, value: T) -> None:
-        if self._done:
-            raise InvalidStateError("Future already done")
-        self._result = value
-        self._done = True
-        self._event.set()
-        self._run_done_callbacks()
-
-    def set_exception(self, exc: BaseException) -> None:
-        if self._done:
-            raise InvalidStateError("Future already done")
-        if not isinstance(exc, BaseException):
-            raise TypeError("exc must be a BaseException instance")
-        self._exception = exc
-        self._done = True
-        self._event.set()
-        self._run_done_callbacks()
-
-    # -- Done callbacks -----------------------------------------------
-
-    def add_done_callback(
-        self,
-        callback: Callable[[Future[T]], object],
-        *,
-        context: contextvars.Context | None = None,
-    ) -> None:
-        if self._done:
-            loop = asyncio.get_running_loop()
-            if context is None:
-                loop.call_soon(callback, self)
-            else:
-                loop.call_soon(callback, self, context=context)
-            return
-        if context is None:
-            context = contextvars.copy_context()
-        self._done_callbacks.append((callback, context))
-
-    def remove_done_callback(self, callback: Callable[[Future[T]], object]) -> int:
-        removed = 0
-        kept: list[tuple[Callable[[Future[T]], object], contextvars.Context | None]] = []
-        for stored_callback, context in self._done_callbacks:
-            if stored_callback is callback:
-                removed += 1
-            else:
-                kept.append((stored_callback, context))
-        self._done_callbacks = kept
-        return removed
-
-    def _run_done_callbacks(self) -> None:
-        callbacks = self._done_callbacks[:]
-        self._done_callbacks.clear()
-        for callback, context in callbacks:
-            if context is None:
-                callback(self)
-            else:
-                context.run(callback, self)
-
-    # -- Waiting and results ------------------------------------------
-
-    def _wait(self) -> bool:
-        if self._done:
-            return True
-
-        return self._event.wait()
-
-    def wait(self) -> T:
-        try:
-            self._wait()
-        except CancelledError:
-            get_running_scheduler().call_soon(self.cancel)
-            raise
-        return self.result()
-
-    async def async_wait(self) -> T:
-        if not self._done:
-            try:
-                await self._event.async_wait()
-            except CancelledError:
-                get_running_scheduler().call_soon(self.cancel)
-                raise
-        return self.result()
-
-    def __await__(self):
-        return self.async_wait().__await__()
-
-    def result(self) -> T:
-        if not self._done:
-            raise InvalidStateError("Result is not ready.")
-        if self.cancelled():
-            assert self._exception is not None
-            raise self._exception
-        if self._exception is not None:
-            raise self._exception
-        return self._result
-
-    def exception(self) -> BaseException | None:
-        if not self._done:
-            raise InvalidStateError("Exception is not set.")
-        if self.cancelled():
-            assert self._exception is not None
-            raise self._exception
-        return self._exception
-
-
-class Shield(Generic[T]):
-    """Wait wrapper that avoids cancelling the wrapped future."""
-
-    def __init__(self, future: Future[T]) -> None:
-        self._future = future
-
-    def wait(self) -> T:
-        self._future._wait()
-        return self._future.result()
-
-
-def shield(future: Future[T]) -> Shield[T]:
-    return Shield(future)
-
-
-class _GatheringFuture(Future[list[object]]):
-    def __init__(self, children: list[Future[object]]) -> None:
+class _GatheringFuture(_tasks.Future[list[object]]):
+    def __init__(self, children: list[_tasks.Future[object]]) -> None:
         super().__init__()
         self._children = children
         self._cancel_requested = False
@@ -613,24 +459,24 @@ class _GatheringFuture(Future[list[object]]):
             cancelled = child.cancel() or cancelled
         return cancelled
 
-    def _cancel_requested_exception(self) -> CancelledError | None:
+    def _cancel_requested_exception(self) -> _tasks.CancelledError | None:
         if self._cancel_requested:
-            return CancelledError()
+            return _tasks.CancelledError()
         return None
 
 
 def gather(
-    *entries: Future[object] | Callable[[], object],
+    *entries: _tasks.Future[object] | Callable[[], object],
     return_exceptions: bool = False,
-) -> Future[list[object]]:
+) -> _tasks.Future[list[object]]:
     scheduler = _current_scheduler()
     if scheduler is None:
         raise RuntimeError("no current scheduler")
 
-    children: list[Future[object]] = []
+    children: list[_tasks.Future[object]] = []
     for entry in entries:
-        if isinstance(entry, Future):
-            if isinstance(entry, TealetTask) and entry.get_scheduler() is not scheduler:
+        if isinstance(entry, _tasks.Future):
+            if isinstance(entry, _tasks.TealetTask) and entry.get_scheduler() is not scheduler:
                 raise RuntimeError("Future is bound to a different scheduler")
             children.append(entry)
         elif callable(entry):
@@ -646,7 +492,7 @@ def gather(
     results: list[object] = [None] * len(children)
     remaining = len(children)
 
-    def child_done(index: int, child: Future[object]) -> None:
+    def child_done(index: int, child: _tasks.Future[object]) -> None:
         nonlocal remaining
         if gather_future.done():
             return
@@ -674,92 +520,13 @@ def gather(
     return gather_future
 
 
-class TealetTask(tealet.tealet, Future[Any]):
-    """Tealet task that is also a Future for its completion result."""
-
-    def __init__(self, owning_scheduler: BaseScheduler):
-        tealet.tealet.__init__(self)
-        Future.__init__(self)
-        self.link: Linkable | None = None
-        self._scheduler: BaseScheduler = owning_scheduler
-
-    # -- Runtime state -------------------------------------------------
-
-    def is_waiting(self):
-        if self.link is None:
-            return False
-        return self.link._query_waiting(self)
-
-    def is_runnable(self):
-        if self.link is None:
-            return False
-        return self.link._query_runnable(self)
-
-    def is_blocked(self):
-        return self._scheduler._is_blocked(self)
-
-    def is_running(self):
-        return tealet.current() is self
-
-    def get_scheduler(self) -> BaseScheduler:
-        return self._scheduler
-
-    # -- Scheduler transfer -------------------------------------------
-
-    def _unlink(self):
-        if self.link is not None:
-            self.link._unlink(self)
-        self._scheduler._unlink_pending_async_wait(self)
-
-    def run(self):
-        self._scheduler._target_run(self)
-
-    def throw(self, exc: BaseException):
-        self._scheduler._target_throw(self, exc)
-
-    def _throw_from_scheduler(self, exc: BaseException):
-        super().throw(exc)
-
-    def cancel(self) -> bool:
-        if self.done():
-            return False
-        self.throw(CancelledError())
-        return True
-
-    # -- Target completion --------------------------------------------
-
-    def resolve_target(self, result, exc, exc_target):
-        suppress = False
-        if exc is None:
-            self.set_result(result)
-        elif isinstance(exc, _tealet.TealetExit):
-            self.set_result(None)
-            suppress = True
-        elif isinstance(exc, (SystemExit, KeyboardInterrupt)):
-            self.set_exception(exc)
-            return super().resolve_target(result, exc, exc_target)
-        else:
-            self.set_exception(exc)
-            suppress = True
-            if exc_target is not None:
-                try:
-                    exc_target._unlink()
-                except AttributeError:
-                    pass
-                return exc_target, None, suppress
-
-        # Scheduler-owned tasks always route via scheduler target selection,
-        # even if task startup immediately raises before user code returns.
-        return self._scheduler._find_target(task_exit=True), None, suppress
-
-
-class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
+class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduler mechanics for concrete drivers."""
 
     def __init__(self) -> None:
         self._tasks: deque[tealet.tealet] = deque()
         self._task_set: set[tealet.tealet] = set()
-        self._all_tasks: weakref.WeakSet[TealetTask] = weakref.WeakSet()
+        self._all_tasks: weakref.WeakSet[_tasks.TealetTask] = weakref.WeakSet()
         self._runner = None
         self._running = False
         self._debug = False
@@ -774,6 +541,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         self._n_scheduled = 0
         self._target_count = None
         self._default_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._task_factory: _tasks.TaskFactory = _tasks.DefaultTaskFactory()
 
     # -- Basic state ---------------------------------------------------
 
@@ -789,10 +557,16 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
     def get_debug(self) -> bool:
         return self._debug
 
-    def all_tasks(self) -> set[TealetTask]:
+    def all_tasks(self) -> set[_tasks.TealetTask]:
         """Return unfinished scheduler-owned tasks."""
 
         return {task for task in self._all_tasks if not task.done()}
+
+    def get_task_factory(self) -> _tasks.TaskFactory:
+        return self._task_factory
+
+    def set_task_factory(self, factory: _tasks.TaskFactory | None) -> None:
+        self._task_factory = _tasks.DefaultTaskFactory() if factory is None else factory
 
     def close(self) -> None:
         executor = self._default_executor
@@ -803,8 +577,8 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
     def shutdown_default_executor(
         self,
         timeout: float | None = DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT,
-    ) -> Future[Any]:
-        future: Future[Any] = Future()
+    ) -> _tasks.Future[Any]:
+        future: _tasks.Future[Any] = _tasks.Future()
         executor = self._default_executor
         if executor is None:
             future.set_result(None)
@@ -859,13 +633,13 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         executor: concurrent.futures.Executor | None,
         func: Callable[..., T],
         *args: object,
-    ) -> Future[T]:
+    ) -> _tasks.Future[T]:
         if executor is None:
             if self._default_executor is None:
                 self._default_executor = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="tealet")
             executor = self._default_executor
 
-        future: Future[T] = Future()
+        future: _tasks.Future[T] = _tasks.Future()
 
         def complete_result(value: T) -> None:
             if not future.done():
@@ -1054,17 +828,13 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         func: Callable[[], T],
         kwargs: dict[str, object] | None = None,
         context: contextvars.Context | None = None,
-    ) -> TealetTask:
+    ) -> _tasks.TealetTask:
         if context is None:
             context = contextvars.copy_context()
         if kwargs is not None:
             raise TypeError("spawn() does not accept callable kwargs")
 
-        def task_main(current: tealet.tealet, _arg: object):
-            return context.run(func)
-
-        t = TealetTask(self)
-        t.prepare(task_main)
+        t = self._task_factory(self, func, context=context)
         self._all_tasks.add(t)
         self._make_runnable(t)
         return t
@@ -1126,7 +896,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         try:
             try:
                 done_evt.wait()
-            except CancelledError:
+            except _tasks.CancelledError:
                 loop.call_soon(fut.cancel)
                 raise
         finally:
@@ -1146,7 +916,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
             t.link = self
         except AttributeError:
             pass
-        if isinstance(t, TealetTask):
+        if isinstance(t, _tasks.TealetTask):
             t._scheduler = self
         self._tasks.append(t)
         self._task_set.add(t)
@@ -1170,7 +940,7 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         except AttributeError:
             raise RuntimeError(f"Cannot throw to this target: {target}") from None
         self._make_runnable(tealet.current())
-        if isinstance(target, TealetTask):
+        if isinstance(target, _tasks.TealetTask):
             target._throw_from_scheduler(exc)
         else:
             target.throw(exc)
@@ -1288,12 +1058,12 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
 
     def run_until_complete(
         self,
-        future: Future[T] | Callable[[], T],
+        future: _tasks.Future[T] | Callable[[], T],
     ) -> T:
         self._verify_current_scheduler()
-        if isinstance(future, Future):
-            target: Future[T] = future
-            if isinstance(target, TealetTask) and target.get_scheduler() is not self:
+        if isinstance(future, _tasks.Future):
+            target: _tasks.Future[T] = future
+            if isinstance(target, _tasks.TealetTask) and target.get_scheduler() is not self:
                 raise RuntimeError("Future is bound to a different scheduler")
         elif callable(future):
             target = self.spawn(future)

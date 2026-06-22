@@ -33,19 +33,16 @@ from tealet.asyncio import (
     TealetSelectorEventLoop,
 )
 from tealet.scheduler import (
-    CancelledError,
     Channel,
-    Future,
     gather,
     get_running_scheduler,
     set_scheduler,
-    shield,
-    TealetTask,
     Scheduler,
     _scheduler,
     to_thread,
 )
 from tealet.selector import SelectorScheduler
+from tealet.tasks import CancelledError, DefaultTaskFactory, Future, StubTaskFactory, TealetTask, shield
 from tealet_examples import (
     demo_future_result,
     demo_future_timeout_then_success,
@@ -122,6 +119,97 @@ class TestSchedulerAccessors:
         s.run()
 
         assert seen == [s]
+
+    def test_task_factory_accessors_reset_to_default(self):
+        s = _new_scheduler()
+        original = s.get_task_factory()
+        custom = StubTaskFactory()
+
+        assert isinstance(original, DefaultTaskFactory)
+        s.set_task_factory(custom)
+        assert s.get_task_factory() is custom
+
+        s.set_task_factory(None)
+        assert isinstance(s.get_task_factory(), DefaultTaskFactory)
+
+    def test_spawn_uses_custom_task_factory(self):
+        s = _new_scheduler()
+        default = DefaultTaskFactory()
+        calls = []
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
+
+        class RecordingTaskFactory:
+            def __call__(self, scheduler, func, *, context):
+                calls.append((scheduler, context.get(marker)))
+                return default(scheduler, func, context=context)
+
+        marker.set("factory-context")
+        s.set_task_factory(RecordingTaskFactory())
+
+        task = s.spawn(lambda: "ok")
+
+        assert s.run_until_complete(task) == "ok"
+        assert calls == [(s, "factory-context")]
+
+    def test_stub_task_factory_lazily_creates_and_reuses_stub(self):
+        s = _new_scheduler()
+        factory = StubTaskFactory()
+        s.set_task_factory(factory)
+
+        first = s.spawn(lambda: "first")
+        stub = factory.stub
+        second = s.spawn(lambda: "second")
+
+        assert stub is not None
+        assert stub.state == _tealet.STATE_STUB
+        assert factory.stub is stub
+        assert s.run_until_complete(first) == "first"
+        assert s.run_until_complete(second) == "second"
+
+    def test_stub_task_factory_can_stub_here_before_use(self):
+        s = _new_scheduler()
+        factory = StubTaskFactory()
+        stub = factory.stub_here()
+        s.set_task_factory(factory)
+
+        task = s.spawn(lambda: "ok")
+
+        assert factory.stub is stub
+        assert stub.state == _tealet.STATE_STUB
+        assert s.run_until_complete(task) == "ok"
+
+    def test_stub_task_factory_preserves_context_and_exceptions(self):
+        s = _new_scheduler()
+        factory = StubTaskFactory()
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
+        context = contextvars.Context()
+        context.run(marker.set, "stub-context")
+        s.set_task_factory(factory)
+
+        good = s.spawn(lambda: marker.get(), context=context)
+
+        def fail() -> object:
+            raise ValueError("factory boom")
+
+        bad = s.spawn(fail)
+
+        assert s.run_until_complete(good) == "stub-context"
+        with pytest.raises(ValueError, match="factory boom"):
+            s.run_until_complete(bad)
+
+    def test_async_scheduler_uses_stub_task_factory(self):
+        async def run() -> None:
+            s = AsyncScheduler()
+            set_scheduler(s)
+            factory = StubTaskFactory()
+            s.set_task_factory(factory)
+
+            task = s.spawn(lambda: "ok")
+
+            assert factory.stub is not None
+            assert await s.arun_until_complete(task) == "ok"
+
+        asyncio.run(run())
 
     def test_get_running_scheduler_during_arun(self):
         s = AsyncScheduler()

@@ -15,7 +15,8 @@ from tealet.asyncio import (
     run_in_asyncio,
 )
 from tealet.runtime import Runner, run
-from tealet.scheduler import Future, Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
+from tealet.scheduler import Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
+from tealet.tasks import Future
 from tealet.selector import SelectorScheduler
 
 
@@ -308,7 +309,7 @@ class TestAsyncRunner:
 
     def test_run_future_entry_waits(self):
         async def run() -> None:
-            from tealet.scheduler import Future
+            from tealet.tasks import Future
 
             runner = AsyncRunner()
             try:
@@ -613,7 +614,7 @@ class TestRunner:
             runner.close()
 
     def test_run_future_entry_waits(self):
-        from tealet.scheduler import Future
+        from tealet.tasks import Future
 
         runner = Runner()
         try:

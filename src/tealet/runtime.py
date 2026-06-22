@@ -12,6 +12,7 @@ from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 import _tealet
 
 from . import scheduler as scheduler_module
+from . import tasks as task_module
 
 
 SchedulerT = TypeVar("SchedulerT", bound=scheduler_module.CoreSchedulerDrivingAPI)
@@ -45,7 +46,7 @@ class BaseRunner(Generic[SchedulerT]):
         assert scheduler is not None
         return scheduler
 
-    def _shutdown_scheduler_tasks(self, scheduler: SchedulerT) -> list[scheduler_module.TealetTask]:
+    def _shutdown_scheduler_tasks(self, scheduler: SchedulerT) -> list[task_module.TealetTask]:
         if not isinstance(scheduler, scheduler_module.BaseScheduler):
             return []
         tasks = list(scheduler.all_tasks())
@@ -90,7 +91,7 @@ class BaseRunner(Generic[SchedulerT]):
 
     def _target_from_entry(self, entry, context: contextvars.Context):
         scheduler = self._require_scheduler()
-        if isinstance(entry, scheduler_module.Future):
+        if isinstance(entry, task_module.Future):
             return entry
         if callable(entry):
             return scheduler.spawn(entry, context=context)
@@ -133,7 +134,7 @@ class BaseRunner(Generic[SchedulerT]):
 
     def _install_sigint_handler(
         self,
-        main_task: scheduler_module.Future[object],
+        main_task: task_module.Future[object],
         scheduler: scheduler_module.BaseScheduler,
     ) -> tuple[object, SignalHandler] | None:
         if not self._can_install_sigint_handler():
@@ -159,7 +160,7 @@ class BaseRunner(Generic[SchedulerT]):
         self,
         signum: int,
         frame: FrameType | None,
-        main_task: scheduler_module.Future[object],
+        main_task: task_module.Future[object],
         scheduler: scheduler_module.BaseScheduler,
     ) -> None:
         self._interrupt_count += 1
@@ -221,7 +222,7 @@ class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
         try:
             try:
                 return scheduler.run_until_complete(target)
-            except scheduler_module.CancelledError:
+            except task_module.CancelledError:
                 self._raise_keyboard_interrupt_if_requested()
                 raise
         finally:

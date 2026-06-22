@@ -12,12 +12,10 @@ from .locks import Event, TimeoutError
 from .scheduler import (
     BaseScheduler,
     CoreSchedulerDrivingAPI,
-    Future,
-    TealetTask,
     _current_scheduler,
-    CancelledError,
     gather,
 )
+from .tasks import CancelledError, Future, TealetTask
 from .runtime import BaseRunner
 from .runtime import Runner as TealetRunner
 from .selector import SelectorScheduler

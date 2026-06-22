@@ -56,6 +56,11 @@ Implemented:
 - Scheduler grouping includes `tealet.scheduler.gather(...)`, which returns a
   future for ordered child results and can optionally collect child exceptions
   as result values.
+- Scheduler-local task creation is configurable with
+  `BaseScheduler.set_task_factory(...)` and `BaseScheduler.get_task_factory()`.
+  The default factory preserves direct `TealetTask.prepare(...)` behavior.
+  `tealet.tasks.StubTaskFactory` can create and reuse a prepared stub via
+  `stub_here()`, then create scheduler tasks from that stub.
 - Cancellation propagates across scheduler boundaries in an asyncio-compatible
   way:
   - cancelling an asyncio waiter on a tealet `Future` schedules cancellation of
@@ -159,6 +164,45 @@ Semantics:
 - With `return_exceptions=True`, child exceptions are collected into the result
   list alongside successful values.
 - Cancelling the group future requests cancellation of unfinished children.
+
+### Scheduler Task Factories
+
+```python
+from tealet.tasks import DefaultTaskFactory, StubTaskFactory, TaskFactory
+
+
+class TaskFactory(Protocol):
+    def __call__(
+        self,
+        scheduler: BaseScheduler,
+        func: Callable[[], object],
+        *,
+        context: contextvars.Context,
+    ) -> TealetTask: ...
+
+class DefaultTaskFactory: ...
+
+class StubTaskFactory:
+    def stub_here(self) -> tealet.tealet: ...
+
+class BaseScheduler:
+    def get_task_factory(self) -> TaskFactory: ...
+    def set_task_factory(self, factory: TaskFactory | None) -> None: ...
+```
+
+Semantics:
+
+- Task factories are tealet scheduler construction strategies, not asyncio task
+  factory compatibility hooks.
+- A factory receives the target callable and already selected context, creates
+  and prepares a `TealetTask`, and returns it unscheduled.
+- `BaseScheduler.spawn(...)` remains responsible for registering the task and
+  making it runnable.
+- Passing `None` to `set_task_factory(...)` restores the default direct-prep
+  factory.
+- `StubTaskFactory.stub_here()` creates the reusable stub at the caller's current
+  tealet stack point. If a stub was not created explicitly, the factory creates
+  one lazily on first use.
 
 ### Runner Factory Types
 
