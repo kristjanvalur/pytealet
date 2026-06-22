@@ -199,6 +199,35 @@ class TestSchedulerAccessors:
 
         assert task.result() is None
 
+    def test_shutdown_default_executor_without_executor_completes_immediately(self):
+        s = _new_scheduler()
+
+        future = s.shutdown_default_executor()
+
+        assert future.done() is True
+        assert future.result() is None
+
+    def test_shutdown_default_executor_waits_for_default_executor(self):
+        s = _new_scheduler()
+        release = threading.Event()
+        worker_started = threading.Event()
+
+        def worker() -> str:
+            worker_started.set()
+            release.wait(timeout=1.0)
+            return "done"
+
+        work_future = s.run_in_executor(None, worker)
+        assert worker_started.wait(timeout=1.0) is True
+
+        shutdown_future = s.shutdown_default_executor()
+        assert shutdown_future.done() is False
+
+        release.set()
+        assert s.run_until_complete(shutdown_future) is None
+        assert work_future.done() is True
+        assert work_future.result() == "done"
+
     def test_to_thread_waits_and_preserves_context(self):
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
         s = _new_scheduler()
@@ -1089,6 +1118,7 @@ class TestSchedulerAccessors:
 
         with pytest.raises(ValueError, match="boom"):
             s.run_until_complete(group)
+        s.run()
 
     def test_gather_return_exceptions_collects_results(self):
         s = _new_scheduler()
@@ -1667,7 +1697,7 @@ class TestSchedulerExamples:
         with pytest.raises(CancelledError):
             task.result()
 
-    def test_uncaught_tealet_exit_sets_task_exception(self):
+    def test_uncaught_tealet_exit_completes_task_without_exception(self):
         s = _new_scheduler()
 
         def target_worker() -> None:
@@ -1678,9 +1708,8 @@ class TestSchedulerExamples:
 
         assert task.done() is True
         assert task.cancelled() is False
-        assert isinstance(task.exception(), _tealet.TealetExit)
-        with pytest.raises(_tealet.TealetExit):
-            task.result()
+        assert task.exception() is None
+        assert task.result() is None
 
     @pytest.mark.parametrize("exc_type", [SystemExit, KeyboardInterrupt])
     def test_uncaught_base_exception_sets_task_exception(self, exc_type):

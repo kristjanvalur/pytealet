@@ -16,6 +16,7 @@ from .scheduler import (
     TealetTask,
     _current_scheduler,
     CancelledError,
+    gather,
 )
 from .runtime import BaseRunner
 from .runtime import Runner as TealetRunner
@@ -346,8 +347,20 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
     def task(self) -> _asyncio.Task[None] | None:
         return None
 
-    def close(self) -> None:
-        super().close()
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        scheduler = self._scheduler
+        try:
+            if scheduler is not None:
+                tasks = self._shutdown_scheduler_tasks(scheduler)
+                async_scheduler = cast(AsyncSchedulerDrivingAPI, scheduler)
+                shutdown_group = gather(*tasks, return_exceptions=True)
+                await async_scheduler.arun_until_complete(shutdown_group)
+                executor_shutdown = scheduler.shutdown_default_executor()
+                await async_scheduler.arun_until_complete(executor_shutdown)
+        finally:
+            self._finalize_close(scheduler)
 
     async def run(self, entry, /, *, context: contextvars.Context | None = None):
         self._lazy_init()
@@ -386,7 +399,7 @@ async def run_async(
     try:
         return await runner.run(entry)
     finally:
-        runner.close()
+        await runner.aclose()
 
 
 def run_in_asyncio(

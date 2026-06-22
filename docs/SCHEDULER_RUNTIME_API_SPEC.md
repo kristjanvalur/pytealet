@@ -80,6 +80,14 @@ Implemented:
     after the inner runner exits
   - runner construction accepts `handle_sigint=False` for embedding scenarios
     where an inner runner should own interrupt handling
+- Runner shutdown follows the asyncio runner pattern:
+  - unfinished scheduler tasks are cancelled and drained with
+    `tealet.scheduler.gather(..., return_exceptions=True)`
+  - `CoreSchedulerDrivingAPI.shutdown_default_executor()` returns a scheduler `Future`
+    that waits for the detached default executor to shut down cleanly
+  - sync `Runner.close()` drives the shutdown futures with
+    `run_until_complete(...)`; async `AsyncRunner.aclose()` uses
+    `arun_until_complete(...)`
 
 Not implemented yet from this proposal:
 
@@ -87,7 +95,6 @@ Not implemented yet from this proposal:
   in one object.
 - Scheduler access has been narrowed to explicit construction plus
   `get_running_scheduler()`.
-- Finalized shutdown policy wording.
 
 ## Goals
 

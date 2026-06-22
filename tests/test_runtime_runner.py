@@ -1,9 +1,11 @@
 import asyncio
 import signal
 import sys
+import threading
 
 import pytest
 
+import _tealet
 from tealet.asyncio import (
     AsyncRunner,
     AsyncScheduler,
@@ -13,7 +15,7 @@ from tealet.asyncio import (
     run_in_asyncio,
 )
 from tealet.runtime import Runner, run
-from tealet.scheduler import Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
+from tealet.scheduler import Future, Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
 from tealet.selector import SelectorScheduler
 
 
@@ -43,13 +45,13 @@ class FakeSignals:
 
 
 class TestAsyncRunner:
-    def test_get_scheduler_lazy_init_and_close_lifecycle(self):
+    def test_get_scheduler_lazy_init_and_aclose_lifecycle(self):
         async def run() -> None:
             runner = AsyncRunner()
             scheduler = runner.get_scheduler()
             assert isinstance(scheduler, AsyncScheduler)
             assert runner.task is None
-            runner.close()
+            await runner.aclose()
             assert runner.task is None
 
         asyncio.run(run())
@@ -67,7 +69,7 @@ class TestAsyncRunner:
             assert result == "ok"
             assert runner.get_scheduler() is not None
             assert seen == [runner.get_scheduler()]
-            runner.close()
+            await runner.aclose()
 
         asyncio.run(run())
 
@@ -81,17 +83,17 @@ class TestAsyncRunner:
                     await runner.run(coro)
             finally:
                 coro.close()
-                runner.close()
+                await runner.aclose()
 
         asyncio.run(run())
 
     def test_scheduler_factory_is_used(self):
         async def run() -> None:
-            custom = Scheduler()
+            custom = AsyncScheduler()
             runner = AsyncRunner(scheduler_factory=lambda: custom)
             started = runner.get_scheduler()
             assert started is custom
-            runner.close()
+            await runner.aclose()
 
         asyncio.run(run())
 
@@ -104,26 +106,31 @@ class TestAsyncRunner:
                 runner.get_scheduler()
                 assert loop.get_debug() is previous
             finally:
-                runner.close()
+                await runner.aclose()
             assert loop.get_debug() is previous
 
         asyncio.run(run_case())
 
     def test_async_runner_debug_sets_scheduler_debug_flag(self):
         async def run_case() -> None:
-            custom = Scheduler()
+            custom = AsyncScheduler()
             runner = AsyncRunner(scheduler_factory=lambda: custom, debug=True)
             try:
                 runner.get_scheduler()
                 assert custom.get_debug() is True
             finally:
-                runner.close()
+                await runner.aclose()
 
         asyncio.run(run_case())
 
     def test_invalid_factory_return_type(self):
         async def run() -> None:
             class InvalidScheduler:
+                def shutdown_default_executor(self) -> Future[None]:
+                    future: Future[None] = Future()
+                    future.set_result(None)
+                    return future
+
                 def close(self) -> None:
                     pass
 
@@ -133,19 +140,135 @@ class TestAsyncRunner:
                 with pytest.raises(AttributeError):
                     await scheduler.arun_until_complete(lambda: None)
             finally:
-                runner.close()
+                runner._finalize_close(runner._scheduler)
                 set_scheduler(None)
 
         asyncio.run(run())
 
-    def test_close_prevents_reuse(self):
+    def test_aclose_prevents_reuse(self):
         async def run() -> None:
             runner = AsyncRunner()
-            runner.close()
+            await runner.aclose()
             with pytest.raises(RuntimeError, match="runner is closed"):
                 await runner.run(lambda: None)
             with pytest.raises(RuntimeError, match="runner is closed"):
                 runner.get_scheduler()
+
+        asyncio.run(run())
+
+    def test_aclose_cancels_unfinished_tasks(self):
+        async def run() -> None:
+            from tealet.scheduler import Event
+
+            runner = AsyncRunner()
+            scheduler = runner.get_scheduler()
+            event = Event()
+            seen: list[str] = []
+
+            def worker() -> None:
+                try:
+                    seen.append("start")
+                    event.wait()
+                finally:
+                    seen.append("finally")
+
+            task = scheduler.spawn(worker)
+            await scheduler.arun_until_complete(lambda: None)
+
+            await runner.aclose()
+
+            assert seen == ["start", "finally"]
+            assert task.done() is True
+            assert task.cancelled() is True
+            with pytest.raises(asyncio.CancelledError):
+                task.result()
+            assert scheduler.all_tasks() == set()
+
+        asyncio.run(run())
+
+    def test_aclose_waits_for_default_executor_shutdown(self):
+        async def run() -> None:
+            from tealet.scheduler import Event
+
+            runner = AsyncRunner()
+            scheduler = runner.get_scheduler()
+            event = Event()
+            release_worker = threading.Event()
+            worker_started = threading.Event()
+            worker_finished = threading.Event()
+
+            def executor_worker() -> None:
+                worker_started.set()
+                release_worker.wait(timeout=1.0)
+                worker_finished.set()
+
+            def worker() -> None:
+                scheduler.run_in_executor(None, executor_worker)
+                assert worker_started.wait(timeout=1.0) is True
+                try:
+                    event.wait()
+                finally:
+                    release_worker.set()
+
+            scheduler.spawn(worker)
+            await scheduler.arun_until_complete(lambda: None)
+
+            await runner.aclose()
+
+            assert worker_finished.is_set() is True
+
+        asyncio.run(run())
+
+    def test_aclose_ignores_tasks_exited_by_prior_shutdown_cancel(self):
+        async def run() -> None:
+            from tealet.scheduler import Event
+
+            class OrderedShutdownScheduler(AsyncScheduler):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.shutdown_tasks = []
+
+                def all_tasks(self):
+                    if self.shutdown_tasks:
+                        return self.shutdown_tasks
+                    return super().all_tasks()
+
+            runner = AsyncRunner(scheduler_factory=OrderedShutdownScheduler)
+            scheduler = runner.get_scheduler()
+            event = Event()
+            seen: list[str] = []
+
+            def victim() -> None:
+                try:
+                    seen.append("victim:start")
+                    event.wait()
+                finally:
+                    seen.append("victim:finally")
+
+            victim_task = scheduler.spawn(victim)
+
+            def closer() -> None:
+                try:
+                    seen.append("closer:start")
+                    event.wait()
+                except asyncio.CancelledError:
+                    seen.append("closer:cancelled")
+                    victim_task.cancel()
+                    raise
+
+            closer_task = scheduler.spawn(closer)
+            await scheduler.arun_until_complete(lambda: None)
+            scheduler.shutdown_tasks = [closer_task, victim_task]
+
+            await runner.aclose()
+
+            assert seen == ["victim:start", "closer:start", "closer:cancelled", "victim:finally"]
+            assert closer_task.done() is True
+            assert victim_task.done() is True
+            with pytest.raises(asyncio.CancelledError):
+                closer_task.result()
+            with pytest.raises(asyncio.CancelledError):
+                victim_task.result()
 
         asyncio.run(run())
 
@@ -167,7 +290,7 @@ class TestAsyncRunner:
                 assert await runner.run(lambda: marker.get()) == "runner-context"
                 assert await runner.run(lambda: marker.get(), context=override_ctx) == "override-context"
             finally:
-                runner.close()
+                await runner.aclose()
 
         asyncio.run(run())
 
@@ -184,7 +307,7 @@ class TestAsyncRunner:
                 assert future.done() is True
                 assert future.result() == 123
             finally:
-                runner.close()
+                await runner.aclose()
 
         asyncio.run(run())
 
@@ -218,7 +341,7 @@ class TestAsyncRunner:
                 with pytest.raises(KeyboardInterrupt):
                     await runner.run(entry)
             finally:
-                runner.close()
+                await runner.aclose()
 
         asyncio.run(run_case())
 
@@ -242,7 +365,7 @@ class TestAsyncRunner:
                 with pytest.raises(KeyboardInterrupt):
                     await runner.run(entry)
             finally:
-                runner.close()
+                await runner.aclose()
 
         asyncio.run(run_case())
 
@@ -260,7 +383,7 @@ class TestAsyncRunner:
                 assert await runner.run(lambda: signals.handler) is not outer_handler
                 assert signals.handler is outer_handler
             finally:
-                runner.close()
+                await runner.aclose()
 
         asyncio.run(run_case())
 
@@ -277,7 +400,7 @@ class TestAsyncRunner:
                 assert await runner.run(lambda: signals.handler) is outer_handler
                 assert signals.handler is outer_handler
             finally:
-                runner.close()
+                await runner.aclose()
 
         asyncio.run(run_case())
 
@@ -420,6 +543,113 @@ class TestRunner:
             runner.run(lambda: None)
         with pytest.raises(RuntimeError, match="runner is closed"):
             runner.get_scheduler()
+
+    def test_close_cancels_unfinished_tasks(self):
+        from tealet.scheduler import Event
+
+        runner = Runner()
+        scheduler = runner.get_scheduler()
+        event = Event()
+        seen: list[str] = []
+
+        def worker() -> None:
+            try:
+                seen.append("start")
+                event.wait()
+            finally:
+                seen.append("finally")
+
+        task = scheduler.spawn(worker)
+        scheduler.pump(1)
+
+        runner.close()
+
+        assert seen == ["start", "finally"]
+        assert task.done() is True
+        assert task.cancelled() is True
+        with pytest.raises(asyncio.CancelledError):
+            task.result()
+        assert scheduler.all_tasks() == set()
+
+    def test_close_waits_for_default_executor_shutdown(self):
+        from tealet.scheduler import Event
+
+        runner = Runner()
+        scheduler = runner.get_scheduler()
+        event = Event()
+        release_worker = threading.Event()
+        worker_started = threading.Event()
+        worker_finished = threading.Event()
+
+        def executor_worker() -> None:
+            worker_started.set()
+            release_worker.wait(timeout=1.0)
+            worker_finished.set()
+
+        def worker() -> None:
+            scheduler.run_in_executor(None, executor_worker)
+            assert worker_started.wait(timeout=1.0) is True
+            try:
+                event.wait()
+            finally:
+                release_worker.set()
+
+        scheduler.spawn(worker)
+        scheduler.pump(1)
+
+        runner.close()
+
+        assert worker_finished.is_set() is True
+
+    def test_close_ignores_tasks_exited_by_prior_shutdown_cancel(self):
+        from tealet.scheduler import Event
+
+        class OrderedShutdownScheduler(Scheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.shutdown_tasks = []
+
+            def all_tasks(self):
+                if self.shutdown_tasks:
+                    return self.shutdown_tasks
+                return super().all_tasks()
+
+        runner = Runner(scheduler_factory=OrderedShutdownScheduler)
+        scheduler = runner.get_scheduler()
+        event = Event()
+        seen: list[str] = []
+
+        def victim() -> None:
+            try:
+                seen.append("victim:start")
+                event.wait()
+            finally:
+                seen.append("victim:finally")
+
+        victim_task = scheduler.spawn(victim)
+
+        def closer() -> None:
+            try:
+                seen.append("closer:start")
+                event.wait()
+            except asyncio.CancelledError:
+                seen.append("closer:cancelled")
+                victim_task.cancel()
+                raise
+
+        closer_task = scheduler.spawn(closer)
+        scheduler.pump(2)
+        scheduler.shutdown_tasks = [closer_task, victim_task]
+
+        runner.close()
+
+        assert seen == ["victim:start", "closer:start", "closer:cancelled", "victim:finally"]
+        assert closer_task.done() is True
+        assert victim_task.done() is True
+        with pytest.raises(asyncio.CancelledError):
+            closer_task.result()
+        with pytest.raises(asyncio.CancelledError):
+            victim_task.result()
 
     def test_lazy_init_installs_and_restores_current_scheduler(self):
         previous = Scheduler()
@@ -661,7 +891,7 @@ class TestRunnerDefaultFactoryOverride:
             runner.close()
 
     def test_async_runner_subclass_default_factory_is_used(self):
-        custom = Scheduler()
+        custom = AsyncScheduler()
 
         class CustomAsyncRunner(AsyncRunner):
             default_factory = staticmethod(lambda: custom)
@@ -671,6 +901,6 @@ class TestRunnerDefaultFactoryOverride:
             try:
                 assert runner.get_scheduler() is custom
             finally:
-                runner.close()
+                await runner.aclose()
 
         asyncio.run(run_case())

@@ -9,6 +9,8 @@ from collections.abc import Callable
 from types import FrameType
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 
+import _tealet
+
 from . import scheduler as scheduler_module
 
 
@@ -43,11 +45,25 @@ class BaseRunner(Generic[SchedulerT]):
         assert scheduler is not None
         return scheduler
 
-    def close(self) -> None:
-        if self._closed:
-            return
+    def _shutdown_scheduler_tasks(self, scheduler: SchedulerT) -> list[scheduler_module.TealetTask]:
+        if not isinstance(scheduler, scheduler_module.BaseScheduler):
+            return []
+        tasks = list(scheduler.all_tasks())
+        if not tasks:
+            return []
+
+        for task in tasks:
+            if task.done():
+                continue
+            try:
+                task.cancel()
+            except _tealet.StateError:
+                if not task.done():
+                    raise
+        return tasks
+
+    def _finalize_close(self, scheduler: SchedulerT | None) -> None:
         self._closed = True
-        scheduler = self._scheduler
         if self._initialized:
             scheduler_module.set_scheduler(self._previous_scheduler)
             self._previous_scheduler = None
@@ -179,6 +195,20 @@ class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
     """Run scheduler-backed entries from synchronous code without asyncio."""
 
     default_factory = scheduler_module.Scheduler
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        scheduler = self._scheduler
+        try:
+            if scheduler is not None:
+                tasks = self._shutdown_scheduler_tasks(scheduler)
+                shutdown_group = scheduler_module.gather(*tasks, return_exceptions=True)
+                scheduler.run_until_complete(shutdown_group)
+                executor_shutdown = scheduler.shutdown_default_executor()
+                scheduler.run_until_complete(executor_shutdown)
+        finally:
+            self._finalize_close(scheduler)
 
     def run(self, entry, /, *, context: contextvars.Context | None = None):
         self._lazy_init()

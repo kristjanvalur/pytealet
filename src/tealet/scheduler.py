@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from typing import Any, Callable, Generic, TypeVar
 
+import _tealet
 import tealet
 
 from .locks import (
@@ -63,6 +64,10 @@ class CoreSchedulerDrivingAPI(ABC):
     @abstractmethod
     def close(self) -> None:
         """Release scheduler-owned resources."""
+
+    @abstractmethod
+    def shutdown_default_executor(self) -> "Future[None]":
+        """Return a future that completes after the default executor shuts down."""
 
     @abstractmethod
     def spawn(
@@ -718,6 +723,9 @@ class TealetTask(tealet.tealet, Future[object]):
         suppress = False
         if exc is None:
             self.set_result(result)
+        elif isinstance(exc, _tealet.TealetExit):
+            self.set_result(None)
+            suppress = True
         elif isinstance(exc, (SystemExit, KeyboardInterrupt)):
             self.set_exception(exc)
             return super().resolve_target(result, exc, exc_target)
@@ -782,6 +790,39 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
         if executor is not None:
             self._default_executor = None
             executor.shutdown(wait=False)
+
+    def shutdown_default_executor(self) -> Future[None]:
+        future: Future[None] = Future()
+        executor = self._default_executor
+        if executor is None:
+            future.set_result(None)
+            return future
+
+        self._default_executor = None
+
+        def complete_result() -> None:
+            if not future.done():
+                future.set_result(None)
+
+        def complete_exception(exc: BaseException) -> None:
+            if not future.done():
+                future.set_exception(exc)
+
+        def shutdown_worker() -> None:
+            try:
+                executor.shutdown(wait=True)
+            except BaseException as exc:
+                self.call_soon_threadsafe(complete_exception, exc)
+            else:
+                self.call_soon_threadsafe(complete_result)
+
+        thread = threading.Thread(
+            target=shutdown_worker,
+            name="tealet-default-executor-shutdown",
+            daemon=True,
+        )
+        thread.start()
+        return future
 
     # -- External integration APIs ------------------------------------
 
