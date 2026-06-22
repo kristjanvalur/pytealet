@@ -178,18 +178,18 @@ class TaskFactory(Protocol):
         func: Callable[[], object],
         *,
         context: contextvars.Context,
-        eager: bool | None = None,
+        eager_start: bool | None = None,
     ) -> TealetTask: ...
 
     class DefaultTaskFactory:
-      def __init__(self, *, eager: bool = False) -> None: ...
+      def __init__(self, *, eager_start: bool = False) -> None: ...
 
 class StubTaskFactory:
       def __init__(
         self,
         stub: tealet.tealet | None = None,
         *,
-        eager: bool = False,
+        eager_start: bool = False,
       ) -> None: ...
     def stub_here(self) -> tealet.tealet: ...
 
@@ -204,11 +204,12 @@ Semantics:
   factory compatibility hooks.
 - A factory receives the target callable and already selected context, creates
   and prepares a `TealetTask`, and returns it unscheduled.
-- Class factories expose an `eager` default. `BaseScheduler.spawn(..., eager=...)`
+- Class factories expose an `eager_start` default. `BaseScheduler.spawn(..., eager_start=...)`
   passes an optional per-spawn override to the factory.
-- When eagerness resolves true, the factory calls `task.run()` before returning
-  the task, so the task starts immediately and may complete before `spawn(...)`
-  returns.
+- When eagerness resolves true and the scheduler is already running, the factory
+  calls `task.run()` before returning the task, so the task starts immediately
+  and may complete before `spawn(...)` returns. Eager startup is deferred when
+  the scheduler is not running, matching asyncio's `eager_start` condition.
 - `BaseScheduler.spawn(...)` remains responsible for registering the task and
   making it runnable if eager startup did not already complete it.
 - Passing `None` to `set_task_factory(...)` restores the default direct-prep

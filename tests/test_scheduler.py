@@ -74,8 +74,10 @@ def _reset_scheduler_tls():
         _scheduler.instance = Scheduler()
 
 
-def _new_scheduler() -> Scheduler:
+def _new_scheduler(task_factory_maker=None) -> Scheduler:
     scheduler = Scheduler()
+    if task_factory_maker is not None:
+        scheduler.set_task_factory(task_factory_maker())
     set_scheduler(scheduler)
     return scheduler
 
@@ -126,7 +128,7 @@ class TestSchedulerAccessors:
         custom = StubTaskFactory()
 
         assert isinstance(original, DefaultTaskFactory)
-        assert original.eager is False
+        assert original.eager_start is False
         s.set_task_factory(custom)
         assert s.get_task_factory() is custom
 
@@ -140,9 +142,9 @@ class TestSchedulerAccessors:
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
 
         class RecordingTaskFactory:
-            def __call__(self, scheduler, func, *, context, eager=None):
-                calls.append((scheduler, context.get(marker), eager))
-                return default(scheduler, func, context=context, eager=eager)
+            def __call__(self, scheduler, func, *, context, eager_start=None):
+                calls.append((scheduler, context.get(marker), eager_start))
+                return default(scheduler, func, context=context, eager_start=eager_start)
 
         marker.set("factory-context")
         s.set_task_factory(RecordingTaskFactory())
@@ -152,35 +154,88 @@ class TestSchedulerAccessors:
         assert s.run_until_complete(task) == "ok"
         assert calls == [(s, "factory-context", None)]
 
-    def test_default_task_factory_eager_runs_before_spawn_returns(self):
+    def test_default_task_factory_eager_defers_until_scheduler_runs(self):
         s = _new_scheduler()
         seen = []
-        s.set_task_factory(DefaultTaskFactory(eager=True))
+        s.set_task_factory(DefaultTaskFactory(eager_start=True))
 
+        seen.append("before-spawn")
         task = s.spawn(lambda: seen.append("ran") or "ok")
+        seen.append("after-spawn")
 
-        assert seen == ["ran"]
-        assert task.done()
-        assert task.result() == "ok"
+        assert seen == ["before-spawn", "after-spawn"]
+        assert task.done() is False
+        assert s.run_until_complete(task) == "ok"
+        assert seen == ["before-spawn", "after-spawn", "ran"]
         assert s.all_tasks() == set()
+
+    def test_default_task_factory_eager_runs_before_spawn_returns_inside_scheduler(self):
+        s = _new_scheduler()
+        seen = []
+        s.set_task_factory(DefaultTaskFactory(eager_start=True))
+
+        def parent() -> None:
+            seen.append("before-spawn")
+            task = s.spawn(lambda: seen.append("ran") or "ok")
+            seen.append("after-spawn")
+            assert task.done()
+            assert task.result() == "ok"
+
+        parent_task = s.spawn(parent)
+        s.run_until_complete(parent_task)
+
+        assert seen == ["before-spawn", "ran", "after-spawn"]
+
+    def test_spawn_eager_true_defers_until_scheduler_runs(self):
+        s = _new_scheduler()
+        seen = []
+
+        seen.append("before-spawn")
+        task = s.spawn(lambda: seen.append("ran") or "ok", eager_start=True)
+        seen.append("after-spawn")
+
+        assert seen == ["before-spawn", "after-spawn"]
+        assert task.done() is False
+        assert s.run_until_complete(task) == "ok"
+        assert seen == ["before-spawn", "after-spawn", "ran"]
+
+    def test_spawn_eager_true_runs_before_spawn_returns_inside_scheduler(self):
+        s = _new_scheduler()
+        seen = []
+
+        def parent() -> None:
+            seen.append("before-spawn")
+            task = s.spawn(lambda: seen.append("ran") or "ok", eager_start=True)
+            seen.append("after-spawn")
+            assert task.done()
+            assert task.result() == "ok"
+
+        parent_task = s.spawn(parent)
+        s.run_until_complete(parent_task)
+
+        assert seen == ["before-spawn", "ran", "after-spawn"]
 
     def test_spawn_eager_overrides_factory_default(self):
         s = _new_scheduler()
         seen = []
-        s.set_task_factory(DefaultTaskFactory(eager=True))
+        s.set_task_factory(DefaultTaskFactory(eager_start=True))
 
-        deferred = s.spawn(lambda: seen.append("deferred") or "deferred", eager=False)
+        deferred = s.spawn(lambda: seen.append("deferred") or "deferred", eager_start=False)
 
         assert seen == []
         assert deferred.done() is False
         assert s.run_until_complete(deferred) == "deferred"
         assert seen == ["deferred"]
 
-        eager = s.spawn(lambda: seen.append("eager") or "eager", eager=True)
+        def parent() -> None:
+            task = s.spawn(lambda: seen.append("eager") or "eager", eager_start=True)
+            assert task.done()
+            assert task.result() == "eager"
 
+        parent_task = s.spawn(parent, eager_start=False)
+        assert seen == ["deferred"]
+        assert s.run_until_complete(parent_task) is None
         assert seen == ["deferred", "eager"]
-        assert eager.done()
-        assert eager.result() == "eager"
 
     def test_eager_task_that_yields_is_scheduled(self):
         s = _new_scheduler()
@@ -192,11 +247,14 @@ class TestSchedulerAccessors:
             seen.append("after-yield")
             return "ok"
 
-        task = s.spawn(worker, eager=True)
+        def parent() -> None:
+            task = s.spawn(worker, eager_start=True)
+            assert seen == ["start"]
+            assert task.done() is False
 
-        assert seen == ["start"]
-        assert task.done() is False
-        assert s.run_until_complete(task) == "ok"
+        parent_task = s.spawn(parent)
+        s.run_until_complete(parent_task)
+
         assert seen == ["start", "after-yield"]
 
     def test_stub_task_factory_lazily_creates_and_reuses_stub(self):
@@ -214,18 +272,22 @@ class TestSchedulerAccessors:
         assert s.run_until_complete(first) == "first"
         assert s.run_until_complete(second) == "second"
 
-    def test_stub_task_factory_eager_runs_before_spawn_returns(self):
+    def test_stub_task_factory_eager_runs_before_spawn_returns_inside_scheduler(self):
         s = _new_scheduler()
         seen = []
-        factory = StubTaskFactory(eager=True)
+        factory = StubTaskFactory(eager_start=True)
         s.set_task_factory(factory)
 
-        task = s.spawn(lambda: seen.append("ran") or "ok")
+        def parent() -> None:
+            task = s.spawn(lambda: seen.append("ran") or "ok")
+            assert task.done()
+            assert task.result() == "ok"
+
+        parent_task = s.spawn(parent)
+        s.run_until_complete(parent_task)
 
         assert factory.stub is not None
         assert seen == ["ran"]
-        assert task.done()
-        assert task.result() == "ok"
 
     def test_stub_task_factory_can_stub_here_before_use(self):
         s = _new_scheduler()
@@ -288,8 +350,8 @@ class TestSchedulerAccessors:
 
         assert seen == [s]
 
-    def test_run_in_executor_waits_for_result(self):
-        s = _new_scheduler()
+    def test_run_in_executor_waits_for_result(self, deferred_scheduler_task_factory_maker):
+        s = _new_scheduler(deferred_scheduler_task_factory_maker)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             def entry() -> int:
@@ -301,8 +363,8 @@ class TestSchedulerAccessors:
 
         assert task.result() == 42
 
-    def test_run_in_executor_propagates_exception(self):
-        s = _new_scheduler()
+    def test_run_in_executor_propagates_exception(self, deferred_scheduler_task_factory_maker):
+        s = _new_scheduler(deferred_scheduler_task_factory_maker)
 
         def fail() -> None:
             raise ValueError("boom")
@@ -319,8 +381,8 @@ class TestSchedulerAccessors:
         assert task.done() is True
         assert task.result() is None
 
-    def test_run_in_executor_ignores_late_result_after_cancel(self):
-        s = _new_scheduler()
+    def test_run_in_executor_ignores_late_result_after_cancel(self, deferred_scheduler_task_factory_maker):
+        s = _new_scheduler(deferred_scheduler_task_factory_maker)
         release = threading.Event()
         worker_started = threading.Event()
 
@@ -357,8 +419,8 @@ class TestSchedulerAccessors:
         assert shutdown.done() is True
         assert shutdown.result() is None
 
-    def test_shutdown_default_executor_waits_for_default_executor(self):
-        s = _new_scheduler()
+    def test_shutdown_default_executor_waits_for_default_executor(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
         release = threading.Event()
         worker_started = threading.Event()
 
@@ -378,8 +440,8 @@ class TestSchedulerAccessors:
         assert work_future.done() is True
         assert work_future.result() == "done"
 
-    def test_shutdown_default_executor_timeout_warns_and_completes(self):
-        s = _new_scheduler()
+    def test_shutdown_default_executor_timeout_warns_and_completes(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
         release = threading.Event()
         worker_started = threading.Event()
 
@@ -401,9 +463,9 @@ class TestSchedulerAccessors:
         release.set()
         assert s.run_until_complete(work_future) == "done"
 
-    def test_to_thread_waits_and_preserves_context(self):
+    def test_to_thread_waits_and_preserves_context(self, deferred_scheduler_task_factory_maker):
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
-        s = _new_scheduler()
+        s = _new_scheduler(deferred_scheduler_task_factory_maker)
 
         def entry() -> str:
             marker.set("tealet-context")
@@ -1207,8 +1269,8 @@ class TestSchedulerAccessors:
 
         asyncio.run(run())
 
-    def test_run_until_complete_returns_result(self):
-        s = _new_scheduler()
+    def test_run_until_complete_returns_result(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
 
         def worker() -> int:
@@ -1218,8 +1280,8 @@ class TestSchedulerAccessors:
         fut = s.spawn(worker)
         assert s.run_until_complete(fut) == 42
 
-    def test_all_tasks_returns_unfinished_tealet_tasks(self):
-        s = _new_scheduler()
+    def test_all_tasks_returns_unfinished_tealet_tasks(self, deferred_scheduler_task_factory_maker):
+        s = _new_scheduler(deferred_scheduler_task_factory_maker)
         set_scheduler(s)
         event = Event()
 
@@ -1234,8 +1296,8 @@ class TestSchedulerAccessors:
         assert s.run_until_complete(task) == "done"
         assert s.all_tasks() == set()
 
-    def test_all_tasks_does_not_keep_completed_tasks_alive(self):
-        s = _new_scheduler()
+    def test_all_tasks_does_not_keep_completed_tasks_alive(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
 
         task = s.spawn(lambda: "done")
@@ -1247,8 +1309,8 @@ class TestSchedulerAccessors:
         gc.collect()
         assert task_ref() is None
 
-    def test_gather_accepts_tasks_and_callables_in_order(self):
-        s = _new_scheduler()
+    def test_gather_accepts_tasks_and_callables_in_order(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
         seen: list[str] = []
 
@@ -1276,8 +1338,8 @@ class TestSchedulerAccessors:
         assert group.done() is True
         assert group.result() == []
 
-    def test_gather_propagates_first_exception(self):
-        s = _new_scheduler()
+    def test_gather_propagates_first_exception(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
 
         def fail() -> None:
@@ -1293,8 +1355,8 @@ class TestSchedulerAccessors:
             s.run_until_complete(group)
         s.run()
 
-    def test_gather_return_exceptions_collects_results(self):
-        s = _new_scheduler()
+    def test_gather_return_exceptions_collects_results(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
 
         def fail() -> None:
@@ -1309,8 +1371,8 @@ class TestSchedulerAccessors:
         assert str(result[0]) == "boom"
         assert result[1] == "ok"
 
-    def test_gather_cancel_cancels_unfinished_children(self):
-        s = _new_scheduler()
+    def test_gather_cancel_cancels_unfinished_children(self, deferred_scheduler_task_factory_maker):
+        s = _new_scheduler(deferred_scheduler_task_factory_maker)
         set_scheduler(s)
         event = Event()
 
@@ -1325,17 +1387,17 @@ class TestSchedulerAccessors:
             s.run_until_complete(group)
         assert task.cancelled() is True
 
-    def test_gather_rejects_foreign_task(self):
-        s1 = _new_scheduler()
-        s2 = _new_scheduler()
+    def test_gather_rejects_foreign_task(self, scheduler_task_factory_maker):
+        s1 = _new_scheduler(scheduler_task_factory_maker)
+        s2 = _new_scheduler(scheduler_task_factory_maker)
         task = s2.spawn(lambda: "foreign")
         set_scheduler(s1)
 
         with pytest.raises(RuntimeError, match="different scheduler"):
             gather(task)
 
-    def test_run_until_complete_propagates_exception(self):
-        s = _new_scheduler()
+    def test_run_until_complete_propagates_exception(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
 
         def worker() -> None:
@@ -1360,9 +1422,9 @@ class TestSchedulerAccessors:
         assert fut.done()
         assert fut.exception() is exc
 
-    def test_run_until_complete_rejects_foreign_task(self):
-        s1 = _new_scheduler()
-        s2 = _new_scheduler()
+    def test_run_until_complete_rejects_foreign_task(self, scheduler_task_factory_maker):
+        s1 = _new_scheduler(scheduler_task_factory_maker)
+        s2 = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s1)
         fut = s2.spawn(lambda: 1)
         with pytest.raises(RuntimeError, match="different scheduler"):
@@ -1376,8 +1438,8 @@ class TestSchedulerAccessors:
         with pytest.raises(RuntimeError, match="stopped before Future completed"):
             s.run_until_complete(fut)
 
-    def test_run_until_complete_accepts_callable(self):
-        s = _new_scheduler()
+    def test_run_until_complete_accepts_callable(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
 
         def worker() -> int:

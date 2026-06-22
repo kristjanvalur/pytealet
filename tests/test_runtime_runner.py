@@ -186,7 +186,7 @@ class TestAsyncRunner:
                     seen.append("finally")
 
             task = scheduler.spawn(worker)
-            await scheduler.arun_until_complete(lambda: None)
+            await scheduler.arun()
 
             await runner.aclose()
 
@@ -199,12 +199,13 @@ class TestAsyncRunner:
 
         asyncio.run(run())
 
-    def test_aclose_waits_for_default_executor_shutdown(self):
+    def test_aclose_waits_for_default_executor_shutdown(self, scheduler_task_factory_maker):
         async def run() -> None:
             from tealet.scheduler import Event
 
             runner = AsyncRunner()
             scheduler = runner.get_scheduler()
+            scheduler.set_task_factory(scheduler_task_factory_maker())
             event = Event()
             release_worker = threading.Event()
             worker_started = threading.Event()
@@ -223,8 +224,8 @@ class TestAsyncRunner:
                 finally:
                     release_worker.set()
 
-            scheduler.spawn(worker)
-            await scheduler.arun_until_complete(lambda: None)
+            scheduler.spawn(worker, eager_start=False)
+            await scheduler.arun()
 
             await runner.aclose()
 
@@ -664,11 +665,12 @@ class TestRunner:
             task.result()
         assert scheduler.all_tasks() == set()
 
-    def test_close_waits_for_default_executor_shutdown(self):
+    def test_close_waits_for_default_executor_shutdown(self, scheduler_task_factory_maker):
         from tealet.scheduler import Event
 
         runner = Runner()
         scheduler = runner.get_scheduler()
+        scheduler.set_task_factory(scheduler_task_factory_maker())
         event = Event()
         release_worker = threading.Event()
         worker_started = threading.Event()
@@ -687,7 +689,7 @@ class TestRunner:
             finally:
                 release_worker.set()
 
-        scheduler.spawn(worker)
+        scheduler.spawn(worker, eager_start=False)
         scheduler.pump(1)
 
         runner.close()

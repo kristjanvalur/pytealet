@@ -80,7 +80,7 @@ class CoreSchedulerDrivingAPI(ABC):
         func: Callable[[], T],
         kwargs: dict[str, object] | None = None,
         context: contextvars.Context | None = None,
-        eager: bool | None = None,
+        eager_start: bool | None = None,
     ) -> "_tasks.TealetTask":
         """Spawn a scheduler-managed task from a zero-arg callable."""
 
@@ -829,14 +829,14 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
         func: Callable[[], T],
         kwargs: dict[str, object] | None = None,
         context: contextvars.Context | None = None,
-        eager: bool | None = None,
+        eager_start: bool | None = None,
     ) -> _tasks.TealetTask:
         if context is None:
             context = contextvars.copy_context()
         if kwargs is not None:
             raise TypeError("spawn() does not accept callable kwargs")
 
-        t = self._task_factory(self, func, context=context, eager=eager)
+        t = self._task_factory(self, func, context=context, eager_start=eager_start)
         self._all_tasks.add(t)
         if not t.done():
             self._make_runnable(t)
