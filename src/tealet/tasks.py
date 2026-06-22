@@ -285,6 +285,7 @@ class TaskFactory(Protocol):
         func: Callable[[], object],
         *,
         context: contextvars.Context,
+        eager: bool | None = None,
     ) -> TealetTask:
         """Create and prepare a task without scheduling it."""
         ...
@@ -297,8 +298,15 @@ def _prepare_task(task: TealetTask, func: Callable[[], object], context: context
     task.prepare(task_main)
 
 
+def _resolve_eager(default: bool, override: bool | None) -> bool:
+    return default if override is None else override
+
+
 class DefaultTaskFactory:
     """Default task factory using direct tealet preparation."""
+
+    def __init__(self, *, eager: bool = False) -> None:
+        self.eager = bool(eager)
 
     def __call__(
         self,
@@ -306,17 +314,21 @@ class DefaultTaskFactory:
         func: Callable[[], object],
         *,
         context: contextvars.Context,
+        eager: bool | None = None,
     ) -> TealetTask:
         task = TealetTask(scheduler)
         _prepare_task(task, func, context)
+        if _resolve_eager(self.eager, eager):
+            task.run()
         return task
 
 
 class StubTaskFactory:
     """Task factory that prepares tasks from a reusable tealet stub."""
 
-    def __init__(self, stub: tealet.tealet | None = None) -> None:
+    def __init__(self, stub: tealet.tealet | None = None, *, eager: bool = False) -> None:
         self._stub = stub
+        self.eager = bool(eager)
 
     @property
     def stub(self) -> tealet.tealet | None:
@@ -334,6 +346,7 @@ class StubTaskFactory:
         func: Callable[[], object],
         *,
         context: contextvars.Context,
+        eager: bool | None = None,
     ) -> TealetTask:
         stub = self._stub
         if stub is None:
@@ -341,4 +354,6 @@ class StubTaskFactory:
         task = TealetTask(scheduler)
         task.set_stub(stub)
         _prepare_task(task, func, context)
+        if _resolve_eager(self.eager, eager):
+            task.run()
         return task

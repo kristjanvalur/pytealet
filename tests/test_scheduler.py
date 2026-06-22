@@ -126,6 +126,7 @@ class TestSchedulerAccessors:
         custom = StubTaskFactory()
 
         assert isinstance(original, DefaultTaskFactory)
+        assert original.eager is False
         s.set_task_factory(custom)
         assert s.get_task_factory() is custom
 
@@ -139,9 +140,9 @@ class TestSchedulerAccessors:
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
 
         class RecordingTaskFactory:
-            def __call__(self, scheduler, func, *, context):
-                calls.append((scheduler, context.get(marker)))
-                return default(scheduler, func, context=context)
+            def __call__(self, scheduler, func, *, context, eager=None):
+                calls.append((scheduler, context.get(marker), eager))
+                return default(scheduler, func, context=context, eager=eager)
 
         marker.set("factory-context")
         s.set_task_factory(RecordingTaskFactory())
@@ -149,7 +150,54 @@ class TestSchedulerAccessors:
         task = s.spawn(lambda: "ok")
 
         assert s.run_until_complete(task) == "ok"
-        assert calls == [(s, "factory-context")]
+        assert calls == [(s, "factory-context", None)]
+
+    def test_default_task_factory_eager_runs_before_spawn_returns(self):
+        s = _new_scheduler()
+        seen = []
+        s.set_task_factory(DefaultTaskFactory(eager=True))
+
+        task = s.spawn(lambda: seen.append("ran") or "ok")
+
+        assert seen == ["ran"]
+        assert task.done()
+        assert task.result() == "ok"
+        assert s.all_tasks() == set()
+
+    def test_spawn_eager_overrides_factory_default(self):
+        s = _new_scheduler()
+        seen = []
+        s.set_task_factory(DefaultTaskFactory(eager=True))
+
+        deferred = s.spawn(lambda: seen.append("deferred") or "deferred", eager=False)
+
+        assert seen == []
+        assert deferred.done() is False
+        assert s.run_until_complete(deferred) == "deferred"
+        assert seen == ["deferred"]
+
+        eager = s.spawn(lambda: seen.append("eager") or "eager", eager=True)
+
+        assert seen == ["deferred", "eager"]
+        assert eager.done()
+        assert eager.result() == "eager"
+
+    def test_eager_task_that_yields_is_scheduled(self):
+        s = _new_scheduler()
+        seen = []
+
+        def worker() -> str:
+            seen.append("start")
+            s.yield_()
+            seen.append("after-yield")
+            return "ok"
+
+        task = s.spawn(worker, eager=True)
+
+        assert seen == ["start"]
+        assert task.done() is False
+        assert s.run_until_complete(task) == "ok"
+        assert seen == ["start", "after-yield"]
 
     def test_stub_task_factory_lazily_creates_and_reuses_stub(self):
         s = _new_scheduler()
@@ -165,6 +213,19 @@ class TestSchedulerAccessors:
         assert factory.stub is stub
         assert s.run_until_complete(first) == "first"
         assert s.run_until_complete(second) == "second"
+
+    def test_stub_task_factory_eager_runs_before_spawn_returns(self):
+        s = _new_scheduler()
+        seen = []
+        factory = StubTaskFactory(eager=True)
+        s.set_task_factory(factory)
+
+        task = s.spawn(lambda: seen.append("ran") or "ok")
+
+        assert factory.stub is not None
+        assert seen == ["ran"]
+        assert task.done()
+        assert task.result() == "ok"
 
     def test_stub_task_factory_can_stub_here_before_use(self):
         s = _new_scheduler()

@@ -178,11 +178,19 @@ class TaskFactory(Protocol):
         func: Callable[[], object],
         *,
         context: contextvars.Context,
+        eager: bool | None = None,
     ) -> TealetTask: ...
 
-class DefaultTaskFactory: ...
+    class DefaultTaskFactory:
+      def __init__(self, *, eager: bool = False) -> None: ...
 
 class StubTaskFactory:
+      def __init__(
+        self,
+        stub: tealet.tealet | None = None,
+        *,
+        eager: bool = False,
+      ) -> None: ...
     def stub_here(self) -> tealet.tealet: ...
 
 class BaseScheduler:
@@ -196,8 +204,13 @@ Semantics:
   factory compatibility hooks.
 - A factory receives the target callable and already selected context, creates
   and prepares a `TealetTask`, and returns it unscheduled.
+- Class factories expose an `eager` default. `BaseScheduler.spawn(..., eager=...)`
+  passes an optional per-spawn override to the factory.
+- When eagerness resolves true, the factory calls `task.run()` before returning
+  the task, so the task starts immediately and may complete before `spawn(...)`
+  returns.
 - `BaseScheduler.spawn(...)` remains responsible for registering the task and
-  making it runnable.
+  making it runnable if eager startup did not already complete it.
 - Passing `None` to `set_task_factory(...)` restores the default direct-prep
   factory.
 - `StubTaskFactory.stub_here()` creates the reusable stub at the caller's current
