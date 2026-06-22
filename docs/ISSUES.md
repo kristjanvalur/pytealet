@@ -155,7 +155,7 @@ Audited against current code. Remaining property getters are safe for STATE_NEW/
 
 ### ✅ Issue #4: tealet_create() Migration Target (Closed)
 
-**Location:** `src/_tealet/pytealet.c` line 40 (stub_new), line 344 (pytealet_run)
+**Location:** `src/_tealet/pytealet.c` (`pytealet_stub_impl`, `pytealet_run_dispatch`)
 
 **Current Approach:**
 Current wrapper uses supported libtealet APIs (`tealet_new`, `tealet_run`, `tealet_spawn`, `tealet_switch`).

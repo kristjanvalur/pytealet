@@ -2931,7 +2931,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         assert(t_current == tealet->tealet);
         assert(TEALET_PYOBJECT(t_current) == tealet);
 
-        /* set the tstate from our own copy.  This includes the context. */
+        /* Restore the saved stub tstate; stub snapshots do not inherit context. */
         PyTealetTstate_Restore(&tealet->tstate, tstate);
     } else if (tealet->state == STATE_RUN) {
         assert(t_current == tealet->tealet);
