@@ -475,7 +475,7 @@ class TestPrepare:
         with pytest.raises(TypeError, match="must be callable"):
             t.prepare(42)
 
-    def test_prepare_latest_callable_wins(self):
+    def test_prepare_twice_requires_new_or_stub(self):
         seen = []
 
         def first(current, arg):
