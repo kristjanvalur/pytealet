@@ -16,7 +16,6 @@
 
 typedef struct PyTealetNewArg {
     struct PyTealetObject *dest;
-    PyTealetModuleState *mstate;
     PyObject *func;
     PyTealetApi_RunCFunc cfunc;
     PyObject *arg;

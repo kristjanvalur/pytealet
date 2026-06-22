@@ -1053,7 +1053,6 @@ static PyObject *pytealet_run_dispatch(PyTealetModuleState *mstate, PyTealetObje
     switch_arg = (void *)ptarg;
 
     ptarg->dest = target;
-    ptarg->mstate = mstate;
     ptarg->func = Py_XNewRef(func);
     ptarg->cfunc = cfunc;
     ptarg->arg = Py_NewRef(farg);
@@ -2883,7 +2882,6 @@ static void pytealet_report_unsuppressed_exception(PyObject **exc_io) {
 
 static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
     PyTealetObject *tealet = TEALET_PYOBJECT(t_current);
-    PyTealetMainData *mdata;
     PyTealetNewArg targ;
 
     assert(tealet);
@@ -2894,12 +2892,7 @@ static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
     if (!tealet->prepared_func && !tealet->prepared_cfunc)
         return pytealet_main(t_current, arg);
 
-    mdata = (PyTealetMainData *)*tealet_main_userpointer(t_current->main);
-    assert(mdata);
-    assert(mdata->mstate);
-
     targ.dest = tealet;
-    targ.mstate = mdata->mstate;
     targ.func = tealet->prepared_func;
     targ.cfunc = tealet->prepared_cfunc;
     targ.arg = arg ? (PyObject *)arg : Py_NewRef(Py_None);
@@ -2913,7 +2906,7 @@ static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
 /* The main function.  Invoked either from tealet.new or tealet.run */
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     PyTealetNewArg *targ = (PyTealetNewArg *)arg;
-    PyTealetModuleState *mstate = targ->mstate;
+    PyTealetModuleState *mstate;
     PyTealetObject *tealet = targ->dest;
     PyObject *func = targ->func;
     PyTealetApi_RunCFunc cfunc = targ->cfunc;
@@ -2928,6 +2921,8 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
     mdata = (PyTealetMainData *)*tealet_main_userpointer(t_current->main);
     assert(mdata);
+    mstate = mdata->mstate;
+    assert(mstate);
     assert(farg);
     targ->func = NULL;
     targ->arg = NULL;
