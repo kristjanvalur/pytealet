@@ -210,59 +210,32 @@ TLS handling has been migrated to `PyThread_tss_*` APIs (`PyThread_tss_create/ge
 
 ---
 
-### TODO: Add Eager Tealet Task Startup
+### ✅ Scheduler Task Factories, Eager Startup, and Stub-Backed Tasks (Resolved)
 
-**Location:** `src/tealet/scheduler.py`, task creation and scheduler run flow
+**Location:** `src/tealet/scheduler.py`, `src/tealet/tasks.py`
 
-**Opportunity:**
-Add an eager task creation mode similar in spirit to asyncio eager tasks, where
-newly spawned work can begin immediately during task construction instead of
-waiting for a later scheduler turn.
-
-**Why Tealets Fit Well:**
-Tealets can be created and entered without requiring an intermediate scheduler
-context switch. That should make eager startup especially natural and efficient:
-a task can run up to its first blocking/scheduling point immediately, while
-still becoming a normal scheduler-owned `TealetTask` afterward.
-
-**Design Notes:**
-- Preserve regular `spawn(...)` behavior unless eager mode is explicitly chosen.
-- Align naming and semantics with asyncio where practical, while keeping tealet
-    stackful behavior explicit.
-- Make sure task bookkeeping such as `all_tasks()` observes eagerly-started
+**Implemented:**
+- `BaseScheduler.set_task_factory(...)` and `get_task_factory()` configure
+    scheduler-local task construction policy.
+- `DefaultTaskFactory` preserves direct `TealetTask.prepare(...)` task creation.
+- `StubTaskFactory` creates scheduler tasks from a reusable prepared tealet stub;
+    `stub_here()` creates the reusable stub at the caller's current tealet stack
+    point, and the factory lazily creates one on first use if needed.
+- Factories receive the owning scheduler, target callable, selected
+    `contextvars.Context`, and optional per-spawn `eager_start` override.
+- `BaseScheduler.spawn(..., eager_start=...)` and factory defaults follow
+    asyncio naming. Eager startup runs immediately only while the scheduler is
+    already running, matching asyncio's `eager_start` condition.
+- Task bookkeeping via `all_tasks()` covers default, eager, and stub-backed
     tasks consistently, including tasks that complete during eager startup.
 
-**Priority:** Future scheduler enhancement
+**Current Design Choice:**
+The scheduler uses a factory-based task construction model rather than a
+dedicated scheduler-level `set_stub(...)` API. Stub usage is expressed by
+installing `StubTaskFactory`, which keeps stub-backed task creation aligned with
+the same task factory path as direct and eager task creation.
 
----
-
-### TODO: Add Scheduler Stub Facility
-
-**Location:** `src/tealet/scheduler.py`, task tealet construction
-
-**Opportunity:**
-Add a scheduler-level facility for controlling whether task tealets are created
-from a shared stub template or as ordinary new tealets.
-
-**Proposed API Shape:**
-- `create_stub()` as a module-level helper to create a task-compatible stub
-    tealet.
-- `set_stub(stub | None)` to configure the current/global scheduler task
-    creation mode.
-- When a stub is configured, new `TealetTask` instances should attach or
-    duplicate that stub before being prepared/run.
-- Passing `None` should restore normal non-stub task creation.
-
-**Design Notes:**
-- Keep the low-level `_tealet.tealet.stub()` / `set_stub(...)` behavior as the
-    underlying primitive; the scheduler API should only make task construction
-    policy convenient.
-- Define ownership and thread-affinity rules explicitly, especially if a stub is
-    created in one scheduler/thread and used by another.
-- Ensure `all_tasks()` and future eager-task startup semantics work the same for
-    stub-backed and non-stub-backed tasks.
-
-**Priority:** Future scheduler enhancement
+**Priority:** Completed
 
 ---
 
@@ -379,6 +352,7 @@ def test_thread_isolation():
 | #3 Other NULL checks | ✅ Fixed | - | Audited current getters; no active NULL-deref issue |
 | #4 tealet_create() | ✅ Closed | - | Migration target not applicable for current vendored libtealet API |
 | #5 PyThread API | ✅ Fixed | - | TLS migrated to `PyThread_tss_*` APIs |
+| Scheduler task factories | ✅ Fixed | - | Factory-based default/stub/eager_start task creation implemented |
 
 ---
 
