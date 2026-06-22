@@ -20,11 +20,11 @@ int PyTealetThrow_ExceptionChainContains(PyObject *raised, PyObject *needle);
 PyObject *PyTealetThrow_GetRaisedException(void);
 void PyTealetThrow_SetRaisedException(PyObject *exc);
 
-int PyTealetThrow_TakeRedirectTarget(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyTealetObject *tealet,
-                                     PyObject *exception, PyTealetObject **redirect_to_out);
+int PyTealetThrow_TakeRedirectTarget(PyTealetMainData *mdata, PyTealetObject *tealet, PyObject *exception,
+                                     PyTealetObject **redirect_to_out);
 
-int PyTealetThrow_RedirectUncaught(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyTealetObject *tealet,
-                                   PyObject *exception, PyTealetObject **return_to_io);
+int PyTealetThrow_RedirectUncaught(PyTealetMainData *mdata, PyTealetObject *tealet, PyObject *exception,
+                                   PyTealetObject **return_to_io);
 PyObject *PyTealetThrow_MaybeRaisePending(PyTealetMainData *mdata, PyTealetObject *current, PyObject *result);
 
 #endif

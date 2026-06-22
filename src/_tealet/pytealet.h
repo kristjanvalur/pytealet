@@ -24,7 +24,7 @@ PyObject *PyTealet_ThreadReap(PyTealetModuleState *mstate, Py_ssize_t cleanup_pa
 PyObject *PyTealet_ThreadSweep(PyTealetModuleState *mstate);
 PyObject *PyTealet_ThreadActive(PyTealetModuleState *mstate);
 PyObject *PyTealet_ThreadKill(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
-int PyTealet_ThreadReapMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata);
+int PyTealet_ThreadReapMdataForTeardown(PyTealetMainData *mdata);
 int PyTealet_ErrorWasRemote(PyTealetModuleState *mstate);
 PyObject *PyTealetApi_Create(PyTealetModuleState *mstate);
 PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_obj);

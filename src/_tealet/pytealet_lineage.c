@@ -68,9 +68,12 @@ static PyTealetMainData *pytealet_ring_pop(PyTealetMainData **ring_anchor_io) {
     return head;
 }
 
-int PyTealet_LineageLinkThreadData(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
-    assert(mstate);
+int PyTealet_LineageLinkThreadData(PyTealetMainData *mdata) {
+    PyTealetModuleState *mstate;
+
     assert(mdata);
+    mstate = mdata->mstate;
+    assert(mstate);
     assert(mstate->thread_data_lock);
 
     PyThread_acquire_lock(mstate->thread_data_lock, WAIT_LOCK);
@@ -79,21 +82,27 @@ int PyTealet_LineageLinkThreadData(PyTealetModuleState *mstate, PyTealetMainData
     return 0;
 }
 
-static void pytealet_unlink_thread_data_locked(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
-    assert(mstate);
+static void pytealet_unlink_thread_data_locked(PyTealetMainData *mdata) {
+    PyTealetModuleState *mstate;
+
     assert(mdata);
+    mstate = mdata->mstate;
+    assert(mstate);
     assert(mstate->thread_data_lock);
 
     pytealet_ring_remove(&mstate->thread_data_ring, mdata);
 }
 
-static void pytealet_unlink_thread_data(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
-    assert(mstate);
+static void pytealet_unlink_thread_data(PyTealetMainData *mdata) {
+    PyTealetModuleState *mstate;
+
     assert(mdata);
+    mstate = mdata->mstate;
+    assert(mstate);
     assert(mstate->thread_data_lock);
 
     PyThread_acquire_lock(mstate->thread_data_lock, WAIT_LOCK);
-    pytealet_unlink_thread_data_locked(mstate, mdata);
+    pytealet_unlink_thread_data_locked(mdata);
     PyThread_release_lock(mstate->thread_data_lock);
 }
 
@@ -124,15 +133,16 @@ static int pytealet_weakref_get_live(PyObject *wref, PyObject **obj_out) {
 #endif
 }
 
-int PyTealet_LineageReapInner(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyObject *nerfed,
-                              int clear_current_tss, int best_effort) {
+int PyTealet_LineageReapInner(PyTealetMainData *mdata, PyObject *nerfed, int clear_current_tss, int best_effort) {
+    PyTealetModuleState *mstate;
     PyObject *wrappers = NULL;
     PyObject *wref;
     tealet_t *main_tealet = NULL;
 
-    assert(mstate);
     if (!mdata)
         return 0;
+    mstate = mdata->mstate;
+    assert(mstate);
 
     if (mdata->main_wrapper) {
         PyTealetObject *main_wrapper = (PyTealetObject *)mdata->main_wrapper;
@@ -263,7 +273,7 @@ int PyTealet_LineageReapInner(PyTealetModuleState *mstate, PyTealetMainData *mda
     Py_CLEAR(mdata->dustbin);
     Py_CLEAR(mdata->wrappers);
     Py_CLEAR(mdata->throw_records);
-    pytealet_unlink_thread_data(mstate, mdata);
+    pytealet_unlink_thread_data(mdata);
     Py_CLEAR(mdata->domain_lock_obj);
     PyMem_Free(mdata);
 
@@ -276,12 +286,12 @@ best_effort_fail:
     /* Best-effort cleanup for teardown paths. */
     PyErr_WriteUnraisable(Py_None);
     PyErr_Clear();
-    pytealet_unlink_thread_data(mstate, mdata);
+    pytealet_unlink_thread_data(mdata);
     return -1;
 }
 
-int PyTealet_ThreadReapMdataForTeardown(PyTealetModuleState *mstate, PyTealetMainData *mdata) {
-    return PyTealet_LineageReapInner(mstate, mdata, NULL, 0, 1);
+int PyTealet_ThreadReapMdataForTeardown(PyTealetMainData *mdata) {
+    return PyTealet_LineageReapInner(mdata, NULL, 0, 1);
 }
 
 int PyTealet_LineageThreadIdentIsAlive(unsigned long thread_id, int *alive_out) {
@@ -427,14 +437,13 @@ static PyObject *pytealet_collect_known_thread_ids(unsigned long current_tid) {
     return known_thread_ids;
 }
 
-static void pytealet_detached_ring_drain(PyTealetModuleState *mstate, PyTealetMainData **ring_io) {
+static void pytealet_detached_ring_drain(PyTealetMainData **ring_io) {
     PyTealetMainData *mdata;
 
-    assert(mstate);
     assert(ring_io);
 
     while ((mdata = pytealet_ring_pop(ring_io)) != NULL) {
-        if (PyTealet_LineageReapInner(mstate, mdata, NULL, 0, 1) < 0) {
+        if (PyTealet_LineageReapInner(mdata, NULL, 0, 1) < 0) {
             if (PyErr_Occurred()) {
                 PyErr_WriteUnraisable(Py_None);
                 PyErr_Clear();
@@ -492,7 +501,7 @@ PyObject *PyTealet_ThreadSweep(PyTealetModuleState *mstate) {
                     if (pytealet_tid_set_add(known_thread_ids, cursor->tid) < 0)
                         goto error;
                 } else {
-                    pytealet_unlink_thread_data_locked(mstate, cursor);
+                    pytealet_unlink_thread_data_locked(cursor);
                     pytealet_ring_append(&detached_ring, cursor);
                 }
             }
@@ -509,7 +518,7 @@ PyObject *PyTealet_ThreadSweep(PyTealetModuleState *mstate) {
 
         assert(detached);
 
-        if (PyTealet_LineageReapInner(mstate, detached, nerfed, 0, 1) < 0) {
+        if (PyTealet_LineageReapInner(detached, nerfed, 0, 1) < 0) {
             if (PyErr_Occurred()) {
                 PyErr_WriteUnraisable(Py_None);
                 PyErr_Clear();
@@ -530,7 +539,7 @@ error:
         PyObject *etb = NULL;
 
         PyErr_Fetch(&etype, &evalue, &etb);
-        pytealet_detached_ring_drain(mstate, &detached_ring);
+        pytealet_detached_ring_drain(&detached_ring);
         PyErr_Restore(etype, evalue, etb);
     }
 
