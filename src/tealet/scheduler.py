@@ -14,7 +14,7 @@ import warnings
 import weakref
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Coroutine, TypeVar, cast
 
 import tealet
 
@@ -169,7 +169,7 @@ class Channel(_tasks.Linkable):
     def _deliver(self, packet: tuple[bool, object]) -> object:
         is_exc, payload = packet
         if is_exc:
-            raise payload
+            raise cast(BaseException, payload)
         return payload
 
     # -- Waiter bookkeeping -------------------------------------------
@@ -325,7 +325,7 @@ class Channel(_tasks.Linkable):
             if packet is not missing and isinstance(exc, RawTimeoutError):
                 # Timeout-vs-delivery race: if a packet was already delivered,
                 # consume the packet and suppress the timeout.
-                return self._deliver(packet)
+                return self._deliver(cast(tuple[bool, object], packet))
             raise
 
         return self._deliver(self._packets.pop(current))
@@ -390,7 +390,7 @@ class Channel(_tasks.Linkable):
             packet = self._packets.pop(waiter, missing)
             self._unlink_waiter(waiter)
             if packet is not missing and isinstance(exc, _tasks.CancelledError):
-                return self._deliver(packet)
+                return self._deliver(cast(tuple[bool, object], packet))
             raise
 
         return self._deliver(self._packets.pop(waiter))
@@ -876,7 +876,7 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             if fut.get_loop() is not loop:
                 raise RuntimeError("wait_async future is bound to a different event loop")
         elif inspect.isawaitable(awaitable):
-            fut = loop.create_task(awaitable)
+            fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable))
         else:
             raise TypeError("awaitable must be an awaitable, Future, or Task")
 
@@ -969,7 +969,7 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             pass
         return result
 
-    def _pump(self, n=0) -> None:
+    def _pump(self, n=0) -> int:
         if self._runner is not None:
             raise RuntimeError("Scheduler already running")
         start_count = self._n_scheduled
@@ -983,7 +983,7 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             self._runner = None
             self._target_count = None
 
-    def pump(self, n=0) -> None:
+    def pump(self, n=0) -> int:
         self._verify_current_scheduler()
         self._running = True
         try:
