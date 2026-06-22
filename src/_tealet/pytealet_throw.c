@@ -220,15 +220,17 @@ void PyTealetThrow_SetRaisedException(PyObject *exc) {
 #endif
 }
 
-int PyTealetThrow_TakeRedirectTarget(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyTealetObject *tealet,
-                                     PyObject *exception, PyTealetObject **redirect_to_out) {
+int PyTealetThrow_TakeRedirectTarget(PyTealetMainData *mdata, PyTealetObject *tealet, PyObject *exception,
+                                     PyTealetObject **redirect_to_out) {
+    PyTealetModuleState *mstate;
     uint64_t token;
     PyObject *throw_exc = NULL;
     PyObject *throw_fallback = NULL;
     int pop_rc;
 
-    assert(mstate);
     assert(mdata);
+    mstate = mdata->mstate;
+    assert(mstate);
     assert(tealet);
     assert(redirect_to_out);
 
@@ -265,17 +267,16 @@ int PyTealetThrow_TakeRedirectTarget(PyTealetModuleState *mstate, PyTealetMainDa
     return 0;
 }
 
-int PyTealetThrow_RedirectUncaught(PyTealetModuleState *mstate, PyTealetMainData *mdata, PyTealetObject *tealet,
-                                   PyObject *exception, PyTealetObject **return_to_io) {
+int PyTealetThrow_RedirectUncaught(PyTealetMainData *mdata, PyTealetObject *tealet, PyObject *exception,
+                                   PyTealetObject **return_to_io) {
     PyTealetObject *redirect_to = NULL;
     int take_rc;
 
-    assert(mstate);
     assert(mdata);
     assert(tealet);
     assert(return_to_io && *return_to_io != NULL);
 
-    take_rc = PyTealetThrow_TakeRedirectTarget(mstate, mdata, tealet, exception, &redirect_to);
+    take_rc = PyTealetThrow_TakeRedirectTarget(mdata, tealet, exception, &redirect_to);
     if (take_rc < 0) {
         PyErr_WriteUnraisable(NULL);
         PyErr_Clear();

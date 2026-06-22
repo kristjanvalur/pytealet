@@ -789,7 +789,7 @@ static void pytealet_module_free(void *m) {
         PyThread_release_lock(mstate->thread_data_lock);
         if (!mdata)
             break;
-        (void)PyTealet_ThreadReapMdataForTeardown(mstate, mdata);
+        (void)PyTealet_ThreadReapMdataForTeardown(mdata);
     }
 
     if (PyThread_tss_is_created(&mstate->tls_key))
