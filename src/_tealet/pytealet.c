@@ -2837,10 +2837,9 @@ static void pytealet_apply_resolve_target(PyTealetMainData *mdata, PyTealetObjec
     }
     if (CheckTarget(mstate, new_return_to, current, "resolve_target") < 0)
         goto err;
-    Py_XDECREF(hook_result);
-
     Py_INCREF(new_return_to);
     new_return_arg = Py_NewRef(arg_obj ? arg_obj : Py_None);
+    Py_XDECREF(hook_result);
 
     *return_to_io = new_return_to;
     *return_arg_io = new_return_arg;
