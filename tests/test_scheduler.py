@@ -10,6 +10,7 @@ import weakref
 import pytest
 
 import _tealet
+import tealet.scheduler as scheduler_module
 from tealet.locks import (
     Barrier,
     BoundedSemaphore,
@@ -94,7 +95,7 @@ class TestSchedulerAccessors:
 
         for name in (
             "spawn",
-            "wait_async",
+            "await_",
         ):
             assert callable(getattr(sync, name))
             assert callable(getattr(async_, name))
@@ -1963,7 +1964,7 @@ class TestSchedulerExamples:
         with pytest.raises(exc_type):
             task.result()
 
-    def test_wait_async_returns_result(self):
+    def test_await_returns_result(self):
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[int] = []
@@ -1973,14 +1974,14 @@ class TestSchedulerExamples:
             return 11
 
         def worker() -> None:
-            seen.append(s.wait_async(compute()))
+            seen.append(s.await_(compute()))
 
         s.spawn(worker)
         asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
 
         assert seen == [11]
 
-    def test_wait_async_propagates_exception(self):
+    def test_await_propagates_exception(self):
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[str] = []
@@ -1991,7 +1992,7 @@ class TestSchedulerExamples:
 
         def worker() -> None:
             with pytest.raises(ValueError, match="boom"):
-                s.wait_async(boom())
+                s.await_(boom())
             seen.append("handled")
 
         s.spawn(worker)
@@ -1999,7 +2000,7 @@ class TestSchedulerExamples:
 
         assert seen == ["handled"]
 
-    def test_wait_async_cancelled_future_cancels_tealet_task(self):
+    def test_await_cancelled_future_cancels_tealet_task(self):
         s = AsyncScheduler()
         set_scheduler(s)
 
@@ -2008,7 +2009,7 @@ class TestSchedulerExamples:
             async_future.cancel()
 
             def worker() -> None:
-                s.wait_async(async_future)
+                s.await_(async_future)
 
             task = s.spawn(worker)
             await asyncio.wait_for(s.arun(), timeout=1.0)
@@ -2020,7 +2021,7 @@ class TestSchedulerExamples:
 
         asyncio.run(orchestrate())
 
-    def test_wait_async_marks_tealet_blocked(self):
+    def test_await_marks_tealet_blocked(self):
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[tuple[str, bool, bool]] = []
@@ -2033,7 +2034,7 @@ class TestSchedulerExamples:
             current = _tealet.current()
             seen.append(("before", current.is_blocked(), current.is_runnable()))
             s.call_later(0.0, lambda: seen.append(("during", current.is_blocked(), current.is_runnable())))
-            s.wait_async(compute())
+            s.await_(compute())
             seen.append(("after", current.is_blocked(), current.is_runnable()))
 
         s.spawn(worker)
@@ -2043,6 +2044,197 @@ class TestSchedulerExamples:
             ("before", False, False),
             ("during", True, False),
             ("after", False, False),
+        ]
+
+    def test_await_asynkit_returns_synchronous_coroutine_without_task(self, monkeypatch):
+        if scheduler_module._get_coro_start() is None:
+            pytest.skip("asynkit is not installed")
+
+        s = AsyncScheduler()
+        set_scheduler(s)
+        seen: list[object] = []
+
+        async def compute() -> int:
+            seen.append(("body", len(s._pending_async_waits)))
+            return 12
+
+        def worker() -> None:
+            seen.append(("result", s.await_(compute())))
+            seen.append(("pending", len(s._pending_async_waits)))
+
+        async def orchestrate() -> None:
+            loop = asyncio.get_running_loop()
+            create_task_calls: list[object] = []
+            original_create_task = loop.create_task
+
+            def create_task(coro, *args, **kwargs):
+                create_task_calls.append(coro)
+                return original_create_task(coro, *args, **kwargs)
+
+            monkeypatch.setattr(loop, "create_task", create_task)
+            s.spawn(worker)
+            await asyncio.wait_for(s.arun(), timeout=1.0)
+            assert create_task_calls == []
+
+        asyncio.run(orchestrate())
+
+        assert seen == [("body", 0), ("result", 12), ("pending", 0)]
+
+    def test_await_asynkit_uses_copied_context_for_synchronous_coroutine(self):
+        if scheduler_module._get_coro_start() is None:
+            pytest.skip("asynkit is not installed")
+
+        s = AsyncScheduler()
+        set_scheduler(s)
+        marker = contextvars.ContextVar("marker", default="unset")
+        seen: list[object] = []
+
+        async def compute() -> str:
+            seen.append(("body-before", marker.get()))
+            marker.set("body-changed")
+            seen.append(("body-after", marker.get()))
+            return marker.get()
+
+        def worker() -> None:
+            marker.set("caller")
+            seen.append(("result", s.await_(compute())))
+            seen.append(("caller-after", marker.get()))
+
+        s.spawn(worker)
+        asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
+
+        assert seen == [
+            ("body-before", "caller"),
+            ("body-after", "body-changed"),
+            ("result", "body-changed"),
+            ("caller-after", "caller"),
+        ]
+
+    def test_await_asynkit_delegates_blocked_coroutine_to_loop(self, monkeypatch):
+        if scheduler_module._get_coro_start() is None:
+            pytest.skip("asynkit is not installed")
+
+        s = AsyncScheduler()
+        set_scheduler(s)
+        seen: list[object] = []
+
+        async def compute() -> int:
+            seen.append("before-await")
+            await asyncio.sleep(0)
+            seen.append("after-await")
+            return 13
+
+        def worker() -> None:
+            seen.append(("result", s.await_(compute())))
+
+        async def orchestrate() -> None:
+            loop = asyncio.get_running_loop()
+            create_task_calls: list[object] = []
+            original_create_task = loop.create_task
+
+            def create_task(coro, *args, **kwargs):
+                create_task_calls.append(coro)
+                return original_create_task(coro, *args, **kwargs)
+
+            monkeypatch.setattr(loop, "create_task", create_task)
+            s.spawn(worker)
+            await asyncio.wait_for(s.arun(), timeout=1.0)
+            assert len(create_task_calls) == 1
+
+        asyncio.run(orchestrate())
+
+        assert seen == ["before-await", "after-await", ("result", 13)]
+
+    def test_await_asynkit_uses_same_context_for_blocked_continuation(self):
+        if scheduler_module._get_coro_start() is None:
+            pytest.skip("asynkit is not installed")
+
+        s = AsyncScheduler()
+        set_scheduler(s)
+        marker = contextvars.ContextVar("marker", default="unset")
+        seen: list[object] = []
+
+        async def compute() -> str:
+            seen.append(("body-before", marker.get()))
+            marker.set("body-before-await")
+            await asyncio.sleep(0)
+            seen.append(("body-after-await", marker.get()))
+            marker.set("body-after-await")
+            return marker.get()
+
+        def worker() -> None:
+            marker.set("caller")
+            seen.append(("result", s.await_(compute())))
+            seen.append(("caller-after", marker.get()))
+
+        s.spawn(worker)
+        asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
+
+        assert seen == [
+            ("body-before", "caller"),
+            ("body-after-await", "body-before-await"),
+            ("result", "body-after-await"),
+            ("caller-after", "caller"),
+        ]
+
+    def test_await_without_asynkit_falls_back_to_loop_task(self, monkeypatch):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        seen: list[object] = []
+        monkeypatch.setattr(scheduler_module, "_get_coro_start", lambda: None)
+
+        async def compute() -> int:
+            seen.append("body")
+            return 14
+
+        def worker() -> None:
+            seen.append(("result", s.await_(compute())))
+
+        async def orchestrate() -> None:
+            loop = asyncio.get_running_loop()
+            create_task_calls: list[object] = []
+            original_create_task = loop.create_task
+
+            def create_task(coro, *args, **kwargs):
+                create_task_calls.append(coro)
+                return original_create_task(coro, *args, **kwargs)
+
+            monkeypatch.setattr(loop, "create_task", create_task)
+            s.spawn(worker)
+            await asyncio.wait_for(s.arun(), timeout=1.0)
+            assert len(create_task_calls) == 1
+
+        asyncio.run(orchestrate())
+
+        assert seen == ["body", ("result", 14)]
+
+    def test_await_without_asynkit_uses_loop_task_context(self, monkeypatch):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        marker = contextvars.ContextVar("marker", default="unset")
+        seen: list[object] = []
+        monkeypatch.setattr(scheduler_module, "_get_coro_start", lambda: None)
+
+        async def compute() -> str:
+            seen.append(("body-before", marker.get()))
+            marker.set("body-changed")
+            await asyncio.sleep(0)
+            seen.append(("body-after", marker.get()))
+            return marker.get()
+
+        def worker() -> None:
+            marker.set("caller")
+            seen.append(("result", s.await_(compute())))
+            seen.append(("caller-after", marker.get()))
+
+        s.spawn(worker)
+        asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
+
+        assert seen == [
+            ("body-before", "caller"),
+            ("body-after", "body-changed"),
+            ("result", "body-changed"),
+            ("caller-after", "caller"),
         ]
 
     def test_lock_serializes_access(self):
@@ -2709,7 +2901,7 @@ class TestFutureExamples:
 
         assert shield(future).wait() == 12
 
-    def test_wait_async_cancelled_error_schedules_async_future_cancel(self):
+    def test_await_cancelled_error_schedules_async_future_cancel(self):
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[object] = []
@@ -2720,7 +2912,7 @@ class TestFutureExamples:
 
             def waiter() -> None:
                 try:
-                    s.wait_async(async_future)
+                    s.await_(async_future)
                 except CancelledError:
                     seen.append(("waiter:cancelled", async_future.cancelled()))
                     raise
@@ -2749,7 +2941,7 @@ class TestFutureExamples:
             ("after-call-soon", True),
         ]
 
-    def test_wait_async_cancelled_error_does_not_cancel_asyncio_shielded_future(self):
+    def test_await_cancelled_error_does_not_cancel_asyncio_shielded_future(self):
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[object] = []
@@ -2761,7 +2953,7 @@ class TestFutureExamples:
 
             def waiter() -> None:
                 try:
-                    s.wait_async(shielded)
+                    s.await_(shielded)
                 except CancelledError:
                     seen.append(("waiter:cancelled", shielded.cancelled(), async_future.cancelled()))
                     raise
@@ -2863,7 +3055,7 @@ class TestFutureExamples:
             s.call_later(0.001, future.set_result, 7)
             runner = asyncio.create_task(s.arun())
             try:
-                assert await asyncio.wait_for(future.async_wait(), timeout=1.0) == 7
+                assert await asyncio.wait_for(future, timeout=1.0) == 7
                 assert future.result() == 7
             finally:
                 await asyncio.wait_for(runner, timeout=1.0)
@@ -2880,7 +3072,7 @@ class TestFutureExamples:
             runner = asyncio.create_task(s.arun())
             try:
                 with pytest.raises(ValueError, match="boom"):
-                    await asyncio.wait_for(future.async_wait(), timeout=1.0)
+                    await asyncio.wait_for(future, timeout=1.0)
                 with pytest.raises(ValueError, match="boom"):
                     future.result()
                 exc = future.exception()
@@ -2902,7 +3094,7 @@ class TestFutureExamples:
             runner = asyncio.create_task(s.arun())
             try:
                 with pytest.raises(CancelledError):
-                    await asyncio.wait_for(task.async_wait(), timeout=1.0)
+                    await asyncio.wait_for(task, timeout=1.0)
                 assert task.cancelled() is True
                 assert isinstance(task._exception, CancelledError)
             finally:

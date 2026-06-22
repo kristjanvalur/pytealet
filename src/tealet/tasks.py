@@ -149,7 +149,7 @@ class Future(Generic[T]):
             raise
         return self.result()
 
-    async def async_wait(self) -> T:
+    async def _async_wait(self) -> T:
         if not self._done:
             try:
                 await self._event.async_wait()
@@ -161,7 +161,7 @@ class Future(Generic[T]):
         return self.result()
 
     def __await__(self):
-        return self.async_wait().__await__()
+        return self._async_wait().__await__()
 
     def result(self) -> T:
         if not self._done:

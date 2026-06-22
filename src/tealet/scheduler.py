@@ -27,6 +27,25 @@ from .locks import (
 )
 from . import tasks as _tasks
 
+_CoroStart: Any | None = None
+_CoroStart_imported = False
+
+
+def _get_coro_start() -> Any | None:
+    global _CoroStart, _CoroStart_imported
+    if not _CoroStart_imported:
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"asynkit(\.|$)")
+                from asynkit import CoroStart
+        except ImportError:
+            _CoroStart = None
+        else:
+            _CoroStart = CoroStart
+        _CoroStart_imported = True
+    return _CoroStart
+
+
 T = TypeVar("T")
 
 
@@ -866,15 +885,22 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             if not awakened:
                 self._schedule()
 
-    def wait_async(self, awaitable):
-        """Wait for an asyncio awaitable from a tealet task and return its result."""
+    def await_(self, awaitable):
+        """Await an asyncio awaitable from a tealet task and return its result."""
         current = tealet.current()
         loop = asyncio.get_running_loop()
 
         if asyncio.isfuture(awaitable):
             fut = awaitable
             if fut.get_loop() is not loop:
-                raise RuntimeError("wait_async future is bound to a different event loop")
+                raise RuntimeError("await_ future is bound to a different event loop")
+        elif inspect.iscoroutine(awaitable) and (coro_start_factory := _get_coro_start()) is not None:
+            coro_start = coro_start_factory(
+                cast(Coroutine[Any, Any, Any], awaitable), context=contextvars.copy_context()
+            )
+            if coro_start.done():
+                return coro_start.result()
+            fut = loop.create_task(coro_start.as_coroutine())
         elif inspect.isawaitable(awaitable):
             fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable))
         else:
@@ -1030,7 +1056,7 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
 
         This sync runner only considers local runnable state (`_tasks`) and
         scheduled timer callbacks (`_timers`). Tealets blocked in
-        `wait_async()` are not progressed here; use `arun()` for that mode.
+        `await_()` are not progressed here; use `arun()` for that mode.
         """
         self._verify_current_scheduler()
         self._running = True

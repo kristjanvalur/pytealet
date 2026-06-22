@@ -67,8 +67,14 @@ Implemented:
     the underlying tealet future/task through the running scheduler
   - cancelling a tealet task waiting on a tealet `Future` schedules cancellation
     of the awaited future/task through the running scheduler
-  - cancelling a tealet task waiting in `wait_async(...)` schedules cancellation
+  - cancelling a tealet task waiting in `await_(...)` schedules cancellation
     of the awaited asyncio future/task with `loop.call_soon(...)`
+  - `await_(awaitable)` delegates awaitable execution through asyncio without
+    exposing a separate `context=` argument, matching the shape of Python's
+    `await` expression
+  - delegated coroutine objects and newly-created asyncio tasks run in a copy
+    of the current `contextvars.Context`; existing asyncio `Future` and `Task`
+    objects retain their already-captured context
   - awaiting an already-cancelled tealet or asyncio future raises the same
     `CancelledError` through the tealet/asyncio boundary
   - shielding prevents waiter cancellation from propagating into the shielded

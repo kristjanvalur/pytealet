@@ -215,37 +215,37 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
     def sock_recv(self, sock: socket.socket, n: int) -> bytes:
         loop = _asyncio.get_running_loop()
-        return self.wait_async(loop.sock_recv(sock, n))
+        return self.await_(loop.sock_recv(sock, n))
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
         loop = _asyncio.get_running_loop()
-        return self.wait_async(loop.sock_recv_into(sock, buf))
+        return self.await_(loop.sock_recv_into(sock, buf))
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
         loop = _asyncio.get_running_loop()
-        return self.wait_async(loop.sock_recvfrom(sock, bufsize))
+        return self.await_(loop.sock_recvfrom(sock, bufsize))
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
         loop = _asyncio.get_running_loop()
         if nbytes:
-            return self.wait_async(loop.sock_recvfrom_into(sock, buf, nbytes))
-        return self.wait_async(loop.sock_recvfrom_into(sock, buf))
+            return self.await_(loop.sock_recvfrom_into(sock, buf, nbytes))
+        return self.await_(loop.sock_recvfrom_into(sock, buf))
 
     def sock_sendall(self, sock: socket.socket, data: Any) -> None:
         loop = _asyncio.get_running_loop()
-        return self.wait_async(loop.sock_sendall(sock, data))
+        return self.await_(loop.sock_sendall(sock, data))
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
         loop = _asyncio.get_running_loop()
-        return self.wait_async(loop.sock_sendto(sock, data, address))
+        return self.await_(loop.sock_sendto(sock, data, address))
 
     def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
         loop = _asyncio.get_running_loop()
-        return self.wait_async(loop.sock_accept(sock))
+        return self.await_(loop.sock_accept(sock))
 
     def sock_connect(self, sock: socket.socket, address: Any) -> None:
         loop = _asyncio.get_running_loop()
-        return self.wait_async(loop.sock_connect(sock, address))
+        return self.await_(loop.sock_connect(sock, address))
 
     # -- Async waiting -------------------------------------------------
 
@@ -257,7 +257,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         timeout = self._time_to_next_timer()
         if timeout is None:
             # No scheduler timer is pending. We may still be alive because one or
-            # more tealets are blocked in wait_async() on external asyncio
+            # more tealets are blocked in await_() on external asyncio
             # awaitables, so block until an explicit wakeup arrives.
             await wakeup.wait()
             wakeup.clear()

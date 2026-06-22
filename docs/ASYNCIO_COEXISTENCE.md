@@ -92,11 +92,11 @@ an asyncio awaitable:
 
 ```python
 def worker() -> bytes:
-  response = get_running_scheduler().wait_async(fetch_bytes(url))
+  response = get_running_scheduler().await_(fetch_bytes(url))
     return parse_response(response)
 ```
 
-`wait_async()` would roughly do this:
+`await_()` would roughly do this:
 
 1. Require or capture an owning asyncio event loop.
 2. Convert the awaitable to an asyncio task or future.
@@ -140,11 +140,17 @@ except StopIteration as exc:
     return exc.value
 ```
 
-This is the same family of technique explored by `py-asynkit`. In particular,
-`asynkit.CoroStart` starts a coroutine eagerly by sending into it until it either
-returns, raises, or yields a blocking object. `asynkit.await_sync()` then treats
-"the coroutine yielded" as failure, because a purely synchronous caller has no
-scheduler available to finish the operation.
+This is the same family of technique explored by `py-asynkit`. When the
+optional `asynkit` dependency is installed, `await_()` uses
+`asynkit.CoroStart` for coroutine objects: synchronous completion returns
+directly in the current tealet, while a coroutine that yields a blocking object
+is continued as an asyncio task and waited on normally. Like Python's `await`
+expression, `await_()` does not expose a separate `context=` parameter.
+Coroutine objects and awaitables that `await_()` wraps in a new asyncio task run
+in a copy of the current `contextvars.Context`; existing asyncio `Future` and
+`Task` objects keep the context they already captured. `asynkit.await_sync()`
+then treats "the coroutine yielded" as failure, because a purely synchronous
+caller has no scheduler available to finish the operation.
 
 Tealet changes that last step. If the coroutine yields,
 `get_running_scheduler().await_()` does not need to fail. It can interpret the
@@ -200,11 +206,11 @@ future while pending; when it is resumed after completion, the future's own awai
 iterator calls `future.result()` and either returns the value or raises the
 stored exception.
 
-This is different from `wait_async(awaitable)`. A `wait_async()` operation can be
-implemented by handing the whole awaitable to `asyncio.create_task()` and waiting
-for that task. An `await_()` operation is a tealet-side task runner. It drives
-the coroutine step by step and only delegates the leaves it cannot service
-itself.
+This is different from a future tealet-side await runner. The current `await_()`
+operation can be implemented by handing the whole awaitable to
+`asyncio.create_task()` and waiting for that task. A tealet-side await runner
+would drive the coroutine step by step and only delegate the leaves it cannot
+service itself.
 
 That gives tealet an interesting depth-first execution model:
 
@@ -325,11 +331,11 @@ Then tealet tasks could still block on asyncio awaitables:
 
 ```python
 def stackful_worker() -> None:
-  data = get_running_scheduler().wait_async(fetch_bytes(url))
+  data = get_running_scheduler().await_(fetch_bytes(url))
     process(data)
 ```
 
-The difference is that `wait_async()` would rely on the asyncio-pump tealet to
+The difference is that `await_()` would rely on the asyncio-pump tealet to
 drive the event loop until the awaitable completes. The application's outermost
 control flow would remain tealet-first and could avoid an `asyncio.run(...)`
 entry point.
@@ -621,7 +627,6 @@ class TealetScheduler:
     async def run_async(self) -> None: ...
 
     def yield_(self) -> None: ...
-    def wait_async(self, awaitable) -> object: ...
     def await_(self, awaitable) -> object: ...
 
 
@@ -633,21 +638,22 @@ class Event:
 
 class TealetFuture(Generic[T]):
     def result(self) -> T: ...
-    async def async_result(self) -> T: ...
+    def __await__(self): ...
     def cancel(self) -> bool: ...
 ```
 
 The explicit method names make it clear which side of the bridge is being used:
 
 - `wait()` and `result()` are tealet-blocking operations.
-- `async_wait()` and `async_result()` are asyncio-awaiting operations.
-- `wait_async()` delegates an awaitable to asyncio and blocks the current tealet
+- `async_wait()` is the explicit asyncio-awaiting operation for events.
+- Tealet futures are asyncio-awaitable through `__await__`.
+- `await_()` delegates an awaitable to asyncio and blocks the current tealet
   until asyncio completes it.
-- `await_()` manually drives the await protocol from the tealet scheduler,
-  falling back to asyncio task machinery only when needed.
+- A future tealet-side await runner could manually drive the await protocol from
+  the tealet scheduler, falling back to asyncio task machinery only when needed.
 
-Later, if the behavior is stable, `Event.__await__` and `TealetFuture.__await__`
-could forward to the explicit asyncio methods.
+Later, if the behavior is stable, `Event.__await__` could forward to the
+explicit asyncio method.
 
 ## Best Coexistence Strategy
 
@@ -659,8 +665,7 @@ The best first direction is:
 3. Embed the tealet scheduler as a guest inside the asyncio loop.
 4. Provide explicit adapters in both directions:
    - asyncio code awaits tealet events and futures;
-  - tealet code delegates asyncio awaitables with `wait_async()`;
-  - tealet code can experimentally drive awaitables with `await_()`.
+  - tealet code delegates asyncio awaitables with `await_()`.
 5. Make cancellation, context propagation, and thread ownership explicit rather
    than implicit.
 
