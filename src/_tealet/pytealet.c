@@ -129,10 +129,6 @@ static int PyTealet_Check(PyObject *op, PyTealetModuleState *mstate) {
     return mstate && mstate->tealet_type && PyObject_TypeCheck(op, mstate->tealet_type);
 }
 
-static int PyTealet_CheckExact(PyObject *op, PyTealetModuleState *mstate) {
-    return mstate && mstate->tealet_type && (Py_TYPE(op) == mstate->tealet_type);
-}
-
 static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const char *what, PyObject *value,
                                            PyObject *exception) {
     PyObject *exc_type;
@@ -950,45 +946,6 @@ validate_target:
     return PyTuple_Pack(3, target_obj, arg_obj ? arg_obj : Py_None, suppress_exc ? Py_True : Py_False);
 }
 
-static int pytealet_prepare_dispatch(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
-                                     PyTealetMainData *mdata, PyObject *func, PyTealetApi_RunCFunc cfunc,
-                                     const char *operation) {
-    if (CheckTarget(mstate, target, current, operation))
-        return -1;
-
-    if (target->state != STATE_NEW && target->state != STATE_STUB) {
-        PyErr_SetString(mstate->state_error, "must be new or stub");
-        return -1;
-    }
-
-    if ((func == NULL) == (cfunc == NULL)) {
-        PyErr_SetString(PyExc_TypeError, "exactly one of python callable or C callable is required");
-        return -1;
-    }
-
-    if (func != NULL) {
-        if (!PyCallable_Check(func)) {
-            PyErr_SetString(PyExc_TypeError, "prepare() argument 'function' must be callable");
-            return -1;
-        }
-        Py_XSETREF(target->prepared_func, Py_NewRef(func));
-        target->prepared_cfunc = NULL;
-    } else {
-        Py_CLEAR(target->prepared_func);
-        target->prepared_cfunc = cfunc;
-    }
-
-    if (pytealet_prime_prepared(mstate, target, current, mdata, operation) < 0) {
-        Py_CLEAR(target->prepared_func);
-        target->prepared_cfunc = NULL;
-        return -1;
-    }
-
-    if (mdata)
-        mdata->last_error_remote = 0;
-    return 0;
-}
-
 static PyObject *pytealet_prepare(PyObject *self, PyObject *args, PyObject *kwargs) {
     static char *kwlist[] = {"function", NULL};
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
@@ -1027,7 +984,40 @@ int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObj
 
     target = (PyTealetObject *)target_obj;
     current = TryGetCurrent(mstate, &mdata);
-    return pytealet_prepare_dispatch(mstate, target, current, mdata, func, cfunc, "prepare()");
+    if (CheckTarget(mstate, target, current, "prepare()"))
+        return -1;
+
+    if (target->state != STATE_NEW && target->state != STATE_STUB) {
+        PyErr_SetString(mstate->state_error, "must be new or stub");
+        return -1;
+    }
+
+    if ((func == NULL) == (cfunc == NULL)) {
+        PyErr_SetString(PyExc_TypeError, "exactly one of python callable or C callable is required");
+        return -1;
+    }
+
+    if (func != NULL) {
+        if (!PyCallable_Check(func)) {
+            PyErr_SetString(PyExc_TypeError, "prepare() argument 'function' must be callable");
+            return -1;
+        }
+        Py_XSETREF(target->prepared_func, Py_NewRef(func));
+        target->prepared_cfunc = NULL;
+    } else {
+        Py_CLEAR(target->prepared_func);
+        target->prepared_cfunc = cfunc;
+    }
+
+    if (pytealet_prime_prepared(mstate, target, current, mdata, "prepare()") < 0) {
+        Py_CLEAR(target->prepared_func);
+        target->prepared_cfunc = NULL;
+        return -1;
+    }
+
+    if (mdata)
+        mdata->last_error_remote = 0;
+    return 0;
 }
 
 static PyObject *pytealet_run_dispatch(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
