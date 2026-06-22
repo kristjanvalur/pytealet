@@ -75,6 +75,8 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
                                 PyObject *kwnames);
 static PyObject *pytealet_set_pending_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                         Py_ssize_t nargs, PyObject *kwnames);
+static int pytealet_prime_prepared(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
+                                   PyTealetMainData *mdata, const char *operation);
 
 enum {
     PYTEALET_COLLECT_OMIT_MAIN = 1u << 0,
@@ -82,6 +84,7 @@ enum {
 };
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
+static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg);
 
 /* ===================================================================== */
 /* Type and Module Access Helpers                                        */
@@ -124,10 +127,6 @@ static PyTealetModuleState *GetModuleStateFromClass(PyTypeObject *cls) {
 
 static int PyTealet_Check(PyObject *op, PyTealetModuleState *mstate) {
     return mstate && mstate->tealet_type && PyObject_TypeCheck(op, mstate->tealet_type);
-}
-
-static int PyTealet_CheckExact(PyObject *op, PyTealetModuleState *mstate) {
-    return mstate && mstate->tealet_type && (Py_TYPE(op) == mstate->tealet_type);
 }
 
 static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const char *what, PyObject *value,
@@ -646,6 +645,13 @@ static int pytealet_traverse(PyObject *obj, visitproc visit, void *arg) {
 static int pytealet_clear(PyObject *obj) {
     /* tracking-ref is cleared in the dealloc it isn't part of the GC cycle */
     PyTealetObject *tealet = (PyTealetObject *)obj;
+    if (tealet->state == STATE_RUN && (tealet->prepared_func || tealet->prepared_cfunc) && tealet->tealet) {
+        TEALET_SET_PYOBJECT(tealet->tealet, NULL);
+        pytealet_untrack_wrapper(tealet, 0);
+        tealet_delete(tealet->tealet);
+        tealet->tealet = NULL;
+        tealet->state = STATE_EXIT;
+    }
     Py_CLEAR(tealet->prepared_func);
     tealet->prepared_cfunc = NULL;
     PyTealetTstate_Drop(&tealet->tstate, NULL, 1);
@@ -657,7 +663,8 @@ static void pytealet_dealloc(PyObject *obj) {
     PyTealetObject *tealet = (PyTealetObject *)obj;
     PyObject_GC_UnTrack(obj);
     /* warn if we have an active tealet that is not a stub */
-    if (tealet->tealet && tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE && tealet->state != STATE_STUB) {
+    if (tealet->tealet && tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE && tealet->state != STATE_STUB &&
+        !(tealet->prepared_func || tealet->prepared_cfunc)) {
         int err = PyErr_WarnEx(PyExc_RuntimeWarning, "freeing an active tealet leaks memory", 1);
         if (err) {
             PyErr_WriteUnraisable(Py_None);
@@ -711,7 +718,7 @@ static int pytealet_stub_impl(PyTealetModuleState *mstate, PyTealetObject *pytea
     assert(pytealet->tealet == NULL);
 
     stack_far = PyTealet_GetStackFar(PyThreadState_GET());
-    if (tealet_stub_new(main->tealet, &tresult, stack_far)) {
+    if (tealet_spawn(main->tealet, &tresult, pytealet_primed_main, NULL, stack_far, TEALET_START_DEFAULT)) {
         PyErr_NoMemory();
         goto out;
     }
@@ -939,39 +946,6 @@ validate_target:
     return PyTuple_Pack(3, target_obj, arg_obj ? arg_obj : Py_None, suppress_exc ? Py_True : Py_False);
 }
 
-static int pytealet_prepare_dispatch(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
-                                     PyTealetMainData *mdata, PyObject *func, PyTealetApi_RunCFunc cfunc,
-                                     const char *operation) {
-    if (CheckTarget(mstate, target, current, operation))
-        return -1;
-
-    if (target->state != STATE_NEW && target->state != STATE_STUB) {
-        PyErr_SetString(mstate->state_error, "must be new or stub");
-        return -1;
-    }
-
-    if ((func == NULL) == (cfunc == NULL)) {
-        PyErr_SetString(PyExc_TypeError, "exactly one of python callable or C callable is required");
-        return -1;
-    }
-
-    if (func != NULL) {
-        if (!PyCallable_Check(func)) {
-            PyErr_SetString(PyExc_TypeError, "prepare() argument 'function' must be callable");
-            return -1;
-        }
-        Py_XSETREF(target->prepared_func, Py_NewRef(func));
-        target->prepared_cfunc = NULL;
-    } else {
-        Py_CLEAR(target->prepared_func);
-        target->prepared_cfunc = cfunc;
-    }
-
-    if (mdata)
-        mdata->last_error_remote = 0;
-    return 0;
-}
-
 static PyObject *pytealet_prepare(PyObject *self, PyObject *args, PyObject *kwargs) {
     static char *kwlist[] = {"function", NULL};
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
@@ -1010,7 +984,40 @@ int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObj
 
     target = (PyTealetObject *)target_obj;
     current = TryGetCurrent(mstate, &mdata);
-    return pytealet_prepare_dispatch(mstate, target, current, mdata, func, cfunc, "prepare()");
+    if (CheckTarget(mstate, target, current, "prepare()"))
+        return -1;
+
+    if (target->state != STATE_NEW && target->state != STATE_STUB) {
+        PyErr_SetString(mstate->state_error, "must be new or stub");
+        return -1;
+    }
+
+    if ((func == NULL) == (cfunc == NULL)) {
+        PyErr_SetString(PyExc_TypeError, "exactly one of python callable or C callable is required");
+        return -1;
+    }
+
+    if (func != NULL) {
+        if (!PyCallable_Check(func)) {
+            PyErr_SetString(PyExc_TypeError, "prepare() argument 'function' must be callable");
+            return -1;
+        }
+        Py_XSETREF(target->prepared_func, Py_NewRef(func));
+        target->prepared_cfunc = NULL;
+    } else {
+        Py_CLEAR(target->prepared_func);
+        target->prepared_cfunc = cfunc;
+    }
+
+    if (pytealet_prime_prepared(mstate, target, current, mdata, "prepare()") < 0) {
+        Py_CLEAR(target->prepared_func);
+        target->prepared_cfunc = NULL;
+        return -1;
+    }
+
+    if (mdata)
+        mdata->last_error_remote = 0;
+    return 0;
 }
 
 static PyObject *pytealet_run_dispatch(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
@@ -1036,17 +1043,16 @@ static PyObject *pytealet_run_dispatch(PyTealetModuleState *mstate, PyTealetObje
     switch_arg = (void *)ptarg;
 
     ptarg->dest = target;
-    ptarg->mstate = mstate;
-    ptarg->func = func;
+    ptarg->func = Py_XNewRef(func);
     ptarg->cfunc = cfunc;
-    ptarg->arg = farg;
+    ptarg->arg = Py_NewRef(farg);
 
     frame_introspection_enabled = (mstate->frame_introspection_enabled != 0);
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Capture(&current->frame_info, 1);
     if (!created_from_new) {
         PyTealetTstate_Save(&current->tstate, tstate);
-        fail = tealet_stub_run(target->tealet, pytealet_main, &switch_arg);
+        fail = tealet_switch(target->tealet, &switch_arg, TEALET_XFER_DEFAULT);
         PyTealetTstate_Restore(&current->tstate, tstate);
     } else {
         void *stack_limit = PyTealet_GetStackFar(tstate);
@@ -1068,6 +1074,8 @@ static PyObject *pytealet_run_dispatch(PyTealetModuleState *mstate, PyTealetObje
     }
     if (frame_introspection_enabled)
         PyTealetFrameInfo_Release(&current->frame_info, NULL);
+    Py_CLEAR(ptarg->func);
+    Py_CLEAR(ptarg->arg);
     if (fail) {
         PyObject *panic_exception = NULL;
         if (fail != TEALET_ERR_PANIC)
@@ -1083,6 +1091,73 @@ static PyObject *pytealet_run_dispatch(PyTealetModuleState *mstate, PyTealetObje
     }
     dustbin_clear(current->tealet);
     return result;
+}
+
+static int pytealet_prime_prepared(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *current,
+                                   PyTealetMainData *mdata, const char *operation) {
+    tealet_t *tealet = NULL;
+    PyThreadState *tstate = PyThreadState_GET();
+    void *stack_limit;
+    void *switch_arg = NULL;
+    int fail;
+    int needs_tracking;
+
+    assert(mstate);
+    assert(target);
+    assert(current);
+    assert(target->state == STATE_NEW || target->state == STATE_STUB);
+    assert(target->prepared_func || target->prepared_cfunc);
+
+    if (!mdata) {
+        PyErr_SetString(PyExc_RuntimeError, "current tealet lineage unavailable");
+        return -1;
+    }
+
+    if (target->state != STATE_STUB) {
+        assert(target->tealet == NULL);
+        stack_limit = PyTealet_GetStackFar(tstate);
+        tealet = tealet_new(current->tealet);
+        if (!tealet)
+            return PyErr_NoMemory(), -1;
+
+        PyTealetTstate_Copy(&target->tstate, tstate, 1, 0);
+        PyTealetTstate_Frame_Setup(&target->tstate, tstate, 0);
+
+        target->tealet = tealet;
+        TEALET_SET_PYOBJECT(tealet, target);
+
+        needs_tracking = (target->tracking_ref == NULL);
+        if (needs_tracking) {
+            pytealet_domain_lock(mdata);
+            if (pytealet_track_wrapper(mdata, target, 1) < 0) {
+                pytealet_domain_unlock(mdata);
+                TEALET_SET_PYOBJECT(tealet, NULL);
+                target->tealet = NULL;
+                PyTealetTstate_Drop(&target->tstate, NULL, 0);
+                tealet_delete(tealet);
+                return -1;
+            }
+            pytealet_domain_unlock(mdata);
+        }
+
+        fail = tealet_run(tealet, pytealet_primed_main, &switch_arg, stack_limit, TEALET_START_DEFAULT);
+        if (fail) {
+            if (needs_tracking) {
+                pytealet_domain_lock(mdata);
+                pytealet_untrack_wrapper(target, 1);
+                pytealet_domain_unlock(mdata);
+            }
+            TEALET_SET_PYOBJECT(tealet, NULL);
+            target->tealet = NULL;
+            PyTealetTstate_Drop(&target->tstate, NULL, 0);
+            tealet_delete(tealet);
+            PyTealet_TranslateTealetError(mstate, fail, operation, NULL, NULL);
+            return -1;
+        }
+    }
+
+    target->state = STATE_RUN;
+    return 0;
 }
 
 /* run a tealet and optinonally run */
@@ -1274,32 +1349,6 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
 
     if (CheckTarget(mstate, target, current, "switch()"))
         return NULL;
-
-    if ((target->state == STATE_NEW || target->state == STATE_STUB) &&
-        (target->prepared_func || target->prepared_cfunc)) {
-        PyObject *prepared_func;
-        PyTealetApi_RunCFunc prepared_cfunc;
-        PyObject *run_result;
-
-        if (switch_flags & TEALET_XFER_PANIC) {
-            PyErr_SetString(PyExc_TypeError, "switch(panic=True) is not supported for prepared tealets");
-            return NULL;
-        }
-
-        prepared_func = target->prepared_func;
-        prepared_cfunc = target->prepared_cfunc;
-        target->prepared_func = NULL; /* transfer ownership to the new tealet */
-        target->prepared_cfunc = NULL;
-
-        if (prepared_func) {
-            run_result = pytealet_run_dispatch(mstate, target, current, mdata, prepared_func, pyarg, NULL);
-            Py_DECREF(prepared_func);
-        } else {
-            run_result = pytealet_run_dispatch(mstate, target, current, mdata, NULL, pyarg, prepared_cfunc);
-        }
-
-        return run_result;
-    }
 
     if (target->state != STATE_RUN) {
         PyErr_SetString(mstate->state_error, "must be active");
@@ -2078,6 +2127,7 @@ PyTealetObject *PyTealet_GetOrCreateMain(PyTealetModuleState *mstate, PyTealetMa
         }
         memset(mdata, 0, sizeof(*mdata));
         mdata->tid = PyThread_get_thread_ident();
+        mdata->mstate = mstate;
         mdata->domain_lock_obj = pytealet_domain_lock_obj_new();
         if (!mdata->domain_lock_obj)
             goto fail;
@@ -2820,10 +2870,33 @@ static void pytealet_report_unsuppressed_exception(PyObject **exc_io) {
     PyErr_Clear();
 }
 
+static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
+    PyTealetObject *tealet = TEALET_PYOBJECT(t_current);
+    PyTealetNewArg targ;
+
+    assert(tealet);
+    /* Default start for spawned STUB tealets. They may be unprepared stubs,
+     * where arg is already a PyTealetNewArg from run(), or prepared tealets,
+     * where arg is the first switch() payload and the callable lives on the wrapper.
+     */
+    if (!tealet->prepared_func && !tealet->prepared_cfunc)
+        return pytealet_main(t_current, arg);
+
+    targ.dest = tealet;
+    targ.func = tealet->prepared_func;
+    targ.cfunc = tealet->prepared_cfunc;
+    targ.arg = arg ? (PyObject *)arg : Py_NewRef(Py_None);
+
+    tealet->prepared_func = NULL;
+    tealet->prepared_cfunc = NULL;
+
+    return pytealet_main(t_current, &targ);
+}
+
 /* The main function.  Invoked either from tealet.new or tealet.run */
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
     PyTealetNewArg *targ = (PyTealetNewArg *)arg;
-    PyTealetModuleState *mstate = targ->mstate;
+    PyTealetModuleState *mstate;
     PyTealetObject *tealet = targ->dest;
     PyObject *func = targ->func;
     PyTealetApi_RunCFunc cfunc = targ->cfunc;
@@ -2838,12 +2911,22 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
     mdata = (PyTealetMainData *)*tealet_main_userpointer(t_current->main);
     assert(mdata);
+    mstate = mdata->mstate;
+    assert(mstate);
+    assert(farg);
+    targ->func = NULL;
+    targ->arg = NULL;
 
     if (tealet->state == STATE_STUB) {
         assert(t_current == tealet->tealet);
         assert(TEALET_PYOBJECT(t_current) == tealet);
 
-        /* set the tstate from our own copy.  This includes the context. */
+        /* Restore the saved stub tstate; stub snapshots do not inherit context. */
+        PyTealetTstate_Restore(&tealet->tstate, tstate);
+    } else if (tealet->state == STATE_RUN) {
+        assert(t_current == tealet->tealet);
+        assert(TEALET_PYOBJECT(t_current) == tealet);
+
         PyTealetTstate_Restore(&tealet->tstate, tstate);
     } else {
         assert(tealet->state == STATE_NEW);
@@ -2887,18 +2970,14 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
         Py_DECREF(result);
         if (cfunc == NULL) {
             assert(func != NULL);
-            Py_INCREF(func);
-            Py_INCREF(farg);
             result = PyObject_CallFunctionObjArgs(func, tealet, farg, NULL);
-            Py_DECREF(func);
-            Py_DECREF(farg);
         } else {
             assert(func == NULL);
-            Py_INCREF(farg);
             result = cfunc((PyObject *)tealet, farg);
-            Py_DECREF(farg);
         }
     }
+    Py_XDECREF(func);
+    Py_DECREF(farg);
 
     pytealet_apply_resolve_target(mstate, mdata, tealet, result, &return_to, &return_arg, &return_exc);
     assert(return_to != NULL);

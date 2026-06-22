@@ -111,6 +111,19 @@ Executes a function in the tealet context.
 - **Effect:** Changes state to STATE_RUN, executes function
 
 ```python
+tealet.prepare(function) -> tealet
+```
+Primes a tealet with a function without transferring control immediately.
+- **State requirement:** Must be STATE_NEW or STATE_STUB
+- **Parameters:**
+    - `function`: Callable that receives `(current_tealet, arg)` on first entry
+- **Returns:** The prepared tealet
+- **Effect:** Captures native start state immediately with
+    `TEALET_START_DEFAULT` and changes state to STATE_RUN. Later `switch()` or
+    `throw()` use the normal active-target path, and the prepared tealet can also
+    be used as an exit target from `resolve_target()`.
+
+```python
 tealet.switch(arg=None) -> result
 ```
 Switches execution to this tealet, passing an optional argument.
@@ -702,39 +715,30 @@ Create a paused tealet template that can be duplicated and then run with a chose
 ### Implementation:
 
 ```c
-/* libtealet (tealet_extras.c) */
-tealet_t *tealet_stub_new(tealet_t *t, void *stack_far) {
-    return tealet_create(t, _tealet_stub_main, stack_far);
-}
+tealet_spawn(main->tealet, &stub, pytealet_primed_main, NULL, stack_far, TEALET_START_DEFAULT);
 ```
 
-The pytealet wrapper uses this API directly:
-- `pytealet_stub()` calls `tealet_stub_new(main->tealet, stack_far)` and marks the wrapper as `STATE_STUB`.
-- `pytealet_run()` uses `tealet_stub_run(target->tealet, pytealet_main, &switch_arg)` when the target is a stub.
+The pytealet wrapper creates stubs as spawned tealets with a baked-in top-level dispatcher:
+- `pytealet_stub()` calls `tealet_spawn(..., pytealet_primed_main, ..., TEALET_START_DEFAULT)` and marks the wrapper as `STATE_STUB`.
+- `pytealet_run()` switches to the stub with a `PyTealetNewArg`; `pytealet_primed_main()` sees no prepared callable and tail-calls `pytealet_main()` with that run payload.
+- `prepare()` stores a prepared callable, promotes the wrapper to `STATE_RUN`, and later `pytealet_primed_main()` consumes the prepared callable instead of expecting a `PyTealetNewArg` switch payload.
 - Duplicating a stub wrapper (`existing_stub.duplicate()`) duplicates native state with `tealet_duplicate()` and duplicates saved thread state.
 - `set_stub(source, duplicate=True)` duplicates native source-stub state and attaches it to an already-constructed NEW target wrapper.
 
 ### Flow:
-1. `tealet_stub_new()` creates a paused tealet using `tealet_create(..., _tealet_stub_main, ...)`.
+1. `tealet_spawn(..., TEALET_START_DEFAULT)` creates a paused tealet whose first entry is `pytealet_primed_main()`.
 2. The stub can be duplicated (`tealet_duplicate`) before use.
-3. `tealet_stub_run()` allocates a small `stub_arg`, stores `(current, run, runarg)`, and switches to the stub.
-4. `_tealet_stub_main` receives `stub_arg`, frees it with tealet allocator, and tail-calls the requested run function.
-5. In pytealet, that run function is `pytealet_main`, which performs Python-level run/switch semantics.
+3. Running the stub switches to it with a `PyTealetNewArg` payload.
+4. Prepared first entry switches to the same dispatcher with the user argument; the dispatcher detects `prepared_func` / `prepared_cfunc` on the wrapper and builds the run payload internally.
+5. `pytealet_main()` performs Python-level run/switch semantics.
 
 ### Benefits:
-- Efficient paused-template creation with explicit run dispatch.
+- Efficient paused-template creation with a pytealet-owned first-entry dispatcher.
 - Supports duplicate-from-stub workflows naturally.
-- Keeps stub-specific trampoline logic in libtealet helper APIs.
+- Uses the same first-entry path for normal stub runs and prepared tealets.
 
 ### Memory Management:
-```c
-struct stub_arg *psarg = (struct stub_arg*)tealet_malloc(stub, sizeof(struct stub_arg));
-```
-Uses tealet's allocator for cross-context data, freed after use:
-```c
-tealet_free(sarg.current, myarg);
-```
-If switching fails, `tealet_stub_run()` frees the allocation on the failure path as well.
+The run payload is owned by the calling pytealet lineage and is valid only for the switch handoff. Prepared-callable fields are owned by the wrapper until `pytealet_primed_main()` consumes them on first entry.
 
 ---
 

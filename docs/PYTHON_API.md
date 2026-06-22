@@ -69,8 +69,10 @@ Custom overrides receive the raw worker return value, worker exception
 in-flight injected exception token and that token has a valid fallback target.
 When populated, it is the redirect fallback target for that uncaught exception.
 Overrides must return `(target, arg)` or `(target, arg, suppress)`.
-`target` must be an active tealet in the same lineage. If `suppress` is truthy,
-any captured worker exception is suppressed before uncaught-exception handling.
+`target` must be an active tealet in the same lineage. A tealet returned by
+`prepare()` is already active and may be used as an exit target. If `suppress`
+is truthy, any captured worker exception is suppressed before
+uncaught-exception handling.
 The default implementation maps successful worker return values from
 `target` or `(target, arg)` into `(target, arg, suppress=False)`. When the worker
 raises `_tealet.TealetExit`, the default implementation routes to `exc_target`
