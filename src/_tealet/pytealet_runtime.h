@@ -25,6 +25,7 @@ typedef struct PyTealetNewArg {
 /* the structure we associate with the main tealet */
 struct PyTealetMainData {
     long tid;
+    PyTealetModuleState *mstate;
     struct PyTealetMainData *ring_prev;
     struct PyTealetMainData *ring_next;
     PyTealetNewArg new_arg;

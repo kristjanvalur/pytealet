@@ -2138,6 +2138,7 @@ PyTealetObject *PyTealet_GetOrCreateMain(PyTealetModuleState *mstate, PyTealetMa
         }
         memset(mdata, 0, sizeof(*mdata));
         mdata->tid = PyThread_get_thread_ident();
+        mdata->mstate = mstate;
         mdata->domain_lock_obj = pytealet_domain_lock_obj_new();
         if (!mdata->domain_lock_obj)
             goto fail;
@@ -2882,6 +2883,7 @@ static void pytealet_report_unsuppressed_exception(PyObject **exc_io) {
 
 static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
     PyTealetObject *tealet = TEALET_PYOBJECT(t_current);
+    PyTealetMainData *mdata;
     PyTealetNewArg targ;
 
     assert(tealet);
@@ -2892,8 +2894,12 @@ static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
     if (!tealet->prepared_func && !tealet->prepared_cfunc)
         return pytealet_main(t_current, arg);
 
+    mdata = (PyTealetMainData *)*tealet_main_userpointer(t_current->main);
+    assert(mdata);
+    assert(mdata->mstate);
+
     targ.dest = tealet;
-    targ.mstate = GetModuleStateFromClass(Py_TYPE(tealet));
+    targ.mstate = mdata->mstate;
     targ.func = tealet->prepared_func;
     targ.cfunc = tealet->prepared_cfunc;
     targ.arg = arg ? (PyObject *)arg : Py_NewRef(Py_None);
@@ -2901,7 +2907,6 @@ static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
     tealet->prepared_func = NULL;
     tealet->prepared_cfunc = NULL;
 
-    assert(targ.mstate);
     return pytealet_main(t_current, &targ);
 }
 
