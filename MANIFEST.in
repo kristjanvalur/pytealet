@@ -1,2 +1,4 @@
 include src/_tealet.pyi
 include src/tealet/py.typed
+recursive-include src/_tealet *.h
+graft src/_tealet/libtealet

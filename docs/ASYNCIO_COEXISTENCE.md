@@ -8,7 +8,8 @@ scheduler owns stackful user-code scheduling. Tealet tasks can then keep the
 main ergonomic benefit of stack switching, namely synchronous-looking code that
 can suspend cooperatively, while still using modern asyncio-driven IO libraries.
 
-This is design reasoning, not a committed public API.
+This is design reasoning around the current scheduler/asyncio bridge and a few
+possible future directions.
 
 ## Current Example Model
 
@@ -27,30 +28,38 @@ protocol used by native `async def` coroutines.
 
 ## Awaitable Tealet Events
 
-Tealet events can be made usable from asyncio, but the meaning should be
-carefully scoped.
+Tealet events can be made usable from asyncio, but the meaning is deliberately
+scoped.
 
-A direct spelling such as this is attractive:
+A direct spelling such as this is attractive for futures, and is the current
+future/task API:
 
 ```python
-await event
 await future
 ```
 
-However, making the raw objects implement `__await__` may hide an important
-boundary. An asyncio coroutine must suspend by yielding control to the asyncio
-event loop. It must not call the existing tealet-blocking `Event.wait()`,
-because `Event.wait()` assumes there is a current tealet task and that it is
-legal to stack-switch to another tealet.
-
-A clearer first API would expose explicit adapters:
+In asyncio, the spelling is `await event.wait()`: `wait()` is already an
+async method. Tealet's `Event` is primarily a tealet-side synchronization
+primitive, so `wait()` stays synchronous and tealet-blocking. Asyncio
+compatibility is provided by the explicit async adapter:
 
 ```python
 await event.async_wait()
-result = await future.async_result()
 ```
 
-Internally, an event would likely keep two classes of waiters:
+This keeps an important boundary visible. An asyncio coroutine must suspend by
+yielding control to the asyncio event loop. It must not call the existing
+tealet-blocking `Event.wait()`, because `Event.wait()` assumes there is a
+current tealet task and that it is legal to stack-switch to another tealet.
+
+The asyncio-facing API is therefore:
+
+```python
+await event.async_wait()
+result = await future
+```
+
+Internally, an event keeps two classes of waiters:
 
 ```python
 class Event:
@@ -69,18 +78,15 @@ already on the loop thread, or `loop.call_soon_threadsafe(...)` when cross-threa
 completion is possible. Since tealets are thread-owned, the first design can
 probably stay same-thread and add cross-thread behavior only when needed.
 
-`Future` can use the same bridge:
+`Future` uses the same bridge internally:
 
 ```python
 def result(self) -> T:
     ...  # blocks a tealet task
 
-async def async_result(self) -> T:
+def __await__(self):
     ...  # awaits from an asyncio task
 ```
-
-The raw `__await__` convenience can be added later if the explicit adapter
-semantics prove stable.
 
 ## Tealet Tasks Waiting on Asyncio
 
@@ -92,7 +98,7 @@ an asyncio awaitable:
 
 ```python
 def worker() -> bytes:
-  response = get_running_scheduler().await_(fetch_bytes(url))
+    response = get_running_scheduler().await_(fetch_bytes(url))
     return parse_response(response)
 ```
 
@@ -331,7 +337,7 @@ Then tealet tasks could still block on asyncio awaitables:
 
 ```python
 def stackful_worker() -> None:
-  data = get_running_scheduler().await_(fetch_bytes(url))
+    data = get_running_scheduler().await_(fetch_bytes(url))
     process(data)
 ```
 

@@ -239,11 +239,11 @@ the same task factory path as direct and eager task creation.
 
 ---
 
-### TODO: Source Distribution Missing Vendored libtealet Archives
+### ✅ Source Distribution Includes Vendored libtealet Archives (Resolved)
 
 **Location:** `MANIFEST.in`, `src/_tealet/libtealet/`, source-distribution build flow
 
-**Problem:**
+**Historical Problem:**
 Building an sdist currently includes Python sources, tests, and typing files, but not the vendored prebuilt `libtealet` archives required by the default build path. A wheel built directly from the workspace succeeds, but a wheel built from the generated sdist fails because `setup.py` cannot find `src/_tealet/libtealet/lib/<abi>/libtealet.a`.
 
 **Observed Failure:**
@@ -251,12 +251,12 @@ Building an sdist currently includes Python sources, tests, and typing files, bu
 RuntimeError: Pre-built libraries not found for ABI: sysv_amd64 at src/_tealet/libtealet/lib/sysv_amd64
 ```
 
-**Follow-up:**
-- Decide whether sdists should include the vendored prebuilt `libtealet` archives or require `BUILD_LIBTEALET_FROM_SOURCE=1` with bundled/source-available libtealet inputs.
-- Update `MANIFEST.in` and build documentation accordingly.
-- Validate with `uv build` from a clean checkout and confirm both sdist and wheel paths work.
+**Fix:**
+- `MANIFEST.in` now grafts `src/_tealet/libtealet`, including the vendored headers and prebuilt archives used by the default build path.
+- `MANIFEST.in` also includes local `_tealet` C headers required to compile extension sources from an extracted sdist.
+- Validated by building an sdist, checking for representative Unix and Windows static archives, and building a wheel from the extracted sdist.
 
-**Priority:** Open packaging follow-up
+**Priority:** Completed
 
 ---
 
