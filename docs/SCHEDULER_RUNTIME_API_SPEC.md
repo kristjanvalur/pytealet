@@ -79,6 +79,12 @@ Implemented:
     `CancelledError` through the tealet/asyncio boundary
   - shielding prevents waiter cancellation from propagating into the shielded
     underlying future, matching `asyncio.shield(...)`
+- Wait primitives are responsible for exception-safe cleanup. If a `TealetTask`
+  receives an exception while blocked, including cancellation or tealet exit,
+  the wait path must unlink the task from every scheduler-owned waiter list or
+  bridge registration before propagating the exception. This is the core
+  robustness rule for cancelled tasks blocked in events, futures, timers,
+  selector waits, channels, locks, queues, or asyncio bridge waits.
 - Runner-level SIGINT handling is implemented for Python 3.11+, following
   `asyncio.Runner` policy:
   - the runner installs a temporary SIGINT handler while driving the main
@@ -91,9 +97,12 @@ Implemented:
     after the inner runner exits
   - runner construction accepts `handle_sigint=False` for embedding scenarios
     where an inner runner should own interrupt handling
-- Runner shutdown follows the asyncio runner pattern:
+- Runner shutdown follows the asyncio runner pattern and uses normal task
+  cancellation rather than a distinct shutdown-specific wait policy:
   - unfinished scheduler tasks are cancelled and drained with
-    `tealet.scheduler.gather(..., return_exceptions=True)`
+    `tealet.scheduler.gather(..., return_exceptions=True)`; this is robust as
+    long as synchronization primitives correctly clean up when blocked
+    `TealetTask` instances receive cancellation or tealet-exit exceptions
   - `CoreSchedulerDrivingAPI.shutdown_default_executor(timeout=300.0)` returns
     a scheduler `Future` that waits for the detached default executor to shut
     down cleanly, warning and continuing if the asyncio-parity timeout expires
@@ -575,8 +584,7 @@ Status: Implemented for Python 3.11+.
 
 - Should `run_async` permit reusing an already running scheduler, or always create
   an inner scope scheduler by default?
-- What is the exact cancellation policy for scheduler-blocked tasks during runtime
-  shutdown?
+
 ## Minimal Usage Sketch
 
 ```python
