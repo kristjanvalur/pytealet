@@ -84,8 +84,7 @@ enum {
 };
 
 static tealet_t *pytealet_main(tealet_t *t_current, void *arg);
-static tealet_t *pytealet_prepared_main(tealet_t *t_current, void *arg);
-static tealet_t *pytealet_prepared_stub_main(tealet_t *t_current, void *arg);
+static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg);
 
 /* ===================================================================== */
 /* Type and Module Access Helpers                                        */
@@ -723,7 +722,7 @@ static int pytealet_stub_impl(PyTealetModuleState *mstate, PyTealetObject *pytea
     assert(pytealet->tealet == NULL);
 
     stack_far = PyTealet_GetStackFar(PyThreadState_GET());
-    if (tealet_stub_new(main->tealet, &tresult, stack_far)) {
+    if (tealet_spawn(main->tealet, &tresult, pytealet_primed_main, NULL, stack_far, TEALET_START_DEFAULT)) {
         PyErr_NoMemory();
         goto out;
     }
@@ -1064,7 +1063,7 @@ static PyObject *pytealet_run_dispatch(PyTealetModuleState *mstate, PyTealetObje
         PyTealetFrameInfo_Capture(&current->frame_info, 1);
     if (!created_from_new) {
         PyTealetTstate_Save(&current->tstate, tstate);
-        fail = tealet_stub_run(target->tealet, pytealet_main, &switch_arg);
+        fail = tealet_switch(target->tealet, &switch_arg, TEALET_XFER_DEFAULT);
         PyTealetTstate_Restore(&current->tstate, tstate);
     } else {
         void *stack_limit = PyTealet_GetStackFar(tstate);
@@ -1125,17 +1124,7 @@ static int pytealet_prime_prepared(PyTealetModuleState *mstate, PyTealetObject *
         return -1;
     }
 
-    if (target->state == STATE_STUB) {
-        assert(target->tealet);
-        assert(target->tracking_ref);
-        PyTealetTstate_Save(&current->tstate, tstate);
-        fail = tealet_stub_run(target->tealet, pytealet_prepared_stub_main, &switch_arg);
-        PyTealetTstate_Restore(&current->tstate, tstate);
-        if (fail) {
-            PyTealet_TranslateTealetError(mstate, fail, operation, NULL, NULL);
-            return -1;
-        }
-    } else {
+    if (target->state != STATE_STUB) {
         assert(target->tealet == NULL);
         stack_limit = PyTealet_GetStackFar(tstate);
         tealet = tealet_new(current->tealet);
@@ -1162,7 +1151,7 @@ static int pytealet_prime_prepared(PyTealetModuleState *mstate, PyTealetObject *
             pytealet_domain_unlock(mdata);
         }
 
-        fail = tealet_run(tealet, pytealet_prepared_main, &switch_arg, stack_limit, TEALET_START_DEFAULT);
+        fail = tealet_run(tealet, pytealet_primed_main, &switch_arg, stack_limit, TEALET_START_DEFAULT);
         if (fail) {
             if (needs_tracking) {
                 pytealet_domain_lock(mdata);
@@ -2891,12 +2880,13 @@ static void pytealet_report_unsuppressed_exception(PyObject **exc_io) {
     PyErr_Clear();
 }
 
-static tealet_t *pytealet_prepared_main(tealet_t *t_current, void *arg) {
+static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
     PyTealetObject *tealet = TEALET_PYOBJECT(t_current);
     PyTealetNewArg targ;
 
     assert(tealet);
-    assert(tealet->prepared_func || tealet->prepared_cfunc);
+    if (!tealet->prepared_func && !tealet->prepared_cfunc)
+        return pytealet_main(t_current, arg);
 
     targ.dest = tealet;
     targ.mstate = GetModuleStateFromClass(Py_TYPE(tealet));
@@ -2909,34 +2899,6 @@ static tealet_t *pytealet_prepared_main(tealet_t *t_current, void *arg) {
 
     assert(targ.mstate);
     return pytealet_main(t_current, &targ);
-}
-
-static tealet_t *pytealet_prepared_stub_main(tealet_t *t_current, void *arg) {
-    PyTealetObject *tealet = TEALET_PYOBJECT(t_current);
-    PyThreadState *tstate = PyThreadState_GET();
-    tealet_t *previous;
-    void *switch_arg = arg;
-    int fail;
-
-    assert(tealet);
-    assert(tealet->state == STATE_STUB);
-    assert(tealet->prepared_func || tealet->prepared_cfunc);
-
-    PyTealetTstate_Restore(&tealet->tstate, tstate);
-    previous = tealet_previous(t_current);
-    assert(previous);
-
-    PyTealetTstate_Save(&tealet->tstate, tstate);
-    fail = tealet_switch(previous, &switch_arg, TEALET_XFER_DEFAULT);
-    if (fail) {
-        PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(tealet));
-        PyTealet_TranslateTealetError(mstate, fail, "prepared stub prime failed", NULL, NULL);
-        PyErr_WriteUnraisable((PyObject *)tealet);
-        PyErr_Clear();
-        return t_current->main;
-    }
-
-    return pytealet_prepared_main(t_current, switch_arg);
 }
 
 /* The main function.  Invoked either from tealet.new or tealet.run */

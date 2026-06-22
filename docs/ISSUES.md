@@ -158,10 +158,10 @@ Audited against current code. Remaining property getters are safe for STATE_NEW/
 **Location:** `src/_tealet/pytealet.c` line 40 (stub_new), line 344 (pytealet_run)
 
 **Current Approach:**
-Current wrapper uses supported libtealet APIs (`tealet_new`, `tealet_run`, `tealet_stub_new`, `tealet_stub_run`).
+Current wrapper uses supported libtealet APIs (`tealet_new`, `tealet_run`, `tealet_spawn`, `tealet_switch`).
 
 ```c
-/* current code paths use tealet_stub_new()/tealet_stub_run() helpers */
+/* stubs are spawned with pytealet_primed_main and TEALET_START_DEFAULT */
 ```
 
 **Status:** Closed as not applicable.
