@@ -10,6 +10,7 @@ import itertools
 import socket
 import threading
 import time
+import warnings
 import weakref
 from abc import ABC, abstractmethod
 from collections import deque
@@ -22,10 +23,15 @@ from .locks import (
     Event,
     InvalidStateError,
     RawTimeoutError,
+    TimeoutError,
     set_scheduler_resolver,
+    timeout as scheduler_timeout,
 )
 
 T = TypeVar("T")
+
+
+DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
 
 
 # a thread local scheduler
@@ -66,7 +72,10 @@ class CoreSchedulerDrivingAPI(ABC):
         """Release scheduler-owned resources."""
 
     @abstractmethod
-    def shutdown_default_executor(self) -> "Future[None]":
+    def shutdown_default_executor(
+        self,
+        timeout: float | None = DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT,
+    ) -> "Future[Any]":
         """Return a future that completes after the default executor shuts down."""
 
     @abstractmethod
@@ -665,7 +674,7 @@ def gather(
     return gather_future
 
 
-class TealetTask(tealet.tealet, Future[object]):
+class TealetTask(tealet.tealet, Future[Any]):
     """Tealet task that is also a Future for its completion result."""
 
     def __init__(self, owning_scheduler: BaseScheduler):
@@ -791,8 +800,11 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
             self._default_executor = None
             executor.shutdown(wait=False)
 
-    def shutdown_default_executor(self) -> Future[None]:
-        future: Future[None] = Future()
+    def shutdown_default_executor(
+        self,
+        timeout: float | None = DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT,
+    ) -> Future[Any]:
+        future: Future[Any] = Future()
         executor = self._default_executor
         if executor is None:
             future.set_result(None)
@@ -800,21 +812,20 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
 
         self._default_executor = None
 
-        def complete_result() -> None:
+        def complete_shutdown(exc: BaseException | None = None) -> None:
             if not future.done():
-                future.set_result(None)
-
-        def complete_exception(exc: BaseException) -> None:
-            if not future.done():
-                future.set_exception(exc)
+                if exc is None:
+                    future.set_result(None)
+                else:
+                    future.set_exception(exc)
 
         def shutdown_worker() -> None:
             try:
                 executor.shutdown(wait=True)
             except BaseException as exc:
-                self.call_soon_threadsafe(complete_exception, exc)
+                self.call_soon_threadsafe(complete_shutdown, exc)
             else:
-                self.call_soon_threadsafe(complete_result)
+                self.call_soon_threadsafe(complete_shutdown)
 
         thread = threading.Thread(
             target=shutdown_worker,
@@ -822,7 +833,24 @@ class BaseScheduler(Linkable, CoreSchedulerDrivingAPI):
             daemon=True,
         )
         thread.start()
-        return future
+
+        def wait_for_shutdown(_timeout: float | None = timeout) -> None:
+            try:
+                if _timeout is None:
+                    future.wait()
+                else:
+                    with scheduler_timeout(_timeout):
+                        future.wait()
+            except TimeoutError:
+                warnings.warn(
+                    "The executor did not finish joining its threads "
+                    f"within {_timeout} seconds.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                executor.shutdown(wait=False)
+
+        return self.spawn(wait_for_shutdown)
 
     # -- External integration APIs ------------------------------------
 

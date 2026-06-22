@@ -202,10 +202,11 @@ class TestSchedulerAccessors:
     def test_shutdown_default_executor_without_executor_completes_immediately(self):
         s = _new_scheduler()
 
-        future = s.shutdown_default_executor()
+        shutdown = s.shutdown_default_executor()
 
-        assert future.done() is True
-        assert future.result() is None
+        assert isinstance(shutdown, Future)
+        assert shutdown.done() is True
+        assert shutdown.result() is None
 
     def test_shutdown_default_executor_waits_for_default_executor(self):
         s = _new_scheduler()
@@ -220,13 +221,36 @@ class TestSchedulerAccessors:
         work_future = s.run_in_executor(None, worker)
         assert worker_started.wait(timeout=1.0) is True
 
-        shutdown_future = s.shutdown_default_executor()
-        assert shutdown_future.done() is False
+        shutdown = s.shutdown_default_executor()
+        assert shutdown.done() is False
 
         release.set()
-        assert s.run_until_complete(shutdown_future) is None
+        assert s.run_until_complete(shutdown) is None
         assert work_future.done() is True
         assert work_future.result() == "done"
+
+    def test_shutdown_default_executor_timeout_warns_and_completes(self):
+        s = _new_scheduler()
+        release = threading.Event()
+        worker_started = threading.Event()
+
+        def worker() -> str:
+            worker_started.set()
+            release.wait(timeout=1.0)
+            return "done"
+
+        work_future = s.run_in_executor(None, worker)
+        assert worker_started.wait(timeout=1.0) is True
+
+        shutdown = s.shutdown_default_executor(timeout=0.001)
+        assert shutdown.done() is False
+        with pytest.warns(RuntimeWarning, match="did not finish joining"):
+            assert s.run_until_complete(shutdown) is None
+
+        assert work_future.done() is False
+
+        release.set()
+        assert s.run_until_complete(work_future) == "done"
 
     def test_to_thread_waits_and_preserves_context(self):
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")

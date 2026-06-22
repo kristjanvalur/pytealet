@@ -126,8 +126,8 @@ class TestAsyncRunner:
     def test_invalid_factory_return_type(self):
         async def run() -> None:
             class InvalidScheduler:
-                def shutdown_default_executor(self) -> Future[None]:
-                    future: Future[None] = Future()
+                def shutdown_default_executor(self, timeout=None) -> Future[object]:
+                    future: Future[object] = Future()
                     future.set_result(None)
                     return future
 
@@ -151,6 +151,18 @@ class TestAsyncRunner:
             await runner.aclose()
             with pytest.raises(RuntimeError, match="runner is closed"):
                 await runner.run(lambda: None)
+            with pytest.raises(RuntimeError, match="runner is closed"):
+                runner.get_scheduler()
+
+        asyncio.run(run())
+
+    def test_async_context_manager_initializes_and_closes(self):
+        async def run() -> None:
+            async with AsyncRunner() as runner:
+                scheduler = runner.get_scheduler()
+                assert isinstance(scheduler, AsyncScheduler)
+                assert await runner.run(lambda: "ok") == "ok"
+
             with pytest.raises(RuntimeError, match="runner is closed"):
                 runner.get_scheduler()
 

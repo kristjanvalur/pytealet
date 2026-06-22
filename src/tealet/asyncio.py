@@ -347,6 +347,13 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
     def task(self) -> _asyncio.Task[None] | None:
         return None
 
+    async def __aenter__(self) -> "AsyncRunner":
+        self._lazy_init()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.aclose()
+
     async def aclose(self) -> None:
         if self._closed:
             return

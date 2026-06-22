@@ -83,8 +83,9 @@ Implemented:
 - Runner shutdown follows the asyncio runner pattern:
   - unfinished scheduler tasks are cancelled and drained with
     `tealet.scheduler.gather(..., return_exceptions=True)`
-  - `CoreSchedulerDrivingAPI.shutdown_default_executor()` returns a scheduler `Future`
-    that waits for the detached default executor to shut down cleanly
+  - `CoreSchedulerDrivingAPI.shutdown_default_executor(timeout=300.0)` returns
+    a scheduler `Future` that waits for the detached default executor to shut
+    down cleanly, warning and continuing if the asyncio-parity timeout expires
   - sync `Runner.close()` drives the shutdown futures with
     `run_until_complete(...)`; async `AsyncRunner.aclose()` uses
     `arun_until_complete(...)`
@@ -197,6 +198,8 @@ class AsyncRunner:
 
     async def run(self, entry, /, *, context: contextvars.Context | None = None): ...
     async def aclose(self) -> None: ...
+    async def __aenter__(self) -> AsyncRunner: ...
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None: ...
 ```
 
 And convenience functions:
@@ -252,8 +255,10 @@ Return behavior:
   creator).
 - Installs scheduler as current for runtime scope.
 - Runs entry to completion inside the active asyncio task.
-- Uses `aclose()` for deterministic async cleanup. `AsyncRunner` deliberately
-  follows Python's async-resource convention and does not expose `close()`.
+- Uses `aclose()` for deterministic async cleanup, and supports
+  `async with AsyncRunner() as runner: ...` as the async counterpart to
+  `with Runner() as runner: ...`. `AsyncRunner` deliberately follows Python's
+  async-resource convention and does not expose `close()`.
 
 ### tealet.asyncio.run_async(...)
 
@@ -339,8 +344,9 @@ Return behavior:
 - Prefer `tealet.runtime.Runner` for synchronous code that wants reusable runner
   state or explicit lifecycle control.
 - Prefer `tealet.runtime.run(...)` for one-shot synchronous entry points.
-- Prefer `tealet.asyncio.AsyncRunner` plus `await runner.aclose()` for async
-  code that needs explicit scheduler lifetime control.
+- Prefer `tealet.asyncio.AsyncRunner` plus `async with` or
+  `await runner.aclose()` for async code that needs explicit scheduler lifetime
+  control.
 - Prefer `tealet.asyncio.run_async(...)` for one-shot async entry points inside
   an existing asyncio task.
 - Prefer `tealet.asyncio.run_in_asyncio(...)` when synchronous code should own a
@@ -512,7 +518,8 @@ Status: Implemented for Python 3.11+.
   an inner scope scheduler by default?
 - What is the exact cancellation policy for scheduler-blocked tasks during runtime
   shutdown?
-- Do we expose a context manager form (`with Runtime(...):`) in phase 1 or later?
+- Should `tealet.runtime` remain the long-term module name, or should the public
+  runner surface move to a `tealet.runner` module/alias?
 
 ## Minimal Usage Sketch
 
