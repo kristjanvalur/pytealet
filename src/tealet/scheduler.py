@@ -584,6 +584,82 @@ def shield(future: Future[T]) -> Shield[T]:
     return Shield(future)
 
 
+class _GatheringFuture(Future[list[object]]):
+    def __init__(self, children: list[Future[object]]) -> None:
+        super().__init__()
+        self._children = children
+        self._cancel_requested = False
+
+    def cancel(self) -> bool:
+        if self.done():
+            return False
+        self._cancel_requested = True
+        cancelled = False
+        for child in self._children:
+            cancelled = child.cancel() or cancelled
+        return cancelled
+
+    def _cancel_requested_exception(self) -> CancelledError | None:
+        if self._cancel_requested:
+            return CancelledError()
+        return None
+
+
+def gather(
+    *entries: Future[object] | Callable[[], object],
+    return_exceptions: bool = False,
+) -> Future[list[object]]:
+    scheduler = _current_scheduler()
+    if scheduler is None:
+        raise RuntimeError("no current scheduler")
+
+    children: list[Future[object]] = []
+    for entry in entries:
+        if isinstance(entry, Future):
+            if isinstance(entry, TealetTask) and entry.get_scheduler() is not scheduler:
+                raise RuntimeError("Future is bound to a different scheduler")
+            children.append(entry)
+        elif callable(entry):
+            children.append(scheduler.spawn(entry))
+        else:
+            raise TypeError("gather arguments must be Futures or callables")
+
+    gather_future = _GatheringFuture(children)
+    if not children:
+        gather_future.set_result([])
+        return gather_future
+
+    results: list[object] = [None] * len(children)
+    remaining = len(children)
+
+    def child_done(index: int, child: Future[object]) -> None:
+        nonlocal remaining
+        if gather_future.done():
+            return
+        if child._exception is not None:
+            if not return_exceptions:
+                gather_future.set_exception(child._exception)
+                return
+            results[index] = child._exception
+        else:
+            results[index] = child._result
+        remaining -= 1
+        if remaining == 0:
+            cancelled = gather_future._cancel_requested_exception()
+            if cancelled is not None:
+                gather_future.set_exception(cancelled)
+                return
+            gather_future.set_result(results)
+
+    for index, child in enumerate(children):
+        if child.done():
+            child_done(index, child)
+        else:
+            child.add_done_callback(lambda done_child, index=index: child_done(index, done_child))
+
+    return gather_future
+
+
 class TealetTask(tealet.tealet, Future[object]):
     """Tealet task that is also a Future for its completion result."""
 

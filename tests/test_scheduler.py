@@ -36,6 +36,7 @@ from tealet.scheduler import (
     CancelledError,
     Channel,
     Future,
+    gather,
     get_running_scheduler,
     set_scheduler,
     shield,
@@ -1043,6 +1044,92 @@ class TestSchedulerAccessors:
         del task
         gc.collect()
         assert task_ref() is None
+
+    def test_gather_accepts_tasks_and_callables_in_order(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def first() -> str:
+            s.yield_()
+            seen.append("first")
+            return "a"
+
+        def second() -> str:
+            seen.append("second")
+            return "b"
+
+        first_task = s.spawn(first)
+        group = gather(first_task, second)
+
+        assert s.run_until_complete(group) == ["a", "b"]
+        assert seen == ["second", "first"]
+
+    def test_gather_empty_completes_immediately(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        group = gather()
+
+        assert group.done() is True
+        assert group.result() == []
+
+    def test_gather_propagates_first_exception(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        def fail() -> None:
+            raise ValueError("boom")
+
+        def succeed() -> str:
+            s.yield_()
+            return "ok"
+
+        group = gather(fail, succeed)
+
+        with pytest.raises(ValueError, match="boom"):
+            s.run_until_complete(group)
+
+    def test_gather_return_exceptions_collects_results(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        def fail() -> None:
+            raise ValueError("boom")
+
+        def succeed() -> str:
+            return "ok"
+
+        result = s.run_until_complete(gather(fail, succeed, return_exceptions=True))
+
+        assert isinstance(result[0], ValueError)
+        assert str(result[0]) == "boom"
+        assert result[1] == "ok"
+
+    def test_gather_cancel_cancels_unfinished_children(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        event = Event()
+
+        def worker() -> None:
+            event.wait()
+
+        task = s.spawn(worker)
+        group = gather(task)
+        assert group.cancel() is True
+
+        with pytest.raises(CancelledError):
+            s.run_until_complete(group)
+        assert task.cancelled() is True
+
+    def test_gather_rejects_foreign_task(self):
+        s1 = _new_scheduler()
+        s2 = _new_scheduler()
+        task = s2.spawn(lambda: "foreign")
+        set_scheduler(s1)
+
+        with pytest.raises(RuntimeError, match="different scheduler"):
+            gather(task)
 
     def test_run_until_complete_propagates_exception(self):
         s = _new_scheduler()

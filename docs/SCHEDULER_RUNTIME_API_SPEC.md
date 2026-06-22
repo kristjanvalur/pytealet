@@ -53,6 +53,9 @@ Implemented:
 - Scheduler task introspection includes `BaseScheduler.all_tasks()`, which
   returns unfinished scheduler-owned tealet tasks without keeping those tasks
   alive solely for introspection.
+- Scheduler grouping includes `tealet.scheduler.gather(...)`, which returns a
+  future for ordered child results and can optionally collect child exceptions
+  as result values.
 - Cancellation propagates across scheduler boundaries in an asyncio-compatible
   way:
   - cancelling an asyncio waiter on a tealet `Future` schedules cancellation of
@@ -129,6 +132,26 @@ Semantics:
   - Returns the scheduler currently running in this execution context.
   - Raises `RuntimeError` if no running scheduler exists.
   - Never creates or installs a scheduler.
+
+### Scheduler Grouping
+
+```python
+def gather(
+    *entries: Future[object] | Callable[[], object],
+    return_exceptions: bool = False,
+) -> Future[list[object]]: ...
+```
+
+Semantics:
+
+- Accepts scheduler futures/tasks and zero-argument callables.
+- Converts callables into scheduler-owned tealet tasks.
+- Returns results in input order.
+- With `return_exceptions=False`, the first child exception completes the group
+  future with that exception.
+- With `return_exceptions=True`, child exceptions are collected into the result
+  list alongside successful values.
+- Cancelling the group future requests cancellation of unfinished children.
 
 ### Runtime Factory Types
 
