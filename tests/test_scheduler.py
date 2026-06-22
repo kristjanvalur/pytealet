@@ -34,13 +34,21 @@ from tealet.asyncio import (
     TealetSelectorEventLoop,
 )
 from tealet.scheduler import (
+    ALL_COMPLETED,
     Channel,
+    FIRST_COMPLETED,
+    FIRST_EXCEPTION,
+    ensure_future,
     gather,
+    get_scheduler,
     get_running_scheduler,
     set_scheduler,
     Scheduler,
     _scheduler,
+    as_completed,
     to_thread,
+    wait,
+    wait_for,
 )
 from tealet.selector import SelectorScheduler
 from tealet.tasks import CancelledError, DefaultTaskFactory, Future, StubTaskFactory, TealetTask, shield
@@ -84,10 +92,21 @@ def _new_scheduler(task_factory_maker=None) -> Scheduler:
 
 
 class TestSchedulerAccessors:
+    def test_get_scheduler_does_not_create_when_unbound(self):
+        set_scheduler(None)
+        with pytest.raises(RuntimeError, match="no current scheduler"):
+            get_scheduler()
+
     def test_get_running_scheduler_does_not_create_when_unbound(self):
         set_scheduler(None)
         with pytest.raises(RuntimeError, match="no running scheduler"):
             get_running_scheduler()
+
+    def test_get_scheduler_returns_bound_scheduler_when_not_running(self):
+        s = Scheduler()
+        set_scheduler(s)
+
+        assert get_scheduler() is s
 
     def test_base_and_concrete_scheduler_api_surfaces_are_split(self):
         sync = Scheduler()
@@ -1396,6 +1415,223 @@ class TestSchedulerAccessors:
 
         with pytest.raises(RuntimeError, match="different scheduler"):
             gather(task)
+
+    def test_ensure_future_returns_existing_future(self):
+        fut: Future[str] = Future()
+
+        assert ensure_future(fut) is fut
+
+    def test_ensure_future_spawns_callable(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        fut = ensure_future(lambda: "done")
+
+        assert s.run_until_complete(fut) == "done"
+
+    def test_scheduler_ensure_future_spawns_callable(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        fut = s.ensure_future(lambda: "done")
+
+        assert s.run_until_complete(fut) == "done"
+
+    def test_ensure_future_returns_existing_shield(self):
+        fut: Future[str] = Future()
+        shielded = shield(fut)
+
+        assert ensure_future(shielded) is shielded
+
+    def test_ensure_future_rejects_foreign_task(self, scheduler_task_factory_maker):
+        s1 = _new_scheduler(scheduler_task_factory_maker)
+        s2 = _new_scheduler(scheduler_task_factory_maker)
+        task = s2.spawn(lambda: "foreign")
+        set_scheduler(s1)
+
+        with pytest.raises(RuntimeError, match="different scheduler"):
+            ensure_future(task)
+
+    def test_wait_first_completed_returns_done_and_pending(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        event = Event()
+
+        def slow() -> str:
+            event.wait()
+            return "slow"
+
+        def fast() -> str:
+            return "fast"
+
+        slow_task = s.spawn(slow)
+        fast_task = s.spawn(fast)
+
+        done, pending = s.run_until_complete(wait([slow_task, fast_task], return_when=FIRST_COMPLETED))
+
+        assert done == {fast_task}
+        assert pending == {slow_task}
+        assert fast_task.result() == "fast"
+        s.call_soon(event.set)
+        assert s.run_until_complete(slow_task) == "slow"
+
+    def test_wait_first_exception_returns_on_exception(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        event = Event()
+
+        def fail() -> None:
+            raise ValueError("boom")
+
+        def slow() -> str:
+            event.wait()
+            return "slow"
+
+        fail_task = s.spawn(fail)
+        slow_task = s.spawn(slow)
+
+        done, pending = s.run_until_complete(wait([fail_task, slow_task], return_when=FIRST_EXCEPTION))
+
+        assert done == {fail_task}
+        assert pending == {slow_task}
+        with pytest.raises(ValueError, match="boom"):
+            fail_task.result()
+        s.call_soon(event.set)
+        assert s.run_until_complete(slow_task) == "slow"
+
+    def test_wait_timeout_returns_pending_without_cancelling(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        event = Event()
+
+        def slow() -> str:
+            event.wait()
+            return "slow"
+
+        slow_task = s.spawn(slow)
+
+        done, pending = s.run_until_complete(wait([slow_task], timeout=0.001, return_when=ALL_COMPLETED))
+
+        assert done == set()
+        assert pending == {slow_task}
+        assert slow_task.done() is False
+        s.call_soon(event.set)
+        assert s.run_until_complete(slow_task) == "slow"
+
+    def test_wait_rejects_empty_and_invalid_return_when(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        with pytest.raises(ValueError, match="empty"):
+            wait([])
+        with pytest.raises(ValueError, match="Invalid return_when"):
+            wait([Future()], return_when="SOON")  # type: ignore[arg-type]
+
+    def test_wait_for_returns_result(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        def worker() -> str:
+            s.yield_()
+            return "done"
+
+        assert s.run_until_complete(wait_for(worker, timeout=1.0)) == "done"
+
+    def test_wait_for_timeout_cancels_child(self, deferred_scheduler_task_factory_maker):
+        s = _new_scheduler(deferred_scheduler_task_factory_maker)
+        set_scheduler(s)
+        event = Event()
+
+        def worker() -> None:
+            event.wait()
+
+        task = s.spawn(worker)
+
+        with pytest.raises(TimeoutError):
+            s.run_until_complete(wait_for(task, timeout=0.001))
+        assert task.cancelled() is True
+
+    def test_wait_for_shield_timeout_does_not_cancel_child(self, deferred_scheduler_task_factory_maker):
+        s = _new_scheduler(deferred_scheduler_task_factory_maker)
+        set_scheduler(s)
+        event = Event()
+
+        def worker() -> str:
+            event.wait()
+            return "done"
+
+        task = s.spawn(worker)
+
+        with pytest.raises(TimeoutError):
+            s.run_until_complete(wait_for(shield(task), timeout=0.001))
+        assert task.done() is False
+        s.call_soon(event.set)
+        assert s.run_until_complete(task) == "done"
+
+    def test_as_completed_yields_results_in_completion_order(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def slow() -> str:
+            s.sleep(0.002)
+            return "slow"
+
+        def fast() -> str:
+            return "fast"
+
+        slow_task = s.spawn(slow)
+        fast_task = s.spawn(fast)
+
+        def consumer() -> None:
+            for completion in as_completed([slow_task, fast_task]):
+                seen.append(completion.result())
+
+        s.spawn(consumer)
+        s.run()
+
+        assert seen == ["fast", "slow"]
+
+    def test_as_completed_deduplicates_existing_futures(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        seen: list[str] = []
+
+        task = s.spawn(lambda: "done")
+
+        def consumer() -> None:
+            for completion in as_completed([task, task]):
+                seen.append(completion.result())
+
+        s.spawn(consumer)
+        s.run()
+
+        assert seen == ["done"]
+
+    def test_as_completed_timeout_marks_unfinished_slots_without_cancelling(self, deferred_scheduler_task_factory_maker):
+        s = _new_scheduler(deferred_scheduler_task_factory_maker)
+        set_scheduler(s)
+        event = Event()
+        seen: list[str] = []
+
+        def slow() -> str:
+            event.wait()
+            return "slow"
+
+        task = s.spawn(slow)
+
+        def consumer() -> None:
+            with pytest.raises(TimeoutError):
+                next(as_completed([task], timeout=0.001))
+            seen.append("timeout")
+
+        s.spawn(consumer)
+        s.run()
+
+        assert seen == ["timeout"]
+        assert task.done() is False
+        s.call_soon(event.set)
+        assert s.run_until_complete(task) == "slow"
 
     def test_run_until_complete_propagates_exception(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
@@ -2900,6 +3136,19 @@ class TestFutureExamples:
         future.set_result(12)
 
         assert shield(future).wait() == 12
+
+    def test_shield_cancel_does_not_cancel_future(self):
+        future: Future[int] = Future()
+        shielded = shield(future)
+
+        assert shielded.cancel() is True
+        assert shielded.cancelled() is True
+        assert future.cancelled() is False
+
+        future.set_result(12)
+        assert future.result() == 12
+        with pytest.raises(CancelledError):
+            shielded.result()
 
     def test_await_cancelled_error_schedules_async_future_cancel(self):
         s = AsyncScheduler()

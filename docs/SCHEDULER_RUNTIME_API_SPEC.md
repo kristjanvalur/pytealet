@@ -53,9 +53,12 @@ Implemented:
 - Scheduler task introspection includes `BaseScheduler.all_tasks()`, which
   returns unfinished scheduler-owned tealet tasks without keeping those tasks
   alive solely for introspection.
-- Scheduler grouping includes `tealet.scheduler.gather(...)`, which returns a
-  future for ordered child results and can optionally collect child exceptions
-  as result values.
+- Scheduler grouping includes `BaseScheduler.ensure_future(...)`,
+  `tealet.scheduler.ensure_future(...)`, `tealet.scheduler.gather(...)`,
+  `tealet.scheduler.wait(...)`, `tealet.scheduler.wait_for(...)`, and
+  `tealet.scheduler.as_completed(...)` for entry normalization, ordered
+  collection, done/pending waiting, timeout-bounded single waits, and
+  completion-order iteration.
 - Scheduler-local task creation is configurable with
   `BaseScheduler.set_task_factory(...)` and `BaseScheduler.get_task_factory()`.
   The default factory preserves direct `TealetTask.prepare(...)` behavior.
@@ -144,6 +147,7 @@ Remaining from this proposal:
 
 ```python
 def set_scheduler(scheduler: BaseScheduler | None) -> None: ...
+def get_scheduler() -> BaseScheduler: ...
 def get_running_scheduler() -> BaseScheduler: ...
 ```
 
@@ -153,6 +157,12 @@ Semantics:
   - Installs scheduler as current in the active context.
   - If argument is `None`, clears current scheduler binding.
 
+- `get_scheduler()`:
+  - Returns the current scheduler in this execution context, whether or not it
+    is actively running.
+  - Raises `RuntimeError` if no current scheduler is bound.
+  - Never creates or installs a scheduler.
+
 - `get_running_scheduler()`:
   - Returns the scheduler currently running in this execution context.
   - Raises `RuntimeError` if no running scheduler exists.
@@ -161,22 +171,61 @@ Semantics:
 ### Scheduler Grouping
 
 ```python
+def ensure_future(
+  entry: Future[Any] | Callable[[], Any],
+) -> Future[Any]: ...
+
+class BaseScheduler:
+    def ensure_future(
+        self,
+    entry: Future[Any] | Callable[[], Any],
+    ) -> Future[Any]: ...
+
 def gather(
-    *entries: Future[object] | Callable[[], object],
+    *entries: Future[Any] | Callable[[], Any],
     return_exceptions: bool = False,
-) -> Future[list[object]]: ...
+) -> Future[list[Any]]: ...
+
+def wait(
+  entries: Iterable[Future[Any] | Callable[[], Any]],
+  *,
+  timeout: float | None = None,
+  return_when: Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"] = "ALL_COMPLETED",
+) -> Future[tuple[set[Future[Any]], set[Future[Any]]]]: ...
+
+def wait_for(
+  entry: Future[Any] | Callable[[], Any],
+  timeout: float | None,
+) -> Future[Any]: ...
+
+def as_completed(
+  entries: Iterable[Future[Any] | Callable[[], Any]],
+  *,
+  timeout: float | None = None,
+) -> Iterator[Future[Any]]: ...
 ```
 
 Semantics:
 
-- Accepts scheduler futures/tasks and zero-argument callables.
-- Converts callables into scheduler-owned tealet tasks.
-- Returns results in input order.
+- `BaseScheduler.ensure_future(...)` returns existing scheduler futures
+  unchanged and spawns zero-argument callables as scheduler tasks.
+  `tealet.scheduler.ensure_future(...)` delegates to the current scheduler.
+- `gather(...)` accepts scheduler futures/tasks and zero-argument callables,
+  converts callables into scheduler-owned tealet tasks, and returns results in
+  input order.
 - With `return_exceptions=False`, the first child exception completes the group
   future with that exception.
 - With `return_exceptions=True`, child exceptions are collected into the result
   list alongside successful values.
 - Cancelling the group future requests cancellation of unfinished children.
+- `wait(...)` completes with `(done, pending)` sets and does not cancel pending
+  children when its timeout expires.
+- `wait_for(...)` completes with the child result, propagates child exceptions,
+  and cancels the wrapped child future on timeout.
+- `as_completed(...)` is a tealet-blocking iterator that yields scheduler
+  futures in child completion order. If its timeout expires before all inputs
+  finish, iteration raises `TimeoutError` without cancelling the unfinished
+  children.
 
 ### Scheduler Task Factories
 
@@ -403,8 +452,8 @@ Return behavior:
 - `asyncio.new_event_loop()` -> `Scheduler` or `AsyncScheduler` used directly as
   a factory
 - `asyncio.get_running_loop()` -> `get_running_scheduler()`
-- `asyncio.get_event_loop()` legacy pattern -> no direct equivalent; create a
-  scheduler explicitly or use a runner factory.
+- `asyncio.get_event_loop()` legacy current-loop lookup -> `get_scheduler()`
+  only for strict lookup of an explicitly-bound scheduler; it never creates one.
 - `asyncio.run(...)` from sync code -> `tealet.runner.run(...)`
 - `asyncio.Runner(...)` from sync code -> `tealet.runner.Runner(...)`
 - async code that needs a scoped tealet scheduler -> `tealet.asyncio.AsyncRunner(...)`
@@ -431,12 +480,12 @@ Return behavior:
 
 Phase 1: Accessor Semantics
 
-Status: Implemented with strict running-scheduler lookup.
+Status: Implemented with strict current-scheduler and running-scheduler lookup.
 
 - Keep explicit `Scheduler` / `AsyncScheduler` construction.
 - Keep `set_scheduler` for runner/manual binding.
-- Add `get_running_scheduler` and ensure it never creates schedulers.
-- Remove global default scheduler factory and lazy `get_scheduler` behavior.
+- Add `get_scheduler` and `get_running_scheduler`; neither creates schedulers.
+- Remove global default scheduler factory and lazy scheduler lookup behavior.
 
 Phase 2: Runner Surface
 

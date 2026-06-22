@@ -14,12 +14,15 @@ import warnings
 import weakref
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Callable, Coroutine, TypeVar, cast
+from collections.abc import Iterable, Iterator
+from contextlib import nullcontext
+from typing import Any, Callable, Coroutine, Literal, TypeAlias, TypeVar, cast
 
 import tealet
 
 from .locks import (
     Event,
+    Queue,
     RawTimeoutError,
     TimeoutError,
     set_scheduler_resolver,
@@ -52,15 +55,28 @@ T = TypeVar("T")
 DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
 
 __all__ = [
+    "ALL_COMPLETED",
     "Channel",
     "DeadlockError",
+    "FIRST_COMPLETED",
+    "FIRST_EXCEPTION",
     "Scheduler",
     "TimerHandle",
+    "as_completed",
+    "ensure_future",
     "gather",
+    "get_scheduler",
     "get_running_scheduler",
     "set_scheduler",
     "to_thread",
+    "wait",
+    "wait_for",
 ]
+
+FIRST_COMPLETED = "FIRST_COMPLETED"
+FIRST_EXCEPTION = "FIRST_EXCEPTION"
+ALL_COMPLETED = "ALL_COMPLETED"
+_ReturnWhen: TypeAlias = Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"]
 
 
 # a thread local scheduler
@@ -144,6 +160,13 @@ set_scheduler_resolver(get_running_scheduler)
 
 def _current_scheduler() -> "BaseScheduler | None":
     return getattr(_scheduler, "instance", None)
+
+
+def get_scheduler() -> "BaseScheduler":
+    current = _current_scheduler()
+    if current is None:
+        raise RuntimeError("no current scheduler")
+    return current
 
 
 def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
@@ -464,8 +487,8 @@ class TimerHandle:
         self.cancel()
 
 
-class _GatheringFuture(_tasks.Future[list[object]]):
-    def __init__(self, children: list[_tasks.Future[object]]) -> None:
+class _GatheringFuture(_tasks.Future[list[Any]]):
+    def __init__(self, children: list[_tasks.Future[Any]]) -> None:
         super().__init__()
         self._children = children
         self._cancel_requested = False
@@ -486,33 +509,21 @@ class _GatheringFuture(_tasks.Future[list[object]]):
 
 
 def gather(
-    *entries: _tasks.Future[object] | Callable[[], object],
+    *entries: _tasks.Future[Any] | Callable[[], Any],
     return_exceptions: bool = False,
-) -> _tasks.Future[list[object]]:
-    scheduler = _current_scheduler()
-    if scheduler is None:
-        raise RuntimeError("no current scheduler")
-
-    children: list[_tasks.Future[object]] = []
-    for entry in entries:
-        if isinstance(entry, _tasks.Future):
-            if isinstance(entry, _tasks.TealetTask) and entry.get_scheduler() is not scheduler:
-                raise RuntimeError("Future is bound to a different scheduler")
-            children.append(entry)
-        elif callable(entry):
-            children.append(scheduler.spawn(entry))
-        else:
-            raise TypeError("gather arguments must be Futures or callables")
+) -> _tasks.Future[list[Any]]:
+    scheduler = get_scheduler()
+    children = [scheduler.ensure_future(entry) for entry in entries]
 
     gather_future = _GatheringFuture(children)
     if not children:
         gather_future.set_result([])
         return gather_future
 
-    results: list[object] = [None] * len(children)
+    results: list[Any] = [None] * len(children)
     remaining = len(children)
 
-    def child_done(index: int, child: _tasks.Future[object]) -> None:
+    def child_done(index: int, child: _tasks.Future[Any]) -> None:
         nonlocal remaining
         if gather_future.done():
             return
@@ -538,6 +549,101 @@ def gather(
             child.add_done_callback(lambda done_child, index=index: child_done(index, done_child))
 
     return gather_future
+
+
+def ensure_future(
+    entry: _tasks.Future[Any] | Callable[[], Any],
+) -> _tasks.Future[Any]:
+    scheduler = get_scheduler()
+    return scheduler.ensure_future(entry)
+
+
+def wait(
+    entries: Iterable[_tasks.Future[Any] | Callable[[], Any]],
+    *,
+    timeout: float | None = None,
+    return_when: _ReturnWhen = ALL_COMPLETED,
+) -> _tasks.Future[tuple[set[_tasks.Future[Any]], set[_tasks.Future[Any]]]]:
+    scheduler = get_scheduler()
+    children = {scheduler.ensure_future(entry) for entry in entries}
+    if not children:
+        raise ValueError("Set of Futures is empty.")
+    if return_when not in (FIRST_COMPLETED, FIRST_EXCEPTION, ALL_COMPLETED):
+        raise ValueError(f"Invalid return_when value: {return_when!r}")
+
+    def wait_task() -> tuple[set[_tasks.Future[Any]], set[_tasks.Future[Any]]]:
+        try:
+            for child in _as_completed_futures(children, timeout=timeout):
+                if return_when == FIRST_COMPLETED:
+                    break
+                if return_when == FIRST_EXCEPTION and child._exception is not None and not child.cancelled():
+                    break
+        except TimeoutError:
+            pass
+        done = {child for child in children if child.done()}
+        return done, children - done
+
+    return scheduler.spawn(wait_task)
+
+
+def _as_completed_futures(
+    children: Iterable[_tasks.Future[Any]],
+    *,
+    timeout: float | None = None,
+) -> Iterator[_tasks.Future[Any]]:
+    children = list(dict.fromkeys(children))
+    pending_callbacks = set(children)
+    completed: Queue[_tasks.Future[Any]] = Queue()
+
+    def complete_next(child: _tasks.Future[Any]) -> None:
+        pending_callbacks.discard(child)
+        completed.put_nowait(child)
+
+    try:
+        for child in children:
+            if child.done():
+                complete_next(child)
+            else:
+                child.add_done_callback(complete_next)
+        remaining = len(children)
+        with (scheduler_timeout(timeout) if timeout is not None else nullcontext()):
+            while remaining:
+                child = completed.sync_get()
+                remaining -= 1
+                yield cast(_tasks.Future[Any], child)
+    finally:
+        for child in pending_callbacks:
+            child.remove_done_callback(complete_next)
+
+
+def wait_for(
+    entry: _tasks.Future[Any] | Callable[[], Any],
+    timeout: float | None,
+) -> _tasks.Future[Any]:
+    scheduler = get_scheduler()
+    child = scheduler.ensure_future(entry)
+
+    def wait_task() -> Any:
+        try:
+            with (scheduler_timeout(timeout) if timeout is not None else nullcontext()):
+                return child.wait()
+        except TimeoutError:
+            if timeout is None:
+                raise
+            child.cancel()
+            raise
+
+    return scheduler.spawn(wait_task)
+
+
+def as_completed(
+    entries: Iterable[_tasks.Future[Any] | Callable[[], Any]],
+    *,
+    timeout: float | None = None,
+) -> Iterator[_tasks.Future[Any]]:
+    scheduler = get_scheduler()
+    children = (scheduler.ensure_future(entry) for entry in entries)
+    return _as_completed_futures(children, timeout=timeout)
 
 
 class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
@@ -630,11 +736,8 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
 
         def wait_for_shutdown(_timeout: float | None = timeout) -> None:
             try:
-                if _timeout is None:
+                with (scheduler_timeout(_timeout) if _timeout is not None else nullcontext()):
                     future.wait()
-                else:
-                    with scheduler_timeout(_timeout):
-                        future.wait()
             except TimeoutError:
                 warnings.warn(
                     "The executor did not finish joining its threads "
@@ -842,6 +945,18 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
                 pass
 
     # -- Task creation and cooperative operations ---------------------
+
+    def ensure_future(
+        self,
+        entry: _tasks.Future[Any] | Callable[[], Any],
+    ) -> _tasks.Future[Any]:
+        if isinstance(entry, _tasks.Future):
+            if isinstance(entry, _tasks.TealetTask) and entry.get_scheduler() is not self:
+                raise RuntimeError("Future is bound to a different scheduler")
+            return entry
+        if callable(entry):
+            return self.spawn(entry)
+        raise TypeError("entry must be a Future or callable")
 
     def spawn(
         self,

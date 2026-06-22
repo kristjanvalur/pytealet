@@ -120,6 +120,19 @@ Primary public names include:
 - `GreenletExit`
 - `error`
 
+## Scheduler Accessors
+
+`tealet.scheduler.set_scheduler(scheduler)` binds a scheduler as current in the
+active context. Passing `None` clears the current scheduler binding.
+
+`tealet.scheduler.get_scheduler()` returns the current scheduler, whether or not
+it is actively running. It raises `RuntimeError` if no scheduler is currently
+bound and never creates one implicitly.
+
+`tealet.scheduler.get_running_scheduler()` returns the current scheduler only
+while it is actively driving work. It raises `RuntimeError` if no scheduler is
+running and never creates one implicitly.
+
 ## Scheduler Asyncio Bridge
 
 `BaseScheduler.await_(awaitable) -> object` waits for an
@@ -133,3 +146,28 @@ When optional `asynkit` support is available, coroutine objects are started with
 `asynkit.CoroStart`; if they complete synchronously, `await_()` returns without
 creating an asyncio task. If they block, their continuation is handed to asyncio
 and waited on normally.
+
+## Scheduler Waiting Helpers
+
+`scheduler.ensure_future(entry)` returns a scheduler `Future` for one entry.
+Existing scheduler futures are returned unchanged, and zero-argument callables
+are spawned as scheduler tasks.
+`tealet.scheduler.ensure_future(entry)` delegates to the current scheduler.
+
+`tealet.scheduler.gather(*entries, return_exceptions=False)` returns a scheduler
+`Future` for ordered child results. Entries may be scheduler futures/tasks or
+zero-argument callables, which are spawned as scheduler tasks.
+
+`tealet.scheduler.wait(entries, *, timeout=None, return_when=ALL_COMPLETED)`
+returns a scheduler `Future` whose result is `(done, pending)`. The
+`return_when` value may be `FIRST_COMPLETED`, `FIRST_EXCEPTION`, or
+`ALL_COMPLETED`. Timeout completion does not cancel pending children.
+
+`tealet.scheduler.wait_for(entry, timeout)` returns a scheduler `Future` for one
+child result. If the timeout expires, the wrapper raises `TimeoutError` and
+cancels the child future.
+
+`tealet.scheduler.as_completed(entries, *, timeout=None)` is a tealet-blocking
+iterator that yields scheduler futures in child completion order. If the timeout
+expires before all children finish, iteration raises `TimeoutError`; unfinished
+children are not cancelled by `as_completed(...)`.

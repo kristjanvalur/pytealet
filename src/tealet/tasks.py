@@ -182,15 +182,27 @@ class Future(Generic[T]):
         return self._exception
 
 
-class Shield(Generic[T]):
-    """Wait wrapper that avoids cancelling the wrapped future."""
+class Shield(Future[T]):
+    """Future wrapper whose cancellation does not cancel the wrapped future."""
 
     def __init__(self, future: Future[T]) -> None:
+        super().__init__()
         self._future = future
+        if future.done():
+            self._complete_from_child(future)
+        else:
+            future.add_done_callback(self._complete_from_child)
+
+    def _complete_from_child(self, future: Future[T]) -> None:
+        if self.done():
+            return
+        try:
+            self.set_result(future.result())
+        except BaseException as exc:
+            self.set_exception(exc)
 
     def wait(self) -> T:
-        self._future._wait()
-        return self._future.result()
+        return super().wait()
 
 
 def shield(future: Future[T]) -> Shield[T]:
