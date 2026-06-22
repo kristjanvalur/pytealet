@@ -2885,6 +2885,10 @@ static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
     PyTealetNewArg targ;
 
     assert(tealet);
+    /* Default start for spawned STUB tealets. They may be unprepared stubs,
+     * where arg is already a PyTealetNewArg from run(), or prepared tealets,
+     * where arg is the first switch() payload and the callable lives on the wrapper.
+     */
     if (!tealet->prepared_func && !tealet->prepared_cfunc)
         return pytealet_main(t_current, arg);
 
