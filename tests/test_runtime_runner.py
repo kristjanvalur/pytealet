@@ -407,6 +407,86 @@ class TestAsyncRunner:
         assert signals.handler is signal.default_int_handler
 
 
+class TestRunnerScopeComposition:
+    def test_nested_sync_runners_restore_scheduler_stack(self):
+        previous = Scheduler()
+        set_scheduler(previous)
+
+        outer = Runner()
+        try:
+            outer_scheduler = outer.get_scheduler()
+            assert _current_scheduler() is outer_scheduler
+
+            inner = Runner()
+            try:
+                inner_scheduler = inner.get_scheduler()
+                assert _current_scheduler() is inner_scheduler
+                assert inner.run(lambda: "inner") == "inner"
+            finally:
+                inner.close()
+
+            assert _current_scheduler() is outer_scheduler
+        finally:
+            outer.close()
+            assert _current_scheduler() is previous
+            set_scheduler(None)
+
+    def test_nested_async_runners_restore_scheduler_stack(self):
+        async def run_case() -> None:
+            previous = Scheduler()
+            set_scheduler(previous)
+
+            outer = AsyncRunner()
+            try:
+                outer_scheduler = outer.get_scheduler()
+                assert _current_scheduler() is outer_scheduler
+
+                inner = AsyncRunner()
+                try:
+                    inner_scheduler = inner.get_scheduler()
+                    assert _current_scheduler() is inner_scheduler
+                    assert await inner.run(lambda: "inner") == "inner"
+                finally:
+                    await inner.aclose()
+
+                assert _current_scheduler() is outer_scheduler
+            finally:
+                await outer.aclose()
+                assert _current_scheduler() is previous
+                set_scheduler(None)
+
+        asyncio.run(run_case())
+
+    def test_sync_runner_rejects_init_inside_running_async_scheduler(self):
+        async def run_case() -> None:
+            runner = AsyncRunner()
+
+            def entry() -> None:
+                nested = Runner()
+                with pytest.raises(RuntimeError, match="another scheduler is running"):
+                    nested.get_scheduler()
+
+            try:
+                await runner.run(entry)
+            finally:
+                await runner.aclose()
+
+        asyncio.run(run_case())
+
+    def test_async_runner_rejects_init_inside_running_sync_scheduler(self):
+        runner = Runner()
+
+        def entry() -> None:
+            nested = AsyncRunner()
+            with pytest.raises(RuntimeError, match="another scheduler is running"):
+                nested.get_scheduler()
+
+        try:
+            runner.run(entry)
+        finally:
+            runner.close()
+
+
 class TestRunner:
     def test_get_scheduler_lazy_init(self):
         runner = Runner()

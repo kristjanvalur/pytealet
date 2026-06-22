@@ -89,12 +89,11 @@ Implemented:
     `run_until_complete(...)`; async `AsyncRunner.aclose()` uses
     `arun_until_complete(...)`
 
-Not implemented yet from this proposal:
+Remaining from this proposal:
 
-- A top-level `Runtime` wrapper class coordinating loop and scheduler factories
-  in one object.
-- Scheduler access has been narrowed to explicit construction plus
-  `get_running_scheduler()`.
+- Decide whether the `tealet.runtime` module name should stay as-is for
+  compatibility, grow a `tealet.runner` alias, or eventually be renamed.
+- Continue hardening the low-level IO and tealet-hosted asyncio loop surfaces.
 
 ## Goals
 
@@ -160,28 +159,44 @@ Semantics:
   list alongside successful values.
 - Cancelling the group future requests cancellation of unfinished children.
 
-### Runtime Factory Types
+### Runner Factory Types
 
 ```python
 from collections.abc import Callable
 
 LoopFactory = Callable[[], asyncio.AbstractEventLoop]
 SchedulerFactory = Callable[[], Scheduler]
+AsyncSchedulerFactory = Callable[[], AsyncScheduler]
 ```
 
-### High-Level Runtime API
+### High-Level Runner API
 
 ```python
-class Runtime:
+class Runner:
     def __init__(
         self,
         *,
-        loop_factory: LoopFactory | None = None,
         scheduler_factory: SchedulerFactory | None = None,
+        context: contextvars.Context | None = None,
+        debug: bool | None = None,
+        handle_sigint: bool = True,
     ) -> None: ...
 
-    def run(self, entry, /, *args, **kwargs): ...
-    async def run_async(self, entry, /, *args, **kwargs): ...
+    def run(self, entry, /, *, context: contextvars.Context | None = None): ...
+    def close(self) -> None: ...
+
+class AsyncRunner:
+    def __init__(
+        self,
+        *,
+        scheduler_factory: AsyncSchedulerFactory | None = None,
+        context: contextvars.Context | None = None,
+        debug: bool | None = None,
+        handle_sigint: bool = True,
+    ) -> None: ...
+
+    async def run(self, entry, /, *, context: contextvars.Context | None = None): ...
+    async def aclose(self) -> None: ...
 ```
 
 And convenience functions:
@@ -219,9 +234,8 @@ Return behavior:
 
 ## Execution Model
 
-### Runtime.run(...)
+### tealet.runtime.Runner.run(...)
 
-- Creates a loop using `loop_factory` (or default loop creator).
 - Creates a scheduler using `scheduler_factory` (or default scheduler creator).
 - Installs scheduler as current for runtime scope.
 - Runs entry to completion.
@@ -229,7 +243,17 @@ Return behavior:
   - pending scheduler waits resolved/cancelled
   - scheduler running marker cleared
   - scheduler binding restored
-  - loop shut down and closed if created by runtime
+  - scheduler default executor shut down cleanly before scheduler close
+
+### tealet.asyncio.AsyncRunner.run(...)
+
+- Requires a currently running asyncio loop.
+- Creates a scheduler using `scheduler_factory` (or default async scheduler
+  creator).
+- Installs scheduler as current for runtime scope.
+- Runs entry to completion inside the active asyncio task.
+- Uses `aclose()` for deterministic async cleanup. `AsyncRunner` deliberately
+  follows Python's async-resource convention and does not expose `close()`.
 
 ### tealet.asyncio.run_async(...)
 
@@ -269,6 +293,8 @@ Return behavior:
 - Nested runtime scopes are allowed and use stack discipline:
   - inner scope overrides current scheduler
   - outer scope restored on exit
+- Initializing a new runner while another scheduler is actively running in the
+  same context is rejected.
 
 ## Error Behavior
 
@@ -303,9 +329,26 @@ Return behavior:
 - `asyncio.get_running_loop()` -> `get_running_scheduler()`
 - `asyncio.get_event_loop()` legacy pattern -> no direct equivalent; create a
   scheduler explicitly or use a runner factory.
-- `asyncio.run(..., loop_factory=...)` -> `run(..., loop_factory=..., scheduler_factory=...)`
+- `asyncio.run(...)` from sync code -> `tealet.runtime.run(...)`
+- `asyncio.Runner(...)` from sync code -> `tealet.runtime.Runner(...)`
+- async code that needs a scoped tealet scheduler -> `tealet.asyncio.AsyncRunner(...)`
 - `asyncio.run(...)` inside tealet -> `tealet.asyncio.run_asyncio_in_tealet(...)`
-- `asyncio.Runner(...)` -> `Runtime(...)`
+
+## Migration Notes
+
+- Prefer `tealet.runtime.Runner` for synchronous code that wants reusable runner
+  state or explicit lifecycle control.
+- Prefer `tealet.runtime.run(...)` for one-shot synchronous entry points.
+- Prefer `tealet.asyncio.AsyncRunner` plus `await runner.aclose()` for async
+  code that needs explicit scheduler lifetime control.
+- Prefer `tealet.asyncio.run_async(...)` for one-shot async entry points inside
+  an existing asyncio task.
+- Prefer `tealet.asyncio.run_in_asyncio(...)` when synchronous code should own a
+  temporary asyncio runner and an inner tealet async scheduler.
+- Prefer `tealet.asyncio.run_asyncio_in_tealet(...)` when tealet code should host
+  a temporary asyncio runner.
+- Direct `Scheduler` / `AsyncScheduler` APIs remain appropriate for low-level
+  tests, integrations, and custom driving loops.
 
 ## Suggested Phase Plan
 
@@ -318,20 +361,25 @@ Status: Implemented with strict running-scheduler lookup.
 - Add `get_running_scheduler` and ensure it never creates schedulers.
 - Remove global default scheduler factory and lazy `get_scheduler` behavior.
 
-Phase 2: Runtime Wrapper
+Phase 2: Runner Surface
 
-Status: Partially covered by existing `Runner`/`AsyncRunner` and top-level
-`tealet.runtime.run`/`tealet.asyncio.run_async`; `Runtime` class itself not added.
+Status: Implemented with `Runner`/`AsyncRunner` and top-level
+`tealet.runtime.run`/`tealet.asyncio.run_async` helpers. A separate `Runtime`
+class is not part of the current public surface.
 
-- Add `Runtime` plus top-level `run` and `run_async`.
-- Add lifecycle and cleanup tests.
+- Keep `Runner`/`AsyncRunner` as the primary public runtime surface.
+- Keep module naming under review: the implementation currently lives in
+  `tealet.runtime`, but a future `tealet.runner` alias or rename may better
+  match the public API shape.
 
 Phase 3: Context Scoping Hardening
 
-Status: Partially complete.
+Status: Implemented for runner binding/restoration, with focused nested scope
+tests.
 
 - Ensure async context-local behavior across task boundaries.
-- Add nested runtime scope tests.
+- Keep nested runtime scope tests covering sync, async, and running-scheduler
+  rejection behavior.
 
 Phase 4: Docs and Migration Notes
 
@@ -342,12 +390,10 @@ Status: In progress.
 
 ## Immediate Next Steps
 
-1. Decide whether to keep introducing a `Runtime` class, or adopt
-  `Runner`/`AsyncRunner` as the primary public runtime surface.
-2. Add explicit nested scope tests for mixed sync/async runner composition.
-3. Document final shutdown guarantees for runner exit paths.
-4. Add a short migration section mapping old helper usage to current runner
-  and top-level helper APIs.
+1. Decide whether `tealet.runtime` should remain the long-term module name, or
+  whether to add a `tealet.runner` alias before any public API freeze.
+2. Continue hardening the low-level IO callback and socket helper surface.
+3. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
 
 ## Next Alignment Backlog (Asyncio Interop)
 
@@ -358,21 +404,28 @@ IO-manager adapters.
 
 1. Running-State API
 
-- Add `scheduler.is_running()` and define it strictly as: a run call is
-  currently active (not merely "created" or "not closed").
-- Guard scheduler replacement APIs so they fail when the currently bound
-  scheduler is running.
+Status: Implemented.
+
+- `scheduler.is_running()` is defined as: a run call is currently active (not
+  merely "created" or "not closed").
+- Runner initialization rejects replacement while the currently bound scheduler
+  is running.
 
 2. Loop-Style Run APIs
 
-- Add `run_forever()` and `run_until_complete(...)` equivalents on scheduler.
-- Keep `pump(...)` as an explicit low-level primitive.
-- Evaluate adding a `stop()` primitive to mirror event-loop lifecycle controls.
+Status: Implemented for current sync/async scheduler drivers.
+
+- `run_forever()`, `run_until_complete(...)`, `arun_forever()`, and
+  `arun_until_complete(...)` are available on the appropriate driving APIs.
+- `pump(...)` remains an explicit low-level primitive.
+- `stop()` is available to request driver termination.
 
 3. Runner Context Support
 
-- Add explicit runner context support (`contextvars.Context`-aware behavior)
-  and use that context when creating/starting the main task/tealet.
+Status: Implemented.
+
+- Runner construction accepts an optional `contextvars.Context` and each
+  `run(...)` call can override that context.
 
 4. Low-Level Scheduler Surface
 
