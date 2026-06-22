@@ -14,7 +14,7 @@ from tealet.asyncio import (
     run_asyncio_in_tealet,
     run_in_asyncio,
 )
-from tealet.runtime import Runner, run
+from tealet.runner import Runner, run
 from tealet.scheduler import Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
 from tealet.tasks import Future
 from tealet.selector import SelectorScheduler

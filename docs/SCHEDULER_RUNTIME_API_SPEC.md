@@ -13,7 +13,7 @@ The repository now contains a meaningful subset of this design.
 Implemented:
 
 - Runner split and driving split are in place:
-  - `tealet.runtime.Runner` drives sync scheduler execution.
+  - `tealet.runner.Runner` drives sync scheduler execution.
   - `tealet.asyncio.AsyncRunner` drives async scheduler execution inside an existing asyncio task.
 - Shared runner lifecycle has been consolidated in a generic `BaseRunner`.
 - Runner factories use per-runner defaults and factory-only construction.
@@ -21,7 +21,7 @@ Implemented:
   - `AsyncRunner` uses `tealet.asyncio.AsyncScheduler` as its default factory.
   - Custom factories are duck typed; runtime does not validate returned objects.
 - Top-level convenience helpers exist:
-  - `tealet.runtime.run(...)`
+  - `tealet.runner.run(...)`
   - `tealet.asyncio.run_async(...)`
   - `tealet.asyncio.run_in_asyncio(...)`
   - `tealet.asyncio.run_asyncio_in_tealet(...)`
@@ -97,8 +97,6 @@ Implemented:
 
 Remaining from this proposal:
 
-- Decide whether the `tealet.runtime` module name should stay as-is for
-  compatibility, grow a `tealet.runner` alias, or eventually be renamed.
 - Continue hardening the low-level IO and tealet-hosted asyncio loop surfaces.
 
 ## Goals
@@ -295,7 +293,7 @@ Return behavior:
 
 ## Execution Model
 
-### tealet.runtime.Runner.run(...)
+### tealet.runner.Runner.run(...)
 
 - Creates a scheduler using `scheduler_factory` (or default scheduler creator).
 - Installs scheduler as current for runtime scope.
@@ -336,7 +334,7 @@ Return behavior:
 
 ### tealet.asyncio.run_asyncio_in_tealet(...)
 
-- Creates a temporary `tealet.runtime.Runner` with a
+- Creates a temporary `tealet.runner.Runner` with a
   `tealet.selector.SelectorScheduler` by default.
 - Disables the outer tealet runner's SIGINT handler by default so the inner
   `asyncio.Runner` can install its normal interrupt handler.
@@ -392,16 +390,16 @@ Return behavior:
 - `asyncio.get_running_loop()` -> `get_running_scheduler()`
 - `asyncio.get_event_loop()` legacy pattern -> no direct equivalent; create a
   scheduler explicitly or use a runner factory.
-- `asyncio.run(...)` from sync code -> `tealet.runtime.run(...)`
-- `asyncio.Runner(...)` from sync code -> `tealet.runtime.Runner(...)`
+- `asyncio.run(...)` from sync code -> `tealet.runner.run(...)`
+- `asyncio.Runner(...)` from sync code -> `tealet.runner.Runner(...)`
 - async code that needs a scoped tealet scheduler -> `tealet.asyncio.AsyncRunner(...)`
 - `asyncio.run(...)` inside tealet -> `tealet.asyncio.run_asyncio_in_tealet(...)`
 
 ## Migration Notes
 
-- Prefer `tealet.runtime.Runner` for synchronous code that wants reusable runner
+- Prefer `tealet.runner.Runner` for synchronous code that wants reusable runner
   state or explicit lifecycle control.
-- Prefer `tealet.runtime.run(...)` for one-shot synchronous entry points.
+- Prefer `tealet.runner.run(...)` for one-shot synchronous entry points.
 - Prefer `tealet.asyncio.AsyncRunner` plus `async with` or
   `await runner.aclose()` for async code that needs explicit scheduler lifetime
   control.
@@ -428,13 +426,12 @@ Status: Implemented with strict running-scheduler lookup.
 Phase 2: Runner Surface
 
 Status: Implemented with `Runner`/`AsyncRunner` and top-level
-`tealet.runtime.run`/`tealet.asyncio.run_async` helpers. A separate `Runtime`
+`tealet.runner.run`/`tealet.asyncio.run_async` helpers. A separate `Runtime`
 class is not part of the current public surface.
 
 - Keep `Runner`/`AsyncRunner` as the primary public runtime surface.
-- Keep module naming under review: the implementation currently lives in
-  `tealet.runtime`, but a future `tealet.runner` alias or rename may better
-  match the public API shape.
+- The synchronous runner implementation lives in `tealet.runner`; the older
+  `tealet.runtime` module name is intentionally not preserved.
 
 Phase 3: Context Scoping Hardening
 
@@ -454,10 +451,8 @@ Status: In progress.
 
 ## Immediate Next Steps
 
-1. Decide whether `tealet.runtime` should remain the long-term module name, or
-  whether to add a `tealet.runner` alias before any public API freeze.
-2. Continue hardening the low-level IO callback and socket helper surface.
-3. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
+1. Continue hardening the low-level IO callback and socket helper surface.
+2. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
 
 ## Next Alignment Backlog (Asyncio Interop)
 
@@ -576,14 +571,11 @@ Status: Implemented for Python 3.11+.
   an inner scope scheduler by default?
 - What is the exact cancellation policy for scheduler-blocked tasks during runtime
   shutdown?
-- Should `tealet.runtime` remain the long-term module name, or should the public
-  runner surface move to a `tealet.runner` module/alias?
-
 ## Minimal Usage Sketch
 
 ```python
 # sync entry with explicit factories
-result = tealet.runtime.run(
+result = tealet.runner.run(
     main,
     scheduler_factory=tealet.scheduler.Scheduler,
 )

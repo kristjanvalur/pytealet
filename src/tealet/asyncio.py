@@ -16,8 +16,8 @@ from .scheduler import (
     gather,
 )
 from .tasks import CancelledError, Future, TealetTask
-from .runtime import BaseRunner
-from .runtime import Runner as TealetRunner
+from .runner import BaseRunner
+from .runner import Runner as TealetRunner
 from .selector import SelectorScheduler
 
 T = TypeVar("T")
