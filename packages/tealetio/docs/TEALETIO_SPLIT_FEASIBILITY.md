@@ -18,9 +18,6 @@ uv workspaces are configured from the root `pyproject.toml`:
 ```toml
 [tool.uv.workspace]
 members = ["packages/*"]
-
-[tool.uv.sources]
-tealetio = { workspace = true }
 ```
 
 Each workspace member needs its own `pyproject.toml`. Inter-package dependencies are declared normally in `[project.dependencies]`, then resolved locally with `[tool.uv.sources]`:
@@ -94,6 +91,46 @@ uv build --package tealetio
 
 The build emits setuptools deprecation warnings for the license classifier, matching current project style; this is not specific to the split.
 
+## CI and Release Automation
+
+The repository should treat `tealet` and `tealetio` as separate publishable
+distributions that happen to share one workspace and one lockfile.
+
+Recommended workflow ownership:
+
+- `.github/workflows/ci.yml`: core `tealet` runtime tests.
+- `.github/workflows/tealetio-ci.yml`: `tealetio` tests, triggered by changes to
+    `packages/tealetio/**`, workspace metadata, or core `src/**` code that
+    `tealetio` depends on.
+- `.github/workflows/release-publish.yml`: native `tealet` wheel/sdist build and
+    publish.
+- `.github/workflows/tealetio-release-publish.yml`: pure-Python `tealetio`
+    wheel/sdist build and publish.
+
+Recommended release tag convention:
+
+- `tealet-vX.Y.Z` publishes only the `tealet` distribution.
+- `tealetio-vX.Y.Z` publishes only the `tealetio` distribution.
+- Legacy `vX.Y.Z` tags may continue to publish `tealet` during the transition,
+    but new automation should prefer package-prefixed tags.
+
+This avoids ambiguous monorepo releases. A GitHub Release should be created for
+the package-specific tag that is being published. The matching workflow builds
+only that package's artifacts and the publish job is additionally guarded by the
+tag prefix, so a `tealetio-v...` release cannot accidentally publish `tealet`.
+
+Recommended PyPI Trusted Publishing setup:
+
+- PyPI project `tealet` trusts this repository's
+    `.github/workflows/release-publish.yml` workflow, using the `pypi-tealet`
+    GitHub environment.
+- PyPI project `tealetio` trusts this repository's
+    `.github/workflows/tealetio-release-publish.yml` workflow, using the
+    `pypi-tealetio` GitHub environment.
+
+Separate GitHub environments make package ownership and approval policy explicit
+even though both packages live in the same repository.
+
 ## Boundary Assessment
 
 The dependency direction is clean:
@@ -117,6 +154,7 @@ The moved implementation size is approximately:
 4. Keep core examples in `src/tealet_examples.py`; keep only a deliberately minimal `tealet.simple_scheduler.SimpleScheduler` example in the base package.
 5. Move richer scheduler demos into `tealetio.examples`.
 6. Split CI packaging jobs so `tealet` still builds native wheels and `tealetio` builds pure-Python wheels/sdists.
+7. Use package-prefixed release tags: `tealet-v...` for `tealet`, `tealetio-v...` for `tealetio`.
 
 ## Open Questions
 

@@ -1,4 +1,4 @@
-name: Build And Publish
+name: tealet Build And Publish
 
 "on":
   pull_request:
@@ -6,6 +6,7 @@ name: Build And Publish
     branches:
       - main
     tags:
+      - "tealet-v*"
       - "v*"
   release:
     types:
@@ -15,6 +16,10 @@ name: Build And Publish
 jobs:
   build_wheels:
     name: Build wheels (${{ matrix.os }} / ${{ matrix.archs }})
+    if: >-
+      github.event_name != 'release' ||
+      startsWith(github.event.release.tag_name, 'tealet-v') ||
+      startsWith(github.event.release.tag_name, 'v')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -66,6 +71,10 @@ jobs:
 
   build_sdist:
     name: Build sdist
+    if: >-
+      github.event_name != 'release' ||
+      startsWith(github.event.release.tag_name, 'tealet-v') ||
+      startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -88,13 +97,17 @@ jobs:
           path: dist/*.tar.gz
 
   publish_pypi:
-    name: Publish to PyPI
+    name: Publish tealet to PyPI
     needs:
       - build_wheels
       - build_sdist
     runs-on: ubuntu-latest
-    environment: pypi
-    if: github.event_name == 'release' && github.event.action == 'published'
+    environment: pypi-tealet
+    if: >-
+      github.event_name == 'release' &&
+      github.event.action == 'published' &&
+      (startsWith(github.event.release.tag_name, 'tealet-v') ||
+      startsWith(github.event.release.tag_name, 'v'))
     permissions:
       id-token: write
       contents: read
