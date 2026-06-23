@@ -46,6 +46,7 @@ pytealet/
 │   └── compat_greenlet/
 ├── packages/
 │   └── tealetio/             # Optional scheduler/asyncio package built on tealet
+│       └── docs/             # tealetio-specific API and design docs
 ├── pyproject.toml
 └── README.md
 ```
@@ -97,6 +98,8 @@ uv run --active python -m tealet_examples
 
 Scheduler, task/future, lock, selector, and asyncio coexistence APIs live in the separate `tealetio` workspace package. `tealetio` depends on `tealet`; `tealet` has no dependency on `tealetio`.
 
+Package-specific documentation lives under `packages/tealetio/docs/`.
+
 Run the `tealetio` test suite from the workspace root:
 
 ```bash
@@ -139,6 +142,7 @@ Detailed API references live in the `docs/` folder:
 
 - [docs/PYTHON_API.md](docs/PYTHON_API.md) for the Python-level API (`tealet`, `_tealet`, and compatibility shim notes)
 - [docs/C_API.md](docs/C_API.md) for the capsule-based C API (`pytealet_capi.h`)
+- [packages/tealetio/docs/PYTHON_API.md](packages/tealetio/docs/PYTHON_API.md) for scheduler, task/future, lock, selector, runner, and asyncio APIs
 
 ### Building the C Extension
 

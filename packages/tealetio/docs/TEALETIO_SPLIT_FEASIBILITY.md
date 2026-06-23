@@ -112,7 +112,8 @@ The moved implementation size is approximately:
 
 1. Publish/reserve `tealetio` if this split is accepted.
 2. Keep `tealet` dependency-free: no default dependency, no optional dependency, and no old scheduler import shims.
-3. Move scheduler docs and tests to `tealetio.*` imports.
+3. Keep scheduler docs and tests under the `tealetio` package, using
+    `tealetio.*` imports.
 4. Keep core examples in `src/tealet_examples.py`; keep only a deliberately minimal `tealet.simple_scheduler.SimpleScheduler` example in the base package.
 5. Move richer scheduler demos into `tealetio.examples`.
 6. Split CI packaging jobs so `tealet` still builds native wheels and `tealetio` builds pure-Python wheels/sdists.

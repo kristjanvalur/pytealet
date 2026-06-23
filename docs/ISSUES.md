@@ -241,7 +241,7 @@ TLS handling has been migrated to `PyThread_tss_*` APIs (`PyThread_tss_create/ge
 
 ### ✅ Scheduler Task Factories, Eager Startup, and Stub-Backed Tasks (Resolved)
 
-**Location:** `src/tealet/scheduler.py`, `src/tealet/tasks.py`
+**Location:** `packages/tealetio/src/tealetio/scheduler.py`, `packages/tealetio/src/tealetio/tasks.py`
 
 **Implemented:**
 - `BaseScheduler.set_task_factory(...)` and `get_task_factory()` configure
