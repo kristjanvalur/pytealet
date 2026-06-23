@@ -70,7 +70,7 @@ If you are using a custom debug CPython build, install via uv pip with an explic
 
 ```bash
 uv venv --python /path/to/cpython-debug/python .venv-cpython313-debug
-uv pip install --python .venv-cpython313-debug/bin/python -e .[dev]
+uv pip install --python .venv-cpython313-debug/bin/python -e . --group dev
 ```
 
 ### Running Tests

@@ -30,7 +30,7 @@ uv venv --python /path/to/cpython-debug/python .venv-cpython310-debug
 Prefer uv pip with an explicit interpreter path for debug builds:
 
 ```bash
-uv pip install --python .venv-cpython310-debug/bin/python -e .[dev]
+uv pip install --python .venv-cpython310-debug/bin/python -e . --group dev
 ```
 
 ### Use uv with an activated venv
@@ -53,7 +53,7 @@ always be explicit about which environment to target:
 Examples:
 
 ```bash
-uv pip install --python .venv313/bin/python -e .[dev]
+uv pip install --python .venv313/bin/python -e . --group dev
 
 source .venv312/bin/activate
 uv pip install test-dependency  # Installs into active .venv312
@@ -70,6 +70,6 @@ exist, this selection is ambiguous, so use `--python`.
   prefer `uv pip` with an explicit interpreter path, for example:
 
 ```bash
-uv pip install --python .venv-cpython310-debug/bin/python -e .[dev]
+uv pip install --python .venv-cpython310-debug/bin/python -e . --group dev
 ```
 - `fast_build.sh` works with debug venvs once the venv is active.

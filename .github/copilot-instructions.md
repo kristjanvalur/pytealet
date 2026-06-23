@@ -65,7 +65,7 @@ When using a debug interpreter (`python3.xd`), prefer explicit `uv pip`:
 
 ```bash
 uv venv --python /path/to/cpython-debug/python .venv-cpython313-debug
-uv pip install --python .venv-cpython313-debug/bin/python -e .[dev]
+uv pip install --python .venv-cpython313-debug/bin/python -e . --group dev
 ```
 
 When the debug venv is activated, prefer `uv --active` forms.
