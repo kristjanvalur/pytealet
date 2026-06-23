@@ -137,7 +137,7 @@ class Future(Generic[T]):
         if self._done:
             return True
 
-        return self._event.wait()
+        return self._event.swait()
 
     def wait(self) -> T:
         try:
@@ -152,7 +152,7 @@ class Future(Generic[T]):
     async def _async_wait(self) -> T:
         if not self._done:
             try:
-                await self._event.async_wait()
+                await self._event.wait()
             except CancelledError:
                 from .scheduler import get_running_scheduler
 

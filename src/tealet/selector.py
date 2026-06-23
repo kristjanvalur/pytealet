@@ -67,7 +67,7 @@ class SelectorMixin:
         self.add_reader(fd, wake)
 
         try:
-            ready.wait()
+            ready.swait()
         finally:
             if active:
                 active = False
@@ -91,7 +91,7 @@ class SelectorMixin:
         self.add_writer(fd, wake)
 
         try:
-            ready.wait()
+            ready.swait()
         finally:
             if active:
                 active = False

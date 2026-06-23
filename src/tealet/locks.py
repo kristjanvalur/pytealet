@@ -113,7 +113,7 @@ class Event:
         except ValueError:
             pass
 
-    def wait(self) -> bool:
+    def swait(self) -> bool:
         if self._is_set:
             return True
 
@@ -129,7 +129,7 @@ class Event:
 
         return True
 
-    async def async_wait(self) -> bool:
+    async def wait(self) -> bool:
         if self._is_set:
             return True
 
@@ -169,7 +169,7 @@ class Lock:
     def locked(self) -> bool:
         return self._locked
 
-    def sync_acquire(self) -> bool:
+    def sacquire(self) -> bool:
         if not self._locked:
             self._locked = True
             return True
@@ -177,7 +177,7 @@ class Lock:
         waiter = Event()
         self._waiters.append(waiter)
         try:
-            waiter.wait()
+            waiter.swait()
         except BaseException:
             try:
                 self._waiters.remove(waiter)
@@ -196,7 +196,7 @@ class Lock:
         waiter = Event()
         self._waiters.append(waiter)
         try:
-            await waiter.async_wait()
+            await waiter.wait()
         except BaseException:
             try:
                 self._waiters.remove(waiter)
@@ -218,7 +218,7 @@ class Lock:
             break
 
     def __enter__(self) -> "Lock":
-        self.sync_acquire()
+        self.sacquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -242,8 +242,8 @@ class Condition:
     def locked(self) -> bool:
         return self._lock.locked()
 
-    def sync_acquire(self) -> bool:
-        return self._lock.sync_acquire()
+    def sacquire(self) -> bool:
+        return self._lock.sacquire()
 
     async def acquire(self) -> bool:
         return await self._lock.acquire()
@@ -251,7 +251,7 @@ class Condition:
     def release(self) -> None:
         self._lock.release()
 
-    def sync_wait(self) -> bool:
+    def swait(self) -> bool:
         if not self.locked():
             raise RuntimeError("cannot wait on un-acquired lock")
 
@@ -259,14 +259,14 @@ class Condition:
         self._waiters.append(waiter)
         self._lock.release()
         try:
-            waiter.wait()
+            waiter.swait()
             return True
         finally:
             try:
                 self._waiters.remove(waiter)
             except ValueError:
                 pass
-            self._lock.sync_acquire()
+            self._lock.sacquire()
 
     async def wait(self) -> bool:
         if not self.locked():
@@ -276,7 +276,7 @@ class Condition:
         self._waiters.append(waiter)
         self._lock.release()
         try:
-            await waiter.async_wait()
+            await waiter.wait()
             return True
         finally:
             try:
@@ -285,10 +285,10 @@ class Condition:
                 pass
             await self._lock.acquire()
 
-    def sync_wait_for(self, predicate: Callable[[], bool]) -> bool:
+    def swait_for(self, predicate: Callable[[], bool]) -> bool:
         result = predicate()
         while not result:
-            self.sync_wait()
+            self.swait()
             result = predicate()
         return result
 
@@ -314,7 +314,7 @@ class Condition:
         self.notify(len(self._waiters))
 
     def __enter__(self) -> "Condition":
-        self.sync_acquire()
+        self.sacquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -368,13 +368,13 @@ class Barrier:
         except ValueError:
             pass
 
-    def sync_wait(self) -> int:
+    def swait(self) -> int:
         index, waiter, generation = self._arrive()
         if waiter is None:
             return index
 
         try:
-            waiter.wait()
+            waiter.swait()
             return index
         except BaseException:
             self._cancel_waiter(waiter, index, generation)
@@ -386,7 +386,7 @@ class Barrier:
             return index
 
         try:
-            await waiter.async_wait()
+            await waiter.wait()
             return index
         except BaseException:
             self._cancel_waiter(waiter, index, generation)
@@ -405,7 +405,7 @@ class Semaphore:
     def locked(self) -> bool:
         return self._value == 0
 
-    def sync_acquire(self) -> bool:
+    def sacquire(self) -> bool:
         if self._value > 0:
             self._value -= 1
             return True
@@ -413,7 +413,7 @@ class Semaphore:
         waiter = Event()
         self._waiters.append(waiter)
         try:
-            waiter.wait()
+            waiter.swait()
         except BaseException:
             try:
                 self._waiters.remove(waiter)
@@ -432,7 +432,7 @@ class Semaphore:
         waiter = Event()
         self._waiters.append(waiter)
         try:
-            await waiter.async_wait()
+            await waiter.wait()
         except BaseException:
             try:
                 self._waiters.remove(waiter)
@@ -451,7 +451,7 @@ class Semaphore:
             break
 
     def __enter__(self) -> "Semaphore":
-        self.sync_acquire()
+        self.sacquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -523,12 +523,12 @@ class Queue(Generic[T]):
         self._finished.clear()
         self._wakeup_next(self._getters)
 
-    def sync_put(self, item: T) -> None:
+    def sput(self, item: T) -> None:
         while self.full():
             waiter = Event()
             self._putters.append(waiter)
             try:
-                waiter.wait()
+                waiter.swait()
             finally:
                 try:
                     self._putters.remove(waiter)
@@ -541,7 +541,7 @@ class Queue(Generic[T]):
             waiter = Event()
             self._putters.append(waiter)
             try:
-                await waiter.async_wait()
+                await waiter.wait()
             finally:
                 try:
                     self._putters.remove(waiter)
@@ -556,12 +556,12 @@ class Queue(Generic[T]):
         self._wakeup_next(self._putters)
         return item
 
-    def sync_get(self) -> T:
+    def sget(self) -> T:
         while self.empty():
             waiter = Event()
             self._getters.append(waiter)
             try:
-                waiter.wait()
+                waiter.swait()
             finally:
                 try:
                     self._getters.remove(waiter)
@@ -574,7 +574,7 @@ class Queue(Generic[T]):
             waiter = Event()
             self._getters.append(waiter)
             try:
-                await waiter.async_wait()
+                await waiter.wait()
             finally:
                 try:
                     self._getters.remove(waiter)
@@ -589,13 +589,13 @@ class Queue(Generic[T]):
         if self._unfinished_tasks == 0:
             self._finished.set()
 
-    def sync_join(self) -> None:
+    def sjoin(self) -> None:
         while self._unfinished_tasks:
-            self._finished.wait()
+            self._finished.swait()
 
     async def join(self) -> None:
         while self._unfinished_tasks:
-            await self._finished.async_wait()
+            await self._finished.wait()
 
 
 class PriorityQueue(Queue[T]):

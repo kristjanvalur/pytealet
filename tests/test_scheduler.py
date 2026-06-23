@@ -518,7 +518,7 @@ class TestSchedulerAccessors:
 
         def entry() -> None:
             s.call_soon(event.set)
-            assert event.wait() is True
+            assert event.swait() is True
             seen.append("resumed")
 
         task = s.spawn(entry)
@@ -1306,7 +1306,7 @@ class TestSchedulerAccessors:
         event = Event()
 
         def worker() -> str:
-            event.wait()
+            event.swait()
             return "done"
 
         task = s.spawn(worker)
@@ -1397,7 +1397,7 @@ class TestSchedulerAccessors:
         event = Event()
 
         def worker() -> None:
-            event.wait()
+            event.swait()
 
         task = s.spawn(worker)
         group = gather(task)
@@ -1458,7 +1458,7 @@ class TestSchedulerAccessors:
         event = Event()
 
         def slow() -> str:
-            event.wait()
+            event.swait()
             return "slow"
 
         def fast() -> str:
@@ -1484,7 +1484,7 @@ class TestSchedulerAccessors:
             raise ValueError("boom")
 
         def slow() -> str:
-            event.wait()
+            event.swait()
             return "slow"
 
         fail_task = s.spawn(fail)
@@ -1505,7 +1505,7 @@ class TestSchedulerAccessors:
         event = Event()
 
         def slow() -> str:
-            event.wait()
+            event.swait()
             return "slow"
 
         slow_task = s.spawn(slow)
@@ -1543,7 +1543,7 @@ class TestSchedulerAccessors:
         event = Event()
 
         def worker() -> None:
-            event.wait()
+            event.swait()
 
         task = s.spawn(worker)
 
@@ -1557,7 +1557,7 @@ class TestSchedulerAccessors:
         event = Event()
 
         def worker() -> str:
-            event.wait()
+            event.swait()
             return "done"
 
         task = s.spawn(worker)
@@ -1615,7 +1615,7 @@ class TestSchedulerAccessors:
         seen: list[str] = []
 
         def slow() -> str:
-            event.wait()
+            event.swait()
             return "slow"
 
         task = s.spawn(slow)
@@ -1917,13 +1917,13 @@ class TestSchedulerExamples:
             tm = timeout(0.001)
             with pytest.raises(TimeoutError, match="Operation timed out"):
                 with tm:
-                    timeout_evt.wait()
+                    timeout_evt.swait()
             seen.append(f"timeout={not tm.expired()}")
 
         def success_waiter() -> None:
             tm = timeout(10.0)
             with tm:
-                success_evt.wait()
+                success_evt.swait()
             seen.append(f"success={not tm.expired()}")
 
         s.spawn(timeout_waiter)
@@ -1944,13 +1944,13 @@ class TestSchedulerExamples:
             tm = timeout(0.001)
             with pytest.raises(TimeoutError, match="Operation timed out"):
                 with tm:
-                    timeout_evt.wait()
+                    timeout_evt.swait()
             seen.append(f"timeout={tm.expired()}")
 
         def success_waiter() -> None:
             tm = timeout(10.0)
             with tm:
-                success_evt.wait()
+                success_evt.swait()
             seen.append(f"success={not tm.expired()}")
 
         s.spawn(timeout_waiter)
@@ -1978,7 +1978,7 @@ class TestSchedulerExamples:
         def waiter() -> None:
             tm = timeout_at(10.0)
             with tm:
-                evt.wait()
+                evt.swait()
             seen.append(f"resumed={tm.expired()}")
 
         s.spawn(waiter)
@@ -2026,11 +2026,11 @@ class TestSchedulerExamples:
 
         assert seen == ["spawned"]
 
-    def test_event_async_wait_from_asyncio_task(self):
+    def test_event_wait_from_asyncio_task(self):
         evt = Event()
 
         async def orchestrate() -> bool:
-            waiter = asyncio.create_task(evt.async_wait())
+            waiter = asyncio.create_task(evt.wait())
             await asyncio.sleep(0)
             assert not waiter.done()
             evt.set()
@@ -2047,7 +2047,7 @@ class TestSchedulerExamples:
         def target_worker() -> None:
             target_ref["t"] = _tealet.current()
             seen.append("target:started")
-            evt.wait()
+            evt.swait()
             seen.append("target:resumed")
 
         def caller() -> None:
@@ -2071,7 +2071,7 @@ class TestSchedulerExamples:
             target_ref["t"] = _tealet.current()
             seen.append("target:started")
             try:
-                evt.wait()
+                evt.swait()
             except ValueError as exc:
                 seen.append(f"target:caught:{exc}")
             seen.append("target:finished")
@@ -2132,7 +2132,7 @@ class TestSchedulerExamples:
         def target_worker() -> None:
             try:
                 seen.append("target:started")
-                evt.wait()
+                evt.swait()
                 seen.append("target:after-wait")
             except CancelledError:
                 seen.append("target:cancelled")
@@ -2531,7 +2531,7 @@ class TestSchedulerExamples:
 
     def test_lock_release_unsets_locked_state(self):
         lock = Lock()
-        assert lock.sync_acquire() is True
+        assert lock.sacquire() is True
         lock.release()
         assert lock.locked() is False
 
@@ -2569,7 +2569,7 @@ class TestSchedulerExamples:
 
         def worker(name: str) -> None:
             nonlocal active, max_active
-            sem.sync_acquire()
+            sem.sacquire()
             try:
                 active += 1
                 max_active = max(max_active, active)
@@ -2598,7 +2598,7 @@ class TestSchedulerExamples:
     def test_bounded_semaphore_overrelease_raises(self):
         sem = BoundedSemaphore(1)
 
-        sem.sync_acquire()
+        sem.sacquire()
         sem.release()
         with pytest.raises(ValueError, match="released too many times"):
             sem.release()
@@ -2664,7 +2664,7 @@ class TestSchedulerExamples:
         def waiter(name: str) -> None:
             with cond:
                 seen.append(f"{name}:waiting")
-                cond.sync_wait()
+                cond.swait()
                 seen.append(f"{name}:resumed")
 
         def notifier() -> None:
@@ -2699,7 +2699,7 @@ class TestSchedulerExamples:
 
         def waiter() -> None:
             with cond:
-                cond.sync_wait_for(lambda: state["ready"])
+                cond.swait_for(lambda: state["ready"])
                 seen.append("waiter:done")
 
         def setter() -> None:
@@ -2718,7 +2718,7 @@ class TestSchedulerExamples:
         cond = Condition()
 
         with pytest.raises(RuntimeError, match="un-acquired lock"):
-            cond.sync_wait()
+            cond.swait()
         with pytest.raises(RuntimeError, match="un-acquired lock"):
             cond.notify()
 
@@ -2788,14 +2788,14 @@ class TestSchedulerExamples:
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
         assert seen == ["waiter:done"]
 
-    def test_barrier_sync_wait_releases_group(self):
+    def test_barrier_swait_releases_group(self):
         s = _new_scheduler()
         barrier = Barrier(3)
         seen: list[str] = []
 
         def worker(name: str) -> None:
             seen.append(f"{name}:before")
-            idx = barrier.sync_wait()
+            idx = barrier.swait()
             seen.append(f"{name}:after:{idx}")
 
         s.spawn(lambda: worker("a"))
@@ -2860,7 +2860,7 @@ class TestFutureExamples:
 
         def blocked() -> int:
             seen.append("blocked:start")
-            gate.wait()
+            gate.swait()
             seen.append("blocked:done")
             return 1
 
@@ -3395,16 +3395,16 @@ class TestQueueExamples:
         seen: list[str] = []
 
         def producer() -> None:
-            q.sync_put(1)
+            q.sput(1)
             seen.append("put:1")
-            q.sync_put(2)
+            q.sput(2)
             seen.append("put:2")
 
         def consumer() -> None:
             s.yield_()
-            seen.append(f"get:{q.sync_get()}")
+            seen.append(f"get:{q.sget()}")
             s.yield_()
-            seen.append(f"get:{q.sync_get()}")
+            seen.append(f"get:{q.sget()}")
 
         s.spawn(producer)
         s.spawn(consumer)
@@ -3422,23 +3422,23 @@ class TestQueueExamples:
             # Let other spawned tasks start so producer exit does not try
             # to hand off directly to an unstarted tealet.
             s.yield_()
-            q.sync_put(1)
-            q.sync_put(2)
+            q.sput(1)
+            q.sput(2)
             seen.append("produced")
             produced_evt.set()
 
         def consumer() -> None:
             s.yield_()
-            q.sync_get()
+            q.sget()
             q.task_done()
             seen.append("done:1")
-            q.sync_get()
+            q.sget()
             q.task_done()
             seen.append("done:2")
 
         def waiter() -> None:
-            produced_evt.wait()
-            q.sync_join()
+            produced_evt.swait()
+            q.sjoin()
             seen.append("joined")
 
         s.spawn(producer)

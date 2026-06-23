@@ -108,7 +108,7 @@ def demo_wait_for_event_start() -> list[str]:
 
     def waiter() -> None:
         seen.append("waiter:waiting")
-        evt.wait()
+        evt.swait()
         seen.append("waiter:started")
 
     def starter() -> None:
@@ -130,7 +130,7 @@ def demo_wait_for_event_between_runs() -> list[str]:
 
     def waiter() -> None:
         seen.append("waiter:waiting")
-        evt.wait()
+        evt.swait()
         seen.append("waiter:resumed")
 
     s.spawn(waiter)
@@ -195,7 +195,7 @@ def demo_future_timeout_then_success() -> list[str]:
         tm = timeout(0.001)
         try:
             with tm:
-                timeout_evt.wait()
+                timeout_evt.swait()
         except TimeoutError:
             pass
         seen.append(f"timeout_waiter:{not tm.expired()}")
@@ -203,7 +203,7 @@ def demo_future_timeout_then_success() -> list[str]:
     def success_waiter() -> None:
         tm = timeout(10.0)
         with tm:
-            success_evt.wait()
+            success_evt.swait()
         seen.append(f"success_waiter:{not tm.expired()}")
 
     s.spawn(timeout_waiter)

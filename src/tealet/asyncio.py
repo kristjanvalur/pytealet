@@ -104,11 +104,11 @@ class _SchedulerSelectorAdapter(selectors.BaseSelector):
         if not self._ready_masks:
             self._ready.clear()
             if timeout is None:
-                self._ready.wait()
+                self._ready.swait()
             else:
                 handle = self._scheduler.call_later(timeout, self._ready.set)
                 try:
-                    self._ready.wait()
+                    self._ready.swait()
                 finally:
                     handle.cancel()
 

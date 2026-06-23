@@ -394,7 +394,7 @@ class Channel(_tasks.Linkable):
         waiter = Event()
         self._link_sender(waiter, packet)
         try:
-            await waiter.async_wait()
+            await waiter.wait()
         except BaseException as exc:
             missing = object()
             pending = self._packets.pop(waiter, missing)
@@ -422,7 +422,7 @@ class Channel(_tasks.Linkable):
         waiter = Event()
         self._link_receiver(waiter)
         try:
-            await waiter.async_wait()
+            await waiter.wait()
         except BaseException as exc:
             # Async timeouts surface as cancellation at this await point.
             # We cannot reliably distinguish timeout cancellation from an
@@ -608,7 +608,7 @@ def _as_completed_futures(
         remaining = len(children)
         with (scheduler_timeout(timeout) if timeout is not None else nullcontext()):
             while remaining:
-                child = completed.sync_get()
+                child = completed.sget()
                 remaining -= 1
                 yield cast(_tasks.Future[Any], child)
     finally:
@@ -1039,7 +1039,7 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
         fut.add_done_callback(_resume_waiter)
         try:
             try:
-                done_evt.wait()
+                done_evt.swait()
             except _tasks.CancelledError:
                 loop.call_soon(fut.cancel)
                 raise

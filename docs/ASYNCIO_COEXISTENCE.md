@@ -16,7 +16,7 @@ possible future directions.
 The scheduler in `src/tealet_examples.py` is intentionally small:
 
 - `Scheduler` owns a runnable queue of tealets.
-- `Event.wait()` blocks the current tealet by recording it as a waiter and
+- `Event.swait()` blocks the current tealet by recording it as a waiter and
   switching to another runnable tealet.
 - `Event.set()` marks the event set and moves blocked tealets back to the
   runnable queue.
@@ -39,23 +39,22 @@ await future
 ```
 
 In asyncio, the spelling is `await event.wait()`: `wait()` is already an
-async method. Tealet's `Event` is primarily a tealet-side synchronization
-primitive, so `wait()` stays synchronous and tealet-blocking. Asyncio
-compatibility is provided by the explicit async adapter:
+async method. Tealet follows that spelling for asyncio compatibility. The
+tealet-blocking operation uses the short synchronous prefix:
 
 ```python
-await event.async_wait()
+event.swait()
 ```
 
-This keeps an important boundary visible. An asyncio coroutine must suspend by
-yielding control to the asyncio event loop. It must not call the existing
-tealet-blocking `Event.wait()`, because `Event.wait()` assumes there is a
-current tealet task and that it is legal to stack-switch to another tealet.
+This keeps an important boundary visible. An asyncio coroutine suspends by
+yielding control to the asyncio event loop through `await event.wait()`. A
+tealet task suspends through `event.swait()`, which assumes there is a current
+tealet task and that it is legal to stack-switch to another tealet.
 
 The asyncio-facing API is therefore:
 
 ```python
-await event.async_wait()
+await event.wait()
 result = await future
 ```
 
@@ -637,8 +636,8 @@ class TealetScheduler:
 
 
 class Event:
-    def wait(self) -> None: ...
-    async def async_wait(self) -> None: ...
+    def swait(self) -> None: ...
+    async def wait(self) -> None: ...
     def set(self) -> None: ...
 
 
@@ -650,16 +649,16 @@ class TealetFuture(Generic[T]):
 
 The explicit method names make it clear which side of the bridge is being used:
 
-- `wait()` and `result()` are tealet-blocking operations.
-- `async_wait()` is the explicit asyncio-awaiting operation for events.
+- `swait()` and future `wait()`/`result()` are tealet-blocking operations.
+- `Event.wait()` is the asyncio-awaiting operation for events.
 - Tealet futures are asyncio-awaitable through `__await__`.
 - `await_()` delegates an awaitable to asyncio and blocks the current tealet
   until asyncio completes it.
 - A future tealet-side await runner could manually drive the await protocol from
   the tealet scheduler, falling back to asyncio task machinery only when needed.
 
-Later, if the behavior is stable, `Event.__await__` could forward to the
-explicit asyncio method.
+Later, if the behavior is stable, `Event.__await__` could forward to
+`Event.wait()`.
 
 ## Best Coexistence Strategy
 

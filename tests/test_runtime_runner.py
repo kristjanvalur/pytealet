@@ -181,7 +181,7 @@ class TestAsyncRunner:
             def worker() -> None:
                 try:
                     seen.append("start")
-                    event.wait()
+                    event.swait()
                 finally:
                     seen.append("finally")
 
@@ -220,7 +220,7 @@ class TestAsyncRunner:
                 scheduler.run_in_executor(None, executor_worker)
                 assert worker_started.wait(timeout=1.0) is True
                 try:
-                    event.wait()
+                    event.swait()
                 finally:
                     release_worker.set()
 
@@ -255,7 +255,7 @@ class TestAsyncRunner:
             def victim() -> None:
                 try:
                     seen.append("victim:start")
-                    event.wait()
+                    event.swait()
                 finally:
                     seen.append("victim:finally")
 
@@ -264,7 +264,7 @@ class TestAsyncRunner:
             def closer() -> None:
                 try:
                     seen.append("closer:start")
-                    event.wait()
+                    event.swait()
                 except asyncio.CancelledError:
                     seen.append("closer:cancelled")
                     victim_task.cancel()
@@ -649,7 +649,7 @@ class TestRunner:
         def worker() -> None:
             try:
                 seen.append("start")
-                event.wait()
+                event.swait()
             finally:
                 seen.append("finally")
 
@@ -685,7 +685,7 @@ class TestRunner:
             scheduler.run_in_executor(None, executor_worker)
             assert worker_started.wait(timeout=1.0) is True
             try:
-                event.wait()
+                event.swait()
             finally:
                 release_worker.set()
 
@@ -717,7 +717,7 @@ class TestRunner:
         def victim() -> None:
             try:
                 seen.append("victim:start")
-                event.wait()
+                event.swait()
             finally:
                 seen.append("victim:finally")
 
@@ -726,7 +726,7 @@ class TestRunner:
         def closer() -> None:
             try:
                 seen.append("closer:start")
-                event.wait()
+                event.swait()
             except asyncio.CancelledError:
                 seen.append("closer:cancelled")
                 victim_task.cancel()
