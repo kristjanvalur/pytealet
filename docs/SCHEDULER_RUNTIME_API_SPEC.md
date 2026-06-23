@@ -47,6 +47,10 @@ Implemented:
   - `arun_until_complete(...)`
   - `arun_forever(...)`
 - Future waiting semantics are aligned so wait paths return final results.
+- Current scheduler binding is thread-local through
+  `tealet.scheduler.set_scheduler(...)` and is restored by runner scopes. Async
+  context-local isolation across multiple asyncio tasks in the same thread is
+  future hardening work, not current behavior.
 - Cancellation is represented by `asyncio.CancelledError`, matching asyncio
   `Future`/`Task` behavior. A stored `CancelledError` is the cancellation state
   indicator for scheduler futures and tealet tasks.
@@ -136,8 +140,9 @@ Remaining from this proposal:
 
 ## Terms
 
-- Current scheduler: context-associated scheduler that may exist but may not be
-  running.
+- Current scheduler: thread-local scheduler that may exist but may not be
+  running in the current implementation. A context-local async binding model is
+  future work.
 - Running scheduler: scheduler currently executing/pumping work.
 - Runtime scope: bounded execution context created by a high-level runner.
 
@@ -412,8 +417,9 @@ Return behavior:
 
 ## Context and Scope Rules
 
-- Current scheduler binding should be context-local for async tasks.
-- Thread-local fallback may be kept for sync compatibility paths.
+- Current scheduler binding is thread-local in the current implementation.
+- Context-local current scheduler binding for async tasks is future hardening
+  work.
 - Running scheduler binding is strictly scoped and never lazy-created.
 - Nested runtime scopes are allowed and use stack discipline:
   - inner scope overrides current scheduler
@@ -499,8 +505,9 @@ class is not part of the current public surface.
 
 Phase 3: Context Scoping Hardening
 
-Status: Implemented for runner binding/restoration, with focused nested scope
-tests.
+Status: Partially implemented. Runner binding/restoration and focused nested
+scope tests are in place; async context-local isolation across asyncio task
+boundaries remains future work.
 
 - Ensure async context-local behavior across task boundaries.
 - Keep nested runtime scope tests covering sync, async, and running-scheduler

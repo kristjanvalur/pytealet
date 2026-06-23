@@ -340,7 +340,9 @@ class SelectorMixin:
             self._update_selector_registration(fd)
 
     def _has_pending_driver_work(self) -> bool:
-        return bool(self._fd_callbacks)
+        return bool(self._fd_callbacks) or BaseScheduler._has_pending_driver_work(
+            cast(BaseScheduler, self)
+        )
 
 
 class SelectorScheduler(SelectorMixin, Scheduler):

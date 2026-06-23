@@ -384,6 +384,21 @@ class TestSchedulerAccessors:
 
         assert task.result() == 42
 
+    def test_selector_scheduler_run_in_executor_keeps_driver_alive(self):
+        s = SelectorScheduler()
+        set_scheduler(s)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                def entry() -> int:
+                    future = get_running_scheduler().run_in_executor(pool, lambda: 42)
+                    return future.wait()
+
+                task = s.spawn(entry)
+                assert s.run_until_complete(task) == 42
+        finally:
+            s.close()
+
     def test_run_in_executor_propagates_exception(self, deferred_scheduler_task_factory_maker):
         s = _new_scheduler(deferred_scheduler_task_factory_maker)
 
