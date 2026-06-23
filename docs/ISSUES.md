@@ -210,6 +210,56 @@ TLS handling has been migrated to `PyThread_tss_*` APIs (`PyThread_tss_create/ge
 
 ---
 
+### ✅ Scheduler Task Factories, Eager Startup, and Stub-Backed Tasks (Resolved)
+
+**Location:** `src/tealet/scheduler.py`, `src/tealet/tasks.py`
+
+**Implemented:**
+- `BaseScheduler.set_task_factory(...)` and `get_task_factory()` configure
+    scheduler-local task construction policy.
+- `DefaultTaskFactory` preserves direct `TealetTask.prepare(...)` task creation.
+- `StubTaskFactory` creates scheduler tasks from a reusable prepared tealet stub;
+    `stub_here()` creates the reusable stub at the caller's current tealet stack
+    point, and the factory lazily creates one on first use if needed.
+- Factories receive the owning scheduler, target callable, selected
+    `contextvars.Context`, and optional per-spawn `eager_start` override.
+- `BaseScheduler.spawn(..., eager_start=...)` and factory defaults follow
+    asyncio naming. Eager startup runs immediately only while the scheduler is
+    already running, matching asyncio's `eager_start` condition.
+- Task bookkeeping via `all_tasks()` covers default, eager, and stub-backed
+    tasks consistently, including tasks that complete during eager startup.
+
+**Current Design Choice:**
+The scheduler uses a factory-based task construction model rather than a
+dedicated scheduler-level `set_stub(...)` API. Stub usage is expressed by
+installing `StubTaskFactory`, which keeps stub-backed task creation aligned with
+the same task factory path as direct and eager task creation.
+
+**Priority:** Completed
+
+---
+
+### ✅ Source Distribution Includes Vendored libtealet Archives (Resolved)
+
+**Location:** `MANIFEST.in`, `src/_tealet/libtealet/`, source-distribution build flow
+
+**Historical Problem:**
+Building an sdist currently includes Python sources, tests, and typing files, but not the vendored prebuilt `libtealet` archives required by the default build path. A wheel built directly from the workspace succeeds, but a wheel built from the generated sdist fails because `setup.py` cannot find `src/_tealet/libtealet/lib/<abi>/libtealet.a`.
+
+**Observed Failure:**
+```text
+RuntimeError: Pre-built libraries not found for ABI: sysv_amd64 at src/_tealet/libtealet/lib/sysv_amd64
+```
+
+**Fix:**
+- `MANIFEST.in` now grafts `src/_tealet/libtealet`, including the vendored headers and prebuilt archives used by the default build path.
+- `MANIFEST.in` also includes local `_tealet` C headers required to compile extension sources from an extracted sdist.
+- Validated by building an sdist, checking for representative Unix and Windows static archives, and building a wheel from the extracted sdist.
+
+**Priority:** Completed
+
+---
+
 ## Testing Recommendations
 
 ### Critical Path Tests (Must Pass Before Release)
@@ -302,6 +352,7 @@ def test_thread_isolation():
 | #3 Other NULL checks | ✅ Fixed | - | Audited current getters; no active NULL-deref issue |
 | #4 tealet_create() | ✅ Closed | - | Migration target not applicable for current vendored libtealet API |
 | #5 PyThread API | ✅ Fixed | - | TLS migrated to `PyThread_tss_*` APIs |
+| Scheduler task factories | ✅ Fixed | - | Factory-based default/stub/eager_start task creation implemented |
 
 ---
 

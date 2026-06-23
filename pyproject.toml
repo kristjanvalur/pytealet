@@ -25,7 +25,11 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+asyncio = [
+    "asynkit>=0.17.7",
+]
 dev = [
+    "asynkit>=0.17.7",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "psutil>=5.9",
@@ -39,7 +43,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-tealet = ["include/*.h"]
+tealet = ["include/*.h", "py.typed"]
 
 [tool.ruff]
 line-length = 120
@@ -55,6 +59,7 @@ python_functions = ["test_*"]
 
 [dependency-groups]
 dev = [
+    "asynkit>=0.17.7",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "psutil>=5.9",

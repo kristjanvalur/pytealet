@@ -24,6 +24,45 @@ def _configure_greenlet_stub_from_env():
     greenlet_shim.set_stub(use_stub)
 
 
+def _make_scheduler_task_factory(name):
+    from tealet.tasks import DefaultTaskFactory, StubTaskFactory
+
+    if name == "default":
+        return DefaultTaskFactory()
+    if name == "eager":
+        return DefaultTaskFactory(eager_start=True)
+    if name == "stub":
+        return StubTaskFactory()
+    raise AssertionError(f"unknown task factory case: {name}")
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("default", id="default-factory"),
+        pytest.param("eager", id="eager-factory"),
+        pytest.param("stub", id="stub-factory"),
+    ]
+)
+def scheduler_task_factory_maker(request):
+    def make_factory():
+        return _make_scheduler_task_factory(request.param)
+
+    return make_factory
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("default", id="default-factory"),
+        pytest.param("stub", id="stub-factory"),
+    ]
+)
+def deferred_scheduler_task_factory_maker(request):
+    def make_factory():
+        return _make_scheduler_task_factory(request.param)
+
+    return make_factory
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--rebuild-ext",

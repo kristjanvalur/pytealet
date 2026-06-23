@@ -7,12 +7,22 @@ example code separate from runtime APIs.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from typing import Callable, Generic, TypeVar
+from typing import Generic, TypeVar
 
 import tealet
-import threading
+from tealet.locks import Event, TimeoutError, timeout
+from tealet.scheduler import (
+    Scheduler,
+    set_scheduler,
+)
 
 T = TypeVar("T")
+
+
+def _new_scheduler() -> Scheduler:
+    scheduler = Scheduler()
+    set_scheduler(scheduler)
+    return scheduler
 
 
 def raw_simple_generator(current: tealet.tealet, source: Iterable[T]) -> tealet.tealet:
@@ -71,191 +81,10 @@ def simple_generator(source: Iterable[T]) -> GeneratorTealet[T]:
     return GeneratorTealet(source)
 
 
-# a simple scheduler and event object.
-
-# a thread local scheduler
-_scheduler = threading.local()
-
-
-def scheduler() -> SimpleScheduler:
-    if not hasattr(_scheduler, "instance"):
-        _scheduler.instance = SimpleScheduler()
-    return _scheduler.instance
-
-
-class ScheduledTealet(tealet.tealet):
-    """Tealet wrapper that tracks scheduler/event placement."""
-
-    def __init__(self):
-        super().__init__()
-        self.where = None
-
-    def is_waiting(self):
-        return isinstance(self.where, Event)
-
-    def is_runnable(self):
-        return isinstance(self.where, SimpleScheduler) and scheduler().is_runnable(self)
-
-    def is_running(self):
-        return tealet.current() is self
-
-
-class Event:
-    """Minimal event primitive for scheduler-driven wait/wake."""
-
-    def __init__(self) -> None:
-        self._waiters: list[tealet.tealet] = []
-        self._is_set = False
-
-    def wait(self) -> None:
-        if self._is_set:
-            return
-
-        current = tealet.current()
-        current.where = self
-        try:
-            self._waiters.append(current)
-            scheduler().schedule()
-        finally:
-            current.where = None
-
-    def set(self) -> None:
-        self._is_set = True
-        for waiter in self._waiters:
-            scheduler().make_runnable(waiter)
-        self._waiters.clear()
-
-    def clear(self) -> None:
-        self._is_set = False
-
-
-class DeadlockError(RuntimeError):
-    """Raised when the scheduler has no runnable tasks."""
-
-    pass
-
-
-class InvalidStateError(RuntimeError):
-    """Raised when attempting to complete a Future more than once."""
-
-    pass
-
-
-class Future(Generic[T]):
-    """Minimal Future for scheduler tasks."""
-
-    def __init__(self) -> None:
-        self._done = False
-        self._result: T | None = None
-        self._exception: BaseException | None = None
-        self._event = Event()
-
-    def done(self) -> bool:
-        return self._done
-
-    def set_result(self, value: T) -> None:
-        if self._done:
-            raise InvalidStateError("Future already done")
-        self._result = value
-        self._done = True
-        self._event.set()
-
-    def set_exception(self, exc: BaseException) -> None:
-        if self._done:
-            raise InvalidStateError("Future already done")
-        if not isinstance(exc, BaseException):
-            raise TypeError("exc must be a BaseException instance")
-        self._exception = exc
-        self._done = True
-        self._event.set()
-
-    def _wait(self) -> None:
-        if self._done:
-            return
-
-        self._event.wait()
-
-    def result(self) -> T:
-        self._wait()
-        if self._exception is not None:
-            raise self._exception
-        return self._result
-
-    def exception(self) -> BaseException | None:
-        self._wait()
-        return self._exception
-
-
-class SimpleScheduler:
-    """Very small cooperative scheduler for runnable tealets."""
-
-    def __init__(self) -> None:
-        self._tasks: list[tealet.tealet] = []
-        self._runner = None
-
-    def is_runnable(self, t: tealet.tealet) -> bool:
-        return t in self._tasks
-
-    def spawn(self, func: Callable[..., T], *args, **kwargs) -> Future[T]:
-        future: Future[T] = Future()
-
-        def task_main(current: tealet.tealet, _arg: object) -> tealet.tealet:
-            try:
-                result = func(*args, **kwargs)
-            except BaseException as exc:
-                future.set_exception(exc)
-            else:
-                future.set_result(result)
-            return scheduler().find_target(task_exit=True)
-
-        t = ScheduledTealet().prepare(task_main)
-        self.make_runnable(t)
-        return future
-
-    def schedule(self) -> None:
-        self.find_target().switch()
-
-    def yield_(self) -> None:
-        self.make_runnable(tealet.current())
-        self.schedule()
-
-    def make_runnable(self, t: tealet.tealet) -> None:
-        if t in self._tasks:
-            return
-        t.where = self
-        self._tasks.append(t)
-
-    def find_target(self, task_exit=False) -> tealet.tealet:
-        if self._tasks:
-            result = self._tasks.pop(0)
-        elif self._runner is not None:
-            result = self._runner
-        # fall back to main
-        elif not task_exit:
-            raise DeadlockError("No tasks to switch to")
-        else:
-            result = tealet.main()
-        try:
-            result.where = None
-        except AttributeError:
-            pass  # main tealet may not have a ``where`` attribute
-        return result
-
-    def run(self) -> None:
-        if self._runner is not None:
-            raise RuntimeError("Scheduler already running")
-        self._runner = tealet.current()
-        try:
-            while self._tasks:
-                self.find_target().switch()
-        finally:
-            self._runner = None
-
-
 def demo_scheduler_append_with_yield() -> list[str]:
     """Run a few tealets that append while yielding to each other."""
 
-    s = scheduler()
+    s = _new_scheduler()
     seen: list[str] = []
 
     def worker(name: str, count: int) -> None:
@@ -263,9 +92,9 @@ def demo_scheduler_append_with_yield() -> list[str]:
             seen.append(f"{name}{i}")
             s.yield_()
 
-    s.spawn(worker, "a", 3)
-    s.spawn(worker, "b", 2)
-    s.spawn(worker, "c", 1)
+    s.spawn(lambda: worker("a", 3))
+    s.spawn(lambda: worker("b", 2))
+    s.spawn(lambda: worker("c", 1))
     s.run()
     return seen
 
@@ -273,13 +102,13 @@ def demo_scheduler_append_with_yield() -> list[str]:
 def demo_wait_for_event_start() -> list[str]:
     """Run one tealet that waits on an event until another starts it."""
 
-    s = scheduler()
+    s = _new_scheduler()
     evt = Event()
     seen: list[str] = []
 
     def waiter() -> None:
         seen.append("waiter:waiting")
-        evt.wait()
+        evt.swait()
         seen.append("waiter:started")
 
     def starter() -> None:
@@ -295,13 +124,13 @@ def demo_wait_for_event_start() -> list[str]:
 def demo_wait_for_event_between_runs() -> list[str]:
     """Run twice with external event wakeup between runs."""
 
-    s = scheduler()
+    s = _new_scheduler()
     evt = Event()
     seen: list[str] = []
 
     def waiter() -> None:
         seen.append("waiter:waiting")
-        evt.wait()
+        evt.swait()
         seen.append("waiter:resumed")
 
     s.spawn(waiter)
@@ -318,7 +147,7 @@ def demo_wait_for_event_between_runs() -> list[str]:
 def demo_future_result() -> list[str]:
     """Run a task via Future and consume it from another tealet."""
 
-    s = scheduler()
+    s = _new_scheduler()
     seen: list[str] = []
 
     def producer() -> int:
@@ -330,9 +159,57 @@ def demo_future_result() -> list[str]:
     future = s.spawn(producer)
 
     def consumer() -> None:
+        future.wait()
         seen.append(f"consumer:result={future.result()}")
 
     s.spawn(consumer)
+    s.run()
+    return seen
+
+
+def demo_sleep() -> list[str]:
+    """Run a tealet that sleeps and resumes via scheduled timer callback."""
+
+    s = _new_scheduler()
+    seen: list[str] = []
+
+    def worker() -> None:
+        seen.append("before:sleep")
+        s.sleep(0.001)
+        seen.append("after:sleep")
+
+    s.spawn(worker)
+    s.run()
+    return seen
+
+
+def demo_future_timeout_then_success() -> list[str]:
+    """Show timeout then successful completion using timeout contexts."""
+
+    s = _new_scheduler()
+    timeout_evt = Event()
+    success_evt = Event()
+    seen: list[str] = []
+
+    def timeout_waiter() -> None:
+        tm = timeout(0.001)
+        try:
+            with tm:
+                timeout_evt.swait()
+        except TimeoutError:
+            pass
+        seen.append(f"timeout_waiter:{not tm.expired()}")
+
+    def success_waiter() -> None:
+        tm = timeout(10.0)
+        with tm:
+            success_evt.swait()
+        seen.append(f"success_waiter:{not tm.expired()}")
+
+    s.spawn(timeout_waiter)
+    s.run()
+    s.spawn(success_waiter)
+    s.call_later(0.002, success_evt.set)
     s.run()
     return seen
 
@@ -357,6 +234,11 @@ def demo() -> None:
         "producer:start",
         "producer:done",
         "consumer:result=42",
+    ]
+    assert demo_sleep() == ["before:sleep", "after:sleep"]
+    assert demo_future_timeout_then_success() == [
+        "timeout_waiter:False",
+        "success_waiter:True",
     ]
 
 

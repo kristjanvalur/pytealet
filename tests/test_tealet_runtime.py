@@ -99,8 +99,6 @@ class TestModule:
 
         assert _tealet.hide_frame(callable=inner, args=(1,), kwargs={"x": 2}) == ((1,), {"x": 2})
 
-
-
 class TestTealetTraversalMethods:
     def test_methods_fail_on_new_tealet(self):
         t = _tealet.tealet()
@@ -125,24 +123,6 @@ class TestTealetTraversalMethods:
         assert seen["self_is_current"] is True
         assert seen["main"] == _tealet.main()
         assert seen["previous"] == _tealet.main()
-
-    @pytest.mark.skip(
-        reason="Deferred-delete post-exit behavior is experimental; re-enable when PYTEALET_DEFER_DELETE is being exercised"
-    )
-    def test_main_on_exited_tealet_depends_on_defer_delete_flag(self):
-        def run_and_exit(current, arg):
-            return _tealet.main()
-
-        t = _tealet.tealet()
-        t.run(run_and_exit, None)
-        assert t.state == _tealet.STATE_EXIT
-
-        if getattr(_tealet, "PYTEALET_DEFER_DELETE", 0):
-            assert t.main() == _tealet.main()
-        else:
-            with pytest.raises(_tealet.StateError):
-                t.main()
-
 
 class TestSimple:
     def test_simple(self):
@@ -469,6 +449,35 @@ class TestPrepare:
 
             assert target.switch("finish") is None
             assert target.state == _tealet.STATE_EXIT
+
+    def test_prepare_first_throw_on_prepared_reports_unraisable_and_skips_worker(self):
+        called = []
+        seen = []
+        original_hook = sys.unraisablehook
+
+        def worker(current, arg):
+            called.append(arg)
+            return current.main(), "done-prepared"
+
+        def capture_unraisable(unraisable):
+            seen.append(unraisable)
+
+        t = _tealet.tealet()
+        t.prepare(worker)
+
+        sys.unraisablehook = capture_unraisable
+        try:
+            assert t.throw(RuntimeError("boom-prepared-first-throw")) is None
+        finally:
+            sys.unraisablehook = original_hook
+
+        assert called == []
+        assert t.state == _tealet.STATE_EXIT
+        assert seen, "expected unraisable error for uncaught thrown exception"
+        assert any(
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-prepared-first-throw"
+            for u in seen
+        )
 
     def test_prepare_requires_callable(self):
         t = _tealet.tealet()
