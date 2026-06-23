@@ -65,6 +65,11 @@
          * with execution context and nulled for fresh branches. */
         PyObject *current_executor;
     #endif
+#if defined(PY_HAS_TSTATE_CRITICAL_SECTION)
+    /* No-GIL critical sections are stack-allocated and chained from the
+     * current thread state. Move the head with the owning C stack. */
+    uintptr_t critical_section;
+#endif
     } PyTealetTstateFrame;
 
     typedef struct PyTealetTstate {

@@ -177,6 +177,9 @@ static void PyTealetTstate_ClearFrame(PyTealetTstateFrame *ttstate, PyThreadStat
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
         ttstate->current_executor = NULL;
 #endif
+#if defined(PY_HAS_TSTATE_CRITICAL_SECTION)
+        ttstate->critical_section = 0;
+#endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
 #if defined(PY_HAS_TSTATE_CFRAME)
         ttstate->cframe = NULL;
@@ -200,6 +203,9 @@ static void PyTealetTstate_ClearFrame(PyTealetTstateFrame *ttstate, PyThreadStat
 #endif
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
         tstate->current_executor = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_CRITICAL_SECTION)
+        tstate->critical_section = 0;
 #endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
 #if defined(PY_HAS_TSTATE_CFRAME)
@@ -333,6 +339,9 @@ static void PyTealetTstate_GetFrame(PyTealetTstateFrame *dst, const PyThreadStat
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
     dst->current_executor = src->current_executor;
 #endif
+#if defined(PY_HAS_TSTATE_CRITICAL_SECTION)
+    dst->critical_section = src->critical_section;
+#endif
 #if defined(PY_HAS_TSTATE_CFRAME)
     dst->cframe = src->cframe;
 #endif
@@ -370,6 +379,9 @@ static void PyTealetTstate_PutFrame(const PyTealetTstateFrame *src, PyThreadStat
 #endif
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
     dst->current_executor = src->current_executor;
+#endif
+#if defined(PY_HAS_TSTATE_CRITICAL_SECTION)
+    dst->critical_section = src->critical_section;
 #endif
 #if defined(PY_HAS_TSTATE_CFRAME)
     dst->cframe = src->cframe;
@@ -431,6 +443,9 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate, 
 #if defined(PY_HAS_TSTATE_CURRENT_EXECUTOR)
         frame_data->current_executor = NULL;
 #endif
+#if defined(PY_HAS_TSTATE_CRITICAL_SECTION)
+        frame_data->critical_section = 0;
+#endif
 #if defined(PY_HAS_TSTATE_DATASTACK)
         frame_data->current_frame = NULL;
 #if defined(PY_HAS_TSTATE_CFRAME_USE_TRACING)
@@ -461,6 +476,10 @@ void PyTealetTstate_Frame_Setup(PyTealetTstate *ttstate, PyThreadState *tstate, 
 #endif
     /* Runtime safety: do not inherit executor state across tealet branches. */
     tstate->current_executor = NULL;
+#endif
+#if defined(PY_HAS_TSTATE_CRITICAL_SECTION)
+    /* Runtime safety: no-GIL critical-section chains point into C stack frames. */
+    tstate->critical_section = 0;
 #endif
 
 #if defined(PY_HAS_TSTATE_CFRAME)

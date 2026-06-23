@@ -651,6 +651,7 @@ Can only switch to RUN.
 - Recursion counters (version-dependent fields)
 - Current exception and error-stack state
 - Context vars and selected cframe/datastack fields where applicable
+- No-GIL critical-section head, because those entries are stack-allocated
 
 **Design:**
 ```c
@@ -702,6 +703,11 @@ If rewrite recording fails (for example, OOM), the implementation restores alrea
 At tealet entry, runtime setup intentionally detaches frame-walking roots from the parent context:
 - On 3.11+, it installs a fresh top cframe view and clears `current_frame` plus datastack links.
 - On 3.10, it clears `tstate->frame` (`Py_CLEAR(tstate->frame)`) before entering tealet code.
+
+On Python free-threaded builds, tealet entry also clears the live
+`critical_section` head for fresh branches. Critical-section records are
+stack-allocated in CPython, so inheriting another tealet's chain can make later
+CPython import, thread, or executor paths follow pointers into the wrong C stack.
 
 Rationale: frame walking from a function-rooted tealet must not "escape" into the caller's external stack chain. Entering with a clean top-of-chain boundary keeps introspection local to the tealet lineage and avoids cross-stack leakage.
 

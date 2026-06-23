@@ -19,6 +19,35 @@ The pytealet C extension has been modernized for Python 3.10+ and currently runs
 
 ## P0 - Historical Critical Issues (Resolved)
 
+### ✅ Issue #0: No-GIL Critical-Section tstate Segfault (Resolved)
+
+**Location:** `src/_tealet/tstate_state.c`, Python 3.13+ free-threaded builds
+
+**Problem:**
+No-GIL CPython stores a `PyThreadState.critical_section` chain whose entries are
+stack-allocated C structures. `_tealet` saved/restored frame and datastack state
+across stack switches, but did not move or clear this critical-section head.
+After switching to another tealet stack, CPython could later try to suspend or
+resume a stale critical-section chain during import, thread startup, or executor
+shutdown, causing a native segfault.
+
+**Observed crash paths:**
+- `concurrent.futures.__getattr__` lazy-loading `ThreadPoolExecutor` from inside
+    a tealet task.
+- `threading.Thread.start()` / `Condition.wait()` while starting executor work
+    from inside a tealet task.
+
+**Fix:**
+Treat `critical_section` as frame-like execution state on `Py_GIL_DISABLED`
+builds: save it with the owning tealet, restore it only with that tealet's C
+stack, and clear it for fresh tealet branches.
+
+**Validation:**
+- Runtime-runner executor/shutdown crash subset repeated 20x.
+- Scheduler executor/to-thread crash subset repeated 20x.
+- Full root suite: `161 passed`.
+- Full `tealetio` suite: `327 passed`.
+
 ### ✅ Issue #1: Segfault in pytealet_get_main() (Resolved)
 
 **Location:** `src/_tealet/pytealet.c` line 438
