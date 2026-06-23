@@ -1,11 +1,13 @@
 # tealetio
 
-`tealetio` provides scheduler, task, synchronization, selector, runner, and
-asyncio coexistence APIs for programs built on `tealet`.
+Did you ever wish `tealet` had the familiar scheduling tools you reach for in
+`asyncio`, but for stack-slicing tealet code? `tealetio` provides the scheduler,
+task, synchronization, selector, runner, and asyncio coexistence APIs for that
+job.
 
-The package is intentionally shaped like a Python module API: common classes and
-helpers are available from the top-level `tealetio` namespace, while submodules
-remain available for code that wants a more specific import home.
+The top-level package is meant to feel direct: import the common classes and
+helpers from `tealetio`, just as you would from `asyncio`. Submodules remain
+available when you want to name the implementation home explicitly.
 
 ```python
 from tealetio import Event, Scheduler, gather, run, wait_for
@@ -13,12 +15,14 @@ from tealetio import Event, Scheduler, gather, run, wait_for
 
 ## Installation
 
+For the usual scheduler and synchronization APIs, install the base package:
+
 ```console
 python -m pip install tealetio
 ```
 
-The base package depends on `tealet`. Optional asyncio bridge optimizations use
-`asynkit` when installed:
+Need the optional asyncio bridge optimizations? Install the `asyncio` extra to
+bring in `asynkit`:
 
 ```console
 python -m pip install 'tealetio[asyncio]'
@@ -26,7 +30,8 @@ python -m pip install 'tealetio[asyncio]'
 
 ## Quick Start
 
-Use `run()` to create and drive a scheduler for synchronous tealet code:
+Need a scheduler for synchronous tealet code? Use `run()` and ask for the
+running scheduler inside your entry point:
 
 ```python
 from tealetio import Event, get_running_scheduler, run
@@ -51,7 +56,8 @@ def main() -> str:
 assert run(main) == "waiting, done"
 ```
 
-For asyncio-hosted programs, use the async runner APIs:
+Already inside an asyncio program? Use `AsyncRunner` to host tealet work without
+leaving the asyncio world:
 
 ```python
 import asyncio
@@ -84,7 +90,7 @@ assert asyncio.run(main()) == ["waiting", "done"]
 
 ## Public API
 
-The top-level package re-exports the common public API, including:
+The common API is available directly from `tealetio`:
 
 - schedulers and runners: `Scheduler`, `SelectorScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `TealetTask`, `CancelledError`, `shield`
@@ -93,17 +99,18 @@ The top-level package re-exports the common public API, including:
 - rendezvous communication: `Channel`
 - asyncio coexistence helpers: `run_in_asyncio`, `run_asyncio_in_tealet`, `TealetSelectorEventLoop`
 
-Submodules such as `tealetio.scheduler`, `tealetio.tasks`, `tealetio.locks`,
-`tealetio.runner`, `tealetio.selector`, and `tealetio.asyncio` define the same
-objects at their implementation homes.
+If you prefer explicit homes, submodules such as `tealetio.scheduler`,
+`tealetio.tasks`, `tealetio.locks`, `tealetio.runner`, `tealetio.selector`, and
+`tealetio.asyncio` define the same objects.
 
 ## Asyncio Model
 
-The design intentionally follows `asyncio` where the mapping is useful. This
-keeps the learning curve small and makes interop with asyncio-hosted programs
-straightforward. Some names differ to match tealet execution: `Scheduler` fills
-the role normally held by an event loop, and `scheduler.spawn(...)` is the
-tealet-facing equivalent of `create_task(...)`.
+The design intentionally follows `asyncio` where the mapping is useful. In
+effect, you already know much of the shape: the learning curve stays small, and
+interop with asyncio-hosted programs stays straightforward. Some names differ to
+match tealet execution: `Scheduler` fills the role normally held by an event
+loop, and `scheduler.spawn(...)` is the tealet-facing equivalent of
+`create_task(...)`.
 
 Synchronization primitives are asyncio-compatible where practical and add
 `s`-prefixed methods for tealet-blocking operations, such as `Event.swait()`,
@@ -115,7 +122,7 @@ communication between tasks, with selectable sender/receiver preference models,
 and can also be used for inter-thread communication through scheduler-safe
 wakeup paths.
 
-One notable runtime difference is exception delivery. Exceptions such as
+Notice one important runtime difference: exception delivery. Exceptions such as
 `CancelledError` are delivered immediately by switching to the target tealet,
 instead of being kept as pending exceptions. This avoids races where multiple
 pending exceptions can accumulate, and removes the need to track pending
