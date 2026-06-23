@@ -1456,8 +1456,13 @@ class TestSchedulerAccessors:
         task = s2.spawn(lambda: "foreign")
         set_scheduler(s1)
 
-        with pytest.raises(RuntimeError, match="different scheduler"):
-            gather(task)
+        try:
+            with pytest.raises(RuntimeError, match="different scheduler"):
+                gather(task)
+        finally:
+            set_scheduler(s2)
+            if not task.done():
+                s2.run_until_complete(task)
 
     def test_ensure_future_returns_existing_future(self):
         fut: Future[str] = Future()
@@ -1492,8 +1497,13 @@ class TestSchedulerAccessors:
         task = s2.spawn(lambda: "foreign")
         set_scheduler(s1)
 
-        with pytest.raises(RuntimeError, match="different scheduler"):
-            ensure_future(task)
+        try:
+            with pytest.raises(RuntimeError, match="different scheduler"):
+                ensure_future(task)
+        finally:
+            set_scheduler(s2)
+            if not task.done():
+                s2.run_until_complete(task)
 
     def test_wait_first_completed_returns_done_and_pending(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
@@ -1713,8 +1723,13 @@ class TestSchedulerAccessors:
         s2 = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s1)
         fut = s2.spawn(lambda: 1)
-        with pytest.raises(RuntimeError, match="different scheduler"):
-            s1.run_until_complete(fut)
+        try:
+            with pytest.raises(RuntimeError, match="different scheduler"):
+                s1.run_until_complete(fut)
+        finally:
+            set_scheduler(s2)
+            if not fut.done():
+                s2.run_until_complete(fut)
 
     def test_run_until_complete_raises_if_stopped_early(self):
         s = _new_scheduler()
