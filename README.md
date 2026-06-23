@@ -8,7 +8,7 @@ Tealet provides low-level stack-switching primitives for cooperative multitaskin
 
 Tealet is intentionally a building-block library, not a full scheduler/runtime framework. It provides primitives (`switch`, `run`, `throw`, thread ownership/state checks, etc.) that higher-level schedulers and runtimes can build on.
 
-Built on vendored libtealet release archives (currently v0.7.5), this library offers:
+Built on vendored libtealet release archives (currently v0.7.6), this library offers:
 - **Stack-slicing**: Efficient context switching without kernel involvement
 - **Low memory overhead**: ~2-16 KB per coroutine vs 1-8 MB for OS threads
 - **Fast context switches**: ~100-500 CPU cycles
@@ -132,7 +132,7 @@ Detailed API references live in the `docs/` folder:
 ### Building the C Extension
 
 The C extension (`_tealet`) links against pre-built libtealet libraries from the vendored release archive. It depends on:
-- **[libtealet](https://github.com/kristjanvalur/libtealet) v0.7.5** - Core stack-slicing library (pre-built binaries in `src/_tealet/libtealet/lib/`)
+- **[libtealet](https://github.com/kristjanvalur/libtealet) v0.7.6** - Core stack-slicing library (pre-built binaries in `src/_tealet/libtealet/lib/`)
 - **[stackman](https://github.com/stackless-dev/stackman)** - Platform-specific stack operations (bundled with libtealet)
 
 Default build mode is release-archive based. To use a local source checkout for debugging instead, place it at `src/_tealet/libtealet-src/` and enable source mode:

@@ -1,7 +1,7 @@
 # PyTealet Architecture Documentation
 
 **Original Code Date:** ~2013  
-**libtealet Version:** 0.7.5  
+**libtealet Version:** 0.7.6
 **Python Version Target:** 3.10+
 
 ## Overview

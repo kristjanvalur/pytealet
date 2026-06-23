@@ -29,7 +29,7 @@ pytealet/
 │   │   ├── pytealet_common.h
 │   │   ├── pytealet.h
 │   │   ├── pytealet_module.h
-│   │   └── libtealet/    # vendored release archive (currently 0.7.5)
+│   │   └── libtealet/    # vendored release archive (currently 0.7.6)
 │   └── tealet_examples.py
 ├── tests/
 │   ├── test_tealet.py

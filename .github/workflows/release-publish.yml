@@ -23,7 +23,11 @@ jobs:
           - os: ubuntu-latest
             archs: "x86_64 i686 aarch64"
           - os: macos-14
-            archs: "x86_64 arm64"
+            archs: "x86_64"
+            macosx_deployment_target: "10.13"
+          - os: macos-14
+            archs: "arm64"
+            macosx_deployment_target: "11.0"
           - os: windows-2022
             archs: "AMD64 x86"
           - os: windows-11-arm
@@ -37,6 +41,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Set macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macosx_deployment_target }}" >> "$GITHUB_ENV"
 
       - name: Set up QEMU (Linux cross-arch)
         if: runner.os == 'Linux'
