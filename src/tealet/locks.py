@@ -23,6 +23,17 @@ class RawTimeoutError(BaseException):
 
 
 TimeoutError = asyncio.TimeoutError
+InvalidStateError = asyncio.InvalidStateError
+QueueEmpty = asyncio.QueueEmpty
+QueueFull = asyncio.QueueFull
+
+class _QueueShutDown(Exception):
+    """Raised when put/get is attempted on a shut-down Queue."""
+
+    pass
+
+
+QueueShutDown: Any = getattr(asyncio, "QueueShutDown", _QueueShutDown)
 
 
 def set_scheduler_resolver(resolver: Callable[[], BaseScheduler]) -> None:
@@ -490,6 +501,7 @@ class Queue(Generic[T]):
         self._getters: deque[Event] = deque()
         self._putters: deque[Event] = deque()
         self._unfinished_tasks = 0
+        self._is_shutdown = False
         self._finished = Event()
         self._finished.set()
         self._init(maxsize)
@@ -517,7 +529,13 @@ class Queue(Generic[T]):
             waiters.popleft().set()
             return
 
+    def _wakeup_all(self, waiters: deque[Event]) -> None:
+        while waiters:
+            waiters.popleft().set()
+
     def put_nowait(self, item: T) -> None:
+        if self._is_shutdown:
+            raise QueueShutDown
         if self.full():
             raise QueueFull
         self._put(item)
@@ -527,6 +545,8 @@ class Queue(Generic[T]):
 
     def sput(self, item: T) -> None:
         while self.full():
+            if self._is_shutdown:
+                raise QueueShutDown
             waiter = Event()
             self._putters.append(waiter)
             try:
@@ -540,6 +560,8 @@ class Queue(Generic[T]):
 
     async def put(self, item: T) -> None:
         while self.full():
+            if self._is_shutdown:
+                raise QueueShutDown
             waiter = Event()
             self._putters.append(waiter)
             try:
@@ -553,13 +575,19 @@ class Queue(Generic[T]):
 
     def get_nowait(self) -> T:
         if self.empty():
+            if self._is_shutdown:
+                raise QueueShutDown
             raise QueueEmpty
         item = self._get()
         self._wakeup_next(self._putters)
+        if self.empty() and self._is_shutdown:
+            self._wakeup_all(self._getters)
         return item
 
     def sget(self) -> T:
         while self.empty():
+            if self._is_shutdown:
+                raise QueueShutDown
             waiter = Event()
             self._getters.append(waiter)
             try:
@@ -573,6 +601,8 @@ class Queue(Generic[T]):
 
     async def get(self) -> T:
         while self.empty():
+            if self._is_shutdown:
+                raise QueueShutDown
             waiter = Event()
             self._getters.append(waiter)
             try:
@@ -599,6 +629,18 @@ class Queue(Generic[T]):
         while self._unfinished_tasks:
             await self._finished.wait()
 
+    def shutdown(self, immediate: bool = False) -> None:
+        self._is_shutdown = True
+        self._wakeup_all(self._putters)
+        if immediate:
+            while self._queue:
+                self._get()
+                if self._unfinished_tasks > 0:
+                    self._unfinished_tasks -= 1
+            if self._unfinished_tasks == 0:
+                self._finished.set()
+        self._wakeup_all(self._getters)
+
 
 class PriorityQueue(Queue[T]):
     """A tealet-compatible priority queue."""
@@ -624,8 +666,3 @@ class LifoQueue(Queue[T]):
 
     def _get(self) -> T:
         return self._queue.pop()
-
-
-InvalidStateError = asyncio.InvalidStateError
-QueueEmpty = asyncio.QueueEmpty
-QueueFull = asyncio.QueueFull

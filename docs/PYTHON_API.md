@@ -171,3 +171,30 @@ cancels the child future.
 iterator that yields scheduler futures in child completion order. If the timeout
 expires before all children finish, iteration raises `TimeoutError`; unfinished
 children are not cancelled by `as_completed(...)`.
+
+## Synchronization Primitives
+
+`tealet.locks` provides scheduler-aware synchronization primitives modeled after
+`asyncio` where practical. Plain method names follow the asyncio-facing API, and
+`s`-prefixed methods are tealet-blocking variants for synchronous tealet code.
+
+Common primitives include:
+- `Event.wait()` / `Event.swait()`
+- `Lock.acquire()` / `Lock.sacquire()`
+- `Semaphore.acquire()` / `Semaphore.sacquire()`
+- `Condition.wait()` / `Condition.swait()`
+- `Barrier.wait()` / `Barrier.swait()`
+- `Queue.put()` / `Queue.sput()`
+- `Queue.get()` / `Queue.sget()`
+- `Queue.join()` / `Queue.sjoin()`
+
+`Queue.shutdown(immediate=False)` follows `asyncio.Queue.shutdown()` semantics
+and raises `tealet.locks.QueueShutDown`. On Python versions with
+`asyncio.QueueShutDown`, this is the standard-library exception; on older
+versions, tealet provides a same-named fallback exception.
+- future `put()` / `put_nowait()` / `sput()` calls raise `QueueShutDown`;
+- blocked async and tealet-blocking putters/getters are woken;
+- graceful shutdown lets existing queued items drain, then future gets raise
+  `QueueShutDown` once the queue is empty;
+- immediate shutdown drains queued items, marks each drained item done for
+  `join()` accounting, and wakes joiners if unfinished work reaches zero.

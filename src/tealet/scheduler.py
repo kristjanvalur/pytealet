@@ -23,6 +23,7 @@ import tealet
 from .locks import (
     Event,
     Queue,
+    QueueShutDown,
     RawTimeoutError,
     TimeoutError,
     set_scheduler_resolver,
@@ -592,12 +593,16 @@ def _as_completed_futures(
     timeout: float | None = None,
 ) -> Iterator[_tasks.Future[Any]]:
     children = list(dict.fromkeys(children))
+    if not children:
+        return
     pending_callbacks = set(children)
     completed: Queue[_tasks.Future[Any]] = Queue()
 
     def complete_next(child: _tasks.Future[Any]) -> None:
         pending_callbacks.discard(child)
         completed.put_nowait(child)
+        if not pending_callbacks:
+            completed.shutdown()
 
     try:
         for child in children:
@@ -605,12 +610,12 @@ def _as_completed_futures(
                 complete_next(child)
             else:
                 child.add_done_callback(complete_next)
-        remaining = len(children)
         with (scheduler_timeout(timeout) if timeout is not None else nullcontext()):
-            while remaining:
+            while True:
                 child = completed.sget()
-                remaining -= 1
                 yield cast(_tasks.Future[Any], child)
+    except QueueShutDown:
+        return
     finally:
         for child in pending_callbacks:
             child.remove_done_callback(complete_next)
