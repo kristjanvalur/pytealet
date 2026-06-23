@@ -474,9 +474,9 @@ class TestSchedulerAccessors:
         work_future = s.run_in_executor(None, worker)
         assert worker_started.wait(timeout=1.0) is True
 
-        shutdown = s.shutdown_default_executor(timeout=0.001)
-        assert shutdown.done() is False
         with pytest.warns(RuntimeWarning, match="did not finish joining"):
+            shutdown = s.shutdown_default_executor(timeout=0.001)
+            assert shutdown.done() is False
             assert s.run_until_complete(shutdown) is None
 
         assert work_future.done() is False

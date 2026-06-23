@@ -666,6 +666,7 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
         ] = deque()
         self._threadsafe_lock = threading.Lock()
+        self._pending_executor_calls = 0
         self._pending_async_waits: set[tealet.tealet] = set()
         self._timers: list[tuple[float, int, TimerHandle]] = []
         self._timer_sequence = itertools.count()
@@ -769,13 +770,22 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
 
         future: _tasks.Future[T] = _tasks.Future()
 
+        with self._threadsafe_lock:
+            self._pending_executor_calls += 1
+
         def complete_result(value: T) -> None:
-            if not future.done():
-                future.set_result(value)
+            try:
+                if not future.done():
+                    future.set_result(value)
+            finally:
+                self._executor_call_done()
 
         def complete_exception(exc: BaseException) -> None:
-            if not future.done():
-                future.set_exception(exc)
+            try:
+                if not future.done():
+                    future.set_exception(exc)
+            finally:
+                self._executor_call_done()
 
         def worker() -> None:
             try:
@@ -785,8 +795,17 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             else:
                 self.call_soon_threadsafe(complete_result, result)
 
-        executor.submit(worker)
+        try:
+            executor.submit(worker)
+        except BaseException:
+            self._executor_call_done()
+            raise
         return future
+
+    def _executor_call_done(self) -> None:
+        with self._threadsafe_lock:
+            self._pending_executor_calls -= 1
+        self._break_wait()
 
     def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
         raise NotImplementedError("reader callbacks require an IO-capable scheduler")
@@ -912,7 +931,8 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
         return max(0.0, self._timers[0][0] - self.time())
 
     def _has_pending_driver_work(self) -> bool:
-        return False
+        with self._threadsafe_lock:
+            return bool(self._threadsafe_callbacks or self._pending_executor_calls)
 
     # -- Link and runnable state --------------------------------------
 
