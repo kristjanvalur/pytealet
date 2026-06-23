@@ -79,7 +79,7 @@ def simple_generator(source: Iterable[T]) -> GeneratorTealet[T]:
     """Return a generator-style iterator backed by a tealet subclass."""
 
     return GeneratorTealet(source)
-                
+
 
 def demo_scheduler_append_with_yield() -> list[str]:
     """Run a few tealets that append while yielding to each other."""

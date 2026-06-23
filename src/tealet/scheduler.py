@@ -1108,7 +1108,6 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
                 result._unlink()
             except AttributeError:
                 self._unlink(result)
-            self._unlink(result)
         elif self._tasks:
             result = self._tasks.popleft()
             self._task_set.discard(result)
