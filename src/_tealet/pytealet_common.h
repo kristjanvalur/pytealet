@@ -125,6 +125,10 @@
 #define PY_HAS_TSTATE_CURRENT_EXECUTOR
 #endif
 
+#if defined(Py_GIL_DISABLED) && defined(PY313P)
+#define PY_HAS_TSTATE_CRITICAL_SECTION
+#endif
+
 #if defined(PY_HAS_TSTATE_CFRAME)
 #if defined(PY310)
 typedef CFrame PyTealetCFrame;
