@@ -123,6 +123,7 @@ class SelectorMixin:
         if entry.empty():
             del self._fd_callbacks[fd]
         self._update_selector_registration(fd)
+        self._wake_selector()
         return True
 
     def add_writer(self, fd: int, callback: Callable[..., object], *args: object) -> None:
@@ -149,6 +150,7 @@ class SelectorMixin:
         if entry.empty():
             del self._fd_callbacks[fd]
         self._update_selector_registration(fd)
+        self._wake_selector()
         return True
 
     # -- Asyncio-style socket helpers ---------------------------------

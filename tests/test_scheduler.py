@@ -924,6 +924,33 @@ class TestSchedulerAccessors:
             writer.close()
             s.close()
 
+    def test_selector_scheduler_remove_callbacks_wakes_selector(self, monkeypatch):
+        s = SelectorScheduler()
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            wakeups: list[str] = []
+
+            def wake_selector() -> None:
+                wakeups.append("wake")
+
+            monkeypatch.setattr(s, "_wake_selector", wake_selector)
+
+            s.add_reader(reader.fileno(), lambda: None)
+            wakeups.clear()
+            assert s.remove_reader(reader.fileno()) is True
+            assert wakeups == ["wake"]
+
+            s.add_writer(writer.fileno(), lambda: None)
+            wakeups.clear()
+            assert s.remove_writer(writer.fileno()) is True
+            assert wakeups == ["wake"]
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
     def test_selector_scheduler_reader_writer_callbacks_share_fd_entry(self):
         s = SelectorScheduler()
         set_scheduler(s)
@@ -2945,6 +2972,18 @@ class TestFutureExamples:
             assert seen == ["done=7"]
 
         asyncio.run(case())
+
+    def test_future_done_callback_already_done_runs_without_asyncio_loop(self):
+        future: Future[int] = Future()
+        future.set_result(7)
+        seen: list[str] = []
+
+        def on_done(done: Future[int]) -> None:
+            seen.append(f"done={done.result()}")
+
+        future.add_done_callback(on_done)
+
+        assert seen == ["done=7"]
 
     def test_future_done_callback_uses_context(self):
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")

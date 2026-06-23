@@ -101,9 +101,12 @@ class Future(Generic[T]):
         context: contextvars.Context | None = None,
     ) -> None:
         if self._done:
-            loop = asyncio.get_running_loop()
             if context is None:
-                loop.call_soon(callback, self)
+                context = contextvars.copy_context()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                context.run(callback, self)
             else:
                 loop.call_soon(callback, self, context=context)
             return
