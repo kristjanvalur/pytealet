@@ -44,11 +44,15 @@ DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
 
 __all__ = [
     "ALL_COMPLETED",
+    "BaseScheduler",
     "Channel",
+    "CoreSchedulerDrivingAPI",
+    "DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT",
     "DeadlockError",
     "FIRST_COMPLETED",
     "FIRST_EXCEPTION",
     "Scheduler",
+    "SyncSchedulerDrivingAPI",
     "TimerHandle",
     "as_completed",
     "ensure_future",

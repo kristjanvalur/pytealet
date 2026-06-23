@@ -13,18 +13,18 @@ The repository now contains a meaningful subset of this design.
 Implemented:
 
 - Runner split and driving split are in place:
-  - `tealet.runner.Runner` drives sync scheduler execution.
-  - `tealet.asyncio.AsyncRunner` drives async scheduler execution inside an existing asyncio task.
+  - `tealetio.runner.Runner` drives sync scheduler execution.
+  - `tealetio.asyncio.AsyncRunner` drives async scheduler execution inside an existing asyncio task.
 - Shared runner lifecycle has been consolidated in a generic `BaseRunner`.
 - Runner factories use per-runner defaults and factory-only construction.
-  - `Runner` uses `tealet.scheduler.Scheduler` as its default factory.
-  - `AsyncRunner` uses `tealet.asyncio.AsyncScheduler` as its default factory.
+  - `Runner` uses `tealetio.scheduler.Scheduler` as its default factory.
+  - `AsyncRunner` uses `tealetio.asyncio.AsyncScheduler` as its default factory.
   - Custom factories are duck typed; runtime does not validate returned objects.
 - Top-level convenience helpers exist:
-  - `tealet.runner.run(...)`
-  - `tealet.asyncio.run_async(...)`
-  - `tealet.asyncio.run_in_asyncio(...)`
-  - `tealet.asyncio.run_asyncio_in_tealet(...)`
+  - `tealetio.runner.run(...)`
+  - `tealetio.asyncio.run_async(...)`
+  - `tealetio.asyncio.run_in_asyncio(...)`
+  - `tealetio.asyncio.run_asyncio_in_tealet(...)`
 - `BaseScheduler` contains shared cooperative scheduling mechanics.
 - `Scheduler` is the concrete synchronous scheduler implementation.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
@@ -36,8 +36,8 @@ Implemented:
   - `remove_reader(...)`
   - `add_writer(...)`
   - `remove_writer(...)`
-  `tealet.asyncio.AsyncScheduler` delegates these hooks to the running asyncio loop.
-  `tealet.selector.SelectorScheduler` implements them through its native selector reactor.
+  `tealetio.asyncio.AsyncScheduler` delegates these hooks to the running asyncio loop.
+  `tealetio.selector.SelectorScheduler` implements them through its native selector reactor.
   Selector readiness waits (`wait_readable(...)` and `wait_writable(...)`) are
   layered on top of one-shot reader/writer callbacks that wake tealet `Event`
   waiters.
@@ -48,7 +48,7 @@ Implemented:
   - `arun_forever(...)`
 - Future waiting semantics are aligned so wait paths return final results.
 - Current scheduler binding is thread-local through
-  `tealet.scheduler.set_scheduler(...)` and is restored by runner scopes. Async
+  `tealetio.scheduler.set_scheduler(...)` and is restored by runner scopes. Async
   context-local isolation across multiple asyncio tasks in the same thread is
   future hardening work, not current behavior.
 - Cancellation is represented by `asyncio.CancelledError`, matching asyncio
@@ -58,15 +58,15 @@ Implemented:
   returns unfinished scheduler-owned tealet tasks without keeping those tasks
   alive solely for introspection.
 - Scheduler grouping includes `BaseScheduler.ensure_future(...)`,
-  `tealet.scheduler.ensure_future(...)`, `tealet.scheduler.gather(...)`,
-  `tealet.scheduler.wait(...)`, `tealet.scheduler.wait_for(...)`, and
-  `tealet.scheduler.as_completed(...)` for entry normalization, ordered
+  `tealetio.scheduler.ensure_future(...)`, `tealetio.scheduler.gather(...)`,
+  `tealetio.scheduler.wait(...)`, `tealetio.scheduler.wait_for(...)`, and
+  `tealetio.scheduler.as_completed(...)` for entry normalization, ordered
   collection, done/pending waiting, timeout-bounded single waits, and
   completion-order iteration.
 - Scheduler-local task creation is configurable with
   `BaseScheduler.set_task_factory(...)` and `BaseScheduler.get_task_factory()`.
   The default factory preserves direct `TealetTask.prepare(...)` behavior.
-  `tealet.tasks.StubTaskFactory` can create and reuse a prepared stub via
+  `tealetio.tasks.StubTaskFactory` can create and reuse a prepared stub via
   `stub_here()`, then create scheduler tasks from that stub.
 - Cancellation propagates across scheduler boundaries in an asyncio-compatible
   way:
@@ -107,7 +107,7 @@ Implemented:
 - Runner shutdown follows the asyncio runner pattern and uses normal task
   cancellation rather than a distinct shutdown-specific wait policy:
   - unfinished scheduler tasks are cancelled and drained with
-    `tealet.scheduler.gather(..., return_exceptions=True)`; this is robust as
+    `tealetio.scheduler.gather(..., return_exceptions=True)`; this is robust as
     long as synchronization primitives correctly clean up when blocked
     `TealetTask` instances receive cancellation or tealet-exit exceptions
   - `CoreSchedulerDrivingAPI.shutdown_default_executor(timeout=300.0)` returns
@@ -214,7 +214,7 @@ Semantics:
 
 - `BaseScheduler.ensure_future(...)` returns existing scheduler futures
   unchanged and spawns zero-argument callables as scheduler tasks.
-  `tealet.scheduler.ensure_future(...)` delegates to the current scheduler.
+  `tealetio.scheduler.ensure_future(...)` delegates to the current scheduler.
 - `gather(...)` accepts scheduler futures/tasks and zero-argument callables,
   converts callables into scheduler-owned tealet tasks, and returns results in
   input order.
@@ -235,7 +235,7 @@ Semantics:
 ### Scheduler Task Factories
 
 ```python
-from tealet.tasks import DefaultTaskFactory, StubTaskFactory, TaskFactory
+from tealetio.tasks import DefaultTaskFactory, StubTaskFactory, TaskFactory
 
 
 class TaskFactory(Protocol):
@@ -362,7 +362,7 @@ Return behavior:
 
 ## Execution Model
 
-### tealet.runner.Runner.run(...)
+### tealetio.runner.Runner.run(...)
 
 - Creates a scheduler using `scheduler_factory` (or default scheduler creator).
 - Installs scheduler as current for runtime scope.
@@ -373,7 +373,7 @@ Return behavior:
   - scheduler binding restored
   - scheduler default executor shut down cleanly before scheduler close
 
-### tealet.asyncio.AsyncRunner.run(...)
+### tealetio.asyncio.AsyncRunner.run(...)
 
 - Requires a currently running asyncio loop.
 - Creates a scheduler using `scheduler_factory` (or default async scheduler
@@ -385,7 +385,7 @@ Return behavior:
   `with Runner() as runner: ...`. `AsyncRunner` deliberately follows Python's
   async-resource convention and does not expose `close()`.
 
-### tealet.asyncio.run_async(...)
+### tealetio.asyncio.run_async(...)
 
 - Requires a currently running asyncio loop.
 - Creates or installs scheduler for runtime scope.
@@ -393,7 +393,7 @@ Return behavior:
 - Restores prior scheduler binding after completion.
 - Does not close the ambient asyncio loop.
 
-### tealet.asyncio.run_in_asyncio(...)
+### tealetio.asyncio.run_in_asyncio(...)
 
 - Creates a temporary `asyncio.Runner`, using `loop_factory` when provided.
 - Creates a temporary `AsyncRunner` inside that asyncio runner.
@@ -401,14 +401,14 @@ Return behavior:
 - Restores prior scheduler binding after completion.
 - Lets `asyncio.Runner` handle loop shutdown and closure.
 
-### tealet.asyncio.run_asyncio_in_tealet(...)
+### tealetio.asyncio.run_asyncio_in_tealet(...)
 
-- Creates a temporary `tealet.runner.Runner` with a
-  `tealet.selector.SelectorScheduler` by default.
+- Creates a temporary `tealetio.runner.Runner` with a
+  `tealetio.selector.SelectorScheduler` by default.
 - Disables the outer tealet runner's SIGINT handler by default so the inner
   `asyncio.Runner` can install its normal interrupt handler.
 - Creates a temporary `asyncio.Runner` whose default loop is
-  `tealet.asyncio.TealetSelectorEventLoop` hosted by the active selector
+  `tealetio.asyncio.TealetSelectorEventLoop` hosted by the active selector
   scheduler.
 - Runs the coroutine/awaitable using the same entry semantics as
   `asyncio.Runner.run(...)` inside the tealet-hosted asyncio loop.
@@ -431,13 +431,13 @@ Return behavior:
 
 - `get_running_scheduler()` with no running scheduler:
   - `RuntimeError("no running scheduler")`
-- `tealet.asyncio.run_async(...)` outside running asyncio loop:
+- `tealetio.asyncio.run_async(...)` outside running asyncio loop:
   - `RuntimeError` consistent with asyncio wording/style
-- `tealet.asyncio.run_in_asyncio(...)` on Python versions without `asyncio.Runner`:
+- `tealetio.asyncio.run_in_asyncio(...)` on Python versions without `asyncio.Runner`:
   - `RuntimeError` indicating Python 3.11+ is required
-- `tealet.asyncio.run_asyncio_in_tealet(...)` without `asyncio.Runner`:
+- `tealetio.asyncio.run_asyncio_in_tealet(...)` without `asyncio.Runner`:
   - `RuntimeError` indicating Python 3.11+ is required
-- `tealet.asyncio.run_asyncio_in_tealet(...)` with a non-selector scheduler and
+- `tealetio.asyncio.run_asyncio_in_tealet(...)` with a non-selector scheduler and
   no custom loop factory:
   - `RuntimeError` indicating that a `SelectorScheduler` is required
 - invalid factory return values:
@@ -451,7 +451,7 @@ Return behavior:
   not add separate `new_sync_scheduler()` / `new_async_scheduler()` helpers
   unless a later API decision requires them.
 - Direct `Scheduler` and `AsyncScheduler` usage remains valid through their
-  owning modules, `tealet.scheduler` and `tealet.asyncio` respectively.
+  owning modules, `tealetio.scheduler` and `tealetio.asyncio` respectively.
 
 ## Asyncio Mapping Table
 
@@ -460,24 +460,24 @@ Return behavior:
 - `asyncio.get_running_loop()` -> `get_running_scheduler()`
 - `asyncio.get_event_loop()` legacy current-loop lookup -> `get_scheduler()`
   only for strict lookup of an explicitly-bound scheduler; it never creates one.
-- `asyncio.run(...)` from sync code -> `tealet.runner.run(...)`
-- `asyncio.Runner(...)` from sync code -> `tealet.runner.Runner(...)`
-- async code that needs a scoped tealet scheduler -> `tealet.asyncio.AsyncRunner(...)`
-- `asyncio.run(...)` inside tealet -> `tealet.asyncio.run_asyncio_in_tealet(...)`
+- `asyncio.run(...)` from sync code -> `tealetio.runner.run(...)`
+- `asyncio.Runner(...)` from sync code -> `tealetio.runner.Runner(...)`
+- async code that needs a scoped tealet scheduler -> `tealetio.asyncio.AsyncRunner(...)`
+- `asyncio.run(...)` inside tealet -> `tealetio.asyncio.run_asyncio_in_tealet(...)`
 
 ## Migration Notes
 
-- Prefer `tealet.runner.Runner` for synchronous code that wants reusable runner
+- Prefer `tealetio.runner.Runner` for synchronous code that wants reusable runner
   state or explicit lifecycle control.
-- Prefer `tealet.runner.run(...)` for one-shot synchronous entry points.
-- Prefer `tealet.asyncio.AsyncRunner` plus `async with` or
+- Prefer `tealetio.runner.run(...)` for one-shot synchronous entry points.
+- Prefer `tealetio.asyncio.AsyncRunner` plus `async with` or
   `await runner.aclose()` for async code that needs explicit scheduler lifetime
   control.
-- Prefer `tealet.asyncio.run_async(...)` for one-shot async entry points inside
+- Prefer `tealetio.asyncio.run_async(...)` for one-shot async entry points inside
   an existing asyncio task.
-- Prefer `tealet.asyncio.run_in_asyncio(...)` when synchronous code should own a
+- Prefer `tealetio.asyncio.run_in_asyncio(...)` when synchronous code should own a
   temporary asyncio runner and an inner tealet async scheduler.
-- Prefer `tealet.asyncio.run_asyncio_in_tealet(...)` when tealet code should host
+- Prefer `tealetio.asyncio.run_asyncio_in_tealet(...)` when tealet code should host
   a temporary asyncio runner.
 - Direct `Scheduler` / `AsyncScheduler` APIs remain appropriate for low-level
   tests, integrations, and custom driving loops.
@@ -496,11 +496,11 @@ Status: Implemented with strict current-scheduler and running-scheduler lookup.
 Phase 2: Runner Surface
 
 Status: Implemented with `Runner`/`AsyncRunner` and top-level
-`tealet.runner.run`/`tealet.asyncio.run_async` helpers. A separate `Runtime`
+`tealetio.runner.run`/`tealetio.asyncio.run_async` helpers. A separate `Runtime`
 class is not part of the current public surface.
 
 - Keep `Runner`/`AsyncRunner` as the primary public runtime surface.
-- The synchronous runner implementation lives in `tealet.runner`; the older
+- The synchronous runner implementation lives in `tealetio.runner`; the older
   `tealet.runtime` module name is intentionally not preserved.
 
 Phase 3: Context Scoping Hardening
@@ -598,8 +598,8 @@ Status: Initial Unix selector prototype implemented.
 
 - A tealet-hosted asyncio loop may be feasible if the asyncio loop's raw
   blocking points can be delegated to the outer tealet scheduler.
-- `tealet.asyncio.TealetSelectorEventLoop` is an experimental
-  `asyncio.SelectorEventLoop` subclass hosted by `tealet.selector.SelectorScheduler`.
+- `tealetio.asyncio.TealetSelectorEventLoop` is an experimental
+  `asyncio.SelectorEventLoop` subclass hosted by `tealetio.selector.SelectorScheduler`.
 - The implementation uses a selector adapter whose fd registration is backed by
   `SelectorScheduler.add_reader(...)` and `add_writer(...)`; when asyncio's
   selector would block, the pump tealet parks on a scheduler `Event` and wakes
@@ -645,19 +645,19 @@ Status: Implemented for Python 3.11+.
 
 ```python
 # sync entry with explicit factories
-result = tealet.runner.run(
+result = tealetio.runner.run(
     main,
-    scheduler_factory=tealet.scheduler.Scheduler,
+    scheduler_factory=tealetio.scheduler.Scheduler,
 )
 
 # async entry inside existing loop
 async def app_main():
-  return await tealet.asyncio.run_async(async_entry)
+  return await tealetio.asyncio.run_async(async_entry)
 
 # asyncio entry inside a tealet selector scheduler
-result = tealet.asyncio.run_asyncio_in_tealet(async_entry())
+result = tealetio.asyncio.run_asyncio_in_tealet(async_entry())
 
 # low-level direct construction
-s = tealet.scheduler.Scheduler()
-tealet.scheduler.set_scheduler(s)
+s = tealetio.scheduler.Scheduler()
+tealetio.scheduler.set_scheduler(s)
 ```

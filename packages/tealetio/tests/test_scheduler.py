@@ -10,12 +10,19 @@ import weakref
 import pytest
 
 import _tealet
-import tealet.scheduler as scheduler_module
-from tealet.locks import (
+import tealetio.scheduler as scheduler_module
+from tealetio import (
+    ALL_COMPLETED,
     Barrier,
     BoundedSemaphore,
+    CancelledError,
+    Channel,
     Condition,
+    DefaultTaskFactory,
     Event,
+    FIRST_COMPLETED,
+    FIRST_EXCEPTION,
+    Future,
     InvalidStateError,
     LifoQueue,
     Lock,
@@ -24,36 +31,34 @@ from tealet.locks import (
     QueueEmpty,
     QueueFull,
     QueueShutDown,
-    RawTimeoutError,
+    Scheduler,
+    SelectorScheduler,
     Semaphore,
-    TimeoutError,
-    timeout,
-    timeout_at,
-)
-from tealet.asyncio import (
-    AsyncScheduler,
+    StubTaskFactory,
     TealetSelectorEventLoop,
-)
-from tealet.scheduler import (
-    ALL_COMPLETED,
-    Channel,
-    FIRST_COMPLETED,
-    FIRST_EXCEPTION,
+    TealetTask,
+    TimeoutError,
+    AsyncScheduler,
+    as_completed,
     ensure_future,
     gather,
-    get_scheduler,
     get_running_scheduler,
+    get_scheduler,
     set_scheduler,
-    Scheduler,
-    _scheduler,
-    as_completed,
+    shield,
+    timeout,
+    timeout_at,
     to_thread,
     wait,
     wait_for,
 )
-from tealet.selector import SelectorScheduler
-from tealet.tasks import CancelledError, DefaultTaskFactory, Future, StubTaskFactory, TealetTask, shield
-from tealet_examples import (
+from tealetio.locks import (
+    RawTimeoutError,
+)
+from tealetio.scheduler import (
+    _scheduler,
+)
+from tealetio.examples import (
     demo_future_result,
     demo_future_timeout_then_success,
     demo_scheduler_append_with_yield,

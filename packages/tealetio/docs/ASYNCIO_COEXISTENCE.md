@@ -11,17 +11,20 @@ can suspend cooperatively, while still using modern asyncio-driven IO libraries.
 This is design reasoning around the current scheduler/asyncio bridge and a few
 possible future directions.
 
-## Current Example Model
+## Current Scheduler Model
 
-The scheduler in `src/tealet_examples.py` is intentionally small:
+The richer scheduler layer now lives in `tealetio`:
 
-- `Scheduler` owns a runnable queue of tealets.
+- `tealetio.scheduler.Scheduler` owns a runnable queue of tealets.
 - `Event.swait()` blocks the current tealet by recording it as a waiter and
   switching to another runnable tealet.
 - `Event.set()` marks the event set and moves blocked tealets back to the
   runnable queue.
 - `Future.result()` waits synchronously from the point of view of the tealet
   task, using `Event` as its wakeup primitive.
+
+The base `tealet.simple_scheduler.SimpleScheduler` example is deliberately
+smaller and does not include futures, IO, or asyncio interoperability.
 
 That model is stackful and scheduler-local. It is not the same suspension
 protocol used by native `async def` coroutines.
@@ -513,11 +516,11 @@ This leads to three coexistence modes worth keeping distinct:
   dependency and a separate event-loop family.
 
 The concrete first experiment is now narrow and Unix-first:
-`tealet.selector.SelectorScheduler` provides selector-backed readiness callbacks
-and socket helpers, and `tealet.asyncio.TealetSelectorEventLoop` provides an
+`tealetio.selector.SelectorScheduler` provides selector-backed readiness callbacks
+and socket helpers, and `tealetio.asyncio.TealetSelectorEventLoop` provides an
 experimental tealet-aware selector adapter for `asyncio.SelectorEventLoop`.
 Asyncio timers, self-pipe wakeups, and socket readiness can share the host
-scheduler's blocking point. `tealet.asyncio.run_asyncio_in_tealet(...)` wraps
+scheduler's blocking point. `tealetio.asyncio.run_asyncio_in_tealet(...)` wraps
 that setup in a temporary selector scheduler and lets the inner `asyncio.Runner`
 own SIGINT handling.
 

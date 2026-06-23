@@ -31,3 +31,27 @@ class TestGeneratorTealet:
 
         with pytest.raises(StopIteration):
             next(gen)
+
+
+class TestSimpleSchedulerExample:
+    def test_simple_scheduler_demo_yields_between_tasks(self):
+        assert examples.demo_simple_scheduler_append_with_yield() == ["a0", "b0", "c0", "a1", "b1", "a2"]
+
+    def test_simple_scheduler_run_until_complete_returns_result(self):
+        scheduler = examples.SimpleScheduler()
+
+        def entry(left, right):
+            scheduler.yield_()
+            return left + right
+
+        assert scheduler.run_until_complete(entry, 20, 22) == 42
+
+    def test_simple_scheduler_run_until_complete_reraises_exception(self):
+        scheduler = examples.SimpleScheduler()
+
+        def entry():
+            scheduler.yield_()
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError, match="boom"):
+            scheduler.run_until_complete(entry)
