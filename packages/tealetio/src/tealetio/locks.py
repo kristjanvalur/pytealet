@@ -1,0 +1,668 @@
+from __future__ import annotations
+
+import asyncio
+import heapq
+from collections import deque
+from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
+
+import tealet
+
+T = TypeVar("T")
+
+if TYPE_CHECKING:
+    from .scheduler import BaseScheduler, TimerHandle
+
+
+_get_current_scheduler: Callable[[], BaseScheduler]
+
+
+class RawTimeoutError(BaseException):
+    """Internal timeout sentinel thrown into tealets by scheduler timeouts."""
+
+    pass
+
+
+TimeoutError = asyncio.TimeoutError
+InvalidStateError = asyncio.InvalidStateError
+QueueEmpty = asyncio.QueueEmpty
+QueueFull = asyncio.QueueFull
+
+class _QueueShutDown(Exception):
+    """Raised when put/get is attempted on a shut-down Queue."""
+
+    pass
+
+
+QueueShutDown: Any = getattr(asyncio, "QueueShutDown", _QueueShutDown)
+
+
+def set_scheduler_resolver(resolver: Callable[[], BaseScheduler]) -> None:
+    global _get_current_scheduler
+    _get_current_scheduler = resolver
+
+
+def timeout(delay: float) -> "Timeout":
+    """Context manager for timing out a block of code via scheduler timers."""
+    sched = _get_current_scheduler()
+    when = sched.time() + delay
+    return Timeout(when)
+
+
+def timeout_at(when: float) -> "Timeout":
+    """Context manager for timing out a block of code at a specific time via scheduler timers."""
+    return Timeout(when)
+
+
+class Timeout:
+    """Timer-backed synchronous timeout context manager."""
+
+    def __init__(self, when: float):
+        self._when = when
+        self._handle: TimerHandle | None = None
+        self._exc = RawTimeoutError()
+        self._expired = False
+
+    # -- Public state --------------------------------------------------
+
+    def reschedule(self, when: float):
+        if not self._expired and self._handle is not None:
+            self._handle.cancel()
+            self._when = when
+            self._handle = _get_current_scheduler().call_at(self._when, self._timeout, tealet.current())
+
+    def expired(self) -> bool:
+        return self._expired
+
+    # -- Context manager ----------------------------------------------
+
+    def __enter__(self) -> "Timeout":
+        self._handle = _get_current_scheduler().call_at(self._when, self._timeout, tealet.current())
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+        if exc_val is self._exc:
+            assert self._expired is True
+            raise asyncio.TimeoutError("Operation timed out") from exc_val
+
+    def _timeout(self, target) -> None:
+        self._expired = True
+        target.throw(self._exc)
+
+
+class Event:
+    """Minimal event primitive for scheduler-driven wait/wake."""
+
+    def __init__(self) -> None:
+        self._waiters: list[tealet.tealet] = []
+        self._async_waiters: list[asyncio.Future[bool]] = []
+        self._is_set = False
+
+    def _link(self, t: tealet.tealet) -> None:
+        assert t.link is None
+        assert t not in self._waiters
+        try:
+            t.link = self
+        except AttributeError:
+            pass  # main tealet may not have a ``link`` attribute
+        self._waiters.append(t)
+
+    def _query_waiting(self, t: tealet.tealet) -> bool:
+        return t in self._waiters
+
+    def _query_runnable(self, t: tealet.tealet) -> bool:
+        return False
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        try:
+            self._waiters.remove(t)
+            try:
+                t.link = None
+            except AttributeError:
+                pass  # main tealet may not have a ``link`` attribute
+        except ValueError:
+            pass
+
+    def swait(self) -> bool:
+        if self._is_set:
+            return True
+
+        current = tealet.current()
+        sched = _get_current_scheduler()
+        try:
+            sched._schedule(lambda: self._link(current))
+        except BaseException as exc:
+            self._unlink(current)
+            if isinstance(exc, RawTimeoutError) and self._is_set:
+                return True
+            raise
+
+        return True
+
+    async def wait(self) -> bool:
+        if self._is_set:
+            return True
+
+        waiter: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._async_waiters.append(waiter)
+        try:
+            return await waiter
+        finally:
+            try:
+                self._async_waiters.remove(waiter)
+            except ValueError:
+                pass
+
+    def set(self) -> None:
+        self._is_set = True
+        if self._waiters:
+            scheduler = _get_current_scheduler()
+            for waiter in self._waiters:
+                scheduler._make_runnable(waiter)
+        self._waiters.clear()
+        for waiter in self._async_waiters:
+            if not waiter.done():
+                waiter.set_result(True)
+        self._async_waiters.clear()
+
+    def clear(self) -> None:
+        self._is_set = False
+
+
+class Lock:
+    """A tealet-compatible mutual exclusion lock."""
+
+    def __init__(self) -> None:
+        self._locked = False
+        self._waiters: deque[Event] = deque()
+
+    def locked(self) -> bool:
+        return self._locked
+
+    def sacquire(self) -> bool:
+        if not self._locked:
+            self._locked = True
+            return True
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        try:
+            waiter.swait()
+        except BaseException:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise
+
+        self._locked = True
+        return True
+
+    async def acquire(self) -> bool:
+        if not self._locked:
+            self._locked = True
+            return True
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        try:
+            await waiter.wait()
+        except BaseException:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise
+
+        self._locked = True
+        return True
+
+    def release(self) -> None:
+        if not self._locked:
+            raise RuntimeError("Lock is not acquired")
+
+        self._locked = False
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            waiter.set()
+            break
+
+    def __enter__(self) -> "Lock":
+        self.sacquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+    async def __aenter__(self) -> "Lock":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+
+class Condition:
+    """A tealet-compatible condition variable."""
+
+    def __init__(self, lock: Lock | None = None) -> None:
+        self._lock = lock if lock is not None else Lock()
+        self._waiters: deque[Event] = deque()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def sacquire(self) -> bool:
+        return self._lock.sacquire()
+
+    async def acquire(self) -> bool:
+        return await self._lock.acquire()
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def swait(self) -> bool:
+        if not self.locked():
+            raise RuntimeError("cannot wait on un-acquired lock")
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        self._lock.release()
+        try:
+            waiter.swait()
+            return True
+        finally:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            self._lock.sacquire()
+
+    async def wait(self) -> bool:
+        if not self.locked():
+            raise RuntimeError("cannot wait on un-acquired lock")
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        self._lock.release()
+        try:
+            await waiter.wait()
+            return True
+        finally:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            await self._lock.acquire()
+
+    def swait_for(self, predicate: Callable[[], bool]) -> bool:
+        result = predicate()
+        while not result:
+            self.swait()
+            result = predicate()
+        return result
+
+    async def wait_for(self, predicate: Callable[[], bool]) -> bool:
+        result = predicate()
+        while not result:
+            await self.wait()
+            result = predicate()
+        return result
+
+    def notify(self, n: int = 1) -> None:
+        if not self.locked():
+            raise RuntimeError("cannot notify on un-acquired lock")
+        if n <= 0:
+            return
+
+        while self._waiters and n > 0:
+            waiter = self._waiters.popleft()
+            waiter.set()
+            n -= 1
+
+    def notify_all(self) -> None:
+        self.notify(len(self._waiters))
+
+    def __enter__(self) -> "Condition":
+        self.sacquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+    async def __aenter__(self) -> "Condition":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+
+class Barrier:
+    """A tealet-compatible barrier with sync and async waits."""
+
+    def __init__(self, parties: int) -> None:
+        if parties <= 0:
+            raise ValueError("parties must be > 0")
+        self.parties = parties
+        self._count = 0
+        self._generation = 0
+        self._waiters: deque[tuple[Event, int, int]] = deque()
+
+    @property
+    def n_waiting(self) -> int:
+        return self._count
+
+    def _arrive(self) -> tuple[int, Event | None, int]:
+        generation = self._generation
+        index = self.parties - self._count - 1
+        self._count += 1
+
+        if self._count == self.parties:
+            self._count = 0
+            self._generation += 1
+            while self._waiters:
+                waiter, _, _ = self._waiters.popleft()
+                waiter.set()
+            return 0, None, generation
+
+        waiter = Event()
+        self._waiters.append((waiter, index, generation))
+        return index, waiter, generation
+
+    def _cancel_waiter(self, waiter: Event, index: int, generation: int) -> None:
+        try:
+            self._waiters.remove((waiter, index, generation))
+            if generation == self._generation and self._count > 0:
+                self._count -= 1
+        except ValueError:
+            pass
+
+    def swait(self) -> int:
+        index, waiter, generation = self._arrive()
+        if waiter is None:
+            return index
+
+        try:
+            waiter.swait()
+            return index
+        except BaseException:
+            self._cancel_waiter(waiter, index, generation)
+            raise
+
+    async def wait(self) -> int:
+        index, waiter, generation = self._arrive()
+        if waiter is None:
+            return index
+
+        try:
+            await waiter.wait()
+            return index
+        except BaseException:
+            self._cancel_waiter(waiter, index, generation)
+            raise
+
+
+class Semaphore:
+    """A tealet-compatible counting semaphore."""
+
+    def __init__(self, value: int = 1) -> None:
+        if value < 0:
+            raise ValueError("Semaphore initial value must be >= 0")
+        self._value = value
+        self._waiters: deque[Event] = deque()
+
+    def locked(self) -> bool:
+        return self._value == 0
+
+    def sacquire(self) -> bool:
+        if self._value > 0:
+            self._value -= 1
+            return True
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        try:
+            waiter.swait()
+        except BaseException:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise
+
+        self._value -= 1
+        return True
+
+    async def acquire(self) -> bool:
+        if self._value > 0:
+            self._value -= 1
+            return True
+
+        waiter = Event()
+        self._waiters.append(waiter)
+        try:
+            await waiter.wait()
+        except BaseException:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise
+
+        self._value -= 1
+        return True
+
+    def release(self) -> None:
+        self._value += 1
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            waiter.set()
+            break
+
+    def __enter__(self) -> "Semaphore":
+        self.sacquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+    async def __aenter__(self) -> "Semaphore":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+
+class BoundedSemaphore(Semaphore):
+    """A semaphore that cannot be released above its initial value."""
+
+    def __init__(self, value: int = 1) -> None:
+        super().__init__(value)
+        self._bound_value = value
+
+    def release(self) -> None:
+        if self._value >= self._bound_value:
+            raise ValueError("BoundedSemaphore released too many times")
+        super().release()
+
+
+class Queue(Generic[T]):
+    """A tealet-compatible FIFO queue modeled after asyncio.Queue."""
+
+    _queue: Any
+
+    def __init__(self, maxsize: int = 0) -> None:
+        if maxsize < 0:
+            raise ValueError("maxsize must be >= 0")
+        self.maxsize = maxsize
+        self._getters: deque[Event] = deque()
+        self._putters: deque[Event] = deque()
+        self._unfinished_tasks = 0
+        self._is_shutdown = False
+        self._finished = Event()
+        self._finished.set()
+        self._init(maxsize)
+
+    def _init(self, maxsize: int) -> None:
+        self._queue = deque()
+
+    def _put(self, item: T) -> None:
+        self._queue.append(item)
+
+    def _get(self) -> T:
+        return self._queue.popleft()
+
+    def qsize(self) -> int:
+        return len(self._queue)
+
+    def empty(self) -> bool:
+        return self.qsize() == 0
+
+    def full(self) -> bool:
+        return self.maxsize > 0 and self.qsize() >= self.maxsize
+
+    def _wakeup_next(self, waiters: deque[Event]) -> None:
+        while waiters:
+            waiters.popleft().set()
+            return
+
+    def _wakeup_all(self, waiters: deque[Event]) -> None:
+        while waiters:
+            waiters.popleft().set()
+
+    def put_nowait(self, item: T) -> None:
+        if self._is_shutdown:
+            raise QueueShutDown
+        if self.full():
+            raise QueueFull
+        self._put(item)
+        self._unfinished_tasks += 1
+        self._finished.clear()
+        self._wakeup_next(self._getters)
+
+    def sput(self, item: T) -> None:
+        while self.full():
+            if self._is_shutdown:
+                raise QueueShutDown
+            waiter = Event()
+            self._putters.append(waiter)
+            try:
+                waiter.swait()
+            finally:
+                try:
+                    self._putters.remove(waiter)
+                except ValueError:
+                    pass
+        self.put_nowait(item)
+
+    async def put(self, item: T) -> None:
+        while self.full():
+            if self._is_shutdown:
+                raise QueueShutDown
+            waiter = Event()
+            self._putters.append(waiter)
+            try:
+                await waiter.wait()
+            finally:
+                try:
+                    self._putters.remove(waiter)
+                except ValueError:
+                    pass
+        self.put_nowait(item)
+
+    def get_nowait(self) -> T:
+        if self.empty():
+            if self._is_shutdown:
+                raise QueueShutDown
+            raise QueueEmpty
+        item = self._get()
+        self._wakeup_next(self._putters)
+        if self.empty() and self._is_shutdown:
+            self._wakeup_all(self._getters)
+        return item
+
+    def sget(self) -> T:
+        while self.empty():
+            if self._is_shutdown:
+                raise QueueShutDown
+            waiter = Event()
+            self._getters.append(waiter)
+            try:
+                waiter.swait()
+            finally:
+                try:
+                    self._getters.remove(waiter)
+                except ValueError:
+                    pass
+        return self.get_nowait()
+
+    async def get(self) -> T:
+        while self.empty():
+            if self._is_shutdown:
+                raise QueueShutDown
+            waiter = Event()
+            self._getters.append(waiter)
+            try:
+                await waiter.wait()
+            finally:
+                try:
+                    self._getters.remove(waiter)
+                except ValueError:
+                    pass
+        return self.get_nowait()
+
+    def task_done(self) -> None:
+        if self._unfinished_tasks <= 0:
+            raise ValueError("task_done() called too many times")
+        self._unfinished_tasks -= 1
+        if self._unfinished_tasks == 0:
+            self._finished.set()
+
+    def sjoin(self) -> None:
+        while self._unfinished_tasks:
+            self._finished.swait()
+
+    async def join(self) -> None:
+        while self._unfinished_tasks:
+            await self._finished.wait()
+
+    def shutdown(self, immediate: bool = False) -> None:
+        self._is_shutdown = True
+        self._wakeup_all(self._putters)
+        if immediate:
+            while self._queue:
+                self._get()
+                if self._unfinished_tasks > 0:
+                    self._unfinished_tasks -= 1
+            if self._unfinished_tasks == 0:
+                self._finished.set()
+        self._wakeup_all(self._getters)
+
+
+class PriorityQueue(Queue[T]):
+    """A tealet-compatible priority queue."""
+
+    def _init(self, maxsize: int) -> None:
+        self._queue = []
+
+    def _put(self, item: T) -> None:
+        heapq.heappush(self._queue, item)
+
+    def _get(self) -> T:
+        return heapq.heappop(self._queue)
+
+
+class LifoQueue(Queue[T]):
+    """A tealet-compatible LIFO queue."""
+
+    def _init(self, maxsize: int) -> None:
+        self._queue = []
+
+    def _put(self, item: T) -> None:
+        self._queue.append(item)
+
+    def _get(self) -> T:
+        return self._queue.pop()
