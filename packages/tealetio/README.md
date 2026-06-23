@@ -1,9 +1,15 @@
 # tealetio
 
+**tealetio: async without the async.**
+
 Did you ever wish `tealet` had the familiar scheduling tools you reach for in
 `asyncio`, but for stack-slicing tealet code? `tealetio` provides the scheduler,
-task, synchronization, selector, runner, and asyncio coexistence APIs for that
+task, synchronisation, selector, runner, and asyncio coexistence APIs for that
 job.
+
+In effect, async operations can work without the `async` keyword: tealet-powered
+stack slicing lets ordinary-looking functions block, resume, and compose through
+the scheduler.
 
 The top-level package is meant to feel direct: import the common classes and
 helpers from `tealetio`, just as you would from `asyncio`. Submodules remain
@@ -15,14 +21,15 @@ from tealetio import Event, Scheduler, gather, run, wait_for
 
 ## Installation
 
-For the usual scheduler and synchronization APIs, install the base package:
+For the usual scheduler and synchronisation APIs, install the base package:
 
 ```console
 python -m pip install tealetio
 ```
 
-Need the optional asyncio bridge optimizations? Install the `asyncio` extra to
-bring in `asynkit`:
+Need to run async methods efficiently from tealetio? Install the optional
+`asyncio` extra. It pulls in `asynkit`, which tealetio uses to optimise the
+asyncio bridge where available:
 
 ```console
 python -m pip install 'tealetio[asyncio]'
@@ -95,7 +102,7 @@ The common API is available directly from `tealetio`:
 - schedulers and runners: `Scheduler`, `SelectorScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `TealetTask`, `CancelledError`, `shield`
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
-- synchronization primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
+- synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - rendezvous communication: `Channel`
 - asyncio coexistence helpers: `run_in_asyncio`, `run_asyncio_in_tealet`, `TealetSelectorEventLoop`
 
@@ -112,10 +119,10 @@ match tealet execution: `Scheduler` fills the role normally held by an event
 loop, and `scheduler.spawn(...)` is the tealet-facing equivalent of
 `create_task(...)`.
 
-Synchronization primitives are asyncio-compatible where practical and add
+Synchronisation primitives are asyncio-compatible where practical and add
 `s`-prefixed methods for tealet-blocking operations, such as `Event.swait()`,
 `Lock.sacquire()`, and `Queue.sget()`. `tealetio` also reuses asyncio
-exceptions where that preserves familiar behavior and compatibility.
+exceptions where that preserves familiar behaviour and compatibility.
 
 `Channel` is inspired by Stackless Python channels. It provides rendezvous-style
 communication between tasks, with selectable sender/receiver preference models,
