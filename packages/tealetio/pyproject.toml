@@ -5,7 +5,7 @@ build-backend = "uv_build"
 [project]
 name = "tealetio"
 version = "0.1.0rc1"
-description = "Scheduler, synchronization, selector, and asyncio helpers for tealet"
+description = "Scheduler, synchronisation, selector, and asyncio helpers for tealet"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -37,7 +37,7 @@ Issues = "https://github.com/kristjanvalur/pytealet/issues"
 
 [project.optional-dependencies]
 asyncio = [
-    "asynkit>=0.17.7",
+    "asynkit>=0.18.0",
 ]
 
 [tool.uv.sources]
@@ -45,7 +45,7 @@ tealet = { workspace = true }
 
 [dependency-groups]
 dev = [
-    "asynkit>=0.17.7",
+    "asynkit>=0.18.0",
     "pytest>=7.0",
 ]
 

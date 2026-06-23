@@ -1,7 +1,7 @@
 # tealetio Python API Reference
 
 This document describes the Python-facing API for `tealetio`, the scheduler,
-synchronization, selector, runner, and asyncio coexistence package built on top
+synchronisation, selector, runner, and asyncio coexistence package built on top
 of `tealet`.
 
 Status note:
@@ -52,10 +52,10 @@ For coroutine objects and awaitables that `await_()` wraps in a new asyncio task
 execution starts in a copy of the current `contextvars.Context`. Existing asyncio
 `Future` and `Task` objects keep the context they already captured.
 
-When optional `asynkit` support is available, coroutine objects are started with
-`asynkit.CoroStart`; if they complete synchronously, `await_()` returns without
-creating an asyncio task. If they block, their continuation is handed to asyncio
-and waited on normally.
+When optional `asynkit` support is available, coroutine objects are wrapped with
+`asynkit.coro_await()` and eagerly started with `asynkit.CoroStart`; if they
+complete synchronously, `await_()` returns without creating an asyncio task. If
+they block, their continuation is handed to asyncio and waited on normally.
 
 ## Scheduler Waiting Helpers
 
@@ -82,9 +82,9 @@ iterator that yields scheduler futures in child completion order. If the timeout
 expires before all children finish, iteration raises `TimeoutError`; unfinished
 children are not cancelled by `as_completed(...)`.
 
-## Synchronization Primitives
+## Synchronisation Primitives
 
-`tealetio` provides scheduler-aware synchronization primitives modeled after
+`tealetio` provides scheduler-aware synchronisation primitives modelled after
 `asyncio` where practical. Plain method names follow the asyncio-facing API, and
 `s`-prefixed methods are tealet-blocking variants for synchronous tealet code.
 

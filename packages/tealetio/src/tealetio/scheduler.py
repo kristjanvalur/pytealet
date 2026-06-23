@@ -33,8 +33,10 @@ from . import tasks as _tasks
 
 try:
     from asynkit import CoroStart as _CoroStart
+    from asynkit import coro_await as _coro_await
 except ImportError:
     _CoroStart = None
+    _coro_await = None
 
 
 T = TypeVar("T")
@@ -1025,9 +1027,12 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             fut = awaitable
             if fut.get_loop() is not loop:
                 raise RuntimeError("await_ future is bound to a different event loop")
-        elif inspect.iscoroutine(awaitable) and _CoroStart is not None:
-            coro_start = _CoroStart(
+        elif inspect.iscoroutine(awaitable) and _CoroStart is not None and _coro_await is not None:
+            wrapped = _coro_await(
                 cast(Coroutine[Any, Any, Any], awaitable), context=contextvars.copy_context()
+            )
+            coro_start = _CoroStart(
+                cast(Coroutine[Any, Any, Any], wrapped)
             )
             if coro_start.done():
                 return coro_start.result()

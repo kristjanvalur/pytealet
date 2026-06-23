@@ -108,7 +108,7 @@ Implemented:
   cancellation rather than a distinct shutdown-specific wait policy:
   - unfinished scheduler tasks are cancelled and drained with
     `tealetio.scheduler.gather(..., return_exceptions=True)`; this is robust as
-    long as synchronization primitives correctly clean up when blocked
+    long as synchronisation primitives correctly clean up when blocked
     `TealetTask` instances receive cancellation or tealet-exit exceptions
   - `CoreSchedulerDrivingAPI.shutdown_default_executor(timeout=300.0)` returns
     a scheduler `Future` that waits for the detached default executor to shut

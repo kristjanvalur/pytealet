@@ -150,10 +150,11 @@ except StopIteration as exc:
 
 This is the same family of technique explored by `py-asynkit`. When the
 optional `asynkit` dependency is installed, `await_()` uses
-`asynkit.CoroStart` for coroutine objects: synchronous completion returns
-directly in the current tealet, while a coroutine that yields a blocking object
-is continued as an asyncio task and waited on normally. Like Python's `await`
-expression, `await_()` does not expose a separate `context=` parameter.
+`asynkit.coro_await()` together with `asynkit.CoroStart` for coroutine objects:
+synchronous completion returns directly in the current tealet, while a coroutine
+that yields a blocking object is continued as an asyncio task and waited on
+normally. Like Python's `await` expression, `await_()` does not expose a separate
+`context=` parameter.
 Coroutine objects and awaitables that `await_()` wraps in a new asyncio task run
 in a copy of the current `contextvars.Context`; existing asyncio `Future` and
 `Task` objects keep the context they already captured. `asynkit.await_sync()`
