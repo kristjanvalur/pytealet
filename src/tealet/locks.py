@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 from collections import deque
-from typing import TYPE_CHECKING, Callable, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
 import tealet
 
@@ -481,6 +481,8 @@ class BoundedSemaphore(Semaphore):
 class Queue(Generic[T]):
     """A tealet-compatible FIFO queue modeled after asyncio.Queue."""
 
+    _queue: Any
+
     def __init__(self, maxsize: int = 0) -> None:
         if maxsize < 0:
             raise ValueError("maxsize must be >= 0")
@@ -493,7 +495,7 @@ class Queue(Generic[T]):
         self._init(maxsize)
 
     def _init(self, maxsize: int) -> None:
-        self._queue: deque[T] = deque()
+        self._queue = deque()
 
     def _put(self, item: T) -> None:
         self._queue.append(item)
@@ -602,7 +604,7 @@ class PriorityQueue(Queue[T]):
     """A tealet-compatible priority queue."""
 
     def _init(self, maxsize: int) -> None:
-        self._queue: list[T] = []
+        self._queue = []
 
     def _put(self, item: T) -> None:
         heapq.heappush(self._queue, item)
@@ -615,7 +617,7 @@ class LifoQueue(Queue[T]):
     """A tealet-compatible LIFO queue."""
 
     def _init(self, maxsize: int) -> None:
-        self._queue: list[T] = []
+        self._queue = []
 
     def _put(self, item: T) -> None:
         self._queue.append(item)
