@@ -13,6 +13,11 @@ from .scheduler import BaseScheduler, Scheduler
 
 _FdCallback = tuple[Callable[..., object], tuple[object, ...], contextvars.Context]
 
+__all__ = [
+    "SelectorMixin",
+    "SelectorScheduler",
+]
+
 
 @dataclass
 class _FdCallbacks:

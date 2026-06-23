@@ -5,9 +5,13 @@ Experimental scheduler, synchronization primitives, selector integration, and as
 This package is a feasibility spike for splitting the scheduler layer out of the core `tealet` package. It depends on `tealet` for the native `_tealet` runtime and keeps development in the same repository through a uv workspace.
 
 ```python
-from tealetio.runner import run
-from tealetio.scheduler import Scheduler
+from tealetio import Scheduler, run
 ```
+
+Most scheduler, task/future, lock, selector, runner, and asyncio bridge classes
+and helpers are re-exported from the top-level `tealetio` package, similar to
+`asyncio`. The submodules remain available as the implementation homes for more
+specific imports.
 
 ## Documentation
 
