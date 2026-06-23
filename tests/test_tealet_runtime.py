@@ -124,24 +124,6 @@ class TestTealetTraversalMethods:
         assert seen["main"] == _tealet.main()
         assert seen["previous"] == _tealet.main()
 
-    @pytest.mark.skip(
-        reason="Deferred-delete post-exit behavior is experimental; re-enable when PYTEALET_DEFER_DELETE is being exercised"
-    )
-    def test_main_on_exited_tealet_depends_on_defer_delete_flag(self):
-        def run_and_exit(current, arg):
-            return _tealet.main()
-
-        t = _tealet.tealet()
-        t.run(run_and_exit, None)
-        assert t.state == _tealet.STATE_EXIT
-
-        if getattr(_tealet, "PYTEALET_DEFER_DELETE", 0):
-            assert t.main() == _tealet.main()
-        else:
-            with pytest.raises(_tealet.StateError):
-                t.main()
-
-
 class TestSimple:
     def test_simple(self):
         status = [0]
