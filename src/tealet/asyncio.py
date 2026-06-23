@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any, Callable, TypeVar, cast
 
+from . import compat
 from .locks import Event, TimeoutError
 from .scheduler import (
     BaseScheduler,
@@ -223,13 +224,11 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
         loop = _asyncio.get_running_loop()
-        return self.await_(loop.sock_recvfrom(sock, bufsize))
+        return self.await_(compat.sock_recvfrom(loop, sock, bufsize))
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
         loop = _asyncio.get_running_loop()
-        if nbytes:
-            return self.await_(loop.sock_recvfrom_into(sock, buf, nbytes))
-        return self.await_(loop.sock_recvfrom_into(sock, buf))
+        return self.await_(compat.sock_recvfrom_into(loop, sock, buf, nbytes))
 
     def sock_sendall(self, sock: socket.socket, data: Any) -> None:
         loop = _asyncio.get_running_loop()
@@ -237,7 +236,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
         loop = _asyncio.get_running_loop()
-        return self.await_(loop.sock_sendto(sock, data, address))
+        return self.await_(compat.sock_sendto(loop, sock, data, address))
 
     def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
         loop = _asyncio.get_running_loop()
@@ -263,8 +262,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
             wakeup.clear()
             return
         try:
-            async with _asyncio.timeout(timeout):
-                await wakeup.wait()
+            await compat.wait_for_timeout(wakeup.wait(), timeout)
         except TimeoutError:
             pass
         finally:
@@ -419,20 +417,17 @@ def run_in_asyncio(
 ):
     """Run one entry under an AsyncRunner owned by a temporary asyncio.Runner."""
 
-    asyncio_runner_type = getattr(_asyncio, "Runner", None)
-    if asyncio_runner_type is None:
-        raise RuntimeError("run_in_asyncio requires asyncio.Runner, available in Python 3.11+")
-
-    with asyncio_runner_type(loop_factory=loop_factory, debug=debug) as asyncio_runner:
-        return asyncio_runner.run(
-            run_async(
-                entry,
-                context=context,
-                scheduler_factory=scheduler_factory,
-                debug=debug,
-                handle_sigint=handle_sigint,
-            )
-        )
+    return compat.run_asyncio_once(
+        run_async(
+            entry,
+            context=context,
+            scheduler_factory=scheduler_factory,
+            debug=debug,
+            handle_sigint=handle_sigint,
+        ),
+        loop_factory=loop_factory,
+        debug=debug,
+    )
 
 
 def run_asyncio_in_tealet(
@@ -446,10 +441,6 @@ def run_asyncio_in_tealet(
     handle_sigint: bool = False,
 ):
     """Run one asyncio entry under a temporary SelectorScheduler-owned tealet runner."""
-
-    asyncio_runner_type = getattr(_asyncio, "Runner", None)
-    if asyncio_runner_type is None:
-        raise RuntimeError("run_asyncio_in_tealet requires asyncio.Runner, available in Python 3.11+")
 
     tealet_runner = TealetRunner(
         scheduler_factory=scheduler_factory or SelectorScheduler,
@@ -467,8 +458,7 @@ def run_asyncio_in_tealet(
             _asyncio.set_event_loop(loop)
             return loop
 
-        with asyncio_runner_type(loop_factory=tealet_loop_factory, debug=debug) as asyncio_runner:
-            return asyncio_runner.run(entry, context=context)
+        return compat.run_asyncio_once(entry, context=context, loop_factory=tealet_loop_factory, debug=debug)
 
     try:
         return tealet_runner.run(run_inside_tealet)

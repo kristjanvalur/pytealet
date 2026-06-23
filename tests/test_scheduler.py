@@ -2317,7 +2317,12 @@ class TestSchedulerExamples:
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
             await asyncio.wait_for(s.arun(), timeout=1.0)
-            assert create_task_calls == []
+            delegated = [
+                coro
+                for coro in create_task_calls
+                if getattr(getattr(coro, "cr_code", None), "co_name", None) == "as_coroutine"
+            ]
+            assert delegated == []
 
         asyncio.run(orchestrate())
 
@@ -2382,7 +2387,12 @@ class TestSchedulerExamples:
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
             await asyncio.wait_for(s.arun(), timeout=1.0)
-            assert len(create_task_calls) == 1
+            delegated = [
+                coro
+                for coro in create_task_calls
+                if getattr(getattr(coro, "cr_code", None), "co_name", None) == "as_coroutine"
+            ]
+            assert len(delegated) == 1
 
         asyncio.run(orchestrate())
 
@@ -2445,7 +2455,12 @@ class TestSchedulerExamples:
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
             await asyncio.wait_for(s.arun(), timeout=1.0)
-            assert len(create_task_calls) == 1
+            delegated = [
+                coro
+                for coro in create_task_calls
+                if getattr(getattr(coro, "cr_code", None), "co_name", None) == "compute"
+            ]
+            assert len(delegated) == 1
 
         asyncio.run(orchestrate())
 
