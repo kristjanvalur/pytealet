@@ -24,18 +24,6 @@ classifiers = [
     "Programming Language :: Python :: 3.15",
 ]
 
-[project.optional-dependencies]
-asyncio = [
-    "tealetio==0.1.0rc1",
-]
-dev = [
-    "tealetio==0.1.0rc1",
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
-    "psutil>=5.9",
-    "objgraph>=3.6",
-]
-
 [tool.setuptools]
 package-dir = {"" = "src"}
 
@@ -44,9 +32,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 tealet = ["include/*.h", "py.typed"]
-
-[tool.uv.sources]
-tealetio = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -65,7 +50,6 @@ python_functions = ["test_*"]
 
 [dependency-groups]
 dev = [
-    "tealetio==0.1.0rc1",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "psutil>=5.9",

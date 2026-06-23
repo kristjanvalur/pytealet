@@ -24,8 +24,12 @@ classifiers = [
     "Programming Language :: Python :: 3.15",
 ]
 dependencies = [
-    "asynkit>=0.17.7",
     "tealet==0.1.0rc1",
+]
+
+[project.optional-dependencies]
+asyncio = [
+    "asynkit>=0.17.7",
 ]
 
 [tool.uv.sources]
@@ -42,5 +46,12 @@ tealetio = ["py.typed"]
 
 [dependency-groups]
 dev = [
+    "asynkit>=0.17.7",
     "pytest>=7.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

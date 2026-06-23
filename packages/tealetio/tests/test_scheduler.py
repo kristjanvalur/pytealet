@@ -10,8 +10,8 @@ import weakref
 import pytest
 
 import _tealet
-import tealet.scheduler as scheduler_module
-from tealet.locks import (
+import tealetio.scheduler as scheduler_module
+from tealetio.locks import (
     Barrier,
     BoundedSemaphore,
     Condition,
@@ -30,11 +30,11 @@ from tealet.locks import (
     timeout,
     timeout_at,
 )
-from tealet.asyncio import (
+from tealetio.asyncio import (
     AsyncScheduler,
     TealetSelectorEventLoop,
 )
-from tealet.scheduler import (
+from tealetio.scheduler import (
     ALL_COMPLETED,
     Channel,
     FIRST_COMPLETED,
@@ -51,9 +51,9 @@ from tealet.scheduler import (
     wait,
     wait_for,
 )
-from tealet.selector import SelectorScheduler
-from tealet.tasks import CancelledError, DefaultTaskFactory, Future, StubTaskFactory, TealetTask, shield
-from tealet_examples import (
+from tealetio.selector import SelectorScheduler
+from tealetio.tasks import CancelledError, DefaultTaskFactory, Future, StubTaskFactory, TealetTask, shield
+from tealetio.examples import (
     demo_future_result,
     demo_future_timeout_then_success,
     demo_scheduler_append_with_yield,

@@ -1,6 +1,6 @@
 def test_eager_spawn_with_queued_task_does_not_crash():
-    from tealet.scheduler import Scheduler, set_scheduler
-    from tealet.tasks import DefaultTaskFactory
+    from tealetio.scheduler import Scheduler, set_scheduler
+    from tealetio.tasks import DefaultTaskFactory
 
     scheduler = Scheduler()
     set_scheduler(scheduler)

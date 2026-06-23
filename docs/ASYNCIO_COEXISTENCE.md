@@ -513,11 +513,11 @@ This leads to three coexistence modes worth keeping distinct:
   dependency and a separate event-loop family.
 
 The concrete first experiment is now narrow and Unix-first:
-`tealet.selector.SelectorScheduler` provides selector-backed readiness callbacks
-and socket helpers, and `tealet.asyncio.TealetSelectorEventLoop` provides an
+`tealetio.selector.SelectorScheduler` provides selector-backed readiness callbacks
+and socket helpers, and `tealetio.asyncio.TealetSelectorEventLoop` provides an
 experimental tealet-aware selector adapter for `asyncio.SelectorEventLoop`.
 Asyncio timers, self-pipe wakeups, and socket readiness can share the host
-scheduler's blocking point. `tealet.asyncio.run_asyncio_in_tealet(...)` wraps
+scheduler's blocking point. `tealetio.asyncio.run_asyncio_in_tealet(...)` wraps
 that setup in a temporary selector scheduler and lets the inner `asyncio.Runner`
 own SIGINT handling.
 

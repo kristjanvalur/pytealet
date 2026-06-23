@@ -29,7 +29,7 @@ pytealet/
 │   └── fast_build.sh
 ├── src/
 │   ├── greenlet_legacy.py   # Legacy greenlet compatibility shim (dev/test helper)
-│   ├── tealet_examples.py    # Development examples (generator/scheduler/event/future)
+│   ├── tealet_examples.py    # Development examples for core tealet primitives
 │   ├── tealet/              # Pure Python package
 │   │   ├── __init__.py
 │   │   └── greenlet/
@@ -44,6 +44,8 @@ pytealet/
 │   ├── test_tealet.py
 │   ├── test_greenlet_legacy.py
 │   └── compat_greenlet/
+├── packages/
+│   └── tealetio/             # Optional scheduler/asyncio package built on tealet
 ├── pyproject.toml
 └── README.md
 ```
@@ -76,20 +78,29 @@ uv pip install --python .venv-cpython313-debug/bin/python -e .[dev]
 uv run --active python -m pytest tests/
 ```
 
-### Example Code
+### Core Example Code
 
 The repository includes runnable development examples in `src/tealet_examples.py`.
 These show:
 - a simple tealet-backed generator
-- a minimal cooperative scheduler and event primitive
-- a minimal future implementation built on top of the scheduler/event model
+- a deliberately minimal `tealet.simple_scheduler.SimpleScheduler` example
 
-The scheduler example is intentionally simple and demonstrates how application- or framework-level scheduling can be implemented on top of tealet's core primitives.
+The core `SimpleScheduler` example demonstrates basic cooperative scheduling on top of tealet primitives only. It intentionally has no IO facilities, timers, thread-safe callbacks, futures, or asyncio interoperability.
 
 Run the module from a source checkout:
 
 ```bash
 uv run --active python -m tealet_examples
+```
+
+### Scheduler Package
+
+Scheduler, task/future, lock, selector, and asyncio coexistence APIs live in the separate `tealetio` workspace package. `tealetio` depends on `tealet`; `tealet` has no dependency on `tealetio`.
+
+Run the `tealetio` test suite from the workspace root:
+
+```bash
+uv run --active --package tealetio python -m pytest packages/tealetio/tests/
 ```
 
 ### Runtime Frame Introspection Toggle

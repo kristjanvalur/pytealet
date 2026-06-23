@@ -6,7 +6,7 @@ import threading
 import pytest
 
 import _tealet
-from tealet.asyncio import (
+from tealetio.asyncio import (
     AsyncRunner,
     AsyncScheduler,
     TealetSelectorEventLoop,
@@ -14,10 +14,10 @@ from tealet.asyncio import (
     run_asyncio_in_tealet,
     run_in_asyncio,
 )
-from tealet.runner import Runner, run
-from tealet.scheduler import Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
-from tealet.tasks import Future
-from tealet.selector import SelectorScheduler
+from tealetio.runner import Runner, run
+from tealetio.scheduler import Scheduler, _current_scheduler, get_running_scheduler, set_scheduler
+from tealetio.tasks import Future
+from tealetio.selector import SelectorScheduler
 
 
 requires_runner_sigint = pytest.mark.skipif(
@@ -171,7 +171,7 @@ class TestAsyncRunner:
 
     def test_aclose_cancels_unfinished_tasks(self):
         async def run() -> None:
-            from tealet.scheduler import Event
+            from tealetio.scheduler import Event
 
             runner = AsyncRunner()
             scheduler = runner.get_scheduler()
@@ -201,7 +201,7 @@ class TestAsyncRunner:
 
     def test_aclose_waits_for_default_executor_shutdown(self, scheduler_task_factory_maker):
         async def run() -> None:
-            from tealet.scheduler import Event
+            from tealetio.scheduler import Event
 
             runner = AsyncRunner()
             scheduler = runner.get_scheduler()
@@ -235,7 +235,7 @@ class TestAsyncRunner:
 
     def test_aclose_ignores_tasks_exited_by_prior_shutdown_cancel(self):
         async def run() -> None:
-            from tealet.scheduler import Event
+            from tealetio.scheduler import Event
 
             class OrderedShutdownScheduler(AsyncScheduler):
                 def __init__(self) -> None:
@@ -310,7 +310,7 @@ class TestAsyncRunner:
 
     def test_run_future_entry_waits(self):
         async def run() -> None:
-            from tealet.tasks import Future
+            from tealetio.tasks import Future
 
             runner = AsyncRunner()
             try:
@@ -615,7 +615,7 @@ class TestRunner:
             runner.close()
 
     def test_run_future_entry_waits(self):
-        from tealet.tasks import Future
+        from tealetio.tasks import Future
 
         runner = Runner()
         try:
@@ -639,7 +639,7 @@ class TestRunner:
             runner.get_scheduler()
 
     def test_close_cancels_unfinished_tasks(self):
-        from tealet.scheduler import Event
+        from tealetio.scheduler import Event
 
         runner = Runner()
         scheduler = runner.get_scheduler()
@@ -666,7 +666,7 @@ class TestRunner:
         assert scheduler.all_tasks() == set()
 
     def test_close_waits_for_default_executor_shutdown(self, scheduler_task_factory_maker):
-        from tealet.scheduler import Event
+        from tealetio.scheduler import Event
 
         runner = Runner()
         scheduler = runner.get_scheduler()
@@ -697,7 +697,7 @@ class TestRunner:
         assert worker_finished.is_set() is True
 
     def test_close_ignores_tasks_exited_by_prior_shutdown_cancel(self):
-        from tealet.scheduler import Event
+        from tealetio.scheduler import Event
 
         class OrderedShutdownScheduler(Scheduler):
             def __init__(self) -> None:

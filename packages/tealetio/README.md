@@ -8,5 +8,3 @@ This package is a feasibility spike for splitting the scheduler layer out of the
 from tealetio.runner import run
 from tealetio.scheduler import Scheduler
 ```
-
-During a transition, the core `tealet.scheduler`, `tealet.tasks`, `tealet.locks`, `tealet.runner`, `tealet.selector`, `tealet.asyncio`, and `tealet.compat` modules can remain as compatibility shims that re-export `tealetio`.
