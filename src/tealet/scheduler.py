@@ -31,23 +31,10 @@ from .locks import (
 )
 from . import tasks as _tasks
 
-_CoroStart: Any | None = None
-_CoroStart_imported = False
-
-
-def _get_coro_start() -> Any | None:
-    global _CoroStart, _CoroStart_imported
-    if not _CoroStart_imported:
-        try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"asynkit(\.|$)")
-                from asynkit import CoroStart
-        except ImportError:
-            _CoroStart = None
-        else:
-            _CoroStart = CoroStart
-        _CoroStart_imported = True
-    return _CoroStart
+try:
+    from asynkit import CoroStart as _CoroStart
+except ImportError:
+    _CoroStart = None
 
 
 T = TypeVar("T")
@@ -1034,8 +1021,8 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             fut = awaitable
             if fut.get_loop() is not loop:
                 raise RuntimeError("await_ future is bound to a different event loop")
-        elif inspect.iscoroutine(awaitable) and (coro_start_factory := _get_coro_start()) is not None:
-            coro_start = coro_start_factory(
+        elif inspect.iscoroutine(awaitable) and _CoroStart is not None:
+            coro_start = _CoroStart(
                 cast(Coroutine[Any, Any, Any], awaitable), context=contextvars.copy_context()
             )
             if coro_start.done():

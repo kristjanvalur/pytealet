@@ -2332,7 +2332,7 @@ class TestSchedulerExamples:
         ]
 
     def test_await_asynkit_returns_synchronous_coroutine_without_task(self, monkeypatch):
-        if scheduler_module._get_coro_start() is None:
+        if scheduler_module._CoroStart is None:
             pytest.skip("asynkit is not installed")
 
         s = AsyncScheduler()
@@ -2371,7 +2371,7 @@ class TestSchedulerExamples:
         assert seen == [("body", 0), ("result", 12), ("pending", 0)]
 
     def test_await_asynkit_uses_copied_context_for_synchronous_coroutine(self):
-        if scheduler_module._get_coro_start() is None:
+        if scheduler_module._CoroStart is None:
             pytest.skip("asynkit is not installed")
 
         s = AsyncScheduler()
@@ -2401,7 +2401,7 @@ class TestSchedulerExamples:
         ]
 
     def test_await_asynkit_delegates_blocked_coroutine_to_loop(self, monkeypatch):
-        if scheduler_module._get_coro_start() is None:
+        if scheduler_module._CoroStart is None:
             pytest.skip("asynkit is not installed")
 
         s = AsyncScheduler()
@@ -2441,7 +2441,7 @@ class TestSchedulerExamples:
         assert seen == ["before-await", "after-await", ("result", 13)]
 
     def test_await_asynkit_uses_same_context_for_blocked_continuation(self):
-        if scheduler_module._get_coro_start() is None:
+        if scheduler_module._CoroStart is None:
             pytest.skip("asynkit is not installed")
 
         s = AsyncScheduler()
@@ -2476,7 +2476,7 @@ class TestSchedulerExamples:
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[object] = []
-        monkeypatch.setattr(scheduler_module, "_get_coro_start", lambda: None)
+        monkeypatch.setattr(scheduler_module, "_CoroStart", None)
 
         async def compute() -> int:
             seen.append("body")
@@ -2513,7 +2513,7 @@ class TestSchedulerExamples:
         set_scheduler(s)
         marker = contextvars.ContextVar("marker", default="unset")
         seen: list[object] = []
-        monkeypatch.setattr(scheduler_module, "_get_coro_start", lambda: None)
+        monkeypatch.setattr(scheduler_module, "_CoroStart", None)
 
         async def compute() -> str:
             seen.append(("body-before", marker.get()))
