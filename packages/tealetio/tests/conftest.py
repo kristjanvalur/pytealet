@@ -7,7 +7,7 @@ os.environ.setdefault("PYTEALET_CHECK_STACK", "1")
 
 
 def _make_scheduler_task_factory(name):
-    from tealetio.tasks import DefaultTaskFactory, StubTaskFactory
+    from tealetio import DefaultTaskFactory, StubTaskFactory
 
     if name == "default":
         return DefaultTaskFactory()
