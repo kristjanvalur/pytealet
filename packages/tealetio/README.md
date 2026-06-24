@@ -104,7 +104,7 @@ The common API is available directly from `tealetio`:
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - rendezvous communication: `Channel`
-- asyncio coexistence helpers: `run_in_asyncio`, `run_asyncio_in_tealet`, `TealetSelectorEventLoop`
+- asyncio coexistence helpers: `asyncio_get_current`, `run_in_asyncio`, `run_asyncio_in_tealet`, `TealetSelectorEventLoop`
 
 If you prefer explicit homes, submodules such as `tealetio.scheduler`,
 `tealetio.tasks`, `tealetio.locks`, `tealetio.runner`, `tealetio.selector`, and

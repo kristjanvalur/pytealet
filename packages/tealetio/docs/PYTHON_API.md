@@ -48,6 +48,11 @@ when the caller is outside a scheduler-owned tealet task. Asyncio tasks therefor
 see `None` rather than an unrelated low-level tealet object. This includes
 coroutines that a tealet task waits for through `BaseScheduler.await_(...)`.
 
+`tealetio.asyncio_get_current()` returns the current `asyncio.Task`, but returns
+`None` while execution is inside a scheduler-owned tealet task. Asyncio runners
+hosted by `run_asyncio_in_tealet(...)` clear that tealetio task scope before
+entering the asyncio entry point, so ordinary asyncio tasks remain visible.
+
 ## Scheduler Asyncio Bridge
 
 `BaseScheduler.await_(awaitable) -> object` waits for an asyncio awaitable from

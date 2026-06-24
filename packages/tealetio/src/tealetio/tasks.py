@@ -292,6 +292,8 @@ class TealetTask(tealet.tealet, Future[Any]):
         return self._scheduler._find_target(task_exit=True), None, suppress
 
 
+# marks scheduler-owned tealet task code while it is on the Python stack. It is
+# cleared when control is handed to asyncio, including nested asyncio loop hosts.
 _current_task: contextvars.ContextVar[TealetTask | None] = contextvars.ContextVar(
     "tealetio_current_task",
     default=None,
@@ -301,13 +303,16 @@ _current_task: contextvars.ContextVar[TealetTask | None] = contextvars.ContextVa
 def get_current() -> TealetTask | None:
     """Return the current scheduler-owned tealet task, if one is running."""
     task = _current_task.get()
-    if task is not None and tealet.current() is task:
-        return task
-    return None
+    if task is None or tealet.current() is not task:
+        return None
+    return task
 
 
-def _copy_context_without_current_task() -> contextvars.Context:
-    context = contextvars.copy_context()
+def _copy_context_without_current_task(context: contextvars.Context | None = None) -> contextvars.Context:
+    if context is None:
+        context = contextvars.copy_context()
+    else:
+        context = context.copy()
     context.run(_current_task.set, None)
     return context
 

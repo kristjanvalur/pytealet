@@ -16,7 +16,7 @@ from .scheduler import (
     _current_scheduler,
     gather,
 )
-from .tasks import CancelledError, Future, TealetTask
+from .tasks import CancelledError, Future, TealetTask, _copy_context_without_current_task, get_current
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
 from .selector import SelectorScheduler
@@ -28,10 +28,18 @@ __all__ = [
     "AsyncScheduler",
     "AsyncSchedulerDrivingAPI",
     "TealetSelectorEventLoop",
+    "asyncio_get_current",
     "run_async",
     "run_asyncio_in_tealet",
     "run_in_asyncio",
 ]
+
+
+def asyncio_get_current() -> _asyncio.Task[Any] | None:
+    """Return the current asyncio task, unless execution is inside a TealetTask."""
+    if get_current() is not None:
+        return None
+    return _asyncio.current_task()
 
 
 class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
@@ -468,7 +476,8 @@ def run_asyncio_in_tealet(
             _asyncio.set_event_loop(loop)
             return loop
 
-        return compat.run_asyncio_once(entry, context=context, loop_factory=tealet_loop_factory, debug=debug)
+        run_context = _copy_context_without_current_task(context)
+        return compat.run_asyncio_once(entry, context=run_context, loop_factory=tealet_loop_factory, debug=debug)
 
     try:
         return tealet_runner.run(run_inside_tealet)

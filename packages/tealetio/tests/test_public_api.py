@@ -51,6 +51,7 @@ def test_top_level_exports_public_scheduler_api():
         "Timeout",
         "TimeoutError",
         "TimerHandle",
+        "asyncio_get_current",
         "as_completed",
         "ensure_future",
         "gather",
@@ -86,6 +87,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.SelectorScheduler is tealetio.selector.SelectorScheduler
     assert tealetio.AsyncRunner is tealetio.asyncio.AsyncRunner
     assert tealetio.AsyncScheduler is tealetio.asyncio.AsyncScheduler
+    assert tealetio.asyncio_get_current is tealetio.asyncio.asyncio_get_current
     assert tealetio.run is tealetio.runner.run
     assert tealetio.run_async is tealetio.asyncio.run_async
     assert tealetio.gather is tealetio.scheduler.gather

@@ -15,6 +15,8 @@ from tealetio import (
     Scheduler,
     SelectorScheduler,
     TealetSelectorEventLoop,
+    asyncio_get_current,
+    get_current,
     get_running_scheduler,
     run,
     run_async,
@@ -48,6 +50,71 @@ class FakeSignals:
         self.handler = handler
         self.installed.append(handler)
         return previous
+
+
+class TestAsyncioCurrentTaskAccessor:
+    def test_raises_without_running_loop(self):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio_get_current()
+
+    def test_returns_current_asyncio_task(self):
+        async def run() -> None:
+            assert asyncio_get_current() is asyncio.current_task()
+
+        asyncio.run(run())
+
+    def test_returns_none_inside_tealetio_task(self):
+        async def run() -> None:
+            scheduler = AsyncScheduler()
+            set_scheduler(scheduler)
+            seen = []
+
+            def worker() -> None:
+                assert asyncio.current_task() is not None
+                seen.append(asyncio_get_current())
+
+            scheduler.spawn(worker)
+            await scheduler.arun()
+            assert seen == [None]
+
+        asyncio.run(run())
+
+    def test_awaited_coroutine_switches_from_tealet_stack_to_asyncio_task(self):
+        async def run() -> None:
+            scheduler = AsyncScheduler()
+            set_scheduler(scheduler)
+            seen = []
+
+            async def check_current() -> str:
+                seen.append(("start", asyncio_get_current()))
+                await asyncio.sleep(0)
+                seen.append(("after", asyncio_get_current()))
+                return "done"
+
+            def worker() -> None:
+                result = scheduler.await_(check_current())
+                seen.append((result, asyncio_get_current()))
+
+            scheduler.spawn(worker)
+            await scheduler.arun()
+
+            assert seen[0][0] == "start"
+            assert isinstance(seen[0][1], asyncio.Task)
+            assert seen[1][0] == "after"
+            assert isinstance(seen[1][1], asyncio.Task)
+            assert seen[2] == ("done", None)
+
+        asyncio.run(run())
+
+    def test_nested_asyncio_runner_returns_current_asyncio_task(self):
+        async def entry() -> tuple[object, object]:
+            await asyncio.sleep(0)
+            return get_current(), asyncio_get_current()
+
+        tealet_current, asyncio_current = run_asyncio_in_tealet(entry())
+
+        assert tealet_current is None
+        assert isinstance(asyncio_current, asyncio.Task)
 
 
 class TestAsyncRunner:
