@@ -293,8 +293,8 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         self._wakeup_loop = _asyncio.get_running_loop()
         self._running = True
         try:
-            while self._tasks or self._timers or self._pending_async_waits:
-                if self._tasks or self._timers:
+            while self._runnable or self._timers or self._pending_async_waits:
+                if self._runnable or self._timers:
                     self._pump()
                 await self._wait_async()
         finally:
@@ -309,7 +309,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         try:
             while not self._stopping:
                 self._run_ready_timers()
-                if self._tasks:
+                if self._runnable:
                     self._pump()
                     continue
                 await self._wait_async()
@@ -338,7 +338,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         try:
             while not target.done() and not self._stopping:
                 self._run_ready_timers()
-                if self._tasks:
+                if self._runnable:
                     self._pump()
                 if not target.done() and not self._stopping:
                     await self._wait_async()

@@ -57,6 +57,10 @@ Implemented:
 - Scheduler task introspection includes `BaseScheduler.all_tasks()`, which
   returns unfinished scheduler-owned tealet tasks without keeping those tasks
   alive solely for introspection.
+- Scheduler runnable introspection and explicit rescheduling are available
+  through `BaseScheduler.runnable_tasks()`, `BaseScheduler.reschedule(...)`, and
+  `BaseScheduler.yield_to(...)`. Runnable scheduling is task-centric rather than
+  callback-centric, and the default queue preserves FIFO behaviour.
 - Scheduler grouping includes `BaseScheduler.ensure_future(...)`,
   `tealetio.scheduler.ensure_future(...)`, `tealetio.scheduler.gather(...)`,
   `tealetio.scheduler.wait(...)`, `tealetio.scheduler.wait_for(...)`, and

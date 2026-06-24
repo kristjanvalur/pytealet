@@ -77,6 +77,54 @@ _ReturnWhen: TypeAlias = Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMP
 _scheduler = threading.local()
 
 
+class _FifoRunnableQueue:
+    def __init__(self) -> None:
+        self._items: deque[tealet.tealet] = deque()
+        self._set: set[tealet.tealet] = set()
+
+    def __bool__(self) -> bool:
+        return bool(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __contains__(self, task: tealet.tealet) -> bool:
+        return task in self._set
+
+    def add(self, task: tealet.tealet) -> bool:
+        if task in self._set:
+            return False
+        self._items.append(task)
+        self._set.add(task)
+        return True
+
+    def discard(self, task: tealet.tealet) -> bool:
+        if task not in self._set:
+            return False
+        self._set.remove(task)
+        try:
+            self._items.remove(task)
+        except ValueError:
+            pass
+        return True
+
+    def pop_next(self) -> tealet.tealet:
+        task = self._items.popleft()
+        self._set.discard(task)
+        return task
+
+    def tasks(self) -> tuple[_tasks.TealetTask, ...]:
+        return tuple(task for task in self._items if isinstance(task, _tasks.TealetTask))
+
+    def reschedule(self, task: tealet.tealet, position: int) -> None:
+        if position < 0:
+            raise ValueError("position must be >= 0")
+        if task not in self._set:
+            raise ValueError("task is not runnable")
+        self._items.remove(task)
+        self._items.insert(position, task)
+
+
 class CoreSchedulerDrivingAPI(ABC):
     """Common control surface shared by sync and async scheduler drivers."""
 
@@ -648,8 +696,7 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduler mechanics for concrete drivers."""
 
     def __init__(self) -> None:
-        self._tasks: deque[tealet.tealet] = deque()
-        self._task_set: set[tealet.tealet] = set()
+        self._runnable = _FifoRunnableQueue()
         self._all_tasks: weakref.WeakSet[_tasks.TealetTask] = weakref.WeakSet()
         self._runner = None
         self._running = False
@@ -686,6 +733,11 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
         """Return unfinished scheduler-owned tasks."""
 
         return {task for task in self._all_tasks if not task.done()}
+
+    def runnable_tasks(self) -> tuple[_tasks.TealetTask, ...]:
+        """Return scheduler-owned tasks currently waiting to run."""
+
+        return self._runnable.tasks()
 
     def get_task_factory(self) -> _tasks.TaskFactory:
         return self._task_factory
@@ -930,7 +982,7 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
     # -- Link and runnable state --------------------------------------
 
     def _is_runnable(self, t: tealet.tealet) -> bool:
-        return t in self._task_set
+        return t in self._runnable
 
     def _query_runnable(self, t: tealet.tealet) -> bool:
         return self._is_runnable(t)
@@ -946,12 +998,7 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
 
     def _unlink(self, t: tealet.tealet) -> None:
         removed = False
-        if t in self._task_set:
-            self._task_set.remove(t)
-            try:
-                self._tasks.remove(t)
-            except ValueError:
-                pass
+        if self._runnable.discard(t):
             removed = True
         if t in self._pending_async_waits:
             self._pending_async_waits.remove(t)
@@ -1077,7 +1124,7 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
     # -- Scheduler-owned transfer -------------------------------------
 
     def _make_runnable(self, t: tealet.tealet) -> None:
-        if t in self._task_set:
+        if t in self._runnable:
             return
         try:
             t.link = self
@@ -1085,9 +1132,31 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             pass
         if isinstance(t, _tasks.TealetTask):
             t._scheduler = self
-        self._tasks.append(t)
-        self._task_set.add(t)
+        self._runnable.add(t)
         self._break_wait()
+
+    def reschedule(self, task: _tasks.TealetTask, *, position: int = 0) -> None:
+        """Move a runnable scheduler task to a new runnable queue position."""
+        if task.get_scheduler() is not self:
+            raise RuntimeError("task is bound to a different scheduler")
+        self._runnable.reschedule(task, position)
+        self._break_wait()
+
+    def yield_to(self, task: _tasks.TealetTask, *, resume_current_at: int | None = 1) -> None:
+        """Yield to a runnable scheduler task and optionally place current task after it."""
+        current = tealet.current()
+        if task is current:
+            return
+        if resume_current_at is not None and resume_current_at < 0:
+            raise ValueError("resume_current_at must be >= 0 or None")
+
+        def enqueue() -> None:
+            self.reschedule(task, position=0)
+            self._make_runnable(current)
+            if resume_current_at is not None:
+                self._runnable.reschedule(current, resume_current_at)
+
+        self._schedule(enqueue)
 
     def _target_run(self, target: tealet.tealet) -> None:
         if target is tealet.current():
@@ -1119,9 +1188,8 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
                 result._unlink()
             except AttributeError:
                 self._unlink(result)
-        elif self._tasks:
-            result = self._tasks.popleft()
-            self._task_set.discard(result)
+        elif self._runnable:
+            result = self._runnable.pop_next()
         elif not task_exit:
             raise DeadlockError("No tasks to switch to")
         else:
@@ -1191,18 +1259,18 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         This method is intended for single threaded context with no
         asyncio loop interaction.
 
-        This sync runner only considers local runnable state (`_tasks`) and
+        This sync runner only considers local runnable state and
         scheduled timer callbacks (`_timers`). Tealets blocked in
         `await_()` are not progressed here; use `arun()` for that mode.
         """
         self._verify_current_scheduler()
         self._running = True
         try:
-            while self._tasks or self._timers or self._has_pending_driver_work():
+            while self._runnable or self._timers or self._has_pending_driver_work():
                 self._run_ready_timers()
-                if self._tasks:
+                if self._runnable:
                     self._pump()
-                if self._tasks or self._timers or self._has_pending_driver_work():
+                if self._runnable or self._timers or self._has_pending_driver_work():
                     self._wait_thread()
         finally:
             self._running = False
@@ -1214,7 +1282,7 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         try:
             while not self._stopping:
                 self._run_ready_timers()
-                if self._tasks:
+                if self._runnable:
                     self._pump()
                     continue
                 self._wait_thread()
@@ -1241,7 +1309,7 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         try:
             while not target.done() and not self._stopping:
                 self._run_ready_timers()
-                if self._tasks:
+                if self._runnable:
                     self._pump()
                 if not target.done() and not self._stopping:
                     self._wait_thread()

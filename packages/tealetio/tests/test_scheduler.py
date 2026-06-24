@@ -122,6 +122,9 @@ class TestSchedulerAccessors:
         for name in (
             "spawn",
             "await_",
+            "runnable_tasks",
+            "reschedule",
+            "yield_to",
         ):
             assert callable(getattr(sync, name))
             assert callable(getattr(async_, name))
@@ -199,6 +202,76 @@ class TestSchedulerAccessors:
             ("after", None),
             ("done", task),
         ]
+
+    def test_runnable_tasks_returns_scheduler_tasks_in_run_order(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        first = s.spawn(lambda: "first")
+        second = s.spawn(lambda: "second")
+
+        assert s.runnable_tasks() == (first, second)
+
+    def test_reschedule_moves_runnable_task_to_position(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        first = s.spawn(lambda: seen.append("first"))
+        second = s.spawn(lambda: seen.append("second"))
+        third = s.spawn(lambda: seen.append("third"))
+
+        s.reschedule(third, position=0)
+        assert s.runnable_tasks() == (third, first, second)
+
+        s.run()
+
+        assert seen == ["third", "first", "second"]
+
+    def test_reschedule_rejects_non_runnable_task(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        task = s.spawn(lambda: "done")
+        assert s.run_until_complete(task) == "done"
+
+        with pytest.raises(ValueError, match="task is not runnable"):
+            s.reschedule(task)
+
+    def test_reschedule_rejects_task_from_different_scheduler(self):
+        first = _new_scheduler()
+        second = Scheduler()
+        set_scheduler(first)
+
+        task = second.spawn(lambda: "done")
+
+        with pytest.raises(RuntimeError, match="different scheduler"):
+            first.reschedule(task)
+
+    def test_yield_to_runs_target_before_current_continues(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: TealetTask | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current:start")
+            s.yield_to(target)
+            seen.append("current:after")
+
+        def selected() -> None:
+            seen.append("target")
+
+        def later() -> None:
+            seen.append("later")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.spawn(later)
+        s.run()
+
+        assert seen == ["current:start", "target", "current:after", "later"]
 
     def test_task_factory_accessors_reset_to_default(self):
         s = _new_scheduler()
@@ -2139,7 +2212,7 @@ class TestSchedulerExamples:
                     pass
                 pytest.fail(
                     "scheduler arun timed out: "
-                    f"tasks={len(s._tasks)} timers={len(s._timers)} "
+                    f"tasks={len(s.runnable_tasks())} timers={len(s._timers)} "
                     f"runner={s._runner is not None} seen={seen}"
                 )
 
@@ -3005,7 +3078,7 @@ class TestFutureExamples:
         def thrower() -> None:
             seen.append("thrower:start")
             future_victim = s.spawn(lambda: 7)
-            victim = s._tasks[-1]
+            victim = s.runnable_tasks()[-1]
             victim.throw(ValueError("pre-start"))
             assert future_victim.done()
             with pytest.raises(ValueError, match="pre-start"):

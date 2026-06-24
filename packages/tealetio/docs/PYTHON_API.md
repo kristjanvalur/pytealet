@@ -69,6 +69,19 @@ and waited on normally.
 
 ## Scheduler Waiting Helpers
 
+`scheduler.runnable_tasks()` returns the scheduler-owned `TealetTask` instances
+currently waiting to run, in scheduler order. It is an introspection helper for
+advanced scheduling and debugging; blocked and completed tasks are not included.
+
+`scheduler.reschedule(task, position=0)` moves a runnable task to a new runnable
+queue position. Position `0` makes it the next scheduler-owned task to run. The
+task must belong to that scheduler and must already be runnable.
+
+`scheduler.yield_to(task, resume_current_at=1)` yields from the current tealet to
+a runnable task. By default, the current task is placed directly after the target
+so it resumes when that target next blocks or completes. Passing
+`resume_current_at=None` leaves the current task at the end of the runnable queue.
+
 `scheduler.ensure_future(entry)` returns a scheduler `Future` for one entry.
 Existing scheduler futures are returned unchanged, and zero-argument callables
 are spawned as scheduler tasks.
