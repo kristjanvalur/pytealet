@@ -289,6 +289,117 @@ class TestSchedulerAccessors:
 
         assert s.runnable_tasks() == (current, later, target)
 
+    def test_priority_runnable_queue_runs_lowest_priority_value_first(self):
+        class PriorityTask(TealetTask):
+            def __init__(self, scheduler, priority: int):
+                super().__init__(scheduler)
+                self.priority = priority
+
+            def get_active_priority(self):
+                return self.priority
+
+        class PriorityTaskFactory:
+            def __init__(self, priorities: list[int]):
+                self._priorities = iter(priorities)
+
+            def __call__(self, scheduler, func, *, context, eager_start=None):
+                task = PriorityTask(scheduler, next(self._priorities))
+                scheduler_module._tasks._prepare_task(task, func, context)
+                return task
+
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(PriorityTaskFactory([0, -10, -5]))
+        set_scheduler(s)
+        seen: list[str] = []
+
+        first = s.spawn(lambda: seen.append("first"))
+        second = s.spawn(lambda: seen.append("second"))
+        third = s.spawn(lambda: seen.append("third"))
+
+        assert s.runnable_tasks() == (second, third, first)
+
+        s.run()
+
+        assert seen == ["second", "third", "first"]
+
+    def test_priority_runnable_queue_uses_stable_default_priority(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        set_scheduler(s)
+        seen: list[str] = []
+
+        first = s.spawn(lambda: seen.append("first"))
+        second = s.spawn(lambda: seen.append("second"))
+        third = s.spawn(lambda: seen.append("third"))
+
+        assert s.runnable_tasks() == (first, second, third)
+
+        s.run()
+
+        assert seen == ["first", "second", "third"]
+
+    def test_priority_runnable_queue_reschedule_none_requeries_priority(self):
+        class PriorityTask(TealetTask):
+            def __init__(self, scheduler, priority: int):
+                super().__init__(scheduler)
+                self.priority = priority
+
+            def get_active_priority(self):
+                return self.priority
+
+        class PriorityTaskFactory:
+            def __init__(self, priorities: list[int]):
+                self._priorities = iter(priorities)
+
+            def __call__(self, scheduler, func, *, context, eager_start=None):
+                task = PriorityTask(scheduler, next(self._priorities))
+                scheduler_module._tasks._prepare_task(task, func, context)
+                return task
+
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(PriorityTaskFactory([0, 10]))
+        set_scheduler(s)
+
+        first = s.spawn(lambda: "first")
+        second = s.spawn(lambda: "second")
+        first.priority = -20
+
+        s.reschedule(first)
+
+        assert s.runnable_tasks() == (first, second)
+
+    def test_priority_runnable_queue_immediate_lane_beats_priority(self):
+        class PriorityTask(TealetTask):
+            def __init__(self, scheduler, priority: int):
+                super().__init__(scheduler)
+                self.priority = priority
+
+            def get_active_priority(self):
+                return self.priority
+
+        class PriorityTaskFactory:
+            def __init__(self, priorities: list[int]):
+                self._priorities = iter(priorities)
+
+            def __call__(self, scheduler, func, *, context, eager_start=None):
+                task = PriorityTask(scheduler, next(self._priorities))
+                scheduler_module._tasks._prepare_task(task, func, context)
+                return task
+
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(PriorityTaskFactory([0, -10]))
+        set_scheduler(s)
+        seen: list[str] = []
+
+        low = s.spawn(lambda: seen.append("low"))
+        high = s.spawn(lambda: seen.append("high"))
+
+        s.reschedule(low, position=0)
+        assert s.runnable_tasks() == (low, high)
+
+        s.run()
+
+        assert seen == ["low", "high"]
+
     def test_reschedule_rejects_non_runnable_task(self):
         s = _new_scheduler()
         set_scheduler(s)

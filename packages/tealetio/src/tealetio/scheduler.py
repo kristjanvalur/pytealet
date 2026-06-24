@@ -267,6 +267,89 @@ class _PrescheduledRunnableQueue(_FifoRunnableQueue):
             self.insert_after_first(current, insert_current_at)
 
 
+class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
+    """Runnable queue with an immediate lane ahead of stable priority policy."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._priority_items: list[tuple[Any, int, tealet.tealet]] = []
+        self._priority_sequence = itertools.count()
+
+    def __bool__(self) -> bool:
+        return bool(self._prescheduled or self._priority_items)
+
+    def __len__(self) -> int:
+        return len(self._prescheduled) + len(self._priority_items)
+
+    def add(self, task: tealet.tealet) -> bool:
+        if task in self._set or task in self._prescheduled_set:
+            return False
+        self._insert_normal(task, len(self._priority_items))
+        return True
+
+    def discard(self, task: tealet.tealet) -> bool:
+        if task in self._prescheduled_set:
+            return super().discard(task)
+        if task not in self._set:
+            return False
+        self._remove_normal(task)
+        try:
+            task.link = None
+        except AttributeError:
+            pass
+        return True
+
+    def pop_next(self) -> tealet.tealet:
+        if self._prescheduled:
+            return super().pop_next()
+        _, _, task = heapq.heappop(self._priority_items)
+        self._set.discard(task)
+        return task
+
+    def tasks(self) -> tuple[_tasks.TealetTask, ...]:
+        return tuple(
+            task
+            for task in (*self._prescheduled, *(entry[2] for entry in sorted(self._priority_items)))
+            if isinstance(task, _tasks.TealetTask)
+        )
+
+    def _active_priority(self, task: tealet.tealet) -> Any:
+        try:
+            return cast(Any, task).get_active_priority()
+        except AttributeError:
+            return 0
+
+    def _priority_entry(self, task: tealet.tealet) -> tuple[Any, int, tealet.tealet]:
+        return (self._active_priority(task), next(self._priority_sequence), task)
+
+    def _remove_normal(self, task: tealet.tealet) -> None:
+        self._set.remove(task)
+        for index, entry in enumerate(self._priority_items):
+            if entry[2] is task:
+                del self._priority_items[index]
+                heapq.heapify(self._priority_items)
+                return
+        raise ValueError("task is not runnable")
+
+    def _remove_without_unlink(self, task: tealet.tealet) -> None:
+        if task in self._prescheduled_set:
+            self._prescheduled_set.remove(task)
+            self._prescheduled.remove(task)
+        elif task in self._set:
+            self._remove_normal(task)
+        else:
+            raise ValueError("task is not runnable")
+
+    def _insert_normal(self, task: tealet.tealet, position: int) -> None:
+        del position
+        heapq.heappush(self._priority_items, self._priority_entry(task))
+        self._set.add(task)
+        try:
+            task.link = self
+        except AttributeError:
+            pass
+
+
 _RunnableQueueFactory: TypeAlias = Callable[[], _FifoRunnableQueue]
 
 
