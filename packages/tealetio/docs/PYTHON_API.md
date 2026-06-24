@@ -74,13 +74,16 @@ currently waiting to run, in scheduler order. It is an introspection helper for
 advanced scheduling and debugging; blocked and completed tasks are not included.
 
 `scheduler.reschedule(task, position=0)` moves a runnable task to a new runnable
-queue position. Position `0` makes it the next scheduler-owned task to run. The
-task must belong to that scheduler and must already be runnable.
+queue position. Position `0` makes it the next scheduler-owned task to run.
+Negative positions count back from the end, with `-1` placing the task at the
+tail. The task must belong to that scheduler and must already be runnable.
 
-`scheduler.yield_to(task, resume_current_at=1)` yields from the current tealet to
-a runnable task. By default, the current task is placed directly after the target
-so it resumes when that target next blocks or completes. Passing
-`resume_current_at=None` leaves the current task at the end of the runnable queue.
+`scheduler.yield_to(task, insert_current_at=-1)` yields from the current tealet to
+a runnable task and keeps the current task runnable. The target is removed from
+the runnable queue before interpreting `insert_current_at`, so position `0` means
+the current task is next in line once the target blocks or completes. The default
+`-1` leaves the current task at the end of the runnable queue; lower negative
+values count back from there, so `-2` inserts before the final queued task.
 
 `scheduler.ensure_future(entry)` returns a scheduler `Future` for one entry.
 Existing scheduler futures are returned unchanged, and zero-argument callables

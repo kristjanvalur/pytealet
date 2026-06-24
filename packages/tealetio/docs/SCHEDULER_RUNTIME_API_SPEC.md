@@ -60,7 +60,10 @@ Implemented:
 - Scheduler runnable introspection and explicit rescheduling are available
   through `BaseScheduler.runnable_tasks()`, `BaseScheduler.reschedule(...)`, and
   `BaseScheduler.yield_to(...)`. Runnable scheduling is task-centric rather than
-  callback-centric, and the default queue preserves FIFO behaviour.
+  callback-centric, and the default queue preserves FIFO behaviour. `yield_to()`
+  keeps the caller runnable and places it by index in the runnable queue after
+  the yielded-to target is removed, with negative indexes counting from the end
+  of the remaining queue.
 - Scheduler grouping includes `BaseScheduler.ensure_future(...)`,
   `tealetio.scheduler.ensure_future(...)`, `tealetio.scheduler.gather(...)`,
   `tealetio.scheduler.wait(...)`, `tealetio.scheduler.wait_for(...)`, and

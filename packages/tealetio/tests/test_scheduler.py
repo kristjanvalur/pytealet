@@ -228,6 +228,22 @@ class TestSchedulerAccessors:
 
         assert seen == ["third", "first", "second"]
 
+    def test_reschedule_accepts_negative_position_from_queue_end(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        first = s.spawn(lambda: seen.append("first"))
+        second = s.spawn(lambda: seen.append("second"))
+        third = s.spawn(lambda: seen.append("third"))
+
+        s.reschedule(first, position=-2)
+        assert s.runnable_tasks() == (second, first, third)
+
+        s.run()
+
+        assert seen == ["second", "first", "third"]
+
     def test_reschedule_rejects_non_runnable_task(self):
         s = _new_scheduler()
         set_scheduler(s)
@@ -248,7 +264,7 @@ class TestSchedulerAccessors:
         with pytest.raises(RuntimeError, match="different scheduler"):
             first.reschedule(task)
 
-    def test_yield_to_runs_target_before_current_continues(self):
+    def test_yield_to_default_leaves_current_at_fifo_tail(self):
         s = _new_scheduler()
         set_scheduler(s)
         seen: list[str] = []
@@ -271,7 +287,150 @@ class TestSchedulerAccessors:
         s.spawn(later)
         s.run()
 
-        assert seen == ["current:start", "target", "current:after", "later"]
+        assert seen == ["current:start", "target", "later", "current:after"]
+
+    def test_yield_to_insert_current_at_zero_places_current_after_target(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: TealetTask | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current:start")
+            s.yield_to(target, insert_current_at=0)
+            seen.append("current:after")
+
+        def selected() -> None:
+            seen.append("target:start")
+            s.yield_()
+            seen.append("target:after")
+
+        def later() -> None:
+            seen.append("later")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.spawn(later)
+        s.run()
+
+        assert seen == ["current:start", "target:start", "current:after", "later", "target:after"]
+
+    def test_yield_to_insert_current_at_is_after_removed_target(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: TealetTask | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current:start")
+            s.yield_to(target, insert_current_at=1)
+            seen.append("current:after")
+
+        def selected() -> None:
+            seen.append("target:start")
+            s.yield_()
+            seen.append("target:after")
+
+        def later() -> None:
+            seen.append("later")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.spawn(later)
+        s.run()
+
+        assert seen == ["current:start", "target:start", "later", "current:after", "target:after"]
+
+    def test_yield_to_minus_one_leaves_current_at_fifo_tail(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: TealetTask | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current:start")
+            s.yield_to(target, insert_current_at=-1)
+            seen.append("current:after")
+
+        def selected() -> None:
+            seen.append("target")
+
+        def later() -> None:
+            seen.append("later")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.spawn(later)
+        s.run()
+
+        assert seen == ["current:start", "target", "later", "current:after"]
+
+    def test_yield_to_negative_insert_current_at_counts_from_queue_end(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: TealetTask | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current:start")
+            s.yield_to(target, insert_current_at=-2)
+            seen.append("current:after")
+
+        def selected() -> None:
+            seen.append("target")
+
+        def later_one() -> None:
+            seen.append("later-one")
+
+        def later_two() -> None:
+            seen.append("later-two")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.spawn(later_one)
+        s.spawn(later_two)
+        s.run()
+
+        assert seen == ["current:start", "target", "later-one", "current:after", "later-two"]
+
+    def test_yield_to_rejects_non_runnable_task(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        done = s.spawn(lambda: "done")
+
+        def current() -> None:
+            with pytest.raises(ValueError, match="task is not runnable"):
+                s.yield_to(done)
+            seen.append("current")
+
+        s.spawn(current)
+        s.run()
+
+        assert seen == ["current"]
+
+    def test_yield_to_rejects_task_from_different_scheduler(self):
+        first = _new_scheduler()
+        second = Scheduler()
+        set_scheduler(first)
+        seen: list[str] = []
+
+        task = second.spawn(lambda: "done")
+
+        def current() -> None:
+            with pytest.raises(RuntimeError, match="different scheduler"):
+                first.yield_to(task)
+            seen.append("current")
+
+        first.spawn(current)
+        first.run()
+
+        assert seen == ["current"]
 
     def test_task_factory_accessors_reset_to_default(self):
         s = _new_scheduler()

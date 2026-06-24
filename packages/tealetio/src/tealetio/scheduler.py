@@ -133,13 +133,34 @@ class _FifoRunnableQueue(_tasks.TaskLink):
     def tasks(self) -> tuple[_tasks.TealetTask, ...]:
         return tuple(task for task in self._items if isinstance(task, _tasks.TealetTask))
 
-    def reschedule(self, task: tealet.tealet, position: int) -> None:
+    def _normalise_insert_position(self, position: int, length: int) -> int:
         if position < 0:
-            raise ValueError("position must be >= 0")
+            return max(length + position + 1, 0)
+        return position
+
+    def reschedule(self, task: tealet.tealet, position: int) -> None:
         if task not in self._set:
             raise ValueError("task is not runnable")
         self._items.remove(task)
-        self._items.insert(position, task)
+        self._items.insert(self._normalise_insert_position(position, len(self._items)), task)
+
+    def reschedule_after_first(self, task: tealet.tealet, position: int) -> None:
+        if task not in self._set:
+            raise ValueError("task is not runnable")
+        self._items.remove(task)
+        task_slots = [
+            index
+            for index in range(1, len(self._items))
+            if isinstance(self._items[index], _tasks.TealetTask)
+        ]
+        position = self._normalise_insert_position(position, len(task_slots))
+        if position < len(task_slots):
+            insert_index = task_slots[position]
+        elif task_slots:
+            insert_index = task_slots[-1] + 1
+        else:
+            insert_index = 1
+        self._items.insert(insert_index, task)
 
 
 class CoreSchedulerDrivingAPI(ABC):
@@ -1149,19 +1170,16 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._runnable.reschedule(task, position)
         self._break_wait()
 
-    def yield_to(self, task: _tasks.TealetTask, *, resume_current_at: int | None = 1) -> None:
-        """Yield to a runnable scheduler task and optionally place current task after it."""
+    def yield_to(self, task: _tasks.TealetTask, *, insert_current_at: int = -1) -> None:
+        """Yield to a runnable scheduler task and place current in the remaining queue."""
         current = tealet.current()
         if task is current:
             return
-        if resume_current_at is not None and resume_current_at < 0:
-            raise ValueError("resume_current_at must be >= 0 or None")
 
         def enqueue() -> None:
             self.reschedule(task, position=0)
             self._make_runnable(current)
-            if resume_current_at is not None:
-                self._runnable.reschedule(current, resume_current_at)
+            self._runnable.reschedule_after_first(current, insert_current_at)
 
         self._schedule(enqueue)
 
