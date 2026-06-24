@@ -20,6 +20,7 @@ __all__ = [
     "CancelledError",
     "DefaultTaskFactory",
     "Future",
+    "get_current",
     "Linkable",
     "Shield",
     "StubTaskFactory",
@@ -291,6 +292,26 @@ class TealetTask(tealet.tealet, Future[Any]):
         return self._scheduler._find_target(task_exit=True), None, suppress
 
 
+_current_task: contextvars.ContextVar[TealetTask | None] = contextvars.ContextVar(
+    "tealetio_current_task",
+    default=None,
+)
+
+
+def get_current() -> TealetTask | None:
+    """Return the current scheduler-owned tealet task, if one is running."""
+    task = _current_task.get()
+    if task is not None and tealet.current() is task:
+        return task
+    return None
+
+
+def _copy_context_without_current_task() -> contextvars.Context:
+    context = contextvars.copy_context()
+    context.run(_current_task.set, None)
+    return context
+
+
 class TaskFactory(Protocol):
     """Callable strategy for creating scheduler-owned tasks."""
 
@@ -308,7 +329,14 @@ class TaskFactory(Protocol):
 
 def _prepare_task(task: TealetTask, func: Callable[[], object], context: contextvars.Context) -> None:
     def task_main(current: tealet.tealet, _arg: object):
-        return context.run(func)
+        def run_func():
+            token = _current_task.set(task)
+            try:
+                return func()
+            finally:
+                _current_task.reset(token)
+
+        return context.run(run_func)
 
     task.prepare(task_main)
 

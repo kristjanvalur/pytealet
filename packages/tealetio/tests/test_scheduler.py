@@ -42,6 +42,7 @@ from tealetio import (
     as_completed,
     ensure_future,
     gather,
+    get_current,
     get_running_scheduler,
     get_scheduler,
     set_scheduler,
@@ -147,6 +148,57 @@ class TestSchedulerAccessors:
         s.run()
 
         assert seen == [s]
+
+    def test_get_current_returns_none_outside_tealetio_task(self):
+        assert get_current() is None
+
+    def test_get_current_returns_running_tealetio_task(self):
+        s = _new_scheduler()
+        seen: list[TealetTask | None] = []
+
+        def check_current() -> None:
+            seen.append(get_current())
+
+        task = s.spawn(check_current)
+        s.run()
+
+        assert seen == [task]
+
+    def test_get_current_returns_none_in_asyncio_task(self):
+        async def check_current() -> TealetTask | None:
+            return get_current()
+
+        assert asyncio.run(check_current()) is None
+
+    def test_get_current_returns_none_inside_awaited_asyncio_coroutine(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        seen: list[tuple[str, TealetTask | None]] = []
+
+        async def check_current() -> str:
+            seen.append(("start", get_current()))
+            await asyncio.sleep(0)
+            seen.append(("after", get_current()))
+            return "done"
+
+        def worker() -> None:
+            seen.append(("worker", get_current()))
+            result = s.await_(check_current())
+            seen.append((result, get_current()))
+
+        task = s.spawn(worker)
+
+        async def run_scheduler() -> None:
+            await s.arun()
+
+        asyncio.run(run_scheduler())
+
+        assert seen == [
+            ("worker", task),
+            ("start", None),
+            ("after", None),
+            ("done", task),
+        ]
 
     def test_task_factory_accessors_reset_to_default(self):
         s = _new_scheduler()

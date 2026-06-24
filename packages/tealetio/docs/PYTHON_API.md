@@ -43,6 +43,11 @@ bound and never creates one implicitly.
 actively driving work. It raises `RuntimeError` if no scheduler is running and
 never creates one implicitly.
 
+`tealetio.get_current()` returns the currently running `TealetTask`, or `None`
+when the caller is outside a scheduler-owned tealet task. Asyncio tasks therefore
+see `None` rather than an unrelated low-level tealet object. This includes
+coroutines that a tealet task waits for through `BaseScheduler.await_(...)`.
+
 ## Scheduler Asyncio Bridge
 
 `BaseScheduler.await_(awaitable) -> object` waits for an asyncio awaitable from

@@ -1028,15 +1028,15 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             if fut.get_loop() is not loop:
                 raise RuntimeError("await_ future is bound to a different event loop")
         elif inspect.iscoroutine(awaitable) and _coro_start is not None:
-            # run in a copy of the current context
-            context = contextvars.copy_context()
+            # run in a copy of the current context, outside tealetio task scope
+            context = _tasks._copy_context_without_current_task()
             coro_start = _coro_start(_CoroStart, cast(Coroutine[Any, Any, Any], awaitable), context)
             if coro_start.done():
                 return coro_start.result()
             fut = loop.create_task(coro_start.as_coroutine())
         elif inspect.isawaitable(awaitable):
-            # run in a copy of the current context if possible
-            context = contextvars.copy_context()
+            # run in a copy of the current context if possible, outside tealetio task scope
+            context = _tasks._copy_context_without_current_task()
             try:
                 fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable), context=context)
             except TypeError:

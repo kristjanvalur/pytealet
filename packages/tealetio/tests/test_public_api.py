@@ -28,6 +28,7 @@ def test_top_level_exports_public_scheduler_api():
         "FIRST_COMPLETED",
         "FIRST_EXCEPTION",
         "Future",
+        "get_current",
         "InvalidStateError",
         "LifoQueue",
         "Lock",
@@ -77,6 +78,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.Lock is tealetio.locks.Lock
     assert tealetio.Queue is tealetio.locks.Queue
     assert tealetio.Future is tealetio.tasks.Future
+    assert tealetio.get_current is tealetio.tasks.get_current
     assert tealetio.TealetTask is tealetio.tasks.TealetTask
     assert tealetio.Scheduler is tealetio.scheduler.Scheduler
     assert tealetio.BaseScheduler is tealetio.scheduler.BaseScheduler
