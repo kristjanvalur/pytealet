@@ -1017,6 +1017,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         with self._threadsafe_lock:
             return bool(self._threadsafe_callbacks or self._pending_executor_calls)
 
+    def _has_runnable_work(self) -> bool:
+        return bool(self._runnable)
+
+    def _pop_next_runnable(self) -> tealet.tealet:
+        return self._runnable.pop_next()
+
     # -- Link and runnable state --------------------------------------
 
     def _is_runnable(self, t: tealet.tealet) -> bool:
@@ -1213,8 +1219,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 result._unlink()
             except AttributeError:
                 self._unlink(result)
-        elif self._runnable:
-            result = self._runnable.pop_next()
+        elif self._has_runnable_work():
+            result = self._pop_next_runnable()
         elif not task_exit:
             raise DeadlockError("No tasks to switch to")
         else:
@@ -1291,11 +1297,11 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         self._verify_current_scheduler()
         self._running = True
         try:
-            while self._runnable or self._timers or self._has_pending_driver_work():
+            while self._has_runnable_work() or self._timers or self._has_pending_driver_work():
                 self._run_ready_timers()
-                if self._runnable:
+                if self._has_runnable_work():
                     self._pump()
-                if self._runnable or self._timers or self._has_pending_driver_work():
+                if self._has_runnable_work() or self._timers or self._has_pending_driver_work():
                     self._wait_thread()
         finally:
             self._running = False
@@ -1307,7 +1313,7 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         try:
             while not self._stopping:
                 self._run_ready_timers()
-                if self._runnable:
+                if self._has_runnable_work():
                     self._pump()
                     continue
                 self._wait_thread()
@@ -1334,7 +1340,7 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         try:
             while not target.done() and not self._stopping:
                 self._run_ready_timers()
-                if self._runnable:
+                if self._has_runnable_work():
                     self._pump()
                 if not target.done() and not self._stopping:
                     self._wait_thread()
