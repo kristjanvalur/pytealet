@@ -37,7 +37,7 @@ Issues = "https://github.com/kristjanvalur/pytealet/issues"
 
 [project.optional-dependencies]
 asyncio = [
-    "asynkit>=0.18.0",
+    "asynkit>=0.18.1",
 ]
 
 [tool.uv.sources]
@@ -45,7 +45,7 @@ tealet = { workspace = true }
 
 [dependency-groups]
 dev = [
-    "asynkit>=0.18.0",
+    "asynkit>=0.18.1",
     "pytest>=7.0",
 ]
 

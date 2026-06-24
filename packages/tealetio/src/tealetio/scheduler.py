@@ -32,11 +32,11 @@ from .locks import (
 from . import tasks as _tasks
 
 try:
+    from asynkit import coro_start as _coro_start
     from asynkit import CoroStart as _CoroStart
-    from asynkit import coro_await as _coro_await
 except ImportError:
+    _coro_start = None
     _CoroStart = None
-    _coro_await = None
 
 
 T = TypeVar("T")
@@ -1027,20 +1027,22 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
             fut = awaitable
             if fut.get_loop() is not loop:
                 raise RuntimeError("await_ future is bound to a different event loop")
-        elif inspect.iscoroutine(awaitable) and _CoroStart is not None and _coro_await is not None:
-            wrapped = _coro_await(
-                cast(Coroutine[Any, Any, Any], awaitable), context=contextvars.copy_context()
-            )
-            coro_start = _CoroStart(
-                cast(Coroutine[Any, Any, Any], wrapped)
-            )
+        elif inspect.iscoroutine(awaitable) and _coro_start is not None:
+            # run in a copy of the current context
+            context = contextvars.copy_context()
+            coro_start = _coro_start(_CoroStart, cast(Coroutine[Any, Any, Any], awaitable), context)
             if coro_start.done():
                 return coro_start.result()
             fut = loop.create_task(coro_start.as_coroutine())
         elif inspect.isawaitable(awaitable):
-            fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable))
+            # run in a copy of the current context if possible
+            context = contextvars.copy_context()
+            try:
+                fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable), context=context)
+            except TypeError:
+                fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable))
         else:
-            raise TypeError("awaitable must be an awaitable, Future, or Task")
+            raise TypeError("awaitable must be an awaitable")
 
         if fut.done():
             return fut.result()

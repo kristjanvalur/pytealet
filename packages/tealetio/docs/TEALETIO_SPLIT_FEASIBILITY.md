@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 asyncio = [
-    "asynkit>=0.18.0",
+    "asynkit>=0.18.1",
 ]
 
 [tool.uv.sources]

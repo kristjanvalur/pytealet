@@ -2496,7 +2496,7 @@ class TestSchedulerExamples:
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[object] = []
-        monkeypatch.setattr(scheduler_module, "_CoroStart", None)
+        monkeypatch.setattr(scheduler_module, "_coro_start", None)
 
         async def compute() -> int:
             seen.append("body")
@@ -2533,7 +2533,7 @@ class TestSchedulerExamples:
         set_scheduler(s)
         marker = contextvars.ContextVar("marker", default="unset")
         seen: list[object] = []
-        monkeypatch.setattr(scheduler_module, "_CoroStart", None)
+        monkeypatch.setattr(scheduler_module, "_coro_start", None)
 
         async def compute() -> str:
             seen.append(("body-before", marker.get()))

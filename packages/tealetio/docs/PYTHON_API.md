@@ -52,10 +52,10 @@ For coroutine objects and awaitables that `await_()` wraps in a new asyncio task
 execution starts in a copy of the current `contextvars.Context`. Existing asyncio
 `Future` and `Task` objects keep the context they already captured.
 
-When optional `asynkit` support is available, coroutine objects are wrapped with
-`asynkit.coro_await()` and eagerly started with `asynkit.CoroStart`; if they
-complete synchronously, `await_()` returns without creating an asyncio task. If
-they block, their continuation is handed to asyncio and waited on normally.
+When optional `asynkit` support is available, coroutine objects are started with
+`asynkit.CoroStart`; if they complete synchronously, `await_()` returns without
+creating an asyncio task. If they block, their continuation is handed to asyncio
+and waited on normally.
 
 ## Scheduler Waiting Helpers
 
