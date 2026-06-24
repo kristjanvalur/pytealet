@@ -212,7 +212,35 @@ class TestSchedulerAccessors:
 
         assert s.runnable_tasks() == (first, second)
 
-    def test_reschedule_moves_runnable_task_to_position(self):
+    def test_scheduler_accepts_runnable_queue_factory(self):
+        events: list[str] = []
+
+        class RecordingQueue(scheduler_module._PrescheduledRunnableQueue):
+            def __init__(self) -> None:
+                events.append("init")
+                super().__init__()
+
+            def add(self, task):
+                events.append("add")
+                return super().add(task)
+
+            def pop_next(self):
+                events.append("pop")
+                return super().pop_next()
+
+        s = Scheduler(runnable_queue_factory=RecordingQueue)
+        set_scheduler(s)
+        seen: list[str] = []
+
+        s.spawn(lambda: seen.append("task"))
+        s.run()
+
+        assert seen == ["task"]
+        assert events[0] == "init"
+        assert "add" in events
+        assert "pop" in events
+
+    def test_reschedule_moves_runnable_task_to_immediate_position(self):
         s = _new_scheduler()
         set_scheduler(s)
         seen: list[str] = []
@@ -228,7 +256,7 @@ class TestSchedulerAccessors:
 
         assert seen == ["third", "first", "second"]
 
-    def test_reschedule_accepts_negative_position_from_queue_end(self):
+    def test_reschedule_negative_position_counts_from_immediate_lane_end(self):
         s = _new_scheduler()
         set_scheduler(s)
         seen: list[str] = []
@@ -237,12 +265,29 @@ class TestSchedulerAccessors:
         second = s.spawn(lambda: seen.append("second"))
         third = s.spawn(lambda: seen.append("third"))
 
-        s.reschedule(first, position=-2)
-        assert s.runnable_tasks() == (second, first, third)
+        s.reschedule(first, position=0)
+        s.reschedule(second, position=-1)
+        s.reschedule(third, position=-2)
+        assert s.runnable_tasks() == (first, third, second)
 
         s.run()
 
-        assert seen == ["second", "first", "third"]
+        assert seen == ["first", "third", "second"]
+
+    def test_reschedule_none_moves_task_to_default_queue_position(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        current = s.spawn(lambda: "current")
+        target = s.spawn(lambda: "target")
+        later = s.spawn(lambda: "later")
+
+        s._runnable.yield_to(target, current, 0)
+        assert s.runnable_tasks() == (target, current, later)
+
+        s.reschedule(target)
+
+        assert s.runnable_tasks() == (current, later, target)
 
     def test_reschedule_rejects_non_runnable_task(self):
         s = _new_scheduler()
@@ -341,9 +386,9 @@ class TestSchedulerAccessors:
         s.spawn(later)
         s.run()
 
-        assert seen == ["current:start", "target:start", "later", "current:after", "target:after"]
+        assert seen == ["current:start", "target:start", "current:after", "later", "target:after"]
 
-    def test_yield_to_minus_one_leaves_current_at_fifo_tail(self):
+    def test_yield_to_minus_one_places_current_at_prescheduled_tail(self):
         s = _new_scheduler()
         set_scheduler(s)
         seen: list[str] = []
@@ -366,36 +411,22 @@ class TestSchedulerAccessors:
         s.spawn(later)
         s.run()
 
-        assert seen == ["current:start", "target", "later", "current:after"]
+        assert seen == ["current:start", "target", "current:after", "later"]
 
-    def test_yield_to_negative_insert_current_at_counts_from_queue_end(self):
+    def test_yield_to_negative_insert_current_at_counts_from_prescheduled_end(self):
         s = _new_scheduler()
         set_scheduler(s)
-        seen: list[str] = []
-        target: TealetTask | None = None
 
-        def current() -> None:
-            assert target is not None
-            seen.append("current:start")
-            s.yield_to(target, insert_current_at=-2)
-            seen.append("current:after")
+        first_current = s.spawn(lambda: "first-current")
+        first_target = s.spawn(lambda: "first-target")
+        second_current = s.spawn(lambda: "second-current")
+        second_target = s.spawn(lambda: "second-target")
+        later = s.spawn(lambda: "later")
 
-        def selected() -> None:
-            seen.append("target")
+        s._runnable.yield_to(first_target, first_current, 0)
+        s._runnable.yield_to(second_target, second_current, -2)
 
-        def later_one() -> None:
-            seen.append("later-one")
-
-        def later_two() -> None:
-            seen.append("later-two")
-
-        s.spawn(current)
-        target = s.spawn(selected)
-        s.spawn(later_one)
-        s.spawn(later_two)
-        s.run()
-
-        assert seen == ["current:start", "target", "later-one", "current:after", "later-two"]
+        assert s.runnable_tasks() == (second_target, first_target, second_current, first_current, later)
 
     def test_yield_to_rejects_non_runnable_task(self):
         s = _new_scheduler()

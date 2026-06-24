@@ -61,9 +61,11 @@ Implemented:
   through `BaseScheduler.runnable_tasks()`, `BaseScheduler.reschedule(...)`, and
   `BaseScheduler.yield_to(...)`. Runnable scheduling is task-centric rather than
   callback-centric, and the default queue preserves FIFO behaviour. `yield_to()`
-  keeps the caller runnable and places it by index in the runnable queue after
-  the yielded-to target is removed, with negative indexes counting from the end
-  of the remaining queue.
+  keeps the caller runnable. By default, the caller returns through normal queue
+  policy; explicit `insert_current_at` indexes place it in the immediate lane
+  after the yielded-to target, using normal list-style insertion.
+  `reschedule(..., position=None)` likewise returns a task through normal queue
+  policy, while integer positions place the task in the immediate lane.
 - Scheduler grouping includes `BaseScheduler.ensure_future(...)`,
   `tealetio.scheduler.ensure_future(...)`, `tealetio.scheduler.gather(...)`,
   `tealetio.scheduler.wait(...)`, `tealetio.scheduler.wait_for(...)`, and

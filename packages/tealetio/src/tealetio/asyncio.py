@@ -189,8 +189,8 @@ class TealetSelectorEventLoop(_asyncio.SelectorEventLoop):
 class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
     """Cooperative scheduler for asyncio-hosted driving."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, runnable_queue_factory=None) -> None:
+        super().__init__(runnable_queue_factory=runnable_queue_factory)
         self._wakeup = _asyncio.Event()
         self._wakeup_loop: _asyncio.AbstractEventLoop | None = None
 
