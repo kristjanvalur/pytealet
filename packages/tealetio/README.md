@@ -2,10 +2,10 @@
 
 **tealetio: async without the async.**
 
-Did you ever wish `tealet` had the familiar scheduling tools you reach for in
-`asyncio`, but for stack-slicing tealet code? `tealetio` provides the scheduler,
-task, synchronisation, selector, runner, and asyncio coexistence APIs for that
-job.
+Where `tealet` gives you stack-slicing primitives, `tealetio` turns them into a
+runtime framework with a familiar shape. It adds scheduler, task,
+synchronisation, selector, runner, and asyncio coexistence APIs for ordinary
+tealet code.
 
 In effect, async operations can work without the `async` keyword: tealet-powered
 stack slicing lets ordinary-looking functions block, resume, and compose through
