@@ -129,10 +129,10 @@ class Event:
             pass  # main tealet may not have a ``link`` attribute
         self._waiters.append(t)
 
-    def _query_waiting(self, t: tealet.tealet) -> bool:
-        return t in self._waiters
+    def _query_waiting(self) -> bool:
+        return True
 
-    def _query_runnable(self, t: tealet.tealet) -> bool:
+    def _query_runnable(self) -> bool:
         return False
 
     def _unlink(self, t: tealet.tealet) -> None:

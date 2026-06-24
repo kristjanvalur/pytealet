@@ -77,7 +77,7 @@ _ReturnWhen: TypeAlias = Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMP
 _scheduler = threading.local()
 
 
-class _FifoRunnableQueue:
+class _FifoRunnableQueue(_tasks.TaskLink):
     def __init__(self) -> None:
         self._items: deque[tealet.tealet] = deque()
         self._set: set[tealet.tealet] = set()
@@ -96,6 +96,10 @@ class _FifoRunnableQueue:
             return False
         self._items.append(task)
         self._set.add(task)
+        try:
+            task.link = self
+        except AttributeError:
+            pass
         return True
 
     def discard(self, task: tealet.tealet) -> bool:
@@ -106,6 +110,19 @@ class _FifoRunnableQueue:
             self._items.remove(task)
         except ValueError:
             pass
+        try:
+            task.link = None
+        except AttributeError:
+            pass
+        return True
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        self.discard(t)
+
+    def _query_waiting(self) -> bool:
+        return False
+
+    def _query_runnable(self) -> bool:
         return True
 
     def pop_next(self) -> tealet.tealet:
@@ -219,7 +236,7 @@ def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
     return get_running_scheduler().run_in_executor(None, call).wait()
 
 
-class Channel(_tasks.Linkable):
+class Channel(_tasks.TaskLink):
     """Rendezvous channel for sync tealet operations and optional async waits."""
 
     # Operation model:
@@ -332,10 +349,10 @@ class Channel(_tasks.Linkable):
     def _unlink(self, t: tealet.tealet) -> None:
         self._unlink_waiter(t)
 
-    def _query_waiting(self, t: tealet.tealet) -> bool:
-        return t in self._waiters
+    def _query_waiting(self) -> bool:
+        return True
 
-    def _query_runnable(self, t: tealet.tealet) -> bool:
+    def _query_runnable(self) -> bool:
         return False
 
     # -- Synchronous operations ---------------------------------------
@@ -692,7 +709,7 @@ def as_completed(
     return _as_completed_futures(children, timeout=timeout)
 
 
-class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
+class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduler mechanics for concrete drivers."""
 
     def __init__(self) -> None:
@@ -984,12 +1001,6 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
     def _is_runnable(self, t: tealet.tealet) -> bool:
         return t in self._runnable
 
-    def _query_runnable(self, t: tealet.tealet) -> bool:
-        return self._is_runnable(t)
-
-    def _query_waiting(self, t: tealet.tealet) -> bool:
-        return False
-
     def _is_blocked(self, t: tealet.tealet) -> bool:
         return t in self._pending_async_waits
 
@@ -1126,10 +1137,6 @@ class BaseScheduler(_tasks.Linkable, CoreSchedulerDrivingAPI):
     def _make_runnable(self, t: tealet.tealet) -> None:
         if t in self._runnable:
             return
-        try:
-            t.link = self
-        except AttributeError:
-            pass
         if isinstance(t, _tasks.TealetTask):
             t._scheduler = self
         self._runnable.add(t)

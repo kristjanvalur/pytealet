@@ -21,7 +21,7 @@ __all__ = [
     "DefaultTaskFactory",
     "Future",
     "get_current",
-    "Linkable",
+    "TaskLink",
     "Shield",
     "StubTaskFactory",
     "TaskFactory",
@@ -30,17 +30,17 @@ __all__ = [
 ]
 
 
-class Linkable(ABC):
+class TaskLink(ABC):
     """Base interface for objects that can be linked from a TealetTask."""
 
     @abstractmethod
     def _unlink(self, t: tealet.tealet) -> None:
         """Detach a tealet from this link target."""
 
-    def _query_waiting(self, t: tealet.tealet) -> bool:
+    def _query_waiting(self) -> bool:
         return False
 
-    def _query_runnable(self, t: tealet.tealet) -> bool:
+    def _query_runnable(self) -> bool:
         return False
 
 
@@ -219,7 +219,7 @@ class TealetTask(tealet.tealet, Future[Any]):
     def __init__(self, owning_scheduler: BaseScheduler):
         tealet.tealet.__init__(self)
         Future.__init__(self)
-        self.link: Linkable | None = None
+        self.link: TaskLink | None = None
         self._scheduler: BaseScheduler = owning_scheduler
 
     # -- Runtime state -------------------------------------------------
@@ -227,12 +227,12 @@ class TealetTask(tealet.tealet, Future[Any]):
     def is_waiting(self):
         if self.link is None:
             return False
-        return self.link._query_waiting(self)
+        return self.link._query_waiting()
 
     def is_runnable(self):
         if self.link is None:
             return False
-        return self.link._query_runnable(self)
+        return self.link._query_runnable()
 
     def is_blocked(self):
         return self._scheduler._is_blocked(self)
