@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
-from typing import Any, Callable, Coroutine, Literal, TypeAlias, TypeVar, cast
+from typing import Any, Callable, Coroutine, Literal, Protocol, TypeAlias, TypeVar, cast
 
 import tealet
 
@@ -150,7 +150,7 @@ class _FifoRunnableQueue(_tasks.TaskLink):
         else:
             self._items.insert(self._normalise_insert_position(position, len(self._items)), task)
 
-    def insert_after_first(self, task: tealet.tealet, position: int) -> None:
+    def _insert_after_first(self, task: tealet.tealet, position: int) -> None:
         if task not in self._set:
             raise ValueError("task is not runnable")
         self._items.remove(task)
@@ -162,7 +162,7 @@ class _FifoRunnableQueue(_tasks.TaskLink):
         self.reschedule(target, 0)
         self.add(current)
         if insert_current_at is not None:
-            self.insert_after_first(current, insert_current_at)
+            self._insert_after_first(current, insert_current_at)
 
 
 class _PrescheduledRunnableQueue(_FifoRunnableQueue):
@@ -246,7 +246,7 @@ class _PrescheduledRunnableQueue(_FifoRunnableQueue):
         # queues, including future priority queues, may not be indexable.
         self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
 
-    def insert_after_first(self, task: tealet.tealet, position: int) -> None:
+    def _insert_after_first(self, task: tealet.tealet, position: int) -> None:
         assert task not in self
         assert self._prescheduled
         # explicit yield_to() positions address only the immediate lane after
@@ -264,7 +264,7 @@ class _PrescheduledRunnableQueue(_FifoRunnableQueue):
         if insert_current_at is None:
             self.add(current)
         else:
-            self.insert_after_first(current, insert_current_at)
+            self._insert_after_first(current, insert_current_at)
 
 
 class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
@@ -358,7 +358,27 @@ class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
         self._insert_normal(task, len(self._priority_items))
 
 
-_RunnableQueueFactory: TypeAlias = Callable[[], _FifoRunnableQueue]
+class _RunnableQueue(Protocol):
+    """Scheduler-facing interface for runnable queue implementations."""
+
+    def __bool__(self) -> bool: ...
+
+    def __contains__(self, task: tealet.tealet) -> bool: ...
+
+    def add(self, task: tealet.tealet) -> bool: ...
+
+    def discard(self, task: tealet.tealet) -> bool: ...
+
+    def pop_next(self) -> tealet.tealet: ...
+
+    def tasks(self) -> tuple[_tasks.TealetTask, ...]: ...
+
+    def reschedule(self, task: tealet.tealet, position: int | None) -> None: ...
+
+    def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None: ...
+
+
+_RunnableQueueFactory: TypeAlias = Callable[[], _RunnableQueue]
 
 
 class CoreSchedulerDrivingAPI(ABC):
