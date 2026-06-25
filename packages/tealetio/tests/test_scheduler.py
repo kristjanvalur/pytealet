@@ -11,30 +11,25 @@ import pytest
 
 import _tealet
 import tealetio.scheduler as scheduler_module
+import tealetio.tasks as task_module
+from helpers import new_scheduler as _new_scheduler
 from tealetio import (
     ALL_COMPLETED,
-    Barrier,
-    BoundedSemaphore,
     CancelledError,
-    Channel,
-    Condition,
     DefaultTaskFactory,
     Event,
     FIRST_COMPLETED,
     FIRST_EXCEPTION,
     Future,
-    InvalidStateError,
-    LifoQueue,
-    Lock,
-    PriorityQueue,
-    Queue,
-    QueueEmpty,
-    QueueFull,
-    QueueShutDown,
+    PriorityTask,
     Scheduler,
     SelectorScheduler,
-    Semaphore,
     StubTaskFactory,
+    TASK_PRIORITY_CRITICAL,
+    TASK_PRIORITY_DEFAULT,
+    TASK_PRIORITY_HIGH,
+    TASK_PRIORITY_IDLE,
+    TASK_PRIORITY_LOW,
     TealetSelectorEventLoop,
     TealetTask,
     TimeoutError,
@@ -53,14 +48,7 @@ from tealetio import (
     wait,
     wait_for,
 )
-from tealetio.locks import (
-    RawTimeoutError,
-)
-from tealetio.scheduler import (
-    _scheduler,
-)
 from tealetio.examples import (
-    demo_future_result,
     demo_future_timeout_then_success,
     demo_scheduler_append_with_yield,
     demo_sleep,
@@ -81,21 +69,26 @@ _SELECTOR_TYPES = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _reset_scheduler_tls():
-    _scheduler.instance = Scheduler()
-    try:
-        yield
-    finally:
-        _scheduler.instance = Scheduler()
+class _PriorityTaskFactory:
+    task_constructor = PriorityTask
 
+    def __init__(self, priorities: list[float] | None = None):
+        self._priorities = iter(priorities) if priorities is not None else None
 
-def _new_scheduler(task_factory_maker=None) -> Scheduler:
-    scheduler = Scheduler()
-    if task_factory_maker is not None:
-        scheduler.set_task_factory(task_factory_maker())
-    set_scheduler(scheduler)
-    return scheduler
+    def __call__(
+        self,
+        scheduler,
+        func,
+        *,
+        context,
+        priority=TASK_PRIORITY_DEFAULT,
+        eager_start=None,
+    ):
+        if self._priorities is not None:
+            priority = next(self._priorities)
+        task = PriorityTask(scheduler, priority)
+        scheduler_module._tasks._prepare_task(task, func, context)
+        return task
 
 
 class TestSchedulerAccessors:
@@ -122,6 +115,9 @@ class TestSchedulerAccessors:
         for name in (
             "spawn",
             "await_",
+            "runnable_tasks",
+            "reschedule",
+            "yield_to",
         ):
             assert callable(getattr(sync, name))
             assert callable(getattr(async_, name))
@@ -200,13 +196,505 @@ class TestSchedulerAccessors:
             ("done", task),
         ]
 
+    def test_runnable_tasks_returns_scheduler_tasks_in_run_order(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        first = s.spawn(lambda: "first")
+        second = s.spawn(lambda: "second")
+
+        assert s.runnable_tasks() == (first, second)
+
+    def test_scheduler_accepts_runnable_queue_factory(self):
+        events: list[str] = []
+
+        class RecordingQueue(scheduler_module._PrescheduledRunnableQueue):
+            def __init__(self) -> None:
+                events.append("init")
+                super().__init__()
+
+            def add(self, task):
+                events.append("add")
+                return super().add(task)
+
+            def pop_next(self):
+                events.append("pop")
+                return super().pop_next()
+
+        s = Scheduler(runnable_queue_factory=RecordingQueue)
+        set_scheduler(s)
+        seen: list[str] = []
+
+        s.spawn(lambda: seen.append("task"))
+        s.run()
+
+        assert seen == ["task"]
+        assert events[0] == "init"
+        assert "add" in events
+        assert "pop" in events
+
+    def test_reschedule_moves_runnable_task_to_immediate_position(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        first = s.spawn(lambda: seen.append("first"))
+        second = s.spawn(lambda: seen.append("second"))
+        third = s.spawn(lambda: seen.append("third"))
+
+        s.reschedule(third, position=0)
+        assert s.runnable_tasks() == (third, first, second)
+
+        s.run()
+
+        assert seen == ["third", "first", "second"]
+
+    def test_reschedule_negative_position_counts_from_immediate_lane_end(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        first = s.spawn(lambda: seen.append("first"))
+        second = s.spawn(lambda: seen.append("second"))
+        third = s.spawn(lambda: seen.append("third"))
+
+        s.reschedule(first, position=0)
+        s.reschedule(second, position=-1)
+        s.reschedule(third, position=-2)
+        assert s.runnable_tasks() == (first, third, second)
+
+        s.run()
+
+        assert seen == ["first", "third", "second"]
+
+    def test_reschedule_none_moves_task_to_default_queue_position(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        current = s.spawn(lambda: "current")
+        target = s.spawn(lambda: "target")
+        later = s.spawn(lambda: "later")
+
+        s._runnable.yield_to(target, current, 0)
+        assert s.runnable_tasks() == (target, current, later)
+
+        s.reschedule(target)
+
+        assert s.runnable_tasks() == (current, later, target)
+
+    def test_priority_runnable_queue_runs_lowest_priority_value_first(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(
+            _PriorityTaskFactory(
+                [TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH, TASK_PRIORITY_HIGH / 2]
+            )
+        )
+        set_scheduler(s)
+        seen: list[str] = []
+
+        first = s.spawn(lambda: seen.append("first"))
+        second = s.spawn(lambda: seen.append("second"))
+        third = s.spawn(lambda: seen.append("third"))
+
+        assert s.runnable_tasks() == (second, third, first)
+
+        s.run()
+
+        assert seen == ["second", "third", "first"]
+
+    def test_priority_task_values_are_float_priority_bands(self):
+        priorities = [
+            TASK_PRIORITY_CRITICAL,
+            TASK_PRIORITY_HIGH,
+            TASK_PRIORITY_DEFAULT,
+            TASK_PRIORITY_LOW,
+            TASK_PRIORITY_IDLE,
+        ]
+
+        assert all(isinstance(priority, float) for priority in priorities)
+        assert priorities == [-20.0, -10.0, 0.0, 10.0, 20.0]
+
+    def test_priority_task_reports_effective_priority(self):
+        s = _new_scheduler()
+
+        task = PriorityTask(s, TASK_PRIORITY_LOW)
+
+        assert task.priority == TASK_PRIORITY_LOW
+        assert task.get_effective_priority() == TASK_PRIORITY_LOW
+
+    def test_priority_task_factory_accepts_spawn_priority_keyword(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(_PriorityTaskFactory())
+        set_scheduler(s)
+        seen: list[str] = []
+
+        s.spawn(lambda: seen.append("default"))
+        s.spawn(lambda: seen.append("early"), priority=TASK_PRIORITY_HIGH)
+        s.spawn(lambda: seen.append("middle"), priority=TASK_PRIORITY_HIGH / 2)
+
+        s.run()
+
+        assert seen == ["early", "middle", "default"]
+
+    def test_default_task_constructor_rejects_unknown_spawn_keyword(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        with pytest.raises(TypeError, match="priority"):
+            s.spawn(lambda: "ok", priority=-10)
+
+    def test_default_task_factory_passes_spawn_kwargs_to_task_constructor(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        seen: list[str] = []
+
+        default = s.spawn(lambda: seen.append("default"))
+        high = s.spawn(lambda: seen.append("high"), priority=TASK_PRIORITY_HIGH)
+
+        assert isinstance(default, PriorityTask)
+        assert isinstance(high, PriorityTask)
+        assert default.priority == TASK_PRIORITY_DEFAULT
+        assert high.priority == TASK_PRIORITY_HIGH
+
+        s.run()
+
+        assert seen == ["high", "default"]
+
+    def test_priority_runnable_queue_uses_stable_default_priority(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        set_scheduler(s)
+        seen: list[str] = []
+
+        first = s.spawn(lambda: seen.append("first"))
+        second = s.spawn(lambda: seen.append("second"))
+        third = s.spawn(lambda: seen.append("third"))
+
+        assert s.runnable_tasks() == (first, second, third)
+
+        s.run()
+
+        assert seen == ["first", "second", "third"]
+
+    def test_priority_runnable_queue_reschedule_none_requeries_priority(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(
+            _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_LOW])
+        )
+        set_scheduler(s)
+
+        first = s.spawn(lambda: "first")
+        second = s.spawn(lambda: "second")
+        first.priority = TASK_PRIORITY_CRITICAL
+
+        s.reschedule(first)
+
+        assert s.runnable_tasks() == (first, second)
+
+    def test_priority_runnable_queue_reorders_when_task_is_modified(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(
+            _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_LOW])
+        )
+        set_scheduler(s)
+
+        first = s.spawn(lambda: "first")
+        second = s.spawn(lambda: "second")
+        second.priority = TASK_PRIORITY_CRITICAL
+
+        assert s.runnable_tasks() == (second, first)
+
+    def test_priority_runnable_queue_does_not_reorder_prescheduled_modified_task(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(
+            _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH])
+        )
+        set_scheduler(s)
+
+        first = s.spawn(lambda: "first")
+        second = s.spawn(lambda: "second")
+        s.reschedule(first, position=0)
+        first.priority = TASK_PRIORITY_CRITICAL
+
+        assert s.runnable_tasks() == (first, second)
+
+    def test_priority_runnable_queue_immediate_lane_beats_priority(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(
+            _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH])
+        )
+        set_scheduler(s)
+        seen: list[str] = []
+
+        low = s.spawn(lambda: seen.append("low"))
+        high = s.spawn(lambda: seen.append("high"))
+
+        s.reschedule(low, position=0)
+        assert s.runnable_tasks() == (low, high)
+
+        s.run()
+
+        assert seen == ["low", "high"]
+
+    def test_priority_runnable_queue_runs_low_priority_task_before_runner(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        seen: list[str] = []
+
+        s.spawn(lambda: seen.append("low"), priority=TASK_PRIORITY_LOW)
+
+        s.run()
+
+        assert seen == ["low"]
+
+    def test_priority_runnable_queue_runs_stub_tasks_before_runner(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(StubTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        seen: list[str] = []
+
+        s.spawn(lambda: seen.append("low"), priority=TASK_PRIORITY_LOW)
+        s.spawn(lambda: seen.append("high"), priority=TASK_PRIORITY_HIGH)
+
+        s.run()
+
+        assert seen == ["high", "low"]
+
+    def test_run_sets_main_tealet_factory_from_task_factory(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+        seen = []
+
+        def worker() -> None:
+            main = _tealet.main()
+            seen.append(
+                (
+                    isinstance(main, PriorityTask),
+                    main.get_scheduler() is s,
+                    main.priority,
+                    _tealet.get_tealet_factory() is not original_factory,
+                )
+            )
+
+        s.spawn(worker)
+        s.run()
+
+        assert seen == [(True, True, task_module.TEALET_PRI_INF, True)]
+        assert _tealet.get_tealet_factory() is original_factory
+
+    def test_run_until_complete_sets_main_tealet_factory_from_task_factory(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+
+        def worker():
+            main = _tealet.main()
+            return (
+                isinstance(main, PriorityTask),
+                main.get_scheduler() is s,
+                main.priority,
+                _tealet.get_tealet_factory() is not original_factory,
+            )
+
+        assert s.run_until_complete(worker) == (True, True, task_module.TEALET_PRI_INF, True)
+        assert _tealet.get_tealet_factory() is original_factory
+
+    def test_main_context_sets_main_tealet_factory_from_task_factory(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+
+        with s.main_context():
+            main = _tealet.main()
+            assert isinstance(main, PriorityTask)
+            assert main.get_scheduler() is s
+            assert main.priority == TASK_PRIORITY_DEFAULT
+            assert _tealet.get_tealet_factory() is not original_factory
+
+        assert _tealet.get_tealet_factory() is original_factory
+
+    def test_reschedule_rejects_non_runnable_task(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        task = s.spawn(lambda: "done")
+        assert s.run_until_complete(task) == "done"
+
+        with pytest.raises(ValueError, match="task is not runnable"):
+            s.reschedule(task)
+
+    def test_reschedule_rejects_task_from_different_scheduler(self):
+        first = _new_scheduler()
+        second = Scheduler()
+        set_scheduler(first)
+
+        task = second.spawn(lambda: "done")
+
+        with pytest.raises(RuntimeError, match="different scheduler"):
+            first.reschedule(task)
+
+    def test_yield_to_default_leaves_current_at_fifo_tail(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: TealetTask | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current:start")
+            s.yield_to(target)
+            seen.append("current:after")
+
+        def selected() -> None:
+            seen.append("target")
+
+        def later() -> None:
+            seen.append("later")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.spawn(later)
+        s.run()
+
+        assert seen == ["current:start", "target", "later", "current:after"]
+
+    def test_yield_to_insert_current_at_zero_places_current_after_target(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: TealetTask | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current:start")
+            s.yield_to(target, insert_current_at=0)
+            seen.append("current:after")
+
+        def selected() -> None:
+            seen.append("target:start")
+            s.yield_()
+            seen.append("target:after")
+
+        def later() -> None:
+            seen.append("later")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.spawn(later)
+        s.run()
+
+        assert seen == ["current:start", "target:start", "current:after", "later", "target:after"]
+
+    def test_yield_to_insert_current_at_is_after_removed_target(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: TealetTask | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current:start")
+            s.yield_to(target, insert_current_at=1)
+            seen.append("current:after")
+
+        def selected() -> None:
+            seen.append("target:start")
+            s.yield_()
+            seen.append("target:after")
+
+        def later() -> None:
+            seen.append("later")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.spawn(later)
+        s.run()
+
+        assert seen == ["current:start", "target:start", "current:after", "later", "target:after"]
+
+    def test_yield_to_minus_one_places_current_at_prescheduled_tail(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: TealetTask | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current:start")
+            s.yield_to(target, insert_current_at=-1)
+            seen.append("current:after")
+
+        def selected() -> None:
+            seen.append("target")
+
+        def later() -> None:
+            seen.append("later")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.spawn(later)
+        s.run()
+
+        assert seen == ["current:start", "target", "current:after", "later"]
+
+    def test_yield_to_negative_insert_current_at_counts_from_prescheduled_end(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        first_current = s.spawn(lambda: "first-current")
+        first_target = s.spawn(lambda: "first-target")
+        second_current = s.spawn(lambda: "second-current")
+        second_target = s.spawn(lambda: "second-target")
+        later = s.spawn(lambda: "later")
+
+        s._runnable.yield_to(first_target, first_current, 0)
+        s._runnable.yield_to(second_target, second_current, -2)
+
+        assert s.runnable_tasks() == (second_target, first_target, second_current, first_current, later)
+
+    def test_yield_to_rejects_non_runnable_task(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        done = s.spawn(lambda: "done")
+
+        def current() -> None:
+            with pytest.raises(ValueError, match="task is not runnable"):
+                s.yield_to(done)
+            seen.append("current")
+
+        s.spawn(current)
+        s.run()
+
+        assert seen == ["current"]
+
+    def test_yield_to_rejects_task_from_different_scheduler(self):
+        first = _new_scheduler()
+        second = Scheduler()
+        set_scheduler(first)
+        seen: list[str] = []
+
+        task = second.spawn(lambda: "done")
+
+        def current() -> None:
+            with pytest.raises(RuntimeError, match="different scheduler"):
+                first.yield_to(task)
+            seen.append("current")
+
+        first.spawn(current)
+        first.run()
+
+        assert seen == ["current"]
+
     def test_task_factory_accessors_reset_to_default(self):
         s = _new_scheduler()
         original = s.get_task_factory()
         custom = StubTaskFactory()
 
         assert isinstance(original, DefaultTaskFactory)
+        assert original.task_constructor is TealetTask
         assert original.eager_start is False
+        assert custom.task_constructor is TealetTask
         s.set_task_factory(custom)
         assert s.get_task_factory() is custom
 
@@ -220,17 +708,19 @@ class TestSchedulerAccessors:
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
 
         class RecordingTaskFactory:
-            def __call__(self, scheduler, func, *, context, eager_start=None):
-                calls.append((scheduler, context.get(marker), eager_start))
+            task_constructor = TealetTask
+
+            def __call__(self, scheduler, func, *, context, eager_start=None, **kwargs):
+                calls.append((scheduler, context.get(marker), eager_start, kwargs))
                 return default(scheduler, func, context=context, eager_start=eager_start)
 
         marker.set("factory-context")
         s.set_task_factory(RecordingTaskFactory())
 
-        task = s.spawn(lambda: "ok")
+        task = s.spawn(lambda: "ok", priority=-10)
 
         assert s.run_until_complete(task) == "ok"
-        assert calls == [(s, "factory-context", None)]
+        assert calls == [(s, "factory-context", None, {"priority": -10})]
 
     def test_default_task_factory_eager_defers_until_scheduler_runs(self):
         s = _new_scheduler()
@@ -349,6 +839,18 @@ class TestSchedulerAccessors:
         assert factory.stub is stub
         assert s.run_until_complete(first) == "first"
         assert s.run_until_complete(second) == "second"
+
+    def test_stub_task_factory_passes_spawn_kwargs_to_task_constructor(self):
+        s = _new_scheduler()
+        factory = StubTaskFactory(task_constructor=PriorityTask)
+        s.set_task_factory(factory)
+
+        task = s.spawn(lambda: "ok", priority=TASK_PRIORITY_HIGH)
+
+        assert factory.stub is not None
+        assert isinstance(task, PriorityTask)
+        assert task.priority == TASK_PRIORITY_HIGH
+        assert s.run_until_complete(task) == "ok"
 
     def test_stub_task_factory_eager_runs_before_spawn_returns_inside_scheduler(self):
         s = _new_scheduler()
@@ -1054,6 +1556,29 @@ class TestSchedulerAccessors:
             writer.close()
             s.close()
 
+    def test_run_forever_sets_main_tealet_factory_from_task_factory(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+        seen = []
+
+        def worker() -> None:
+            main = _tealet.main()
+            seen.append(
+                (
+                    isinstance(main, PriorityTask),
+                    main.get_scheduler() is s,
+                    main.priority,
+                    _tealet.get_tealet_factory() is not original_factory,
+                )
+            )
+            s.stop()
+
+        s.call_soon(worker)
+        s.run_forever()
+
+        assert seen == [(True, True, task_module.TEALET_PRI_INF, True)]
+        assert _tealet.get_tealet_factory() is original_factory
+
     def test_tealet_selector_event_loop_runs_asyncio_timer(self):
         s = SelectorScheduler()
         set_scheduler(s)
@@ -1375,6 +1900,27 @@ class TestSchedulerAccessors:
 
         asyncio.run(run())
 
+    def test_arun_until_complete_sets_main_tealet_factory_from_task_factory(self):
+        s = AsyncScheduler()
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        original_factory = _tealet.get_tealet_factory()
+
+        def worker():
+            main = _tealet.main()
+            return (
+                isinstance(main, PriorityTask),
+                main.get_scheduler() is s,
+                main.priority,
+                _tealet.get_tealet_factory() is not original_factory,
+            )
+
+        async def run() -> None:
+            assert await s.arun_until_complete(worker) == (True, True, task_module.TEALET_PRI_INF, True)
+
+        asyncio.run(run())
+        assert _tealet.get_tealet_factory() is original_factory
+
     def test_arun_forever_stops(self):
         s = AsyncScheduler()
         set_scheduler(s)
@@ -1388,6 +1934,34 @@ class TestSchedulerAccessors:
             await s.arun_forever()
 
         asyncio.run(run())
+
+    def test_arun_forever_sets_main_tealet_factory_from_task_factory(self):
+        s = AsyncScheduler()
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        original_factory = _tealet.get_tealet_factory()
+        seen = []
+
+        def worker() -> None:
+            main = _tealet.main()
+            seen.append(
+                (
+                    isinstance(main, PriorityTask),
+                    main.get_scheduler() is s,
+                    main.priority,
+                    _tealet.get_tealet_factory() is not original_factory,
+                )
+            )
+            s.stop()
+
+        s.call_soon(worker)
+
+        async def run() -> None:
+            await s.arun_forever()
+
+        asyncio.run(run())
+        assert seen == [(True, True, task_module.TEALET_PRI_INF, True)]
+        assert _tealet.get_tealet_factory() is original_factory
 
     def test_run_until_complete_returns_result(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
@@ -1501,7 +2075,8 @@ class TestSchedulerAccessors:
 
         task = s.spawn(worker)
         group = gather(task)
-        assert group.cancel() is True
+        with s.main_context():
+            assert group.cancel() is True
 
         with pytest.raises(CancelledError):
             s.run_until_complete(group)
@@ -2139,7 +2714,7 @@ class TestSchedulerExamples:
                     pass
                 pytest.fail(
                     "scheduler arun timed out: "
-                    f"tasks={len(s._tasks)} timers={len(s._timers)} "
+                    f"tasks={len(s.runnable_tasks())} timers={len(s._timers)} "
                     f"runner={s._runner is not None} seen={seen}"
                 )
 
@@ -2425,8 +3000,9 @@ class TestSchedulerExamples:
             original_create_task = loop.create_task
 
             def create_task(coro, *args, **kwargs):
+                task = original_create_task(coro, *args, **kwargs)
                 create_task_calls.append(coro)
-                return original_create_task(coro, *args, **kwargs)
+                return task
 
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
@@ -2495,8 +3071,9 @@ class TestSchedulerExamples:
             original_create_task = loop.create_task
 
             def create_task(coro, *args, **kwargs):
+                task = original_create_task(coro, *args, **kwargs)
                 create_task_calls.append(coro)
-                return original_create_task(coro, *args, **kwargs)
+                return task
 
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
@@ -2563,8 +3140,9 @@ class TestSchedulerExamples:
             original_create_task = loop.create_task
 
             def create_task(coro, *args, **kwargs):
+                task = original_create_task(coro, *args, **kwargs)
                 create_task_calls.append(coro)
-                return original_create_task(coro, *args, **kwargs)
+                return task
 
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
@@ -2608,1508 +3186,3 @@ class TestSchedulerExamples:
             ("result", "body-changed"),
             ("caller-after", "caller"),
         ]
-
-    def test_lock_serializes_access(self):
-        s = _new_scheduler()
-        lock = Lock()
-        seen: list[str] = []
-
-        def worker(name: str) -> None:
-            seen.append(f"{name}:before")
-            with lock:
-                seen.append(f"{name}:acquired")
-                s.yield_()
-                seen.append(f"{name}:releasing")
-            seen.append(f"{name}:after")
-
-        s.spawn(lambda: worker("a"))
-        s.spawn(lambda: worker("b"))
-        s.run()
-
-        assert seen == [
-            "a:before",
-            "a:acquired",
-            "b:before",
-            "a:releasing",
-            "a:after",
-            "b:acquired",
-            "b:releasing",
-            "b:after",
-        ]
-
-    def test_lock_asyncio_acquire_release(self):
-        lock = Lock()
-        seen: list[str] = []
-
-        async def worker(name: str) -> None:
-            seen.append(f"{name}:before")
-            await lock.acquire()
-            try:
-                seen.append(f"{name}:acquired")
-                await asyncio.sleep(0)
-            finally:
-                lock.release()
-                seen.append(f"{name}:released")
-
-        async def orchestrate() -> None:
-            await asyncio.gather(worker("a"), worker("b"))
-
-        asyncio.run(orchestrate())
-
-        assert seen == [
-            "a:before",
-            "a:acquired",
-            "b:before",
-            "a:released",
-            "b:acquired",
-            "b:released",
-        ]
-
-    def test_lock_release_unsets_locked_state(self):
-        lock = Lock()
-        assert lock.sacquire() is True
-        lock.release()
-        assert lock.locked() is False
-
-    def test_lock_asyncio_context_manager(self):
-        lock = Lock()
-        seen: list[str] = []
-
-        async def worker(name: str) -> None:
-            seen.append(f"{name}:before")
-            async with lock:
-                seen.append(f"{name}:inside")
-                await asyncio.sleep(0)
-            seen.append(f"{name}:after")
-
-        async def orchestrate() -> None:
-            await asyncio.gather(worker("x"), worker("y"))
-
-        asyncio.run(orchestrate())
-
-        assert seen == [
-            "x:before",
-            "x:inside",
-            "y:before",
-            "x:after",
-            "y:inside",
-            "y:after",
-        ]
-
-    def test_semaphore_limits_concurrency(self):
-        s = _new_scheduler()
-        sem = Semaphore(2)
-        active = 0
-        max_active = 0
-        seen: list[str] = []
-
-        def worker(name: str) -> None:
-            nonlocal active, max_active
-            sem.sacquire()
-            try:
-                active += 1
-                max_active = max(max_active, active)
-                seen.append(f"{name}:entered")
-                s.yield_()
-            finally:
-                active -= 1
-                sem.release()
-                seen.append(f"{name}:left")
-
-        s.spawn(lambda: worker("a"))
-        s.spawn(lambda: worker("b"))
-        s.spawn(lambda: worker("c"))
-        s.run()
-
-        assert max_active == 2
-        assert seen == [
-            "a:entered",
-            "b:entered",
-            "a:left",
-            "b:left",
-            "c:entered",
-            "c:left",
-        ]
-
-    def test_bounded_semaphore_overrelease_raises(self):
-        sem = BoundedSemaphore(1)
-
-        sem.sacquire()
-        sem.release()
-        with pytest.raises(ValueError, match="released too many times"):
-            sem.release()
-
-    def test_semaphore_asyncio_acquire_release(self):
-        sem = Semaphore(1)
-        seen: list[str] = []
-
-        async def worker(name: str) -> None:
-            seen.append(f"{name}:before")
-            await sem.acquire()
-            try:
-                seen.append(f"{name}:inside")
-                await asyncio.sleep(0)
-            finally:
-                sem.release()
-                seen.append(f"{name}:after")
-
-        async def run() -> None:
-            await asyncio.gather(worker("x"), worker("y"))
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-
-        assert seen == [
-            "x:before",
-            "x:inside",
-            "y:before",
-            "x:after",
-            "y:inside",
-            "y:after",
-        ]
-
-    def test_semaphore_asyncio_context_manager(self):
-        sem = Semaphore(1)
-        seen: list[str] = []
-
-        async def worker(name: str) -> None:
-            seen.append(f"{name}:before")
-            async with sem:
-                seen.append(f"{name}:inside")
-                await asyncio.sleep(0)
-            seen.append(f"{name}:after")
-
-        async def run() -> None:
-            await asyncio.gather(worker("x"), worker("y"))
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-
-        assert seen == [
-            "x:before",
-            "x:inside",
-            "y:before",
-            "x:after",
-            "y:inside",
-            "y:after",
-        ]
-
-    def test_condition_wait_notify(self):
-        s = _new_scheduler()
-        cond = Condition()
-        seen: list[str] = []
-
-        def waiter(name: str) -> None:
-            with cond:
-                seen.append(f"{name}:waiting")
-                cond.swait()
-                seen.append(f"{name}:resumed")
-
-        def notifier() -> None:
-            s.yield_()
-            with cond:
-                seen.append("notifier:notify")
-                cond.notify()
-            s.yield_()
-            with cond:
-                seen.append("notifier:notify_all")
-                cond.notify_all()
-
-        s.spawn(lambda: waiter("a"))
-        s.spawn(lambda: waiter("b"))
-        s.spawn(notifier)
-        s.run()
-
-        assert seen == [
-            "a:waiting",
-            "b:waiting",
-            "notifier:notify",
-            "a:resumed",
-            "notifier:notify_all",
-            "b:resumed",
-        ]
-
-    def test_condition_wait_for_predicate(self):
-        s = _new_scheduler()
-        cond = Condition()
-        state = {"ready": False}
-        seen: list[str] = []
-
-        def waiter() -> None:
-            with cond:
-                cond.swait_for(lambda: state["ready"])
-                seen.append("waiter:done")
-
-        def setter() -> None:
-            s.yield_()
-            with cond:
-                state["ready"] = True
-                cond.notify_all()
-
-        s.spawn(waiter)
-        s.spawn(setter)
-        s.run()
-
-        assert seen == ["waiter:done"]
-
-    def test_condition_wait_and_notify_require_lock(self):
-        cond = Condition()
-
-        with pytest.raises(RuntimeError, match="un-acquired lock"):
-            cond.swait()
-        with pytest.raises(RuntimeError, match="un-acquired lock"):
-            cond.notify()
-
-    def test_condition_asyncio_wait_notify(self):
-        cond = Condition()
-        seen: list[str] = []
-
-        async def waiter(name: str) -> None:
-            async with cond:
-                seen.append(f"{name}:waiting")
-                await cond.wait()
-                seen.append(f"{name}:resumed")
-
-        async def notifier() -> None:
-            await asyncio.sleep(0)
-            async with cond:
-                seen.append("notifier:notify")
-                cond.notify()
-            await asyncio.sleep(0)
-            async with cond:
-                seen.append("notifier:notify_all")
-                cond.notify_all()
-
-        async def run() -> None:
-            t1 = asyncio.create_task(waiter("a"))
-            t2 = asyncio.create_task(waiter("b"))
-            await notifier()
-            await asyncio.wait_for(asyncio.gather(t1, t2), timeout=1.0)
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-
-        assert set(seen) == {
-            "a:waiting",
-            "b:waiting",
-            "notifier:notify",
-            "notifier:notify_all",
-            "a:resumed",
-            "b:resumed",
-        }
-        notify_idx = seen.index("notifier:notify")
-        notify_all_idx = seen.index("notifier:notify_all")
-        assert notify_idx < seen.index("a:resumed")
-        assert notify_idx < seen.index("b:resumed")
-        assert notify_idx < notify_all_idx
-
-    def test_condition_asyncio_wait_for_predicate(self):
-        cond = Condition()
-        state = {"ready": False}
-        seen: list[str] = []
-
-        async def waiter() -> None:
-            async with cond:
-                await cond.wait_for(lambda: state["ready"])
-                seen.append("waiter:done")
-
-        async def setter() -> None:
-            await asyncio.sleep(0)
-            async with cond:
-                state["ready"] = True
-                cond.notify_all()
-
-        async def run() -> None:
-            t_waiter = asyncio.create_task(waiter())
-            t_setter = asyncio.create_task(setter())
-            await asyncio.wait_for(asyncio.gather(t_waiter, t_setter), timeout=1.0)
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-        assert seen == ["waiter:done"]
-
-    def test_barrier_swait_releases_group(self):
-        s = _new_scheduler()
-        barrier = Barrier(3)
-        seen: list[str] = []
-
-        def worker(name: str) -> None:
-            seen.append(f"{name}:before")
-            idx = barrier.swait()
-            seen.append(f"{name}:after:{idx}")
-
-        s.spawn(lambda: worker("a"))
-        s.spawn(lambda: worker("b"))
-        s.spawn(lambda: worker("c"))
-        s.run()
-
-        assert seen[:3] == ["a:before", "b:before", "c:before"]
-        assert set(seen[3:]) == {"a:after:2", "b:after:1", "c:after:0"}
-
-    def test_barrier_async_wait_releases_group(self):
-        barrier = Barrier(3)
-        seen: list[str] = []
-
-        async def worker(name: str) -> None:
-            seen.append(f"{name}:before")
-            idx = await barrier.wait()
-            seen.append(f"{name}:after:{idx}")
-
-        async def run() -> None:
-            await asyncio.gather(worker("a"), worker("b"), worker("c"))
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-
-        assert set(seen) == {
-            "a:before",
-            "b:before",
-            "c:before",
-            "a:after:2",
-            "b:after:1",
-            "c:after:0",
-        }
-
-    def test_barrier_requires_positive_parties(self):
-        with pytest.raises(ValueError, match="parties must be > 0"):
-            Barrier(0)
-
-
-class TestFutureExamples:
-    def test_future_demo(self):
-        seen = demo_future_result()
-        assert seen == ["producer:start", "producer:done", "consumer:result=42"]
-
-    def test_future_exception_propagates(self):
-        s = _new_scheduler()
-
-        def boom():
-            raise ValueError("boom")
-
-        future = s.spawn(boom)
-        s.run()
-
-        assert future.done()
-        with pytest.raises(ValueError, match="boom"):
-            future.result()
-        assert isinstance(future.exception(), ValueError)
-
-    def test_future_exception_before_task_main_starts(self):
-        s = _new_scheduler()
-        gate = Event()
-        seen: list[str] = []
-
-        def blocked() -> int:
-            seen.append("blocked:start")
-            gate.swait()
-            seen.append("blocked:done")
-            return 1
-
-        future_blocked = s.spawn(blocked)
-
-        def thrower() -> None:
-            seen.append("thrower:start")
-            future_victim = s.spawn(lambda: 7)
-            victim = s._tasks[-1]
-            victim.throw(ValueError("pre-start"))
-            assert future_victim.done()
-            with pytest.raises(ValueError, match="pre-start"):
-                future_victim.result()
-            gate.set()
-            seen.append("thrower:done")
-
-        s.spawn(thrower)
-        s.run()
-
-        assert future_blocked.result() == 1
-        assert seen == ["blocked:start", "thrower:start", "thrower:done", "blocked:done"]
-
-    def test_future_set_result_once(self):
-        future = Future()
-        future.set_result(123)
-
-        assert future.done()
-        assert future.wait() == 123
-        assert future.result() == 123
-        assert future.exception() is None
-
-        with pytest.raises(InvalidStateError):
-            future.set_result(456)
-
-    def test_future_done_callback_runs_on_completion(self):
-        future: Future[int] = Future()
-        seen: list[str] = []
-
-        def on_done(done: Future[int]) -> None:
-            seen.append(f"done={done.result()}")
-
-        future.add_done_callback(on_done)
-        future.set_result(5)
-
-        assert seen == ["done=5"]
-
-    def test_future_done_callback_is_scheduled_when_already_done(self):
-        async def case() -> None:
-            future: Future[int] = Future()
-            future.set_result(7)
-            seen: list[str] = []
-
-            def on_done(done: Future[int]) -> None:
-                seen.append(f"done={done.result()}")
-
-            future.add_done_callback(on_done)
-
-            assert seen == []
-            await asyncio.sleep(0)
-            assert seen == ["done=7"]
-
-        asyncio.run(case())
-
-    def test_future_done_callback_already_done_runs_without_asyncio_loop(self):
-        future: Future[int] = Future()
-        future.set_result(7)
-        seen: list[str] = []
-
-        def on_done(done: Future[int]) -> None:
-            seen.append(f"done={done.result()}")
-
-        future.add_done_callback(on_done)
-
-        assert seen == ["done=7"]
-
-    def test_future_done_callback_uses_context(self):
-        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
-        future: Future[int] = Future()
-        seen: list[str] = []
-
-        def on_done(_done: Future[int]) -> None:
-            seen.append(marker.get())
-
-        ctx = contextvars.copy_context()
-        ctx.run(marker.set, "callback-context")
-
-        future.add_done_callback(on_done, context=ctx)
-        future.set_result(1)
-
-        assert seen == ["callback-context"]
-
-    def test_future_done_callback_captures_current_context_by_default(self):
-        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
-        future: Future[int] = Future()
-        seen: list[str] = []
-
-        marker.set("registered")
-
-        def on_done(_done: Future[int]) -> None:
-            seen.append(marker.get())
-
-        future.add_done_callback(on_done)
-        marker.set("after-register")
-        future.set_result(1)
-
-        assert seen == ["registered"]
-
-    def test_future_remove_done_callback(self):
-        future: Future[int] = Future()
-        seen: list[str] = []
-
-        def cb_one(_done: Future[int]) -> None:
-            seen.append("one")
-
-        def cb_two(_done: Future[int]) -> None:
-            seen.append("two")
-
-        future.add_done_callback(cb_one)
-        future.add_done_callback(cb_one)
-        future.add_done_callback(cb_two)
-
-        assert future.remove_done_callback(cb_one) == 2
-
-        future.set_result(1)
-
-        assert seen == ["two"]
-
-    def test_future_result_and_exception_require_done(self):
-        future = Future()
-
-        with pytest.raises(InvalidStateError, match="Result is not ready"):
-            future.result()
-        with pytest.raises(InvalidStateError, match="Exception is not set"):
-            future.exception()
-
-    def test_future_cancel_marks_done_and_raises_cancelled(self):
-        future = Future()
-
-        assert future.cancel() is True
-        assert future.done()
-        assert future.cancelled()
-        assert future.cancel() is False
-
-        with pytest.raises(CancelledError):
-            future.result()
-        with pytest.raises(CancelledError):
-            future.exception()
-
-    def test_future_set_cancelled_error_marks_cancelled(self):
-        future = Future()
-
-        future.set_exception(CancelledError())
-
-        assert future.done()
-        assert future.cancelled()
-        with pytest.raises(CancelledError):
-            future.result()
-        with pytest.raises(CancelledError):
-            future.exception()
-
-    def test_future_wait_after_cancel_raises_cancelled(self):
-        future = Future()
-        assert future.cancel() is True
-        with pytest.raises(CancelledError):
-            future.wait()
-
-    def test_future_await_after_cancel_raises_cancelled(self):
-        future = Future()
-        assert future.cancel() is True
-
-        async def orchestrate() -> None:
-            with pytest.raises(CancelledError):
-                await future
-
-        asyncio.run(orchestrate())
-
-    def test_future_await_cancelled_schedules_future_cancel(self):
-        s = AsyncScheduler()
-        set_scheduler(s)
-        future: Future[int] = Future()
-        seen: list[object] = []
-
-        async def waiter() -> None:
-            try:
-                await future
-            except asyncio.CancelledError:
-                seen.append(("waiter:cancelled", future.cancelled()))
-                raise
-
-        async def orchestrate() -> None:
-            runner = asyncio.create_task(s.arun_forever())
-            task = asyncio.create_task(waiter())
-            await asyncio.sleep(0)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            seen.append(("after-await", future.cancelled()))
-            await asyncio.sleep(0)
-            seen.append(("after-call-soon", future.cancelled()))
-            s.stop()
-            await asyncio.wait_for(runner, timeout=1.0)
-
-        asyncio.run(orchestrate())
-
-        assert seen == [("waiter:cancelled", False), ("after-await", True), ("after-call-soon", True)]
-
-    def test_future_wait_cancelled_error_schedules_future_cancel(self):
-        s = _new_scheduler()
-        future: Future[int] = Future()
-        seen: list[object] = []
-        waiter_ref: dict[str, TealetTask] = {}
-
-        def waiter() -> None:
-            try:
-                future.wait()
-            except CancelledError:
-                seen.append(("waiter:cancelled", future.cancelled()))
-                raise
-
-        def canceller() -> None:
-            seen.append("canceller:start")
-            assert waiter_ref["task"].cancel() is True
-            seen.append(("canceller:after-cancel", future.cancelled()))
-
-        waiter_ref["task"] = s.spawn(waiter)
-        s.spawn(canceller)
-        s.run()
-        seen.append(("after-run", future.cancelled()))
-
-        assert waiter_ref["task"].cancelled() is True
-        assert future.cancelled() is True
-        assert seen == [
-            "canceller:start",
-            ("waiter:cancelled", False),
-            ("canceller:after-cancel", False),
-            ("after-run", True),
-        ]
-
-    def test_future_wait_cancelled_future_cancels_waiting_task(self):
-        s = _new_scheduler()
-        future: Future[int] = Future()
-        future.cancel()
-
-        def waiter() -> None:
-            future.wait()
-
-        waiter_task = s.spawn(waiter)
-        s.run()
-
-        assert waiter_task.done() is True
-        assert waiter_task.cancelled() is True
-        with pytest.raises(CancelledError):
-            waiter_task.result()
-
-    def test_shield_wait_cancelled_error_does_not_cancel_future(self):
-        s = _new_scheduler()
-        future: Future[int] = Future()
-        seen: list[object] = []
-        waiter_ref: dict[str, TealetTask] = {}
-
-        def waiter() -> None:
-            try:
-                shield(future).wait()
-            except CancelledError:
-                seen.append(("waiter:cancelled", future.cancelled()))
-                raise
-
-        def canceller() -> None:
-            seen.append("canceller:start")
-            assert waiter_ref["task"].cancel() is True
-            seen.append(("canceller:after-cancel", future.cancelled()))
-            future.set_result(9)
-
-        waiter_ref["task"] = s.spawn(waiter)
-        s.spawn(canceller)
-        s.run()
-
-        assert waiter_ref["task"].cancelled() is True
-        assert future.cancelled() is False
-        assert future.result() == 9
-        assert seen == ["canceller:start", ("waiter:cancelled", False), ("canceller:after-cancel", False)]
-
-    def test_shield_wait_returns_future_result(self):
-        future: Future[int] = Future()
-        future.set_result(12)
-
-        assert shield(future).wait() == 12
-
-    def test_shield_cancel_does_not_cancel_future(self):
-        future: Future[int] = Future()
-        shielded = shield(future)
-
-        assert shielded.cancel() is True
-        assert shielded.cancelled() is True
-        assert future.cancelled() is False
-
-        future.set_result(12)
-        assert future.result() == 12
-        with pytest.raises(CancelledError):
-            shielded.result()
-
-    def test_await_cancelled_error_schedules_async_future_cancel(self):
-        s = AsyncScheduler()
-        set_scheduler(s)
-        seen: list[object] = []
-
-        async def orchestrate() -> None:
-            async_future = asyncio.get_running_loop().create_future()
-            waiter_ref: dict[str, TealetTask] = {}
-
-            def waiter() -> None:
-                try:
-                    s.await_(async_future)
-                except CancelledError:
-                    seen.append(("waiter:cancelled", async_future.cancelled()))
-                    raise
-
-            def canceller() -> None:
-                seen.append("canceller:start")
-                assert waiter_ref["task"].cancel() is True
-                seen.append(("canceller:after-cancel", async_future.cancelled()))
-
-            waiter_ref["task"] = s.spawn(waiter)
-            s.spawn(canceller)
-            await s.arun()
-            seen.append(("after-arun", async_future.cancelled()))
-            await asyncio.sleep(0)
-            seen.append(("after-call-soon", async_future.cancelled()))
-
-            assert waiter_ref["task"].cancelled() is True
-
-        asyncio.run(orchestrate())
-
-        assert seen == [
-            "canceller:start",
-            ("waiter:cancelled", False),
-            ("canceller:after-cancel", False),
-            ("after-arun", False),
-            ("after-call-soon", True),
-        ]
-
-    def test_await_cancelled_error_does_not_cancel_asyncio_shielded_future(self):
-        s = AsyncScheduler()
-        set_scheduler(s)
-        seen: list[object] = []
-
-        async def orchestrate() -> None:
-            async_future = asyncio.get_running_loop().create_future()
-            shielded = asyncio.shield(async_future)
-            waiter_ref: dict[str, TealetTask] = {}
-
-            def waiter() -> None:
-                try:
-                    s.await_(shielded)
-                except CancelledError:
-                    seen.append(("waiter:cancelled", shielded.cancelled(), async_future.cancelled()))
-                    raise
-
-            def canceller() -> None:
-                seen.append("canceller:start")
-                assert waiter_ref["task"].cancel() is True
-                seen.append(("canceller:after-cancel", shielded.cancelled(), async_future.cancelled()))
-
-            waiter_ref["task"] = s.spawn(waiter)
-            s.spawn(canceller)
-            await s.arun()
-            seen.append(("after-arun", shielded.cancelled(), async_future.cancelled()))
-            await asyncio.sleep(0)
-            seen.append(("after-call-soon", shielded.cancelled(), async_future.cancelled()))
-            async_future.set_result(9)
-
-            assert waiter_ref["task"].cancelled() is True
-
-        asyncio.run(orchestrate())
-
-        assert seen == [
-            "canceller:start",
-            ("waiter:cancelled", False, False),
-            ("canceller:after-cancel", False, False),
-            ("after-arun", False, False),
-            ("after-call-soon", True, False),
-        ]
-
-    def test_future_wait_timeout_does_not_cancel_future(self):
-        s = _new_scheduler()
-        future: Future[int] = Future()
-
-        def waiter() -> None:
-            with pytest.raises(RawTimeoutError):
-                future.wait()
-
-        waiter_task = s.spawn(waiter)
-        s.pump(1)
-        waiter_task.throw(RawTimeoutError())
-        s.run()
-
-        assert waiter_task.done() is True
-        assert future.done() is False
-        assert future.cancelled() is False
-
-    def test_future_result_timeout(self):
-        s = _new_scheduler()
-        future: Future[int] = Future()
-        seen: list[str] = []
-
-        def complete_later() -> None:
-            s.sleep(0.01)
-            future.set_result(1)
-
-        def waiter() -> None:
-            tm = timeout(0.001)
-            with pytest.raises(TimeoutError, match="Operation timed out"):
-                with tm:
-                    future.wait()
-            seen.append(f"timed-out={tm.expired()}")
-            future.wait()
-            seen.append(f"value={future.result()}")
-
-        s.spawn(complete_later)
-        s.spawn(waiter)
-        s.run()
-        assert seen == ["timed-out=True", "value=1"]
-
-    def test_timeout_context_future_result_timeout(self):
-        s = _new_scheduler()
-        future: Future[int] = Future()
-        seen: list[str] = []
-
-        def complete_later() -> None:
-            s.sleep(0.01)
-            future.set_result(1)
-
-        def waiter() -> None:
-            tm = timeout(0.001)
-            with pytest.raises(TimeoutError, match="Operation timed out"):
-                with tm:
-                    future.wait()
-            seen.append(f"timed-out={tm.expired()}")
-            future.wait()
-            seen.append(f"value={future.result()}")
-
-        s.spawn(complete_later)
-        s.spawn(waiter)
-        s.run()
-        assert seen == ["timed-out=True", "value=1"]
-
-    def test_future_async_result(self):
-        s = AsyncScheduler()
-        set_scheduler(s)
-        future: Future[int] = Future()
-
-        async def orchestrate() -> None:
-            s.call_later(0.001, future.set_result, 7)
-            runner = asyncio.create_task(s.arun())
-            try:
-                assert await asyncio.wait_for(future, timeout=1.0) == 7
-                assert future.result() == 7
-            finally:
-                await asyncio.wait_for(runner, timeout=1.0)
-
-        asyncio.run(orchestrate())
-
-    def test_future_async_exception(self):
-        s = AsyncScheduler()
-        set_scheduler(s)
-        future: Future[int] = Future()
-
-        async def orchestrate() -> None:
-            s.call_later(0.001, future.set_exception, ValueError("boom"))
-            runner = asyncio.create_task(s.arun())
-            try:
-                with pytest.raises(ValueError, match="boom"):
-                    await asyncio.wait_for(future, timeout=1.0)
-                with pytest.raises(ValueError, match="boom"):
-                    future.result()
-                exc = future.exception()
-                assert isinstance(exc, ValueError)
-            finally:
-                await asyncio.wait_for(runner, timeout=1.0)
-
-        asyncio.run(orchestrate())
-
-    def test_tealet_task_async_wait_cancelled_error_raises_cancelled_error(self):
-        s = AsyncScheduler()
-        set_scheduler(s)
-
-        def target_worker() -> None:
-            raise CancelledError
-
-        async def orchestrate() -> None:
-            task = s.spawn(target_worker)
-            runner = asyncio.create_task(s.arun())
-            try:
-                with pytest.raises(CancelledError):
-                    await asyncio.wait_for(task, timeout=1.0)
-                assert task.cancelled() is True
-                assert isinstance(task._exception, CancelledError)
-            finally:
-                await asyncio.wait_for(runner, timeout=1.0)
-
-        asyncio.run(orchestrate())
-
-    def test_future_is_awaitable(self):
-        s = AsyncScheduler()
-        set_scheduler(s)
-        future: Future[int] = Future()
-
-        async def orchestrate() -> None:
-            s.call_later(0.001, future.set_result, 9)
-            runner = asyncio.create_task(s.arun())
-            try:
-                awaited = await asyncio.wait_for(future, timeout=1.0)
-                assert awaited == 9
-                assert future.result() == 9
-            finally:
-                await asyncio.wait_for(runner, timeout=1.0)
-
-        asyncio.run(orchestrate())
-
-
-class TestQueueExamples:
-    def test_queue_fifo_order(self):
-        q: Queue[int] = Queue()
-        q.put_nowait(1)
-        q.put_nowait(2)
-        q.put_nowait(3)
-
-        assert q.get_nowait() == 1
-        assert q.get_nowait() == 2
-        assert q.get_nowait() == 3
-
-    def test_queue_nowait_errors(self):
-        q: Queue[int] = Queue(maxsize=1)
-        with pytest.raises(QueueEmpty):
-            q.get_nowait()
-
-        q.put_nowait(1)
-        with pytest.raises(QueueFull):
-            q.put_nowait(2)
-
-    def test_queue_put_get_with_scheduler_blocking(self):
-        s = _new_scheduler()
-        q: Queue[int] = Queue(maxsize=1)
-        seen: list[str] = []
-
-        def producer() -> None:
-            q.sput(1)
-            seen.append("put:1")
-            q.sput(2)
-            seen.append("put:2")
-
-        def consumer() -> None:
-            s.yield_()
-            seen.append(f"get:{q.sget()}")
-            s.yield_()
-            seen.append(f"get:{q.sget()}")
-
-        s.spawn(producer)
-        s.spawn(consumer)
-        s.run()
-
-        assert seen == ["put:1", "get:1", "put:2", "get:2"]
-
-    def test_queue_join_and_task_done(self):
-        s = _new_scheduler()
-        q: Queue[int] = Queue()
-        produced_evt = Event()
-        seen: list[str] = []
-
-        def producer() -> None:
-            # Let other spawned tasks start so producer exit does not try
-            # to hand off directly to an unstarted tealet.
-            s.yield_()
-            q.sput(1)
-            q.sput(2)
-            seen.append("produced")
-            produced_evt.set()
-
-        def consumer() -> None:
-            s.yield_()
-            q.sget()
-            q.task_done()
-            seen.append("done:1")
-            q.sget()
-            q.task_done()
-            seen.append("done:2")
-
-        def waiter() -> None:
-            produced_evt.swait()
-            q.sjoin()
-            seen.append("joined")
-
-        s.spawn(producer)
-        s.spawn(consumer)
-        s.spawn(waiter)
-        s.run()
-
-        assert seen == ["produced", "done:1", "done:2", "joined"]
-
-    def test_queue_task_done_underflow_raises(self):
-        q: Queue[int] = Queue()
-        with pytest.raises(ValueError, match=r"task_done\(\) called too many times"):
-            q.task_done()
-
-    def test_queue_shutdown_graceful_drains_existing_items(self):
-        q: Queue[int] = Queue()
-        q.put_nowait(1)
-        q.put_nowait(2)
-
-        q.shutdown()
-
-        with pytest.raises(QueueShutDown):
-            q.put_nowait(3)
-        assert q.get_nowait() == 1
-        q.task_done()
-        assert q.get_nowait() == 2
-        q.task_done()
-        q.sjoin()
-        with pytest.raises(QueueShutDown):
-            q.get_nowait()
-
-    def test_queue_shutdown_immediate_drains_and_unblocks_join(self):
-        q: Queue[int] = Queue()
-        q.put_nowait(1)
-        q.put_nowait(2)
-
-        q.shutdown(immediate=True)
-
-        assert q.empty()
-        q.sjoin()
-        with pytest.raises(QueueShutDown):
-            q.get_nowait()
-        with pytest.raises(QueueShutDown):
-            q.put_nowait(3)
-        with pytest.raises(ValueError, match=r"task_done\(\) called too many times"):
-            q.task_done()
-
-    def test_queue_shutdown_immediate_wakes_blocked_sync_joiner(self):
-        s = _new_scheduler()
-        q: Queue[int] = Queue()
-        q.put_nowait(1)
-        q.put_nowait(2)
-        seen: list[str] = []
-
-        def waiter() -> None:
-            q.sjoin()
-            seen.append("joined")
-
-        def closer() -> None:
-            s.yield_()
-            q.shutdown(immediate=True)
-            seen.append("shutdown")
-
-        s.spawn(waiter)
-        s.spawn(closer)
-        s.run()
-
-        assert seen == ["shutdown", "joined"]
-
-    def test_queue_shutdown_wakes_blocked_sync_getter(self):
-        s = _new_scheduler()
-        q: Queue[int] = Queue()
-        seen: list[str] = []
-
-        def consumer() -> None:
-            try:
-                q.sget()
-            except QueueShutDown:
-                seen.append("getter:shutdown")
-
-        def closer() -> None:
-            s.yield_()
-            q.shutdown()
-            seen.append("shutdown")
-
-        s.spawn(consumer)
-        s.spawn(closer)
-        s.run()
-
-        assert seen == ["shutdown", "getter:shutdown"]
-
-    def test_queue_shutdown_wakes_blocked_sync_putter(self):
-        s = _new_scheduler()
-        q: Queue[int] = Queue(maxsize=1)
-        q.put_nowait(1)
-        seen: list[str] = []
-
-        def producer() -> None:
-            try:
-                q.sput(2)
-            except QueueShutDown:
-                seen.append("putter:shutdown")
-
-        def closer() -> None:
-            s.yield_()
-            q.shutdown()
-            seen.append("shutdown")
-
-        s.spawn(producer)
-        s.spawn(closer)
-        s.run()
-
-        assert seen == ["shutdown", "putter:shutdown"]
-
-    def test_queue_asyncio_put_get(self):
-        q: Queue[int] = Queue(maxsize=1)
-        seen: list[str] = []
-
-        async def producer() -> None:
-            await q.put(1)
-            seen.append("put:1")
-            await q.put(2)
-            seen.append("put:2")
-
-        async def consumer() -> None:
-            await asyncio.sleep(0)
-            seen.append(f"get:{await q.get()}")
-            await asyncio.sleep(0)
-            seen.append(f"get:{await q.get()}")
-
-        async def run() -> None:
-            await asyncio.gather(producer(), consumer())
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-        assert seen == ["put:1", "get:1", "put:2", "get:2"]
-
-    def test_queue_asyncio_join(self):
-        q: Queue[int] = Queue()
-        seen: list[str] = []
-
-        async def producer() -> None:
-            await q.put(1)
-            await q.put(2)
-            seen.append("produced")
-
-        async def consumer() -> None:
-            await asyncio.sleep(0)
-            await q.get()
-            q.task_done()
-            seen.append("done:1")
-            await asyncio.sleep(0)
-            await q.get()
-            q.task_done()
-            seen.append("done:2")
-
-        async def waiter() -> None:
-            await q.join()
-            seen.append("joined")
-
-        async def run() -> None:
-            await asyncio.gather(producer(), consumer(), waiter())
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-        assert seen == ["produced", "done:1", "done:2", "joined"]
-
-    def test_queue_shutdown_wakes_blocked_asyncio_getter(self):
-        q: Queue[int] = Queue()
-        seen: list[str] = []
-
-        async def consumer() -> None:
-            try:
-                await q.get()
-            except QueueShutDown:
-                seen.append("getter:shutdown")
-
-        async def run() -> None:
-            task = asyncio.create_task(consumer())
-            await asyncio.sleep(0)
-            q.shutdown()
-            seen.append("shutdown")
-            await task
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-        assert seen == ["shutdown", "getter:shutdown"]
-
-    def test_queue_shutdown_wakes_blocked_asyncio_putter(self):
-        q: Queue[int] = Queue(maxsize=1)
-        q.put_nowait(1)
-        seen: list[str] = []
-
-        async def producer() -> None:
-            try:
-                await q.put(2)
-            except QueueShutDown:
-                seen.append("putter:shutdown")
-
-        async def run() -> None:
-            task = asyncio.create_task(producer())
-            await asyncio.sleep(0)
-            q.shutdown()
-            seen.append("shutdown")
-            await task
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-        assert seen == ["shutdown", "putter:shutdown"]
-
-    def test_queue_shutdown_immediate_wakes_blocked_asyncio_joiner(self):
-        q: Queue[int] = Queue()
-        q.put_nowait(1)
-        q.put_nowait(2)
-        seen: list[str] = []
-
-        async def waiter() -> None:
-            await q.join()
-            seen.append("joined")
-
-        async def run() -> None:
-            task = asyncio.create_task(waiter())
-            await asyncio.sleep(0)
-            q.shutdown(immediate=True)
-            seen.append("shutdown")
-            await task
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-        assert seen == ["shutdown", "joined"]
-
-    def test_priority_queue_order(self):
-        q: PriorityQueue[tuple[int, str]] = PriorityQueue()
-        q.put_nowait((2, "b"))
-        q.put_nowait((1, "a"))
-        q.put_nowait((3, "c"))
-
-        assert q.get_nowait() == (1, "a")
-        assert q.get_nowait() == (2, "b")
-        assert q.get_nowait() == (3, "c")
-
-    def test_lifo_queue_order(self):
-        q: LifoQueue[int] = LifoQueue()
-        q.put_nowait(1)
-        q.put_nowait(2)
-        q.put_nowait(3)
-
-        assert q.get_nowait() == 3
-        assert q.get_nowait() == 2
-        assert q.get_nowait() == 1
-
-
-class TestChannelExamples:
-    def test_channel_balance_tracks_waiting_senders(self):
-        s = _new_scheduler()
-        ch = Channel()
-        seen: list[str] = []
-
-        def sender() -> None:
-            seen.append("sender:before")
-            ch.send(7)
-            seen.append("sender:after")
-
-        s.spawn(sender)
-        s.pump(1)
-
-        assert ch.balance == 1
-
-        def receiver() -> None:
-            seen.append(f"receiver:{ch.receive()}")
-
-        s.spawn(receiver)
-        s.run()
-
-        assert ch.balance == 0
-        assert seen == ["sender:before", "receiver:7", "sender:after"]
-
-    def test_channel_balance_tracks_waiting_receivers(self):
-        s = _new_scheduler()
-        ch = Channel()
-        seen: list[str] = []
-
-        def receiver() -> None:
-            seen.append("receiver:before")
-            seen.append(f"receiver:{ch.receive()}")
-
-        s.spawn(receiver)
-        s.pump(1)
-
-        assert ch.balance == -1
-
-        def sender() -> None:
-            ch.send(11)
-            seen.append("sender:after")
-
-        s.spawn(sender)
-        s.run()
-
-        assert ch.balance == 0
-        assert seen == ["receiver:before", "receiver:11", "sender:after"]
-
-    def test_channel_preference_sender(self):
-        s = _new_scheduler()
-        ch = Channel(preference=1)
-        seen: list[str] = []
-
-        def receiver() -> None:
-            seen.append("receiver:before")
-            seen.append(f"receiver:{ch.receive()}")
-
-        def sender() -> None:
-            ch.send(3)
-            seen.append("sender:after")
-
-        s.spawn(receiver)
-        s.spawn(sender)
-        s.run()
-
-        assert seen == ["receiver:before", "sender:after", "receiver:3"]
-
-    def test_channel_preference_validation(self):
-        with pytest.raises(ValueError, match="preference must be -1, 0, or 1"):
-            Channel(preference=2)
-
-    def test_channel_send_exception(self):
-        s = _new_scheduler()
-        ch = Channel()
-        seen: list[str] = []
-
-        def receiver() -> None:
-            try:
-                ch.receive()
-            except ValueError as exc:
-                seen.append(f"caught:{exc}")
-
-        def sender() -> None:
-            ch.send_exception(ValueError("boom"))
-
-        s.spawn(receiver)
-        s.spawn(sender)
-        s.run()
-
-        assert seen == ["caught:boom"]
-
-    def test_channel_send_exception_requires_instance(self):
-        ch = Channel()
-        with pytest.raises(TypeError, match="BaseException instance"):
-            ch.send_exception(ValueError)  # type: ignore[arg-type]
-
-    def test_channel_async_send_wakes_tealet_non_immediate(self):
-        s = _new_scheduler()
-        ch = Channel(preference=-1)
-        seen: list[str] = []
-
-        def receiver() -> None:
-            seen.append("receiver:before")
-            seen.append(f"receiver:{ch.receive()}")
-
-        s.spawn(receiver)
-        s.pump(1)
-        assert ch.balance == -1
-
-        asyncio.run(asyncio.wait_for(ch.async_send(9), timeout=1.0))
-        assert seen == ["receiver:before"]
-
-        s.run()
-        assert seen == ["receiver:before", "receiver:9"]
-
-    def test_channel_async_receive_wakes_tealet_non_immediate(self):
-        s = _new_scheduler()
-        ch = Channel(preference=1)
-        seen: list[str] = []
-
-        def sender() -> None:
-            seen.append("sender:before")
-            ch.send(4)
-            seen.append("sender:after")
-
-        s.spawn(sender)
-        s.pump(1)
-        assert ch.balance == 1
-
-        value = asyncio.run(asyncio.wait_for(ch.async_receive(), timeout=1.0))
-        assert value == 4
-        assert seen == ["sender:before"]
-
-        s.run()
-        assert seen == ["sender:before", "sender:after"]
-
-    def test_channel_async_sender_and_receiver_pair(self):
-        ch = Channel()
-
-        async def run() -> None:
-            recv_task = asyncio.create_task(ch.async_receive())
-            await asyncio.sleep(0)
-            await ch.async_send(12)
-            got = await asyncio.wait_for(recv_task, timeout=1.0)
-            assert got == 12
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-
-    def test_channel_async_receive_cancelled_with_pending_packet_delivers(self):
-        ch = Channel()
-
-        async def run() -> None:
-            recv_task = asyncio.create_task(ch.async_receive())
-            await asyncio.sleep(0)
-
-            # Queue payload first, then cancel before receiver resumes.
-            await ch.async_send(None)
-            recv_task.cancel()
-
-            got = await asyncio.wait_for(recv_task, timeout=1.0)
-            assert got is None
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-
-    def test_channel_async_receive_cancelled_without_packet_propagates(self):
-        ch = Channel()
-
-        async def run() -> None:
-            recv_task = asyncio.create_task(ch.async_receive())
-            await asyncio.sleep(0)
-            recv_task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await recv_task
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-
-    def test_channel_send_raw_timeout_suppressed_when_packet_already_consumed(self):
-        s = _new_scheduler()
-        ch = Channel(preference=0)
-        seen: list[object] = []
-
-        def sender() -> None:
-            try:
-                ch.send(5)
-                seen.append("send:ok")
-            except BaseException as exc:
-                seen.append(type(exc).__name__)
-
-        sender_task = s.spawn(sender)
-        s.pump(1)
-        assert ch.balance == 1
-
-        # Receiver consumes the packet first; timeout throw races after.
-        s.call_soon(ch.receive)
-        s.call_soon(sender_task.throw, RawTimeoutError())
-        s.run()
-
-        assert seen == ["send:ok"]
-        assert ch.balance == 0
-
-    def test_channel_async_send_cancelled_with_consumed_packet_returns(self):
-        ch = Channel()
-
-        async def run() -> None:
-            send_task = asyncio.create_task(ch.async_send(None))
-            await asyncio.sleep(0)
-
-            # Consume payload first, then race cancellation against sender wake.
-            got = await ch.async_receive()
-            assert got is None
-            send_task.cancel()
-
-            await asyncio.wait_for(send_task, timeout=1.0)
-
-        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
-
-    def test_channel_receive_external_exception_drops_pending_packet(self):
-        s = _new_scheduler()
-        ch = Channel(preference=0)
-        seen: list[str] = []
-
-        def receiver() -> None:
-            try:
-                ch.receive()
-            except RuntimeError as exc:
-                seen.append(f"receiver:exc:{exc}")
-
-        receiver_task = s.spawn(receiver)
-        s.pump(1)
-        assert ch.balance == -1
-
-        s.call_soon(ch.send, 42)
-        s.call_soon(receiver_task.throw, RuntimeError("interrupt"))
-        s.run()
-
-        assert "receiver:exc:interrupt" in seen
-        assert ch.balance == 0
-
-        # The pending packet must have been discarded with the external wake.
-        got: list[int] = []
-
-        def receiver2() -> None:
-            value = ch.receive()
-            assert isinstance(value, int)
-            got.append(value)
-
-        s.spawn(receiver2)
-        s.pump(1)
-        assert ch.balance == -1
-
-        s.spawn(lambda: ch.send(99))
-        s.run()
-        assert got == [99]
-
-    def test_channel_receive_raw_timeout_suppressed_when_packet_already_delivered(self):
-        s = _new_scheduler()
-        ch = Channel(preference=0)
-        seen: list[object] = []
-
-        def receiver() -> None:
-            try:
-                seen.append(ch.receive())
-            except BaseException as exc:
-                seen.append(type(exc).__name__)
-
-        receiver_task = s.spawn(receiver)
-        s.pump(1)
-        assert ch.balance == -1
-
-        # Sender callback runs first and delivers packet; timeout throw races after.
-        # Use None payload to ensure packet existence check does not treat None
-        # as "missing".
-        s.call_soon(ch.send, None)
-        s.call_soon(receiver_task.throw, RawTimeoutError())
-        s.run()
-
-        assert seen == [None]
-        assert ch.balance == 0

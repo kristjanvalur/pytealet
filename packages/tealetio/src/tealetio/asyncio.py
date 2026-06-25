@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any, Callable, TypeVar, cast
 
+import tealet
+
 from . import compat
 from .locks import Event, TimeoutError
 from .scheduler import (
@@ -16,7 +18,15 @@ from .scheduler import (
     _current_scheduler,
     gather,
 )
-from .tasks import CancelledError, Future, TealetTask, _copy_context_without_current_task, get_current
+from .tasks import (
+    CancelledError,
+    Future,
+    TEALET_PRI_INF,
+    TealetTask,
+    _copy_context_without_current_task,
+    get_current,
+    task_priority,
+)
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
 from .selector import SelectorScheduler
@@ -189,8 +199,8 @@ class TealetSelectorEventLoop(_asyncio.SelectorEventLoop):
 class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
     """Cooperative scheduler for asyncio-hosted driving."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, runnable_queue_factory=None) -> None:
+        super().__init__(runnable_queue_factory=runnable_queue_factory)
         self._wakeup = _asyncio.Event()
         self._wakeup_loop: _asyncio.AbstractEventLoop | None = None
 
@@ -290,66 +300,69 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
     async def arun(self) -> None:
         self._verify_current_scheduler()
-        self._wakeup_loop = _asyncio.get_running_loop()
-        self._running = True
-        try:
-            while self._tasks or self._timers or self._pending_async_waits:
-                if self._tasks or self._timers:
-                    self._pump()
-                await self._wait_async()
-        finally:
-            self._running = False
-            self._wakeup_loop = None
+        with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
+            self._wakeup_loop = _asyncio.get_running_loop()
+            self._running = True
+            try:
+                while self._has_runnable_work() or self._timers or self._pending_async_waits:
+                    if self._has_runnable_work() or self._timers:
+                        self._pump()
+                    await self._wait_async()
+            finally:
+                self._running = False
+                self._wakeup_loop = None
 
     async def arun_forever(self) -> None:
         self._verify_current_scheduler()
-        self._wakeup_loop = _asyncio.get_running_loop()
-        self._stopping = False
-        self._running = True
-        try:
-            while not self._stopping:
-                self._run_ready_timers()
-                if self._tasks:
-                    self._pump()
-                    continue
-                await self._wait_async()
-        finally:
-            self._running = False
+        with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
+            self._wakeup_loop = _asyncio.get_running_loop()
             self._stopping = False
-            self._wakeup_loop = None
+            self._running = True
+            try:
+                while not self._stopping:
+                    self._run_ready_timers()
+                    if self._has_runnable_work():
+                        self._pump()
+                        continue
+                    await self._wait_async()
+            finally:
+                self._running = False
+                self._stopping = False
+                self._wakeup_loop = None
 
     async def arun_until_complete(
         self,
         future: Future[T] | Callable[[], T],
     ) -> T:
         self._verify_current_scheduler()
-        if isinstance(future, Future):
-            target: Future[T] = future
-            if isinstance(target, TealetTask) and target.get_scheduler() is not self:
-                raise RuntimeError("Future is bound to a different scheduler")
-        elif callable(future):
-            target = cast(Future[T], self.spawn(future))
-        else:
-            raise TypeError("future must be a Future or callable")
+        with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
+            if isinstance(future, Future):
+                target: Future[T] = future
+                if isinstance(target, TealetTask) and target.get_scheduler() is not self:
+                    raise RuntimeError("Future is bound to a different scheduler")
+            elif callable(future):
+                target = cast(Future[T], self.spawn(future))
+            else:
+                raise TypeError("future must be a Future or callable")
 
-        self._wakeup_loop = _asyncio.get_running_loop()
-        self._stopping = False
-        self._running = True
-        try:
-            while not target.done() and not self._stopping:
-                self._run_ready_timers()
-                if self._tasks:
-                    self._pump()
-                if not target.done() and not self._stopping:
-                    await self._wait_async()
-        finally:
-            self._running = False
+            self._wakeup_loop = _asyncio.get_running_loop()
             self._stopping = False
-            self._wakeup_loop = None
+            self._running = True
+            try:
+                while not target.done() and not self._stopping:
+                    self._run_ready_timers()
+                    if self._has_runnable_work():
+                        self._pump()
+                    if not target.done() and not self._stopping:
+                        await self._wait_async()
+            finally:
+                self._running = False
+                self._stopping = False
+                self._wakeup_loop = None
 
-        if not target.done():
-            raise RuntimeError("Scheduler stopped before Future completed.")
-        return cast(T, target.result())
+            if not target.done():
+                raise RuntimeError("Scheduler stopped before Future completed.")
+            return cast(T, target.result())
 
 
 class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
@@ -374,12 +387,13 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
         scheduler = self._scheduler
         try:
             if scheduler is not None:
-                tasks = self._shutdown_scheduler_tasks(scheduler)
-                async_scheduler = cast(AsyncSchedulerDrivingAPI, scheduler)
-                shutdown_group = gather(*tasks, return_exceptions=True)
-                await async_scheduler.arun_until_complete(shutdown_group)
-                executor_shutdown = scheduler.shutdown_default_executor()
-                await async_scheduler.arun_until_complete(executor_shutdown)
+                with scheduler.main_context():
+                    tasks = self._shutdown_scheduler_tasks(scheduler)
+                    async_scheduler = cast(AsyncSchedulerDrivingAPI, scheduler)
+                    shutdown_group = gather(*tasks, return_exceptions=True)
+                    await async_scheduler.arun_until_complete(shutdown_group)
+                    executor_shutdown = scheduler.shutdown_default_executor()
+                    await async_scheduler.arun_until_complete(executor_shutdown)
         finally:
             self._finalize_close(scheduler)
 
@@ -387,17 +401,18 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
         self._lazy_init()
         scheduler = self._require_scheduler()
         run_context = self._resolve_context(context)
-        target = self._target_from_entry(entry, run_context)
-        sigint_handler = self._install_sigint_handler(target, cast(BaseScheduler, scheduler))
-        self._interrupt_count = 0
-        try:
+        with scheduler.main_context():
+            target = self._target_from_entry(entry, run_context)
+            sigint_handler = self._install_sigint_handler(target, cast(BaseScheduler, scheduler))
+            self._interrupt_count = 0
             try:
-                return await scheduler.arun_until_complete(target)
-            except CancelledError:
-                self._raise_keyboard_interrupt_if_requested()
-                raise
-        finally:
-            self._restore_sigint_handler(sigint_handler)
+                try:
+                    return await scheduler.arun_until_complete(target)
+                except CancelledError:
+                    self._raise_keyboard_interrupt_if_requested()
+                    raise
+            finally:
+                self._restore_sigint_handler(sigint_handler)
 
 
 async def run_async(

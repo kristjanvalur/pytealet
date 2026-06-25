@@ -57,6 +57,15 @@ Implemented:
 - Scheduler task introspection includes `BaseScheduler.all_tasks()`, which
   returns unfinished scheduler-owned tealet tasks without keeping those tasks
   alive solely for introspection.
+- Scheduler runnable introspection and explicit rescheduling are available
+  through `BaseScheduler.runnable_tasks()`, `BaseScheduler.reschedule(...)`, and
+  `BaseScheduler.yield_to(...)`. Runnable scheduling is task-centric rather than
+  callback-centric, and the default queue preserves FIFO behaviour. `yield_to()`
+  keeps the caller runnable. By default, the caller returns through normal queue
+  policy; explicit `insert_current_at` indexes place it in the immediate lane
+  after the yielded-to target, using normal list-style insertion.
+  `reschedule(..., position=None)` likewise returns a task through normal queue
+  policy, while integer positions place the task in the immediate lane.
 - Scheduler grouping includes `BaseScheduler.ensure_future(...)`,
   `tealetio.scheduler.ensure_future(...)`, `tealetio.scheduler.gather(...)`,
   `tealetio.scheduler.wait(...)`, `tealetio.scheduler.wait_for(...)`, and
@@ -68,6 +77,16 @@ Implemented:
   The default factory preserves direct `TealetTask.prepare(...)` behavior.
   `tealetio.tasks.StubTaskFactory` can create and reuse a prepared stub via
   `stub_here()`, then create scheduler tasks from that stub.
+- The scheduler main-tealet context is explicit through
+  `BaseScheduler.main_context()`. It installs the scheduler's task factory as
+  the low-level tealet wrapper factory for the current main tealet, so direct
+  task access from main code sees a scheduler-owned `TealetTask` wrapper rather
+  than a raw `_tealet.tealet` wrapper.
+- Scheduler and runner driving entry points enter `main_context()`
+  automatically while constructing, cancelling, transferring, and driving
+  scheduler tasks. Low-level code that manipulates scheduler tasks directly
+  from the raw main tealet must enter `with scheduler.main_context():`
+  explicitly.
 - Cancellation propagates across scheduler boundaries in an asyncio-compatible
   way:
   - cancelling an asyncio waiter on a tealet `Future` schedules cancellation of
@@ -173,6 +192,48 @@ Semantics:
   - Raises `RuntimeError` if no running scheduler exists.
   - Never creates or installs a scheduler.
 
+### Scheduler Main Context
+
+```python
+class BaseScheduler:
+    def main_context(self) -> ContextManager[None]: ...
+```
+
+Semantics:
+
+- `main_context()` temporarily configures the low-level tealet factory so the
+  current main tealet is wrapped using this scheduler's configured task constructor.
+  With the default factory that wrapper is a `TealetTask`; with a priority
+  factory it may be a `PriorityTask` or another scheduler-compatible subclass.
+- The context is reentrant for the same scheduler. Entering it again while the
+  same scheduler factory is active is a no-op, and exiting restores the previous
+  low-level tealet factory.
+- Code running inside a scheduler-owned `TealetTask` already has the right
+  scheduler shape. Code running from the raw process main tealet must enter
+  `with scheduler.main_context():` before directly cancelling, throwing into,
+  rescheduling, yielding to, or otherwise transferring scheduler-owned tasks.
+- `TealetTask.run()`, `TealetTask.throw(...)`, and cancellation do not create
+  this context themselves. The boundary is owned by scheduler/runner driving
+  APIs and by explicit low-level callers.
+- Sync driving entry points (`run()`, `run_forever()`,
+  `run_until_complete(...)`, and `pump(...)`) and async driving entry points
+  (`arun(...)`, `arun_forever()`, and `arun_until_complete(...)`) enter
+  `main_context()` automatically. `Runner.run()`, `Runner.close()`,
+  `AsyncRunner.run()`, and `AsyncRunner.aclose()` also enter it while creating
+  and draining their main and shutdown tasks.
+- Priority-based schedulers also temporarily give the driving main tealet an
+  internal infinity priority while the scheduler is being driven. This keeps
+  real runnable work ahead of the driver and is an implementation detail rather
+  than a public priority band.
+
+Example:
+
+```python
+with scheduler.main_context():
+    task.cancel()
+    scheduler.run_until_complete(task)
+```
+
 ### Scheduler Grouping
 
 ```python
@@ -235,10 +296,26 @@ Semantics:
 ### Scheduler Task Factories
 
 ```python
-from tealetio.tasks import DefaultTaskFactory, StubTaskFactory, TaskFactory
+from tealetio.tasks import (
+    DefaultTaskFactory,
+    PriorityTask,
+    StubTaskFactory,
+    TaskConstructor,
+    TaskFactory,
+    TASK_PRIORITY_CRITICAL,
+    TASK_PRIORITY_DEFAULT,
+    TASK_PRIORITY_HIGH,
+    TASK_PRIORITY_IDLE,
+    TASK_PRIORITY_LOW,
+)
+
+TaskConstructor = Callable[..., TealetTask]
 
 
 class TaskFactory(Protocol):
+    @property
+    def task_constructor(self) -> TaskConstructor: ...
+
     def __call__(
         self,
         scheduler: BaseScheduler,
@@ -246,19 +323,46 @@ class TaskFactory(Protocol):
         *,
         context: contextvars.Context,
         eager_start: bool | None = None,
+        **kwargs: Any,
     ) -> TealetTask: ...
 
-    class DefaultTaskFactory:
-      def __init__(self, *, eager_start: bool = False) -> None: ...
+class DefaultTaskFactory:
+    def __init__(
+        self,
+        *,
+        task_constructor: TaskConstructor = TealetTask,
+        eager_start: bool = False,
+    ) -> None: ...
 
 class StubTaskFactory:
-      def __init__(
+    def __init__(
         self,
         stub: tealet.tealet | None = None,
         *,
+        task_constructor: TaskConstructor = TealetTask,
         eager_start: bool = False,
-      ) -> None: ...
+    ) -> None: ...
     def stub_here(self) -> tealet.tealet: ...
+
+class PriorityTask(TealetTask):
+    def __init__(
+        self,
+        owning_scheduler: BaseScheduler,
+        priority: float = TASK_PRIORITY_DEFAULT,
+    ) -> None: ...
+
+    @property
+    def priority(self) -> float: ...
+
+    @priority.setter
+    def priority(self, value: float) -> None: ...
+
+    def get_effective_priority(self) -> float: ...
+
+class PriorityLock(Lock):
+    def sacquire(self) -> bool: ...
+    async def acquire(self) -> bool: ...
+    def get_effective_priority(self) -> float | None: ...
 
 class BaseScheduler:
     def get_task_factory(self) -> TaskFactory: ...
@@ -271,6 +375,31 @@ Semantics:
   factory compatibility hooks.
 - A factory receives the target callable and already selected context, creates
   and prepares a `TealetTask`, and returns it unscheduled.
+- `BaseScheduler.spawn(..., **kwargs)` forwards extra keyword arguments to the
+  configured task factory, mirroring `asyncio.create_task(coro, **kwargs)`. This
+  allows custom factories to accept construction-time options such as
+  `priority=...` before the task becomes runnable.
+- `DefaultTaskFactory` and `StubTaskFactory` accept a `task_constructor`.
+  They instantiate it as `task_constructor(scheduler, **kwargs)`, so extra spawn
+  keyword arguments are handled by the task constructor. With the default
+  `TealetTask`, unsupported keywords are rejected by `TealetTask.__init__`;
+  with `PriorityTask`, `priority=...` is accepted directly.
+- `PriorityTask` is a scheduler task with a float `priority` property. Lower
+  numeric values run first in priority queues, matching Python priority queue
+  and Unix `nice` conventions. The standard public bands are
+  `TASK_PRIORITY_CRITICAL = -20.0`, `TASK_PRIORITY_HIGH = -10.0`,
+  `TASK_PRIORITY_DEFAULT = 0.0`, `TASK_PRIORITY_LOW = 10.0`, and
+  `TASK_PRIORITY_IDLE = 20.0`, leaving space for intermediate values.
+- Changing `PriorityTask.priority` calls `modified()`, so a runnable queue can
+  recompute ordering when the task is already linked.
+- `PriorityTask.get_effective_priority()` is the scheduling priority used by
+  priority-aware queues. It includes inherited priority from owned
+  `PriorityLock` instances.
+- `PriorityLock` supports both tealet `sacquire()` and asyncio `acquire()`.
+  Regular `TealetTask` instances and asyncio tasks can acquire and release it
+  normally. It keeps `Lock`'s FIFO waiter policy, and priority inheritance only
+  affects scheduler ordering. When `PriorityTask` instances participate, a lock
+  owner inherits the best waiting priority while the lock is held.
 - Class factories expose an `eager_start` default. `BaseScheduler.spawn(..., eager_start=...)`
   passes an optional per-spawn override to the factory.
 - When eagerness resolves true and the scheduler is already running, the factory
@@ -421,6 +550,9 @@ Return behavior:
 - Context-local current scheduler binding for async tasks is future hardening
   work.
 - Running scheduler binding is strictly scoped and never lazy-created.
+- Main-tealet scheduler context is also scoped. The scheduler/runner driving
+  entry points install it automatically, but raw main code that touches
+  scheduler-owned tasks directly must install `scheduler.main_context()` itself.
 - Nested runtime scopes are allowed and use stack discipline:
   - inner scope overrides current scheduler
   - outer scope restored on exit

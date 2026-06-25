@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar, cast
 
 import _tealet
@@ -12,7 +13,15 @@ from .locks import Event, InvalidStateError
 
 if TYPE_CHECKING:
     from .scheduler import BaseScheduler
+    from .locks import PriorityLock
 
+
+TASK_PRIORITY_CRITICAL = -20.0
+TASK_PRIORITY_HIGH = -10.0
+TASK_PRIORITY_DEFAULT = 0.0
+TASK_PRIORITY_LOW = 10.0
+TASK_PRIORITY_IDLE = 20.0
+TEALET_PRI_INF = float("inf")
 
 CancelledError = asyncio.CancelledError
 
@@ -22,29 +31,86 @@ __all__ = [
     "Future",
     "get_current",
     "Linkable",
+    "PriorityTask",
+    "TaskLink",
     "Shield",
     "StubTaskFactory",
+    "TaskConstructor",
     "TaskFactory",
+    "TASK_PRIORITY_CRITICAL",
+    "TASK_PRIORITY_DEFAULT",
+    "TASK_PRIORITY_HIGH",
+    "TASK_PRIORITY_IDLE",
+    "TASK_PRIORITY_LOW",
     "TealetTask",
     "shield",
 ]
 
 
-class Linkable(ABC):
+class TaskLink(ABC):
     """Base interface for objects that can be linked from a TealetTask."""
 
     @abstractmethod
     def _unlink(self, t: tealet.tealet) -> None:
         """Detach a tealet from this link target."""
 
-    def _query_waiting(self, t: tealet.tealet) -> bool:
+    def _query_waiting(self) -> bool:
         return False
 
-    def _query_runnable(self, t: tealet.tealet) -> bool:
+    def _query_runnable(self) -> bool:
         return False
+
+    def on_modified(self, task: tealet.tealet) -> None:
+        """Handle a linked tealet changing its scheduling related state."""
+
+
+Linkable = TaskLink
 
 
 T = TypeVar("T")
+TaskConstructor = Callable[..., "TealetTask"]
+
+
+class _SchedulerTealetFactory:
+    def __init__(self, scheduler: BaseScheduler, task_constructor: Callable[[Any], _tealet.tealet]) -> None:
+        self.scheduler = scheduler
+        self._task_constructor = task_constructor
+
+    def __call__(self) -> _tealet.tealet:
+        return self._task_constructor(self.scheduler)
+
+
+@contextmanager
+def scheduler_tealet_factory(scheduler: BaseScheduler):
+    current_factory = _tealet.get_tealet_factory()
+    if isinstance(current_factory, _SchedulerTealetFactory) and current_factory.scheduler is scheduler:
+        yield
+        return
+
+    task_constructor = cast(
+        Callable[[Any], _tealet.tealet], scheduler.get_task_factory().task_constructor
+    )
+    previous_factory = current_factory
+    _tealet.set_tealet_factory(_SchedulerTealetFactory(scheduler, task_constructor))
+    try:
+        yield
+    finally:
+        _tealet.set_tealet_factory(previous_factory)
+
+
+@contextmanager
+def task_priority(task: tealet.tealet, priority: float):
+    try:
+        previous_priority = cast(Any, task).priority
+    except AttributeError:
+        yield
+        return
+
+    cast(Any, task).priority = priority
+    try:
+        yield
+    finally:
+        cast(Any, task).priority = previous_priority
 
 
 class Future(Generic[T]):
@@ -219,7 +285,7 @@ class TealetTask(tealet.tealet, Future[Any]):
     def __init__(self, owning_scheduler: BaseScheduler):
         tealet.tealet.__init__(self)
         Future.__init__(self)
-        self.link: Linkable | None = None
+        self.link: TaskLink | None = None
         self._scheduler: BaseScheduler = owning_scheduler
 
     # -- Runtime state -------------------------------------------------
@@ -227,12 +293,12 @@ class TealetTask(tealet.tealet, Future[Any]):
     def is_waiting(self):
         if self.link is None:
             return False
-        return self.link._query_waiting(self)
+        return self.link._query_waiting()
 
     def is_runnable(self):
         if self.link is None:
             return False
-        return self.link._query_runnable(self)
+        return self.link._query_runnable()
 
     def is_blocked(self):
         return self._scheduler._is_blocked(self)
@@ -242,6 +308,11 @@ class TealetTask(tealet.tealet, Future[Any]):
 
     def get_scheduler(self) -> BaseScheduler:
         return self._scheduler
+
+    def modified(self) -> None:
+        """Notify the current link that task state used for scheduling changed."""
+        if self.link is not None:
+            self.link.on_modified(self)
 
     # -- Scheduler transfer -------------------------------------------
 
@@ -292,6 +363,59 @@ class TealetTask(tealet.tealet, Future[Any]):
         return self._scheduler._find_target(task_exit=True), None, suppress
 
 
+class PriorityTask(TealetTask):
+    """Tealet task with a scheduler priority value."""
+
+    def __init__(
+        self,
+        owning_scheduler: BaseScheduler,
+        priority: float = TASK_PRIORITY_DEFAULT,
+    ):
+        super().__init__(owning_scheduler)
+        self._priority = TASK_PRIORITY_DEFAULT
+        self._owned_priority_locks: set[PriorityLock] = set()
+        self._waiting_on_priority: Any | None = None
+        self.priority = priority
+
+    @property
+    def priority(self) -> float:
+        return self._priority
+
+    @priority.setter
+    def priority(self, value: float) -> None:
+        self._priority = float(value)
+        self.modified()
+
+    def add_owned_priority_lock(self, lock: PriorityLock) -> None:
+        self._owned_priority_locks.add(lock)
+
+    def remove_owned_priority_lock(self, lock: PriorityLock) -> None:
+        self._owned_priority_locks.remove(lock)
+
+    def set_waiting_on_priority(self, target: Any | None) -> None:
+        self._waiting_on_priority = target
+
+    def get_effective_priority(self) -> float:
+        inherited = min(
+            (
+                priority
+                for lock in self._owned_priority_locks
+                if (priority := lock.get_effective_priority()) is not None
+            ),
+            default=None,
+        )
+        if inherited is None:
+            return self.priority
+        return min(self.priority, inherited)
+
+    def _propagate_priority(self, source: Any) -> None:
+        del source
+        if self.is_runnable():
+            self.modified()
+        elif self._waiting_on_priority is not None:
+            self._waiting_on_priority._propagate_priority(self)
+
+
 # marks scheduler-owned tealet task code while it is on the Python stack. It is
 # cleared when control is handed to asyncio, including nested asyncio loop hosts.
 _current_task: contextvars.ContextVar[TealetTask | None] = contextvars.ContextVar(
@@ -320,6 +444,11 @@ def _copy_context_without_current_task(context: contextvars.Context | None = Non
 class TaskFactory(Protocol):
     """Callable strategy for creating scheduler-owned tasks."""
 
+    @property
+    def task_constructor(self) -> TaskConstructor:
+        """Return the concrete tealet wrapper constructor used by this factory."""
+        ...
+
     def __call__(
         self,
         scheduler: BaseScheduler,
@@ -327,6 +456,7 @@ class TaskFactory(Protocol):
         *,
         context: contextvars.Context,
         eager_start: bool | None = None,
+        **kwargs: Any,
     ) -> TealetTask:
         """Create and prepare a task without scheduling it."""
         ...
@@ -354,7 +484,13 @@ def _should_start_eager(scheduler: BaseScheduler, default: bool, override: bool 
 class DefaultTaskFactory:
     """Default task factory using direct tealet preparation."""
 
-    def __init__(self, *, eager_start: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        task_constructor: TaskConstructor = TealetTask,
+        eager_start: bool = False,
+    ) -> None:
+        self.task_constructor = task_constructor
         self.eager_start = bool(eager_start)
 
     def __call__(
@@ -364,8 +500,9 @@ class DefaultTaskFactory:
         *,
         context: contextvars.Context,
         eager_start: bool | None = None,
+        **kwargs: Any,
     ) -> TealetTask:
-        task = TealetTask(scheduler)
+        task = self.task_constructor(scheduler, **kwargs)
         _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):
             task.run()
@@ -375,8 +512,15 @@ class DefaultTaskFactory:
 class StubTaskFactory:
     """Task factory that prepares tasks from a reusable tealet stub."""
 
-    def __init__(self, stub: tealet.tealet | None = None, *, eager_start: bool = False) -> None:
+    def __init__(
+        self,
+        stub: tealet.tealet | None = None,
+        *,
+        task_constructor: TaskConstructor = TealetTask,
+        eager_start: bool = False,
+    ) -> None:
         self._stub = stub
+        self.task_constructor = task_constructor
         self.eager_start = bool(eager_start)
 
     @property
@@ -396,11 +540,12 @@ class StubTaskFactory:
         *,
         context: contextvars.Context,
         eager_start: bool | None = None,
+        **kwargs: Any,
     ) -> TealetTask:
         stub = self._stub
         if stub is None:
             stub = self.stub_here()
-        task = TealetTask(scheduler)
+        task = self.task_constructor(scheduler, **kwargs)
         task.set_stub(stub)
         _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):

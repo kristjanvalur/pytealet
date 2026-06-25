@@ -53,6 +53,68 @@ coroutines that a tealet task waits for through `BaseScheduler.await_(...)`.
 hosted by `run_asyncio_in_tealet(...)` clear that tealetio task scope before
 entering the asyncio entry point, so ordinary asyncio tasks remain visible.
 
+## Scheduler Main Context
+
+`scheduler.main_context()` is the low-level boundary for direct scheduler task
+access from the process main tealet. It temporarily wraps the current main
+tealet with the scheduler's configured task class, so operations that transfer
+or inspect scheduler-owned tasks see a `TealetTask`-shaped current tealet.
+
+High-level driving APIs enter this context for you. That includes scheduler
+drivers such as `run()`, `run_forever()`, `run_until_complete(...)`, and
+their async counterparts, as well as `Runner.run()`, `Runner.close()`,
+`AsyncRunner.run()`, and `AsyncRunner.aclose()`.
+
+Use it explicitly only when raw main code manipulates scheduler tasks directly:
+
+```python
+with scheduler.main_context():
+    task.cancel()
+    scheduler.run_until_complete(task)
+```
+
+Code already running inside a scheduler-owned `TealetTask` does not need this
+wrapper, and task transfer methods do not install it implicitly.
+
+## Task Priorities
+
+`PriorityTask` is a `TealetTask` subclass for schedulers that use a priority
+runnable queue. Its `priority` property is a float, and changing it notifies the
+current task link so the queue can recompute runnable order when the task is
+already waiting to run. `get_effective_priority()` returns the priority the
+scheduler should use right now, including inherited priority from
+`PriorityLock` waiters.
+
+Priority values follow Python priority queue and Unix `nice` intuition: lower
+numeric values run first. The public constants provide spaced bands with room
+for intermediate values:
+
+```python
+TASK_PRIORITY_CRITICAL = -20.0
+TASK_PRIORITY_HIGH = -10.0
+TASK_PRIORITY_DEFAULT = 0.0
+TASK_PRIORITY_LOW = 10.0
+TASK_PRIORITY_IDLE = 20.0
+```
+
+For example, the built-in task factories can construct priority tasks directly:
+
+```python
+scheduler.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
+```
+
+The factory passes extra `spawn(...)` keyword arguments to the task constructor
+before the scheduler makes the task runnable.
+
+`PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
+supports `sacquire()` / `with lock:` from scheduler-owned tasks and
+`acquire()` / `async with lock:` from asyncio tasks. It keeps the same FIFO lock
+waiter policy as `Lock`. When `PriorityTask` instances participate, a
+low-priority owner inherits the best waiter priority until it releases the lock,
+which avoids the usual low/medium/high priority inversion. Regular tealet tasks
+and asyncio tasks participate with the default priority.
+
 ## Scheduler Asyncio Bridge
 
 `BaseScheduler.await_(awaitable) -> object` waits for an asyncio awaitable from
@@ -68,6 +130,25 @@ creating an asyncio task. If they block, their continuation is handed to asyncio
 and waited on normally.
 
 ## Scheduler Waiting Helpers
+
+`scheduler.runnable_tasks()` returns the scheduler-owned `TealetTask` instances
+currently waiting to run, in scheduler order. It is an introspection helper for
+advanced scheduling and debugging; blocked and completed tasks are not included.
+
+`scheduler.reschedule(task, position=None)` moves a runnable task to a new
+runnable queue position. By default, the task returns through normal runnable
+policy. Passing an integer inserts the task into the immediate lane; position
+`0` makes it the next scheduler-owned task to run. Negative positions count back
+from the end of the immediate lane, with out-of-range values truncated like list
+insertion. The task must belong to that scheduler and must already be runnable.
+
+`scheduler.yield_to(task, insert_current_at=None)` yields from the current tealet
+to a runnable task and keeps the current task runnable. The target is placed in
+the immediate lane. By default, the current task is returned through the normal
+runnable policy. Passing an integer inserts the current task into the immediate
+lane after the target; position `0` means the current task is next once the
+target blocks or completes. Negative values count from the end of the immediate
+lane, with out-of-range values truncated like list insertion.
 
 `scheduler.ensure_future(entry)` returns a scheduler `Future` for one entry.
 Existing scheduler futures are returned unchanged, and zero-argument callables
