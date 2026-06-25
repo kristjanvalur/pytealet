@@ -71,6 +71,7 @@ def test_top_level_exports_public_scheduler_api():
         "run_in_asyncio",
         "set_scheduler",
         "shield",
+        "sleep",
         "timeout",
         "timeout_at",
         "to_thread",
@@ -109,6 +110,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.run_async is tealetio.asyncio.run_async
     assert tealetio.gather is tealetio.scheduler.gather
     assert tealetio.wait_for is tealetio.scheduler.wait_for
+    assert tealetio.sleep is tealetio.scheduler.sleep
 
 
 def test_star_import_uses_top_level_all():

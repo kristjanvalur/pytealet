@@ -42,6 +42,7 @@ from tealetio import (
     get_scheduler,
     set_scheduler,
     shield,
+    sleep,
     timeout,
     timeout_at,
     to_thread,
@@ -2714,7 +2715,7 @@ class TestSchedulerExamples:
 
         def sleeper() -> None:
             seen.append("before")
-            s.sleep(0)
+            sleep(0)
             seen.append("after")
 
         s.spawn(sleeper)

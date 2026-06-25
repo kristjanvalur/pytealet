@@ -62,6 +62,7 @@ __all__ = [
     "get_scheduler",
     "get_running_scheduler",
     "set_scheduler",
+    "sleep",
     "to_thread",
     "wait",
     "wait_for",
@@ -455,6 +456,16 @@ def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
     context = contextvars.copy_context()
     call = functools.partial(context.run, func, *args, **kwargs)
     return get_running_scheduler().run_in_executor(None, call).wait()
+
+
+def sleep(delay: float) -> None:
+    """Suspend the current task for `delay` seconds.
+
+    `sleep(0)` is a cooperative yield point, matching the conventional
+    `asyncio.sleep(0)` pattern.
+    """
+
+    get_running_scheduler().sleep(delay)
 
 
 class Channel(_tasks.TaskLink):

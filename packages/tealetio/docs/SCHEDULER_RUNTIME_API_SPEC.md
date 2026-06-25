@@ -269,6 +269,8 @@ def as_completed(
   *,
   timeout: float | None = None,
 ) -> Iterator[Future[Any]]: ...
+
+def sleep(delay: float) -> None: ...
 ```
 
 Semantics:
