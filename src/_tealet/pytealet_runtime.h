@@ -30,6 +30,7 @@ struct PyTealetMainData {
     PyTealetNewArg new_arg;
     PyObject *dustbin;
     PyObject *main_wrapper;       /* strong ref to this thread's main tealet wrapper */
+    unsigned long main_factory_version;
     PyObject *wrappers;           /* set of weakrefs to non-main wrappers in this main lineage */
     PyObject *domain_lock_obj;    /* strong ref to lineage lock object */
     uint64_t throw_next_token;    /* monotonically increasing throw token generator */

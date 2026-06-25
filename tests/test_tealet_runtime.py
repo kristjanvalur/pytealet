@@ -18,45 +18,76 @@ class TestModule:
     def test_main3(self):
         assert _tealet.main().state == _tealet.STATE_RUN
 
-    def test_tealet_class_configures_main_wrapper(self):
+    def test_tealet_factory_configures_main_wrapper(self):
         class CustomMain(_tealet.tealet):
             pass
 
-        original = _tealet.get_tealet_class()
+        original = _tealet.get_tealet_factory()
         old_main = _tealet.main()
 
         try:
-            new_main = _tealet.set_tealet_class(CustomMain)
+            new_main = _tealet.set_tealet_factory(CustomMain)
             assert isinstance(new_main, CustomMain)
-            assert _tealet.get_tealet_class() is CustomMain
+            assert _tealet.get_tealet_factory() is CustomMain
             assert _tealet.main() is new_main
             assert _tealet.current() is new_main
             assert old_main is not new_main
             assert old_main.is_main() is False
             assert new_main.is_main() is True
         finally:
-            _tealet.set_tealet_class(original)
+            _tealet.set_tealet_factory(original)
 
-    def test_tealet_class_none_resets_to_base_type(self):
+    def test_tealet_factory_calls_constructor_for_main_wrapper(self):
+        class CustomMain(_tealet.tealet):
+            def __init__(self):
+                super().__init__()
+                self.ready = True
+
+        original = _tealet.get_tealet_factory()
+
+        try:
+            new_main = _tealet.set_tealet_factory(CustomMain)
+            assert isinstance(new_main, CustomMain)
+            assert new_main.ready is True
+        finally:
+            _tealet.set_tealet_factory(original)
+
+    def test_tealet_factory_none_resets_to_base_factory(self):
         class CustomMain(_tealet.tealet):
             pass
 
-        original = _tealet.get_tealet_class()
+        original = _tealet.get_tealet_factory()
 
         try:
-            assert isinstance(_tealet.set_tealet_class(CustomMain), CustomMain)
-            reset_main = _tealet.set_tealet_class(None)
-            assert _tealet.get_tealet_class() is _tealet.tealet
+            assert isinstance(_tealet.set_tealet_factory(CustomMain), CustomMain)
+            reset_main = _tealet.set_tealet_factory(None)
+            assert _tealet.get_tealet_factory() is _tealet.tealet
             assert type(reset_main) is _tealet.tealet
         finally:
-            _tealet.set_tealet_class(original)
+            _tealet.set_tealet_factory(original)
 
-    def test_set_tealet_class_rejects_non_tealet_type(self):
-        with pytest.raises(TypeError, match="tealet class"):
-            _tealet.set_tealet_class(object)
+    def test_set_tealet_factory_rejects_noncallable(self):
+        with pytest.raises(TypeError, match="tealet factory"):
+            _tealet.set_tealet_factory(42)
 
-        with pytest.raises(TypeError):
-            _tealet.set_tealet_class(42)
+    def test_set_tealet_factory_rejects_factory_returning_non_tealet(self):
+        original = _tealet.get_tealet_factory()
+
+        with pytest.raises(TypeError, match="tealet factory"):
+            _tealet.set_tealet_factory(object)
+
+        assert _tealet.get_tealet_factory() is original
+
+    def test_set_tealet_factory_rejects_reentrant_factory(self):
+        original = _tealet.get_tealet_factory()
+
+        def factory():
+            return _tealet.tealet().duplicate()
+
+        with pytest.raises(RuntimeError, match="re-enter"):
+            _tealet.set_tealet_factory(factory)
+
+        assert _tealet.get_tealet_factory() is original
 
     def test_is_main_reports_underlying_main_handle(self):
         assert _tealet.main().is_main() is True
@@ -77,28 +108,31 @@ class TestModule:
         class CustomMain(_tealet.tealet):
             pass
 
-        original = _tealet.get_tealet_class()
+        original = _tealet.get_tealet_factory()
         old_main = _tealet.main()
 
         try:
-            new_main = _tealet.set_tealet_class(CustomMain)
+            new_main = _tealet.set_tealet_factory(CustomMain)
             assert old_main is not new_main
             assert old_main.is_main() is False
         finally:
-            _tealet.set_tealet_class(original)
+            _tealet.set_tealet_factory(original)
 
-    def test_base_tealet_duplicate_uses_configured_class(self):
+    def test_base_tealet_duplicate_uses_configured_factory(self):
         class CustomDuplicate(_tealet.tealet):
-            pass
+            def __init__(self):
+                super().__init__()
+                self.ready = True
 
-        original = _tealet.get_tealet_class()
+        original = _tealet.get_tealet_factory()
 
         try:
-            _tealet.set_tealet_class(CustomDuplicate)
+            _tealet.set_tealet_factory(CustomDuplicate)
             duplicate = _tealet.tealet().duplicate()
             assert isinstance(duplicate, CustomDuplicate)
+            assert duplicate.ready is True
         finally:
-            _tealet.set_tealet_class(original)
+            _tealet.set_tealet_factory(original)
 
     def test_subclass_duplicate_preserves_source_class(self):
         class Configured(_tealet.tealet):
@@ -107,14 +141,14 @@ class TestModule:
         class Explicit(_tealet.tealet):
             pass
 
-        original = _tealet.get_tealet_class()
+        original = _tealet.get_tealet_factory()
 
         try:
-            _tealet.set_tealet_class(Configured)
+            _tealet.set_tealet_factory(Configured)
             duplicate = Explicit().duplicate()
             assert type(duplicate) is Explicit
         finally:
-            _tealet.set_tealet_class(original)
+            _tealet.set_tealet_factory(original)
 
     def test_previous_matches_method_previous_inside_running_tealet(self):
         def run(current, arg):
