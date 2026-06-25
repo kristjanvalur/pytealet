@@ -469,6 +469,31 @@ class TestSchedulerAccessors:
 
         assert seen == ["low", "high"]
 
+    def test_priority_runnable_queue_runs_low_priority_task_before_runner(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        set_scheduler(s)
+        seen: list[str] = []
+
+        s.spawn(lambda: seen.append("low"), priority=TASK_PRIORITY_LOW)
+
+        s.run()
+
+        assert seen == ["low"]
+
+    def test_priority_runnable_queue_runs_stub_tasks_before_runner(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(StubTaskFactory(task_class=PriorityTask))
+        set_scheduler(s)
+        seen: list[str] = []
+
+        s.spawn(lambda: seen.append("low"), priority=TASK_PRIORITY_LOW)
+        s.spawn(lambda: seen.append("high"), priority=TASK_PRIORITY_HIGH)
+
+        s.run()
+
+        assert seen == ["high", "low"]
+
     def test_reschedule_rejects_non_runnable_task(self):
         s = _new_scheduler()
         set_scheduler(s)

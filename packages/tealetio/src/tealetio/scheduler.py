@@ -317,7 +317,11 @@ class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
         try:
             return cast(Any, task).get_active_priority()
         except AttributeError:
-            return 0
+            if isinstance(task, _tasks.TealetTask):
+                return _tasks.TASK_PRIORITY_DEFAULT
+            # external tealets such as the main runner must sort after tasks so
+            # every scheduler-owned task can run before control returns to caller.
+            return float("inf")
 
     def _priority_entry(self, task: tealet.tealet) -> tuple[Any, int, tealet.tealet]:
         return (self._active_priority(task), next(self._priority_sequence), task)
