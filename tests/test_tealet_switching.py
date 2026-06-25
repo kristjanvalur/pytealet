@@ -47,41 +47,41 @@ class TestSwitch:
         t = [None, None]
 
         def t2(current, arg):
-            assert current != _tealet.main()
-            assert current != t[0]
+            assert current is not _tealet.main()
+            assert current is not t[0]
             t[1] = current
             assert status[0] == 1
             status[0] = 2
-            assert _tealet.current() == current
+            assert _tealet.current() is current
             t[0].switch()
             assert status[0] == 3
             status[0] = 4
-            assert _tealet.current() == current
+            assert _tealet.current() is current
             t[0].switch()
             assert status[0] == 5
             status[0] = 6
-            assert current == t[1]
-            assert _tealet.current() == current
+            assert current is t[1]
+            assert _tealet.current() is current
             t[1].switch()  # noop
             assert status[0] == 6
             status[0] = 7
-            assert _tealet.current() == current
+            assert _tealet.current() is current
             return _tealet.main()
 
         def t1(current, arg):
-            assert current != _tealet.main()
+            assert current is not _tealet.main()
             t[0] = current
             assert status[0] == 0
             status[0] = 1
-            assert current == _tealet.current()
+            assert current is _tealet.current()
             get_new()(t2)
             assert status[0] == 2
             status[0] = 3
-            assert current == _tealet.current()
+            assert current is _tealet.current()
             t[1].switch()
             assert status[0] == 4
             status[0] = 5
-            assert current == _tealet.current()
+            assert current is _tealet.current()
             return t[1]
 
         get_new()(t1)

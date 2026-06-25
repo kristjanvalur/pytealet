@@ -58,7 +58,7 @@ class greenlet(object):
 
     def __del__(self):
         if self:
-            if _tealet.current() == self._tealet:
+            if _tealet.current() is self._tealet:
                 # Can't kill ourselves from here
                 return
             tealetmap[self._tealet] = self  # re-insert

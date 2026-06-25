@@ -385,7 +385,7 @@ class greenlet(object):
                     # This would not be a problem if python were to anchor GC lists in heap allocated objects.
                     self._main._garbage.append(self)
                     return
-                if _tealet.current() == tealet:
+                if _tealet.current() is tealet:
                     # Can't kill ourselves from here
                     return
                 current_wrapper = getcurrent()

@@ -465,6 +465,47 @@ static PyObject *module_main(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return Py_XNewRef((PyObject *)PyTealet_GetOrCreateMain(mstate, NULL));
 }
 
+static PyObject *module_get_tealet_class(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate;
+    GET_MODULE_STATE(mod, mstate);
+    if (!mstate->tealet_class) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    return Py_NewRef(mstate->tealet_class);
+}
+
+static PyObject *module_set_tealet_class(PyObject *mod, PyObject *cls) {
+    PyTealetModuleState *mstate;
+    PyObject *new_class;
+    PyTealetObject *main_wrapper;
+
+    GET_MODULE_STATE(mod, mstate);
+    if (!mstate->tealet_type) {
+        PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
+        return NULL;
+    }
+    if (cls == Py_None) {
+        new_class = (PyObject *)mstate->tealet_type;
+    } else {
+        int is_subtype;
+        is_subtype = PyObject_IsSubclass(cls, (PyObject *)mstate->tealet_type);
+        if (is_subtype < 0)
+            return NULL;
+        if (!is_subtype) {
+            PyErr_SetString(PyExc_TypeError, "tealet class must be a _tealet.tealet subclass");
+            return NULL;
+        }
+        new_class = cls;
+    }
+
+    Py_SETREF(mstate->tealet_class, Py_NewRef(new_class));
+    main_wrapper = PyTealet_GetOrCreateMain(mstate, NULL);
+    if (!main_wrapper)
+        return NULL;
+    return Py_NewRef((PyObject *)main_wrapper);
+}
+
 static PyObject *module_previous(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     PyTealetModuleState *mstate;
     GET_MODULE_STATE(mod, mstate);
@@ -609,6 +650,10 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args, PyObj
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
+    {"get_tealet_class", (PyCFunction)module_get_tealet_class, METH_NOARGS,
+     "get_tealet_class() -> type\n\nReturn the configured tealet wrapper class."},
+    {"set_tealet_class", (PyCFunction)module_set_tealet_class, METH_O,
+     "set_tealet_class(cls) -> tealet\n\nSet the class used for internally created tealet wrappers."},
     {"previous", (PyCFunction)module_previous, METH_NOARGS, ""},
     {"thread_reap", (PyCFunction)(void (*)(void))module_thread_reap, METH_VARARGS | METH_KEYWORDS, ""},
     {"thread_sweep", (PyCFunction)module_thread_sweep, METH_NOARGS, ""},
@@ -631,6 +676,7 @@ static int pytealet_module_exec(PyObject *m) {
     mstate->thread_data_ring = NULL;
     mstate->frame_introspection_enabled = PYTEALET_WITH_PENDING_FRAME_INTROSPECTION;
     mstate->tealet_type = NULL;
+    mstate->tealet_class = NULL;
     mstate->tealet_error = NULL;
     mstate->invalid_error = NULL;
     mstate->thread_mismatch_error = NULL;
@@ -662,6 +708,7 @@ static int pytealet_module_exec(PyObject *m) {
     if (!type_obj)
         return -1;
     mstate->tealet_type = (PyTypeObject *)type_obj;
+    mstate->tealet_class = Py_NewRef(type_obj);
 #if !defined(Py312P)
     mstate->tealet_type->tp_weaklistoffset = PyTealet_WeaklistOffset();
 #endif
@@ -749,6 +796,7 @@ static int pytealet_module_traverse(PyObject *m, visitproc visit, void *arg) {
     if (!mstate)
         return 0;
     Py_VISIT(mstate->tealet_error);
+    Py_VISIT(mstate->tealet_class);
     Py_VISIT(mstate->invalid_error);
     Py_VISIT(mstate->thread_mismatch_error);
     Py_VISIT(mstate->state_error);
@@ -769,6 +817,7 @@ static int pytealet_module_clear(PyObject *m) {
     Py_CLEAR(mstate->defunct_error);
     Py_CLEAR(mstate->panic_error);
     Py_CLEAR(mstate->tealet_exit_error);
+    Py_CLEAR(mstate->tealet_class);
     mstate->tealet_type = NULL;
     return 0;
 }

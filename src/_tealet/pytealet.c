@@ -129,6 +129,14 @@ static int PyTealet_Check(PyObject *op, PyTealetModuleState *mstate) {
     return mstate && mstate->tealet_type && PyObject_TypeCheck(op, mstate->tealet_type);
 }
 
+static PyTypeObject *PyTealet_ConfiguredClass(PyTealetModuleState *mstate) {
+    if (mstate && mstate->tealet_class)
+        return (PyTypeObject *)mstate->tealet_class;
+    if (mstate)
+        return mstate->tealet_type;
+    return NULL;
+}
+
 static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const char *what, PyObject *value,
                                            PyObject *exception) {
     PyObject *exc_type;
@@ -414,6 +422,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
 
 static PyObject *pytealet_duplicate_impl(PyTealetModuleState *mstate, PyTealetObject *src) {
     PyTealetObject *result;
+    PyTypeObject *duplicate_type;
 
     assert(mstate);
     assert(src);
@@ -423,7 +432,11 @@ static PyObject *pytealet_duplicate_impl(PyTealetModuleState *mstate, PyTealetOb
         return NULL;
     }
 
-    result = (PyTealetObject *)PyType_GenericAlloc(Py_TYPE(src), 0);
+    duplicate_type = Py_TYPE(src);
+    if (duplicate_type == mstate->tealet_type)
+        duplicate_type = PyTealet_ConfiguredClass(mstate);
+
+    result = (PyTealetObject *)PyType_GenericAlloc(duplicate_type, 0);
     if (!result)
         return NULL;
 
@@ -622,7 +635,7 @@ PyObject *PyTealetApi_Create(PyTealetModuleState *mstate) {
         PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
         return NULL;
     }
-    return PyObject_CallNoArgs((PyObject *)mstate->tealet_type);
+    return pytealet_new_impl(PyTealet_ConfiguredClass(mstate), NULL, NULL, 0);
 }
 
 static int pytealet_traverse(PyObject *obj, visitproc visit, void *arg) {
@@ -663,7 +676,8 @@ static void pytealet_dealloc(PyObject *obj) {
     PyTealetObject *tealet = (PyTealetObject *)obj;
     PyObject_GC_UnTrack(obj);
     /* warn if we have an active tealet that is not a stub */
-    if (tealet->tealet && tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE && tealet->state != STATE_STUB &&
+    if (tealet->tealet && !TEALET_IS_MAIN(tealet->tealet) &&
+        tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE && tealet->state != STATE_STUB &&
         !(tealet->prepared_func || tealet->prepared_cfunc)) {
         int err = PyErr_WarnEx(PyExc_RuntimeWarning, "freeing an active tealet leaks memory", 1);
         if (err) {
@@ -676,7 +690,7 @@ static void pytealet_dealloc(PyObject *obj) {
     /* Release GC-managed references. */
     (void)pytealet_clear(obj);
     PyTealetFrameInfo_Fini(&tealet->frame_info);
-    if (tealet->tealet)
+    if (tealet->tealet && !TEALET_IS_MAIN(tealet->tealet))
         tealet_delete(tealet->tealet);
     Py_CLEAR(tealet->domain_lock_obj);
     Py_TYPE(obj)->tp_free(obj);
@@ -868,6 +882,11 @@ static PyObject *pytealet_main_method(PyObject *self, PyObject *Py_UNUSED(_ignor
 static PyObject *pytealet_is_foreign(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
     PyTealetObject *base = (PyTealetObject *)self;
     return PyBool_FromLong(base->owner_tid != PyThread_get_thread_ident());
+}
+
+static PyObject *pytealet_is_main(PyObject *self, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetObject *base = (PyTealetObject *)self;
+    return PyBool_FromLong(base->tealet && TEALET_IS_MAIN(base->tealet));
 }
 
 static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObject *kwargs) {
@@ -1877,6 +1896,9 @@ static struct PyMethodDef pytealet_methods[] = {
     {"previous", (PyCFunction)pytealet_previous, METH_NOARGS, ""},
     {"main", (PyCFunction)pytealet_main_method, METH_NOARGS, ""},
     {"is_foreign", (PyCFunction)pytealet_is_foreign, METH_NOARGS, ""},
+    {"is_main", (PyCFunction)pytealet_is_main, METH_NOARGS,
+    "is_main() -> bool\n\n"
+    "Return True if this wrapper points at the lineage main tealet."},
     {"resolve_target", (PyCFunction)(void (*)(void))pytealet_resolve_target, METH_VARARGS | METH_KEYWORDS,
          "resolve_target(result, exc, exc_target) -> (tealet, arg) | (tealet, arg, suppress)\n\n"
          "Hook for subclasses to resolve exit target routing and exception disposition from pytealet_main()."},
@@ -2163,8 +2185,8 @@ PyTealetObject *PyTealet_GetOrCreateMain(PyTealetModuleState *mstate, PyTealetMa
         }
         *tealet_main_userpointer(tmain) = (void *)mdata;
 
-        /* create the main tealet */
-        t_main = (PyTealetObject *)pytealet_new_impl(mstate->tealet_type, NULL, NULL, 1);
+        /* create the main tealet wrapper */
+        t_main = (PyTealetObject *)pytealet_new_impl(PyTealet_ConfiguredClass(mstate), NULL, NULL, 1);
         if (!t_main)
             goto fail;
 
@@ -2187,6 +2209,20 @@ PyTealetObject *PyTealet_GetOrCreateMain(PyTealetModuleState *mstate, PyTealetMa
         }
     } else {
         t_main = (PyTealetObject *)mdata->main_wrapper;
+        if (Py_TYPE(t_main) != PyTealet_ConfiguredClass(mstate)) {
+            PyTealetObject *replacement;
+            replacement = (PyTealetObject *)pytealet_new_impl(PyTealet_ConfiguredClass(mstate), NULL, NULL, 1);
+            if (!replacement)
+                return NULL;
+            replacement->domain_lock_obj = Py_NewRef(mdata->domain_lock_obj);
+            replacement->tealet = t_main->tealet;
+            replacement->state = STATE_RUN;
+            TEALET_SET_PYOBJECT(replacement->tealet, replacement);
+            t_main->tealet = NULL;
+            t_main->state = STATE_EXIT;
+            Py_SETREF(mdata->main_wrapper, (PyObject *)replacement);
+            t_main = replacement;
+        }
     }
     assert(t_main);
     assert(t_main->tealet);

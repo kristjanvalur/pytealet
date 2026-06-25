@@ -10,13 +10,111 @@ import _tealet
 from ._tealet_test_helpers import get_new
 class TestModule:
     def test_main(self):
-        assert _tealet.main() == _tealet.current()
+        assert _tealet.main() is _tealet.current()
 
     def test_main2(self):
-        assert _tealet.main() == _tealet.current().main()
+        assert _tealet.main() is _tealet.current().main()
 
     def test_main3(self):
         assert _tealet.main().state == _tealet.STATE_RUN
+
+    def test_tealet_class_configures_main_wrapper(self):
+        class CustomMain(_tealet.tealet):
+            pass
+
+        original = _tealet.get_tealet_class()
+        old_main = _tealet.main()
+
+        try:
+            new_main = _tealet.set_tealet_class(CustomMain)
+            assert isinstance(new_main, CustomMain)
+            assert _tealet.get_tealet_class() is CustomMain
+            assert _tealet.main() is new_main
+            assert _tealet.current() is new_main
+            assert old_main is not new_main
+            assert old_main.is_main() is False
+            assert new_main.is_main() is True
+        finally:
+            _tealet.set_tealet_class(original)
+
+    def test_tealet_class_none_resets_to_base_type(self):
+        class CustomMain(_tealet.tealet):
+            pass
+
+        original = _tealet.get_tealet_class()
+
+        try:
+            assert isinstance(_tealet.set_tealet_class(CustomMain), CustomMain)
+            reset_main = _tealet.set_tealet_class(None)
+            assert _tealet.get_tealet_class() is _tealet.tealet
+            assert type(reset_main) is _tealet.tealet
+        finally:
+            _tealet.set_tealet_class(original)
+
+    def test_set_tealet_class_rejects_non_tealet_type(self):
+        with pytest.raises(TypeError, match="tealet class"):
+            _tealet.set_tealet_class(object)
+
+        with pytest.raises(TypeError):
+            _tealet.set_tealet_class(42)
+
+    def test_is_main_reports_underlying_main_handle(self):
+        assert _tealet.main().is_main() is True
+        assert _tealet.tealet().is_main() is False
+
+    def test_tealet_hash_is_stable_across_run(self):
+        def worker(current, _arg):
+            return current.main()
+
+        t = _tealet.tealet()
+        original_hash = hash(t)
+
+        t.run(worker, None)
+
+        assert hash(t) == original_hash
+
+    def test_replaced_main_wrapper_becomes_detached(self):
+        class CustomMain(_tealet.tealet):
+            pass
+
+        original = _tealet.get_tealet_class()
+        old_main = _tealet.main()
+
+        try:
+            new_main = _tealet.set_tealet_class(CustomMain)
+            assert old_main is not new_main
+            assert old_main.is_main() is False
+        finally:
+            _tealet.set_tealet_class(original)
+
+    def test_base_tealet_duplicate_uses_configured_class(self):
+        class CustomDuplicate(_tealet.tealet):
+            pass
+
+        original = _tealet.get_tealet_class()
+
+        try:
+            _tealet.set_tealet_class(CustomDuplicate)
+            duplicate = _tealet.tealet().duplicate()
+            assert isinstance(duplicate, CustomDuplicate)
+        finally:
+            _tealet.set_tealet_class(original)
+
+    def test_subclass_duplicate_preserves_source_class(self):
+        class Configured(_tealet.tealet):
+            pass
+
+        class Explicit(_tealet.tealet):
+            pass
+
+        original = _tealet.get_tealet_class()
+
+        try:
+            _tealet.set_tealet_class(Configured)
+            duplicate = Explicit().duplicate()
+            assert type(duplicate) is Explicit
+        finally:
+            _tealet.set_tealet_class(original)
 
     def test_previous_matches_method_previous_inside_running_tealet(self):
         def run(current, arg):
@@ -24,8 +122,8 @@ class TestModule:
 
         module_prev, method_prev = _tealet.tealet().run(run, None)
 
-        assert module_prev == _tealet.main()
-        assert method_prev == _tealet.main()
+        assert module_prev is _tealet.main()
+        assert method_prev is _tealet.main()
 
     def test_previous_on_main_after_switch_is_last_switcher(self):
         def parked(current, arg):
@@ -34,7 +132,7 @@ class TestModule:
 
         t = _tealet.tealet()
         assert t.run(parked, None) == "paused"
-        assert _tealet.previous() == t
+        assert _tealet.previous() is t
 
     def test_frame_introspection_toggle(self):
         compiled = bool(getattr(_tealet, "PYTEALET_WITH_PENDING_FRAME_INTROSPECTION", 1))
@@ -113,7 +211,7 @@ class TestTealetTraversalMethods:
         seen = {}
 
         def run(current, arg):
-            seen["self_is_current"] = current.current() == current
+            seen["self_is_current"] = current.current() is current
             seen["main"] = current.main()
             seen["previous"] = current.previous()
             return _tealet.main()
@@ -121,8 +219,8 @@ class TestTealetTraversalMethods:
         _tealet.tealet().run(run, None)
 
         assert seen["self_is_current"] is True
-        assert seen["main"] == _tealet.main()
-        assert seen["previous"] == _tealet.main()
+        assert seen["main"] is _tealet.main()
+        assert seen["previous"] is _tealet.main()
 
 class TestSimple:
     def test_simple(self):
@@ -283,7 +381,7 @@ class TestResolveTargetHook:
 
             def resolve_target(self, result, exc, exc_target):
                 if exc is not None:
-                    assert exc_target == _tealet.main()
+                    assert exc_target is _tealet.main()
                     return self._target, "via-custom-resolver", True
                 return super().resolve_target(result, exc, exc_target)
 
@@ -546,7 +644,7 @@ class TestPrepare:
 class TestStatus:
     def test_status_run(self):
         t = _tealet.current()
-        assert t.main() == _tealet.main()
+        assert t.main() is _tealet.main()
         assert t.state == _tealet.STATE_RUN
 
     @pytest.mark.stub

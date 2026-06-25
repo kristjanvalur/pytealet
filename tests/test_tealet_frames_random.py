@@ -129,18 +129,18 @@ class TestRandom1:
                 d = self.tealets[i].switch()
                 # assert d == math.sqrt(2344.2)
             assert self.status >= prevstatus
-            assert _tealet.current() == cur
-            assert self.tealets[index] == cur
+            assert _tealet.current() is cur
+            assert self.tealets[index] is cur
             assert self.got_index == index
             if self.status >= self.max_status:
                 break
 
     def randomTealet(self, current, index):
         i = self.got_index
-        assert _tealet.current() == current
+        assert _tealet.current() is current
         assert i == index
         assert i > 0 and i < len(self.tealets)
-        assert self.tealets[i] == None
+        assert self.tealets[i] is None
         self.tealets[i] = current
         self.randomRun(i)
         self.tealets[i] = None
@@ -160,7 +160,7 @@ class TestRandom1:
         while self.status < self.max_status:
             self.randomRun(0)
 
-        assert _tealet.current() == self.tealets[0]
+        assert _tealet.current() is self.tealets[0]
         for i in range(1, len(self.tealets)):
             while self.tealets[i]:
                 self.randomRun(0)
@@ -173,16 +173,16 @@ class TestRandom2:
     ARRAYSIZE = 127
 
     def randomTealet(self, cur, index):
-        assert _tealet.current() == cur
+        assert _tealet.current() is cur
         assert index > 0 and index < len(self.tealets)
-        assert self.tealets[index] == None
+        assert self.tealets[index] is None
         self.tealets[index] = cur
         self.randomRun(index)
         self.tealets[index] = None
         return self.tealets[0]  # switch to main
 
     def randomRun(self, index):
-        assert self.tealets[index] == None or self.tealets[index] == _tealet.current()
+        assert self.tealets[index] is None or self.tealets[index] is _tealet.current()
         self.tealets[index] = _tealet.current()
         for i in range(self.N_RUNS):
             if self.randomDescend(index, random.randint(0, self.MAX_DESCEND + 1)) == 0:

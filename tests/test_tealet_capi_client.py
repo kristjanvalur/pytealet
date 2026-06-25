@@ -231,9 +231,9 @@ def test_capi_client_previous_matches_python_api():
 
     module_prev, capi_prev, method_prev = _tealet.tealet().run(parked, None)
 
-    assert module_prev == _tealet.main()
-    assert capi_prev == _tealet.main()
-    assert method_prev == _tealet.main()
+    assert module_prev is _tealet.main()
+    assert capi_prev is _tealet.main()
+    assert method_prev is _tealet.main()
 
 
 def test_capi_client_frame_introspection_toggle():
