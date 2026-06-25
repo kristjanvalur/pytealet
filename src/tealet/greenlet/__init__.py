@@ -75,7 +75,9 @@ class ErrorWrapper(object):
                 msg = str(val)
                 # Map backend thread-mismatch wording for pending exception routing
                 # to the compatibility message expected by greenlet tests.
-                if "set_pending_exception() not allowed from a different thread" in msg or msg.startswith("thread mismatch:"):
+                if "set_pending_exception() not allowed from a different thread" in msg or msg.startswith(
+                    "thread mismatch:"
+                ):
                     msg = "cannot switch to a different thread (which happens to have exited)"
                 raise error(msg).with_traceback(tb)
         finally:

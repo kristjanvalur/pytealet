@@ -50,6 +50,7 @@ class build_py(_build_py):
         super().run()
         self.copy_file("src/_tealet.pyi", os.path.join(self.build_lib, "_tealet.pyi"))
 
+
 # Default to release archive builds. Set BUILD_LIBTEALET_FROM_SOURCE=1 to use
 # a local source checkout in src/_tealet/libtealet-src.
 BUILD_LIBTEALET_FROM_SOURCE = os.environ.get("BUILD_LIBTEALET_FROM_SOURCE", "0") == "1"

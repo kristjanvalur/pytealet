@@ -47,7 +47,17 @@ tealet = { workspace = true }
 dev = [
     "asynkit>=0.18.1",
     "pytest>=7.0",
+    "ruff>=0.8",
 ]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [
+    "tests/**",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/tealetio/__init__.py" = ["F403"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

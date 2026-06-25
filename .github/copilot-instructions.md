@@ -110,6 +110,18 @@ PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1 \
 
 CI defaults to `PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=0`.
 
+## Code Quality Workflow
+
+Run Ruff regularly while editing Python code:
+
+```bash
+uv run --active ruff format .
+uv run --active ruff check .
+```
+
+Ruff is configured for 120-character formatting. Tests are intentionally
+excluded from Ruff checks; source folders should stay clean under `ruff check`.
+
 ## Current Status Snapshot
 
 - Core in-repo test baseline is healthy.

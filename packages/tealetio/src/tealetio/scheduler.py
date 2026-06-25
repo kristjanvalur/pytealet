@@ -887,7 +887,7 @@ def _as_completed_futures(
                 complete_next(child)
             else:
                 child.add_done_callback(complete_next)
-        with (scheduler_timeout(timeout) if timeout is not None else nullcontext()):
+        with scheduler_timeout(timeout) if timeout is not None else nullcontext():
             while True:
                 child = completed.sget()
                 yield cast(_tasks.Future[Any], child)
@@ -907,7 +907,7 @@ def wait_for(
 
     def wait_task() -> Any:
         try:
-            with (scheduler_timeout(timeout) if timeout is not None else nullcontext()):
+            with scheduler_timeout(timeout) if timeout is not None else nullcontext():
                 return child.wait()
         except TimeoutError:
             if timeout is None:
@@ -1029,12 +1029,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         def wait_for_shutdown(_timeout: float | None = timeout) -> None:
             try:
-                with (scheduler_timeout(_timeout) if _timeout is not None else nullcontext()):
+                with scheduler_timeout(_timeout) if _timeout is not None else nullcontext():
                     future.wait()
             except TimeoutError:
                 warnings.warn(
-                    "The executor did not finish joining its threads "
-                    f"within {_timeout} seconds.",
+                    f"The executor did not finish joining its threads within {_timeout} seconds.",
                     RuntimeWarning,
                     stacklevel=2,
                 )

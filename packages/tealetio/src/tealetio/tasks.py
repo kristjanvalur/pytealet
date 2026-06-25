@@ -87,9 +87,7 @@ def scheduler_tealet_factory(scheduler: BaseScheduler):
         yield
         return
 
-    task_constructor = cast(
-        Callable[[Any], _tealet.tealet], scheduler.get_task_factory().task_constructor
-    )
+    task_constructor = cast(Callable[[Any], _tealet.tealet], scheduler.get_task_factory().task_constructor)
     previous_factory = current_factory
     _tealet.set_tealet_factory(_SchedulerTealetFactory(scheduler, task_constructor))
     try:
@@ -121,9 +119,7 @@ class Future(Generic[T]):
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._event = Event()
-        self._done_callbacks: list[
-            tuple[Callable[[Future[T]], object], contextvars.Context | None]
-        ] = []
+        self._done_callbacks: list[tuple[Callable[[Future[T]], object], contextvars.Context | None]] = []
 
     # -- State ---------------------------------------------------------
 
