@@ -65,6 +65,9 @@ upstream greenlet parity yet.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Upstream compatibility tests](tests/compat_greenlet/README.md)
 
+The historical 2014-era `greenlet_legacy.py` shim is kept under `tests/` as a
+comparison fixture. It is not part of the installable package API.
+
 ## Tests
 
 Run the package-local tests from the repository root:

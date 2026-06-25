@@ -14,8 +14,8 @@ wheel stay small and focused.
 - `tealet_greenlet`: canonical implementation package.
 - `greenlet`: top-level wrapper package for upstream-style imports.
 - `greenlet._greenlet`: wrapper for implementation-specific compatibility APIs.
-- `greenlet_legacy`: legacy emulation kept as a package-local development and test helper.
 - `tests/compat_greenlet`: vendored upstream-style compatibility tests.
+- `tests/greenlet_legacy.py`: historical 2014-era compatibility shim kept as a test fixture for comparison.
 
 `tealet.greenlet` remains in the core package only as a transition wrapper that
 imports from `tealet_greenlet` when this package is installed.
@@ -52,6 +52,6 @@ Important behaviours include:
 
 ## Tests
 
-The default package test suite covers the local legacy shim and package wiring.
+The default package test suite covers the historical legacy shim and package wiring.
 Vendored upstream-style compatibility tests live under `tests/compat_greenlet`
 and are opt-in through `PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1`.
