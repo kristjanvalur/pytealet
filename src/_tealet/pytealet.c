@@ -129,14 +129,6 @@ static int PyTealet_Check(PyObject *op, PyTealetModuleState *mstate) {
     return mstate && mstate->tealet_type && PyObject_TypeCheck(op, mstate->tealet_type);
 }
 
-static PyTypeObject *PyTealet_ConfiguredClass(PyTealetModuleState *mstate) {
-    if (mstate && mstate->tealet_class)
-        return (PyTypeObject *)mstate->tealet_class;
-    if (mstate)
-        return mstate->tealet_type;
-    return NULL;
-}
-
 static int PyTealet_SetPanicErrorWithValue(PyTealetModuleState *mstate, const char *what, PyObject *value,
                                            PyObject *exception) {
     PyObject *exc_type;
@@ -381,8 +373,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     if (!mstate)
         return NULL;
 
-    /* Every non-main tealet object is bound to an existing thread-main. */
-    if (!creating_main) {
+    if (!creating_main && mstate->tealet_factory_call_depth == 0) {
         if (!PyTealet_GetOrCreateMain(mstate, &lineage_mdata))
             return NULL;
     }
@@ -420,6 +411,49 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     return (PyObject *)result;
 }
 
+static PyObject *PyTealet_CreateConfiguredWrapper(PyTealetModuleState *mstate, PyObject *domain_lock_obj,
+                                                  int creating_main) {
+    PyObject *factory;
+    PyObject *created;
+    PyTealetObject *result;
+
+    assert(mstate);
+    assert(mstate->tealet_type);
+
+    factory = mstate->tealet_factory ? mstate->tealet_factory : (PyObject *)mstate->tealet_type;
+    if (factory == (PyObject *)mstate->tealet_type) {
+        created = pytealet_new_impl(mstate->tealet_type, NULL, NULL, creating_main);
+    } else {
+        if (mstate->tealet_factory_call_depth != 0) {
+            PyErr_SetString(PyExc_RuntimeError, "tealet factory must not re-enter configured wrapper creation");
+            return NULL;
+        }
+        mstate->tealet_factory_call_depth++;
+        created = PyObject_CallNoArgs(factory);
+        mstate->tealet_factory_call_depth--;
+    }
+    if (!created)
+        return NULL;
+
+    if (!PyTealet_Check(created, mstate)) {
+        Py_DECREF(created);
+        PyErr_SetString(PyExc_TypeError, "tealet factory must return a _tealet.tealet instance");
+        return NULL;
+    }
+
+    result = (PyTealetObject *)created;
+    if (result->state != STATE_NEW || result->tealet != NULL) {
+        Py_DECREF(created);
+        PyErr_SetString(mstate->state_error, "tealet factory must return a new unlinked tealet");
+        return NULL;
+    }
+
+    if (domain_lock_obj && !result->domain_lock_obj)
+        result->domain_lock_obj = Py_NewRef(domain_lock_obj);
+
+    return created;
+}
+
 static PyObject *pytealet_duplicate_impl(PyTealetModuleState *mstate, PyTealetObject *src) {
     PyTealetObject *result;
     PyTypeObject *duplicate_type;
@@ -433,25 +467,29 @@ static PyObject *pytealet_duplicate_impl(PyTealetModuleState *mstate, PyTealetOb
     }
 
     duplicate_type = Py_TYPE(src);
-    if (duplicate_type == mstate->tealet_type)
-        duplicate_type = PyTealet_ConfiguredClass(mstate);
+    if (duplicate_type == mstate->tealet_type) {
+        result = (PyTealetObject *)PyTealet_CreateConfiguredWrapper(mstate, src->domain_lock_obj, 0);
+        if (!result)
+            return NULL;
+        result->owner_tid = src->owner_tid;
+    } else {
+        result = (PyTealetObject *)PyType_GenericAlloc(duplicate_type, 0);
+        if (!result)
+            return NULL;
 
-    result = (PyTealetObject *)PyType_GenericAlloc(duplicate_type, 0);
-    if (!result)
-        return NULL;
-
-    result->state = STATE_NEW;
-    result->tealet = NULL;
-    result->owner_tid = src->owner_tid;
-    result->domain_lock_obj = NULL;
-    result->tracking_ref = NULL;
-    result->prepared_func = NULL;
-    result->inflight_throw_token = 0;
-    PyTealetTstate_Init(&result->tstate);
-    PyTealetFrameInfo_Init(&result->frame_info);
+        result->state = STATE_NEW;
+        result->tealet = NULL;
+        result->owner_tid = src->owner_tid;
+        result->domain_lock_obj = NULL;
+        result->tracking_ref = NULL;
+        result->prepared_func = NULL;
+        result->inflight_throw_token = 0;
+        PyTealetTstate_Init(&result->tstate);
+        PyTealetFrameInfo_Init(&result->frame_info);
 #if !defined(Py312P)
-    result->weakreflist = NULL;
+        result->weakreflist = NULL;
 #endif
+    }
 
     if (src->state == STATE_STUB) {
         PyTealetMainData *lineage_mdata;
@@ -635,7 +673,7 @@ PyObject *PyTealetApi_Create(PyTealetModuleState *mstate) {
         PyErr_SetString(PyExc_RuntimeError, "_tealet module state unavailable");
         return NULL;
     }
-    return pytealet_new_impl(PyTealet_ConfiguredClass(mstate), NULL, NULL, 0);
+    return PyTealet_CreateConfiguredWrapper(mstate, NULL, 0);
 }
 
 static int pytealet_traverse(PyObject *obj, visitproc visit, void *arg) {
@@ -2186,16 +2224,15 @@ PyTealetObject *PyTealet_GetOrCreateMain(PyTealetModuleState *mstate, PyTealetMa
         *tealet_main_userpointer(tmain) = (void *)mdata;
 
         /* create the main tealet wrapper */
-        t_main = (PyTealetObject *)pytealet_new_impl(PyTealet_ConfiguredClass(mstate), NULL, NULL, 1);
+        t_main = (PyTealetObject *)PyTealet_CreateConfiguredWrapper(mstate, mdata->domain_lock_obj, 1);
         if (!t_main)
             goto fail;
-
-        t_main->domain_lock_obj = Py_NewRef(mdata->domain_lock_obj);
 
         t_main->tealet = tmain;
         t_main->state = STATE_RUN;
         TEALET_SET_PYOBJECT(tmain, t_main); /* back link */
         mdata->main_wrapper = (PyObject *)t_main;
+        mdata->main_factory_version = mstate->tealet_factory_version;
         if (PyThread_tss_set(&mstate->tls_key, (void *)mdata) != 0) {
             PyErr_SetString(PyExc_RuntimeError, "failed to set thread-local main tealet");
             goto fail;
@@ -2209,18 +2246,18 @@ PyTealetObject *PyTealet_GetOrCreateMain(PyTealetModuleState *mstate, PyTealetMa
         }
     } else {
         t_main = (PyTealetObject *)mdata->main_wrapper;
-        if (Py_TYPE(t_main) != PyTealet_ConfiguredClass(mstate)) {
+        if (mdata->main_factory_version != mstate->tealet_factory_version) {
             PyTealetObject *replacement;
-            replacement = (PyTealetObject *)pytealet_new_impl(PyTealet_ConfiguredClass(mstate), NULL, NULL, 1);
+            replacement = (PyTealetObject *)PyTealet_CreateConfiguredWrapper(mstate, mdata->domain_lock_obj, 1);
             if (!replacement)
                 return NULL;
-            replacement->domain_lock_obj = Py_NewRef(mdata->domain_lock_obj);
             replacement->tealet = t_main->tealet;
             replacement->state = STATE_RUN;
             TEALET_SET_PYOBJECT(replacement->tealet, replacement);
             t_main->tealet = NULL;
             t_main->state = STATE_EXIT;
             Py_SETREF(mdata->main_wrapper, (PyObject *)replacement);
+            mdata->main_factory_version = mstate->tealet_factory_version;
             t_main = replacement;
         }
     }

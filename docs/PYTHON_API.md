@@ -25,8 +25,8 @@ Common constants/types re-exported from `_tealet` include:
 Module-level functions:
 - `_tealet.current() -> _tealet.tealet`
 - `_tealet.main() -> _tealet.tealet`
-- `_tealet.get_tealet_class() -> type[_tealet.tealet]`
-- `_tealet.set_tealet_class(cls | None) -> _tealet.tealet`
+- `_tealet.get_tealet_factory() -> Callable[[], _tealet.tealet]`
+- `_tealet.set_tealet_factory(factory | None) -> _tealet.tealet`
 - `_tealet.previous() -> _tealet.tealet | None`
 - `_tealet.thread_reap(cleanup_passes: int = 3, kill_exc = None) -> list[_tealet.tealet]`
 - `_tealet.thread_sweep() -> list[_tealet.tealet]`
@@ -97,18 +97,19 @@ Properties:
 Equality and hashing use normal Python wrapper identity. Use `is` and `is not`
 when comparing tealet wrappers directly.
 
-`_tealet.set_tealet_class(cls)` configures the Python wrapper class used for
-internally created tealet wrappers. `cls` must be a subclass of
-`_tealet.tealet`; passing `None` resets the class to the base type. If the
-current thread already has a main wrapper whose exact type does not match the
-configured class, the runtime creates a replacement wrapper around the same
-underlying main tealet and returns it. Existing references to the older main
-wrapper become detached old wrappers, and future `_tealet.main()` calls may
-return a different wrapper instance. Use `is_main()` to test whether a live
-tealet wrapper is the current main wrapper for its lineage.
+`_tealet.set_tealet_factory(factory)` configures the callable used for
+internally created tealet wrappers. The factory is called with no arguments and
+must return a new, unlinked `_tealet.tealet` instance. Passing `None` resets the
+factory to the base `_tealet.tealet` constructor. If the current thread already
+has a main wrapper from an older factory generation, the runtime creates a
+replacement wrapper around the same underlying main tealet and returns it.
+Existing references to the older main wrapper become detached old wrappers, and
+future `_tealet.main()` calls may return a different wrapper instance. Use
+`is_main()` to test whether a live tealet wrapper is the current main wrapper
+for its lineage.
 Direct `_tealet.tealet()` construction still constructs exactly
-`_tealet.tealet()`. Duplicating a base-wrapper tealet uses the configured class;
-duplicating an explicit subclass preserves that subclass.
+`_tealet.tealet()`. Duplicating a base-wrapper tealet uses the configured
+factory; duplicating an explicit subclass preserves that subclass.
 
 ## Exceptions
 
