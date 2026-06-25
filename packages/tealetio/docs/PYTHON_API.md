@@ -53,6 +53,29 @@ coroutines that a tealet task waits for through `BaseScheduler.await_(...)`.
 hosted by `run_asyncio_in_tealet(...)` clear that tealetio task scope before
 entering the asyncio entry point, so ordinary asyncio tasks remain visible.
 
+## Scheduler Main Context
+
+`scheduler.main_context()` is the low-level boundary for direct scheduler task
+access from the process main tealet. It temporarily wraps the current main
+tealet with the scheduler's configured task class, so operations that transfer
+or inspect scheduler-owned tasks see a `TealetTask`-shaped current tealet.
+
+High-level driving APIs enter this context for you. That includes scheduler
+drivers such as `run()`, `run_forever()`, `run_until_complete(...)`, and
+their async counterparts, as well as `Runner.run()`, `Runner.close()`,
+`AsyncRunner.run()`, and `AsyncRunner.aclose()`.
+
+Use it explicitly only when raw main code manipulates scheduler tasks directly:
+
+```python
+with scheduler.main_context():
+    task.cancel()
+    scheduler.run_until_complete(task)
+```
+
+Code already running inside a scheduler-owned `TealetTask` does not need this
+wrapper, and task transfer methods do not install it implicitly.
+
 ## Task Priorities
 
 `PriorityTask` is a `TealetTask` subclass for schedulers that use a priority

@@ -81,10 +81,7 @@ def scheduler_tealet_factory(scheduler: BaseScheduler):
         yield
         return
 
-    task_class = getattr(scheduler.get_task_factory(), "task_class", None)
-    if not callable(task_class):
-        yield
-        return
+    task_class = scheduler.get_task_factory().task_class
     task_constructor = cast(Callable[[Any], _tealet.tealet], task_class)
     previous_factory = current_factory
     _tealet.set_tealet_factory(_SchedulerTealetFactory(scheduler, task_constructor))

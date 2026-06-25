@@ -98,10 +98,7 @@ class _FifoRunnableQueue(_tasks.TaskLink):
             return False
         self._items.append(task)
         self._set.add(task)
-        try:
-            task.link = self
-        except AttributeError:
-            pass
+        task.link = self
         return True
 
     def discard(self, task: tealet.tealet) -> bool:
@@ -112,10 +109,7 @@ class _FifoRunnableQueue(_tasks.TaskLink):
             self._items.remove(task)
         except ValueError:
             pass
-        try:
-            task.link = None
-        except AttributeError:
-            pass
+        task.link = None
         return True
 
     def _unlink(self, t: tealet.tealet) -> None:
@@ -133,7 +127,7 @@ class _FifoRunnableQueue(_tasks.TaskLink):
         return task
 
     def tasks(self) -> tuple[_tasks.TealetTask, ...]:
-        return tuple(task for task in self._items if isinstance(task, _tasks.TealetTask))
+        return cast(tuple[_tasks.TealetTask, ...], tuple(self._items))
 
     def _normalise_insert_position(self, position: int, length: int) -> int:
         # match list/deque insertion semantics, with -1 meaning append.
@@ -189,10 +183,7 @@ class _PrescheduledRunnableQueue(_FifoRunnableQueue):
                 self._prescheduled.remove(task)
             except ValueError:
                 pass
-            try:
-                task.link = None
-            except AttributeError:
-                pass
+            task.link = None
             return True
         return super().discard(task)
 
@@ -204,11 +195,7 @@ class _PrescheduledRunnableQueue(_FifoRunnableQueue):
         return super().pop_next()
 
     def tasks(self) -> tuple[_tasks.TealetTask, ...]:
-        return tuple(
-            task
-            for task in (*self._prescheduled, *self._items)
-            if isinstance(task, _tasks.TealetTask)
-        )
+        return cast(tuple[_tasks.TealetTask, ...], (*self._prescheduled, *self._items))
 
     def _remove_without_unlink(self, task: tealet.tealet) -> None:
         # queue moves keep the task linked to this queue, so do not clear link.
@@ -224,18 +211,12 @@ class _PrescheduledRunnableQueue(_FifoRunnableQueue):
     def _insert_prescheduled(self, task: tealet.tealet, position: int) -> None:
         self._prescheduled.insert(position, task)
         self._prescheduled_set.add(task)
-        try:
-            task.link = self
-        except AttributeError:
-            pass
+        task.link = self
 
     def _insert_normal(self, task: tealet.tealet, position: int) -> None:
         self._items.insert(position, task)
         self._set.add(task)
-        try:
-            task.link = self
-        except AttributeError:
-            pass
+        task.link = self
 
     def reschedule(self, task: tealet.tealet, position: int | None) -> None:
         self._remove_without_unlink(task)
@@ -293,10 +274,7 @@ class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
         if task not in self._set:
             return False
         self._remove_normal(task)
-        try:
-            task.link = None
-        except AttributeError:
-            pass
+        task.link = None
         return True
 
     def pop_next(self) -> tealet.tealet:
@@ -307,21 +285,17 @@ class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
         return task
 
     def tasks(self) -> tuple[_tasks.TealetTask, ...]:
-        return tuple(
-            task
-            for task in (*self._prescheduled, *(entry[2] for entry in sorted(self._priority_items)))
-            if isinstance(task, _tasks.TealetTask)
+        return cast(
+            tuple[_tasks.TealetTask, ...],
+            (*self._prescheduled, *(entry[2] for entry in sorted(self._priority_items))),
         )
 
     def _active_priority(self, task: tealet.tealet) -> Any:
+        assert isinstance(task, _tasks.TealetTask)
         try:
             return cast(Any, task).get_active_priority()
         except AttributeError:
-            if isinstance(task, _tasks.TealetTask):
-                return _tasks.TASK_PRIORITY_DEFAULT
-            # external tealets such as the main runner must sort after tasks so
-            # every scheduler-owned task can run before control returns to caller.
-            return float("inf")
+            return _tasks.TASK_PRIORITY_DEFAULT
 
     def _priority_entry(self, task: tealet.tealet) -> tuple[Any, int, tealet.tealet]:
         return (self._active_priority(task), next(self._priority_sequence), task)
@@ -348,10 +322,7 @@ class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
         del position
         heapq.heappush(self._priority_items, self._priority_entry(task))
         self._set.add(task)
-        try:
-            task.link = self
-        except AttributeError:
-            pass
+        task.link = self
 
     def on_modified(self, task: tealet.tealet) -> None:
         if task in self._prescheduled_set:
@@ -1396,8 +1367,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _make_runnable(self, t: tealet.tealet) -> None:
         if t in self._runnable:
             return
-        if isinstance(t, _tasks.TealetTask):
-            t._scheduler = self
+        assert isinstance(t, _tasks.TealetTask)
+        t._scheduler = self
         self._runnable.add(t)
         self._break_wait()
 
@@ -1424,43 +1395,32 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _target_run(self, target: tealet.tealet) -> None:
         if target is tealet.current():
             return
-        try:
-            target._unlink()
-        except AttributeError:
-            raise RuntimeError(f"Cannot throw to this target: {target}") from None
+        assert isinstance(target, _tasks.TealetTask)
+        target._unlink()
         self._make_runnable(tealet.current())
         target.switch()
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
         if target is tealet.current():
             raise exc
-        try:
-            target._unlink()
-        except AttributeError:
-            raise RuntimeError(f"Cannot throw to this target: {target}") from None
+        assert isinstance(target, _tasks.TealetTask)
+        target._unlink()
         self._make_runnable(tealet.current())
-        if isinstance(target, _tasks.TealetTask):
-            target._throw_from_scheduler(exc)
-        else:
-            target.throw(exc)
+        target._throw_from_scheduler(exc)
 
     def _find_target(self, task_exit=False) -> tealet.tealet:
         if self._runner is not None and self._target_count is not None and self._n_scheduled >= self._target_count:
             result = self._runner
-            try:
-                result._unlink()
-            except AttributeError:
-                self._unlink(result)
+            assert isinstance(result, _tasks.TealetTask)
+            result._unlink()
         elif self._has_runnable_work():
             result = self._pop_next_runnable()
         elif not task_exit:
             raise DeadlockError("No tasks to switch to")
         else:
             result = tealet.main()
-        try:
-            result.link = None
-        except AttributeError:
-            pass
+        assert isinstance(result, _tasks.TealetTask)
+        result.link = None
         return result
 
     def _pump(self, n=0) -> int:
@@ -1479,11 +1439,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def pump(self, n=0) -> int:
         self._verify_current_scheduler()
-        self._running = True
-        try:
-            return self._pump(n)
-        finally:
-            self._running = False
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+            self._running = True
+            try:
+                return self._pump(n)
+            finally:
+                self._running = False
 
     # -- Concrete driver hooks ----------------------------------------
 

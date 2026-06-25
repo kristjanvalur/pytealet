@@ -106,6 +106,8 @@ def _new_scheduler(task_factory_maker=None) -> Scheduler:
 
 
 class _PriorityTaskFactory:
+    task_class = PriorityTask
+
     def __init__(self, priorities: list[float] | None = None):
         self._priorities = iter(priorities) if priorities is not None else None
 
@@ -742,6 +744,8 @@ class TestSchedulerAccessors:
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
 
         class RecordingTaskFactory:
+            task_class = TealetTask
+
             def __call__(self, scheduler, func, *, context, eager_start=None, **kwargs):
                 calls.append((scheduler, context.get(marker), eager_start, kwargs))
                 return default(scheduler, func, context=context, eager_start=eager_start)
@@ -2107,7 +2111,8 @@ class TestSchedulerAccessors:
 
         task = s.spawn(worker)
         group = gather(task)
-        assert group.cancel() is True
+        with s.main_context():
+            assert group.cancel() is True
 
         with pytest.raises(CancelledError):
             s.run_until_complete(group)
@@ -3996,7 +4001,8 @@ class TestFutureExamples:
 
         waiter_task = s.spawn(waiter)
         s.pump(1)
-        waiter_task.throw(RawTimeoutError())
+        with s.main_context():
+            waiter_task.throw(RawTimeoutError())
         s.run()
 
         assert waiter_task.done() is True

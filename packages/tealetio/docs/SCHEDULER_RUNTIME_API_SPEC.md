@@ -77,6 +77,16 @@ Implemented:
   The default factory preserves direct `TealetTask.prepare(...)` behavior.
   `tealetio.tasks.StubTaskFactory` can create and reuse a prepared stub via
   `stub_here()`, then create scheduler tasks from that stub.
+- The scheduler main-tealet context is explicit through
+  `BaseScheduler.main_context()`. It installs the scheduler's task factory as
+  the low-level tealet wrapper factory for the current main tealet, so direct
+  task access from main code sees a scheduler-owned `TealetTask` wrapper rather
+  than a raw `_tealet.tealet` wrapper.
+- Scheduler and runner driving entry points enter `main_context()`
+  automatically while constructing, cancelling, transferring, and driving
+  scheduler tasks. Low-level code that manipulates scheduler tasks directly
+  from the raw main tealet must enter `with scheduler.main_context():`
+  explicitly.
 - Cancellation propagates across scheduler boundaries in an asyncio-compatible
   way:
   - cancelling an asyncio waiter on a tealet `Future` schedules cancellation of
@@ -181,6 +191,48 @@ Semantics:
   - Returns the scheduler currently running in this execution context.
   - Raises `RuntimeError` if no running scheduler exists.
   - Never creates or installs a scheduler.
+
+### Scheduler Main Context
+
+```python
+class BaseScheduler:
+    def main_context(self) -> ContextManager[None]: ...
+```
+
+Semantics:
+
+- `main_context()` temporarily configures the low-level tealet factory so the
+  current main tealet is wrapped by this scheduler's configured task class.
+  With the default factory that wrapper is a `TealetTask`; with a priority
+  factory it may be a `PriorityTask` or another scheduler-compatible subclass.
+- The context is reentrant for the same scheduler. Entering it again while the
+  same scheduler factory is active is a no-op, and exiting restores the previous
+  low-level tealet factory.
+- Code running inside a scheduler-owned `TealetTask` already has the right
+  scheduler shape. Code running from the raw process main tealet must enter
+  `with scheduler.main_context():` before directly cancelling, throwing into,
+  rescheduling, yielding to, or otherwise transferring scheduler-owned tasks.
+- `TealetTask.run()`, `TealetTask.throw(...)`, and cancellation do not create
+  this context themselves. The boundary is owned by scheduler/runner driving
+  APIs and by explicit low-level callers.
+- Sync driving entry points (`run()`, `run_forever()`,
+  `run_until_complete(...)`, and `pump(...)`) and async driving entry points
+  (`arun(...)`, `arun_forever()`, and `arun_until_complete(...)`) enter
+  `main_context()` automatically. `Runner.run()`, `Runner.close()`,
+  `AsyncRunner.run()`, and `AsyncRunner.aclose()` also enter it while creating
+  and draining their main and shutdown tasks.
+- Priority-based schedulers also temporarily give the driving main tealet an
+  internal infinity priority while the scheduler is being driven. This keeps
+  real runnable work ahead of the driver and is an implementation detail rather
+  than a public priority band.
+
+Example:
+
+```python
+with scheduler.main_context():
+    task.cancel()
+    scheduler.run_until_complete(task)
+```
 
 ### Scheduler Grouping
 
@@ -479,6 +531,9 @@ Return behavior:
 - Context-local current scheduler binding for async tasks is future hardening
   work.
 - Running scheduler binding is strictly scoped and never lazy-created.
+- Main-tealet scheduler context is also scoped. The scheduler/runner driving
+  entry points install it automatically, but raw main code that touches
+  scheduler-owned tasks directly must install `scheduler.main_context()` itself.
 - Nested runtime scopes are allowed and use stack discipline:
   - inner scope overrides current scheduler
   - outer scope restored on exit
