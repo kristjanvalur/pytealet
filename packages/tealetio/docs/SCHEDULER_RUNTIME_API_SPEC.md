@@ -244,7 +244,17 @@ Semantics:
 ### Scheduler Task Factories
 
 ```python
-from tealetio.tasks import DefaultTaskFactory, StubTaskFactory, TaskFactory
+from tealetio.tasks import (
+    DefaultTaskFactory,
+    PriorityTask,
+    StubTaskFactory,
+    TaskFactory,
+    TASK_PRIORITY_CRITICAL,
+    TASK_PRIORITY_DEFAULT,
+    TASK_PRIORITY_HIGH,
+    TASK_PRIORITY_IDLE,
+    TASK_PRIORITY_LOW,
+)
 
 
 class TaskFactory(Protocol):
@@ -255,20 +265,35 @@ class TaskFactory(Protocol):
         *,
         context: contextvars.Context,
         eager_start: bool | None = None,
-      **kwargs: Any,
+        **kwargs: Any,
     ) -> TealetTask: ...
 
-    class DefaultTaskFactory:
-      def __init__(self, *, eager_start: bool = False) -> None: ...
+class DefaultTaskFactory:
+    def __init__(self, *, eager_start: bool = False) -> None: ...
 
 class StubTaskFactory:
-      def __init__(
+    def __init__(
         self,
         stub: tealet.tealet | None = None,
         *,
         eager_start: bool = False,
-      ) -> None: ...
+    ) -> None: ...
     def stub_here(self) -> tealet.tealet: ...
+
+class PriorityTask(TealetTask):
+    def __init__(
+        self,
+        owning_scheduler: BaseScheduler,
+        priority: float = TASK_PRIORITY_DEFAULT,
+    ) -> None: ...
+
+    @property
+    def priority(self) -> float: ...
+
+    @priority.setter
+    def priority(self, value: float) -> None: ...
+
+    def get_active_priority(self) -> float: ...
 
 class BaseScheduler:
     def get_task_factory(self) -> TaskFactory: ...
@@ -285,6 +310,14 @@ Semantics:
   configured task factory, mirroring `asyncio.create_task(coro, **kwargs)`. This
   allows custom factories to accept construction-time options such as
   `priority=...` before the task becomes runnable.
+- `PriorityTask` is a scheduler task with a float `priority` property. Lower
+  numeric values run first in priority queues, matching Python priority queue
+  and Unix `nice` conventions. The standard public bands are
+  `TASK_PRIORITY_CRITICAL = -20.0`, `TASK_PRIORITY_HIGH = -10.0`,
+  `TASK_PRIORITY_DEFAULT = 0.0`, `TASK_PRIORITY_LOW = 10.0`, and
+  `TASK_PRIORITY_IDLE = 20.0`, leaving space for intermediate values.
+- Changing `PriorityTask.priority` calls `modified()`, so a runnable queue can
+  recompute ordering when the task is already linked.
 - Class factories expose an `eager_start` default. `BaseScheduler.spawn(..., eager_start=...)`
   passes an optional per-spawn override to the factory.
 - When eagerness resolves true and the scheduler is already running, the factory

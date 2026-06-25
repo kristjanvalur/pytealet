@@ -53,6 +53,29 @@ coroutines that a tealet task waits for through `BaseScheduler.await_(...)`.
 hosted by `run_asyncio_in_tealet(...)` clear that tealetio task scope before
 entering the asyncio entry point, so ordinary asyncio tasks remain visible.
 
+## Task Priorities
+
+`PriorityTask` is a `TealetTask` subclass for schedulers that use a priority
+runnable queue. Its `priority` property is a float, and changing it notifies the
+current task link so the queue can recompute runnable order when the task is
+already waiting to run. `get_active_priority()` returns that current property
+value.
+
+Priority values follow Python priority queue and Unix `nice` intuition: lower
+numeric values run first. The public constants provide spaced bands with room
+for intermediate values:
+
+```python
+TASK_PRIORITY_CRITICAL = -20.0
+TASK_PRIORITY_HIGH = -10.0
+TASK_PRIORITY_DEFAULT = 0.0
+TASK_PRIORITY_LOW = 10.0
+TASK_PRIORITY_IDLE = 20.0
+```
+
+For example, a custom task factory can accept `priority=...`, construct a
+`PriorityTask`, and return it before the scheduler makes it runnable.
+
 ## Scheduler Asyncio Bridge
 
 `BaseScheduler.await_(awaitable) -> object` waits for an asyncio awaitable from

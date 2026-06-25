@@ -14,6 +14,12 @@ if TYPE_CHECKING:
     from .scheduler import BaseScheduler
 
 
+TASK_PRIORITY_CRITICAL = -20.0
+TASK_PRIORITY_HIGH = -10.0
+TASK_PRIORITY_DEFAULT = 0.0
+TASK_PRIORITY_LOW = 10.0
+TASK_PRIORITY_IDLE = 20.0
+
 CancelledError = asyncio.CancelledError
 
 __all__ = [
@@ -21,10 +27,16 @@ __all__ = [
     "DefaultTaskFactory",
     "Future",
     "get_current",
+    "PriorityTask",
     "TaskLink",
     "Shield",
     "StubTaskFactory",
     "TaskFactory",
+    "TASK_PRIORITY_CRITICAL",
+    "TASK_PRIORITY_DEFAULT",
+    "TASK_PRIORITY_HIGH",
+    "TASK_PRIORITY_IDLE",
+    "TASK_PRIORITY_LOW",
     "TealetTask",
     "shield",
 ]
@@ -298,6 +310,31 @@ class TealetTask(tealet.tealet, Future[Any]):
         # Scheduler-owned tasks always route via scheduler target selection,
         # even if task startup immediately raises before user code returns.
         return self._scheduler._find_target(task_exit=True), None, suppress
+
+
+class PriorityTask(TealetTask):
+    """Tealet task with a scheduler priority value."""
+
+    def __init__(
+        self,
+        owning_scheduler: BaseScheduler,
+        priority: float = TASK_PRIORITY_DEFAULT,
+    ):
+        super().__init__(owning_scheduler)
+        self._priority = TASK_PRIORITY_DEFAULT
+        self.priority = priority
+
+    @property
+    def priority(self) -> float:
+        return self._priority
+
+    @priority.setter
+    def priority(self, value: float) -> None:
+        self._priority = float(value)
+        self.modified()
+
+    def get_active_priority(self) -> float:
+        return self.priority
 
 
 # marks scheduler-owned tealet task code while it is on the Python stack. It is

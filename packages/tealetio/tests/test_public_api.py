@@ -32,6 +32,7 @@ def test_top_level_exports_public_scheduler_api():
         "InvalidStateError",
         "LifoQueue",
         "Lock",
+        "PriorityTask",
         "PriorityQueue",
         "Queue",
         "QueueEmpty",
@@ -45,6 +46,11 @@ def test_top_level_exports_public_scheduler_api():
         "Shield",
         "StubTaskFactory",
         "SyncSchedulerDrivingAPI",
+        "TASK_PRIORITY_CRITICAL",
+        "TASK_PRIORITY_DEFAULT",
+        "TASK_PRIORITY_HIGH",
+        "TASK_PRIORITY_IDLE",
+        "TASK_PRIORITY_LOW",
         "TaskFactory",
         "TealetSelectorEventLoop",
         "TealetTask",
@@ -80,7 +86,13 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.Queue is tealetio.locks.Queue
     assert tealetio.Future is tealetio.tasks.Future
     assert tealetio.get_current is tealetio.tasks.get_current
+    assert tealetio.PriorityTask is tealetio.tasks.PriorityTask
     assert tealetio.TealetTask is tealetio.tasks.TealetTask
+    assert tealetio.TASK_PRIORITY_CRITICAL is tealetio.tasks.TASK_PRIORITY_CRITICAL
+    assert tealetio.TASK_PRIORITY_HIGH is tealetio.tasks.TASK_PRIORITY_HIGH
+    assert tealetio.TASK_PRIORITY_DEFAULT is tealetio.tasks.TASK_PRIORITY_DEFAULT
+    assert tealetio.TASK_PRIORITY_LOW is tealetio.tasks.TASK_PRIORITY_LOW
+    assert tealetio.TASK_PRIORITY_IDLE is tealetio.tasks.TASK_PRIORITY_IDLE
     assert tealetio.Scheduler is tealetio.scheduler.Scheduler
     assert tealetio.BaseScheduler is tealetio.scheduler.BaseScheduler
     assert tealetio.Runner is tealetio.runner.Runner
