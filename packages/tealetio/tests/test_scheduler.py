@@ -369,12 +369,30 @@ class TestSchedulerAccessors:
 
         assert seen == ["early", "middle", "default"]
 
-    def test_default_task_factory_rejects_unknown_spawn_keyword(self):
+    def test_default_task_constructor_rejects_unknown_spawn_keyword(self):
         s = _new_scheduler()
         set_scheduler(s)
 
-        with pytest.raises(TypeError, match="unexpected task factory keyword argument: priority"):
+        with pytest.raises(TypeError, match="priority"):
             s.spawn(lambda: "ok", priority=-10)
+
+    def test_default_task_factory_passes_spawn_kwargs_to_task_class(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        set_scheduler(s)
+        seen: list[str] = []
+
+        default = s.spawn(lambda: seen.append("default"))
+        high = s.spawn(lambda: seen.append("high"), priority=TASK_PRIORITY_HIGH)
+
+        assert isinstance(default, PriorityTask)
+        assert isinstance(high, PriorityTask)
+        assert default.priority == TASK_PRIORITY_DEFAULT
+        assert high.priority == TASK_PRIORITY_HIGH
+
+        s.run()
+
+        assert seen == ["high", "default"]
 
     def test_priority_runnable_queue_uses_stable_default_priority(self):
         s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
@@ -631,7 +649,9 @@ class TestSchedulerAccessors:
         custom = StubTaskFactory()
 
         assert isinstance(original, DefaultTaskFactory)
+        assert original.task_class is TealetTask
         assert original.eager_start is False
+        assert custom.task_class is TealetTask
         s.set_task_factory(custom)
         assert s.get_task_factory() is custom
 
@@ -774,6 +794,18 @@ class TestSchedulerAccessors:
         assert factory.stub is stub
         assert s.run_until_complete(first) == "first"
         assert s.run_until_complete(second) == "second"
+
+    def test_stub_task_factory_passes_spawn_kwargs_to_task_class(self):
+        s = _new_scheduler()
+        factory = StubTaskFactory(task_class=PriorityTask)
+        s.set_task_factory(factory)
+
+        task = s.spawn(lambda: "ok", priority=TASK_PRIORITY_HIGH)
+
+        assert factory.stub is not None
+        assert isinstance(task, PriorityTask)
+        assert task.priority == TASK_PRIORITY_HIGH
+        assert s.run_until_complete(task) == "ok"
 
     def test_stub_task_factory_eager_runs_before_spawn_returns_inside_scheduler(self):
         s = _new_scheduler()

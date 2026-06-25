@@ -60,6 +60,7 @@ class TaskLink(ABC):
 
 
 T = TypeVar("T")
+TaskClass = Callable[..., "TealetTask"]
 
 
 class Future(Generic[T]):
@@ -400,7 +401,13 @@ def _should_start_eager(scheduler: BaseScheduler, default: bool, override: bool 
 class DefaultTaskFactory:
     """Default task factory using direct tealet preparation."""
 
-    def __init__(self, *, eager_start: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        task_class: TaskClass = TealetTask,
+        eager_start: bool = False,
+    ) -> None:
+        self.task_class = task_class
         self.eager_start = bool(eager_start)
 
     def __call__(
@@ -412,10 +419,7 @@ class DefaultTaskFactory:
         eager_start: bool | None = None,
         **kwargs: Any,
     ) -> TealetTask:
-        if kwargs:
-            unexpected = next(iter(kwargs))
-            raise TypeError(f"unexpected task factory keyword argument: {unexpected}")
-        task = TealetTask(scheduler)
+        task = self.task_class(scheduler, **kwargs)
         _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):
             task.run()
@@ -425,8 +429,15 @@ class DefaultTaskFactory:
 class StubTaskFactory:
     """Task factory that prepares tasks from a reusable tealet stub."""
 
-    def __init__(self, stub: tealet.tealet | None = None, *, eager_start: bool = False) -> None:
+    def __init__(
+        self,
+        stub: tealet.tealet | None = None,
+        *,
+        task_class: TaskClass = TealetTask,
+        eager_start: bool = False,
+    ) -> None:
         self._stub = stub
+        self.task_class = task_class
         self.eager_start = bool(eager_start)
 
     @property
@@ -448,13 +459,10 @@ class StubTaskFactory:
         eager_start: bool | None = None,
         **kwargs: Any,
     ) -> TealetTask:
-        if kwargs:
-            unexpected = next(iter(kwargs))
-            raise TypeError(f"unexpected task factory keyword argument: {unexpected}")
         stub = self._stub
         if stub is None:
             stub = self.stub_here()
-        task = TealetTask(scheduler)
+        task = self.task_class(scheduler, **kwargs)
         task.set_stub(stub)
         _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):

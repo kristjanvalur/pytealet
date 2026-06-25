@@ -269,13 +269,19 @@ class TaskFactory(Protocol):
     ) -> TealetTask: ...
 
 class DefaultTaskFactory:
-    def __init__(self, *, eager_start: bool = False) -> None: ...
+    def __init__(
+        self,
+        *,
+        task_class: Callable[..., TealetTask] = TealetTask,
+        eager_start: bool = False,
+    ) -> None: ...
 
 class StubTaskFactory:
     def __init__(
         self,
         stub: tealet.tealet | None = None,
         *,
+        task_class: Callable[..., TealetTask] = TealetTask,
         eager_start: bool = False,
     ) -> None: ...
     def stub_here(self) -> tealet.tealet: ...
@@ -310,6 +316,11 @@ Semantics:
   configured task factory, mirroring `asyncio.create_task(coro, **kwargs)`. This
   allows custom factories to accept construction-time options such as
   `priority=...` before the task becomes runnable.
+- `DefaultTaskFactory` and `StubTaskFactory` accept a `task_class` constructor.
+  They instantiate it as `task_class(scheduler, **kwargs)`, so extra spawn
+  keyword arguments are handled by the task class. With the default
+  `TealetTask`, unsupported keywords are rejected by `TealetTask.__init__`;
+  with `PriorityTask`, `priority=...` is accepted directly.
 - `PriorityTask` is a scheduler task with a float `priority` property. Lower
   numeric values run first in priority queues, matching Python priority queue
   and Unix `nice` conventions. The standard public bands are

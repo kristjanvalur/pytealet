@@ -73,8 +73,15 @@ TASK_PRIORITY_LOW = 10.0
 TASK_PRIORITY_IDLE = 20.0
 ```
 
-For example, a custom task factory can accept `priority=...`, construct a
-`PriorityTask`, and return it before the scheduler makes it runnable.
+For example, the built-in task factories can construct priority tasks directly:
+
+```python
+scheduler.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
+```
+
+The factory passes extra `spawn(...)` keyword arguments to the task class before
+the scheduler makes the task runnable.
 
 ## Scheduler Asyncio Bridge
 
