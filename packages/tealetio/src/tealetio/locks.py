@@ -59,6 +59,8 @@ QueueShutDown: Any = getattr(asyncio, "QueueShutDown", _QueueShutDown)
 
 
 def set_scheduler_resolver(resolver: Callable[[], BaseScheduler]) -> None:
+    """Install the callback used by primitives to find the running scheduler."""
+
     global _get_current_scheduler
     _get_current_scheduler = resolver
 
@@ -87,12 +89,16 @@ class Timeout:
     # -- Public state --------------------------------------------------
 
     def reschedule(self, when: float):
+        """Move this timeout to a new absolute scheduler time."""
+
         if not self._expired and self._handle is not None:
             self._handle.cancel()
             self._when = when
             self._handle = _get_current_scheduler().call_at(self._when, self._timeout, tealet.current())
 
     def expired(self) -> bool:
+        """Return True if this timeout has fired."""
+
         return self._expired
 
     # -- Context manager ----------------------------------------------
@@ -147,6 +153,8 @@ class Event:
             pass
 
     def swait(self) -> bool:
+        """Block the current tealet until the event is set."""
+
         if self._is_set:
             return True
 
@@ -163,6 +171,8 @@ class Event:
         return True
 
     async def wait(self) -> bool:
+        """Await until the event is set."""
+
         if self._is_set:
             return True
 
@@ -177,6 +187,8 @@ class Event:
                 pass
 
     def set(self) -> None:
+        """Set the event and wake all sync and async waiters."""
+
         self._is_set = True
         if self._waiters:
             scheduler = _get_current_scheduler()
@@ -189,6 +201,8 @@ class Event:
         self._async_waiters.clear()
 
     def clear(self) -> None:
+        """Reset the event to the unset state."""
+
         self._is_set = False
 
 
@@ -200,9 +214,13 @@ class Lock:
         self._waiters: deque[Event] = deque()
 
     def locked(self) -> bool:
+        """Return True if the lock is currently acquired."""
+
         return self._locked
 
     def sacquire(self) -> bool:
+        """Acquire the lock from synchronous tealet code."""
+
         if not self._locked:
             self._locked = True
             return True
@@ -222,6 +240,8 @@ class Lock:
         return True
 
     async def acquire(self) -> bool:
+        """Acquire the lock from async code."""
+
         if not self._locked:
             self._locked = True
             return True
@@ -241,6 +261,8 @@ class Lock:
         return True
 
     def release(self) -> None:
+        """Release the lock and wake one waiter, if any."""
+
         if not self._locked:
             raise RuntimeError("Lock is not acquired")
 
@@ -317,6 +339,8 @@ class PriorityLock(Lock):
             pass
 
     def get_effective_priority(self) -> float | None:
+        """Return the best inherited priority among waiting tasks."""
+
         if not self._waiter_tasks:
             return None
         return min(self._task_effective_priority(task) for task in self._waiter_tasks)
@@ -330,6 +354,8 @@ class PriorityLock(Lock):
                 pass
 
     def sacquire(self) -> bool:
+        """Acquire the lock from synchronous tealet code with priority inheritance."""
+
         task = self._current_task()
         if not self._locked:
             super().sacquire()
@@ -357,6 +383,8 @@ class PriorityLock(Lock):
         return True
 
     async def acquire(self) -> bool:
+        """Acquire the lock from async code with priority inheritance."""
+
         task = self._current_async_owner()
         if not self._locked:
             await super().acquire()
@@ -376,6 +404,8 @@ class PriorityLock(Lock):
         return True
 
     def release(self) -> None:
+        """Release the priority lock from its owning task."""
+
         if not self._locked:
             raise RuntimeError("Lock is not acquired")
 
@@ -391,18 +421,28 @@ class Condition:
         self._waiters: deque[Event] = deque()
 
     def locked(self) -> bool:
+        """Return True if the underlying lock is currently acquired."""
+
         return self._lock.locked()
 
     def sacquire(self) -> bool:
+        """Acquire the underlying lock from synchronous tealet code."""
+
         return self._lock.sacquire()
 
     async def acquire(self) -> bool:
+        """Acquire the underlying lock from async code."""
+
         return await self._lock.acquire()
 
     def release(self) -> None:
+        """Release the underlying lock."""
+
         self._lock.release()
 
     def swait(self) -> bool:
+        """Release the lock and block until notified from sync tealet code."""
+
         if not self.locked():
             raise RuntimeError("cannot wait on un-acquired lock")
 
@@ -420,6 +460,8 @@ class Condition:
             self._lock.sacquire()
 
     async def wait(self) -> bool:
+        """Release the lock and await until notified from async code."""
+
         if not self.locked():
             raise RuntimeError("cannot wait on un-acquired lock")
 
@@ -437,6 +479,8 @@ class Condition:
             await self._lock.acquire()
 
     def swait_for(self, predicate: Callable[[], bool]) -> bool:
+        """Synchronously wait until `predicate` returns a truthy value."""
+
         result = predicate()
         while not result:
             self.swait()
@@ -444,6 +488,8 @@ class Condition:
         return result
 
     async def wait_for(self, predicate: Callable[[], bool]) -> bool:
+        """Asynchronously wait until `predicate` returns a truthy value."""
+
         result = predicate()
         while not result:
             await self.wait()
@@ -451,6 +497,8 @@ class Condition:
         return result
 
     def notify(self, n: int = 1) -> None:
+        """Wake up to `n` tasks waiting on this condition."""
+
         if not self.locked():
             raise RuntimeError("cannot notify on un-acquired lock")
         if n <= 0:
@@ -462,6 +510,8 @@ class Condition:
             n -= 1
 
     def notify_all(self) -> None:
+        """Wake all tasks waiting on this condition."""
+
         self.notify(len(self._waiters))
 
     def __enter__(self) -> "Condition":
@@ -492,6 +542,8 @@ class Barrier:
 
     @property
     def n_waiting(self) -> int:
+        """Return the number of parties currently waiting at the barrier."""
+
         return self._count
 
     def _arrive(self) -> tuple[int, Event | None, int]:
@@ -520,6 +572,8 @@ class Barrier:
             pass
 
     def swait(self) -> int:
+        """Synchronously wait for all barrier parties and return this party index."""
+
         index, waiter, generation = self._arrive()
         if waiter is None:
             return index
@@ -532,6 +586,8 @@ class Barrier:
             raise
 
     async def wait(self) -> int:
+        """Asynchronously wait for all barrier parties and return this party index."""
+
         index, waiter, generation = self._arrive()
         if waiter is None:
             return index
@@ -554,9 +610,13 @@ class Semaphore:
         self._waiters: deque[Event] = deque()
 
     def locked(self) -> bool:
+        """Return True if the semaphore cannot be acquired immediately."""
+
         return self._value == 0
 
     def sacquire(self) -> bool:
+        """Acquire one semaphore slot from synchronous tealet code."""
+
         if self._value > 0:
             self._value -= 1
             return True
@@ -576,6 +636,8 @@ class Semaphore:
         return True
 
     async def acquire(self) -> bool:
+        """Acquire one semaphore slot from async code."""
+
         if self._value > 0:
             self._value -= 1
             return True
@@ -595,6 +657,8 @@ class Semaphore:
         return True
 
     def release(self) -> None:
+        """Release one semaphore slot and wake one waiter, if any."""
+
         self._value += 1
         while self._waiters:
             waiter = self._waiters.popleft()
@@ -624,6 +688,8 @@ class BoundedSemaphore(Semaphore):
         self._bound_value = value
 
     def release(self) -> None:
+        """Release one slot, failing if it would exceed the initial value."""
+
         if self._value >= self._bound_value:
             raise ValueError("BoundedSemaphore released too many times")
         super().release()
@@ -656,12 +722,18 @@ class Queue(Generic[T]):
         return self._queue.popleft()
 
     def qsize(self) -> int:
+        """Return the current number of items in the queue."""
+
         return len(self._queue)
 
     def empty(self) -> bool:
+        """Return True if the queue currently has no items."""
+
         return self.qsize() == 0
 
     def full(self) -> bool:
+        """Return True if the queue has reached `maxsize`."""
+
         return self.maxsize > 0 and self.qsize() >= self.maxsize
 
     def _wakeup_next(self, waiters: deque[Event]) -> None:
@@ -674,6 +746,8 @@ class Queue(Generic[T]):
             waiters.popleft().set()
 
     def put_nowait(self, item: T) -> None:
+        """Put `item` without blocking, or raise QueueFull/QueueShutDown."""
+
         if self._is_shutdown:
             raise QueueShutDown
         if self.full():
@@ -684,6 +758,8 @@ class Queue(Generic[T]):
         self._wakeup_next(self._getters)
 
     def sput(self, item: T) -> None:
+        """Put `item`, blocking the current tealet while the queue is full."""
+
         while self.full():
             if self._is_shutdown:
                 raise QueueShutDown
@@ -699,6 +775,8 @@ class Queue(Generic[T]):
         self.put_nowait(item)
 
     async def put(self, item: T) -> None:
+        """Put `item`, awaiting while the queue is full."""
+
         while self.full():
             if self._is_shutdown:
                 raise QueueShutDown
@@ -714,6 +792,8 @@ class Queue(Generic[T]):
         self.put_nowait(item)
 
     def get_nowait(self) -> T:
+        """Remove and return an item without blocking."""
+
         if self.empty():
             if self._is_shutdown:
                 raise QueueShutDown
@@ -725,6 +805,8 @@ class Queue(Generic[T]):
         return item
 
     def sget(self) -> T:
+        """Remove and return an item, blocking the current tealet if needed."""
+
         while self.empty():
             if self._is_shutdown:
                 raise QueueShutDown
@@ -740,6 +822,8 @@ class Queue(Generic[T]):
         return self.get_nowait()
 
     async def get(self) -> T:
+        """Remove and return an item, awaiting if needed."""
+
         while self.empty():
             if self._is_shutdown:
                 raise QueueShutDown
@@ -755,6 +839,8 @@ class Queue(Generic[T]):
         return self.get_nowait()
 
     def task_done(self) -> None:
+        """Mark one formerly queued item as fully processed."""
+
         if self._unfinished_tasks <= 0:
             raise ValueError("task_done() called too many times")
         self._unfinished_tasks -= 1
@@ -762,14 +848,20 @@ class Queue(Generic[T]):
             self._finished.set()
 
     def sjoin(self) -> None:
+        """Block the current tealet until all queued work is marked done."""
+
         while self._unfinished_tasks:
             self._finished.swait()
 
     async def join(self) -> None:
+        """Await until all queued work is marked done."""
+
         while self._unfinished_tasks:
             await self._finished.wait()
 
     def shutdown(self, immediate: bool = False) -> None:
+        """Shut down the queue and wake blocked putters/getters."""
+
         self._is_shutdown = True
         self._wakeup_all(self._putters)
         if immediate:

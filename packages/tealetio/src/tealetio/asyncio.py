@@ -226,52 +226,76 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
     # -- Asyncio fd callbacks ----------------------------------------
 
     def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        """Register a readability callback on the running asyncio loop."""
+
         loop = _asyncio.get_running_loop()
         loop.add_reader(fd, callback, *args)
 
     def remove_reader(self, fd: int) -> bool:
+        """Remove a readability callback from the running asyncio loop."""
+
         loop = _asyncio.get_running_loop()
         return loop.remove_reader(fd)
 
     def add_writer(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        """Register a writability callback on the running asyncio loop."""
+
         loop = _asyncio.get_running_loop()
         loop.add_writer(fd, callback, *args)
 
     def remove_writer(self, fd: int) -> bool:
+        """Remove a writability callback from the running asyncio loop."""
+
         loop = _asyncio.get_running_loop()
         return loop.remove_writer(fd)
 
     # -- Asyncio socket helpers --------------------------------------
 
     def sock_recv(self, sock: socket.socket, n: int) -> bytes:
+        """Receive up to `n` bytes using asyncio socket readiness."""
+
         loop = _asyncio.get_running_loop()
         return self.await_(loop.sock_recv(sock, n))
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
+        """Receive bytes into `buf` using asyncio socket readiness."""
+
         loop = _asyncio.get_running_loop()
         return self.await_(loop.sock_recv_into(sock, buf))
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
+        """Receive datagram bytes and address using asyncio socket readiness."""
+
         loop = _asyncio.get_running_loop()
         return self.await_(compat.sock_recvfrom(loop, sock, bufsize))
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
+        """Receive datagram bytes into `buf` using asyncio socket readiness."""
+
         loop = _asyncio.get_running_loop()
         return self.await_(compat.sock_recvfrom_into(loop, sock, buf, nbytes))
 
     def sock_sendall(self, sock: socket.socket, data: Any) -> None:
+        """Send all `data` using asyncio socket readiness."""
+
         loop = _asyncio.get_running_loop()
         return self.await_(loop.sock_sendall(sock, data))
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
+        """Send one datagram using asyncio socket readiness."""
+
         loop = _asyncio.get_running_loop()
         return self.await_(compat.sock_sendto(loop, sock, data, address))
 
     def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+        """Accept one connection using asyncio socket readiness."""
+
         loop = _asyncio.get_running_loop()
         return self.await_(loop.sock_accept(sock))
 
     def sock_connect(self, sock: socket.socket, address: Any) -> None:
+        """Connect a socket using asyncio socket readiness."""
+
         loop = _asyncio.get_running_loop()
         return self.await_(loop.sock_connect(sock, address))
 
@@ -300,6 +324,8 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
     # -- Async run entry points ---------------------------------------
 
     async def arun(self, *, yield_every: int | None = None) -> None:
+        """Run scheduler work until idle, yielding to asyncio between batches."""
+
         self._verify_current_scheduler()
         if yield_every is not None and yield_every <= 0:
             raise ValueError("yield_every must be > 0 or None")
@@ -328,6 +354,8 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
                 self._wakeup_loop = None
 
     async def arun_forever(self, *, yield_every: int | None = None) -> None:
+        """Run scheduler work until `stop()` is called."""
+
         self._verify_current_scheduler()
         if yield_every is not None and yield_every <= 0:
             raise ValueError("yield_every must be > 0 or None")
@@ -353,6 +381,8 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         *,
         yield_every: int | None = None,
     ) -> T:
+        """Run scheduler work until `future` completes and return its result."""
+
         self._verify_current_scheduler()
         if yield_every is not None and yield_every <= 0:
             raise ValueError("yield_every must be > 0 or None")
@@ -395,6 +425,8 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
 
     @property
     def task(self) -> _asyncio.Task[None] | None:
+        """Return the background asyncio task used by this runner, if any."""
+
         return None
 
     async def __aenter__(self) -> "AsyncRunner":
@@ -405,6 +437,8 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
         await self.aclose()
 
     async def aclose(self) -> None:
+        """Shut down pending scheduler tasks and release runner resources."""
+
         if self._closed:
             return
         scheduler = self._scheduler
@@ -421,6 +455,8 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
             self._finalize_close(scheduler)
 
     async def run(self, entry, /, *, context: contextvars.Context | None = None):
+        """Run one callable or Future to completion using this async runner."""
+
         self._lazy_init()
         scheduler = self._require_scheduler()
         run_context = self._resolve_context(context)

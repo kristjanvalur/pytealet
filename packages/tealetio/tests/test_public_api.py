@@ -115,7 +115,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.sleep is tealetio.scheduler.sleep
     assert tealetio.spawn is tealetio.scheduler.spawn
     assert tealetio.create_task is tealetio.scheduler.create_task
-    assert tealetio.create_task is tealetio.spawn
+    assert tealetio.create_task.__doc__
 
 
 def test_star_import_uses_top_level_all():

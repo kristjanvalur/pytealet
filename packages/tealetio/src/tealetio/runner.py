@@ -26,6 +26,8 @@ __all__ = [
 
 
 class BaseRunner(Generic[SchedulerT]):
+    """Common lifecycle and signal handling for scheduler runners."""
+
     default_factory: ClassVar[object]
 
     def __init__(
@@ -47,6 +49,8 @@ class BaseRunner(Generic[SchedulerT]):
         self._interrupt_count = 0
 
     def get_scheduler(self) -> SchedulerT:
+        """Return the runner's scheduler, creating it on first access."""
+
         self._lazy_init()
         scheduler = self._scheduler
         assert scheduler is not None
@@ -204,6 +208,8 @@ class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
     default_factory = scheduler_module.Scheduler
 
     def close(self) -> None:
+        """Shut down pending scheduler tasks and release runner resources."""
+
         if self._closed:
             return
         scheduler = self._scheduler
@@ -219,6 +225,8 @@ class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
             self._finalize_close(scheduler)
 
     def run(self, entry, /, *, context: contextvars.Context | None = None):
+        """Run one callable or Future to completion using this runner."""
+
         self._lazy_init()
         scheduler = self._scheduler
         assert scheduler is not None

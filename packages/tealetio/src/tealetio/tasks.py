@@ -82,6 +82,8 @@ class _SchedulerTealetFactory:
 
 @contextmanager
 def scheduler_tealet_factory(scheduler: BaseScheduler):
+    """Use `scheduler` to construct low-level tealets in this context."""
+
     current_factory = _tealet.get_tealet_factory()
     if isinstance(current_factory, _SchedulerTealetFactory) and current_factory.scheduler is scheduler:
         yield
@@ -98,6 +100,8 @@ def scheduler_tealet_factory(scheduler: BaseScheduler):
 
 @contextmanager
 def task_priority(task: tealet.tealet, priority: float):
+    """Temporarily assign `priority` to a task that supports priorities."""
+
     try:
         previous_priority = cast(Any, task).priority
     except AttributeError:
@@ -124,12 +128,18 @@ class Future(Generic[T]):
     # -- State ---------------------------------------------------------
 
     def done(self) -> bool:
+        """Return True if the Future has a result or exception."""
+
         return self._done
 
     def cancelled(self) -> bool:
+        """Return True if the Future completed by cancellation."""
+
         return isinstance(self._exception, CancelledError)
 
     def cancel(self) -> bool:
+        """Cancel the Future if it has not completed yet."""
+
         if self._done:
             return False
         self.set_exception(CancelledError())
@@ -138,6 +148,8 @@ class Future(Generic[T]):
     # -- Completion ----------------------------------------------------
 
     def set_result(self, value: T) -> None:
+        """Complete the Future successfully with `value`."""
+
         if self._done:
             raise InvalidStateError("Future already done")
         self._result = value
@@ -146,6 +158,8 @@ class Future(Generic[T]):
         self._run_done_callbacks()
 
     def set_exception(self, exc: BaseException) -> None:
+        """Complete the Future by raising `exc` to waiters."""
+
         if self._done:
             raise InvalidStateError("Future already done")
         if not isinstance(exc, BaseException):
@@ -163,6 +177,8 @@ class Future(Generic[T]):
         *,
         context: contextvars.Context | None = None,
     ) -> None:
+        """Register `callback` to run when the Future completes."""
+
         if self._done:
             if context is None:
                 context = contextvars.copy_context()
@@ -178,6 +194,8 @@ class Future(Generic[T]):
         self._done_callbacks.append((callback, context))
 
     def remove_done_callback(self, callback: Callable[[Future[T]], object]) -> int:
+        """Remove matching done callbacks and return the number removed."""
+
         removed = 0
         kept: list[tuple[Callable[[Future[T]], object], contextvars.Context | None]] = []
         for stored_callback, context in self._done_callbacks:
@@ -206,6 +224,8 @@ class Future(Generic[T]):
         return self._event.swait()
 
     def wait(self) -> T:
+        """Block the current scheduler task until the Future completes."""
+
         try:
             self._wait()
         except CancelledError:
@@ -230,6 +250,8 @@ class Future(Generic[T]):
         return self._async_wait().__await__()
 
     def result(self) -> T:
+        """Return the Future result or raise its completion exception."""
+
         if not self._done:
             raise InvalidStateError("Result is not ready.")
         if self.cancelled():
@@ -240,6 +262,8 @@ class Future(Generic[T]):
         return cast(T, self._result)
 
     def exception(self) -> BaseException | None:
+        """Return the Future exception, or None for successful completion."""
+
         if not self._done:
             raise InvalidStateError("Exception is not set.")
         if self.cancelled():
@@ -268,10 +292,14 @@ class Shield(Future[T]):
             self.set_exception(exc)
 
     def wait(self) -> T:
+        """Block until the shielded Future completes."""
+
         return super().wait()
 
 
 def shield(future: Future[T]) -> Shield[T]:
+    """Return a Future wrapper that protects `future` from cancellation."""
+
     return Shield(future)
 
 
@@ -287,22 +315,32 @@ class Task(tealet.tealet, Future[Any]):
     # -- Runtime state -------------------------------------------------
 
     def is_waiting(self):
+        """Return True if this task is linked to a waiting primitive."""
+
         if self.link is None:
             return False
         return self.link._query_waiting()
 
     def is_runnable(self):
+        """Return True if this task is currently runnable."""
+
         if self.link is None:
             return False
         return self.link._query_runnable()
 
     def is_blocked(self):
+        """Return True if this task is blocked on an asyncio awaitable."""
+
         return self._scheduler._is_blocked(self)
 
     def is_running(self):
+        """Return True if this task is the current low-level tealet."""
+
         return tealet.current() is self
 
     def get_scheduler(self) -> BaseScheduler:
+        """Return the scheduler that owns this task."""
+
         return self._scheduler
 
     def modified(self) -> None:
@@ -318,15 +356,21 @@ class Task(tealet.tealet, Future[Any]):
         self._scheduler._unlink_pending_async_wait(self)
 
     def run(self):
+        """Transfer execution to this task from its owning scheduler."""
+
         self._scheduler._target_run(self)
 
     def throw(self, exc: BaseException):
+        """Throw `exc` into this task from its owning scheduler."""
+
         self._scheduler._target_throw(self, exc)
 
     def _throw_from_scheduler(self, exc: BaseException):
         super().throw(exc)
 
     def cancel(self) -> bool:
+        """Request cancellation by throwing `CancelledError` into the task."""
+
         if self.done():
             return False
         self.throw(CancelledError())
@@ -335,6 +379,8 @@ class Task(tealet.tealet, Future[Any]):
     # -- Target completion --------------------------------------------
 
     def resolve_target(self, result, exc, exc_target):
+        """Resolve where control goes when this task exits."""
+
         suppress = False
         if exc is None:
             self.set_result(result)
@@ -375,23 +421,35 @@ class PriorityTask(Task):
 
     @property
     def priority(self) -> float:
+        """Return this task's base scheduling priority."""
+
         return self._priority
 
     @priority.setter
     def priority(self, value: float) -> None:
+        """Set this task's base scheduling priority."""
+
         self._priority = float(value)
         self.modified()
 
     def add_owned_priority_lock(self, lock: PriorityLock) -> None:
+        """Track a priority lock currently owned by this task."""
+
         self._owned_priority_locks.add(lock)
 
     def remove_owned_priority_lock(self, lock: PriorityLock) -> None:
+        """Stop tracking a priority lock released by this task."""
+
         self._owned_priority_locks.remove(lock)
 
     def set_waiting_on_priority(self, target: Any | None) -> None:
+        """Set the priority-inheritance target this task is waiting on."""
+
         self._waiting_on_priority = target
 
     def get_effective_priority(self) -> float:
+        """Return the priority after applying inherited lock priority."""
+
         inherited = min(
             (
                 priority
@@ -521,9 +579,13 @@ class StubTaskFactory:
 
     @property
     def stub(self) -> tealet.tealet | None:
+        """Return the reusable stub tealet, if one has been created."""
+
         return self._stub
 
     def stub_here(self) -> tealet.tealet:
+        """Create and store a reusable tealet stub in the current place."""
+
         stub = tealet.tealet()
         stub.stub()
         self._stub = stub

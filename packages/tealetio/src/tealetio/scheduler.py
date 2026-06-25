@@ -424,6 +424,8 @@ class SyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
 
 
 def set_scheduler(value: "BaseScheduler | None") -> None:
+    """Bind or clear the current scheduler for this thread."""
+
     if value is None:
         if hasattr(_scheduler, "instance"):
             del _scheduler.instance
@@ -432,6 +434,8 @@ def set_scheduler(value: "BaseScheduler | None") -> None:
 
 
 def get_running_scheduler() -> "BaseScheduler":
+    """Return the current scheduler while it is actively driving work."""
+
     current = _current_scheduler()
     if current is not None and current.is_running():
         return current
@@ -446,6 +450,8 @@ def _current_scheduler() -> "BaseScheduler | None":
 
 
 def get_scheduler() -> "BaseScheduler":
+    """Return the currently bound scheduler, whether or not it is running."""
+
     current = _current_scheduler()
     if current is None:
         raise RuntimeError("no current scheduler")
@@ -482,7 +488,16 @@ def spawn(
     return get_scheduler().spawn(func, context=context, eager_start=eager_start, **kwargs)
 
 
-create_task = spawn
+def create_task(
+    func: Callable[[], T],
+    *,
+    context: contextvars.Context | None = None,
+    eager_start: bool | None = None,
+    **kwargs: Any,
+) -> "_tasks.Task":
+    """Create a task on the current scheduler using asyncio-style naming."""
+
+    return spawn(func, context=context, eager_start=eager_start, **kwargs)
 
 
 class Channel(_tasks.TaskLink):
@@ -504,14 +519,20 @@ class Channel(_tasks.TaskLink):
 
     @property
     def balance(self) -> int:
+        """Return positive senders or negative receivers waiting on the channel."""
+
         return self._balance
 
     @property
     def preference(self) -> int:
+        """Return the immediate-transfer preference for sync rendezvous."""
+
         return self._preference
 
     @preference.setter
     def preference(self, value: int) -> None:
+        """Set sync rendezvous preference to sender, neutral, or receiver."""
+
         if value not in (-1, 0, 1):
             raise ValueError("preference must be -1, 0, or 1")
         self._preference = value
@@ -770,12 +791,18 @@ class TimerHandle:
 
     @property
     def when(self) -> float:
+        """Return the monotonic time when this handle is due."""
+
         return self._when
 
     def cancel(self) -> None:
+        """Prevent this timer callback from running."""
+
         self._cancelled = True
 
     def cancelled(self) -> bool:
+        """Return True if this timer handle has been cancelled."""
+
         return self._cancelled
 
     # -- Execution -----------------------------------------------------
@@ -820,6 +847,8 @@ def gather(
     *entries: _tasks.Future[Any] | Callable[[], Any],
     return_exceptions: bool = False,
 ) -> _tasks.Future[list[Any]]:
+    """Return a Future collecting results from scheduler futures or callables."""
+
     scheduler = get_scheduler()
     children = [scheduler.ensure_future(entry) for entry in entries]
 
@@ -862,6 +891,8 @@ def gather(
 def ensure_future(
     entry: _tasks.Future[Any] | Callable[[], Any],
 ) -> _tasks.Future[Any]:
+    """Return `entry` as a scheduler Future, spawning callables as needed."""
+
     scheduler = get_scheduler()
     return scheduler.ensure_future(entry)
 
@@ -872,6 +903,8 @@ def wait(
     timeout: float | None = None,
     return_when: _ReturnWhen = ALL_COMPLETED,
 ) -> _tasks.Future[tuple[set[_tasks.Future[Any]], set[_tasks.Future[Any]]]]:
+    """Return a Future that waits for entries according to `return_when`."""
+
     scheduler = get_scheduler()
     children = {scheduler.ensure_future(entry) for entry in entries}
     if not children:
@@ -932,6 +965,8 @@ def wait_for(
     entry: _tasks.Future[Any] | Callable[[], Any],
     timeout: float | None,
 ) -> _tasks.Future[Any]:
+    """Return a Future that waits for one entry with an optional timeout."""
+
     scheduler = get_scheduler()
     child = scheduler.ensure_future(entry)
 
@@ -953,6 +988,8 @@ def as_completed(
     *,
     timeout: float | None = None,
 ) -> Iterator[_tasks.Future[Any]]:
+    """Yield scheduler futures as they complete."""
+
     scheduler = get_scheduler()
     children = (scheduler.ensure_future(entry) for entry in entries)
     return _as_completed_futures(children, timeout=timeout)
@@ -986,15 +1023,23 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     # -- Basic state ---------------------------------------------------
 
     def time(self) -> float:
+        """Return the scheduler's monotonic clock value."""
+
         return time.monotonic()
 
     def is_running(self) -> bool:
+        """Return True while this scheduler is being driven."""
+
         return self._running
 
     def set_debug(self, enabled: bool) -> None:
+        """Set the scheduler debug flag."""
+
         self._debug = bool(enabled)
 
     def get_debug(self) -> bool:
+        """Return the scheduler debug flag."""
+
         return self._debug
 
     def all_tasks(self) -> set[_tasks.Task]:
@@ -1008,9 +1053,13 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return self._runnable.tasks()
 
     def get_task_factory(self) -> _tasks.TaskFactory:
+        """Return the task factory used by `spawn()`."""
+
         return self._task_factory
 
     def set_task_factory(self, factory: _tasks.TaskFactory | None) -> None:
+        """Set the task factory, or restore the default when `factory` is None."""
+
         self._task_factory = _tasks.DefaultTaskFactory() if factory is None else factory
 
     def main_context(self) -> ContextManager[None]:
@@ -1018,6 +1067,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return _tasks.scheduler_tealet_factory(self)
 
     def close(self) -> None:
+        """Release scheduler-owned external resources."""
+
         executor = self._default_executor
         if executor is not None:
             self._default_executor = None
@@ -1027,6 +1078,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self,
         timeout: float | None = DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT,
     ) -> _tasks.Future[Any]:
+        """Return a Future that completes after the default executor shuts down."""
+
         future: _tasks.Future[Any] = _tasks.Future()
         executor = self._default_executor
         if executor is None:
@@ -1079,6 +1132,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         func: Callable[..., T],
         *args: object,
     ) -> _tasks.Future[T]:
+        """Run `func(*args)` in an executor and return a scheduler Future."""
+
         if executor is None:
             if self._default_executor is None:
                 self._default_executor = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="tealet")
@@ -1124,39 +1179,63 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
 
     def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        """Register a callback for readability on `fd`."""
+
         raise NotImplementedError("reader callbacks require an IO-capable scheduler")
 
     def remove_reader(self, fd: int) -> bool:
+        """Remove the readability callback for `fd`."""
+
         raise NotImplementedError("reader callbacks require an IO-capable scheduler")
 
     def add_writer(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        """Register a callback for writability on `fd`."""
+
         raise NotImplementedError("writer callbacks require an IO-capable scheduler")
 
     def remove_writer(self, fd: int) -> bool:
+        """Remove the writability callback for `fd`."""
+
         raise NotImplementedError("writer callbacks require an IO-capable scheduler")
 
     def sock_recv(self, sock: socket.socket, n: int) -> bytes:
+        """Receive up to `n` bytes from a non-blocking socket."""
+
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
+        """Receive bytes from a non-blocking socket into `buf`."""
+
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
+        """Receive datagram bytes and address from a non-blocking socket."""
+
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
+        """Receive datagram bytes into `buf` from a non-blocking socket."""
+
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_sendall(self, sock: socket.socket, data: Any) -> None:
+        """Send all `data` through a non-blocking socket."""
+
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
+        """Send one datagram through a non-blocking socket."""
+
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+        """Accept one connection from a non-blocking listening socket."""
+
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     def sock_connect(self, sock: socket.socket, address: Any) -> None:
+        """Connect a non-blocking socket to `address`."""
+
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
     # -- Driver state --------------------------------------------------
@@ -1168,6 +1247,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             raise RuntimeError("Scheduler already running")
 
     def stop(self) -> None:
+        """Ask the currently running driver loop to stop."""
+
         self._stopping = True
         self._break_wait()
 
@@ -1179,6 +1260,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         *args: object,
         context: contextvars.Context | None = None,
     ) -> TimerHandle:
+        """Schedule `callback(*args)` to run on the next scheduler turn."""
+
         return self.call_at(self.time(), callback, *args, context=context)
 
     def call_soon_threadsafe(
@@ -1187,6 +1270,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         *args: object,
         context: contextvars.Context | None = None,
     ) -> None:
+        """Schedule `callback(*args)` from another thread or driver context."""
+
         if context is None:
             context = contextvars.copy_context()
         with self._threadsafe_lock:
@@ -1200,6 +1285,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         *args: object,
         context: contextvars.Context | None = None,
     ) -> TimerHandle:
+        """Schedule `callback(*args)` to run after `delay` seconds."""
+
         if delay < 0:
             delay = 0
         return self.call_at(self.time() + delay, callback, *args, context=context)
@@ -1211,6 +1298,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         *args: object,
         context: contextvars.Context | None = None,
     ) -> TimerHandle:
+        """Schedule `callback(*args)` at monotonic time `when`."""
+
         if context is None:
             context = contextvars.copy_context()
         handle = TimerHandle(when, callback, args, context=context)
@@ -1286,6 +1375,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self,
         entry: _tasks.Future[Any] | Callable[[], Any],
     ) -> _tasks.Future[Any]:
+        """Return `entry` as a Future owned by this scheduler."""
+
         if isinstance(entry, _tasks.Future):
             if isinstance(entry, _tasks.Task) and entry.get_scheduler() is not self:
                 raise RuntimeError("Future is bound to a different scheduler")
@@ -1302,6 +1393,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         eager_start: bool | None = None,
         **kwargs: Any,
     ) -> _tasks.Task:
+        """Create and schedule a task from a zero-argument callable."""
+
         if context is None:
             context = contextvars.copy_context()
 
@@ -1319,9 +1412,13 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         target.switch()
 
     def yield_(self) -> None:
+        """Yield the current task and make it runnable again."""
+
         self._schedule(lambda: self._make_runnable(tealet.current()))
 
     def sleep(self, delay: float) -> None:
+        """Suspend the current task for `delay` seconds."""
+
         if delay <= 0:
             self.yield_()
             return
@@ -1477,6 +1574,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             self._target_count = None
 
     def pump(self, n: int | None = None) -> int:
+        """Run at most `n` ready scheduler transfers and return the count."""
+
         self._verify_current_scheduler()
         with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._running = True
@@ -1542,6 +1641,8 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
                 self._running = False
 
     def run_forever(self) -> None:
+        """Run scheduler work until `stop()` is called."""
+
         self._verify_current_scheduler()
         with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._stopping = False
@@ -1560,6 +1661,8 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         self,
         future: _tasks.Future[T] | Callable[[], T],
     ) -> T:
+        """Run scheduler work until `future` completes and return its result."""
+
         self._verify_current_scheduler()
         with self.main_context():
             if isinstance(future, _tasks.Future):

@@ -47,6 +47,8 @@ class SelectorMixin:
     # -- Lifecycle -----------------------------------------------------
 
     def close(self) -> None:
+        """Close selector resources and scheduler-owned resources."""
+
         self._selector.close()
         self._selector_wakeup_reader.close()
         self._selector_wakeup_writer.close()
@@ -105,6 +107,8 @@ class SelectorMixin:
     # -- File descriptor callbacks -----------------------------------
 
     def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        """Register `callback(*args)` for readability on `fd`."""
+
         fd = self._fileobj_to_fd(fd)
         entry = self._fd_callbacks[fd]
         previous = entry.reader
@@ -120,6 +124,8 @@ class SelectorMixin:
         self._wake_selector()
 
     def remove_reader(self, fd: int) -> bool:
+        """Remove the readability callback for `fd`."""
+
         fd = self._fileobj_to_fd(fd)
         entry = self._fd_callbacks.get(fd)
         if entry is None or entry.reader is None:
@@ -132,6 +138,8 @@ class SelectorMixin:
         return True
 
     def add_writer(self, fd: int, callback: Callable[..., object], *args: object) -> None:
+        """Register `callback(*args)` for writability on `fd`."""
+
         fd = self._fileobj_to_fd(fd)
         entry = self._fd_callbacks[fd]
         previous = entry.writer
@@ -147,6 +155,8 @@ class SelectorMixin:
         self._wake_selector()
 
     def remove_writer(self, fd: int) -> bool:
+        """Remove the writability callback for `fd`."""
+
         fd = self._fileobj_to_fd(fd)
         entry = self._fd_callbacks.get(fd)
         if entry is None or entry.writer is None:
@@ -161,6 +171,8 @@ class SelectorMixin:
     # -- Asyncio-style socket helpers ---------------------------------
 
     def sock_recv(self, sock: socket.socket, n: int) -> bytes:
+        """Receive up to `n` bytes from a non-blocking socket."""
+
         self._check_socket(sock)
         while True:
             try:
@@ -169,6 +181,8 @@ class SelectorMixin:
                 self.wait_readable(sock)
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
+        """Receive bytes from a non-blocking socket into `buf`."""
+
         self._check_socket(sock)
         while True:
             try:
@@ -177,6 +191,8 @@ class SelectorMixin:
                 self.wait_readable(sock)
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
+        """Receive datagram bytes and address from a non-blocking socket."""
+
         self._check_socket(sock)
         while True:
             try:
@@ -185,6 +201,8 @@ class SelectorMixin:
                 self.wait_readable(sock)
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
+        """Receive datagram bytes into `buf` from a non-blocking socket."""
+
         self._check_socket(sock)
         while True:
             try:
@@ -195,6 +213,8 @@ class SelectorMixin:
                 self.wait_readable(sock)
 
     def sock_sendall(self, sock: socket.socket, data: Any) -> None:
+        """Send all `data` through a non-blocking socket."""
+
         self._check_socket(sock)
         view = memoryview(data)
         total = 0
@@ -209,6 +229,8 @@ class SelectorMixin:
                 self.wait_writable(sock)
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
+        """Send one datagram through a non-blocking socket."""
+
         self._check_socket(sock)
         while True:
             try:
@@ -217,6 +239,8 @@ class SelectorMixin:
                 self.wait_writable(sock)
 
     def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+        """Accept one connection from a non-blocking listening socket."""
+
         self._check_socket(sock)
         while True:
             try:
@@ -227,6 +251,8 @@ class SelectorMixin:
                 self.wait_readable(sock)
 
     def sock_connect(self, sock: socket.socket, address: Any) -> None:
+        """Connect a non-blocking socket to `address`."""
+
         self._check_socket(sock)
         try:
             sock.connect(address)
