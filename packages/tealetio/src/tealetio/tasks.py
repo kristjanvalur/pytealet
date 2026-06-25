@@ -43,6 +43,9 @@ class TaskLink(ABC):
     def _query_runnable(self) -> bool:
         return False
 
+    def on_modified(self, task: tealet.tealet) -> None:
+        """Handle a linked tealet changing its scheduling related state."""
+
 
 T = TypeVar("T")
 
@@ -243,6 +246,11 @@ class TealetTask(tealet.tealet, Future[Any]):
     def get_scheduler(self) -> BaseScheduler:
         return self._scheduler
 
+    def modified(self) -> None:
+        """Notify the current link that task state used for scheduling changed."""
+        if self.link is not None:
+            self.link.on_modified(self)
+
     # -- Scheduler transfer -------------------------------------------
 
     def _unlink(self):
@@ -327,6 +335,7 @@ class TaskFactory(Protocol):
         *,
         context: contextvars.Context,
         eager_start: bool | None = None,
+        **kwargs: Any,
     ) -> TealetTask:
         """Create and prepare a task without scheduling it."""
         ...
@@ -364,7 +373,11 @@ class DefaultTaskFactory:
         *,
         context: contextvars.Context,
         eager_start: bool | None = None,
+        **kwargs: Any,
     ) -> TealetTask:
+        if kwargs:
+            unexpected = next(iter(kwargs))
+            raise TypeError(f"unexpected task factory keyword argument: {unexpected}")
         task = TealetTask(scheduler)
         _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):
@@ -396,7 +409,11 @@ class StubTaskFactory:
         *,
         context: contextvars.Context,
         eager_start: bool | None = None,
+        **kwargs: Any,
     ) -> TealetTask:
+        if kwargs:
+            unexpected = next(iter(kwargs))
+            raise TypeError(f"unexpected task factory keyword argument: {unexpected}")
         stub = self._stub
         if stub is None:
             stub = self.stub_here()

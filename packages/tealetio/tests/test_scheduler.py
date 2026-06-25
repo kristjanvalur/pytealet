@@ -322,6 +322,41 @@ class TestSchedulerAccessors:
 
         assert seen == ["second", "third", "first"]
 
+    def test_priority_task_factory_accepts_spawn_priority_keyword(self):
+        class PriorityTask(TealetTask):
+            def __init__(self, scheduler, priority: int):
+                super().__init__(scheduler)
+                self.priority = priority
+
+            def get_active_priority(self):
+                return self.priority
+
+        class PriorityTaskFactory:
+            def __call__(self, scheduler, func, *, context, priority=0, eager_start=None):
+                task = PriorityTask(scheduler, priority)
+                scheduler_module._tasks._prepare_task(task, func, context)
+                return task
+
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(PriorityTaskFactory())
+        set_scheduler(s)
+        seen: list[str] = []
+
+        s.spawn(lambda: seen.append("default"))
+        s.spawn(lambda: seen.append("early"), priority=-10)
+        s.spawn(lambda: seen.append("middle"), priority=-5)
+
+        s.run()
+
+        assert seen == ["early", "middle", "default"]
+
+    def test_default_task_factory_rejects_unknown_spawn_keyword(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+
+        with pytest.raises(TypeError, match="unexpected task factory keyword argument: priority"):
+            s.spawn(lambda: "ok", priority=-10)
+
     def test_priority_runnable_queue_uses_stable_default_priority(self):
         s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
         set_scheduler(s)
@@ -364,6 +399,81 @@ class TestSchedulerAccessors:
         first.priority = -20
 
         s.reschedule(first)
+
+        assert s.runnable_tasks() == (first, second)
+
+    def test_priority_runnable_queue_reorders_when_task_is_modified(self):
+        class PriorityTask(TealetTask):
+            def __init__(self, scheduler, priority: int):
+                super().__init__(scheduler)
+                self._priority = priority
+
+            @property
+            def priority(self):
+                return self._priority
+
+            @priority.setter
+            def priority(self, value):
+                self._priority = value
+                self.modified()
+
+            def get_active_priority(self):
+                return self.priority
+
+        class PriorityTaskFactory:
+            def __init__(self, priorities: list[int]):
+                self._priorities = iter(priorities)
+
+            def __call__(self, scheduler, func, *, context, eager_start=None):
+                task = PriorityTask(scheduler, next(self._priorities))
+                scheduler_module._tasks._prepare_task(task, func, context)
+                return task
+
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(PriorityTaskFactory([0, 10]))
+        set_scheduler(s)
+
+        first = s.spawn(lambda: "first")
+        second = s.spawn(lambda: "second")
+        second.priority = -20
+
+        assert s.runnable_tasks() == (second, first)
+
+    def test_priority_runnable_queue_does_not_reorder_prescheduled_modified_task(self):
+        class PriorityTask(TealetTask):
+            def __init__(self, scheduler, priority: int):
+                super().__init__(scheduler)
+                self._priority = priority
+
+            @property
+            def priority(self):
+                return self._priority
+
+            @priority.setter
+            def priority(self, value):
+                self._priority = value
+                self.modified()
+
+            def get_active_priority(self):
+                return self.priority
+
+        class PriorityTaskFactory:
+            def __init__(self, priorities: list[int]):
+                self._priorities = iter(priorities)
+
+            def __call__(self, scheduler, func, *, context, eager_start=None):
+                task = PriorityTask(scheduler, next(self._priorities))
+                scheduler_module._tasks._prepare_task(task, func, context)
+                return task
+
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(PriorityTaskFactory([0, -10]))
+        set_scheduler(s)
+
+        first = s.spawn(lambda: "first")
+        second = s.spawn(lambda: "second")
+        s.reschedule(first, position=0)
+        first.priority = -20
 
         assert s.runnable_tasks() == (first, second)
 
@@ -594,17 +704,17 @@ class TestSchedulerAccessors:
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
 
         class RecordingTaskFactory:
-            def __call__(self, scheduler, func, *, context, eager_start=None):
-                calls.append((scheduler, context.get(marker), eager_start))
+            def __call__(self, scheduler, func, *, context, eager_start=None, **kwargs):
+                calls.append((scheduler, context.get(marker), eager_start, kwargs))
                 return default(scheduler, func, context=context, eager_start=eager_start)
 
         marker.set("factory-context")
         s.set_task_factory(RecordingTaskFactory())
 
-        task = s.spawn(lambda: "ok")
+        task = s.spawn(lambda: "ok", priority=-10)
 
         assert s.run_until_complete(task) == "ok"
-        assert calls == [(s, "factory-context", None)]
+        assert calls == [(s, "factory-context", None, {"priority": -10})]
 
     def test_default_task_factory_eager_defers_until_scheduler_runs(self):
         s = _new_scheduler()

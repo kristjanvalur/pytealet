@@ -255,6 +255,7 @@ class TaskFactory(Protocol):
         *,
         context: contextvars.Context,
         eager_start: bool | None = None,
+      **kwargs: Any,
     ) -> TealetTask: ...
 
     class DefaultTaskFactory:
@@ -280,6 +281,10 @@ Semantics:
   factory compatibility hooks.
 - A factory receives the target callable and already selected context, creates
   and prepares a `TealetTask`, and returns it unscheduled.
+- `BaseScheduler.spawn(..., **kwargs)` forwards extra keyword arguments to the
+  configured task factory, mirroring `asyncio.create_task(coro, **kwargs)`. This
+  allows custom factories to accept construction-time options such as
+  `priority=...` before the task becomes runnable.
 - Class factories expose an `eager_start` default. `BaseScheduler.spawn(..., eager_start=...)`
   passes an optional per-spawn override to the factory.
 - When eagerness resolves true and the scheduler is already running, the factory

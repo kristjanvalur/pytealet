@@ -349,6 +349,14 @@ class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
         except AttributeError:
             pass
 
+    def on_modified(self, task: tealet.tealet) -> None:
+        if task in self._prescheduled_set:
+            return
+        if task not in self._set:
+            return
+        self._remove_normal(task)
+        self._insert_normal(task, len(self._priority_items))
+
 
 _RunnableQueueFactory: TypeAlias = Callable[[], _FifoRunnableQueue]
 
@@ -383,9 +391,10 @@ class CoreSchedulerDrivingAPI(ABC):
     def spawn(
         self,
         func: Callable[[], T],
-        kwargs: dict[str, object] | None = None,
+        *,
         context: contextvars.Context | None = None,
         eager_start: bool | None = None,
+        **kwargs: Any,
     ) -> "_tasks.TealetTask":
         """Spawn a scheduler-managed task from a zero-arg callable."""
 
@@ -1256,16 +1265,15 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def spawn(
         self,
         func: Callable[[], T],
-        kwargs: dict[str, object] | None = None,
+        *,
         context: contextvars.Context | None = None,
         eager_start: bool | None = None,
+        **kwargs: Any,
     ) -> _tasks.TealetTask:
         if context is None:
             context = contextvars.copy_context()
-        if kwargs is not None:
-            raise TypeError("spawn() does not accept callable kwargs")
 
-        t = self._task_factory(self, func, context=context, eager_start=eager_start)
+        t = self._task_factory(self, func, context=context, eager_start=eager_start, **kwargs)
         self._all_tasks.add(t)
         if not t.done():
             self._make_runnable(t)
