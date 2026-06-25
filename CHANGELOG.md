@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-06-05
 
+## [0.1.0rc2] - 2026-06-25
+
+### Changed
+- Split greenlet compatibility into the separate `tealet-greenlet` workspace package.
+- Kept core `tealet` focused on stack-slicing primitives, C API headers, and runtime safety.
+- Updated sibling workspace packages to depend on `tealet==0.1.0rc2`.
+
+### Notes
+- Pre-release candidate for publishing the split workspace package set: `tealet`, `tealetio`, and `tealet-greenlet`.
+
 ## [0.1.0rc1] - 2026-06-09
 
 ### Added
