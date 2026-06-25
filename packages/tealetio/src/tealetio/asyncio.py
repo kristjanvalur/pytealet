@@ -60,15 +60,15 @@ class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
         """Stop a currently running async driver."""
 
     @abstractmethod
-    async def arun(self) -> None:
+    async def arun(self, *, yield_every: int | None = None) -> None:
         """Run async scheduler loop until idle."""
 
     @abstractmethod
-    async def arun_forever(self) -> None:
+    async def arun_forever(self, *, yield_every: int | None = None) -> None:
         """Run async scheduler loop until stop() is called."""
 
     @abstractmethod
-    async def arun_until_complete(self, future: Future[T] | Callable[[], T]) -> T:
+    async def arun_until_complete(self, future: Future[T] | Callable[[], T], *, yield_every: int | None = None) -> T:
         """Run async scheduler loop until a target future/callable completes."""
 
 
@@ -298,31 +298,47 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
     # -- Async run entry points ---------------------------------------
 
-    async def arun(self) -> None:
+    async def arun(self, *, yield_every: int | None = None) -> None:
         self._verify_current_scheduler()
+        if yield_every is not None and yield_every <= 0:
+            raise ValueError("yield_every must be > 0 or None")
         with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
             self._wakeup_loop = _asyncio.get_running_loop()
             self._running = True
+
+            def should_terminate() -> bool:
+                return not (
+                    self._has_runnable_work()
+                    or self._timers
+                    or self._pending_async_waits
+                    or self._has_pending_driver_work()
+                )
+
             try:
-                while self._has_runnable_work() or self._timers or self._pending_async_waits:
-                    if self._has_runnable_work() or self._timers:
-                        self._pump()
-                    await self._wait_async()
+                while not should_terminate():
+                    self._run_ready_batch(yield_every)
+                    if yield_every is not None and self._has_runnable_work():
+                        await _asyncio.sleep(0)
+                        continue
+                    if not should_terminate():
+                        await self._wait_async()
             finally:
                 self._running = False
                 self._wakeup_loop = None
 
-    async def arun_forever(self) -> None:
+    async def arun_forever(self, *, yield_every: int | None = None) -> None:
         self._verify_current_scheduler()
+        if yield_every is not None and yield_every <= 0:
+            raise ValueError("yield_every must be > 0 or None")
         with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
             self._wakeup_loop = _asyncio.get_running_loop()
             self._stopping = False
             self._running = True
             try:
                 while not self._stopping:
-                    self._run_ready_timers()
-                    if self._has_runnable_work():
-                        self._pump()
+                    self._run_ready_batch(yield_every)
+                    if not self._stopping and self._has_runnable_work():
+                        await _asyncio.sleep(0)
                         continue
                     await self._wait_async()
             finally:
@@ -333,8 +349,12 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
     async def arun_until_complete(
         self,
         future: Future[T] | Callable[[], T],
+        *,
+        yield_every: int | None = None,
     ) -> T:
         self._verify_current_scheduler()
+        if yield_every is not None and yield_every <= 0:
+            raise ValueError("yield_every must be > 0 or None")
         with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
             if isinstance(future, Future):
                 target: Future[T] = future
@@ -350,9 +370,11 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
             self._running = True
             try:
                 while not target.done() and not self._stopping:
-                    self._run_ready_timers()
-                    if self._has_runnable_work():
-                        self._pump()
+                    schedule_limit = yield_every if yield_every is not None else len(self._runnable)
+                    self._run_ready_batch(schedule_limit)
+                    if not target.done() and not self._stopping and self._has_runnable_work():
+                        await _asyncio.sleep(0)
+                        continue
                     if not target.done() and not self._stopping:
                         await self._wait_async()
             finally:

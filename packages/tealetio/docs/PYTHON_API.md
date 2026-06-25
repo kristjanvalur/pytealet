@@ -65,6 +65,15 @@ drivers such as `run()`, `run_forever()`, `run_until_complete(...)`, and
 their async counterparts, as well as `Runner.run()`, `Runner.close()`,
 `AsyncRunner.run()`, and `AsyncRunner.aclose()`.
 
+`AsyncScheduler.arun(yield_every=N)`,
+`AsyncScheduler.arun_forever(yield_every=N)`, and
+`AsyncScheduler.arun_until_complete(..., yield_every=N)` bound each scheduler
+batch to at most `N` scheduling transfers before yielding to asyncio with
+`asyncio.sleep(0)` if runnable scheduler work remains. With `yield_every=None`,
+`arun(...)` and `arun_forever(...)` run each scheduler batch without an early
+batch limit, while `arun_until_complete(...)` uses the runnable queue length at
+batch entry.
+
 Use it explicitly only when raw main code manipulates scheduler tasks directly:
 
 ```python

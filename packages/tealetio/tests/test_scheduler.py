@@ -930,6 +930,62 @@ class TestSchedulerAccessors:
 
         assert seen == [s]
 
+    def test_arun_explicit_budget_yields_to_asyncio(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        events: list[str] = []
+
+        def make_worker(index: int):
+            def worker() -> None:
+                events.append(f"task:{index}")
+
+            return worker
+
+        async def asyncio_peer() -> None:
+            events.append("asyncio")
+
+        for index in range(5):
+            s.spawn(make_worker(index))
+
+        async def run() -> None:
+            peer = asyncio.create_task(asyncio_peer())
+            await s.arun(yield_every=2)
+            await peer
+
+        asyncio.run(run())
+
+        assert events == ["task:0", "task:1", "asyncio", "task:2", "task:3", "task:4"]
+
+    def test_arun_rejects_non_positive_yield_every(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+
+        async def run() -> None:
+            with pytest.raises(ValueError, match="yield_every"):
+                await s.arun(yield_every=0)
+
+        asyncio.run(run())
+
+    def test_arun_waits_for_pending_driver_work(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def worker() -> None:
+            future = s.run_in_executor(None, lambda: "done")
+            seen.append(future.wait())
+
+        async def run() -> None:
+            s.spawn(worker)
+            await asyncio.wait_for(s.arun(), timeout=1.0)
+
+        try:
+            asyncio.run(run())
+        finally:
+            s.close()
+
+        assert seen == ["done"]
+
     def test_run_in_executor_waits_for_result(self, deferred_scheduler_task_factory_maker):
         s = _new_scheduler(deferred_scheduler_task_factory_maker)
 
@@ -1900,6 +1956,76 @@ class TestSchedulerAccessors:
 
         asyncio.run(run())
 
+    def test_arun_until_complete_default_budget_is_initial_runnable_count(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        future: Future[str] = Future()
+        events: list[str] = []
+
+        def first() -> None:
+            events.append("first")
+
+        def second() -> None:
+            events.append("second")
+
+        def complete() -> None:
+            events.append("complete")
+            future.set_result("done")
+
+        async def asyncio_peer() -> None:
+            events.append("asyncio")
+
+        s.spawn(first)
+        s.spawn(second)
+        s.spawn(complete)
+
+        async def run() -> None:
+            peer = asyncio.create_task(asyncio_peer())
+            assert await s.arun_until_complete(future) == "done"
+            assert events == ["first", "second", "complete"]
+            await peer
+
+        asyncio.run(run())
+
+    def test_arun_until_complete_explicit_budget_yields_to_asyncio(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        future: Future[str] = Future()
+        events: list[str] = []
+
+        def make_worker(index: int):
+            def worker() -> None:
+                events.append(f"task:{index}")
+                if index == 4:
+                    future.set_result("done")
+
+            return worker
+
+        async def asyncio_peer() -> None:
+            events.append("asyncio")
+
+        for index in range(5):
+            s.spawn(make_worker(index))
+
+        async def run() -> None:
+            peer = asyncio.create_task(asyncio_peer())
+            assert await s.arun_until_complete(future, yield_every=2) == "done"
+            await peer
+
+        asyncio.run(run())
+
+        assert events == ["task:0", "task:1", "asyncio", "task:2", "task:3", "task:4"]
+
+    def test_arun_until_complete_rejects_non_positive_yield_every(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+
+        async def run() -> None:
+            with pytest.raises(ValueError, match="yield_every"):
+                await s.arun_until_complete(lambda: None, yield_every=0)
+
+        asyncio.run(run())
+
     def test_arun_until_complete_sets_main_tealet_factory_from_task_factory(self):
         s = AsyncScheduler()
         s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
@@ -1932,6 +2058,44 @@ class TestSchedulerAccessors:
 
         async def run() -> None:
             await s.arun_forever()
+
+        asyncio.run(run())
+
+    def test_arun_forever_explicit_budget_yields_to_asyncio(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        events: list[str] = []
+
+        def make_worker(index: int):
+            def worker() -> None:
+                events.append(f"task:{index}")
+                if index == 4:
+                    s.stop()
+
+            return worker
+
+        async def asyncio_peer() -> None:
+            events.append("asyncio")
+
+        for index in range(5):
+            s.spawn(make_worker(index))
+
+        async def run() -> None:
+            peer = asyncio.create_task(asyncio_peer())
+            await s.arun_forever(yield_every=2)
+            await peer
+
+        asyncio.run(run())
+
+        assert events == ["task:0", "task:1", "asyncio", "task:2", "task:3", "task:4"]
+
+    def test_arun_forever_rejects_non_positive_yield_every(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+
+        async def run() -> None:
+            with pytest.raises(ValueError, match="yield_every"):
+                await s.arun_forever(yield_every=0)
 
         asyncio.run(run())
 
@@ -2443,6 +2607,21 @@ class TestSchedulerExamples:
         s.pump(1)
         assert seen == [True]
         assert s.is_running() is False
+
+    def test_pump_count_limits_one_shot_task_completion_chain(self):
+        s = _new_scheduler()
+        seen: list[int] = []
+
+        for index in range(5):
+            s.spawn(lambda index=index: seen.append(index))
+
+        s.pump(2)
+
+        assert seen == [0, 1]
+
+        s.run()
+
+        assert seen == [0, 1, 2, 3, 4]
 
     def test_run_forever_stops_when_stop_called(self):
         s = _new_scheduler()

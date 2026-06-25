@@ -338,6 +338,8 @@ class _RunnableQueue(Protocol):
 
     def __bool__(self) -> bool: ...
 
+    def __len__(self) -> int: ...
+
     def __contains__(self, task: tealet.tealet) -> bool: ...
 
     def add(self, task: tealet.tealet) -> bool: ...
@@ -1286,7 +1288,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             enqueue()
         self._run_ready_timers()
         target = self._find_target()
-        self._n_scheduled += 1
         target.switch()
 
     def yield_(self) -> None:
@@ -1408,40 +1409,47 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         target._throw_from_scheduler(exc)
 
     def _find_target(self, task_exit=False) -> tealet.tealet:
+        count_transfer = True
         if self._runner is not None and self._target_count is not None and self._n_scheduled >= self._target_count:
             result = self._runner
             assert isinstance(result, _tasks.TealetTask)
             result._unlink()
+            count_transfer = False
         elif self._has_runnable_work():
             result = self._pop_next_runnable()
         elif not task_exit:
             raise DeadlockError("No tasks to switch to")
         else:
             result = tealet.main()
+        if count_transfer:
+            self._n_scheduled += 1
         assert isinstance(result, _tasks.TealetTask)
         result.link = None
         return result
 
-    def _pump(self, n=0) -> int:
+    def _run_ready_batch(self, limit: int | None = None) -> int:
         if self._runner is not None:
             raise RuntimeError("Scheduler already running")
         start_count = self._n_scheduled
-        if n > 0:
-            self._target_count = start_count + n
+        if limit is not None and limit > 0:
+            self._target_count = start_count + limit
         self._runner = tealet.current()
         try:
+            self._run_ready_timers()
+            if not self._has_runnable_work():
+                return 0
             self.yield_()
             return self._n_scheduled - start_count - 1
         finally:
             self._runner = None
             self._target_count = None
 
-    def pump(self, n=0) -> int:
+    def pump(self, n: int | None = None) -> int:
         self._verify_current_scheduler()
         with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._running = True
             try:
-                return self._pump(n)
+                return self._run_ready_batch(n)
             finally:
                 self._running = False
 
@@ -1489,12 +1497,14 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         self._verify_current_scheduler()
         with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._running = True
+
+            def should_terminate() -> bool:
+                return not (self._has_runnable_work() or self._timers or self._has_pending_driver_work())
+
             try:
-                while self._has_runnable_work() or self._timers or self._has_pending_driver_work():
-                    self._run_ready_timers()
-                    if self._has_runnable_work():
-                        self._pump()
-                    if self._has_runnable_work() or self._timers or self._has_pending_driver_work():
+                while not should_terminate():
+                    self._run_ready_batch()
+                    if not should_terminate():
                         self._wait_thread()
             finally:
                 self._running = False
@@ -1506,9 +1516,8 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
             self._running = True
             try:
                 while not self._stopping:
-                    self._run_ready_timers()
+                    self._run_ready_batch()
                     if self._has_runnable_work():
-                        self._pump()
                         continue
                     self._wait_thread()
             finally:
@@ -1538,9 +1547,7 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
             self._running = True
             try:
                 while not target.done() and not self._stopping:
-                    self._run_ready_timers()
-                    if self._has_runnable_work():
-                        self._pump()
+                    self._run_ready_batch()
                     if not target.done() and not self._stopping:
                         self._wait_thread()
             finally:

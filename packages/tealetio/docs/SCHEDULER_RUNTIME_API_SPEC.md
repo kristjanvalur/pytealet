@@ -679,6 +679,9 @@ Status: Implemented for current sync/async scheduler drivers.
 
 - `run_forever()`, `run_until_complete(...)`, `arun_forever()`, and
   `arun_until_complete(...)` are available on the appropriate driving APIs.
+- `arun(yield_every=N)`, `arun_forever(yield_every=N)`, and
+  `arun_until_complete(..., yield_every=N)` periodically yield to asyncio after
+  bounded scheduler batches when runnable scheduler work remains.
 - `pump(...)` remains an explicit low-level primitive.
 - `stop()` is available to request driver termination.
 
