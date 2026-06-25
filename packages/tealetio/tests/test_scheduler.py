@@ -11,6 +11,7 @@ import pytest
 
 import _tealet
 import tealetio.scheduler as scheduler_module
+import tealetio.tasks as task_module
 from tealetio import (
     ALL_COMPLETED,
     Barrier,
@@ -493,6 +494,57 @@ class TestSchedulerAccessors:
         s.run()
 
         assert seen == ["high", "low"]
+
+    def test_run_sets_main_tealet_factory_from_task_factory(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_class=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+        seen = []
+
+        def worker() -> None:
+            main = _tealet.main()
+            seen.append(
+                (
+                    isinstance(main, PriorityTask),
+                    main.get_scheduler() is s,
+                    main.priority,
+                    _tealet.get_tealet_factory() is not original_factory,
+                )
+            )
+
+        s.spawn(worker)
+        s.run()
+
+        assert seen == [(True, True, task_module.TEALET_PRI_INF, True)]
+        assert _tealet.get_tealet_factory() is original_factory
+
+    def test_run_until_complete_sets_main_tealet_factory_from_task_factory(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_class=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+
+        def worker():
+            main = _tealet.main()
+            return (
+                isinstance(main, PriorityTask),
+                main.get_scheduler() is s,
+                main.priority,
+                _tealet.get_tealet_factory() is not original_factory,
+            )
+
+        assert s.run_until_complete(worker) == (True, True, task_module.TEALET_PRI_INF, True)
+        assert _tealet.get_tealet_factory() is original_factory
+
+    def test_main_context_sets_main_tealet_factory_from_task_factory(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_class=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+
+        with s.main_context():
+            main = _tealet.main()
+            assert isinstance(main, PriorityTask)
+            assert main.get_scheduler() is s
+            assert main.priority == TASK_PRIORITY_DEFAULT
+            assert _tealet.get_tealet_factory() is not original_factory
+
+        assert _tealet.get_tealet_factory() is original_factory
 
     def test_reschedule_rejects_non_runnable_task(self):
         s = _new_scheduler()
@@ -1536,6 +1588,29 @@ class TestSchedulerAccessors:
             writer.close()
             s.close()
 
+    def test_run_forever_sets_main_tealet_factory_from_task_factory(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_class=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+        seen = []
+
+        def worker() -> None:
+            main = _tealet.main()
+            seen.append(
+                (
+                    isinstance(main, PriorityTask),
+                    main.get_scheduler() is s,
+                    main.priority,
+                    _tealet.get_tealet_factory() is not original_factory,
+                )
+            )
+            s.stop()
+
+        s.call_soon(worker)
+        s.run_forever()
+
+        assert seen == [(True, True, task_module.TEALET_PRI_INF, True)]
+        assert _tealet.get_tealet_factory() is original_factory
+
     def test_tealet_selector_event_loop_runs_asyncio_timer(self):
         s = SelectorScheduler()
         set_scheduler(s)
@@ -1857,6 +1932,27 @@ class TestSchedulerAccessors:
 
         asyncio.run(run())
 
+    def test_arun_until_complete_sets_main_tealet_factory_from_task_factory(self):
+        s = AsyncScheduler()
+        s.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        set_scheduler(s)
+        original_factory = _tealet.get_tealet_factory()
+
+        def worker():
+            main = _tealet.main()
+            return (
+                isinstance(main, PriorityTask),
+                main.get_scheduler() is s,
+                main.priority,
+                _tealet.get_tealet_factory() is not original_factory,
+            )
+
+        async def run() -> None:
+            assert await s.arun_until_complete(worker) == (True, True, task_module.TEALET_PRI_INF, True)
+
+        asyncio.run(run())
+        assert _tealet.get_tealet_factory() is original_factory
+
     def test_arun_forever_stops(self):
         s = AsyncScheduler()
         set_scheduler(s)
@@ -1870,6 +1966,34 @@ class TestSchedulerAccessors:
             await s.arun_forever()
 
         asyncio.run(run())
+
+    def test_arun_forever_sets_main_tealet_factory_from_task_factory(self):
+        s = AsyncScheduler()
+        s.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        set_scheduler(s)
+        original_factory = _tealet.get_tealet_factory()
+        seen = []
+
+        def worker() -> None:
+            main = _tealet.main()
+            seen.append(
+                (
+                    isinstance(main, PriorityTask),
+                    main.get_scheduler() is s,
+                    main.priority,
+                    _tealet.get_tealet_factory() is not original_factory,
+                )
+            )
+            s.stop()
+
+        s.call_soon(worker)
+
+        async def run() -> None:
+            await s.arun_forever()
+
+        asyncio.run(run())
+        assert seen == [(True, True, task_module.TEALET_PRI_INF, True)]
+        assert _tealet.get_tealet_factory() is original_factory
 
     def test_run_until_complete_returns_result(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)

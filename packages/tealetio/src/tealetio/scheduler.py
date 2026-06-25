@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
-from typing import Any, Callable, Coroutine, Literal, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Callable, ContextManager, Coroutine, Literal, Protocol, TypeAlias, TypeVar, cast
 
 import tealet
 
@@ -403,6 +403,10 @@ class CoreSchedulerDrivingAPI(ABC):
     @abstractmethod
     def close(self) -> None:
         """Release scheduler-owned resources."""
+
+    @abstractmethod
+    def main_context(self) -> ContextManager[None]:
+        """Use this scheduler's task factory for the current main tealet wrapper."""
 
     @abstractmethod
     def shutdown_default_executor(
@@ -1008,6 +1012,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def set_task_factory(self, factory: _tasks.TaskFactory | None) -> None:
         self._task_factory = _tasks.DefaultTaskFactory() if factory is None else factory
 
+    def main_context(self) -> ContextManager[None]:
+        """Use this scheduler's task factory for the current main tealet wrapper."""
+        return _tasks.scheduler_tealet_factory(self)
+
     def close(self) -> None:
         executor = self._default_executor
         if executor is not None:
@@ -1519,58 +1527,65 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         `await_()` are not progressed here; use `arun()` for that mode.
         """
         self._verify_current_scheduler()
-        self._running = True
-        try:
-            while self._has_runnable_work() or self._timers or self._has_pending_driver_work():
-                self._run_ready_timers()
-                if self._has_runnable_work():
-                    self._pump()
-                if self._has_runnable_work() or self._timers or self._has_pending_driver_work():
-                    self._wait_thread()
-        finally:
-            self._running = False
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+            self._running = True
+            try:
+                while self._has_runnable_work() or self._timers or self._has_pending_driver_work():
+                    self._run_ready_timers()
+                    if self._has_runnable_work():
+                        self._pump()
+                    if self._has_runnable_work() or self._timers or self._has_pending_driver_work():
+                        self._wait_thread()
+            finally:
+                self._running = False
 
     def run_forever(self) -> None:
         self._verify_current_scheduler()
-        self._stopping = False
-        self._running = True
-        try:
-            while not self._stopping:
-                self._run_ready_timers()
-                if self._has_runnable_work():
-                    self._pump()
-                    continue
-                self._wait_thread()
-        finally:
-            self._running = False
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._stopping = False
+            self._running = True
+            try:
+                while not self._stopping:
+                    self._run_ready_timers()
+                    if self._has_runnable_work():
+                        self._pump()
+                        continue
+                    self._wait_thread()
+            finally:
+                self._running = False
+                self._stopping = False
 
     def run_until_complete(
         self,
         future: _tasks.Future[T] | Callable[[], T],
     ) -> T:
         self._verify_current_scheduler()
-        if isinstance(future, _tasks.Future):
-            target: _tasks.Future[T] = future
-            if isinstance(target, _tasks.TealetTask) and target.get_scheduler() is not self:
-                raise RuntimeError("Future is bound to a different scheduler")
-        elif callable(future):
-            target = self.spawn(future)
-        else:
-            raise TypeError("future must be a Future or callable")
+        with self.main_context():
+            if isinstance(future, _tasks.Future):
+                target: _tasks.Future[T] = future
+                if isinstance(target, _tasks.TealetTask) and target.get_scheduler() is not self:
+                    raise RuntimeError("Future is bound to a different scheduler")
+            elif callable(future):
+                target = self.spawn(future)
+            else:
+                raise TypeError("future must be a Future or callable")
 
-        self._stopping = False
-        self._running = True
-        try:
-            while not target.done() and not self._stopping:
-                self._run_ready_timers()
-                if self._has_runnable_work():
-                    self._pump()
-                if not target.done() and not self._stopping:
-                    self._wait_thread()
-        finally:
-            self._running = False
+            return self._run_until_complete_target(target)
+
+    def _run_until_complete_target(self, target: _tasks.Future[T]) -> T:
+        with _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._stopping = False
+            self._running = True
+            try:
+                while not target.done() and not self._stopping:
+                    self._run_ready_timers()
+                    if self._has_runnable_work():
+                        self._pump()
+                    if not target.done() and not self._stopping:
+                        self._wait_thread()
+            finally:
+                self._running = False
+                self._stopping = False
 
         if not target.done():
             raise RuntimeError("Scheduler stopped before Future completed.")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar, cast
 
 import _tealet
@@ -19,6 +20,7 @@ TASK_PRIORITY_HIGH = -10.0
 TASK_PRIORITY_DEFAULT = 0.0
 TASK_PRIORITY_LOW = 10.0
 TASK_PRIORITY_IDLE = 20.0
+TEALET_PRI_INF = float("inf")
 
 CancelledError = asyncio.CancelledError
 
@@ -61,6 +63,50 @@ class TaskLink(ABC):
 
 T = TypeVar("T")
 TaskClass = Callable[..., "TealetTask"]
+
+
+class _SchedulerTealetFactory:
+    def __init__(self, scheduler: BaseScheduler, task_constructor: Callable[[Any], _tealet.tealet]) -> None:
+        self.scheduler = scheduler
+        self._task_constructor = task_constructor
+
+    def __call__(self) -> _tealet.tealet:
+        return self._task_constructor(self.scheduler)
+
+
+@contextmanager
+def scheduler_tealet_factory(scheduler: BaseScheduler):
+    current_factory = _tealet.get_tealet_factory()
+    if isinstance(current_factory, _SchedulerTealetFactory) and current_factory.scheduler is scheduler:
+        yield
+        return
+
+    task_class = getattr(scheduler.get_task_factory(), "task_class", None)
+    if not callable(task_class):
+        yield
+        return
+    task_constructor = cast(Callable[[Any], _tealet.tealet], task_class)
+    previous_factory = current_factory
+    _tealet.set_tealet_factory(_SchedulerTealetFactory(scheduler, task_constructor))
+    try:
+        yield
+    finally:
+        _tealet.set_tealet_factory(previous_factory)
+
+
+@contextmanager
+def task_priority(task: tealet.tealet, priority: float):
+    try:
+        previous_priority = cast(Any, task).priority
+    except AttributeError:
+        yield
+        return
+
+    cast(Any, task).priority = priority
+    try:
+        yield
+    finally:
+        cast(Any, task).priority = previous_priority
 
 
 class Future(Generic[T]):
@@ -365,6 +411,11 @@ def _copy_context_without_current_task(context: contextvars.Context | None = Non
 
 class TaskFactory(Protocol):
     """Callable strategy for creating scheduler-owned tasks."""
+
+    @property
+    def task_class(self) -> TaskClass:
+        """Return the concrete tealet wrapper class produced by this factory."""
+        ...
 
     def __call__(
         self,

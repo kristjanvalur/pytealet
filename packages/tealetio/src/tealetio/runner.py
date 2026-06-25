@@ -209,11 +209,12 @@ class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
         scheduler = self._scheduler
         try:
             if scheduler is not None:
-                tasks = self._shutdown_scheduler_tasks(scheduler)
-                shutdown_group = scheduler_module.gather(*tasks, return_exceptions=True)
-                scheduler.run_until_complete(shutdown_group)
-                executor_shutdown = scheduler.shutdown_default_executor()
-                scheduler.run_until_complete(executor_shutdown)
+                with scheduler.main_context():
+                    tasks = self._shutdown_scheduler_tasks(scheduler)
+                    shutdown_group = scheduler_module.gather(*tasks, return_exceptions=True)
+                    scheduler.run_until_complete(shutdown_group)
+                    executor_shutdown = scheduler.shutdown_default_executor()
+                    scheduler.run_until_complete(executor_shutdown)
         finally:
             self._finalize_close(scheduler)
 
@@ -222,17 +223,18 @@ class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
         scheduler = self._scheduler
         assert scheduler is not None
         run_context = self._resolve_context(context)
-        target = self._target_from_entry(entry, run_context)
-        sigint_handler = self._install_sigint_handler(target, cast(scheduler_module.BaseScheduler, scheduler))
-        self._interrupt_count = 0
-        try:
+        with scheduler.main_context():
+            target = self._target_from_entry(entry, run_context)
+            sigint_handler = self._install_sigint_handler(target, cast(scheduler_module.BaseScheduler, scheduler))
+            self._interrupt_count = 0
             try:
-                return scheduler.run_until_complete(target)
-            except task_module.CancelledError:
-                self._raise_keyboard_interrupt_if_requested()
-                raise
-        finally:
-            self._restore_sigint_handler(sigint_handler)
+                try:
+                    return scheduler.run_until_complete(target)
+                except task_module.CancelledError:
+                    self._raise_keyboard_interrupt_if_requested()
+                    raise
+            finally:
+                self._restore_sigint_handler(sigint_handler)
 
     def __enter__(self) -> "Runner":
         self._lazy_init()

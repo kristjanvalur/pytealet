@@ -6,11 +6,14 @@ import threading
 import pytest
 
 import _tealet
+import tealetio.tasks as task_module
 from tealetio import (
     AsyncRunner,
     AsyncScheduler,
+    DefaultTaskFactory,
     Event,
     Future,
+    PriorityTask,
     Runner,
     Scheduler,
     SelectorScheduler,
@@ -143,6 +146,30 @@ class TestAsyncRunner:
             assert runner.get_scheduler() is not None
             assert seen == [runner.get_scheduler()]
             await runner.aclose()
+
+        asyncio.run(run())
+
+    def test_run_sync_callable_sets_main_tealet_factory_from_task_factory(self):
+        async def run() -> None:
+            runner = AsyncRunner()
+            scheduler = runner.get_scheduler()
+            scheduler.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+            original_factory = _tealet.get_tealet_factory()
+
+            def entry():
+                main = _tealet.main()
+                return (
+                    isinstance(main, PriorityTask),
+                    main.get_scheduler() is scheduler,
+                    main.priority,
+                    _tealet.get_tealet_factory() is not original_factory,
+                )
+
+            try:
+                assert await runner.run(entry) == (True, True, task_module.TEALET_PRI_INF, True)
+                assert _tealet.get_tealet_factory() is original_factory
+            finally:
+                await runner.aclose()
 
         asyncio.run(run())
 
@@ -615,6 +642,27 @@ class TestRunner:
             assert result == "ok"
             assert runner.get_scheduler() is not None
             assert seen == [runner.get_scheduler()]
+        finally:
+            runner.close()
+
+    def test_run_sync_callable_sets_main_tealet_factory_from_task_factory(self):
+        runner = Runner()
+        scheduler = runner.get_scheduler()
+        scheduler.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+
+        def entry():
+            main = _tealet.main()
+            return (
+                isinstance(main, PriorityTask),
+                main.get_scheduler() is scheduler,
+                main.priority,
+                _tealet.get_tealet_factory() is not original_factory,
+            )
+
+        try:
+            assert runner.run(entry) == (True, True, task_module.TEALET_PRI_INF, True)
+            assert _tealet.get_tealet_factory() is original_factory
         finally:
             runner.close()
 
