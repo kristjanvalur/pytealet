@@ -3164,8 +3164,9 @@ class TestSchedulerExamples:
             original_create_task = loop.create_task
 
             def create_task(coro, *args, **kwargs):
+                task = original_create_task(coro, *args, **kwargs)
                 create_task_calls.append(coro)
-                return original_create_task(coro, *args, **kwargs)
+                return task
 
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
@@ -3234,8 +3235,9 @@ class TestSchedulerExamples:
             original_create_task = loop.create_task
 
             def create_task(coro, *args, **kwargs):
+                task = original_create_task(coro, *args, **kwargs)
                 create_task_calls.append(coro)
-                return original_create_task(coro, *args, **kwargs)
+                return task
 
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
@@ -3302,8 +3304,9 @@ class TestSchedulerExamples:
             original_create_task = loop.create_task
 
             def create_task(coro, *args, **kwargs):
+                task = original_create_task(coro, *args, **kwargs)
                 create_task_calls.append(coro)
-                return original_create_task(coro, *args, **kwargs)
+                return task
 
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
