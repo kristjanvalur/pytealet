@@ -33,6 +33,7 @@ __all__ = [
     "TaskLink",
     "Shield",
     "StubTaskFactory",
+    "TaskConstructor",
     "TaskFactory",
     "TASK_PRIORITY_CRITICAL",
     "TASK_PRIORITY_DEFAULT",
@@ -62,7 +63,7 @@ class TaskLink(ABC):
 
 
 T = TypeVar("T")
-TaskClass = Callable[..., "TealetTask"]
+TaskConstructor = Callable[..., "TealetTask"]
 
 
 class _SchedulerTealetFactory:
@@ -81,8 +82,9 @@ def scheduler_tealet_factory(scheduler: BaseScheduler):
         yield
         return
 
-    task_class = scheduler.get_task_factory().task_class
-    task_constructor = cast(Callable[[Any], _tealet.tealet], task_class)
+    task_constructor = cast(
+        Callable[[Any], _tealet.tealet], scheduler.get_task_factory().task_constructor
+    )
     previous_factory = current_factory
     _tealet.set_tealet_factory(_SchedulerTealetFactory(scheduler, task_constructor))
     try:
@@ -410,8 +412,8 @@ class TaskFactory(Protocol):
     """Callable strategy for creating scheduler-owned tasks."""
 
     @property
-    def task_class(self) -> TaskClass:
-        """Return the concrete tealet wrapper class produced by this factory."""
+    def task_constructor(self) -> TaskConstructor:
+        """Return the concrete tealet wrapper constructor used by this factory."""
         ...
 
     def __call__(
@@ -452,10 +454,10 @@ class DefaultTaskFactory:
     def __init__(
         self,
         *,
-        task_class: TaskClass = TealetTask,
+        task_constructor: TaskConstructor = TealetTask,
         eager_start: bool = False,
     ) -> None:
-        self.task_class = task_class
+        self.task_constructor = task_constructor
         self.eager_start = bool(eager_start)
 
     def __call__(
@@ -467,7 +469,7 @@ class DefaultTaskFactory:
         eager_start: bool | None = None,
         **kwargs: Any,
     ) -> TealetTask:
-        task = self.task_class(scheduler, **kwargs)
+        task = self.task_constructor(scheduler, **kwargs)
         _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):
             task.run()
@@ -481,11 +483,11 @@ class StubTaskFactory:
         self,
         stub: tealet.tealet | None = None,
         *,
-        task_class: TaskClass = TealetTask,
+        task_constructor: TaskConstructor = TealetTask,
         eager_start: bool = False,
     ) -> None:
         self._stub = stub
-        self.task_class = task_class
+        self.task_constructor = task_constructor
         self.eager_start = bool(eager_start)
 
     @property
@@ -510,7 +512,7 @@ class StubTaskFactory:
         stub = self._stub
         if stub is None:
             stub = self.stub_here()
-        task = self.task_class(scheduler, **kwargs)
+        task = self.task_constructor(scheduler, **kwargs)
         task.set_stub(stub)
         _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):

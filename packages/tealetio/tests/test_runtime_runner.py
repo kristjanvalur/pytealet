@@ -153,7 +153,7 @@ class TestAsyncRunner:
         async def run() -> None:
             runner = AsyncRunner()
             scheduler = runner.get_scheduler()
-            scheduler.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+            scheduler.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
             original_factory = _tealet.get_tealet_factory()
 
             def entry():
@@ -648,7 +648,7 @@ class TestRunner:
     def test_run_sync_callable_sets_main_tealet_factory_from_task_factory(self):
         runner = Runner()
         scheduler = runner.get_scheduler()
-        scheduler.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        scheduler.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
         original_factory = _tealet.get_tealet_factory()
 
         def entry():

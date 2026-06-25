@@ -106,7 +106,7 @@ def _new_scheduler(task_factory_maker=None) -> Scheduler:
 
 
 class _PriorityTaskFactory:
-    task_class = PriorityTask
+    task_constructor = PriorityTask
 
     def __init__(self, priorities: list[float] | None = None):
         self._priorities = iter(priorities) if priorities is not None else None
@@ -379,9 +379,9 @@ class TestSchedulerAccessors:
         with pytest.raises(TypeError, match="priority"):
             s.spawn(lambda: "ok", priority=-10)
 
-    def test_default_task_factory_passes_spawn_kwargs_to_task_class(self):
+    def test_default_task_factory_passes_spawn_kwargs_to_task_constructor(self):
         s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
-        s.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
         set_scheduler(s)
         seen: list[str] = []
 
@@ -474,7 +474,7 @@ class TestSchedulerAccessors:
 
     def test_priority_runnable_queue_runs_low_priority_task_before_runner(self):
         s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
-        s.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
         set_scheduler(s)
         seen: list[str] = []
 
@@ -486,7 +486,7 @@ class TestSchedulerAccessors:
 
     def test_priority_runnable_queue_runs_stub_tasks_before_runner(self):
         s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
-        s.set_task_factory(StubTaskFactory(task_class=PriorityTask))
+        s.set_task_factory(StubTaskFactory(task_constructor=PriorityTask))
         set_scheduler(s)
         seen: list[str] = []
 
@@ -498,7 +498,7 @@ class TestSchedulerAccessors:
         assert seen == ["high", "low"]
 
     def test_run_sets_main_tealet_factory_from_task_factory(self):
-        s = _new_scheduler(lambda: DefaultTaskFactory(task_class=PriorityTask))
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
         original_factory = _tealet.get_tealet_factory()
         seen = []
 
@@ -520,7 +520,7 @@ class TestSchedulerAccessors:
         assert _tealet.get_tealet_factory() is original_factory
 
     def test_run_until_complete_sets_main_tealet_factory_from_task_factory(self):
-        s = _new_scheduler(lambda: DefaultTaskFactory(task_class=PriorityTask))
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
         original_factory = _tealet.get_tealet_factory()
 
         def worker():
@@ -536,7 +536,7 @@ class TestSchedulerAccessors:
         assert _tealet.get_tealet_factory() is original_factory
 
     def test_main_context_sets_main_tealet_factory_from_task_factory(self):
-        s = _new_scheduler(lambda: DefaultTaskFactory(task_class=PriorityTask))
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
         original_factory = _tealet.get_tealet_factory()
 
         with s.main_context():
@@ -728,9 +728,9 @@ class TestSchedulerAccessors:
         custom = StubTaskFactory()
 
         assert isinstance(original, DefaultTaskFactory)
-        assert original.task_class is TealetTask
+        assert original.task_constructor is TealetTask
         assert original.eager_start is False
-        assert custom.task_class is TealetTask
+        assert custom.task_constructor is TealetTask
         s.set_task_factory(custom)
         assert s.get_task_factory() is custom
 
@@ -744,7 +744,7 @@ class TestSchedulerAccessors:
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
 
         class RecordingTaskFactory:
-            task_class = TealetTask
+            task_constructor = TealetTask
 
             def __call__(self, scheduler, func, *, context, eager_start=None, **kwargs):
                 calls.append((scheduler, context.get(marker), eager_start, kwargs))
@@ -876,9 +876,9 @@ class TestSchedulerAccessors:
         assert s.run_until_complete(first) == "first"
         assert s.run_until_complete(second) == "second"
 
-    def test_stub_task_factory_passes_spawn_kwargs_to_task_class(self):
+    def test_stub_task_factory_passes_spawn_kwargs_to_task_constructor(self):
         s = _new_scheduler()
-        factory = StubTaskFactory(task_class=PriorityTask)
+        factory = StubTaskFactory(task_constructor=PriorityTask)
         s.set_task_factory(factory)
 
         task = s.spawn(lambda: "ok", priority=TASK_PRIORITY_HIGH)
@@ -1593,7 +1593,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_run_forever_sets_main_tealet_factory_from_task_factory(self):
-        s = _new_scheduler(lambda: DefaultTaskFactory(task_class=PriorityTask))
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
         original_factory = _tealet.get_tealet_factory()
         seen = []
 
@@ -1938,7 +1938,7 @@ class TestSchedulerAccessors:
 
     def test_arun_until_complete_sets_main_tealet_factory_from_task_factory(self):
         s = AsyncScheduler()
-        s.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
         set_scheduler(s)
         original_factory = _tealet.get_tealet_factory()
 
@@ -1973,7 +1973,7 @@ class TestSchedulerAccessors:
 
     def test_arun_forever_sets_main_tealet_factory_from_task_factory(self):
         s = AsyncScheduler()
-        s.set_task_factory(DefaultTaskFactory(task_class=PriorityTask))
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
         set_scheduler(s)
         original_factory = _tealet.get_tealet_factory()
         seen = []
