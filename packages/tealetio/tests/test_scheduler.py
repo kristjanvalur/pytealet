@@ -2702,6 +2702,27 @@ class TestSchedulerExamples:
         seen = demo_sleep()
         assert seen == ["before:sleep", "after:sleep"]
 
+    def test_sleep_zero_is_plain_yield(self):
+        seen: list[str] = []
+
+        class NoTimerScheduler(Scheduler):
+            def call_later(self, delay, callback, *args, context=None):
+                raise AssertionError("sleep(0) should not schedule a timer")
+
+        s = NoTimerScheduler()
+        set_scheduler(s)
+
+        def sleeper() -> None:
+            seen.append("before")
+            s.sleep(0)
+            seen.append("after")
+
+        s.spawn(sleeper)
+        s.spawn(lambda: seen.append("peer"))
+        s.run()
+
+        assert seen == ["before", "peer", "after"]
+
     def test_timer_handle_cancel(self):
         s = _new_scheduler()
         seen: list[str] = []

@@ -1012,6 +1012,21 @@ class TestRunHelper:
 
         assert run_asyncio_in_tealet(entry()) == "done"
 
+    def test_run_asyncio_in_tealet_yields_to_sibling_tealets(self):
+        events: list[str] = []
+
+        async def entry() -> tuple[str, ...]:
+            scheduler = get_running_scheduler()
+            scheduler.spawn(lambda: events.append("peer"))
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if events:
+                    break
+            events.append("entry")
+            return tuple(events)
+
+        assert run_asyncio_in_tealet(entry()) == ("peer", "entry")
+
     def test_run_asyncio_in_tealet_helper_uses_tealet_selector_loop(self):
         async def entry() -> asyncio.AbstractEventLoop:
             return asyncio.get_running_loop()

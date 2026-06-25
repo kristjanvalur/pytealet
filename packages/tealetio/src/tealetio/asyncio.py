@@ -6,6 +6,7 @@ import selectors
 import socket
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from contextlib import suppress
 from typing import Any, Callable, TypeVar, cast
 
 import tealet
@@ -504,7 +505,7 @@ def run_asyncio_in_tealet(
     )
 
     def run_inside_tealet():
-        tealet_runner.get_scheduler()
+        scheduler = cast(SelectorScheduler, tealet_runner.get_scheduler())
 
         def tealet_loop_factory() -> _asyncio.AbstractEventLoop:
             if loop_factory is not None:
@@ -513,8 +514,22 @@ def run_asyncio_in_tealet(
             _asyncio.set_event_loop(loop)
             return loop
 
+        async def yield_to_tealet_scheduler() -> None:
+            while True:
+                await _asyncio.sleep(0)
+                scheduler.sleep(0)
+
+        async def wrapped_entry():
+            yielder = _asyncio.create_task(yield_to_tealet_scheduler())
+            try:
+                return await entry
+            finally:
+                yielder.cancel()
+                with suppress(CancelledError):
+                    await yielder
+
         run_context = _copy_context_without_current_task(context)
-        return compat.run_asyncio_once(entry, context=run_context, loop_factory=tealet_loop_factory, debug=debug)
+        return compat.run_asyncio_once(wrapped_entry(), context=run_context, loop_factory=tealet_loop_factory, debug=debug)
 
     try:
         return tealet_runner.run(run_inside_tealet)

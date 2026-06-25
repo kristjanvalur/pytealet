@@ -1294,6 +1294,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._schedule(lambda: self._make_runnable(tealet.current()))
 
     def sleep(self, delay: float) -> None:
+        if delay <= 0:
+            self.yield_()
+            return
+
         current = tealet.current()
         awakened = False
 
