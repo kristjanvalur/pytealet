@@ -15,6 +15,7 @@ struct PyTealetModuleState {
     struct PyTealetMainData *thread_data_ring;
     int frame_introspection_enabled;
     PyTypeObject *tealet_type;
+    PyObject *tealet_class;
     PyObject *tealet_error;
     PyObject *invalid_error;
     PyObject *thread_mismatch_error;
