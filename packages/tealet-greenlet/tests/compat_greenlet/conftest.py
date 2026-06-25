@@ -25,7 +25,7 @@ if _skip_long_greenlet_tests is None:
     _skip_long_greenlet_tests = RUNNING_ON_CI
 
 LONG_RUNNING_TESTS = {
-    "tests/compat_greenlet/test_leaks.py::TestLeaks::test_untracked_memory_doesnt_increase_unfinished_thread_dealloc_in_main": (
+    "test_leaks.py::TestLeaks::test_untracked_memory_doesnt_increase_unfinished_thread_dealloc_in_main": (
         "Skipped long-running compat leak test in CI. "
         "Set PYTEALET_SKIP_LONG_GREENLET_TESTS=0 to run it."
     ),
@@ -71,9 +71,10 @@ def pytest_collection_modifyitems(config, items):
         if reason:
             item.add_marker(pytest.mark.skip(reason=reason))
         if _skip_long_greenlet_tests:
-            long_reason = LONG_RUNNING_TESTS.get(item.nodeid)
-            if long_reason:
-                item.add_marker(pytest.mark.skip(reason=long_reason))
+            for nodeid_suffix, long_reason in LONG_RUNNING_TESTS.items():
+                if item.nodeid.endswith(nodeid_suffix):
+                    item.add_marker(pytest.mark.skip(reason=long_reason))
+                    break
 
 
 @pytest.fixture(autouse=True)

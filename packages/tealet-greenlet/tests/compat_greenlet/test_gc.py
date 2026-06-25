@@ -12,7 +12,7 @@ from .leakcheck import fails_leakcheck
 # which is no longer optional.
 assert greenlet.GREENLET_USE_GC
 
-IS_PYTEALET_SHIM = getattr(greenlet, "__name__", "") == "tealet.greenlet"
+IS_PYTEALET_SHIM = getattr(greenlet, "__name__", "") == "tealet_greenlet"
 PYTEALET_FINALIZER_EXPECTATION_REASON = (
     "pytealet shim does not match upstream leak expectation for this finalizer scenario"
 )

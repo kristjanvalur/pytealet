@@ -291,14 +291,14 @@ Operational-vs-remote distinction:
 
 ---
 
-### High-Level Python API: `tealet.greenlet`
+### High-Level Python API: `tealet-greenlet`
 
-The `tealet.greenlet` module provides a greenlet-compatible interface:
+The separate `tealet-greenlet` workspace package provides a greenlet-compatible interface on top of tealet primitives:
 
 ```python
-from tealet import greenlet
+from tealet_greenlet import greenlet, getcurrent
 
-greenlet.getcurrent() -> greenlet
+getcurrent() -> greenlet
 ```
 Returns the current greenlet.
 
@@ -928,12 +928,12 @@ Each thread gets its own tealet family; cross-thread operations are explicitly f
 
 ## Comparison with greenlet
 
-PyTealet provides a greenlet-compatible interface while using libtealet as the underlying implementation:
+The `tealet-greenlet` package provides a greenlet-compatible interface while using libtealet as the underlying implementation:
 
 **Similarities:**
 - Cooperative coroutines without async/await keywords
 - Stack switching and preservation
-- Greenlet-compatible API via `tealet.greenlet` module
+- Greenlet-compatible API via the `tealet_greenlet` package
 
 **Differences:**
 - Built on libtealet instead of direct assembly/platform code

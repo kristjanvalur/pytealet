@@ -1,0 +1,79 @@
+name: tealet-greenlet Build And Publish
+
+"on":
+  pull_request:
+    paths:
+      - ".github/workflows/tealet-greenlet-release-publish.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/**"
+      - "packages/tealet-greenlet/**"
+  push:
+    branches:
+      - main
+    tags:
+      - "tealet-greenlet-v*"
+    paths-ignore:
+      - "docs/**"
+      - "tests/**"
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+jobs:
+  build_package:
+    name: Build tealet-greenlet package
+    if: >-
+      github.event_name != 'release' ||
+      startsWith(github.event.release.tag_name, 'tealet-greenlet-v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python 3.12 with uv
+        run: uv python install 3.12
+
+      - name: Build tealet-greenlet sdist and wheel
+        run: uv build --package tealet-greenlet --out-dir dist/tealet-greenlet
+
+      - name: Upload tealet-greenlet artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: tealet-greenlet-dist
+          path: dist/tealet-greenlet/*
+
+  publish_pypi:
+    name: Publish tealet-greenlet to PyPI
+    needs:
+      - build_package
+    runs-on: ubuntu-latest
+    environment: pypi-tealet-greenlet
+    if: >-
+      github.event_name == 'release' &&
+      github.event.action == 'published' &&
+      startsWith(github.event.release.tag_name, 'tealet-greenlet-v')
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+
+      - name: Flatten dist tree
+        run: |
+          mkdir -p publish-dist
+          find dist -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} publish-dist/ \;
+          ls -la publish-dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: publish-dist/
+          print-hash: true

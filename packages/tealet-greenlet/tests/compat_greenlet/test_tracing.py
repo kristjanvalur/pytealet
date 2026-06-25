@@ -20,7 +20,7 @@ ASSERTION_BUILD_PY312 = (
     "Broken on assertion-enabled builds of Python 3.12"
 )
 
-IS_PYTEALET_SHIM = getattr(greenlet, "__name__", "") == "tealet.greenlet"
+IS_PYTEALET_SHIM = getattr(greenlet, "__name__", "") == "tealet_greenlet"
 PYTEALET_PROFILE_NOISE_REASON = (
     "pytealet greenlet shim runs in Python; sys.setprofile observes shim helper frames "
     "and event ordering differences"

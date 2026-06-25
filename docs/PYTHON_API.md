@@ -126,9 +126,9 @@ The runtime exposes these exception classes:
 - `result()`
 - `exception()`
 
-## Greenlet Compatibility Shim
+## Greenlet Compatibility Package
 
-The `tealet.greenlet` module is a compatibility-oriented layer built on top of tealet primitives.
+Greenlet compatibility now lives in the separate `tealet-greenlet` workspace package. Its canonical import package is `tealet_greenlet`; `tealet.greenlet` remains only as a transition wrapper when `tealet-greenlet` is installed.
 
 Important scope note:
 - It is best viewed as a proof-of-concept and compatibility shim, not as a statement that tealet itself is a full greenlet runtime replacement for all workloads.
