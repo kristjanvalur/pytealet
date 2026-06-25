@@ -4,6 +4,13 @@ A Python wrapper for [libtealet](https://github.com/kristjanvalur/libtealet), gi
 
 Normal Python functions have a nice property: they can call other functions without changing their own shape. `tealet` keeps that feeling while allowing a stack to pause and resume later, so higher-level runtimes can build cooperative scheduling without forcing `async`/`await` through every layer.
 
+## Related Workspace Projects
+
+This repository also contains higher-level packages built on top of core `tealet`:
+
+- [`tealetio`](packages/tealetio/): a synchronous, asyncio-like runtime for tealet, including schedulers, tasks, futures, locks, queues, selector helpers, and asyncio coexistence.
+- [`tealet-greenlet`](packages/tealet-greenlet/): an experimental greenlet emulation layer via tealet, including greenlet-compatible imports and upstream-style compatibility tests.
+
 ## About
 
 `tealet` is intentionally small. It is a building-block library, not a scheduler, event loop, or complete async framework. The core package provides stack-switching primitives such as `switch`, `run`, and `throw`, plus thread ownership and runtime state checks that schedulers can use directly.
@@ -17,15 +24,13 @@ Built on vendored libtealet release archives, currently v0.7.6, the core package
 - **Fast context switches**: stack transfers intended to be cheap enough for cooperative runtimes
 - **Composable primitives**: enough machinery to build custom schedulers and runtime policies
 
-Need a scheduler, locks, futures, selector helpers, or asyncio coexistence? Use the separate `tealetio` package in `packages/tealetio`. It depends on `tealet`, while `tealet` itself stays dependency-light and runtime-focused.
-
-The `tealet.greenlet` compatibility layer is best viewed as a practical compatibility shim and proof of concept. It shows how richer APIs can sit on top of the primitives, but the core project does not claim broad greenlet parity.
+Need a scheduler, locks, futures, selector helpers, asyncio coexistence, or greenlet compatibility? Use the related workspace packages above. They depend on `tealet`, while `tealet` itself stays dependency-light and runtime-focused.
 
 ## Development
 
 ### Development Setup
 
-This repository is a `uv` workspace. The main package is `tealet`, and the current secondary workspace project is `tealetio` under `packages/tealetio`.
+This repository is a `uv` workspace. The main package is `tealet`; secondary workspace projects live under `packages/`.
 
 Use `uv` for dependency and environment management.
 
@@ -79,6 +84,16 @@ Run the `tealetio` test suite from the workspace root:
 uv run --active --package tealetio python -m pytest packages/tealetio/tests/
 ```
 
+### Greenlet Compatibility Package
+
+Greenlet compatibility APIs live in the separate `tealet-greenlet` workspace package. Its canonical import is `tealet_greenlet`, with a transition wrapper available at `tealet.greenlet` when the package is installed.
+
+Run the package tests from the workspace root:
+
+```bash
+uv run --active --package tealet-greenlet python -m pytest packages/tealet-greenlet/tests/
+```
+
 ### Runtime Frame Introspection Toggle
 
 Need to inspect dormant tealet frames while debugging? The extension exposes a module-level runtime switch for dormant-frame exposure:
@@ -112,9 +127,10 @@ Client extensions should include this header at build time and import the runtim
 
 Detailed API references live in the `docs/` folder:
 
-- [docs/PYTHON_API.md](docs/PYTHON_API.md) for the Python-level API (`tealet`, `_tealet`, and compatibility shim notes)
+- [docs/PYTHON_API.md](docs/PYTHON_API.md) for the Python-level core API (`tealet` and `_tealet`)
 - [docs/C_API.md](docs/C_API.md) for the capsule-based C API (`pytealet_capi.h`)
 - [packages/tealetio/docs/PYTHON_API.md](packages/tealetio/docs/PYTHON_API.md) for scheduler, task/future, lock, selector, runner, and asyncio APIs
+- [packages/tealet-greenlet/docs/PYTHON_API.md](packages/tealet-greenlet/docs/PYTHON_API.md) for the greenlet compatibility package
 
 ## Supported Python and Platforms
 
@@ -167,11 +183,10 @@ pytealet/
 ├── scripts/
 │   └── fast_build.sh
 ├── src/
-│   ├── greenlet_legacy.py   # Legacy greenlet compatibility shim (dev/test helper)
 │   ├── tealet_examples.py    # Development examples for core tealet primitives
 │   ├── tealet/              # Pure Python package
 │   │   ├── __init__.py
-│   │   └── greenlet/
+│   │   └── greenlet/         # Transition wrapper for tealet-greenlet
 │   └── _tealet/             # C extension module
 │       ├── pytealet.c       # Core runtime for tealet objects
 │       ├── pytealet_module.c # CPython module lifecycle
@@ -181,11 +196,13 @@ pytealet/
 │       └── libtealet-src/   # Optional local libtealet source checkout (gitignored)
 ├── tests/
 │   ├── test_tealet.py
-│   ├── test_greenlet_legacy.py
-│   └── compat_greenlet/
+│   └── test_examples.py
 ├── packages/
-│   └── tealetio/             # Optional scheduler/asyncio package built on tealet
-│       └── docs/             # tealetio-specific API and design docs
+│   ├── tealetio/             # Optional scheduler/asyncio package built on tealet
+│   │   └── docs/             # tealetio-specific API and design docs
+│   └── tealet-greenlet/      # Greenlet compatibility package built on tealet
+│       ├── docs/             # tealet-greenlet-specific API and architecture docs
+│       └── tests/            # Legacy and upstream-compat greenlet tests
 ├── pyproject.toml
 └── README.md
 ```

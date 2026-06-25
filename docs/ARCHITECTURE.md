@@ -291,31 +291,12 @@ Operational-vs-remote distinction:
 
 ---
 
-### High-Level Python API: `tealet.greenlet`
+### Higher-Level Workspace Packages
 
-The `tealet.greenlet` module provides a greenlet-compatible interface:
+The core package exposes low-level tealet primitives. Higher-level runtime layers live in sibling workspace packages:
 
-```python
-from tealet import greenlet
-
-greenlet.getcurrent() -> greenlet
-```
-Returns the current greenlet.
-
-```python
-class greenlet.greenlet(run=None, parent=None)
-```
-Greenlet-compatible wrapper around tealets.
-
-**Methods:**
-- `switch(*args, **kwds)` - Switch to this greenlet
-- `throw(type, value=None, traceback=None)` - Throw exception in greenlet
-- `gr_frame` - Property: current frame
-- `dead` - Property: True if greenlet has exited
-
-**Exceptions:**
-- `greenlet.error` - Greenlet error
-- `greenlet.GreenletExit` - Raised to exit a greenlet
+- `tealetio`: synchronous, asyncio-like runtime APIs. See `packages/tealetio/docs/`.
+- `tealet-greenlet`: experimental greenlet emulation via tealet. See `packages/tealet-greenlet/docs/`.
 
 ---
 
@@ -926,20 +907,9 @@ Each thread gets its own tealet family; cross-thread operations are explicitly f
 
 ---
 
-## Comparison with greenlet
+## Related Runtime Layers
 
-PyTealet provides a greenlet-compatible interface while using libtealet as the underlying implementation:
-
-**Similarities:**
-- Cooperative coroutines without async/await keywords
-- Stack switching and preservation
-- Greenlet-compatible API via `tealet.greenlet` module
-
-**Differences:**
-- Built on libtealet instead of direct assembly/platform code
-- May have different performance characteristics
-- Uses tealet's memory allocator interface
-- Supports custom allocators via `tealet_alloc_t`
+`tealetio` and `tealet-greenlet` provide higher-level runtime layers on top of the core stack-slicing API. Their architecture notes live with the packages so the core documentation stays focused on `_tealet`, libtealet integration, frame handling, thread ownership, and C API contracts.
 
 ---
 

@@ -126,19 +126,12 @@ The runtime exposes these exception classes:
 - `result()`
 - `exception()`
 
-## Greenlet Compatibility Shim
+## Related Workspace Packages
 
-The `tealet.greenlet` module is a compatibility-oriented layer built on top of tealet primitives.
+Core `tealet` stays focused on low-level stack-slicing primitives. Higher-level APIs live in sibling workspace packages:
 
-Important scope note:
-- It is best viewed as a proof-of-concept and compatibility shim, not as a statement that tealet itself is a full greenlet runtime replacement for all workloads.
-
-Primary public names include:
-- `greenlet`
-- `getcurrent()`
-- `settrace(func)`, `gettrace()`
-- `GreenletExit`
-- `error`
+- `tealetio`: scheduler, task/future, lock, selector, runner, and asyncio APIs. See `packages/tealetio/docs/PYTHON_API.md`.
+- `tealet-greenlet`: experimental greenlet emulation via tealet. See `packages/tealet-greenlet/docs/PYTHON_API.md`.
 
 ## Minimal Scheduler Example
 

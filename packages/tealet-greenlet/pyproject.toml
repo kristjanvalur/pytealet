@@ -1,0 +1,68 @@
+[build-system]
+requires = ["uv_build>=0.9.0,<0.12.0"]
+build-backend = "uv_build"
+
+[project]
+name = "tealet-greenlet"
+version = "0.1.0rc1"
+description = "Greenlet compatibility layer built on tealet"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    {name = "Kristján Valur Jónsson", email = "sweskman@gmail.com"}
+]
+keywords = ["coroutines", "greenlet", "greenlets", "tealet", "tealets"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+]
+dependencies = [
+    "tealet==0.1.0rc1",
+]
+
+[project.urls]
+Homepage = "https://github.com/kristjanvalur/pytealet/tree/main/packages/tealet-greenlet"
+Documentation = "https://github.com/kristjanvalur/pytealet/tree/main/packages/tealet-greenlet"
+Repository = "https://github.com/kristjanvalur/pytealet"
+Source = "https://github.com/kristjanvalur/pytealet/tree/main/packages/tealet-greenlet"
+Issues = "https://github.com/kristjanvalur/pytealet/issues"
+
+[tool.uv.sources]
+tealet = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "objgraph>=3.6",
+    "psutil>=5.9",
+    "pytest>=7.0",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [
+    "tests/**",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/greenlet/__init__.py" = ["F401", "F403"]
+"src/greenlet/_greenlet.py" = ["F401", "F403"]
+"src/tealet_greenlet/__init__.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "greenlet_compat: tests that require the greenlet compatibility layer",
+    "stub: tests that exercise stub functionality",
+]

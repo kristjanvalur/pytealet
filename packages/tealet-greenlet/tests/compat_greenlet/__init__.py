@@ -16,7 +16,7 @@ from time import time
 
 import psutil
 
-import tealet.greenlet as _tealet_greenlet
+import tealet_greenlet as _tealet_greenlet
 _tealet_greenlet.install()
 
 from greenlet import greenlet as RawGreenlet
@@ -233,7 +233,7 @@ class TestCase(unittest.TestCase, metaclass=TestCaseMetaClass):
         )
         bootstrap = (
             "import runpy, sys; "
-            "import tealet.greenlet as _tealet_greenlet; "
+            "import tealet_greenlet as _tealet_greenlet; "
             "_tealet_greenlet.install(); "
             "runpy.run_path(sys.argv[1], run_name='__main__')"
         )

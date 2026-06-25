@@ -1,7 +1,27 @@
 import os
 import subprocess
 
+import pytest
+
+
 os.environ.setdefault("PYTEALET_CHECK_STACK", "1")
+
+
+def _env_flag(name):
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _configure_greenlet_stub_from_env():
+    use_stub = _env_flag("PYTEALET_GREENLET_USE_STUB")
+    if use_stub is None:
+        return
+
+    import tealet_greenlet
+
+    tealet_greenlet.set_stub(use_stub)
 
 
 def pytest_addoption(parser):
@@ -24,7 +44,7 @@ def pytest_sessionstart(session):
     do_rebuild = session.config.getoption("--rebuild-ext") or os.environ.get("PYTEALET_REBUILD_EXT") == "1"
 
     if not skip_rebuild and do_rebuild:
-        root = os.path.dirname(os.path.dirname(__file__))
+        root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         env = os.environ.copy()
         env.setdefault("BUILD_LIBTEALET_FROM_SOURCE", "0")
         if env.get("BUILD_LIBTEALET_FROM_SOURCE") == "1":
@@ -38,7 +58,9 @@ def pytest_sessionstart(session):
             check=True,
         )
 
+    _configure_greenlet_stub_from_env()
+
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "stub: tests that exercise stub functionality")
-
+    config.addinivalue_line("markers", "greenlet_compat: tests that require greenlet compatibility layer")
