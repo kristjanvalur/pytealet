@@ -31,6 +31,7 @@ def test_top_level_exports_public_scheduler_api():
         "get_current",
         "InvalidStateError",
         "LifoQueue",
+        "Linkable",
         "Lock",
         "PriorityLock",
         "PriorityTask",
@@ -88,6 +89,8 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.Queue is tealetio.locks.Queue
     assert tealetio.Future is tealetio.tasks.Future
     assert tealetio.get_current is tealetio.tasks.get_current
+    assert tealetio.Linkable is tealetio.tasks.Linkable
+    assert tealetio.Linkable is tealetio.tasks.TaskLink
     assert tealetio.PriorityTask is tealetio.tasks.PriorityTask
     assert tealetio.TealetTask is tealetio.tasks.TealetTask
     assert tealetio.TASK_PRIORITY_CRITICAL is tealetio.tasks.TASK_PRIORITY_CRITICAL

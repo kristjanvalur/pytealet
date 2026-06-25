@@ -30,6 +30,7 @@ __all__ = [
     "DefaultTaskFactory",
     "Future",
     "get_current",
+    "Linkable",
     "PriorityTask",
     "TaskLink",
     "Shield",
@@ -61,6 +62,9 @@ class TaskLink(ABC):
 
     def on_modified(self, task: tealet.tealet) -> None:
         """Handle a linked tealet changing its scheduling related state."""
+
+
+Linkable = TaskLink
 
 
 T = TypeVar("T")
