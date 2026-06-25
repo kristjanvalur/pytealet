@@ -450,8 +450,8 @@ The scheduler-owned wait state might look like:
 ```python
 class SelectorScheduler(BaseScheduler):
     _selector: selectors.BaseSelector
-    _read_waiters: dict[int, TealetTask]
-    _write_waiters: dict[int, TealetTask]
+    _read_waiters: dict[int, Task]
+    _write_waiters: dict[int, Task]
 
     def wait_readable(self, fileobj) -> None: ...
     def wait_writable(self, fileobj) -> None: ...

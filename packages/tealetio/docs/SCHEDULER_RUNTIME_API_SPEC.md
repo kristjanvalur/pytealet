@@ -74,13 +74,13 @@ Implemented:
   completion-order iteration.
 - Scheduler-local task creation is configurable with
   `BaseScheduler.set_task_factory(...)` and `BaseScheduler.get_task_factory()`.
-  The default factory preserves direct `TealetTask.prepare(...)` behavior.
+  The default factory preserves direct `Task.prepare(...)` behavior.
   `tealetio.tasks.StubTaskFactory` can create and reuse a prepared stub via
   `stub_here()`, then create scheduler tasks from that stub.
 - The scheduler main-tealet context is explicit through
   `BaseScheduler.main_context()`. It installs the scheduler's task factory as
   the low-level tealet wrapper factory for the current main tealet, so direct
-  task access from main code sees a scheduler-owned `TealetTask` wrapper rather
+  task access from main code sees a scheduler-owned `Task` wrapper rather
   than a raw `_tealet.tealet` wrapper.
 - Scheduler and runner driving entry points enter `main_context()`
   automatically while constructing, cancelling, transferring, and driving
@@ -105,7 +105,7 @@ Implemented:
     `CancelledError` through the tealet/asyncio boundary
   - shielding prevents waiter cancellation from propagating into the shielded
     underlying future, matching `asyncio.shield(...)`
-- Wait primitives are responsible for exception-safe cleanup. If a `TealetTask`
+- Wait primitives are responsible for exception-safe cleanup. If a `Task`
   receives an exception while blocked, including cancellation or tealet exit,
   the wait path must unlink the task from every scheduler-owned waiter list or
   bridge registration before propagating the exception. This is the core
@@ -128,7 +128,7 @@ Implemented:
   - unfinished scheduler tasks are cancelled and drained with
     `tealetio.scheduler.gather(..., return_exceptions=True)`; this is robust as
     long as synchronisation primitives correctly clean up when blocked
-    `TealetTask` instances receive cancellation or tealet-exit exceptions
+    `Task` instances receive cancellation or tealet-exit exceptions
   - `CoreSchedulerDrivingAPI.shutdown_default_executor(timeout=300.0)` returns
     a scheduler `Future` that waits for the detached default executor to shut
     down cleanly, warning and continuing if the asyncio-parity timeout expires
@@ -203,16 +203,16 @@ Semantics:
 
 - `main_context()` temporarily configures the low-level tealet factory so the
   current main tealet is wrapped using this scheduler's configured task constructor.
-  With the default factory that wrapper is a `TealetTask`; with a priority
+  With the default factory that wrapper is a `Task`; with a priority
   factory it may be a `PriorityTask` or another scheduler-compatible subclass.
 - The context is reentrant for the same scheduler. Entering it again while the
   same scheduler factory is active is a no-op, and exiting restores the previous
   low-level tealet factory.
-- Code running inside a scheduler-owned `TealetTask` already has the right
+- Code running inside a scheduler-owned `Task` already has the right
   scheduler shape. Code running from the raw process main tealet must enter
   `with scheduler.main_context():` before directly cancelling, throwing into,
   rescheduling, yielding to, or otherwise transferring scheduler-owned tasks.
-- `TealetTask.run()`, `TealetTask.throw(...)`, and cancellation do not create
+- `Task.run()`, `Task.throw(...)`, and cancellation do not create
   this context themselves. The boundary is owned by scheduler/runner driving
   APIs and by explicit low-level callers.
 - Sync driving entry points (`run()`, `run_forever()`,
@@ -311,7 +311,7 @@ from tealetio.tasks import (
     TASK_PRIORITY_LOW,
 )
 
-TaskConstructor = Callable[..., TealetTask]
+TaskConstructor = Callable[..., Task]
 
 
 class TaskFactory(Protocol):
@@ -326,13 +326,13 @@ class TaskFactory(Protocol):
         context: contextvars.Context,
         eager_start: bool | None = None,
         **kwargs: Any,
-    ) -> TealetTask: ...
+    ) -> Task: ...
 
 class DefaultTaskFactory:
     def __init__(
         self,
         *,
-        task_constructor: TaskConstructor = TealetTask,
+        task_constructor: TaskConstructor = Task,
         eager_start: bool = False,
     ) -> None: ...
 
@@ -341,12 +341,12 @@ class StubTaskFactory:
         self,
         stub: tealet.tealet | None = None,
         *,
-        task_constructor: TaskConstructor = TealetTask,
+        task_constructor: TaskConstructor = Task,
         eager_start: bool = False,
     ) -> None: ...
     def stub_here(self) -> tealet.tealet: ...
 
-class PriorityTask(TealetTask):
+class PriorityTask(Task):
     def __init__(
         self,
         owning_scheduler: BaseScheduler,
@@ -376,7 +376,7 @@ Semantics:
 - Task factories are tealet scheduler construction strategies, not asyncio task
   factory compatibility hooks.
 - A factory receives the target callable and already selected context, creates
-  and prepares a `TealetTask`, and returns it unscheduled.
+  and prepares a `Task`, and returns it unscheduled.
 - `BaseScheduler.spawn(..., **kwargs)` forwards extra keyword arguments to the
   configured task factory, mirroring `asyncio.create_task(coro, **kwargs)`. This
   allows custom factories to accept construction-time options such as
@@ -384,7 +384,7 @@ Semantics:
 - `DefaultTaskFactory` and `StubTaskFactory` accept a `task_constructor`.
   They instantiate it as `task_constructor(scheduler, **kwargs)`, so extra spawn
   keyword arguments are handled by the task constructor. With the default
-  `TealetTask`, unsupported keywords are rejected by `TealetTask.__init__`;
+  `Task`, unsupported keywords are rejected by `Task.__init__`;
   with `PriorityTask`, `priority=...` is accepted directly.
 - `PriorityTask` is a scheduler task with a float `priority` property. Lower
   numeric values run first in priority queues, matching Python priority queue
@@ -398,7 +398,7 @@ Semantics:
   priority-aware queues. It includes inherited priority from owned
   `PriorityLock` instances.
 - `PriorityLock` supports both tealet `sacquire()` and asyncio `acquire()`.
-  Regular `TealetTask` instances and asyncio tasks can acquire and release it
+  Regular `Task` instances and asyncio tasks can acquire and release it
   normally. It keeps `Lock`'s FIFO waiter policy, and priority inheritance only
   affects scheduler ordering. When `PriorityTask` instances participate, a lock
   owner inherits the best waiting priority while the lock is held.

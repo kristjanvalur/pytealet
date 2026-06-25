@@ -55,7 +55,7 @@ def test_top_level_exports_public_scheduler_api():
         "TASK_PRIORITY_LOW",
         "TaskFactory",
         "TealetSelectorEventLoop",
-        "TealetTask",
+        "Task",
         "Timeout",
         "TimeoutError",
         "TimerHandle",
@@ -93,7 +93,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.Linkable is tealetio.tasks.Linkable
     assert tealetio.Linkable is tealetio.tasks.TaskLink
     assert tealetio.PriorityTask is tealetio.tasks.PriorityTask
-    assert tealetio.TealetTask is tealetio.tasks.TealetTask
+    assert tealetio.Task is tealetio.tasks.Task
     assert tealetio.TASK_PRIORITY_CRITICAL is tealetio.tasks.TASK_PRIORITY_CRITICAL
     assert tealetio.TASK_PRIORITY_HIGH is tealetio.tasks.TASK_PRIORITY_HIGH
     assert tealetio.TASK_PRIORITY_DEFAULT is tealetio.tasks.TASK_PRIORITY_DEFAULT

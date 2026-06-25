@@ -43,7 +43,7 @@ bound and never creates one implicitly.
 actively driving work. It raises `RuntimeError` if no scheduler is running and
 never creates one implicitly.
 
-`tealetio.get_current()` returns the currently running `TealetTask`, or `None`
+`tealetio.get_current()` returns the currently running `Task`, or `None`
 when the caller is outside a scheduler-owned tealet task. Asyncio tasks therefore
 see `None` rather than an unrelated low-level tealet object. This includes
 coroutines that a tealet task waits for through `BaseScheduler.await_(...)`.
@@ -62,7 +62,7 @@ scheduler. `sleep(0)` is the tealetio yield checkpoint, matching the familiar
 `scheduler.main_context()` is the low-level boundary for direct scheduler task
 access from the process main tealet. It temporarily wraps the current main
 tealet with the scheduler's configured task class, so operations that transfer
-or inspect scheduler-owned tasks see a `TealetTask`-shaped current tealet.
+or inspect scheduler-owned tasks see a `Task`-shaped current tealet.
 
 High-level driving APIs enter this context for you. That includes scheduler
 drivers such as `run()`, `run_forever()`, `run_until_complete(...)`, and
@@ -86,12 +86,12 @@ with scheduler.main_context():
     scheduler.run_until_complete(task)
 ```
 
-Code already running inside a scheduler-owned `TealetTask` does not need this
+Code already running inside a scheduler-owned `Task` does not need this
 wrapper, and task transfer methods do not install it implicitly.
 
 ## Task Priorities
 
-`PriorityTask` is a `TealetTask` subclass for schedulers that use a priority
+`PriorityTask` is a `Task` subclass for schedulers that use a priority
 runnable queue. Its `priority` property is a float, and changing it notifies the
 current task link so the queue can recompute runnable order when the task is
 already waiting to run. `get_effective_priority()` returns the priority the
@@ -144,7 +144,7 @@ and waited on normally.
 
 ## Scheduler Waiting Helpers
 
-`scheduler.runnable_tasks()` returns the scheduler-owned `TealetTask` instances
+`scheduler.runnable_tasks()` returns the scheduler-owned `Task` instances
 currently waiting to run, in scheduler order. It is an introspection helper for
 advanced scheduling and debugging; blocked and completed tasks are not included.
 

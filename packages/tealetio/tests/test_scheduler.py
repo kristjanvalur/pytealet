@@ -31,7 +31,7 @@ from tealetio import (
     TASK_PRIORITY_IDLE,
     TASK_PRIORITY_LOW,
     TealetSelectorEventLoop,
-    TealetTask,
+    Task,
     TimeoutError,
     AsyncScheduler,
     as_completed,
@@ -151,7 +151,7 @@ class TestSchedulerAccessors:
 
     def test_get_current_returns_running_tealetio_task(self):
         s = _new_scheduler()
-        seen: list[TealetTask | None] = []
+        seen: list[Task | None] = []
 
         def check_current() -> None:
             seen.append(get_current())
@@ -162,7 +162,7 @@ class TestSchedulerAccessors:
         assert seen == [task]
 
     def test_get_current_returns_none_in_asyncio_task(self):
-        async def check_current() -> TealetTask | None:
+        async def check_current() -> Task | None:
             return get_current()
 
         assert asyncio.run(check_current()) is None
@@ -170,7 +170,7 @@ class TestSchedulerAccessors:
     def test_get_current_returns_none_inside_awaited_asyncio_coroutine(self):
         s = AsyncScheduler()
         set_scheduler(s)
-        seen: list[tuple[str, TealetTask | None]] = []
+        seen: list[tuple[str, Task | None]] = []
 
         async def check_current() -> str:
             seen.append(("start", get_current()))
@@ -537,7 +537,7 @@ class TestSchedulerAccessors:
         s = _new_scheduler()
         set_scheduler(s)
         seen: list[str] = []
-        target: TealetTask | None = None
+        target: Task | None = None
 
         def current() -> None:
             assert target is not None
@@ -562,7 +562,7 @@ class TestSchedulerAccessors:
         s = _new_scheduler()
         set_scheduler(s)
         seen: list[str] = []
-        target: TealetTask | None = None
+        target: Task | None = None
 
         def current() -> None:
             assert target is not None
@@ -589,7 +589,7 @@ class TestSchedulerAccessors:
         s = _new_scheduler()
         set_scheduler(s)
         seen: list[str] = []
-        target: TealetTask | None = None
+        target: Task | None = None
 
         def current() -> None:
             assert target is not None
@@ -616,7 +616,7 @@ class TestSchedulerAccessors:
         s = _new_scheduler()
         set_scheduler(s)
         seen: list[str] = []
-        target: TealetTask | None = None
+        target: Task | None = None
 
         def current() -> None:
             assert target is not None
@@ -693,9 +693,9 @@ class TestSchedulerAccessors:
         custom = StubTaskFactory()
 
         assert isinstance(original, DefaultTaskFactory)
-        assert original.task_constructor is TealetTask
+        assert original.task_constructor is Task
         assert original.eager_start is False
-        assert custom.task_constructor is TealetTask
+        assert custom.task_constructor is Task
         s.set_task_factory(custom)
         assert s.get_task_factory() is custom
 
@@ -709,7 +709,7 @@ class TestSchedulerAccessors:
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
 
         class RecordingTaskFactory:
-            task_constructor = TealetTask
+            task_constructor = Task
 
             def __call__(self, scheduler, func, *, context, eager_start=None, **kwargs):
                 calls.append((scheduler, context.get(marker), eager_start, kwargs))
@@ -2939,7 +2939,7 @@ class TestSchedulerExamples:
         s = _new_scheduler()
         evt = Event()
         seen: list[str] = []
-        target_ref: dict[str, TealetTask] = {}
+        target_ref: dict[str, Task] = {}
 
         def target_worker() -> None:
             target_ref["t"] = _tealet.current()
@@ -2962,7 +2962,7 @@ class TestSchedulerExamples:
         s = _new_scheduler()
         evt = Event()
         seen: list[str] = []
-        target_ref: dict[str, TealetTask] = {}
+        target_ref: dict[str, Task] = {}
 
         def target_worker() -> None:
             target_ref["t"] = _tealet.current()
@@ -2993,7 +2993,7 @@ class TestSchedulerExamples:
     def test_cancel_throws_cancelled_error_into_runnable_task(self):
         s = _new_scheduler()
         seen: list[str] = []
-        target_ref: dict[str, TealetTask] = {}
+        target_ref: dict[str, Task] = {}
 
         def target_worker() -> None:
             try:
@@ -3024,7 +3024,7 @@ class TestSchedulerExamples:
         s = _new_scheduler()
         evt = Event()
         seen: list[str] = []
-        target_ref: dict[str, TealetTask] = {}
+        target_ref: dict[str, Task] = {}
 
         def target_worker() -> None:
             try:

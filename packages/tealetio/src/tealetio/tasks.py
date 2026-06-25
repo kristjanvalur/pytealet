@@ -42,13 +42,13 @@ __all__ = [
     "TASK_PRIORITY_HIGH",
     "TASK_PRIORITY_IDLE",
     "TASK_PRIORITY_LOW",
-    "TealetTask",
+    "Task",
     "shield",
 ]
 
 
 class TaskLink(ABC):
-    """Base interface for objects that can be linked from a TealetTask."""
+    """Base interface for objects that can be linked from a Task."""
 
     @abstractmethod
     def _unlink(self, t: tealet.tealet) -> None:
@@ -68,7 +68,7 @@ Linkable = TaskLink
 
 
 T = TypeVar("T")
-TaskConstructor = Callable[..., "TealetTask"]
+TaskConstructor = Callable[..., "Task"]
 
 
 class _SchedulerTealetFactory:
@@ -275,7 +275,7 @@ def shield(future: Future[T]) -> Shield[T]:
     return Shield(future)
 
 
-class TealetTask(tealet.tealet, Future[Any]):
+class Task(tealet.tealet, Future[Any]):
     """Tealet task that is also a Future for its completion result."""
 
     def __init__(self, owning_scheduler: BaseScheduler):
@@ -359,7 +359,7 @@ class TealetTask(tealet.tealet, Future[Any]):
         return self._scheduler._find_target(task_exit=True), None, suppress
 
 
-class PriorityTask(TealetTask):
+class PriorityTask(Task):
     """Tealet task with a scheduler priority value."""
 
     def __init__(
@@ -414,13 +414,13 @@ class PriorityTask(TealetTask):
 
 # marks scheduler-owned tealet task code while it is on the Python stack. It is
 # cleared when control is handed to asyncio, including nested asyncio loop hosts.
-_current_task: contextvars.ContextVar[TealetTask | None] = contextvars.ContextVar(
+_current_task: contextvars.ContextVar[Task | None] = contextvars.ContextVar(
     "tealetio_current_task",
     default=None,
 )
 
 
-def get_current() -> TealetTask | None:
+def get_current() -> Task | None:
     """Return the current scheduler-owned tealet task, if one is running."""
     task = _current_task.get()
     if task is None or tealet.current() is not task:
@@ -453,12 +453,12 @@ class TaskFactory(Protocol):
         context: contextvars.Context,
         eager_start: bool | None = None,
         **kwargs: Any,
-    ) -> TealetTask:
+    ) -> Task:
         """Create and prepare a task without scheduling it."""
         ...
 
 
-def _prepare_task(task: TealetTask, func: Callable[[], object], context: contextvars.Context) -> None:
+def _prepare_task(task: Task, func: Callable[[], object], context: contextvars.Context) -> None:
     def task_main(current: tealet.tealet, _arg: object):
         def run_func():
             token = _current_task.set(task)
@@ -483,7 +483,7 @@ class DefaultTaskFactory:
     def __init__(
         self,
         *,
-        task_constructor: TaskConstructor = TealetTask,
+        task_constructor: TaskConstructor = Task,
         eager_start: bool = False,
     ) -> None:
         self.task_constructor = task_constructor
@@ -497,7 +497,7 @@ class DefaultTaskFactory:
         context: contextvars.Context,
         eager_start: bool | None = None,
         **kwargs: Any,
-    ) -> TealetTask:
+    ) -> Task:
         task = self.task_constructor(scheduler, **kwargs)
         _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):
@@ -512,7 +512,7 @@ class StubTaskFactory:
         self,
         stub: tealet.tealet | None = None,
         *,
-        task_constructor: TaskConstructor = TealetTask,
+        task_constructor: TaskConstructor = Task,
         eager_start: bool = False,
     ) -> None:
         self._stub = stub
@@ -537,7 +537,7 @@ class StubTaskFactory:
         context: contextvars.Context,
         eager_start: bool | None = None,
         **kwargs: Any,
-    ) -> TealetTask:
+    ) -> Task:
         stub = self._stub
         if stub is None:
             stub = self.stub_here()

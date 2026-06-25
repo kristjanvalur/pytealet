@@ -23,7 +23,7 @@ from .tasks import (
     CancelledError,
     Future,
     TEALET_PRI_INF,
-    TealetTask,
+    Task,
     _copy_context_without_current_task,
     get_current,
     task_priority,
@@ -47,7 +47,7 @@ __all__ = [
 
 
 def asyncio_get_current() -> _asyncio.Task[Any] | None:
-    """Return the current asyncio task, unless execution is inside a TealetTask."""
+    """Return the current asyncio task, unless execution is inside a Task."""
     if get_current() is not None:
         return None
     return _asyncio.current_task()
@@ -359,7 +359,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
             if isinstance(future, Future):
                 target: Future[T] = future
-                if isinstance(target, TealetTask) and target.get_scheduler() is not self:
+                if isinstance(target, Task) and target.get_scheduler() is not self:
                     raise RuntimeError("Future is bound to a different scheduler")
             elif callable(future):
                 target = cast(Future[T], self.spawn(future))

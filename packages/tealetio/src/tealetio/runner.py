@@ -52,7 +52,7 @@ class BaseRunner(Generic[SchedulerT]):
         assert scheduler is not None
         return scheduler
 
-    def _shutdown_scheduler_tasks(self, scheduler: SchedulerT) -> list[task_module.TealetTask]:
+    def _shutdown_scheduler_tasks(self, scheduler: SchedulerT) -> list[task_module.Task]:
         if not isinstance(scheduler, scheduler_module.BaseScheduler):
             return []
         tasks = list(scheduler.all_tasks())

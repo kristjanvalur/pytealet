@@ -100,7 +100,7 @@ assert asyncio.run(main()) == ["waiting", "done"]
 The common API is available directly from `tealetio`:
 
 - schedulers and runners: `Scheduler`, `SelectorScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
-- tasks and futures: `Future`, `TealetTask`, `get_current`, `CancelledError`, `shield`
+- tasks and futures: `Future`, `Task`, `get_current`, `CancelledError`, `shield`
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - rendezvous communication: `Channel`

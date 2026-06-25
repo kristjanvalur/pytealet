@@ -9,7 +9,7 @@ from tealetio import (
     Event,
     Future,
     InvalidStateError,
-    TealetTask,
+    Task,
     TimeoutError,
     set_scheduler,
     shield,
@@ -258,7 +258,7 @@ class TestFutureExamples:
         s = _new_scheduler()
         future: Future[int] = Future()
         seen: list[object] = []
-        waiter_ref: dict[str, TealetTask] = {}
+        waiter_ref: dict[str, Task] = {}
 
         def waiter() -> None:
             try:
@@ -306,7 +306,7 @@ class TestFutureExamples:
         s = _new_scheduler()
         future: Future[int] = Future()
         seen: list[object] = []
-        waiter_ref: dict[str, TealetTask] = {}
+        waiter_ref: dict[str, Task] = {}
 
         def waiter() -> None:
             try:
@@ -356,7 +356,7 @@ class TestFutureExamples:
 
         async def orchestrate() -> None:
             async_future = asyncio.get_running_loop().create_future()
-            waiter_ref: dict[str, TealetTask] = {}
+            waiter_ref: dict[str, Task] = {}
 
             def waiter() -> None:
                 try:
@@ -397,7 +397,7 @@ class TestFutureExamples:
         async def orchestrate() -> None:
             async_future = asyncio.get_running_loop().create_future()
             shielded = asyncio.shield(async_future)
-            waiter_ref: dict[str, TealetTask] = {}
+            waiter_ref: dict[str, Task] = {}
 
             def waiter() -> None:
                 try:
