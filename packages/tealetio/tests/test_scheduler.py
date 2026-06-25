@@ -27,6 +27,7 @@ from tealetio import (
     InvalidStateError,
     LifoQueue,
     Lock,
+    PriorityLock,
     PriorityTask,
     PriorityQueue,
     Queue,
@@ -350,13 +351,140 @@ class TestSchedulerAccessors:
         assert all(isinstance(priority, float) for priority in priorities)
         assert priorities == [-20.0, -10.0, 0.0, 10.0, 20.0]
 
-    def test_priority_task_reports_active_priority(self):
+    def test_priority_task_reports_effective_priority(self):
         s = _new_scheduler()
 
         task = PriorityTask(s, TASK_PRIORITY_LOW)
 
         assert task.priority == TASK_PRIORITY_LOW
-        assert task.get_active_priority() == TASK_PRIORITY_LOW
+        assert task.get_effective_priority() == TASK_PRIORITY_LOW
+
+    def test_priority_lock_works_with_regular_tasks(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        lock = PriorityLock()
+        seen: list[str] = []
+
+        def second() -> None:
+            seen.append("second:start")
+            lock.sacquire()
+            try:
+                seen.append("second:acquired")
+            finally:
+                lock.release()
+
+        def first() -> None:
+            lock.sacquire()
+            try:
+                seen.append("first:acquired")
+                s.spawn(second)
+                s.yield_()
+                seen.append("first:release")
+            finally:
+                lock.release()
+
+        s.spawn(first)
+        s.run()
+
+        assert seen == [
+            "first:acquired",
+            "second:start",
+            "first:release",
+            "second:acquired",
+        ]
+
+    def test_priority_lock_inherits_high_waiter_priority(self):
+        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        lock = PriorityLock()
+        seen: list[str] = []
+
+        def high() -> None:
+            seen.append("high:start")
+            lock.sacquire()
+            try:
+                seen.append("high:acquired")
+            finally:
+                lock.release()
+
+        def medium() -> None:
+            seen.append("medium")
+
+        def low() -> None:
+            lock.sacquire()
+            try:
+                seen.append("low:acquired")
+                s.spawn(high, priority=TASK_PRIORITY_HIGH)
+                s.spawn(medium, priority=TASK_PRIORITY_DEFAULT)
+                s.yield_()
+                seen.append("low:inherited")
+            finally:
+                lock.release()
+
+        s.spawn(low, priority=TASK_PRIORITY_LOW)
+        s.run()
+
+        assert seen == [
+            "low:acquired",
+            "high:start",
+            "low:inherited",
+            "high:acquired",
+            "medium",
+        ]
+
+    def test_priority_lock_asyncio_acquire_release(self):
+        lock = PriorityLock()
+        seen: list[str] = []
+
+        async def worker(name: str) -> None:
+            seen.append(f"{name}:before")
+            await lock.acquire()
+            try:
+                seen.append(f"{name}:acquired")
+                await asyncio.sleep(0)
+            finally:
+                lock.release()
+                seen.append(f"{name}:released")
+
+        async def orchestrate() -> None:
+            await asyncio.gather(worker("a"), worker("b"))
+
+        asyncio.run(orchestrate())
+
+        assert seen == [
+            "a:before",
+            "a:acquired",
+            "b:before",
+            "a:released",
+            "b:acquired",
+            "b:released",
+        ]
+
+    def test_priority_lock_asyncio_context_manager(self):
+        lock = PriorityLock()
+        seen: list[str] = []
+
+        async def worker(name: str) -> None:
+            seen.append(f"{name}:before")
+            async with lock:
+                seen.append(f"{name}:inside")
+                await asyncio.sleep(0)
+            seen.append(f"{name}:after")
+
+        async def orchestrate() -> None:
+            await asyncio.gather(worker("x"), worker("y"))
+
+        asyncio.run(orchestrate())
+
+        assert seen == [
+            "x:before",
+            "x:inside",
+            "y:before",
+            "x:after",
+            "y:inside",
+            "y:after",
+        ]
 
     def test_priority_task_factory_accepts_spawn_priority_keyword(self):
         s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)

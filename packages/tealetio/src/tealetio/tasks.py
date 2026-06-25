@@ -13,6 +13,7 @@ from .locks import Event, InvalidStateError
 
 if TYPE_CHECKING:
     from .scheduler import BaseScheduler
+    from .locks import PriorityLock
 
 
 TASK_PRIORITY_CRITICAL = -20.0
@@ -368,6 +369,8 @@ class PriorityTask(TealetTask):
     ):
         super().__init__(owning_scheduler)
         self._priority = TASK_PRIORITY_DEFAULT
+        self._owned_priority_locks: set[PriorityLock] = set()
+        self._waiting_on_priority: Any | None = None
         self.priority = priority
 
     @property
@@ -379,8 +382,34 @@ class PriorityTask(TealetTask):
         self._priority = float(value)
         self.modified()
 
-    def get_active_priority(self) -> float:
-        return self.priority
+    def add_owned_priority_lock(self, lock: PriorityLock) -> None:
+        self._owned_priority_locks.add(lock)
+
+    def remove_owned_priority_lock(self, lock: PriorityLock) -> None:
+        self._owned_priority_locks.remove(lock)
+
+    def set_waiting_on_priority(self, target: Any | None) -> None:
+        self._waiting_on_priority = target
+
+    def get_effective_priority(self) -> float:
+        inherited = min(
+            (
+                priority
+                for lock in self._owned_priority_locks
+                if (priority := lock.get_effective_priority()) is not None
+            ),
+            default=None,
+        )
+        if inherited is None:
+            return self.priority
+        return min(self.priority, inherited)
+
+    def _propagate_priority(self, source: Any) -> None:
+        del source
+        if self.is_runnable():
+            self.modified()
+        elif self._waiting_on_priority is not None:
+            self._waiting_on_priority._propagate_priority(self)
 
 
 # marks scheduler-owned tealet task code while it is on the Python stack. It is

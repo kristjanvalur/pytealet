@@ -293,7 +293,7 @@ class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
     def _active_priority(self, task: tealet.tealet) -> Any:
         assert isinstance(task, _tasks.TealetTask)
         try:
-            return cast(Any, task).get_active_priority()
+            return cast(Any, task).get_effective_priority()
         except AttributeError:
             return _tasks.TASK_PRIORITY_DEFAULT
 

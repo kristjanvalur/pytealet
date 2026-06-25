@@ -81,8 +81,9 @@ wrapper, and task transfer methods do not install it implicitly.
 `PriorityTask` is a `TealetTask` subclass for schedulers that use a priority
 runnable queue. Its `priority` property is a float, and changing it notifies the
 current task link so the queue can recompute runnable order when the task is
-already waiting to run. `get_active_priority()` returns that current property
-value.
+already waiting to run. `get_effective_priority()` returns the priority the
+scheduler should use right now, including inherited priority from
+`PriorityLock` waiters.
 
 Priority values follow Python priority queue and Unix `nice` intuition: lower
 numeric values run first. The public constants provide spaced bands with room
@@ -105,6 +106,14 @@ scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
 
 The factory passes extra `spawn(...)` keyword arguments to the task constructor
 before the scheduler makes the task runnable.
+
+`PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
+supports `sacquire()` / `with lock:` from scheduler-owned tasks and
+`acquire()` / `async with lock:` from asyncio tasks. It keeps the same FIFO lock
+waiter policy as `Lock`. When `PriorityTask` instances participate, a
+low-priority owner inherits the best waiter priority until it releases the lock,
+which avoids the usual low/medium/high priority inversion. Regular tealet tasks
+and asyncio tasks participate with the default priority.
 
 ## Scheduler Asyncio Bridge
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar, cast
 
 import tealet
 
@@ -17,6 +17,7 @@ __all__ = [
     "InvalidStateError",
     "LifoQueue",
     "Lock",
+    "PriorityLock",
     "PriorityQueue",
     "Queue",
     "QueueEmpty",
@@ -262,6 +263,124 @@ class Lock:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
+
+
+class PriorityLock(Lock):
+    """A tealet-compatible lock with priority inheritance."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._owner: object | None = None
+        self._waiter_tasks: set[object] = set()
+
+    def _current_task(self) -> tealet.tealet:
+        return tealet.current()
+
+    def _current_async_owner(self) -> object:
+        task = asyncio.current_task()
+        if task is None:
+            return tealet.current()
+        return task
+
+    def _is_current(self, owner: object) -> bool:
+        if owner is tealet.current():
+            return True
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        return owner is task
+
+    def _task_effective_priority(self, task: object) -> float:
+        try:
+            return cast(Any, task).get_effective_priority()
+        except AttributeError:
+            return 0.0
+
+    def _take_lock(self, task: object) -> None:
+        self._locked = True
+        self._owner = task
+        try:
+            cast(Any, task).add_owned_priority_lock(self)
+        except AttributeError:
+            pass
+
+    def _drop_lock(self) -> None:
+        owner = self._owner
+        if not self._is_current(owner):
+            raise RuntimeError("PriorityLock can only be released by its owner")
+        self._owner = None
+        try:
+            cast(Any, owner).remove_owned_priority_lock(self)
+            cast(Any, owner).modified()
+        except AttributeError:
+            pass
+
+    def get_effective_priority(self) -> float | None:
+        if not self._waiter_tasks:
+            return None
+        return min(self._task_effective_priority(task) for task in self._waiter_tasks)
+
+    def _propagate_priority(self, source: object) -> None:
+        del source
+        if self._owner is not None:
+            try:
+                cast(Any, self._owner)._propagate_priority(self)
+            except AttributeError:
+                pass
+
+    def sacquire(self) -> bool:
+        task = self._current_task()
+        if not self._locked:
+            super().sacquire()
+            self._take_lock(task)
+            return True
+
+        self._waiter_tasks.add(task)
+        try:
+            cast(Any, task).set_waiting_on_priority(self)
+        except AttributeError:
+            pass
+        self._propagate_priority(task)
+        try:
+            super().sacquire()
+        finally:
+            self._waiter_tasks.discard(task)
+            try:
+                cast(Any, task).set_waiting_on_priority(None)
+            except AttributeError:
+                pass
+            if self._locked and self._owner is not task:
+                self._propagate_priority(task)
+
+        self._take_lock(task)
+        return True
+
+    async def acquire(self) -> bool:
+        task = self._current_async_owner()
+        if not self._locked:
+            await super().acquire()
+            self._take_lock(task)
+            return True
+
+        self._waiter_tasks.add(task)
+        self._propagate_priority(task)
+        try:
+            await super().acquire()
+        finally:
+            self._waiter_tasks.discard(task)
+            if self._locked and self._owner is not task:
+                self._propagate_priority(task)
+
+        self._take_lock(task)
+        return True
+
+    def release(self) -> None:
+        if not self._locked:
+            raise RuntimeError("Lock is not acquired")
+
+        self._drop_lock()
+        super().release()
 
 
 class Condition:

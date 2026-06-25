@@ -357,7 +357,12 @@ class PriorityTask(TealetTask):
     @priority.setter
     def priority(self, value: float) -> None: ...
 
-    def get_active_priority(self) -> float: ...
+    def get_effective_priority(self) -> float: ...
+
+class PriorityLock(Lock):
+    def sacquire(self) -> bool: ...
+  async def acquire(self) -> bool: ...
+    def get_effective_priority(self) -> float | None: ...
 
 class BaseScheduler:
     def get_task_factory(self) -> TaskFactory: ...
@@ -387,6 +392,14 @@ Semantics:
   `TASK_PRIORITY_IDLE = 20.0`, leaving space for intermediate values.
 - Changing `PriorityTask.priority` calls `modified()`, so a runnable queue can
   recompute ordering when the task is already linked.
+- `PriorityTask.get_effective_priority()` is the scheduling priority used by
+  priority-aware queues. It includes inherited priority from owned
+  `PriorityLock` instances.
+- `PriorityLock` supports both tealet `sacquire()` and asyncio `acquire()`.
+  Regular `TealetTask` instances and asyncio tasks can acquire and release it
+  normally. It keeps `Lock`'s FIFO waiter policy, and priority inheritance only
+  affects scheduler ordering. When `PriorityTask` instances participate, a lock
+  owner inherits the best waiting priority while the lock is held.
 - Class factories expose an `eager_start` default. `BaseScheduler.spawn(..., eager_start=...)`
   passes an optional per-spawn override to the factory.
 - When eagerness resolves true and the scheduler is already running, the factory
