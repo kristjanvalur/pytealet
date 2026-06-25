@@ -100,7 +100,7 @@ assert asyncio.run(main()) == ["waiting", "done"]
 The common API is available directly from `tealetio`:
 
 - schedulers and runners: `Scheduler`, `SelectorScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
-- tasks and futures: `Future`, `Task`, `get_current`, `CancelledError`, `shield`
+- tasks and futures: `Future`, `Task`, `spawn`, `create_task`, `get_current`, `CancelledError`, `shield`
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - rendezvous communication: `Channel`
@@ -116,8 +116,9 @@ The design intentionally follows `asyncio` where the mapping is useful. In
 effect, you already know much of the shape: the learning curve stays small, and
 interop with asyncio-hosted programs stays straightforward. Some names differ to
 match tealet execution: `Scheduler` fills the role normally held by an event
-loop, and `scheduler.spawn(...)` is the tealet-facing equivalent of
-`create_task(...)`.
+loop, and `spawn(...)` is the native tealet-facing equivalent of
+`create_task(...)`. The package root also exports `create_task(...)` as a
+familiar alias.
 
 Synchronisation primitives are asyncio-compatible where practical and add
 `s`-prefixed methods for tealet-blocking operations, such as `Event.swait()`,

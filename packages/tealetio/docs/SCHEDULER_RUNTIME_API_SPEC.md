@@ -271,6 +271,9 @@ def as_completed(
 ) -> Iterator[Future[Any]]: ...
 
 def sleep(delay: float) -> None: ...
+
+def spawn(func: Callable[[], T], **kwargs: Any) -> Task: ...
+create_task = spawn
 ```
 
 Semantics:

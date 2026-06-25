@@ -61,6 +61,7 @@ def test_top_level_exports_public_scheduler_api():
         "TimerHandle",
         "asyncio_get_current",
         "as_completed",
+        "create_task",
         "ensure_future",
         "gather",
         "get_running_scheduler",
@@ -72,6 +73,7 @@ def test_top_level_exports_public_scheduler_api():
         "set_scheduler",
         "shield",
         "sleep",
+        "spawn",
         "timeout",
         "timeout_at",
         "to_thread",
@@ -111,6 +113,9 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.gather is tealetio.scheduler.gather
     assert tealetio.wait_for is tealetio.scheduler.wait_for
     assert tealetio.sleep is tealetio.scheduler.sleep
+    assert tealetio.spawn is tealetio.scheduler.spawn
+    assert tealetio.create_task is tealetio.scheduler.create_task
+    assert tealetio.create_task is tealetio.spawn
 
 
 def test_star_import_uses_top_level_all():

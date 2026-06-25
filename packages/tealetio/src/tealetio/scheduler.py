@@ -57,12 +57,14 @@ __all__ = [
     "SyncSchedulerDrivingAPI",
     "TimerHandle",
     "as_completed",
+    "create_task",
     "ensure_future",
     "gather",
     "get_scheduler",
     "get_running_scheduler",
     "set_scheduler",
     "sleep",
+    "spawn",
     "to_thread",
     "wait",
     "wait_for",
@@ -466,6 +468,21 @@ def sleep(delay: float) -> None:
     """
 
     get_running_scheduler().sleep(delay)
+
+
+def spawn(
+    func: Callable[[], T],
+    *,
+    context: contextvars.Context | None = None,
+    eager_start: bool | None = None,
+    **kwargs: Any,
+) -> "_tasks.Task":
+    """Spawn a task on the current scheduler from a zero-argument callable."""
+
+    return get_scheduler().spawn(func, context=context, eager_start=eager_start, **kwargs)
+
+
+create_task = spawn
 
 
 class Channel(_tasks.TaskLink):

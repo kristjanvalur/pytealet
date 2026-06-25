@@ -35,6 +35,7 @@ from tealetio import (
     TimeoutError,
     AsyncScheduler,
     as_completed,
+    create_task,
     ensure_future,
     gather,
     get_current,
@@ -43,6 +44,7 @@ from tealetio import (
     set_scheduler,
     shield,
     sleep,
+    spawn,
     timeout,
     timeout_at,
     to_thread,
@@ -233,6 +235,21 @@ class TestSchedulerAccessors:
         assert events[0] == "init"
         assert "add" in events
         assert "pop" in events
+
+    def test_top_level_spawn_and_create_task_use_current_scheduler(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        first = spawn(lambda: seen.append("spawn"))
+        second = create_task(lambda: seen.append("create_task"))
+
+        assert first.get_scheduler() is s
+        assert second.get_scheduler() is s
+
+        s.run()
+
+        assert seen == ["spawn", "create_task"]
 
     def test_reschedule_moves_runnable_task_to_immediate_position(self):
         s = _new_scheduler()

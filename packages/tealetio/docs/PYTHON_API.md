@@ -18,7 +18,7 @@ pattern: submodules define explicit public names with `__all__`, and
 Common imports can use the package root:
 
 ```python
-from tealetio import Event, Future, Scheduler, gather, run, sleep, wait_for
+from tealetio import Event, Future, Scheduler, gather, run, sleep, spawn, wait_for
 from tealetio import AsyncRunner, AsyncScheduler, SelectorScheduler
 ```
 
@@ -56,6 +56,10 @@ entering the asyncio entry point, so ordinary asyncio tasks remain visible.
 `tealetio.sleep(delay)` suspends the current scheduler task on the running
 scheduler. `sleep(0)` is the tealetio yield checkpoint, matching the familiar
 `asyncio.sleep(0)` pattern without scheduling a timer.
+
+`tealetio.spawn(func)` creates a `Task` on the current scheduler from a
+zero-argument callable. `tealetio.create_task(func)` is an asyncio-style alias
+for the same operation; `spawn(...)` is the native tealetio spelling.
 
 ## Scheduler Main Context
 
