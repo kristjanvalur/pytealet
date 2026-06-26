@@ -98,7 +98,6 @@ Release/
 
 # uv
 .uv/
-uv.lock
 
 # Build artifacts from libtealet
 src/_tealet/libtealet/stackman/tools/tmp/

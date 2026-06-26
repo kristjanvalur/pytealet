@@ -25,7 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.15",
 ]
 dependencies = [
-    "asynkit>=0.19.1",
+    "asynkit>=0.19.2",
     "tealet>=0.1.0rc2,<0.2",
 ]
 

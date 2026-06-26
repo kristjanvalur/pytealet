@@ -19,21 +19,17 @@ from contextlib import nullcontext
 from typing import (
     Any,
     Callable,
-    Concatenate,
     ContextManager,
     Coroutine,
-    Generic,
     Literal,
-    ParamSpec,
     Protocol,
     TypeAlias,
     TypeVar,
     cast,
-    overload,
 )
 
-from asynkit import await_sync as _await_sync
 from asynkit import coro_drive as _coro_drive
+from asynkit import syncmethod as _syncmethod
 import tealet
 
 from .locks import (
@@ -49,41 +45,9 @@ from . import tasks as _tasks
 
 
 T = TypeVar("T")
-SelfT = TypeVar("SelfT")
-P = ParamSpec("P")
 
 
 DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
-
-
-class _SyncMethod(Generic[SelfT, P, T]):
-    def __init__(self, func: Callable[Concatenate[SelfT, P], Coroutine[Any, Any, T]]) -> None:
-        self._func = func
-
-    @overload
-    def __get__(self, obj: None, owner: type[SelfT]) -> Callable[Concatenate[SelfT, P], T]: ...
-
-    @overload
-    def __get__(self, obj: SelfT, owner: type[SelfT] | None = None) -> Callable[P, T]: ...
-
-    def __get__(self, obj: SelfT | None, owner: type[SelfT] | None = None) -> Callable[..., T]:
-        if obj is None:
-            return self
-
-        @functools.wraps(self._func)
-        def helper(*args: P.args, **kwargs: P.kwargs) -> T:
-            return self(obj, *args, **kwargs)
-
-        return helper
-
-    def __call__(self, obj: SelfT, *args: P.args, **kwargs: P.kwargs) -> T:
-        return _await_sync(self._func(obj, *args, **kwargs))
-
-
-def _syncmethod(
-    func: Callable[Concatenate[SelfT, P], Coroutine[Any, Any, T]],
-) -> _SyncMethod[SelfT, P, T]:
-    return _SyncMethod(func)
 
 
 __all__ = [

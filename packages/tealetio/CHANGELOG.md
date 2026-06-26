@@ -24,8 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delegating ordinary coroutines to `asyncio.Task` immediately.
 - Uses the typed `asynkit.coro_drive` implementation directly for coroutine
   driving.
-- Raised the `asynkit` dependency floor to `asynkit>=0.19.1` for the native
-  coroutine driver implementation and typed `coro_drive` export.
+- Raised the `asynkit` dependency floor to `asynkit>=0.19.2` for the native
+  coroutine driver implementation, typed `coro_drive` export, and `syncmethod`
+  descriptor.
 
 ## [0.1.0rc1] - 2026-06-25
 
