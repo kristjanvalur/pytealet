@@ -1,16 +1,10 @@
 name: tealet Build And Publish
 
 "on":
-  pull_request:
   push:
-    branches:
-      - main
     tags:
       - "tealet-v*"
       - "v*"
-  release:
-    types:
-      - published
   workflow_dispatch:
 
 jobs:

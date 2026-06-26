@@ -1,24 +1,9 @@
 name: tealetio Build And Publish
 
 "on":
-  pull_request:
-    paths:
-      - ".github/workflows/tealetio-release-publish.yml"
-      - "pyproject.toml"
-      - "uv.lock"
-      - "src/**"
-      - "packages/tealetio/**"
   push:
-    branches:
-      - main
     tags:
       - "tealetio-v*"
-    paths-ignore:
-      - "docs/**"
-      - "tests/**"
-  release:
-    types:
-      - published
   workflow_dispatch:
 
 jobs:

@@ -1,24 +1,9 @@
 name: tealet-greenlet Build And Publish
 
 "on":
-  pull_request:
-    paths:
-      - ".github/workflows/tealet-greenlet-release-publish.yml"
-      - "pyproject.toml"
-      - "uv.lock"
-      - "src/**"
-      - "packages/tealet-greenlet/**"
   push:
-    branches:
-      - main
     tags:
       - "tealet-greenlet-v*"
-    paths-ignore:
-      - "docs/**"
-      - "tests/**"
-  release:
-    types:
-      - published
   workflow_dispatch:
 
 jobs:
