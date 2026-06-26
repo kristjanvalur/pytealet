@@ -56,6 +56,13 @@ exclude = [
     "packages/**/tests/**",
 ]
 
+[tool.ty.environment]
+root = [
+    "src",
+    "packages/tealetio/src",
+    "packages/tealet-greenlet/src",
+]
+
 [tool.ty.terminal]
 output-format = "concise"
 
