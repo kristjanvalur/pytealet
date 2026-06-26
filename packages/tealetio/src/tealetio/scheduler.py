@@ -1455,7 +1455,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if inspect.iscoroutine(awaitable):
             return self._await_coro(cast(Coroutine[Any, Any, Any], awaitable), loop)
         if asyncio.isfuture(awaitable):
-            return self._await_future(cast(asyncio.Future[Any], awaitable), loop)
+            return self._await_future(awaitable, loop)
         if inspect.isawaitable(awaitable):
             # run in a copy of the current context if possible, outside tealetio task scope
             context = _tasks._copy_context_without_current_task()
@@ -1472,27 +1472,43 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         coro: Coroutine[Any, Any, Any],
         loop: asyncio.AbstractEventLoop,
     ) -> Any:
-        if _coro_start is not None:
-            # run in a copy of the current context, outside tealetio task scope
-            context = _tasks._copy_context_without_current_task()
-            coro_start = _coro_start(_CoroStart, coro, context)
-            if coro_start.done():
-                return coro_start.result()
-            return self._await_future(loop.create_task(coro_start.as_coroutine()), loop)
+        send_value = None
+        pending_error: BaseException | None = None
 
-        # run in a copy of the current context if possible, outside tealetio task scope
-        context = _tasks._copy_context_without_current_task()
-        try:
-            fut = cast(Any, loop).create_task(coro, context=context)
-        except TypeError:
-            fut = loop.create_task(coro)
-        return self._await_future(fut, loop)
+        with _tasks._without_current_task():
+            while True:
+                try:
+                    if pending_error is not None:
+                        yielded = coro.throw(pending_error)
+                        pending_error = None
+                    else:
+                        yielded = coro.send(send_value)
+                        send_value = None
+                except StopIteration as exc:
+                    return exc.value
+                except GeneratorExit:
+                    coro.close()
+                    raise
+
+                try:
+                    self._await_future(yielded, loop)
+                except BaseException as exc:
+                    pending_error = exc
 
     def _await_future(
         self,
-        fut: asyncio.Future[Any],
+        fut: Any,
         loop: asyncio.AbstractEventLoop,
     ) -> Any:
+        if fut is None:
+            self.yield_()
+            return None
+
+        if not asyncio.isfuture(fut):
+            raise RuntimeError(f"await_ coroutine yielded unsupported object: {fut!r}")
+
+        fut = cast(asyncio.Future[Any], fut)
+
         current = tealet.current()
 
         if fut.get_loop() is not loop:

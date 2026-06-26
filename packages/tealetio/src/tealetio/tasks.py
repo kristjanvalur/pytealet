@@ -495,6 +495,15 @@ def _copy_context_without_current_task(context: contextvars.Context | None = Non
     return context
 
 
+@contextmanager
+def _without_current_task():
+    token = _current_task.set(None)
+    try:
+        yield
+    finally:
+        _current_task.reset(token)
+
+
 class TaskFactory(Protocol):
     """Callable strategy for creating scheduler-owned tasks."""
 
