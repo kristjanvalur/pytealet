@@ -1,19 +1,20 @@
-# PyTealet Current Issues
+# PyTealet Issue Log
 
-**Date:** June 8, 2026  
-**Status:** Operational baseline is healthy; this file tracks historical fixes plus remaining hardening items.
+**Status:** Historical fixes plus remaining hardening items.
 
 ## Overview
 
-The pytealet C extension has been modernized for Python 3.10+ and currently runs a stable core test baseline. This document tracks historical issues, resolved fixes, and remaining hardening work.
+The pytealet C extension has been modernised for Python 3.10+ and currently runs a stable in-repo baseline. This document tracks historical issues, resolved fixes, and remaining hardening work. Use the repository test and CI results as the source of truth for current pass counts; older counts below are retained only as validation evidence for specific fixes.
 
-## Recent Validation (June 8, 2026)
+## Validation Notes
 
-- Full in-repo test suite currently passes on the debug venv baseline:
-    - `.venv-cpython313-debug/bin/python -m pytest tests -q`
-    - Result: `111 passed, 1 skipped`.
 - Historical P0 runtime crashes documented below are fixed in current code.
-- Remaining items are mainly hardening and modernization follow-ups.
+- Remaining items are mainly hardening and modernisation follow-ups.
+- Run the current checks from the workspace root when validating a release:
+    - `make check`
+    - `uv run --active python -m pytest tests/`
+    - `uv run --active --package tealetio python -m pytest packages/tealetio/tests/`
+    - `uv run --active --package tealet-greenlet python -m pytest packages/tealet-greenlet/tests/`
 
 ---
 
@@ -356,23 +357,21 @@ def test_thread_isolation():
 - [x] **P0-1:** Fix `pytealet_get_main()` segfault
 - [x] **P0-2:** Fix `tealet_exit()` flags (DEFAULT → DELETE)
 - [x] **P1-3:** Add NULL checks to other property getters (audited/resolved)
-- [x] **Test:** Run full test suite (current baseline: 93 passed, 1 skipped)
+- [x] **Test:** Run full test suite for the original fix baseline
 - [x] **Test:** Fix segfault in TestRandom1 and TestRandom2 (no longer reproducing in current suite)
 - [ ] **Test:** Verify no memory leaks with valgrind
 - [ ] **Test:** Multi-threaded stress test
 - [x] **P2-4:** (Closed) `tealet_create()` migration target is not applicable in current vendored libtealet API
 - [x] **P2-5:** (Resolved) Migrated away from deprecated TLS key-value PyThread API to `PyThread_tss_*`
 
-**Test Results (current):**
-```
-93 passed, 1 skipped
-```
+Historical validation counts for individual fixes are recorded in their issue
+sections. Current pass counts should come from the test commands above or CI.
 
 ---
 
 ## Resolution Status
 
-**Last Updated:** June 5, 2026
+**Status:** Historical summary; current validation lives in CI and the test commands above.
 
 | Issue | Status | Assignee | Notes |
 |-------|--------|----------|-------|
