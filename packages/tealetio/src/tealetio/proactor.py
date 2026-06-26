@@ -6,13 +6,18 @@ import socket
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, Protocol, TypeVar, cast
+
+from .locks import Event
+from .scheduler import BaseScheduler, RunnableQueueFactory, Scheduler
 
 T = TypeVar("T")
 
 __all__ = [
-    "InvalidStateError",
     "Operation",
+    "Proactor",
+    "ProactorFactory",
+    "ProactorScheduler",
     "SelectorProactor",
 ]
 
@@ -24,6 +29,37 @@ class InvalidStateError(Exception):
 _DoneCallback = Callable[["Operation[Any]"], object]
 _CancelCallback = Callable[["Operation[Any]"], bool]
 _WakeupCallback = Callable[[], object]
+
+
+class Proactor(Protocol):
+    """Minimal completion-oriented IO backend used by `ProactorScheduler`."""
+
+    def close(self) -> None: ...
+
+    def break_wait(self) -> None: ...
+
+    def has_pending_operations(self) -> bool: ...
+
+    def wait(self, timeout: float | None = None) -> list[Operation[Any]]: ...
+
+    def recv(self, sock: socket.socket, n: int) -> Operation[bytes]: ...
+
+    def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]: ...
+
+    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]: ...
+
+    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]: ...
+
+    def sendall(self, sock: socket.socket, data: Any) -> Operation[None]: ...
+
+    def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
+
+    def accept(self, sock: socket.socket) -> Operation[tuple[socket.socket, Any]]: ...
+
+    def connect(self, sock: socket.socket, address: Any) -> Operation[None]: ...
+
+
+ProactorFactory = Callable[[], Proactor]
 
 
 class Operation(Generic[T]):
@@ -156,6 +192,11 @@ class SelectorProactor:
         """Set the callback used to notify an owner that the proactor needs pumping."""
 
         self._wakeup_callback = callback
+
+    def has_pending_operations(self) -> bool:
+        """Return True if operations are waiting for backend completion."""
+
+        return bool(self._fd_operations)
 
     def close(self) -> None:
         """Close selector and wakeup resources."""
@@ -455,3 +496,116 @@ class SelectorProactor:
             raise ValueError("socket must be non-blocking")
         if sock.fileno() < 0:
             raise ValueError("socket is closed")
+
+
+class ProactorScheduler(Scheduler):
+    """Synchronous scheduler whose IO wait point is a proactor backend."""
+
+    def __init__(
+        self,
+        proactor_factory: ProactorFactory | None = None,
+        *,
+        runnable_queue_factory: RunnableQueueFactory | None = None,
+    ) -> None:
+        super().__init__(runnable_queue_factory=runnable_queue_factory)
+        if proactor_factory is None:
+            proactor_factory = SelectorProactor
+        self._proactor = proactor_factory()
+
+    @property
+    def proactor(self) -> Proactor:
+        """Return the proactor backend owned by this scheduler."""
+
+        return self._proactor
+
+    def close(self) -> None:
+        """Close proactor and scheduler-owned resources."""
+
+        self._proactor.close()
+        BaseScheduler.close(self)
+
+    # -- Driver wakeup -------------------------------------------------
+
+    def _break_wait_threadsafe(self) -> None:
+        self._proactor.break_wait()
+
+    def _break_wait(self) -> None:
+        self._proactor.break_wait()
+
+    def _wait_thread(self) -> None:
+        deadline = self._next_timer_deadline()
+        timeout = None if deadline is None else self._delay_until(deadline)
+        self._proactor.wait(timeout)
+
+    # -- Operation waits ----------------------------------------------
+
+    def wait_operation(self, operation: Operation[T]) -> T:
+        """Block the current tealet until `operation` completes."""
+
+        if operation.done():
+            return operation.result()
+
+        ready = Event()
+        active = True
+
+        def wake(_operation: Operation[Any]) -> None:
+            nonlocal active
+            if not active:
+                return
+            active = False
+            ready.set()
+
+        operation.add_done_callback(wake)
+        try:
+            ready.swait()
+        finally:
+            if active:
+                active = False
+                operation.remove_done_callback(wake)
+                operation.cancel()
+        return operation.result()
+
+    # -- Asyncio-style socket helpers ---------------------------------
+
+    def sock_recv(self, sock: socket.socket, n: int) -> bytes:
+        """Receive up to `n` bytes from a non-blocking socket."""
+
+        return self.wait_operation(self._proactor.recv(sock, n))
+
+    def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
+        """Receive bytes from a non-blocking socket into `buf`."""
+
+        return self.wait_operation(self._proactor.recv_into(sock, buf))
+
+    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
+        """Receive datagram bytes and address from a non-blocking socket."""
+
+        return self.wait_operation(self._proactor.recvfrom(sock, bufsize))
+
+    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
+        """Receive datagram bytes into `buf` from a non-blocking socket."""
+
+        return self.wait_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
+
+    def sock_sendall(self, sock: socket.socket, data: Any) -> None:
+        """Send all `data` through a non-blocking socket."""
+
+        return self.wait_operation(self._proactor.sendall(sock, data))
+
+    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
+        """Send one datagram through a non-blocking socket."""
+
+        return self.wait_operation(self._proactor.sendto(sock, data, address))
+
+    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+        """Accept one connection from a non-blocking listening socket."""
+
+        return self.wait_operation(self._proactor.accept(sock))
+
+    def sock_connect(self, sock: socket.socket, address: Any) -> None:
+        """Connect a non-blocking socket to `address`."""
+
+        return self.wait_operation(self._proactor.connect(sock, address))
+
+    def _has_pending_driver_work(self) -> bool:
+        return self._proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)

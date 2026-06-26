@@ -4,6 +4,7 @@ import tealetio.locks
 import tealetio.runner
 import tealetio.scheduler
 import tealetio.selector
+import tealetio.proactor
 import tealetio.tasks
 
 
@@ -28,6 +29,10 @@ def test_top_level_exports_public_scheduler_api():
         "FIRST_COMPLETED",
         "FIRST_EXCEPTION",
         "Future",
+        "Operation",
+        "Proactor",
+        "ProactorFactory",
+        "ProactorScheduler",
         "get_current",
         "InvalidStateError",
         "LifoQueue",
@@ -43,6 +48,7 @@ def test_top_level_exports_public_scheduler_api():
         "Runner",
         "Scheduler",
         "SelectorMixin",
+        "SelectorProactor",
         "SelectorScheduler",
         "Semaphore",
         "Shield",
@@ -106,6 +112,9 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.BaseScheduler is tealetio.scheduler.BaseScheduler
     assert tealetio.Runner is tealetio.runner.Runner
     assert tealetio.SelectorScheduler is tealetio.selector.SelectorScheduler
+    assert tealetio.Operation is tealetio.proactor.Operation
+    assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
+    assert tealetio.SelectorProactor is tealetio.proactor.SelectorProactor
     assert tealetio.AsyncRunner is tealetio.asyncio.AsyncRunner
     assert tealetio.AsyncScheduler is tealetio.asyncio.AsyncScheduler
     assert tealetio.asyncio_get_current is tealetio.asyncio.asyncio_get_current
