@@ -58,6 +58,10 @@ class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
     """Asyncio-hosted scheduler driver API."""
 
     @abstractmethod
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Bind this scheduler to an asyncio event loop clock."""
+
+    @abstractmethod
     def stop(self) -> None:
         """Stop a currently running async driver."""
 
@@ -206,6 +210,18 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         self._wakeup = _asyncio.Event()
         self._wakeup_loop: _asyncio.AbstractEventLoop | None = None
 
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Bind this scheduler to an asyncio event loop clock."""
+
+        if self._wakeup_loop is not None and self._wakeup_loop is not loop:
+            raise RuntimeError("AsyncScheduler is already bound to a different event loop")
+        self._wakeup_loop = loop
+        self._time = loop.time
+
+    def _lazy_bind_running_loop(self) -> None:
+        if self._wakeup_loop is None:
+            self.bind_loop(_asyncio.get_running_loop())
+
     # -- Driver wakeup -------------------------------------------------
 
     def _break_wait_threadsafe(self) -> None:
@@ -307,8 +323,8 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         if wakeup.is_set():
             wakeup.clear()
             return
-        timeout = self._time_to_next_timer()
-        if timeout is None:
+        deadline = self._next_timer_deadline()
+        if deadline is None:
             # No scheduler timer is pending. We may still be alive because one or
             # more tealets are blocked in await_() on external asyncio
             # awaitables, so block until an explicit wakeup arrives.
@@ -316,7 +332,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
             wakeup.clear()
             return
         try:
-            await compat.wait_for_timeout(wakeup.wait(), timeout)
+            await compat.wait_until(wakeup.wait(), deadline)
         except TimeoutError:
             pass
         finally:
@@ -331,13 +347,13 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         if yield_every is not None and yield_every <= 0:
             raise ValueError("yield_every must be > 0 or None")
         with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
-            self._wakeup_loop = _asyncio.get_running_loop()
+            self._lazy_bind_running_loop()
             self._running = True
 
             def should_terminate() -> bool:
                 return not (
                     self._has_runnable_work()
-                    or self._timers
+                    or self._has_pending_timers()
                     or self._pending_async_waits
                     or self._has_pending_driver_work()
                 )
@@ -352,7 +368,6 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
                         await self._wait_async()
             finally:
                 self._running = False
-                self._wakeup_loop = None
 
     async def arun_forever(self, *, yield_every: int | None = None) -> None:
         """Run scheduler work until `stop()` is called."""
@@ -361,7 +376,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         if yield_every is not None and yield_every <= 0:
             raise ValueError("yield_every must be > 0 or None")
         with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
-            self._wakeup_loop = _asyncio.get_running_loop()
+            self._lazy_bind_running_loop()
             self._stopping = False
             self._running = True
             try:
@@ -374,7 +389,6 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
             finally:
                 self._running = False
                 self._stopping = False
-                self._wakeup_loop = None
 
     async def arun_until_complete(
         self,
@@ -397,7 +411,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
             else:
                 raise TypeError("future must be a Future or callable")
 
-            self._wakeup_loop = _asyncio.get_running_loop()
+            self._lazy_bind_running_loop()
             self._stopping = False
             self._running = True
             try:
@@ -412,7 +426,6 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
             finally:
                 self._running = False
                 self._stopping = False
-                self._wakeup_loop = None
 
             if not target.done():
                 raise RuntimeError("Scheduler stopped before Future completed.")
@@ -445,6 +458,7 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
         scheduler = self._scheduler
         try:
             if scheduler is not None:
+                scheduler.bind_loop(_asyncio.get_running_loop())
                 with scheduler.main_context():
                     tasks = self._shutdown_scheduler_tasks(scheduler)
                     async_scheduler = scheduler
@@ -460,6 +474,7 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
 
         self._lazy_init()
         scheduler = self._require_scheduler()
+        scheduler.bind_loop(_asyncio.get_running_loop())
         run_context = self._resolve_context(context)
         with scheduler.main_context():
             target = self._target_from_entry(entry, run_context)

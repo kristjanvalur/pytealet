@@ -88,6 +88,7 @@ FIRST_COMPLETED = "FIRST_COMPLETED"
 FIRST_EXCEPTION = "FIRST_EXCEPTION"
 ALL_COMPLETED = "ALL_COMPLETED"
 _ReturnWhen: TypeAlias = Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"]
+_TimeFunction: TypeAlias = Callable[[], float]
 
 
 def _py_coro_drive(coro: Coroutine[Any, Any, T], callback: _CoroYieldCallback) -> T:
@@ -1068,6 +1069,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._pending_async_waits: set[tealet.tealet] = set()
         self._timers: list[tuple[float, int, TimerHandle]] = []
         self._timer_sequence = itertools.count()
+        self._time: _TimeFunction = time.monotonic
         self._n_scheduled = 0
         self._target_count = None
         self._default_executor: concurrent.futures.ThreadPoolExecutor | None = None
@@ -1078,7 +1080,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def time(self) -> float:
         """Return the scheduler's monotonic clock value."""
 
-        return time.monotonic()
+        return self._time()
 
     def is_running(self) -> bool:
         """Return True while this scheduler is being driven."""
@@ -1381,12 +1383,18 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             _, _, handle = heapq.heappop(self._timers)
             handle._run()
 
-    def _time_to_next_timer(self) -> float | None:
+    def _next_timer_deadline(self) -> float | None:
         while self._timers and self._timers[0][2].cancelled():
             heapq.heappop(self._timers)
         if not self._timers:
             return None
-        return max(0.0, self._timers[0][0] - self.time())
+        return self._timers[0][0]
+
+    def _delay_until(self, when: float) -> float:
+        return max(0.0, when - self.time())
+
+    def _has_pending_timers(self) -> bool:
+        return self._next_timer_deadline() is not None
 
     def _has_pending_driver_work(self) -> bool:
         with self._threadsafe_lock:
@@ -1469,10 +1477,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         self._schedule(lambda: self._make_runnable(tealet.current()))
 
-    def sleep(self, delay: float) -> None:
-        """Suspend the current task for `delay` seconds."""
-
-        if delay <= 0:
+    def _sleep_until(self, when: float) -> None:
+        if when <= self.time():
             self.yield_()
             return
 
@@ -1484,9 +1490,14 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             awakened = True
             self._make_runnable(current)
 
-        with self.call_later(delay, wake):
+        with self.call_at(when, wake):
             if not awakened:
                 self._schedule()
+
+    def sleep(self, delay: float) -> None:
+        """Suspend the current task for `delay` seconds."""
+
+        self._sleep_until(self.time() + delay)
 
     def await_(self, awaitable):
         """Await an asyncio awaitable from a tealet task and return its result."""
@@ -1684,7 +1695,9 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         self._wakeup.set()
 
     def _wait_thread(self) -> None:
-        self._wakeup.wait(timeout=self._time_to_next_timer())
+        deadline = self._next_timer_deadline()
+        timeout = None if deadline is None else self._delay_until(deadline)
+        self._wakeup.wait(timeout=timeout)
         self._wakeup.clear()
 
     # -- Sync run entry points ----------------------------------------
@@ -1703,7 +1716,7 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
             self._running = True
 
             def should_terminate() -> bool:
-                return not (self._has_runnable_work() or self._timers or self._has_pending_driver_work())
+                return not (self._has_runnable_work() or self._has_pending_timers() or self._has_pending_driver_work())
 
             try:
                 while not should_terminate():

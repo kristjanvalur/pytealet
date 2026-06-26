@@ -357,7 +357,9 @@ class SelectorMixin:
 
     def _wait_thread(self) -> None:
         scheduler = cast(BaseScheduler, self)
-        events = self._selector.select(timeout=scheduler._time_to_next_timer())
+        deadline = scheduler._next_timer_deadline()
+        timeout = None if deadline is None else scheduler._delay_until(deadline)
+        events = self._selector.select(timeout=timeout)
         wakeup_fd = self._selector_wakeup_reader.fileno()
         for key, mask in events:
             fd = key.fd

@@ -2816,6 +2816,76 @@ class TestSchedulerExamples:
 
         assert seen == ["before", "peer", "after"]
 
+    def test_next_timer_deadline_is_absolute(self):
+        s = _new_scheduler()
+        now = 100.0
+        s._time = lambda: now
+
+        handle = s.call_later(5.0, lambda: None)
+
+        assert handle.when == 105.0
+        assert s._next_timer_deadline() == 105.0
+        now = 104.0
+        assert s._delay_until(handle.when) == 1.0
+        now = 106.0
+        assert s._delay_until(handle.when) == 0.0
+
+    def test_sleep_schedules_absolute_deadline(self):
+        seen: list[str] = []
+        deadlines: list[float] = []
+
+        class RecordingScheduler(Scheduler):
+            def _sleep_until(self, when):
+                deadlines.append(when)
+
+        s = RecordingScheduler()
+        s._time = lambda: 20.0
+        set_scheduler(s)
+
+        def sleeper() -> None:
+            s.sleep(3.0)
+            seen.append("after")
+
+        s.spawn(sleeper)
+        s.run()
+
+        assert deadlines == [23.0]
+        assert seen == ["after"]
+
+    def test_async_scheduler_binds_to_running_loop_time(self):
+        seen: list[float] = []
+
+        async def orchestrate() -> None:
+            loop = asyncio.get_running_loop()
+            s = AsyncScheduler()
+            s._time = lambda: -1.0
+            set_scheduler(s)
+
+            def worker() -> None:
+                seen.append(s.time() - loop.time())
+
+            s.spawn(worker)
+            await asyncio.wait_for(s.arun(), timeout=1.0)
+
+        asyncio.run(orchestrate())
+
+        assert seen == pytest.approx([0.0], abs=0.001)
+
+    def test_async_scheduler_bind_loop_rejects_different_loop(self):
+        async def orchestrate() -> None:
+            loop = asyncio.get_running_loop()
+            other_loop = asyncio.new_event_loop()
+            try:
+                s = AsyncScheduler()
+                s.bind_loop(loop)
+                s.bind_loop(loop)
+                with pytest.raises(RuntimeError, match="different event loop"):
+                    s.bind_loop(other_loop)
+            finally:
+                other_loop.close()
+
+        asyncio.run(orchestrate())
+
     def test_timer_handle_cancel(self):
         s = _new_scheduler()
         seen: list[str] = []
@@ -2829,6 +2899,15 @@ class TestSchedulerExamples:
 
         assert handle.cancelled()
         assert seen == []
+
+    def test_run_ignores_cancelled_pending_timer(self):
+        s = _new_scheduler()
+        handle = s.call_later(60.0, lambda: None)
+        handle.cancel()
+
+        s.run()
+
+        assert s._next_timer_deadline() is None
 
     def test_call_later_captures_current_context(self):
         s = _new_scheduler()

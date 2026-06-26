@@ -56,9 +56,17 @@ if sys.version_info >= (3, 11):
         async with asyncio.timeout(timeout):
             await awaitable
 
+    async def wait_until(awaitable, when: float) -> None:
+        async with asyncio.timeout_at(when):
+            await awaitable
+
 else:
 
     async def wait_for_timeout(awaitable, timeout: float) -> None:
+        await asyncio.wait_for(awaitable, timeout=timeout)
+
+    async def wait_until(awaitable, when: float) -> None:
+        timeout = max(0.0, when - asyncio.get_running_loop().time())
         await asyncio.wait_for(awaitable, timeout=timeout)
 
 
