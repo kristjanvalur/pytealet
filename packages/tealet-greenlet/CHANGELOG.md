@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Relaxed the `tealet` dependency to the compatible `0.1` range
+	(`tealet>=0.1.0rc2,<0.2`) instead of pinning one release candidate exactly.
+
 ## [0.1.0rc1] - 2026-06-25
 
 ### Added
@@ -18,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Split greenlet compatibility out of the core `tealet` package.
 - Moved the historical `greenlet_legacy.py` shim into tests as a comparison fixture instead of an installable module.
-- Depends on `tealet==0.1.0rc2` for the split workspace release.
+- Depends on the compatible `tealet` 0.1 release-candidate line for the split workspace release.
 
 ### Notes
 - Pre-release candidate for tracking greenlet compatibility without making the core `tealet` wheel carry that semantic surface.

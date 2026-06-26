@@ -124,6 +124,26 @@ scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
 The factory passes extra `spawn(...)` keyword arguments to the task constructor
 before the scheduler makes the task runnable.
 
+Schedulers accept a `runnable_queue_factory` for applications that need a
+specific runnable policy. The default is `PrescheduledRunnableQueue`, which keeps
+FIFO ordering with an immediate lane for explicit `reschedule(...)` and
+`yield_to(...)` operations. `PriorityRunnableQueue` is the built-in priority
+policy, and it is intended to be paired with `PriorityTask`:
+
+```python
+from tealetio import DefaultTaskFactory, PriorityRunnableQueue, PriorityTask, Scheduler
+
+scheduler = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
+scheduler.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
+```
+
+The public runnable queue symbols are `FifoRunnableQueue`,
+`PrescheduledRunnableQueue`, `PriorityRunnableQueue`, `RunnableQueue`, and
+`RunnableQueueFactory`. Custom queue implementations should satisfy the
+`RunnableQueue` protocol so the scheduler can add, discard, pop, reschedule, and
+introspect runnable tasks without knowing the queue's concrete policy.
+
 `PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
 supports `sacquire()` / `with lock:` from scheduler-owned tasks and
 `acquire()` / `async with lock:` from asyncio tasks. It keeps the same FIFO lock

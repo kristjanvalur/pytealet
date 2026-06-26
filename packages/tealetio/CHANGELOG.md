@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Published runnable queue policies (`FifoRunnableQueue`,
+	`PrescheduledRunnableQueue`, and `PriorityRunnableQueue`) for explicit
+	scheduler construction, including priority-scheduling applications.
+
+### Changed
+- Relaxed the `tealet` dependency to the compatible `0.1` range
+	(`tealet>=0.1.0rc2,<0.2`) instead of pinning one release candidate exactly.
+
 ## [0.1.0rc1] - 2026-06-25
 
 ### Added
@@ -15,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added package-local tests and documentation for the public API.
 
 ### Changed
-- Depends on `tealet==0.1.0rc2` for the split workspace release.
+- Depends on the compatible `tealet` 0.1 release-candidate line for the split workspace release.
 
 ### Notes
 - Pre-release candidate for validating the package boundary and publication workflow before `0.1.0`.

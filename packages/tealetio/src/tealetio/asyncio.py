@@ -16,6 +16,7 @@ from .locks import Event, TimeoutError
 from .scheduler import (
     BaseScheduler,
     CoreSchedulerDrivingAPI,
+    RunnableQueueFactory,
     _current_scheduler,
     gather,
 )
@@ -200,7 +201,7 @@ class TealetSelectorEventLoop(_asyncio.SelectorEventLoop):
 class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
     """Cooperative scheduler for asyncio-hosted driving."""
 
-    def __init__(self, *, runnable_queue_factory=None) -> None:
+    def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         super().__init__(runnable_queue_factory=runnable_queue_factory)
         self._wakeup = _asyncio.Event()
         self._wakeup_loop: _asyncio.AbstractEventLoop | None = None

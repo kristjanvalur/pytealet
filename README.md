@@ -82,6 +82,26 @@ You can also run the type checker directly:
 uvx ty check
 ```
 
+### Release Process
+
+The workspace publishes each distribution independently. Release tags are the
+canonical publish trigger:
+
+- `tealet`: `tealet-vX.Y.Z` or `vX.Y.Z`
+- `tealetio`: `tealetio-vX.Y.Z`
+- `tealet-greenlet`: `tealet-greenlet-vX.Y.Z`
+
+Sibling packages should declare compatibility ranges for their dependency on the
+base `tealet` package, not exact pins. For the current `0.1` line, use
+`tealet>=0.1.0rc2,<0.2` unless a package needs a newer core API. Tighten the
+lower bound when a release starts using new `tealet` behaviour, and move the
+upper bound when the next compatible `tealet` line is known.
+
+Before tagging a release, update the package version, package changelog, and any
+dependency lower bounds that changed. Run `make check` from the workspace root,
+then push the matching release tag so only the intended package publish workflow
+runs.
+
 ### Core Example Code
 
 The repository includes runnable development examples in `src/tealet_examples.py`.

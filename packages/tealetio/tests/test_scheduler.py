@@ -20,8 +20,12 @@ from tealetio import (
     Event,
     FIRST_COMPLETED,
     FIRST_EXCEPTION,
+    FifoRunnableQueue,
     Future,
+    PrescheduledRunnableQueue,
+    PriorityRunnableQueue,
     PriorityTask,
+    RunnableQueue,
     Scheduler,
     SelectorScheduler,
     StubTaskFactory,
@@ -211,7 +215,7 @@ class TestSchedulerAccessors:
     def test_scheduler_accepts_runnable_queue_factory(self):
         events: list[str] = []
 
-        class RecordingQueue(scheduler_module._PrescheduledRunnableQueue):
+        class RecordingQueue(PrescheduledRunnableQueue):
             def __init__(self) -> None:
                 events.append("init")
                 super().__init__()
@@ -235,6 +239,12 @@ class TestSchedulerAccessors:
         assert events[0] == "init"
         assert "add" in events
         assert "pop" in events
+
+    def test_public_runnable_queue_symbols_are_importable(self):
+        assert issubclass(FifoRunnableQueue, scheduler_module._tasks.TaskLink)
+        assert issubclass(PrescheduledRunnableQueue, FifoRunnableQueue)
+        assert issubclass(PriorityRunnableQueue, PrescheduledRunnableQueue)
+        assert RunnableQueue
 
     def test_top_level_spawn_and_create_task_use_current_scheduler(self):
         s = _new_scheduler()
@@ -301,7 +311,7 @@ class TestSchedulerAccessors:
         assert s.runnable_tasks() == (current, later, target)
 
     def test_priority_runnable_queue_runs_lowest_priority_value_first(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(
             _PriorityTaskFactory(
                 [TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH, TASK_PRIORITY_HIGH / 2]
@@ -341,7 +351,7 @@ class TestSchedulerAccessors:
         assert task.get_effective_priority() == TASK_PRIORITY_LOW
 
     def test_priority_task_factory_accepts_spawn_priority_keyword(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(_PriorityTaskFactory())
         set_scheduler(s)
         seen: list[str] = []
@@ -362,7 +372,7 @@ class TestSchedulerAccessors:
             s.spawn(lambda: "ok", priority=-10)
 
     def test_default_task_factory_passes_spawn_kwargs_to_task_constructor(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
         set_scheduler(s)
         seen: list[str] = []
@@ -380,7 +390,7 @@ class TestSchedulerAccessors:
         assert seen == ["high", "default"]
 
     def test_priority_runnable_queue_uses_stable_default_priority(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         set_scheduler(s)
         seen: list[str] = []
 
@@ -395,7 +405,7 @@ class TestSchedulerAccessors:
         assert seen == ["first", "second", "third"]
 
     def test_priority_runnable_queue_reschedule_none_requeries_priority(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(
             _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_LOW])
         )
@@ -410,7 +420,7 @@ class TestSchedulerAccessors:
         assert s.runnable_tasks() == (first, second)
 
     def test_priority_runnable_queue_reorders_when_task_is_modified(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(
             _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_LOW])
         )
@@ -423,7 +433,7 @@ class TestSchedulerAccessors:
         assert s.runnable_tasks() == (second, first)
 
     def test_priority_runnable_queue_does_not_reorder_prescheduled_modified_task(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(
             _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH])
         )
@@ -437,7 +447,7 @@ class TestSchedulerAccessors:
         assert s.runnable_tasks() == (first, second)
 
     def test_priority_runnable_queue_immediate_lane_beats_priority(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(
             _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH])
         )
@@ -455,7 +465,7 @@ class TestSchedulerAccessors:
         assert seen == ["low", "high"]
 
     def test_priority_runnable_queue_runs_low_priority_task_before_runner(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
         set_scheduler(s)
         seen: list[str] = []
@@ -467,7 +477,7 @@ class TestSchedulerAccessors:
         assert seen == ["low"]
 
     def test_priority_runnable_queue_runs_stub_tasks_before_runner(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(StubTaskFactory(task_constructor=PriorityTask))
         set_scheduler(s)
         seen: list[str] = []

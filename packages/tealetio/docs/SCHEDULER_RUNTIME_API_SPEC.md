@@ -139,6 +139,10 @@ Implemented:
 Remaining from this proposal:
 
 - Continue hardening the low-level IO and tealet-hosted asyncio loop surfaces.
+- Research whether `await_(...)` can pump coroutine await iterators across
+  yielded asyncio `Future`/`Task` objects by hooking callbacks and resuming the
+  iterator from tealetio, falling back to asyncio `Task` delegation only when
+  unsupported scheduler tokens or real task semantics are required.
 
 ## Goals
 

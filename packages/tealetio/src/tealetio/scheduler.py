@@ -61,7 +61,12 @@ __all__ = [
     "DeadlockError",
     "FIRST_COMPLETED",
     "FIRST_EXCEPTION",
+    "FifoRunnableQueue",
     "Scheduler",
+    "PrescheduledRunnableQueue",
+    "PriorityRunnableQueue",
+    "RunnableQueue",
+    "RunnableQueueFactory",
     "SyncSchedulerDrivingAPI",
     "TimerHandle",
     "as_completed",
@@ -88,7 +93,7 @@ _ReturnWhen: TypeAlias = Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMP
 _scheduler = threading.local()
 
 
-class _FifoRunnableQueue(_tasks.TaskLink):
+class FifoRunnableQueue(_tasks.TaskLink):
     """FIFO runnable task storage and TaskLink owner for runnable tealets."""
 
     def __init__(self) -> None:
@@ -170,7 +175,7 @@ class _FifoRunnableQueue(_tasks.TaskLink):
             self._insert_after_first(current, insert_current_at)
 
 
-class _PrescheduledRunnableQueue(_FifoRunnableQueue):
+class PrescheduledRunnableQueue(FifoRunnableQueue):
     """Runnable queue with an immediate lane ahead of the normal FIFO policy."""
 
     def __init__(self) -> None:
@@ -259,7 +264,7 @@ class _PrescheduledRunnableQueue(_FifoRunnableQueue):
             self._insert_after_first(current, insert_current_at)
 
 
-class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
+class PriorityRunnableQueue(PrescheduledRunnableQueue):
     """Runnable queue with an immediate lane ahead of stable priority policy."""
 
     def __init__(self) -> None:
@@ -344,7 +349,7 @@ class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
         self._insert_normal(task, len(self._priority_items))
 
 
-class _RunnableQueue(Protocol):
+class RunnableQueue(Protocol):
     """Scheduler-facing interface for runnable queue implementations."""
 
     def __bool__(self) -> bool: ...
@@ -366,7 +371,7 @@ class _RunnableQueue(Protocol):
     def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None: ...
 
 
-_RunnableQueueFactory: TypeAlias = Callable[[], _RunnableQueue]
+RunnableQueueFactory: TypeAlias = Callable[[], RunnableQueue]
 
 
 class CoreSchedulerDrivingAPI(ABC):
@@ -1006,9 +1011,9 @@ def as_completed(
 class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduler mechanics for concrete drivers."""
 
-    def __init__(self, *, runnable_queue_factory: _RunnableQueueFactory | None = None) -> None:
+    def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         if runnable_queue_factory is None:
-            runnable_queue_factory = _PrescheduledRunnableQueue
+            runnable_queue_factory = PrescheduledRunnableQueue
         self._runnable = runnable_queue_factory()
         self._all_tasks: weakref.WeakSet[_tasks.Task] = weakref.WeakSet()
         self._runner = None
@@ -1606,7 +1611,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
     """Cooperative scheduler for synchronous driving."""
 
-    def __init__(self, *, runnable_queue_factory: _RunnableQueueFactory | None = None) -> None:
+    def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         super().__init__(runnable_queue_factory=runnable_queue_factory)
         self._wakeup = threading.Event()
 
