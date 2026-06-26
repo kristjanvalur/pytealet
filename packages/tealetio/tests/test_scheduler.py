@@ -3443,22 +3443,21 @@ class TestSchedulerExamples:
 
         assert seen == ["before-await", "after-await", ("result", 13)]
 
-    def test_await_corostart_continuation_is_pumped_without_loop_task(self, monkeypatch):
-        if scheduler_module._coro_start is None:
+    def test_await_asynkit_coro_drive_is_used_without_loop_task(self, monkeypatch):
+        if scheduler_module._coro_drive is scheduler_module._py_coro_drive:
             pytest.skip("asynkit is not installed")
 
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[object] = []
-        coro_start_records: list[tuple[bool, object]] = []
-        real_coro_start = scheduler_module._coro_start
+        drive_records: list[object] = []
+        real_coro_drive = scheduler_module._coro_drive
 
-        def coro_start(corostart_type, coro):
-            started = real_coro_start(corostart_type, coro)
-            coro_start_records.append((started.done(), getattr(coro, "cr_code", None)))
-            return started
+        def coro_drive(coro, callback):
+            drive_records.append(getattr(coro, "cr_code", None))
+            return real_coro_drive(coro, callback)
 
-        monkeypatch.setattr(scheduler_module, "_coro_start", coro_start)
+        monkeypatch.setattr(scheduler_module, "_coro_drive", coro_drive)
 
         async def compute() -> int:
             seen.append("before-await")
@@ -3487,7 +3486,7 @@ class TestSchedulerExamples:
 
         asyncio.run(orchestrate())
 
-        assert coro_start_records == [(False, compute.__code__)]
+        assert drive_records == [compute.__code__]
         assert seen == ["before-await", "after-await", ("result", 15)]
 
     def test_await_pumps_yielded_asyncio_future_without_loop_task(self, monkeypatch):
@@ -3596,7 +3595,7 @@ class TestSchedulerExamples:
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[object] = []
-        monkeypatch.setattr(scheduler_module, "_coro_start", None)
+        monkeypatch.setattr(scheduler_module, "_coro_drive", scheduler_module._py_coro_drive)
 
         async def compute() -> int:
             seen.append("body")
@@ -3630,7 +3629,7 @@ class TestSchedulerExamples:
         set_scheduler(s)
         marker = contextvars.ContextVar("marker", default="unset")
         seen: list[object] = []
-        monkeypatch.setattr(scheduler_module, "_coro_start", None)
+        monkeypatch.setattr(scheduler_module, "_coro_drive", scheduler_module._py_coro_drive)
 
         async def compute() -> str:
             seen.append(("body-current", get_current()))

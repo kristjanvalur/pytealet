@@ -40,15 +40,14 @@ except ImportError:
     _asynkit = None
 
 if _asynkit is None:
-    _coro_start = None
-    _CoroStart = None
+    _asynkit_coro_drive = None
 else:
-    _coro_start = getattr(_asynkit, "coro_start")
-    _CoroStart = getattr(_asynkit, "CoroStart")
+    _asynkit_coro_drive = getattr(_asynkit, "coro_drive", None)
 
 
 T = TypeVar("T")
 _CoroYieldCallback: TypeAlias = Callable[[Any], Any]
+_CoroDriver: TypeAlias = Callable[[Coroutine[Any, Any, Any], _CoroYieldCallback], Any]
 
 
 DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
@@ -91,7 +90,7 @@ ALL_COMPLETED = "ALL_COMPLETED"
 _ReturnWhen: TypeAlias = Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"]
 
 
-def coro_drive(coro: Coroutine[Any, Any, T], callback: _CoroYieldCallback) -> T:
+def _py_coro_drive(coro: Coroutine[Any, Any, T], callback: _CoroYieldCallback) -> T:
     send_value = None
     pending_error: BaseException | None = None
 
@@ -111,8 +110,17 @@ def coro_drive(coro: Coroutine[Any, Any, T], callback: _CoroYieldCallback) -> T:
 
         try:
             send_value = callback(yielded)
+        except GeneratorExit:
+            coro.close()
+            raise
         except BaseException as exc:
             pending_error = exc
+
+
+_coro_drive: _CoroDriver = cast(
+    _CoroDriver,
+    _py_coro_drive if _asynkit_coro_drive is None else _asynkit_coro_drive,
+)
 
 
 # a thread local scheduler
@@ -1505,13 +1513,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         loop: asyncio.AbstractEventLoop,
     ) -> Any:
         with _tasks._without_current_task():
-            if _coro_start is not None:
-                coro_start = _coro_start(_CoroStart, coro)
-                if coro_start.done():
-                    return coro_start.result()
-                coro = coro_start.as_coroutine()
-
-            return coro_drive(coro, lambda yielded: self._await_future(yielded, loop))
+            return _coro_drive(coro, lambda yielded: self._await_future(yielded, loop))
 
     def _await_future(
         self,
