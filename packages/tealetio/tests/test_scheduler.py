@@ -3341,6 +3341,53 @@ class TestSchedulerExamples:
 
         assert seen == ["before-await", "after-await", ("result", 13)]
 
+    def test_await_corostart_continuation_is_pumped_without_loop_task(self, monkeypatch):
+        if scheduler_module._coro_start is None:
+            pytest.skip("asynkit is not installed")
+
+        s = AsyncScheduler()
+        set_scheduler(s)
+        seen: list[object] = []
+        coro_start_records: list[tuple[bool, object]] = []
+        real_coro_start = scheduler_module._coro_start
+
+        def coro_start(corostart_type, coro):
+            started = real_coro_start(corostart_type, coro)
+            coro_start_records.append((started.done(), getattr(coro, "cr_code", None)))
+            return started
+
+        monkeypatch.setattr(scheduler_module, "_coro_start", coro_start)
+
+        async def compute() -> int:
+            seen.append("before-await")
+            await asyncio.sleep(0)
+            seen.append("after-await")
+            return 15
+
+        def worker() -> None:
+            seen.append(("result", s.await_(compute())))
+
+        async def orchestrate() -> None:
+            loop = asyncio.get_running_loop()
+            create_task_calls: list[object] = []
+            original_create_task = loop.create_task
+
+            def create_task(coro, *args, **kwargs):
+                task = original_create_task(coro, *args, **kwargs)
+                create_task_calls.append(coro)
+                return task
+
+            monkeypatch.setattr(loop, "create_task", create_task)
+            s.spawn(worker)
+            await asyncio.wait_for(s.arun(), timeout=1.0)
+            delegated = [coro for coro in create_task_calls if getattr(coro, "cr_code", None) is compute.__code__]
+            assert delegated == []
+
+        asyncio.run(orchestrate())
+
+        assert coro_start_records == [(False, compute.__code__)]
+        assert seen == ["before-await", "after-await", ("result", 15)]
+
     def test_await_pumps_yielded_asyncio_future_without_loop_task(self, monkeypatch):
         s = AsyncScheduler()
         set_scheduler(s)

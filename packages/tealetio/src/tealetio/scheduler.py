@@ -1476,6 +1476,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         pending_error: BaseException | None = None
 
         with _tasks._without_current_task():
+            if _coro_start is not None:
+                coro_start = _coro_start(_CoroStart, coro)
+                if coro_start.done():
+                    return coro_start.result()
+                coro = coro_start.as_coroutine()
+
             while True:
                 try:
                     if pending_error is not None:
