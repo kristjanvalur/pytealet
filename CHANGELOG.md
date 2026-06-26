@@ -14,11 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-06-05
 
+### Workspace
+- Documented the release process and sibling-package version policy: workspace
+  packages should depend on compatible `tealet` ranges rather than exact pins.
+
 ## [0.1.0rc2] - 2026-06-25
 
 ### Workspace
 - Split greenlet compatibility into the separate `tealet-greenlet` workspace package.
-- Updated sibling workspace packages to depend on `tealet==0.1.0rc2`.
+- Updated sibling workspace packages for compatibility with the `tealet` 0.1 release-candidate line.
 
 ### tealet
 - Kept core `tealet` focused on stack-slicing primitives, C API headers, and runtime safety.

@@ -107,6 +107,7 @@ The common API is available directly from `tealetio`:
 - tasks and futures: `Future`, `Task`, `spawn`, `create_task`, `get_current`, `CancelledError`, `shield`
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
+- runnable scheduling policies: `FifoRunnableQueue`, `PrescheduledRunnableQueue`, `PriorityRunnableQueue`
 - rendezvous communication: `Channel`
 - asyncio coexistence helpers: `asyncio_get_current`, `run_in_asyncio`, `run_asyncio_in_tealet`, `TealetSelectorEventLoop`
 

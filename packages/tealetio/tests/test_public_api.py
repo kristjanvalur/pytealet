@@ -61,6 +61,7 @@ def test_top_level_exports_public_scheduler_api():
         "TimerHandle",
         "asyncio_get_current",
         "as_completed",
+        "await_",
         "create_task",
         "ensure_future",
         "gather",
@@ -113,6 +114,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.gather is tealetio.scheduler.gather
     assert tealetio.wait_for is tealetio.scheduler.wait_for
     assert tealetio.sleep is tealetio.scheduler.sleep
+    assert tealetio.await_ is tealetio.scheduler.await_
     assert tealetio.spawn is tealetio.scheduler.spawn
     assert tealetio.create_task is tealetio.scheduler.create_task
     assert tealetio.create_task.__doc__

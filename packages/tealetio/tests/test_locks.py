@@ -9,6 +9,7 @@ from tealetio import (
     DefaultTaskFactory,
     Lock,
     PriorityLock,
+    PriorityRunnableQueue,
     PriorityTask,
     Scheduler,
     Semaphore,
@@ -18,8 +19,6 @@ from tealetio import (
     TASK_PRIORITY_LOW,
     set_scheduler,
 )
-import tealetio.scheduler as scheduler_module
-
 from helpers import new_scheduler as _new_scheduler
 
 
@@ -59,7 +58,7 @@ class TestPriorityLockExamples:
         ]
 
     def test_priority_lock_inherits_high_waiter_priority(self):
-        s = Scheduler(runnable_queue_factory=scheduler_module._PriorityRunnableQueue)
+        s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
         set_scheduler(s)
         lock = PriorityLock()

@@ -95,8 +95,8 @@ def __await__(self):
 A tealet task cannot literally use `await` unless it is an `async def` native
 coroutine. That is a Python syntax rule, not a tealet limitation.
 
-The more useful bridge is allowing synchronous-looking tealet code to wait for
-an asyncio awaitable:
+The useful bridge is allowing synchronous-looking tealet code to wait for an
+asyncio awaitable:
 
 ```python
 def worker() -> bytes:
@@ -104,137 +104,58 @@ def worker() -> bytes:
     return parse_response(response)
 ```
 
-`await_()` would roughly do this:
+`await_()` now does this:
 
 1. Require or capture an owning asyncio event loop.
-2. Convert the awaitable to an asyncio task or future.
-3. Attach a completion callback.
-4. Mark the current tealet as blocked on that asyncio future.
-5. Switch to another runnable tealet.
-6. When the asyncio future completes, make the blocked tealet runnable again.
-7. When resumed, return the result or raise the exception into the tealet task.
+2. For existing asyncio `Future` and `Task` objects, keep their captured context
+   and wait for them directly.
+3. For coroutine objects, drive the coroutine await protocol directly, using
+   optional `asynkit.coro_drive` when available and a Python fallback otherwise.
+4. When the coroutine yields `None`, perform a cooperative tealet yield.
+5. When the coroutine yields an asyncio future-like object, attach callbacks,
+   block the current tealet, and resume the same coroutine driver when the
+   future completes.
+6. For generic non-coroutine awaitables, wrap them in an asyncio task where
+   possible.
+7. Attach completion/cancellation callbacks, block the current tealet, and make
+   it runnable again when the asyncio future completes.
+8. When resumed, return the result or raise the exception into the tealet task.
 
 That keeps the stackful value proposition: code inside a tealet task can call
 ordinary functions that eventually wait on IO without coloring every caller as
 `async def`.
 
-It is also possible for `spawn()` to accept an `async def` function and drive the
-native coroutine protocol. That is a less compelling first target, because once
-code is already a native coroutine, asyncio is already the natural scheduler for
-it. The stronger use case is stackful tealet code consuming asyncio-backed IO.
+## Coroutine Driving and Future Waits
 
-## Manually Driving the Await Protocol
+The important fast path is implemented through `asynkit.coro_drive` when
+available, with the local Python driver as a compatibility fallback. When a
+coroutine finishes before it needs to await anything, `await_()` returns its
+value immediately. No asyncio task is created for that purely synchronous work,
+and no extra tealet scheduling hop is needed.
 
-There is a more direct bridge than delegating the whole awaitable to asyncio:
-the tealet scheduler can manually drive the await protocol from a normal
-function.
+When the coroutine does need to await, `await_()` keeps ownership of the
+coroutine iterator for the supported surface. A yielded `None` maps to a
+cooperative scheduler yield. A yielded asyncio future-like object is waited
+directly: tealetio registers a done callback, parks the current tealet, then
+resumes the same coroutine driver when the future completes. In effect,
+ordinary asyncio future waits can remain tealet-owned without allocating an
+outer asyncio `Task` for the coroutine.
 
-The proposed spelling might be:
-
-```python
-def worker() -> bytes:
-  data = get_running_scheduler().await_(fetch_bytes(url))
-    return data
-```
-
-This is feasible. A normal Python function can obtain an await iterator and
-drive it with `send()`, `throw()`, and `close()`:
-
-```python
-iterator = awaitable.__await__()
-try:
-    yielded = iterator.send(None)
-except StopIteration as exc:
-    return exc.value
-```
-
-This is the same family of technique explored by `py-asynkit`. When the
-optional `asynkit` dependency is installed, `await_()` uses `asynkit.CoroStart`
-for coroutine objects: synchronous completion returns directly in the current
-tealet, while a coroutine that yields a blocking object is continued as an
-asyncio task and waited on normally. Like Python's `await` expression,
-`await_()` does not expose a separate `context=` parameter.
-Coroutine objects and awaitables that `await_()` wraps in a new asyncio task run
-in a copy of the current `contextvars.Context`; existing asyncio `Future` and
-`Task` objects keep the context they already captured. `asynkit.await_sync()`
-then treats "the coroutine yielded" as failure, because a purely synchronous
-caller has no scheduler available to finish the operation.
-
-Tealet changes that last step. If the coroutine yields,
-`get_running_scheduler().await_()` does not need to fail. It can interpret the
-yielded value as a wait request, park the current tealet, and resume the await
-iterator later.
-
-Conceptually:
-
-```python
-def await_(self, awaitable):
-    iterator = awaitable.__await__()
-    send_value = None
-    pending_error = None
-
-    while True:
-        try:
-            if pending_error is not None:
-                yielded = iterator.throw(pending_error)
-                pending_error = None
-            else:
-                yielded = iterator.send(send_value)
-                send_value = None
-        except StopIteration as exc:
-            return exc.value
-
-        try:
-            send_value = self.wait_yielded_awaitable(yielded)
-        except BaseException as exc:
-            pending_error = exc
-```
-
-The real design problem is `wait_yielded_awaitable(yielded)`. The Python await
-protocol defines how an awaitable yields control, but the yielded values are a
-contract with a scheduler. Asyncio's scheduler understands asyncio futures,
-tasks, bare `None` yields used by some fast paths, cancellation, and loop state.
-A tealet scheduler would need its own interpretation layer.
-
-Useful cases are straightforward:
-
-- If the coroutine yields a tealet event or tealet future, wait on it directly.
-- If it yields a pending asyncio future, add a done callback, park the current
-  tealet, and resume when the future completes.
-- If it yields an already-done asyncio future, resume the await iterator
-  immediately.
-- If it yields `None`, treat that as a cooperative checkpoint and reschedule the
-  current tealet soon.
-- If it yields an unsupported scheduler token, raise a clear error or delegate
-  the remaining coroutine to a real asyncio task.
-
-For asyncio futures, the driver should usually resume the await iterator with
-`None`, not with `future.result()`. `asyncio.Future.__await__()` yields the
-future while pending; when it is resumed after completion, the future's own await
-iterator calls `future.result()` and either returns the value or raises the
-stored exception.
-
-This is different from a future tealet-side await runner. The current `await_()`
-operation can be implemented by handing the whole awaitable to
-`asyncio.create_task()` and waiting for that task. A tealet-side await runner
-would drive the coroutine step by step and only delegate the leaves it cannot
-service itself.
-
-That gives tealet an interesting depth-first execution model:
-
-```python
-def service_request() -> Response:
-  user = get_running_scheduler().await_(load_user())
-  permissions = get_running_scheduler().await_(load_acl())
-    return render(user, permissions)
-```
+Like Python's `await` expression, `await_()` does not expose a separate
+`context=` parameter. Coroutine objects run in the current
+`contextvars.Context`, but tealetio temporarily clears its current-task marker
+so awaited async code does not observe itself as scheduler-owned tealet code.
+Generic non-coroutine awaitables that `await_()` wraps in a new asyncio task run
+in a copy of the current context; existing asyncio `Future` and `Task` objects
+keep the context they already captured.
 
 No `async def` is required in the tealet task, but the called functions can still
 be native async functions. Coroutines that complete before their first real IO
-wait return with very little scheduling overhead. Coroutines that block become
-ordinary tealet blocking points.
+wait return with very little scheduling overhead. Coroutines that block on
+asyncio futures become ordinary tealet blocking points backed by future
+callbacks.
 
-There are important caveats.
+There are still important caveats.
 
 First, many asyncio APIs assume a running event loop. For example, an awaitable
 may call `asyncio.get_running_loop()` before it ever yields. If the tealet task is
@@ -244,31 +165,26 @@ from the loop thread while a loop exists.
 
 Second, some asyncio APIs assume a current asyncio task. `asyncio.current_task()`,
 timeouts, task groups, and cancellation machinery can depend on real Task state.
-Asynkit handles related eager-start cases by creating a real task on demand when
-task identity is observed. Tealet could use a similar escape hatch:
-
-1. Start the coroutine manually.
-2. If it completes, return the result immediately.
-3. If it yields ordinary future-like IO, keep driving it from tealet.
-4. If it asks for task identity or unsupported asyncio machinery, wrap the
-   remaining await iterator in a real asyncio task and wait for that task.
+`await_()` is optimised for ordinary awaitable/future protocol usage; APIs that
+require real task identity remain outside that supported fast path.
 
 Third, cancellation and closing must mirror coroutine protocol semantics. If the
-tealet task waiting in `await_()` is cancelled, the scheduler should decide
-whether to:
+tealet task waiting in `await_()` is cancelled, the bridge must decide whether to
+cancel the underlying asyncio future/task or merely stop waiting for it. Current
+behaviour follows the scheduler cancellation rules documented in the runtime API
+spec.
 
-- detach from the awaitable and leave underlying asyncio work running;
-- cancel the yielded asyncio future or task;
-- throw a cancellation exception into the await iterator;
-- close the await iterator with `GeneratorExit`.
+## Await Token Interpretation Status
 
-The safest first API should make those policies explicit.
+The planned future-wait optimisation is complete for the supported surface.
+`await_()` now drives coroutine await iterators directly and interprets yielded
+`None` and asyncio future-like objects. Unsupported yielded values raise a clear
+runtime error instead of being silently delegated to an asyncio task.
 
-The promising conclusion is that `get_running_scheduler().await_(awaitable)` is
-not only possible, it may be the most tealet-native bridge. It is essentially
-`await_sync()` plus a cooperative scheduler. The hard part is not driving
-`__await__`; the hard part is defining which yielded scheduler tokens tealet
-understands, and when it falls back to asyncio's Task machinery.
+The success criterion was not full asyncio task replacement. It was a narrow,
+well-tested path where ordinary future waits remain tealet-owned. That is now
+the implemented behaviour, including multi-step socket send/receive coroutines
+running under both asyncio-hosted tealetio and tealet-hosted asyncio.
 
 ## Where the Asyncio Loop Lives
 
@@ -571,112 +487,39 @@ A combined scheduler could expose one policy object for:
 - shutdown
 
 Even then, it should probably delegate actual IO readiness and asyncio library
-compatibility to an asyncio event loop. Reimplementing selectors, transports,
-TLS, subprocess handling, and third-party asyncio integration would move tealet
-away from its core strength.
+execution to an event-loop implementation. In other words, the combined object
+would be a scheduler and coordination surface, not a replacement for asyncio's
+entire IO ecosystem.
 
-So a combined scheduler is best viewed as a policy facade over an asyncio loop
-plus a tealet runnable queue, not as a full replacement reactor.
+The most realistic combined shape is the current direction in `tealetio`:
 
-## Cancellation and Errors
+- `BaseScheduler` owns runnable tasks, timers, futures, callbacks, and wait
+  cleanup rules.
+- `Scheduler` provides the no-IO synchronous driver.
+- `SelectorScheduler` adds selector-backed readiness and socket helpers.
+- `AsyncScheduler` embeds tealet work inside an existing asyncio loop.
+- `TealetSelectorEventLoop` explores the opposite direction by letting asyncio's
+  selector wait be hosted by a selector-backed tealet scheduler.
 
-Cancellation needs explicit design.
-
-When an asyncio task awaits a tealet future and is cancelled, there are at least
-two possible meanings:
-
-- Detach only this asyncio waiter and leave the tealet computation running.
-- Propagate cancellation into the tealet task, likely by throwing an exception at
-  its next switch boundary.
-
-Those are different policies and should be visible in the API. A default that
-only detaches the waiter is safer. A stronger `cancel_task=True` or explicit
-`future.cancel()` operation can inject cancellation into the tealet task.
-
-The same issue exists in the other direction. If a tealet task blocks on an
-asyncio future and the tealet task is cancelled, the bridge must decide whether
-to cancel the underlying asyncio future or merely stop waiting for it.
-
-Error propagation should follow each side's normal conventions:
-
-- Asyncio waiters should receive results, exceptions, and cancellation through
-  asyncio futures.
-- Tealet waiters should receive results by returning from synchronous wait calls
-  and exceptions by raising in the resumed tealet task.
-
-## Context and Threading
-
-Tealet already has explicit thread ownership and a `contextvars.Context` property
-on tealets. Asyncio also relies heavily on context variables, especially around
-task creation and callback execution.
-
-The bridge should define context propagation deliberately:
-
-- When spawning a tealet task from asyncio, capture the current `contextvars`
-  context unless the caller provides one.
-- When completing an asyncio future from tealet, use the loop's normal callback
-  context behavior where possible.
-- Avoid cross-thread wakeups in the first design unless the API explicitly owns
-  thread-safe completion.
-
-Same-thread integration is much easier to reason about and matches tealet's
-lineage model.
-
-## Suggested API Sketch
-
-The first useful layer could look like this:
-
-```python
-class TealetScheduler:
-    def __init__(self, loop: asyncio.AbstractEventLoop | None = None): ...
-
-    def spawn(self, func, *args, **kwargs) -> TealetFuture: ...
-    def run_ready_batch(self, limit: int | None = None) -> None: ...
-    async def run_async(self) -> None: ...
-
-    def yield_(self) -> None: ...
-    def await_(self, awaitable) -> object: ...
-
-
-class Event:
-    def swait(self) -> None: ...
-    async def wait(self) -> None: ...
-    def set(self) -> None: ...
-
-
-class TealetFuture(Generic[T]):
-    def result(self) -> T: ...
-    def __await__(self): ...
-    def cancel(self) -> bool: ...
-```
-
-The explicit method names make it clear which side of the bridge is being used:
-
-- `swait()` and future `wait()`/`result()` are tealet-blocking operations.
-- `Event.wait()` is the asyncio-awaiting operation for events.
-- Tealet futures are asyncio-awaitable through `__await__`.
-- `await_()` delegates an awaitable to asyncio and blocks the current tealet
-  until asyncio completes it.
-- A future tealet-side await runner could manually drive the await protocol from
-  the tealet scheduler, falling back to asyncio task machinery only when needed.
-
-Later, if the behavior is stable, `Event.__await__` could forward to
-`Event.wait()`.
+That keeps the implementation modular while leaving room for future policy
+objects, such as priority runnable queues or deeper await-token interpretation.
 
 ## Best Coexistence Strategy
 
-The best first direction is:
+The best default direction is:
 
-1. Keep tealet as a low-level stack-switching primitive plus optional scheduler
-   layer.
-2. Let asyncio remain the top-level reactor for modern IO integration.
-3. Embed the tealet scheduler as a guest inside the asyncio loop.
-4. Provide explicit adapters in both directions:
-   - asyncio code awaits tealet events and futures;
-  - tealet code delegates asyncio awaitables with `await_()`.
-5. Make cancellation, context propagation, and thread ownership explicit rather
+1. Keep `tealet` as the low-level stack-switching primitive.
+2. Keep `tealetio` as the scheduler, synchronisation, selector, and asyncio
+   coexistence layer.
+3. Let asyncio remain the top-level reactor for general-purpose IO integration.
+4. Embed tealet scheduling as a guest inside asyncio when applications already
+   live in asyncio.
+5. Use `SelectorScheduler` and `TealetSelectorEventLoop` for explicit
+   tealet-hosted asyncio experiments, with clear same-thread and selector-loop
+   constraints.
+6. Make cancellation, context propagation, and thread ownership explicit rather
    than implicit.
 
 This preserves tealet's main benefit: stackful cooperative concurrency for code
-that wants to look synchronous. It also avoids asking tealet to reimplement the
-large ecosystem surface that asyncio already owns.
+that wants to look synchronous. It also avoids asking tealetio to reimplement
+the large ecosystem surface that asyncio already owns.

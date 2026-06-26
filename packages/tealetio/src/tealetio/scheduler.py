@@ -40,14 +40,14 @@ except ImportError:
     _asynkit = None
 
 if _asynkit is None:
-    _coro_start = None
-    _CoroStart = None
+    _asynkit_coro_drive = None
 else:
-    _coro_start = getattr(_asynkit, "coro_start")
-    _CoroStart = getattr(_asynkit, "CoroStart")
+    _asynkit_coro_drive = getattr(_asynkit, "coro_drive", None)
 
 
 T = TypeVar("T")
+_CoroYieldCallback: TypeAlias = Callable[[Any], Any]
+_CoroDriver: TypeAlias = Callable[[Coroutine[Any, Any, Any], _CoroYieldCallback], Any]
 
 
 DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
@@ -61,10 +61,16 @@ __all__ = [
     "DeadlockError",
     "FIRST_COMPLETED",
     "FIRST_EXCEPTION",
+    "FifoRunnableQueue",
     "Scheduler",
+    "PrescheduledRunnableQueue",
+    "PriorityRunnableQueue",
+    "RunnableQueue",
+    "RunnableQueueFactory",
     "SyncSchedulerDrivingAPI",
     "TimerHandle",
     "as_completed",
+    "await_",
     "create_task",
     "ensure_future",
     "gather",
@@ -84,11 +90,44 @@ ALL_COMPLETED = "ALL_COMPLETED"
 _ReturnWhen: TypeAlias = Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"]
 
 
+def _py_coro_drive(coro: Coroutine[Any, Any, T], callback: _CoroYieldCallback) -> T:
+    send_value = None
+    pending_error: BaseException | None = None
+
+    while True:
+        try:
+            if pending_error is not None:
+                yielded = coro.throw(pending_error)
+                pending_error = None
+            else:
+                yielded = coro.send(send_value)
+                send_value = None
+        except StopIteration as exc:
+            return cast(T, exc.value)
+        except GeneratorExit:
+            coro.close()
+            raise
+
+        try:
+            send_value = callback(yielded)
+        except GeneratorExit:
+            coro.close()
+            raise
+        except BaseException as exc:
+            pending_error = exc
+
+
+_coro_drive: _CoroDriver = cast(
+    _CoroDriver,
+    _py_coro_drive if _asynkit_coro_drive is None else _asynkit_coro_drive,
+)
+
+
 # a thread local scheduler
 _scheduler = threading.local()
 
 
-class _FifoRunnableQueue(_tasks.TaskLink):
+class FifoRunnableQueue(_tasks.TaskLink):
     """FIFO runnable task storage and TaskLink owner for runnable tealets."""
 
     def __init__(self) -> None:
@@ -170,7 +209,7 @@ class _FifoRunnableQueue(_tasks.TaskLink):
             self._insert_after_first(current, insert_current_at)
 
 
-class _PrescheduledRunnableQueue(_FifoRunnableQueue):
+class PrescheduledRunnableQueue(FifoRunnableQueue):
     """Runnable queue with an immediate lane ahead of the normal FIFO policy."""
 
     def __init__(self) -> None:
@@ -259,7 +298,7 @@ class _PrescheduledRunnableQueue(_FifoRunnableQueue):
             self._insert_after_first(current, insert_current_at)
 
 
-class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
+class PriorityRunnableQueue(PrescheduledRunnableQueue):
     """Runnable queue with an immediate lane ahead of stable priority policy."""
 
     def __init__(self) -> None:
@@ -344,7 +383,7 @@ class _PriorityRunnableQueue(_PrescheduledRunnableQueue):
         self._insert_normal(task, len(self._priority_items))
 
 
-class _RunnableQueue(Protocol):
+class RunnableQueue(Protocol):
     """Scheduler-facing interface for runnable queue implementations."""
 
     def __bool__(self) -> bool: ...
@@ -366,7 +405,7 @@ class _RunnableQueue(Protocol):
     def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None: ...
 
 
-_RunnableQueueFactory: TypeAlias = Callable[[], _RunnableQueue]
+RunnableQueueFactory: TypeAlias = Callable[[], RunnableQueue]
 
 
 class CoreSchedulerDrivingAPI(ABC):
@@ -482,6 +521,12 @@ def sleep(delay: float) -> None:
     """
 
     get_running_scheduler().sleep(delay)
+
+
+def await_(awaitable: Any) -> Any:
+    """Await an asyncio awaitable from the current scheduler task."""
+
+    return get_running_scheduler().await_(awaitable)
 
 
 def spawn(
@@ -1006,9 +1051,9 @@ def as_completed(
 class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduler mechanics for concrete drivers."""
 
-    def __init__(self, *, runnable_queue_factory: _RunnableQueueFactory | None = None) -> None:
+    def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         if runnable_queue_factory is None:
-            runnable_queue_factory = _PrescheduledRunnableQueue
+            runnable_queue_factory = PrescheduledRunnableQueue
         self._runnable = runnable_queue_factory()
         self._all_tasks: weakref.WeakSet[_tasks.Task] = weakref.WeakSet()
         self._runner = None
@@ -1445,29 +1490,49 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def await_(self, awaitable):
         """Await an asyncio awaitable from a tealet task and return its result."""
-        current = tealet.current()
         loop = asyncio.get_running_loop()
 
+        if inspect.iscoroutine(awaitable):
+            return self._await_coro(cast(Coroutine[Any, Any, Any], awaitable), loop)
         if asyncio.isfuture(awaitable):
-            fut = awaitable
-            if fut.get_loop() is not loop:
-                raise RuntimeError("await_ future is bound to a different event loop")
-        elif inspect.iscoroutine(awaitable) and _coro_start is not None:
-            # run in a copy of the current context, outside tealetio task scope
-            context = _tasks._copy_context_without_current_task()
-            coro_start = _coro_start(_CoroStart, cast(Coroutine[Any, Any, Any], awaitable), context)
-            if coro_start.done():
-                return coro_start.result()
-            fut = loop.create_task(coro_start.as_coroutine())
-        elif inspect.isawaitable(awaitable):
+            return self._await_future(awaitable, loop)
+        if inspect.isawaitable(awaitable):
             # run in a copy of the current context if possible, outside tealetio task scope
             context = _tasks._copy_context_without_current_task()
             try:
                 fut = cast(Any, loop).create_task(cast(Coroutine[Any, Any, Any], awaitable), context=context)
             except TypeError:
                 fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable))
-        else:
-            raise TypeError("awaitable must be an awaitable")
+            return self._await_future(fut, loop)
+
+        raise TypeError("awaitable must be an awaitable")
+
+    def _await_coro(
+        self,
+        coro: Coroutine[Any, Any, Any],
+        loop: asyncio.AbstractEventLoop,
+    ) -> Any:
+        with _tasks._without_current_task():
+            return _coro_drive(coro, lambda yielded: self._await_future(yielded, loop))
+
+    def _await_future(
+        self,
+        fut: Any,
+        loop: asyncio.AbstractEventLoop,
+    ) -> Any:
+        if fut is None:
+            self.yield_()
+            return None
+
+        if not asyncio.isfuture(fut):
+            raise RuntimeError(f"await_ coroutine yielded unsupported object: {fut!r}")
+
+        fut = cast(asyncio.Future[Any], fut)
+
+        current = tealet.current()
+
+        if fut.get_loop() is not loop:
+            raise RuntimeError("await_ future is bound to a different event loop")
 
         if fut.done():
             return fut.result()
@@ -1606,7 +1671,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
     """Cooperative scheduler for synchronous driving."""
 
-    def __init__(self, *, runnable_queue_factory: _RunnableQueueFactory | None = None) -> None:
+    def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         super().__init__(runnable_queue_factory=runnable_queue_factory)
         self._wakeup = threading.Event()
 
