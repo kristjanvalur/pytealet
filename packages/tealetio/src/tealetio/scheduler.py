@@ -5,6 +5,7 @@ import concurrent.futures
 import contextvars
 import functools
 import heapq
+import importlib
 import inspect
 import itertools
 import socket
@@ -31,12 +32,19 @@ from .locks import (
 )
 from . import tasks as _tasks
 
+_asynkit: Any
+
 try:
-    from asynkit import coro_start as _coro_start
-    from asynkit import CoroStart as _CoroStart
+    _asynkit = importlib.import_module("asynkit")
 except ImportError:
+    _asynkit = None
+
+if _asynkit is None:
     _coro_start = None
     _CoroStart = None
+else:
+    _coro_start = getattr(_asynkit, "coro_start")
+    _CoroStart = getattr(_asynkit, "CoroStart")
 
 
 T = TypeVar("T")
@@ -953,7 +961,7 @@ def _as_completed_futures(
         with scheduler_timeout(timeout) if timeout is not None else nullcontext():
             while True:
                 child = completed.sget()
-                yield cast(_tasks.Future[Any], child)
+                yield child
     except QueueShutDown:
         return
     finally:
@@ -1455,7 +1463,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             # run in a copy of the current context if possible, outside tealetio task scope
             context = _tasks._copy_context_without_current_task()
             try:
-                fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable), context=context)
+                fut = cast(Any, loop).create_task(cast(Coroutine[Any, Any, Any], awaitable), context=context)
             except TypeError:
                 fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable))
         else:

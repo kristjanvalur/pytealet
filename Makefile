@@ -1,4 +1,4 @@
-.PHONY: cext-clean cext-cc cext-cc-debug cext-cc-warnings cext-cc-ci format-c format-c-check rebuild-ext test test-compat
+.PHONY: cext-clean cext-cc cext-cc-debug cext-cc-warnings cext-cc-ci check fix format format-check format-c format-c-check lint rebuild-ext test test-compat typecheck
 
 CLANG_FORMAT ?= clang-format-14
 EXT_SRC := $(sort $(wildcard src/_tealet/*.c))
@@ -48,6 +48,24 @@ cext-cc-warnings: cext-clean $(EXT_OBJ)
 
 cext-cc-ci: EXT_MODE_FLAGS := $(EXT_CI_FLAGS)
 cext-cc-ci: cext-clean $(EXT_OBJ)
+
+format:
+	uvx ruff format .
+
+format-check:
+	uvx ruff format --check .
+
+lint:
+	uvx ruff check .
+
+typecheck:
+	uvx ty check
+
+check: format-check lint typecheck
+
+fix:
+	uvx ruff format .
+	uvx ruff check . --fix
 
 format-c:
 	$(CLANG_FORMAT) -i $(C_FORMAT_FILES)

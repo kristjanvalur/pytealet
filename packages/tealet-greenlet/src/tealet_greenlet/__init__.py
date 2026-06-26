@@ -49,7 +49,7 @@ def _cross_thread_switch_error_message(current_tid, target_tid, is_alive):
     return "cannot switch to a different thread (which happens to have exited)"
 
 
-class ErrorWrapper(object):
+class _ErrorWrapper(object):
     def __enter__(self):
         pass
 
@@ -89,7 +89,7 @@ class ErrorWrapper(object):
             val = tb = None
 
 
-ErrorWrapper = ErrorWrapper()  # stateless singleton
+ErrorWrapper = _ErrorWrapper()  # stateless singleton
 
 
 def install(force=True):
@@ -800,7 +800,7 @@ class UnswitchableGreenlet(greenlet):
 
 
 if not hasattr(_greenlet, "UnswitchableGreenlet"):
-    _greenlet.UnswitchableGreenlet = UnswitchableGreenlet
+    setattr(_greenlet, "UnswitchableGreenlet", UnswitchableGreenlet)
 
 
 __all__ = [

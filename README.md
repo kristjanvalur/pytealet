@@ -56,6 +56,32 @@ uv pip install --python .venv-cpython313-debug/bin/python -e . --group dev
 uv run --active python -m pytest tests/
 ```
 
+### Quality Checks
+
+Use the top-level Makefile for Python formatting, linting, and type checking:
+
+```bash
+make check
+```
+
+That runs the non-mutating checks:
+
+```bash
+uvx ruff format --check .
+uvx ruff check .
+uvx ty check
+```
+
+Use `make fix` to apply Ruff formatting and autofixes. The `ty` configuration
+checks the installable source trees and leaves test folders out, since tests
+often use deliberately dynamic or type-unsafe probes.
+
+You can also run the type checker directly:
+
+```bash
+uvx ty check
+```
+
 ### Core Example Code
 
 The repository includes runnable development examples in `src/tealet_examples.py`.

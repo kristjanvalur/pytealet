@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar, cast
 
 import tealet
 
@@ -45,7 +45,7 @@ class SimpleTask(tealet.tealet, Generic[T]):
             raise RuntimeError("task is not done")
         if self._exception is not None:
             raise self._exception
-        return self._result  # type: ignore[return-value]
+        return cast(T, self._result)
 
     def exception(self) -> BaseException | None:
         if not self._done:

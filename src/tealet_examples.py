@@ -7,7 +7,7 @@ example code separate from runtime APIs.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, cast
 
 import tealet
 from tealet.simple_scheduler import SimpleScheduler
@@ -26,6 +26,8 @@ def raw_simple_generator(current: tealet.tealet, source: Iterable[T]) -> tealet.
     """
 
     previous = current.previous()
+    if previous is None:
+        raise RuntimeError("raw generator requires a previous tealet")
     for value in source:
         previous.switch(value)
 
@@ -53,14 +55,14 @@ class GeneratorTealet(tealet.tealet, Iterator[T], Generic[T]):
         if self._closed:
             raise StopIteration
         try:
-            return self.switch(tealet.current())
+            return cast(T, self.switch(tealet.current()))
         except StopIteration:
             self._closed = True
             raise
 
     def _main(self, current: tealet.tealet, previous: tealet.tealet) -> tealet.tealet:
         for value in self._source:
-            previous = previous.switch(value)
+            previous = cast(tealet.tealet, previous.switch(value))
         previous.set_pending_exception(StopIteration())
         return previous
 

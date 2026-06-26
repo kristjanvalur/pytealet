@@ -881,10 +881,10 @@ class PriorityQueue(Queue[T]):
         self._queue = []
 
     def _put(self, item: T) -> None:
-        heapq.heappush(self._queue, item)
+        heapq.heappush(cast(list[Any], self._queue), cast(Any, item))
 
     def _get(self) -> T:
-        return heapq.heappop(self._queue)
+        return cast(T, heapq.heappop(cast(list[Any], self._queue)))
 
 
 class LifoQueue(Queue[T]):

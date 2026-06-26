@@ -45,6 +45,20 @@ extend-exclude = [
     "tests/**",
 ]
 
+[tool.ty.src]
+include = [
+    "src",
+    "packages/tealetio/src",
+    "packages/tealet-greenlet/src",
+]
+exclude = [
+    "tests/**",
+    "packages/**/tests/**",
+]
+
+[tool.ty.terminal]
+output-format = "concise"
+
 [tool.ruff.lint.per-file-ignores]
 "src/tealet/__init__.py" = ["F401", "F403"]
 

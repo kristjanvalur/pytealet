@@ -415,7 +415,7 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
             if not target.done():
                 raise RuntimeError("Scheduler stopped before Future completed.")
-            return cast(T, target.result())
+            return target.result()
 
 
 class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
@@ -446,7 +446,7 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
             if scheduler is not None:
                 with scheduler.main_context():
                     tasks = self._shutdown_scheduler_tasks(scheduler)
-                    async_scheduler = cast(AsyncSchedulerDrivingAPI, scheduler)
+                    async_scheduler = scheduler
                     shutdown_group = gather(*tasks, return_exceptions=True)
                     await async_scheduler.arun_until_complete(shutdown_group)
                     executor_shutdown = scheduler.shutdown_default_executor()
@@ -565,7 +565,9 @@ def run_asyncio_in_tealet(
                     await yielder
 
         run_context = _copy_context_without_current_task(context)
-        return compat.run_asyncio_once(wrapped_entry(), context=run_context, loop_factory=tealet_loop_factory, debug=debug)
+        return compat.run_asyncio_once(
+            wrapped_entry(), context=run_context, loop_factory=tealet_loop_factory, debug=debug
+        )
 
     try:
         return tealet_runner.run(run_inside_tealet)
