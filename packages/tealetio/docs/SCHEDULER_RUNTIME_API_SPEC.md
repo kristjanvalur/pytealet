@@ -98,7 +98,7 @@ Implemented:
   - `await_(awaitable)` does not expose a separate `context=` argument,
     matching the shape of Python's `await` expression
   - coroutine objects are driven directly through their await protocol, using
-    `asynkit.coro_drive` when available and a Python fallback otherwise; yielded
+    `asynkit.coro_drive`; yielded
     asyncio future-like objects are waited by callback registration and resume
     the same coroutine driver when complete
   - while a coroutine is driven, the caller's `contextvars.Context` remains the

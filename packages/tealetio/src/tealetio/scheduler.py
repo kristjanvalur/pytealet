@@ -5,7 +5,6 @@ import concurrent.futures
 import contextvars
 import functools
 import heapq
-import importlib
 import inspect
 import itertools
 import socket
@@ -19,6 +18,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
 from typing import Any, Callable, ContextManager, Coroutine, Literal, Protocol, TypeAlias, TypeVar, cast
 
+from asynkit import coro_drive as _coro_drive
 import tealet
 
 from .locks import (
@@ -32,22 +32,8 @@ from .locks import (
 )
 from . import tasks as _tasks
 
-_asynkit: Any
-
-try:
-    _asynkit = importlib.import_module("asynkit")
-except ImportError:
-    _asynkit = None
-
-if _asynkit is None:
-    _asynkit_coro_drive = None
-else:
-    _asynkit_coro_drive = getattr(_asynkit, "coro_drive", None)
-
 
 T = TypeVar("T")
-_CoroYieldCallback: TypeAlias = Callable[[Any], Any]
-_CoroDriver: TypeAlias = Callable[[Coroutine[Any, Any, Any], _CoroYieldCallback], Any]
 
 
 DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
@@ -89,39 +75,6 @@ FIRST_EXCEPTION = "FIRST_EXCEPTION"
 ALL_COMPLETED = "ALL_COMPLETED"
 _ReturnWhen: TypeAlias = Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"]
 _TimeFunction: TypeAlias = Callable[[], float]
-
-
-def _py_coro_drive(coro: Coroutine[Any, Any, T], callback: _CoroYieldCallback) -> T:
-    send_value = None
-    pending_error: BaseException | None = None
-
-    while True:
-        try:
-            if pending_error is not None:
-                yielded = coro.throw(pending_error)
-                pending_error = None
-            else:
-                yielded = coro.send(send_value)
-                send_value = None
-        except StopIteration as exc:
-            return cast(T, exc.value)
-        except GeneratorExit:
-            coro.close()
-            raise
-
-        try:
-            send_value = callback(yielded)
-        except GeneratorExit:
-            coro.close()
-            raise
-        except BaseException as exc:
-            pending_error = exc
-
-
-_coro_drive: _CoroDriver = cast(
-    _CoroDriver,
-    _py_coro_drive if _asynkit_coro_drive is None else _asynkit_coro_drive,
-)
 
 
 # a thread local scheduler

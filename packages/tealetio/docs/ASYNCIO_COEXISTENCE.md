@@ -109,8 +109,8 @@ def worker() -> bytes:
 1. Require or capture an owning asyncio event loop.
 2. For existing asyncio `Future` and `Task` objects, keep their captured context
    and wait for them directly.
-3. For coroutine objects, drive the coroutine await protocol directly, using
-   optional `asynkit.coro_drive` when available and a Python fallback otherwise.
+3. For coroutine objects, drive the coroutine await protocol directly with
+  `asynkit.coro_drive`.
 4. When the coroutine yields `None`, perform a cooperative tealet yield.
 5. When the coroutine yields an asyncio future-like object, attach callbacks,
    block the current tealet, and resume the same coroutine driver when the
@@ -127,8 +127,7 @@ ordinary functions that eventually wait on IO without coloring every caller as
 
 ## Coroutine Driving and Future Waits
 
-The important fast path is implemented through `asynkit.coro_drive` when
-available, with the local Python driver as a compatibility fallback. When a
+The important fast path is implemented through `asynkit.coro_drive`. When a
 coroutine finishes before it needs to await anything, `await_()` returns its
 value immediately. No asyncio task is created for that purely synchronous work,
 and no extra tealet scheduling hop is needed.

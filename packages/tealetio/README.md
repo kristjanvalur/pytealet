@@ -27,13 +27,9 @@ For the usual scheduler and synchronisation APIs, install the base package:
 python -m pip install tealetio
 ```
 
-Need to run async methods efficiently from tealetio? Install the optional
-`asyncio` extra. It pulls in `asynkit`, which tealetio uses to optimise the
-asyncio bridge where available:
-
-```console
-python -m pip install 'tealetio[asyncio]'
-```
+`tealetio` relies on [asynkit](https://github.com/kristjanvalur/asynkit) for
+some advanced async trickery, including efficient coroutine await-protocol
+driving in the asyncio bridge.
 
 ## Changelog
 

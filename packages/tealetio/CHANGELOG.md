@@ -22,8 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optimised `await_()` coroutine handling so coroutine await protocols are driven
   directly, with yielded asyncio futures waited by the scheduler instead of
   delegating ordinary coroutines to `asyncio.Task` immediately.
-- Uses `asynkit.coro_drive` when available, falling back to the local Python
-  coroutine driver when `asynkit` is unavailable.
+- Uses the typed `asynkit.coro_drive` implementation directly for coroutine
+  driving.
 - Raised the `asynkit` dependency floor to `asynkit>=0.19.1` for the native
   coroutine driver implementation and typed `coro_drive` export.
 

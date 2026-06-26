@@ -157,12 +157,11 @@ and asyncio tasks participate with the default priority.
 `BaseScheduler.await_(awaitable) -> object` waits for an asyncio awaitable from
 the current tealet task and returns its result.
 
-Coroutine objects are driven directly through their await protocol. When optional
-`asynkit` support is available, tealetio uses `asynkit.coro_drive`; otherwise it
-uses the local Python fallback. If the coroutine completes synchronously,
-`await_()` returns without creating an asyncio task. If it yields an asyncio
-future-like object, tealetio waits for that future and resumes the same coroutine
-driver when it completes.
+Coroutine objects are driven directly through their await protocol with
+`asynkit.coro_drive`. If the coroutine completes synchronously, `await_()`
+returns without creating an asyncio task. If it yields an asyncio future-like
+object, tealetio waits for that future and resumes the same coroutine driver
+when it completes.
 
 Coroutine objects run in the current `contextvars.Context`, with tealetio's
 current-task marker temporarily cleared while the coroutine is driven. Existing

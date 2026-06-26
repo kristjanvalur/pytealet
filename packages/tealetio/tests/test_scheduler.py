@@ -3524,9 +3524,6 @@ class TestSchedulerExamples:
         assert seen == ["before-await", "after-await", ("result", 13)]
 
     def test_await_asynkit_coro_drive_is_used_without_loop_task(self, monkeypatch):
-        if scheduler_module._coro_drive is scheduler_module._py_coro_drive:
-            pytest.skip("asynkit is not installed")
-
         s = AsyncScheduler()
         set_scheduler(s)
         seen: list[object] = []
@@ -3671,70 +3668,3 @@ class TestSchedulerExamples:
             ("worker-current-after", True),
         ]
 
-    def test_await_pumps_coroutine_without_asynkit(self, monkeypatch):
-        s = AsyncScheduler()
-        set_scheduler(s)
-        seen: list[object] = []
-        monkeypatch.setattr(scheduler_module, "_coro_drive", scheduler_module._py_coro_drive)
-
-        async def compute() -> int:
-            seen.append("body")
-            return 14
-
-        def worker() -> None:
-            seen.append(("result", s.await_(compute())))
-
-        async def orchestrate() -> None:
-            loop = asyncio.get_running_loop()
-            create_task_calls: list[object] = []
-            original_create_task = loop.create_task
-
-            def create_task(coro, *args, **kwargs):
-                task = original_create_task(coro, *args, **kwargs)
-                create_task_calls.append(coro)
-                return task
-
-            monkeypatch.setattr(loop, "create_task", create_task)
-            s.spawn(worker)
-            await asyncio.wait_for(s.arun(), timeout=1.0)
-            delegated = [coro for coro in create_task_calls if getattr(coro, "cr_code", None) is compute.__code__]
-            assert delegated == []
-
-        asyncio.run(orchestrate())
-
-        assert seen == ["body", ("result", 14)]
-
-    def test_await_without_asynkit_uses_current_context_and_clears_task(self, monkeypatch):
-        s = AsyncScheduler()
-        set_scheduler(s)
-        marker = contextvars.ContextVar("marker", default="unset")
-        seen: list[object] = []
-        monkeypatch.setattr(scheduler_module, "_coro_drive", scheduler_module._py_coro_drive)
-
-        async def compute() -> str:
-            seen.append(("body-current", get_current()))
-            seen.append(("body-before", marker.get()))
-            marker.set("body-changed")
-            await asyncio.sleep(0)
-            seen.append(("body-after", marker.get()))
-            return marker.get()
-
-        def worker() -> None:
-            marker.set("caller")
-            seen.append(("worker-current-before", get_current() is not None))
-            seen.append(("result", s.await_(compute())))
-            seen.append(("caller-after", marker.get()))
-            seen.append(("worker-current-after", get_current() is not None))
-
-        s.spawn(worker)
-        asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
-
-        assert seen == [
-            ("worker-current-before", True),
-            ("body-current", None),
-            ("body-before", "caller"),
-            ("body-after", "body-changed"),
-            ("result", "body-changed"),
-            ("caller-after", "body-changed"),
-            ("worker-current-after", True),
-        ]
