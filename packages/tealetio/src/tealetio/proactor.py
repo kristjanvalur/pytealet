@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 from .locks import Event
-from .scheduler import BaseScheduler, RunnableQueueFactory, Scheduler
+from .scheduler import BaseScheduler, RunnableQueueFactory, SyncSchedulerDrivingAPI
 
 T = TypeVar("T")
 
@@ -498,7 +498,7 @@ class SelectorProactor:
             raise ValueError("socket is closed")
 
 
-class ProactorScheduler(Scheduler):
+class ProactorScheduler(BaseScheduler, SyncSchedulerDrivingAPI):
     """Synchronous scheduler whose IO wait point is a proactor backend."""
 
     def __init__(
@@ -536,6 +536,9 @@ class ProactorScheduler(Scheduler):
         deadline = self._next_timer_deadline()
         timeout = None if deadline is None else self._delay_until(deadline)
         self._proactor.wait(timeout)
+
+    async def _driver_wait(self) -> None:
+        self._wait_thread()
 
     # -- Operation waits ----------------------------------------------
 
