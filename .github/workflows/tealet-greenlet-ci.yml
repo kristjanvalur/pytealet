@@ -39,6 +39,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
+      - name: Check uv lockfile
+        run: uv lock --check
+
       - name: Install Python ${{ matrix.python-version }} with uv
         run: uv python install ${{ matrix.python-version }}
 
@@ -48,7 +51,7 @@ jobs:
       - name: Sync tealet-greenlet dependencies
         run: |
           source .venv/bin/activate
-          uv sync --active --dev --package tealet-greenlet
+          uv sync --active --locked --dev --package tealet-greenlet
 
       - name: Run tealet-greenlet tests
         run: |
