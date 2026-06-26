@@ -3369,7 +3369,7 @@ class TestSchedulerExamples:
             delegated = [
                 coro
                 for coro in create_task_calls
-                if getattr(getattr(coro, "cr_code", None), "co_name", None) == "as_coroutine"
+                if getattr(coro, "cr_code", None) is compute.__code__
             ]
             assert delegated == []
 
