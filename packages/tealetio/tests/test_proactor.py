@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import selectors
 import socket
 from concurrent.futures import CancelledError
@@ -297,6 +298,59 @@ class TestSelectorProactor:
             reader.close()
             writer.close()
             proactor.close()
+
+    def test_wait_async_completes_operation(self):
+        async def run() -> bytes:
+            proactor = SelectorProactor()
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+                operation = proactor.recv(reader, 5)
+                waiter = asyncio.create_task(proactor.wait_async(1.0))
+                await asyncio.sleep(0)
+
+                writer.send(b"hello")
+
+                assert await waiter == [operation]
+                return operation.result()
+            finally:
+                reader.close()
+                writer.close()
+                proactor.close()
+
+        assert asyncio.run(run()) == b"hello"
+
+    def test_wait_async_timeout_returns_no_completions(self):
+        async def run() -> list[Operation[object]]:
+            proactor = SelectorProactor()
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+                proactor.recv(reader, 1)
+                return await proactor.wait_async(0.001)
+            finally:
+                reader.close()
+                writer.close()
+                proactor.close()
+
+        assert asyncio.run(run()) == []
+
+    def test_wait_async_break_wait_returns_no_completions(self):
+        async def run() -> list[Operation[object]]:
+            proactor = SelectorProactor()
+            try:
+                waiter = asyncio.create_task(proactor.wait_async(1.0))
+                await asyncio.sleep(0)
+
+                proactor.break_wait()
+
+                return await waiter
+            finally:
+                proactor.close()
+
+        assert asyncio.run(run()) == []
 
 
 class TestProactorScheduler:

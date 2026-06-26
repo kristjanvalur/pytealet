@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio as _asyncio
 import errno
 import selectors
 import socket
@@ -41,6 +42,8 @@ class Proactor(Protocol):
     def has_pending_operations(self) -> bool: ...
 
     def wait(self, timeout: float | None = None) -> list[Operation[Any]]: ...
+
+    async def wait_async(self, timeout: float | None = None) -> list[Operation[Any]]: ...
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]: ...
 
@@ -240,6 +243,54 @@ class SelectorProactor:
         if completed:
             self._notify_wakeup()
         return completed
+
+    async def wait_async(self, timeout: float | None = None) -> list[Operation[Any]]:
+        """Wait asynchronously for ready operations and return those completed."""
+
+        self._check_open()
+        completed = self.poll()
+        if completed or timeout == 0:
+            return completed
+
+        loop = _asyncio.get_running_loop()
+        ready = loop.create_future()
+
+        def wake() -> None:
+            if not ready.done():
+                ready.set_result(None)
+
+        registered: list[tuple[int, int]] = []
+        wakeup_fd = self._wakeup_reader.fileno()
+
+        def add_reader(fd: int) -> None:
+            loop.add_reader(fd, wake)
+            registered.append((fd, selectors.EVENT_READ))
+
+        def add_writer(fd: int) -> None:
+            loop.add_writer(fd, wake)
+            registered.append((fd, selectors.EVENT_WRITE))
+
+        try:
+            add_reader(wakeup_fd)
+            for fd in self._fd_operations:
+                mask = self._selector_mask_for_fd(fd)
+                if mask & selectors.EVENT_READ:
+                    add_reader(fd)
+                if mask & selectors.EVENT_WRITE:
+                    add_writer(fd)
+            if timeout is None:
+                await ready
+            else:
+                await _asyncio.wait_for(ready, timeout)
+        except _asyncio.TimeoutError:
+            return []
+        finally:
+            for fd, event in registered:
+                if event == selectors.EVENT_READ:
+                    loop.remove_reader(fd)
+                else:
+                    loop.remove_writer(fd)
+        return self.poll()
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
