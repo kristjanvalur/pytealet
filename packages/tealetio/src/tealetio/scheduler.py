@@ -48,6 +48,7 @@ else:
 
 
 T = TypeVar("T")
+_CoroYieldCallback: TypeAlias = Callable[[Any], Any]
 
 
 DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
@@ -87,6 +88,30 @@ FIRST_COMPLETED = "FIRST_COMPLETED"
 FIRST_EXCEPTION = "FIRST_EXCEPTION"
 ALL_COMPLETED = "ALL_COMPLETED"
 _ReturnWhen: TypeAlias = Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"]
+
+
+def coro_drive(coro: Coroutine[Any, Any, T], callback: _CoroYieldCallback) -> T:
+    send_value = None
+    pending_error: BaseException | None = None
+
+    while True:
+        try:
+            if pending_error is not None:
+                yielded = coro.throw(pending_error)
+                pending_error = None
+            else:
+                yielded = coro.send(send_value)
+                send_value = None
+        except StopIteration as exc:
+            return cast(T, exc.value)
+        except GeneratorExit:
+            coro.close()
+            raise
+
+        try:
+            send_value = callback(yielded)
+        except BaseException as exc:
+            pending_error = exc
 
 
 # a thread local scheduler
@@ -1472,9 +1497,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         coro: Coroutine[Any, Any, Any],
         loop: asyncio.AbstractEventLoop,
     ) -> Any:
-        send_value = None
-        pending_error: BaseException | None = None
-
         with _tasks._without_current_task():
             if _coro_start is not None:
                 coro_start = _coro_start(_CoroStart, coro)
@@ -1482,24 +1504,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                     return coro_start.result()
                 coro = coro_start.as_coroutine()
 
-            while True:
-                try:
-                    if pending_error is not None:
-                        yielded = coro.throw(pending_error)
-                        pending_error = None
-                    else:
-                        yielded = coro.send(send_value)
-                        send_value = None
-                except StopIteration as exc:
-                    return exc.value
-                except GeneratorExit:
-                    coro.close()
-                    raise
-
-                try:
-                    self._await_future(yielded, loop)
-                except BaseException as exc:
-                    pending_error = exc
+            return coro_drive(coro, lambda yielded: self._await_future(yielded, loop))
 
     def _await_future(
         self,
