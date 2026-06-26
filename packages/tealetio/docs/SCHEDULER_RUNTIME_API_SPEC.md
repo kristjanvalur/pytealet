@@ -95,12 +95,18 @@ Implemented:
     of the awaited future/task through the running scheduler
   - cancelling a tealet task waiting in `await_(...)` schedules cancellation
     of the awaited asyncio future/task with `loop.call_soon(...)`
-  - `await_(awaitable)` delegates awaitable execution through asyncio without
-    exposing a separate `context=` argument, matching the shape of Python's
-    `await` expression
-  - delegated coroutine objects and newly-created asyncio tasks run in a copy
-    of the current `contextvars.Context`; existing asyncio `Future` and `Task`
-    objects retain their already-captured context
+  - `await_(awaitable)` does not expose a separate `context=` argument,
+    matching the shape of Python's `await` expression
+  - coroutine objects are driven directly through their await protocol, using
+    `asynkit.coro_drive` when available and a Python fallback otherwise; yielded
+    asyncio future-like objects are waited by callback registration and resume
+    the same coroutine driver when complete
+  - while a coroutine is driven, the caller's `contextvars.Context` remains the
+    active context, but the tealetio current-task marker is temporarily cleared
+    so awaited async code does not observe itself as scheduler-owned tealet code
+  - generic non-coroutine awaitables that need wrapping in a new asyncio task run
+    in a copy of the current `contextvars.Context`; existing asyncio `Future`
+    and `Task` objects retain their already-captured context
   - awaiting an already-cancelled tealet or asyncio future raises the same
     `CancelledError` through the tealet/asyncio boundary
   - shielding prevents waiter cancellation from propagating into the shielded
@@ -139,10 +145,10 @@ Implemented:
 Remaining from this proposal:
 
 - Continue hardening the low-level IO and tealet-hosted asyncio loop surfaces.
-- Research whether `await_(...)` can pump coroutine await iterators across
-  yielded asyncio `Future`/`Task` objects by hooking callbacks and resuming the
-  iterator from tealetio, falling back to asyncio `Task` delegation only when
-  unsupported scheduler tokens or real task semantics are required.
+- The planned `await_(...)` coroutine-driver optimisation is complete for the
+  supported surface: coroutine objects are driven directly, yielded asyncio
+  future-like objects are scheduler wait points, and unsupported yielded tokens
+  fail explicitly instead of silently changing execution model.
 
 ## Goals
 
