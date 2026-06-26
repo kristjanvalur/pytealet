@@ -3303,10 +3303,11 @@ class TestSchedulerExamples:
             def worker() -> None:
                 seen.append(s.await_(shielded))
 
-            monkeypatch.setattr(loop, "create_task", create_task)
             loop.call_soon(async_future.set_result, 17)
             s.spawn(worker)
-            await asyncio.wait_for(s.arun(), timeout=1.0)
+            run_task = loop.create_task(s.arun())
+            monkeypatch.setattr(loop, "create_task", create_task)
+            await asyncio.wait_for(run_task, timeout=1.0)
 
             assert create_task_calls == []
 
