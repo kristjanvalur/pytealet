@@ -46,6 +46,8 @@ from tealetio import (
     get_current,
     get_running_scheduler,
     get_scheduler,
+    run_asyncio_in_tealet,
+    run_in_asyncio,
     set_scheduler,
     shield,
     sleep,
@@ -75,6 +77,51 @@ _SELECTOR_TYPES = [
     )
     if (selector_type := getattr(selectors, name, None)) is not None
 ]
+
+
+class _SocketAwaitExchange:
+    PAYLOAD = b"alpha-beta-gamma"
+
+    def __init__(self) -> None:
+        self.left, self.right = socket.socketpair()
+        self.left.setblocking(False)
+        self.right.setblocking(False)
+        self.results: dict[str, object] = {}
+
+    async def send_payload(self) -> int:
+        loop = asyncio.get_running_loop()
+        sent = 0
+        for chunk in (self.PAYLOAD[:5], self.PAYLOAD[5:10], self.PAYLOAD[10:]):
+            await asyncio.sleep(0)
+            await loop.sock_sendall(self.left, chunk)
+            sent += len(chunk)
+        return sent
+
+    async def receive_payload(self) -> bytes:
+        loop = asyncio.get_running_loop()
+        received = bytearray()
+        while len(received) < len(self.PAYLOAD):
+            await asyncio.sleep(0)
+            chunk = await loop.sock_recv(self.right, 3)
+            if not chunk:
+                break
+            received.extend(chunk)
+        return bytes(received)
+
+    def spawn_tasks(self) -> tuple[Task, Task]:
+        scheduler = get_running_scheduler()
+
+        def sender() -> None:
+            self.results["sent"] = await_(self.send_payload())
+
+        def receiver() -> None:
+            self.results["received"] = await_(self.receive_payload())
+
+        return scheduler.spawn(sender), scheduler.spawn(receiver)
+
+    def close(self) -> None:
+        self.left.close()
+        self.right.close()
 
 
 class _PriorityTaskFactory:
@@ -3158,6 +3205,43 @@ class TestSchedulerExamples:
         asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
 
         assert seen == [11]
+
+    def test_await_socket_pair_exchange_hosted_in_asyncio(self):
+        def entry() -> dict[str, object]:
+            exchange = _SocketAwaitExchange()
+            try:
+                sender, receiver = exchange.spawn_tasks()
+                gather(sender, receiver).wait()
+                return dict(exchange.results)
+            finally:
+                exchange.close()
+
+        assert run_in_asyncio(entry) == {
+            "sent": len(_SocketAwaitExchange.PAYLOAD),
+            "received": _SocketAwaitExchange.PAYLOAD,
+        }
+
+    def test_await_socket_pair_exchange_hosted_in_tealetio(self):
+        async def entry() -> dict[str, object]:
+            exchange = _SocketAwaitExchange()
+            try:
+                tasks = exchange.spawn_tasks()
+                for _ in range(100):
+                    if all(task.done() for task in tasks):
+                        break
+                    await asyncio.sleep(0)
+
+                assert all(task.done() for task in tasks)
+                for task in tasks:
+                    task.result()
+                return dict(exchange.results)
+            finally:
+                exchange.close()
+
+        assert run_asyncio_in_tealet(entry()) == {
+            "sent": len(_SocketAwaitExchange.PAYLOAD),
+            "received": _SocketAwaitExchange.PAYLOAD,
+        }
 
     def test_await_propagates_exception(self):
         s = AsyncScheduler()
