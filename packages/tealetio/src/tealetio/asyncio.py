@@ -4,12 +4,10 @@ import asyncio as _asyncio
 import contextvars
 import selectors
 import socket
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any, Callable, TypeVar, cast
-
-import tealet
 
 from . import compat
 from .locks import Event, TimeoutError
@@ -23,11 +21,8 @@ from .scheduler import (
 from .tasks import (
     CancelledError,
     Future,
-    TEALET_PRI_INF,
-    Task,
     _copy_context_without_current_task,
     get_current,
-    task_priority,
 )
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
@@ -56,26 +51,6 @@ def asyncio_get_current() -> _asyncio.Task[Any] | None:
 
 class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
     """Asyncio-hosted scheduler driver API."""
-
-    @abstractmethod
-    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        """Bind this scheduler to an asyncio event loop clock."""
-
-    @abstractmethod
-    def stop(self) -> None:
-        """Stop a currently running async driver."""
-
-    @abstractmethod
-    async def arun(self, *, yield_every: int | None = None) -> None:
-        """Run async scheduler loop until idle."""
-
-    @abstractmethod
-    async def arun_forever(self, *, yield_every: int | None = None) -> None:
-        """Run async scheduler loop until stop() is called."""
-
-    @abstractmethod
-    async def arun_until_complete(self, future: Future[T] | Callable[[], T], *, yield_every: int | None = None) -> T:
-        """Run async scheduler loop until a target future/callable completes."""
 
 
 class _SchedulerSelectorAdapter(selectors.BaseSelector):
@@ -222,6 +197,9 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         if self._wakeup_loop is None:
             self.bind_loop(_asyncio.get_running_loop())
 
+    def _before_arun(self) -> None:
+        self._lazy_bind_running_loop()
+
     # -- Driver wakeup -------------------------------------------------
 
     def _break_wait_threadsafe(self) -> None:
@@ -338,98 +316,31 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
         finally:
             wakeup.clear()
 
-    # -- Async run entry points ---------------------------------------
+    async def _driver_wait(self) -> None:
+        await self._wait_async()
 
-    async def arun(self, *, yield_every: int | None = None) -> None:
-        """Run scheduler work until idle, yielding to asyncio between batches."""
+    async def _driver_yield(self) -> None:
+        await _asyncio.sleep(0)
 
-        self._verify_current_scheduler()
-        if yield_every is not None and yield_every <= 0:
-            raise ValueError("yield_every must be > 0 or None")
-        with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
-            self._lazy_bind_running_loop()
-            self._running = True
+    def run(self, *, yield_every: int | None = None) -> None:
+        """Raise because AsyncScheduler must be driven from an asyncio task."""
 
-            def should_terminate() -> bool:
-                return not (
-                    self._has_runnable_work()
-                    or self._has_pending_timers()
-                    or self._pending_async_waits
-                    or self._has_pending_driver_work()
-                )
+        raise NotImplementedError("AsyncScheduler does not support run(); use arun()")
 
-            try:
-                while not should_terminate():
-                    self._run_ready_batch(yield_every)
-                    if yield_every is not None and self._has_runnable_work():
-                        await _asyncio.sleep(0)
-                        continue
-                    if not should_terminate():
-                        await self._wait_async()
-            finally:
-                self._running = False
+    def run_forever(self, *, yield_every: int | None = None) -> None:
+        """Raise because AsyncScheduler must be driven from an asyncio task."""
 
-    async def arun_forever(self, *, yield_every: int | None = None) -> None:
-        """Run scheduler work until `stop()` is called."""
+        raise NotImplementedError("AsyncScheduler does not support run_forever(); use arun_forever()")
 
-        self._verify_current_scheduler()
-        if yield_every is not None and yield_every <= 0:
-            raise ValueError("yield_every must be > 0 or None")
-        with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
-            self._lazy_bind_running_loop()
-            self._stopping = False
-            self._running = True
-            try:
-                while not self._stopping:
-                    self._run_ready_batch(yield_every)
-                    if not self._stopping and self._has_runnable_work():
-                        await _asyncio.sleep(0)
-                        continue
-                    await self._wait_async()
-            finally:
-                self._running = False
-                self._stopping = False
-
-    async def arun_until_complete(
+    def run_until_complete(
         self,
         future: Future[T] | Callable[[], T],
         *,
         yield_every: int | None = None,
     ) -> T:
-        """Run scheduler work until `future` completes and return its result."""
+        """Raise because AsyncScheduler must be driven from an asyncio task."""
 
-        self._verify_current_scheduler()
-        if yield_every is not None and yield_every <= 0:
-            raise ValueError("yield_every must be > 0 or None")
-        with self.main_context(), task_priority(tealet.current(), TEALET_PRI_INF):
-            if isinstance(future, Future):
-                target: Future[T] = future
-                if isinstance(target, Task) and target.get_scheduler() is not self:
-                    raise RuntimeError("Future is bound to a different scheduler")
-            elif callable(future):
-                target = cast(Future[T], self.spawn(future))
-            else:
-                raise TypeError("future must be a Future or callable")
-
-            self._lazy_bind_running_loop()
-            self._stopping = False
-            self._running = True
-            try:
-                while not target.done() and not self._stopping:
-                    schedule_limit = yield_every if yield_every is not None else len(self._runnable)
-                    self._run_ready_batch(schedule_limit)
-                    if not target.done() and not self._stopping and self._has_runnable_work():
-                        await _asyncio.sleep(0)
-                        continue
-                    if not target.done() and not self._stopping:
-                        await self._wait_async()
-            finally:
-                self._running = False
-                self._stopping = False
-
-            if not target.done():
-                raise RuntimeError("Scheduler stopped before Future completed.")
-            return target.result()
+        raise NotImplementedError("AsyncScheduler does not support run_until_complete(); use arun_until_complete()")
 
 
 class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):

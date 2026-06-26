@@ -16,8 +16,23 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
-from typing import Any, Callable, ContextManager, Coroutine, Literal, Protocol, TypeAlias, TypeVar, cast
+from typing import (
+    Any,
+    Callable,
+    Concatenate,
+    ContextManager,
+    Coroutine,
+    Generic,
+    Literal,
+    ParamSpec,
+    Protocol,
+    TypeAlias,
+    TypeVar,
+    cast,
+    overload,
+)
 
+from asynkit import await_sync as _await_sync
 from asynkit import coro_drive as _coro_drive
 import tealet
 
@@ -34,9 +49,42 @@ from . import tasks as _tasks
 
 
 T = TypeVar("T")
+SelfT = TypeVar("SelfT")
+P = ParamSpec("P")
 
 
 DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
+
+
+class _SyncMethod(Generic[SelfT, P, T]):
+    def __init__(self, func: Callable[Concatenate[SelfT, P], Coroutine[Any, Any, T]]) -> None:
+        self._func = func
+
+    @overload
+    def __get__(self, obj: None, owner: type[SelfT]) -> Callable[Concatenate[SelfT, P], T]: ...
+
+    @overload
+    def __get__(self, obj: SelfT, owner: type[SelfT] | None = None) -> Callable[P, T]: ...
+
+    def __get__(self, obj: SelfT | None, owner: type[SelfT] | None = None) -> Callable[..., T]:
+        if obj is None:
+            return self
+
+        @functools.wraps(self._func)
+        def helper(*args: P.args, **kwargs: P.kwargs) -> T:
+            return self(obj, *args, **kwargs)
+
+        return helper
+
+    def __call__(self, obj: SelfT, *args: P.args, **kwargs: P.kwargs) -> T:
+        return _await_sync(self._func(obj, *args, **kwargs))
+
+
+def _syncmethod(
+    func: Callable[Concatenate[SelfT, P], Coroutine[Any, Any, T]],
+) -> _SyncMethod[SelfT, P, T]:
+    return _SyncMethod(func)
+
 
 __all__ = [
     "ALL_COMPLETED",
@@ -363,7 +411,7 @@ RunnableQueueFactory: TypeAlias = Callable[[], RunnableQueue]
 
 
 class CoreSchedulerDrivingAPI(ABC):
-    """Common control surface shared by sync and async scheduler drivers."""
+    """Common control and driving surface shared by scheduler drivers."""
 
     @abstractmethod
     def is_running(self) -> bool:
@@ -386,6 +434,10 @@ class CoreSchedulerDrivingAPI(ABC):
         """Use this scheduler's task factory for the current main tealet wrapper."""
 
     @abstractmethod
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Bind this scheduler to an asyncio event loop clock."""
+
+    @abstractmethod
     def shutdown_default_executor(
         self,
         timeout: float | None = DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT,
@@ -403,25 +455,51 @@ class CoreSchedulerDrivingAPI(ABC):
     ) -> "_tasks.Task":
         """Spawn a scheduler-managed task from a zero-arg callable."""
 
-
-class SyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
-    """Synchronous scheduler driver API."""
-
     @abstractmethod
     def stop(self) -> None:
-        """Stop a currently running sync driver."""
+        """Stop a currently running driver."""
 
     @abstractmethod
-    def run(self) -> None:
-        """Run until no local runnable tasks or timers remain."""
+    def run(self, *, yield_every: int | None = None) -> None:
+        """Run scheduler work synchronously until idle."""
 
     @abstractmethod
-    def run_forever(self) -> None:
-        """Run until stop() is called."""
+    def run_forever(self, *, yield_every: int | None = None) -> None:
+        """Run scheduler work synchronously until stop() is called."""
 
     @abstractmethod
-    def run_until_complete(self, future: "_tasks.Future[T] | Callable[[], T]") -> T:
-        """Run until a target future/callable completes."""
+    def run_until_complete(
+        self,
+        future: "_tasks.Future[T] | Callable[[], T]",
+        *,
+        yield_every: int | None = None,
+    ) -> T:
+        """Run scheduler work synchronously until a target completes."""
+
+    @abstractmethod
+    async def arun(self, *, yield_every: int | None = None) -> None:
+        """Run scheduler work asynchronously until idle."""
+
+    @abstractmethod
+    async def arun_forever(self, *, yield_every: int | None = None) -> None:
+        """Run scheduler work asynchronously until stop() is called."""
+
+    @abstractmethod
+    async def arun_until_complete(
+        self,
+        future: "_tasks.Future[T] | Callable[[], T]",
+        *,
+        yield_every: int | None = None,
+    ) -> T:
+        """Run scheduler work asynchronously until a target completes."""
+
+
+class SyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
+    """Synchronous scheduler driver API.
+
+    This class is retained as a descriptive compatibility alias for callers
+    that specifically require the synchronous convenience methods.
+    """
 
 
 def set_scheduler(value: "BaseScheduler | None") -> None:
@@ -1035,6 +1113,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         return self._time()
 
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Raise because this scheduler does not support explicit loop binding."""
+
+        raise NotImplementedError(f"{type(self).__name__} does not support bind_loop()")
+
     def is_running(self) -> bool:
         """Return True while this scheduler is being driven."""
 
@@ -1623,6 +1706,111 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     # -- Concrete driver hooks ----------------------------------------
 
+    async def _driver_wait(self) -> None:
+        raise NotImplementedError
+
+    async def _driver_yield(self) -> None:
+        return None
+
+    def _before_arun(self) -> None:
+        pass
+
+    def _arun_should_terminate(self) -> bool:
+        return not (
+            self._has_runnable_work()
+            or self._has_pending_timers()
+            or self._pending_async_waits
+            or self._has_pending_driver_work()
+        )
+
+    @staticmethod
+    def _validate_yield_every(yield_every: int | None) -> None:
+        if yield_every is not None and yield_every <= 0:
+            raise ValueError("yield_every must be > 0 or None")
+
+    async def arun(self, *, yield_every: int | None = None) -> None:
+        """Run scheduler work until idle."""
+
+        self._verify_current_scheduler()
+        self._validate_yield_every(yield_every)
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+            self._before_arun()
+            self._running = True
+            try:
+                while not self._arun_should_terminate():
+                    self._run_ready_batch(yield_every)
+                    if yield_every is not None and self._has_runnable_work():
+                        await self._driver_yield()
+                        continue
+                    if not self._arun_should_terminate():
+                        await self._driver_wait()
+            finally:
+                self._running = False
+
+    async def arun_forever(self, *, yield_every: int | None = None) -> None:
+        """Run scheduler work until `stop()` is called."""
+
+        self._verify_current_scheduler()
+        self._validate_yield_every(yield_every)
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+            self._before_arun()
+            self._stopping = False
+            self._running = True
+            try:
+                while not self._stopping:
+                    self._run_ready_batch(yield_every)
+                    if not self._stopping and self._has_runnable_work():
+                        await self._driver_yield()
+                        continue
+                    if not self._stopping:
+                        await self._driver_wait()
+            finally:
+                self._running = False
+                self._stopping = False
+
+    async def arun_until_complete(
+        self,
+        future: _tasks.Future[T] | Callable[[], T],
+        *,
+        yield_every: int | None = None,
+    ) -> T:
+        """Run scheduler work until `future` completes and return its result."""
+
+        self._verify_current_scheduler()
+        self._validate_yield_every(yield_every)
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+            if isinstance(future, _tasks.Future):
+                target: _tasks.Future[T] = future
+                if isinstance(target, _tasks.Task) and target.get_scheduler() is not self:
+                    raise RuntimeError("Future is bound to a different scheduler")
+            elif callable(future):
+                target = self.spawn(future)
+            else:
+                raise TypeError("future must be a Future or callable")
+
+            self._before_arun()
+            self._stopping = False
+            self._running = True
+            try:
+                while not target.done() and not self._stopping:
+                    self._run_ready_batch(yield_every)
+                    if not target.done() and not self._stopping and self._has_runnable_work():
+                        await self._driver_yield()
+                        continue
+                    if not target.done() and not self._stopping:
+                        await self._driver_wait()
+            finally:
+                self._running = False
+                self._stopping = False
+
+        if not target.done():
+            raise RuntimeError("Scheduler stopped before Future completed.")
+        return target.result()
+
+    run = _syncmethod(arun)
+    run_forever = _syncmethod(arun_forever)
+    run_until_complete = _syncmethod(arun_until_complete)
+
     @abstractmethod
     def _break_wait_threadsafe(self) -> None:
         """Wake a concrete driver from another thread or scheduler context."""
@@ -1653,81 +1841,5 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         self._wakeup.wait(timeout=timeout)
         self._wakeup.clear()
 
-    # -- Sync run entry points ----------------------------------------
-
-    def run(self) -> None:
-        """Run scheduler synchronously until no runnable tasks or timers remain.
-        This method is intended for single threaded context with no
-        asyncio loop interaction.
-
-        This sync runner only considers local runnable state and
-        scheduled timer callbacks (`_timers`). Tealets blocked in
-        `await_()` are not progressed here; use `arun()` for that mode.
-        """
-        self._verify_current_scheduler()
-        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
-            self._running = True
-
-            def should_terminate() -> bool:
-                return not (self._has_runnable_work() or self._has_pending_timers() or self._has_pending_driver_work())
-
-            try:
-                while not should_terminate():
-                    self._run_ready_batch()
-                    if not should_terminate():
-                        self._wait_thread()
-            finally:
-                self._running = False
-
-    def run_forever(self) -> None:
-        """Run scheduler work until `stop()` is called."""
-
-        self._verify_current_scheduler()
-        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
-            self._stopping = False
-            self._running = True
-            try:
-                while not self._stopping:
-                    self._run_ready_batch()
-                    if self._has_runnable_work():
-                        continue
-                    self._wait_thread()
-            finally:
-                self._running = False
-                self._stopping = False
-
-    def run_until_complete(
-        self,
-        future: _tasks.Future[T] | Callable[[], T],
-    ) -> T:
-        """Run scheduler work until `future` completes and return its result."""
-
-        self._verify_current_scheduler()
-        with self.main_context():
-            if isinstance(future, _tasks.Future):
-                target: _tasks.Future[T] = future
-                if isinstance(target, _tasks.Task) and target.get_scheduler() is not self:
-                    raise RuntimeError("Future is bound to a different scheduler")
-            elif callable(future):
-                target = self.spawn(future)
-            else:
-                raise TypeError("future must be a Future or callable")
-
-            return self._run_until_complete_target(target)
-
-    def _run_until_complete_target(self, target: _tasks.Future[T]) -> T:
-        with _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
-            self._stopping = False
-            self._running = True
-            try:
-                while not target.done() and not self._stopping:
-                    self._run_ready_batch()
-                    if not target.done() and not self._stopping:
-                        self._wait_thread()
-            finally:
-                self._running = False
-                self._stopping = False
-
-        if not target.done():
-            raise RuntimeError("Scheduler stopped before Future completed.")
-        return target.result()
+    async def _driver_wait(self) -> None:
+        self._wait_thread()

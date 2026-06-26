@@ -163,7 +163,7 @@ class TestSchedulerAccessors:
 
         assert get_scheduler() is s
 
-    def test_base_and_concrete_scheduler_api_surfaces_are_split(self):
+    def test_scheduler_api_surfaces_expose_sync_and_async_drivers_intentionally(self):
         sync = Scheduler()
         async_ = AsyncScheduler()
 
@@ -173,15 +173,29 @@ class TestSchedulerAccessors:
             "runnable_tasks",
             "reschedule",
             "yield_to",
+            "bind_loop",
         ):
             assert callable(getattr(sync, name))
             assert callable(getattr(async_, name))
         for name in ("run", "run_forever", "run_until_complete"):
             assert callable(getattr(sync, name))
-            assert not hasattr(async_, name)
-        for name in ("arun", "arun_forever", "arun_until_complete"):
-            assert not hasattr(sync, name)
             assert callable(getattr(async_, name))
+        for name in ("arun", "arun_forever", "arun_until_complete"):
+            assert callable(getattr(sync, name))
+            assert callable(getattr(async_, name))
+
+        with pytest.raises(NotImplementedError, match="use arun"):
+            async_.run()
+        with pytest.raises(NotImplementedError, match="use arun_forever"):
+            async_.run_forever()
+        with pytest.raises(NotImplementedError, match="use arun_until_complete"):
+            async_.run_until_complete(lambda: None)
+        loop = asyncio.new_event_loop()
+        try:
+            with pytest.raises(NotImplementedError, match="bind_loop"):
+                sync.bind_loop(loop)
+        finally:
+            loop.close()
 
     def test_get_running_scheduler_raises_when_not_running(self):
         with pytest.raises(RuntimeError, match="no running scheduler"):
