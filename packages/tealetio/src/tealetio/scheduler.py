@@ -71,6 +71,7 @@ __all__ = [
     "SyncSchedulerDrivingAPI",
     "TimerHandle",
     "as_completed",
+    "await_",
     "create_task",
     "ensure_future",
     "gather",
@@ -512,6 +513,12 @@ def sleep(delay: float) -> None:
     """
 
     get_running_scheduler().sleep(delay)
+
+
+def await_(awaitable: Any) -> Any:
+    """Await an asyncio awaitable from the current scheduler task."""
+
+    return get_running_scheduler().await_(awaitable)
 
 
 def spawn(

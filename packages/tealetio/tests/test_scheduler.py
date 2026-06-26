@@ -39,6 +39,7 @@ from tealetio import (
     TimeoutError,
     AsyncScheduler,
     as_completed,
+    await_,
     create_task,
     ensure_future,
     gather,
@@ -202,6 +203,23 @@ class TestSchedulerAccessors:
             ("after", None),
             ("done", task),
         ]
+
+    def test_top_level_await_uses_running_scheduler(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        seen: list[object] = []
+
+        async def compute() -> int:
+            await asyncio.sleep(0)
+            return 7
+
+        def worker() -> None:
+            seen.append(await_(compute()))
+
+        s.spawn(worker)
+        asyncio.run(asyncio.wait_for(s.arun(), timeout=1.0))
+
+        assert seen == [7]
 
     def test_runnable_tasks_returns_scheduler_tasks_in_run_order(self):
         s = _new_scheduler()
