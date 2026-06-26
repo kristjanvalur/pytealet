@@ -11,10 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Published runnable queue policies (`FifoRunnableQueue`,
 	`PrescheduledRunnableQueue`, and `PriorityRunnableQueue`) for explicit
 	scheduler construction, including priority-scheduling applications.
+- Added top-level `tealetio.await_()` for awaiting asyncio awaitables from the
+	current scheduler task without reaching through the scheduler object.
+- Added integration coverage for multi-step async socket send/receive coroutines
+	awaited by sibling tealet tasks in both host modes.
 
 ### Changed
 - Relaxed the `tealet` dependency to the compatible `0.1` range
 	(`tealet>=0.1.0rc2,<0.2`) instead of pinning one release candidate exactly.
+- Optimised `await_()` coroutine handling so coroutine await protocols are driven
+	directly, with yielded asyncio futures waited by the scheduler instead of
+	delegating ordinary coroutines to `asyncio.Task` immediately.
+- Uses `asynkit.coro_drive` when available, falling back to the local Python
+	coroutine driver when `asynkit` is unavailable.
+- Raised the `asynkit` dependency floor to `asynkit>=0.19.0` for the native
+	coroutine driver implementation.
 
 ## [0.1.0rc1] - 2026-06-25
 
