@@ -61,6 +61,7 @@ upstream greenlet parity yet.
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md)
 - [Python API](docs/PYTHON_API.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Upstream compatibility tests](tests/compat_greenlet/README.md)

@@ -215,7 +215,11 @@ pytealet/
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
+See [CHANGELOG.md](CHANGELOG.md) for workspace and core `tealet` version history.
+Sibling packages keep their own histories:
+
+- [tealetio changelog](packages/tealetio/CHANGELOG.md)
+- [tealet-greenlet changelog](packages/tealet-greenlet/CHANGELOG.md)
 
 ## License
 

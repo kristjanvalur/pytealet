@@ -35,6 +35,10 @@ asyncio bridge where available:
 python -m pip install 'tealetio[asyncio]'
 ```
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for package-specific release notes.
+
 ## Quick Start
 
 Need a scheduler for synchronous tealet code? Use `run()` and ask for the

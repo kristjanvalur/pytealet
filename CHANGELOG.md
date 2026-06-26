@@ -1,6 +1,13 @@
-# Changelog
+# Workspace and tealet Changelog
 
-All notable changes to this project will be documented in this file.
+All notable workspace and core `tealet` changes will be documented in this file.
+
+The repository root is both the workspace home and the package home for the base
+`tealet` library, so this changelog covers both roles. Package-specific histories
+for sibling projects live next to those packages:
+
+- [tealetio changelog](packages/tealetio/CHANGELOG.md)
+- [tealet-greenlet changelog](packages/tealet-greenlet/CHANGELOG.md)
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -9,10 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0rc2] - 2026-06-25
 
-### Changed
+### Workspace
 - Split greenlet compatibility into the separate `tealet-greenlet` workspace package.
-- Kept core `tealet` focused on stack-slicing primitives, C API headers, and runtime safety.
 - Updated sibling workspace packages to depend on `tealet==0.1.0rc2`.
+
+### tealet
+- Kept core `tealet` focused on stack-slicing primitives, C API headers, and runtime safety.
 
 ### Notes
 - Pre-release candidate for publishing the split workspace package set: `tealet`, `tealetio`, and `tealet-greenlet`.

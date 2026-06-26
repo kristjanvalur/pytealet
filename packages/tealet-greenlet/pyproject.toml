@@ -33,6 +33,7 @@ Homepage = "https://github.com/kristjanvalur/pytealet/tree/main/packages/tealet-
 Documentation = "https://github.com/kristjanvalur/pytealet/tree/main/packages/tealet-greenlet"
 Repository = "https://github.com/kristjanvalur/pytealet"
 Source = "https://github.com/kristjanvalur/pytealet/tree/main/packages/tealet-greenlet"
+Changelog = "https://github.com/kristjanvalur/pytealet/blob/main/packages/tealet-greenlet/CHANGELOG.md"
 Issues = "https://github.com/kristjanvalur/pytealet/issues"
 
 [tool.uv.sources]
