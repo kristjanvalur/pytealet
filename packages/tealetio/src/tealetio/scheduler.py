@@ -5,6 +5,7 @@ import concurrent.futures
 import contextvars
 import functools
 import heapq
+import importlib
 import inspect
 import itertools
 import socket
@@ -53,6 +54,7 @@ DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
 __all__ = [
     "ALL_COMPLETED",
     "BaseScheduler",
+    "BasicScheduler",
     "Channel",
     "CoreSchedulerDrivingAPI",
     "DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT",
@@ -1784,8 +1786,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Wake a concrete driver from its owning context."""
 
 
-class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
-    """Cooperative scheduler for synchronous driving."""
+class BasicScheduler(BaseScheduler, SyncSchedulerDrivingAPI):
+    """Cooperative scheduler with timers and explicit wakeups, but no IO driver."""
 
     def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         super().__init__(runnable_queue_factory=runnable_queue_factory)
@@ -1807,3 +1809,10 @@ class Scheduler(BaseScheduler, SyncSchedulerDrivingAPI):
 
     async def _driver_wait(self) -> None:
         self._wait_thread()
+
+
+_ProactorScheduler = importlib.import_module(".proactor", __package__).ProactorScheduler
+
+
+class Scheduler(_ProactorScheduler):
+    """Default synchronous scheduler backed by a proactor."""

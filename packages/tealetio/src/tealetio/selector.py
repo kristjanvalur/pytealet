@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, cast
 
 from .locks import Event
-from .scheduler import BaseScheduler, Scheduler
+from .scheduler import BaseScheduler, BasicScheduler
 
 _FdCallback = tuple[Callable[..., object], tuple[object, ...], contextvars.Context]
 
@@ -376,7 +376,7 @@ class SelectorMixin:
         return bool(self._fd_callbacks) or BaseScheduler._has_pending_driver_work(cast(BaseScheduler, self))
 
 
-class SelectorScheduler(SelectorMixin, Scheduler):
+class SelectorScheduler(SelectorMixin, BasicScheduler):
     """Synchronous scheduler with selector-backed fd readiness waits."""
 
     def __init__(self, selector: selectors.BaseSelector | None = None, *, runnable_queue_factory=None) -> None:

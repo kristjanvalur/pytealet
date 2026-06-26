@@ -38,6 +38,7 @@ from tealetio import (
     Task,
     TimeoutError,
     AsyncScheduler,
+    BasicScheduler,
     as_completed,
     await_,
     create_task,
@@ -1497,8 +1498,9 @@ class TestSchedulerAccessors:
             receiver.close()
             s.close()
 
-    def test_scheduler_socket_helpers_require_selector_scheduler(self):
-        s = _new_scheduler()
+    def test_basic_scheduler_socket_helpers_require_io_capable_scheduler(self):
+        s = BasicScheduler()
+        set_scheduler(s)
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -1508,8 +1510,31 @@ class TestSchedulerAccessors:
             reader.close()
             _writer.close()
 
-    def test_scheduler_io_callbacks_require_io_capable_scheduler(self):
+    def test_scheduler_socket_helpers_use_default_proactor(self):
         s = _new_scheduler()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def receive() -> bytes:
+                return s.sock_recv(reader, 5)
+
+            def send() -> None:
+                s.sleep(0.001)
+                s.sock_sendall(writer, b"hello")
+
+            task = s.spawn(receive)
+            s.spawn(send)
+            assert s.run_until_complete(task) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_basic_scheduler_io_callbacks_require_io_capable_scheduler(self):
+        s = BasicScheduler()
+        set_scheduler(s)
         reader, _writer = socket.socketpair()
         try:
             with pytest.raises(NotImplementedError, match="reader callbacks"):

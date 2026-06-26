@@ -16,6 +16,7 @@ def test_top_level_exports_public_scheduler_api():
         "AsyncSchedulerDrivingAPI",
         "BaseRunner",
         "BaseScheduler",
+        "BasicScheduler",
         "Barrier",
         "BoundedSemaphore",
         "CancelledError",
@@ -110,10 +111,12 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.TASK_PRIORITY_IDLE is tealetio.tasks.TASK_PRIORITY_IDLE
     assert tealetio.Scheduler is tealetio.scheduler.Scheduler
     assert tealetio.BaseScheduler is tealetio.scheduler.BaseScheduler
+    assert tealetio.BasicScheduler is tealetio.scheduler.BasicScheduler
     assert tealetio.Runner is tealetio.runner.Runner
     assert tealetio.SelectorScheduler is tealetio.selector.SelectorScheduler
     assert tealetio.Operation is tealetio.proactor.Operation
     assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
+    assert issubclass(tealetio.Scheduler, tealetio.ProactorScheduler)
     assert tealetio.SelectorProactor is tealetio.proactor.SelectorProactor
     assert tealetio.AsyncRunner is tealetio.asyncio.AsyncRunner
     assert tealetio.AsyncScheduler is tealetio.asyncio.AsyncScheduler

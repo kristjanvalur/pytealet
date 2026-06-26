@@ -30,6 +30,11 @@ from tealetio.scheduler import Scheduler
 from tealetio.runner import run
 ```
 
+`Scheduler` is the default synchronous scheduler and is backed by a proactor.
+Use `ProactorScheduler` directly when you want to provide a custom proactor
+factory, and use `BasicScheduler` when you deliberately want the small no-IO
+driver that only waits for timers and explicit scheduler wakeups.
+
 ## Scheduler Accessors
 
 `tealetio.set_scheduler(scheduler)` binds a scheduler as current in the active
