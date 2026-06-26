@@ -1450,29 +1450,53 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def await_(self, awaitable):
         """Await an asyncio awaitable from a tealet task and return its result."""
-        current = tealet.current()
         loop = asyncio.get_running_loop()
 
+        if inspect.iscoroutine(awaitable):
+            return self._await_coro(cast(Coroutine[Any, Any, Any], awaitable), loop)
         if asyncio.isfuture(awaitable):
-            fut = awaitable
-            if fut.get_loop() is not loop:
-                raise RuntimeError("await_ future is bound to a different event loop")
-        elif inspect.iscoroutine(awaitable) and _coro_start is not None:
-            # run in a copy of the current context, outside tealetio task scope
-            context = _tasks._copy_context_without_current_task()
-            coro_start = _coro_start(_CoroStart, cast(Coroutine[Any, Any, Any], awaitable), context)
-            if coro_start.done():
-                return coro_start.result()
-            fut = loop.create_task(coro_start.as_coroutine())
-        elif inspect.isawaitable(awaitable):
+            return self._await_future(cast(asyncio.Future[Any], awaitable), loop)
+        if inspect.isawaitable(awaitable):
             # run in a copy of the current context if possible, outside tealetio task scope
             context = _tasks._copy_context_without_current_task()
             try:
                 fut = cast(Any, loop).create_task(cast(Coroutine[Any, Any, Any], awaitable), context=context)
             except TypeError:
                 fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable))
-        else:
-            raise TypeError("awaitable must be an awaitable")
+            return self._await_future(fut, loop)
+
+        raise TypeError("awaitable must be an awaitable")
+
+    def _await_coro(
+        self,
+        coro: Coroutine[Any, Any, Any],
+        loop: asyncio.AbstractEventLoop,
+    ) -> Any:
+        if _coro_start is not None:
+            # run in a copy of the current context, outside tealetio task scope
+            context = _tasks._copy_context_without_current_task()
+            coro_start = _coro_start(_CoroStart, coro, context)
+            if coro_start.done():
+                return coro_start.result()
+            return self._await_future(loop.create_task(coro_start.as_coroutine()), loop)
+
+        # run in a copy of the current context if possible, outside tealetio task scope
+        context = _tasks._copy_context_without_current_task()
+        try:
+            fut = cast(Any, loop).create_task(coro, context=context)
+        except TypeError:
+            fut = loop.create_task(coro)
+        return self._await_future(fut, loop)
+
+    def _await_future(
+        self,
+        fut: asyncio.Future[Any],
+        loop: asyncio.AbstractEventLoop,
+    ) -> Any:
+        current = tealet.current()
+
+        if fut.get_loop() is not loop:
+            raise RuntimeError("await_ future is bound to a different event loop")
 
         if fut.done():
             return fut.result()
