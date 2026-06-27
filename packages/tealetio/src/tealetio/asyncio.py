@@ -35,6 +35,7 @@ T = TypeVar("T")
 __all__ = [
     "AsyncRunner",
     "AsyncScheduler",
+    "ForwardingSelector",
     "ForwardingProactor",
     "TealetProactorEventLoop",
     "TealetSelectorEventLoop",
@@ -52,7 +53,9 @@ def asyncio_get_current() -> _asyncio.Task[Any] | None:
     return _asyncio.current_task()
 
 
-class _SchedulerSelectorAdapter(selectors.BaseSelector):
+class ForwardingSelector(selectors.BaseSelector):
+    """Asyncio selector facade backed by a tealetio selector scheduler."""
+
     def __init__(self, scheduler: SelectorScheduler) -> None:
         self._scheduler = scheduler
         self._keys: dict[int, selectors.SelectorKey] = {}
@@ -173,7 +176,7 @@ class TealetSelectorEventLoop(_asyncio.SelectorEventLoop):
                 raise RuntimeError("TealetSelectorEventLoop requires a current SelectorScheduler")
             scheduler = current
         self._tealet_scheduler = scheduler
-        super().__init__(selector=_SchedulerSelectorAdapter(scheduler))
+        super().__init__(selector=ForwardingSelector(scheduler))
 
 
 class ForwardingProactor:

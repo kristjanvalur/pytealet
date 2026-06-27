@@ -34,6 +34,7 @@ def test_top_level_exports_public_scheduler_api():
         "FIRST_COMPLETED",
         "FIRST_EXCEPTION",
         "Future",
+        "ForwardingSelector",
         "ForwardingProactor",
         "Operation",
         "Proactor",
@@ -142,6 +143,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.ThreadedSelectorProactor is tealetio.proactor.ThreadedSelectorProactor
     assert tealetio.AsyncRunner is tealetio.asyncio.AsyncRunner
     assert tealetio.AsyncScheduler is tealetio.asyncio.AsyncScheduler
+    assert tealetio.ForwardingSelector is tealetio.asyncio.ForwardingSelector
     assert tealetio.ForwardingProactor is tealetio.asyncio.ForwardingProactor
     assert tealetio.TealetProactorEventLoop is tealetio.asyncio.TealetProactorEventLoop
     assert tealetio.AsyncSchedulerDrivingAPI is tealetio.scheduler.AsyncSchedulerDrivingAPI

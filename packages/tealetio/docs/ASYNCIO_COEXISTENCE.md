@@ -503,8 +503,8 @@ The most realistic combined shape is the current direction in `tealetio`:
 - `SelectorScheduler` is the shared selector readiness core, with
   `SyncSelectorScheduler` and `AsyncSelectorScheduler` as concrete drivers.
 - `AsyncScheduler` embeds tealet work inside an existing asyncio loop.
-- `TealetSelectorEventLoop` explores the opposite direction by letting asyncio's
-  selector wait be hosted by `SyncSelectorScheduler`.
+- `TealetSelectorEventLoop` explores the opposite direction by giving asyncio a
+  `ForwardingSelector` whose wait is hosted by `SyncSelectorScheduler`.
 - `TealetProactorEventLoop` is the analogous proactor experiment: asyncio sees
   a `BaseProactorEventLoop`, while `ForwardingProactor` delegates operations and
   waits to a host tealet proactor scheduler.

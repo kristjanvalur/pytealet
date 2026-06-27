@@ -39,9 +39,10 @@ Implemented:
 - `SelectorScheduler` is the shared abstract selector core.
   `SyncSelectorScheduler` and `AsyncSelectorScheduler` apply the same driving
   split to selector readiness. The tealet-hosted asyncio runner uses
-  `SyncSelectorScheduler` with `TealetSelectorEventLoop`'s forwarding selector.
-- `ForwardingProactor` and `TealetProactorEventLoop` provide the analogous
-  proactor-shaped tealet-hosted asyncio experiment for `SyncProactorScheduler`.
+  `SyncSelectorScheduler` with `TealetSelectorEventLoop`'s `ForwardingSelector`.
+- `ForwardingSelector`, `ForwardingProactor`, `TealetSelectorEventLoop`, and
+  `TealetProactorEventLoop` provide explicit tealet-hosted asyncio experiments
+  for selector-backed and proactor-backed schedulers.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
 - `Scheduler` and `AsyncScheduler` can be used directly as factories. They share
   the common scheduler/task/timer APIs from `BaseScheduler`, while implementing
@@ -781,7 +782,7 @@ Status: Initial Unix selector and proactor-shaped prototypes implemented.
   blocking points can be delegated to the outer tealet scheduler.
 - `tealetio.asyncio.TealetSelectorEventLoop` is an experimental
   `asyncio.SelectorEventLoop` subclass hosted by `tealetio.selector.SyncSelectorScheduler`.
-- The implementation uses a selector adapter whose fd registration is backed by
+- The implementation uses `ForwardingSelector`, whose fd registration is backed by
   `SyncSelectorScheduler.add_reader(...)` and `add_writer(...)`; when asyncio's
   selector would block, the pump tealet parks on a scheduler `Event` and wakes
   from fd readiness, a scheduler timer, or asyncio's self-pipe.

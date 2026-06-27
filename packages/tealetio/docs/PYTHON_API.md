@@ -37,7 +37,7 @@ proactor-backed IO model under an async driving facade. `ProactorScheduler` is
 the shared abstract proactor core. Likewise, `SelectorScheduler` is the shared
 abstract selector core, with `SyncSelectorScheduler` and `AsyncSelectorScheduler`
 as concrete driving variants. `run_asyncio_in_tealet(...)` uses
-`SyncSelectorScheduler` with `TealetSelectorEventLoop`'s forwarding selector for
+`SyncSelectorScheduler` with `TealetSelectorEventLoop`'s `ForwardingSelector` for
 the default tealet-hosted asyncio experiment. It can also host an explicit
 `TealetProactorEventLoop` with `SyncProactorScheduler`; in that mode
 `ForwardingProactor` presents asyncio's proactor shape while delegating socket
