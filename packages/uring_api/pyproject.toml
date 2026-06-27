@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uring-api"
+version = "0.1.0a0"
+description = "Small Python wrapper around Linux io_uring"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    {name = "Kristjan Valur Jonsson", email = "sweskman@gmail.com"}
+]
+keywords = ["io_uring", "linux", "async", "proactor"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/kristjanvalur/pytealet/tree/main/packages/uring_api"
+Repository = "https://github.com/kristjanvalur/pytealet"
+Source = "https://github.com/kristjanvalur/pytealet/tree/main/packages/uring_api"
+Issues = "https://github.com/kristjanvalur/pytealet/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.8",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+uring_api = ["py.typed"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [
+    "tests/**",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

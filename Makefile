@@ -3,7 +3,8 @@
 CLANG_FORMAT ?= clang-format-14
 EXT_SRC := $(sort $(wildcard src/_tealet/*.c))
 EXT_SRC_ALL := $(sort $(EXT_SRC) $(wildcard src/_tealet/*.h))
-C_FORMAT_FILES ?= $(EXT_SRC_ALL)
+URING_API_C_SRC := $(sort $(wildcard packages/uring_api/src/*.c) $(wildcard packages/uring_api/src/*.h))
+C_FORMAT_FILES ?= $(EXT_SRC_ALL) $(URING_API_C_SRC)
 
 PYTHON ?= $(if $(VIRTUAL_ENV),$(VIRTUAL_ENV)/bin/python,python)
 TEST ?= tests/

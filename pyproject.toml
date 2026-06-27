@@ -50,6 +50,7 @@ include = [
     "src",
     "packages/tealetio/src",
     "packages/tealet-greenlet/src",
+    "packages/uring_api/src",
 ]
 exclude = [
     "tests/**",
@@ -61,6 +62,7 @@ root = [
     "src",
     "packages/tealetio/src",
     "packages/tealet-greenlet/src",
+    "packages/uring_api/src",
 ]
 
 [tool.ty.terminal]
