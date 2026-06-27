@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import signal
 import sys
 import threading
@@ -1012,6 +1013,35 @@ class TestRunHelper:
             return "done"
 
         assert run_asyncio_in_tealet(entry()) == "done"
+
+    def test_run_asyncio_in_tealet_requires_base_scheduler(self):
+        class MinimalSyncScheduler:
+            def main_context(self):
+                return contextlib.nullcontext()
+
+            def spawn(self, func, *, context=None, eager_start=None, **kwargs):
+                return func
+
+            def run_until_complete(self, target, *, yield_every=None):
+                if hasattr(target, "result"):
+                    return target.result()
+                return target()
+
+            def shutdown_default_executor(self, timeout=None):
+                return lambda: None
+
+            def close(self) -> None:
+                pass
+
+        async def entry() -> str:
+            return "done"
+
+        coroutine = entry()
+        try:
+            with pytest.raises(RuntimeError, match="BaseScheduler"):
+                run_asyncio_in_tealet(coroutine, scheduler_factory=MinimalSyncScheduler)
+        finally:
+            coroutine.close()
 
     def test_run_asyncio_in_tealet_yields_to_sibling_tealets(self):
         events: list[str] = []

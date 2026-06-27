@@ -1618,6 +1618,33 @@ class TestSchedulerAccessors:
 
         assert asyncio.run(run()) == b"hello"
 
+    def test_async_selector_scheduler_requires_loop_fd_watchers(self, monkeypatch):
+        async def run() -> None:
+            s = AsyncSelectorScheduler()
+            set_scheduler(s)
+            reader, writer = socket.socketpair()
+            try:
+                loop = asyncio.get_running_loop()
+
+                def add_reader_unavailable(*args: object) -> None:
+                    raise NotImplementedError
+
+                monkeypatch.setattr(loop, "add_reader", add_reader_unavailable)
+                reader.setblocking(False)
+
+                def receive() -> None:
+                    s.wait_readable(reader)
+
+                task = s.spawn(receive)
+                with pytest.raises(RuntimeError, match="add_reader/add_writer"):
+                    await s.arun_until_complete(task)
+            finally:
+                reader.close()
+                writer.close()
+                s.close()
+
+        asyncio.run(run())
+
     @pytest.mark.parametrize("selector_type", _SELECTOR_TYPES)
     def test_selector_scheduler_waits_for_socket_io_with_selector_type(self, selector_type):
         selector = selector_type()

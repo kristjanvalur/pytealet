@@ -605,7 +605,9 @@ def run_asyncio_in_tealet(
 
     def run_inside_tealet():
         scheduler = tealet_runner.get_scheduler()
-        base_scheduler = cast(BaseScheduler, scheduler)
+        if not isinstance(scheduler, BaseScheduler):
+            raise RuntimeError("run_asyncio_in_tealet requires a BaseScheduler-compatible scheduler")
+        base_scheduler = scheduler
 
         def tealet_loop_factory() -> _asyncio.AbstractEventLoop:
             if loop_factory is not None:

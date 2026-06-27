@@ -459,16 +459,20 @@ class AsyncSelectorScheduler(AsyncDrivingMixin, SelectorScheduler, AsyncSchedule
                 waiter.set_result(None)
 
         registered: list[tuple[int, int]] = []
-        for key in self._selector.get_map().values():
-            if key.events & selectors.EVENT_READ:
-                loop.add_reader(key.fd, wake)
-                registered.append((key.fd, selectors.EVENT_READ))
-            if key.events & selectors.EVENT_WRITE:
-                loop.add_writer(key.fd, wake)
-                registered.append((key.fd, selectors.EVENT_WRITE))
-
         timeout = None if deadline is None else max(0.0, deadline - self.time())
         try:
+            for key in self._selector.get_map().values():
+                try:
+                    if key.events & selectors.EVENT_READ:
+                        loop.add_reader(key.fd, wake)
+                        registered.append((key.fd, selectors.EVENT_READ))
+                    if key.events & selectors.EVENT_WRITE:
+                        loop.add_writer(key.fd, wake)
+                        registered.append((key.fd, selectors.EVENT_WRITE))
+                except (AttributeError, NotImplementedError) as exc:
+                    raise RuntimeError(
+                        "AsyncSelectorScheduler requires an asyncio event loop with add_reader/add_writer support"
+                    ) from exc
             if timeout is None:
                 await waiter
             else:
