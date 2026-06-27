@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import errno
-import math
-import select
 import selectors
 import socket
 import threading
@@ -14,6 +12,7 @@ from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, cast
 
+from . import compat
 from .locks import Event
 from .scheduler import (
     AsyncDrivingMixin,
@@ -46,96 +45,6 @@ _DoneCallback = Callable[["Operation[Any]"], object]
 _CancelCallback = Callable[["Operation[Any]"], bool]
 _CompletionCallback = Callable[[], object]
 _Clock = Callable[[], float]
-
-
-class _SelectReleasedSelector(Protocol):
-    def select_released(
-        self, timeout: float | None = None, lock: Any | None = None
-    ) -> list[tuple[selectors.SelectorKey, int]]: ...
-
-
-class _ReleasedSelectSelector(selectors.SelectSelector):
-    """Select selector that snapshots fd sets before releasing a caller lock."""
-
-    def select_released(
-        self, timeout: float | None = None, lock: Any | None = None
-    ) -> list[tuple[selectors.SelectorKey, int]]:
-        timeout = None if timeout is None else max(timeout, 0)
-        selector = cast(Any, self)
-        readers = frozenset(selector._readers)
-        writers = frozenset(selector._writers)
-        ready: list[tuple[selectors.SelectorKey, int]] = []
-
-        if lock is not None:
-            lock.release()
-        try:
-            try:
-                readable, writable, _ = selector._select(readers, writers, [], timeout)
-            except InterruptedError:
-                return ready
-        finally:
-            if lock is not None:
-                lock.acquire()
-
-        readable = frozenset(readable)
-        writable = frozenset(writable)
-        fd_to_key_get = selector._fd_to_key.get
-        for fd in readable | writable:
-            key = fd_to_key_get(fd)
-            if key:
-                events = (fd in readable and selectors.EVENT_READ) | (fd in writable and selectors.EVENT_WRITE)
-                ready.append((key, events & key.events))
-        return ready
-
-
-if hasattr(selectors, "EpollSelector"):
-
-    class _ReleasedEpollSelector(selectors.EpollSelector):
-        """Epoll selector that releases a caller lock only during epoll_wait."""
-
-        def select_released(
-            self, timeout: float | None = None, lock: Any | None = None
-        ) -> list[tuple[selectors.SelectorKey, int]]:
-            if timeout is None:
-                timeout = -1
-            elif timeout <= 0:
-                timeout = 0
-            else:
-                timeout = math.ceil(timeout * 1e3) * 1e-3
-
-            selector = cast(Any, self)
-            max_events = len(selector._fd_to_key) or 1
-            ready: list[tuple[selectors.SelectorKey, int]] = []
-
-            if lock is not None:
-                lock.release()
-            try:
-                try:
-                    fd_event_list = selector._selector.poll(timeout, max_events)
-                except InterruptedError:
-                    return ready
-            finally:
-                if lock is not None:
-                    lock.acquire()
-
-            fd_to_key = selector._fd_to_key
-            for fd, event in fd_event_list:
-                key = fd_to_key.get(fd)
-                if key:
-                    events = (event & ~select.EPOLLIN and selectors.EVENT_WRITE) | (
-                        event & ~select.EPOLLOUT and selectors.EVENT_READ
-                    )
-                    ready.append((key, events & key.events))
-            return ready
-
-else:
-    _ReleasedEpollSelector = None
-
-
-def _released_default_selector() -> selectors.BaseSelector:
-    if _ReleasedEpollSelector is not None:
-        return _ReleasedEpollSelector()
-    return _ReleasedSelectSelector()
 
 
 class Proactor(Protocol):
@@ -397,7 +306,7 @@ class SelectorProactor:
         if select_released is None:
             events = self._selector.select(timeout)
         else:
-            events = cast(_SelectReleasedSelector, self._selector).select_released(timeout, self._lock)
+            events = cast(compat.SelectReleasedSelector, self._selector).select_released(timeout, self._lock)
         completed: list[Operation[Any]] = []
         wakeup_fd = self._wakeup_reader.fileno()
         for key, mask in events:
@@ -763,7 +672,7 @@ class ThreadedSelectorProactor(SelectorProactor):
         wakeup_callback: _CompletionCallback | None = None,
     ) -> None:
         if selector is None:
-            selector = _released_default_selector()
+            selector = compat.released_default_selector()
         elif not hasattr(selector, "select_released"):
             raise TypeError("ThreadedSelectorProactor requires a selector with select_released()")
         super().__init__(selector, completion_callback=completion_callback, wakeup_callback=wakeup_callback)
