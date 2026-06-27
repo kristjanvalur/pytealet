@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import errno
+import math
 import selectors
 import socket
 import threading
@@ -84,6 +85,57 @@ class _ReleasedSelectSelector(selectors.SelectSelector):
                 events = (fd in readable and selectors.EVENT_READ) | (fd in writable and selectors.EVENT_WRITE)
                 ready.append((key, events & key.events))
         return ready
+
+
+if hasattr(selectors, "EpollSelector"):
+
+    class _ReleasedEpollSelector(selectors.EpollSelector):
+        """Epoll selector that releases a caller lock only during epoll_wait."""
+
+        def select_released(
+            self, timeout: float | None = None, lock: Any | None = None
+        ) -> list[tuple[selectors.SelectorKey, int]]:
+            if timeout is None:
+                timeout = -1
+            elif timeout <= 0:
+                timeout = 0
+            else:
+                timeout = math.ceil(timeout * 1e3) * 1e-3
+
+            selector = cast(Any, self)
+            selector_module = cast(Any, selectors)
+            max_events = len(selector._fd_to_key) or 1
+            ready: list[tuple[selectors.SelectorKey, int]] = []
+
+            if lock is not None:
+                lock.release()
+            try:
+                try:
+                    fd_event_list = selector._selector.poll(timeout, max_events)
+                except InterruptedError:
+                    return ready
+            finally:
+                if lock is not None:
+                    lock.acquire()
+
+            fd_to_key = selector._fd_to_key
+            for fd, event in fd_event_list:
+                key = fd_to_key.get(fd)
+                if key:
+                    events = (event & selector_module._NOT_EPOLLIN and selectors.EVENT_WRITE) | (
+                        event & selector_module._NOT_EPOLLOUT and selectors.EVENT_READ
+                    )
+                    ready.append((key, events & key.events))
+            return ready
+
+else:
+    _ReleasedEpollSelector = None
+
+
+def _released_default_selector() -> selectors.BaseSelector:
+    if _ReleasedEpollSelector is not None:
+        return _ReleasedEpollSelector()
+    return _ReleasedSelectSelector()
 
 
 class Proactor(Protocol):
@@ -711,7 +763,7 @@ class ThreadedSelectorProactor(SelectorProactor):
         wakeup_callback: _CompletionCallback | None = None,
     ) -> None:
         if selector is None:
-            selector = _ReleasedSelectSelector()
+            selector = _released_default_selector()
         elif not hasattr(selector, "select_released"):
             raise TypeError("ThreadedSelectorProactor requires a selector with select_released()")
         super().__init__(selector, completion_callback=completion_callback, wakeup_callback=wakeup_callback)

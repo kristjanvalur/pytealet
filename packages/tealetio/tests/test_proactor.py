@@ -416,6 +416,15 @@ class TestSelectorProactor:
 
 
 class TestThreadedSelectorProactor:
+    def test_defaults_to_epoll_selector_when_available(self):
+        proactor = ThreadedSelectorProactor()
+        try:
+            if hasattr(selectors, "EpollSelector"):
+                assert isinstance(proactor._selector, selectors.EpollSelector)
+            assert hasattr(proactor._selector, "select_released")
+        finally:
+            proactor.close()
+
     def test_requires_selector_with_select_released(self):
         with pytest.raises(TypeError, match="select_released"):
             ThreadedSelectorProactor(selector=selectors.SelectSelector())
