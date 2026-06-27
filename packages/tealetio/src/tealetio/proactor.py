@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio as _asyncio
 import errno
 import math
+import select
 import selectors
 import socket
 import threading
@@ -103,7 +104,6 @@ if hasattr(selectors, "EpollSelector"):
                 timeout = math.ceil(timeout * 1e3) * 1e-3
 
             selector = cast(Any, self)
-            selector_module = cast(Any, selectors)
             max_events = len(selector._fd_to_key) or 1
             ready: list[tuple[selectors.SelectorKey, int]] = []
 
@@ -122,8 +122,8 @@ if hasattr(selectors, "EpollSelector"):
             for fd, event in fd_event_list:
                 key = fd_to_key.get(fd)
                 if key:
-                    events = (event & selector_module._NOT_EPOLLIN and selectors.EVENT_WRITE) | (
-                        event & selector_module._NOT_EPOLLOUT and selectors.EVENT_READ
+                    events = (event & ~select.EPOLLIN and selectors.EVENT_WRITE) | (
+                        event & ~select.EPOLLOUT and selectors.EVENT_READ
                     )
                     ready.append((key, events & key.events))
             return ready
