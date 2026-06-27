@@ -107,14 +107,38 @@ The intended baseline is simple:
 - other threads may call submit-side methods such as `submit_recv()`,
     `submit_send()`, and `break_wait()`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`;
-- multiple concurrent `wait()` calls are serialised by the `Ring` object.
+- multiple concurrent `wait()` calls are serialised by the `Ring` object;
+- alternatively, `Ring.callback` plus `start()` can run a native delivery thread
+  that waits for completions and calls the callback directly.
 
 `break_wait()` prepares and submits an internal NOP. When the reaper consumes that
 completion, `wait()` returns `None` rather than a user completion.
 
-`close()` is still an owner-coordinated shutdown operation. Do not close a ring
-while another thread may submit new user operations; wake and join any owner
-reaper first.
+The delivery thread uses the same receive side as `wait()`, so public `wait()`
+calls raise `RuntimeError` while it is running. `stop()` asks the thread to exit,
+wakes it with `break_wait()`, and waits until it has stopped. `close()` does the
+same before closing the ring. If the callback raises, the exception is reported
+as unraisable and the delivery thread exits.
+
+```python
+import uring_api
+
+
+def delivered(completion):
+    print(completion["user_data"], completion["res"], completion["result"])
+
+
+with uring_api.Ring() as ring:
+    ring.callback = delivered
+    ring.start()
+    try:
+        ...
+    finally:
+        ring.stop()
+```
+
+`close()` is still an owner-coordinated shutdown operation for submissions. Do
+not close a ring while another thread may submit new user operations.
 
 ## Choosing Ring Sizes
 

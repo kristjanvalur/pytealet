@@ -1,6 +1,7 @@
 import errno
 from importlib import resources
 import socket
+import sys
 import threading
 
 import pytest
@@ -171,3 +172,82 @@ def test_ring_rejects_concurrent_wait_when_available():
     assert thread.is_alive() is False
     assert errors == []
     assert results == [None]
+
+
+def test_ring_delivery_thread_invokes_callback_when_available():
+    probe = uring_api.probe()
+    if not probe.available:
+        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        delivered = threading.Event()
+        completions: list[dict[str, object]] = []
+
+        with uring_api.Ring() as ring:
+            ring.callback = lambda completion: (completions.append(completion), delivered.set())
+            ring.start()
+            assert ring.running
+
+            with pytest.raises(RuntimeError, match="delivery thread is active"):
+                ring.wait(0)
+
+            ring.submit_recv(reader.fileno(), 5, 125)
+            writer.send(b"hello")
+            assert delivered.wait(1.0)
+
+            ring.stop()
+            assert not ring.running
+
+            ring.start()
+            assert ring.running
+            ring.stop()
+            assert not ring.running
+
+        assert completions
+        assert completions[0]["user_data"] == 125
+        assert completions[0]["res"] == 5
+        assert completions[0]["result"] == b"hello"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_delivery_thread_writes_unraisable_and_exits_when_callback_fails():
+    probe = uring_api.probe()
+    if not probe.available:
+        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+
+    reader, writer = socket.socketpair()
+    old_hook = sys.unraisablehook
+    unraisable = threading.Event()
+    reports: list[object] = []
+
+    def hook(args):
+        reports.append(args.object)
+        unraisable.set()
+
+    def fail_callback(completion):
+        raise RuntimeError("callback failed")
+
+    try:
+        sys.unraisablehook = hook
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            ring.callback = fail_callback
+            ring.start()
+            ring.submit_recv(reader.fileno(), 1, 126)
+            writer.send(b"x")
+
+            assert unraisable.wait(1.0)
+            ring.stop()
+            assert not ring.running
+
+        assert reports == [ring]
+    finally:
+        sys.unraisablehook = old_hook
+        reader.close()
+        writer.close()
