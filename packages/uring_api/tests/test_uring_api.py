@@ -129,3 +129,45 @@ def test_ring_break_wait_interrupts_wait_when_available():
 
     assert thread.is_alive() is False
     assert results == [None]
+
+
+def test_ring_rejects_concurrent_wait_when_available():
+    probe = uring_api.probe()
+    if not probe.available:
+        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+
+    with uring_api.Ring() as ring:
+        started = threading.Event()
+        results: list[object] = []
+        errors: list[BaseException] = []
+
+        def wait_in_thread():
+            started.set()
+            try:
+                results.append(ring.wait(10.0))
+            except BaseException as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        thread = threading.Thread(target=wait_in_thread)
+        thread.start()
+        assert started.wait(1.0)
+
+        for _ in range(10000):
+            try:
+                completion = ring.wait(0)
+            except RuntimeError as exc:
+                assert "another wait is already active" in str(exc)
+                break
+            assert completion is None
+        else:
+            pytest.fail("concurrent wait was not rejected")
+
+        ring.break_wait()
+        thread.join(1.0)
+        if thread.is_alive():
+            ring.break_wait()
+            thread.join(1.0)
+
+    assert thread.is_alive() is False
+    assert errors == []
+    assert results == [None]

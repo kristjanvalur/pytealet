@@ -96,6 +96,26 @@ else:
         ring.close()
 ```
 
+## Threading Model
+
+`Ring` deliberately stays close to liburing's shared-ring model, but the Python
+object adds native locking around the parts that matter for normal use.
+
+The intended baseline is simple:
+
+- one thread may reap completions with `wait()`;
+- other threads may call submit-side methods such as `submit_recv()`,
+    `submit_send()`, and `break_wait()`;
+- `break_wait()` is safe to call while another thread is blocked in `wait()`;
+- multiple concurrent `wait()` calls are serialised by the `Ring` object.
+
+`break_wait()` prepares and submits an internal NOP. When the reaper consumes that
+completion, `wait()` returns `None` rather than a user completion.
+
+`close()` is still an owner-coordinated shutdown operation. Do not close a ring
+while another thread may submit new user operations; wake and join any owner
+reaper first.
+
 ## Choosing Ring Sizes
 
 Ring sizing is about queue depth, not payload buffer size. A modest application

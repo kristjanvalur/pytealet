@@ -15,11 +15,25 @@
 #define IO_URING_VERSION_MINOR 0
 #endif
 
+#ifndef Py_BEGIN_CRITICAL_SECTION
+#define Py_BEGIN_CRITICAL_SECTION(op) {
+#define Py_END_CRITICAL_SECTION() }
+#endif
+
+#ifndef Py_BEGIN_CRITICAL_SECTION_MUTEX
+typedef char UringApiMutex;
+#define Py_BEGIN_CRITICAL_SECTION_MUTEX(mutex) {
+#else
+typedef PyMutex UringApiMutex;
+#endif
+
 typedef struct {
     PyObject_HEAD
     struct io_uring ring;
     PyObject *pending;
+    UringApiMutex receive_mutex;
     unsigned long long next_wakeup_data;
+    bool receive_waiting;
     bool initialized;
 } UringApiRing;
 
@@ -162,6 +176,9 @@ static int pending_store_view(UringApiRing *self, unsigned long long user_data, 
         return -1;
     }
     ret = PyDict_SetItem(self->pending, key, pending);
+    if (ret < 0) {
+        ((UringApiPending *)pending)->has_view = false;
+    }
     Py_DECREF(pending);
     Py_DECREF(key);
     return ret;
@@ -196,9 +213,7 @@ static int submit_one(UringApiRing *self) {
     int ret;
 
     errno = 0;
-    Py_BEGIN_ALLOW_THREADS
     ret = io_uring_submit(&self->ring);
-    Py_END_ALLOW_THREADS
 
     if (ret < 0) {
         int errnum = normalize_ret_errno(ret);
@@ -211,6 +226,31 @@ static int submit_one(UringApiRing *self) {
         return -1;
     }
     return 0;
+}
+
+static void pending_discard(UringApiRing *self, unsigned long long user_data) {
+    PyObject *ignored = pending_pop(self, user_data);
+    Py_XDECREF(ignored);
+}
+
+static int receive_wait_begin(UringApiRing *self) {
+    int ret = 0;
+
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    if (self->receive_waiting) {
+        PyErr_SetString(PyExc_RuntimeError, "another wait is already active");
+        ret = -1;
+    } else {
+        self->receive_waiting = true;
+    }
+    Py_END_CRITICAL_SECTION();
+    return ret;
+}
+
+static void receive_wait_end(UringApiRing *self) {
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    self->receive_waiting = false;
+    Py_END_CRITICAL_SECTION();
 }
 
 static struct io_uring_sqe *get_sqe(UringApiRing *self) {
@@ -300,6 +340,7 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
         PyDict_Clear(self->pending);
     }
     self->next_wakeup_data = ULLONG_MAX;
+    self->receive_waiting = false;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -338,6 +379,7 @@ static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(igno
     if (self->pending) {
         PyDict_Clear(self->pending);
     }
+    self->receive_waiting = false;
     Py_RETURN_NONE;
 }
 
@@ -354,6 +396,7 @@ static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) {
     if (self->pending) {
         PyDict_Clear(self->pending);
     }
+    self->receive_waiting = false;
     Py_RETURN_NONE;
 }
 
@@ -364,11 +407,9 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
     long fd;
     Py_ssize_t n;
     unsigned long long user_data;
+    int failed = 0;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lnK", keywords, &fd, &n, &user_data)) {
-        return NULL;
-    }
-    if (ring_check_open(self) < 0) {
         return NULL;
     }
     if (fd < 0 || fd > INT_MAX) {
@@ -384,21 +425,30 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
     if (!buffer) {
         return NULL;
     }
-    sqe = get_sqe(self);
-    if (!sqe) {
-        Py_DECREF(buffer);
-        return NULL;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (pending_store(self, user_data, URING_API_PENDING_RECV, buffer) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            pending_discard(self, user_data);
+            failed = 1;
+        } else {
+            io_uring_prep_recv(sqe, (int)fd, PyBytes_AS_STRING(buffer), (size_t)n, 0);
+            io_uring_sqe_set_data64(sqe, user_data);
+            if (submit_one(self) < 0) {
+                pending_discard(self, user_data);
+                failed = 1;
+            }
+        }
     }
-    io_uring_prep_recv(sqe, (int)fd, PyBytes_AS_STRING(buffer), (size_t)n, 0);
-    io_uring_sqe_set_data64(sqe, user_data);
-    if (pending_store(self, user_data, URING_API_PENDING_RECV, buffer) < 0) {
-        Py_DECREF(buffer);
-        return NULL;
-    }
+    Py_END_CRITICAL_SECTION();
+
     Py_DECREF(buffer);
-    if (submit_one(self) < 0) {
-        PyObject *ignored = pending_pop(self, user_data);
-        Py_XDECREF(ignored);
+    if (failed) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -410,12 +460,10 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
     Py_buffer view;
     long fd;
     unsigned long long user_data;
+    int failed = 0;
+    bool view_transferred = false;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*K", keywords, &fd, &view, &user_data)) {
-        return NULL;
-    }
-    if (ring_check_open(self) < 0) {
-        PyBuffer_Release(&view);
         return NULL;
     }
     if (fd < 0 || fd > INT_MAX) {
@@ -423,20 +471,33 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
         PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
         return NULL;
     }
-    sqe = get_sqe(self);
-    if (!sqe) {
-        PyBuffer_Release(&view);
-        return NULL;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (pending_store_view(self, user_data, URING_API_PENDING_SEND, &view) < 0) {
+        failed = 1;
+    } else {
+        view_transferred = true;
+        sqe = get_sqe(self);
+        if (!sqe) {
+            pending_discard(self, user_data);
+            failed = 1;
+        } else {
+            io_uring_prep_send(sqe, (int)fd, view.buf, (size_t)view.len, 0);
+            io_uring_sqe_set_data64(sqe, user_data);
+            if (submit_one(self) < 0) {
+                pending_discard(self, user_data);
+                failed = 1;
+            }
+        }
     }
-    io_uring_prep_send(sqe, (int)fd, view.buf, (size_t)view.len, 0);
-    io_uring_sqe_set_data64(sqe, user_data);
-    if (pending_store_view(self, user_data, URING_API_PENDING_SEND, &view) < 0) {
+    Py_END_CRITICAL_SECTION();
+
+    if (!view_transferred) {
         PyBuffer_Release(&view);
-        return NULL;
     }
-    if (submit_one(self) < 0) {
-        PyObject *ignored = pending_pop(self, user_data);
-        Py_XDECREF(ignored);
+    if (failed) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -445,26 +506,33 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     struct io_uring_sqe *sqe;
     unsigned long long user_data;
+    int failed = 0;
 
+    Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
-        return NULL;
+        failed = 1;
+    } else {
+        user_data = self->next_wakeup_data--;
+        if (pending_store(self, user_data, URING_API_PENDING_WAKE, Py_None) < 0) {
+            failed = 1;
+        } else {
+            sqe = get_sqe(self);
+            if (!sqe) {
+                pending_discard(self, user_data);
+                failed = 1;
+            } else {
+                io_uring_prep_nop(sqe);
+                io_uring_sqe_set_data64(sqe, user_data);
+                if (submit_one(self) < 0) {
+                    pending_discard(self, user_data);
+                    failed = 1;
+                }
+            }
+        }
     }
+    Py_END_CRITICAL_SECTION();
 
-    user_data = self->next_wakeup_data--;
-    if (pending_store(self, user_data, URING_API_PENDING_WAKE, Py_None) < 0) {
-        return NULL;
-    }
-    sqe = get_sqe(self);
-    if (!sqe) {
-        PyObject *ignored = pending_pop(self, user_data);
-        Py_XDECREF(ignored);
-        return NULL;
-    }
-    io_uring_prep_nop(sqe);
-    io_uring_sqe_set_data64(sqe, user_data);
-    if (submit_one(self) < 0) {
-        PyObject *ignored = pending_pop(self, user_data);
-        Py_XDECREF(ignored);
+    if (failed) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -563,6 +631,9 @@ static PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject 
     if (timeout_kind < 0) {
         return NULL;
     }
+    if (receive_wait_begin(self) < 0) {
+        return NULL;
+    }
 
     errno = 0;
     if (timeout_kind == 0) {
@@ -580,17 +651,24 @@ static PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject 
     if (ret < 0) {
         int errnum = normalize_ret_errno(ret);
         if (errnum == EAGAIN || errnum == ETIME || errnum == ETIMEDOUT) {
+            receive_wait_end(self);
             Py_RETURN_NONE;
         }
         errno = errnum;
         PyErr_SetFromErrno(PyExc_OSError);
+        receive_wait_end(self);
         return NULL;
     }
     if (!cqe) {
+        receive_wait_end(self);
         Py_RETURN_NONE;
     }
+
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     result = build_cqe_result(self, cqe);
     io_uring_cqe_seen(&self->ring, cqe);
+    self->receive_waiting = false;
+    Py_END_CRITICAL_SECTION();
     return result;
 }
 
