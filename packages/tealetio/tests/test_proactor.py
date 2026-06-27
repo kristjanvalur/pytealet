@@ -125,6 +125,26 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_ready_recv_completes_immediately_without_selector_registration(self):
+        selector = selectors.SelectSelector()
+        proactor = SelectorProactor(selector=selector)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.send(b"hello")
+
+            operation = proactor.recv(reader, 5)
+
+            assert operation.done() is True
+            assert operation.result() == b"hello"
+            with pytest.raises(KeyError):
+                selector.get_key(reader.fileno())
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_accept_and_connect_complete_after_pumping(self):
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -418,7 +438,7 @@ class TestThreadedSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_immediate_completion_is_queued(self):
+    def test_immediate_completion_returns_completed_operation_without_queueing(self):
         proactor = ThreadedSelectorProactor()
         reader, writer = socket.socketpair()
         try:
@@ -427,7 +447,8 @@ class TestThreadedSelectorProactor:
 
             operation = proactor.sendall(writer, b"hello")
 
-            assert proactor.wait(0) == [operation]
+            assert operation.done() is True
+            assert proactor.wait(0) == []
             assert operation.result() is None
             assert reader.recv(5) == b"hello"
         finally:

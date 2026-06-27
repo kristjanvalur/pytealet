@@ -474,18 +474,37 @@ class SelectorProactor:
         self._check_open()
         self._check_socket(sock)
         fd = sock.fileno()
+        self._check_fd_operation_available(fd, event)
+        if self._try_complete_operation(operation, attempt):
+            return
         self._reserve_fd_operation(fd, event, operation)
         operation._attempt = attempt
         operation._set_cancel_callback(self._cancel_operation)
         self._update_selector_registration(fd)
         self.break_wait()
-        self._step_fd_operation(fd, event, [])
 
-    def _reserve_fd_operation(self, fd: int, event: int, operation: Operation[Any]) -> None:
-        entry = self._fd_operations.setdefault(fd, _FdEntry())
+    def _try_complete_operation(self, operation: Operation[T], attempt: Callable[[], T]) -> bool:
+        try:
+            result = attempt()
+        except (BlockingIOError, InterruptedError):
+            return False
+        except BaseException as exc:
+            operation._set_exception(exc)
+        else:
+            operation._set_result(result)
+        return True
+
+    def _check_fd_operation_available(self, fd: int, event: int) -> None:
+        entry = self._fd_operations.get(fd)
+        if entry is None:
+            return
         current = entry.reader if event == selectors.EVENT_READ else entry.writer
         if current is not None:
             raise RuntimeError("an operation is already pending for this fd and direction")
+
+    def _reserve_fd_operation(self, fd: int, event: int, operation: Operation[Any]) -> None:
+        self._check_fd_operation_available(fd, event)
+        entry = self._fd_operations.setdefault(fd, _FdEntry())
         if event == selectors.EVENT_READ:
             entry.reader = operation
         else:
@@ -659,26 +678,6 @@ class ThreadedSelectorProactor(SelectorProactor):
         loop = _asyncio.get_running_loop()
         await loop.run_in_executor(None, self._wait_for_completed, timeout)
         return self._drain_completed()
-
-    def _submit_socket_operation(
-        self,
-        sock: socket.socket,
-        event: int,
-        operation: Operation[T],
-        attempt: Callable[[], T],
-    ) -> None:
-        completed: list[Operation[Any]] = []
-        self._check_open()
-        self._check_socket(sock)
-        fd = sock.fileno()
-        self._reserve_fd_operation(fd, event, operation)
-        operation._attempt = attempt
-        operation._set_cancel_callback(self._cancel_operation)
-        self._update_selector_registration(fd)
-        self.break_wait()
-        self._step_fd_operation(fd, event, completed)
-        if completed:
-            self._queue_completed(completed)
 
     def _queue_completed(self, completed: list[Operation[Any]]) -> None:
         with self._completed_lock:

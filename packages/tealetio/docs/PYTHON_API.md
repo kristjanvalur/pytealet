@@ -49,6 +49,11 @@ running asyncio loop so future asyncio-hosted schedulers can pump tealetio-owned
 IO completions without blocking asyncio itself. Deadlines use the proactor clock:
 `None` waits forever, and `0` always means poll without blocking.
 
+An operation may also complete before it ever reaches the backend wait queue.
+In that case the proactor returns an already-done `Operation`, and callers can
+read its result directly without switching or waiting. Selector-backed proactors
+use this fast path for socket operations that succeed right away.
+
 Proactors also expose `set_completion_callback(callback)`. A real thread-backed
 proactor should call this callback when completions are queued so an async host
 can wake its event loop, for example with `loop.call_soon_threadsafe(...)`.

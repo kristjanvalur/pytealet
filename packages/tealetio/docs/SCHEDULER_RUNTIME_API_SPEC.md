@@ -734,6 +734,10 @@ Status: Implemented.
   queued; `AsyncProactorScheduler` installs a callback that wakes the host
   asyncio loop with `loop.call_soon_threadsafe(...)`. `break_wait()` remains the
   explicit interruption path and does not imply an IO completion.
+- Proactors may return an already-done `Operation` when submission itself can
+  complete the IO. This is the preferred short-circuit path: callers inspect the
+  operation directly, and the backend does not need to queue a completion or wake
+  a wait host.
 - `ThreadedSelectorProactor` is the selector-backed experiment for this shape:
   a worker thread owns readiness polling, queues completed operations, and uses
   the completion callback to wake an async host. `SelectorProactor` remains the
