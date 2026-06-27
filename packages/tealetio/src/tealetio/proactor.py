@@ -8,6 +8,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from contextlib import contextmanager
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, cast
@@ -44,6 +45,17 @@ _DoneCallback = Callable[["Operation[Any]"], object]
 _CancelCallback = Callable[["Operation[Any]"], bool]
 _CompletionCallback = Callable[[], object]
 _Clock = Callable[[], float]
+
+
+@contextmanager
+def released(lock: threading.RLock):
+    """Release `lock` for a blocking call, then reacquire it."""
+
+    lock.release()
+    try:
+        yield
+    finally:
+        lock.acquire()
 
 
 class Proactor(Protocol):
@@ -301,7 +313,8 @@ class SelectorProactor:
 
     def _poll(self, deadline: float | None = None) -> list[Operation[Any]]:
         timeout = self._timeout_until_deadline(deadline)
-        events = self._selector.select(timeout)
+        with released(self._lock):
+            events = self._selector.select(timeout)
         completed: list[Operation[Any]] = []
         wakeup_fd = self._wakeup_reader.fileno()
         for key, mask in events:
@@ -672,8 +685,6 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._completed_ready = threading.Event()
         self._worker_started = False
         self._worker_stop = threading.Event()
-        self._mutation_condition = threading.Condition()
-        self._mutation_requested = False
         self._worker = threading.Thread(target=self._worker_main, name="tealetio-selector-proactor", daemon=True)
 
     def close(self) -> None:
@@ -681,44 +692,12 @@ class ThreadedSelectorProactor(SelectorProactor):
 
         self._worker_stop.set()
         self._completed_ready.set()
-        self._begin_worker_mutation()
-        try:
-            if self._closed:
-                return
-        finally:
-            self._end_worker_mutation()
+        self.break_wait()
+        if self._closed:
+            return
         if self._worker_started and threading.current_thread() is not self._worker:
             self._worker.join()
         super().close()
-
-    def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
-        """Set the callback invoked when backend completions may be ready."""
-
-        self._begin_worker_mutation()
-        try:
-            super().set_completion_callback(callback)
-        finally:
-            self._end_worker_mutation()
-
-    def _submit_socket_operation(
-        self,
-        sock: socket.socket,
-        event: int,
-        operation: Operation[T],
-        attempt: Callable[[], T],
-    ) -> None:
-        self._begin_worker_mutation()
-        try:
-            super()._submit_socket_operation(sock, event, operation, attempt)
-        finally:
-            self._end_worker_mutation()
-
-    def _cancel_operation(self, operation: Operation[Any]) -> bool:
-        self._begin_worker_mutation()
-        try:
-            return super()._cancel_operation(operation)
-        finally:
-            self._end_worker_mutation()
 
     def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
         """Return completed operations, waiting only for queued completions."""
@@ -766,9 +745,6 @@ class ThreadedSelectorProactor(SelectorProactor):
 
     def _worker_main(self) -> None:
         while not self._worker_stop.is_set():
-            self._wait_for_worker_mutations()
-            if self._worker_stop.is_set():
-                return
             try:
                 with self._lock:
                     completed = self._poll(None)
@@ -787,25 +763,6 @@ class ThreadedSelectorProactor(SelectorProactor):
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         self._completed_ready.wait(timeout)
-
-    def _begin_worker_mutation(self) -> None:
-        with self._mutation_condition:
-            self._mutation_requested = True
-        self.break_wait()
-        self._lock.acquire()
-
-    def _end_worker_mutation(self) -> None:
-        try:
-            self._lock.release()
-        finally:
-            with self._mutation_condition:
-                self._mutation_requested = False
-                self._mutation_condition.notify_all()
-
-    def _wait_for_worker_mutations(self) -> None:
-        with self._mutation_condition:
-            while self._mutation_requested and not self._worker_stop.is_set():
-                self._mutation_condition.wait()
 
 
 class ProactorScheduler(BaseScheduler):
