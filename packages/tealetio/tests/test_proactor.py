@@ -383,6 +383,34 @@ class TestSelectorProactor:
 
         assert asyncio.run(run()) == b"hello"
 
+    def test_wait_async_falls_back_when_loop_cannot_watch_fds(self, monkeypatch):
+        async def run() -> bytes:
+            proactor = SelectorProactor()
+            reader, writer = socket.socketpair()
+            try:
+                loop = asyncio.get_running_loop()
+
+                def add_reader_unavailable(*args: object) -> None:
+                    raise NotImplementedError
+
+                monkeypatch.setattr(loop, "add_reader", add_reader_unavailable)
+                reader.setblocking(False)
+                writer.setblocking(False)
+                operation = proactor.recv(reader, 5)
+                waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
+                await asyncio.sleep(0)
+
+                writer.send(b"hello")
+
+                assert await asyncio.wait_for(waiter, 1.0) == [operation]
+                return operation.result()
+            finally:
+                reader.close()
+                writer.close()
+                proactor.close()
+
+        assert asyncio.run(run()) == b"hello"
+
     def test_wait_async_timeout_returns_no_completions(self):
         async def run() -> list[Operation[object]]:
             proactor = SelectorProactor()

@@ -232,7 +232,7 @@ class SelectorProactor:
         if completion_callback is not None and wakeup_callback is not None:
             raise TypeError("use either completion_callback or wakeup_callback, not both")
         self._lock = threading.RLock()
-        self._selector = selector if selector is not None else selectors.DefaultSelector()
+        self._selector = selector if selector is not None else compat.released_default_selector()
         self._fd_operations: dict[int, _FdEntry] = {}
         self._closed = False
         self._completion_callback = completion_callback if completion_callback is not None else wakeup_callback
@@ -342,6 +342,9 @@ class SelectorProactor:
         registered: list[tuple[int, int]] = []
         wakeup_fd = self._wakeup_reader.fileno()
 
+        async def wait_in_executor() -> list[Operation[Any]]:
+            return await loop.run_in_executor(None, self.wait, deadline)
+
         def add_reader(fd: int) -> None:
             loop.add_reader(fd, wake)
             registered.append((fd, selectors.EVENT_READ))
@@ -350,6 +353,7 @@ class SelectorProactor:
             loop.add_writer(fd, wake)
             registered.append((fd, selectors.EVENT_WRITE))
 
+        fallback_to_executor = False
         try:
             add_reader(wakeup_fd)
             with self._lock:
@@ -365,6 +369,8 @@ class SelectorProactor:
                 await ready
             else:
                 await _asyncio.wait_for(ready, timeout)
+        except NotImplementedError:
+            fallback_to_executor = True
         except _asyncio.TimeoutError:
             return []
         finally:
@@ -373,6 +379,8 @@ class SelectorProactor:
                     loop.remove_reader(fd)
                 else:
                     loop.remove_writer(fd)
+        if fallback_to_executor:
+            return await wait_in_executor()
         return self.wait(0)
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:

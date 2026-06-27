@@ -84,9 +84,11 @@ if hasattr(selectors, "EpollSelector"):
             for fd, event in fd_event_list:
                 key = fd_to_key.get(fd)
                 if key:
-                    events = (event & ~select.EPOLLIN and selectors.EVENT_WRITE) | (
-                        event & ~select.EPOLLOUT and selectors.EVENT_READ
-                    )
+                    events = 0
+                    if event & (select.EPOLLIN | select.EPOLLPRI | select.EPOLLERR | select.EPOLLHUP):
+                        events |= selectors.EVENT_READ
+                    if event & (select.EPOLLOUT | select.EPOLLERR | select.EPOLLHUP):
+                        events |= selectors.EVENT_WRITE
                     ready.append((key, events & key.events))
             return ready
 

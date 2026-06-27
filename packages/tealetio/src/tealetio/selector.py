@@ -474,7 +474,7 @@ class AsyncSelectorScheduler(AsyncDrivingMixin, SelectorScheduler, AsyncSchedule
             else:
                 try:
                     await _asyncio.wait_for(waiter, timeout)
-                except TimeoutError:
+                except _asyncio.TimeoutError:
                     pass
         finally:
             for fd, event in registered:
