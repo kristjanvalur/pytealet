@@ -91,6 +91,7 @@ class Operation(Generic[T]):
     def __init__(self, *, kind: str, fileobj: object | None = None) -> None:
         self.kind = kind
         self.fileobj = fileobj
+        self._lock = threading.RLock()
         self._done = False
         self._cancelled = False
         self._result: T | None = None
@@ -102,84 +103,108 @@ class Operation(Generic[T]):
     def done(self) -> bool:
         """Return True if the operation has completed."""
 
-        return self._done
+        with self._lock:
+            return self._done
 
     def cancelled(self) -> bool:
         """Return True if the operation completed by cancellation."""
 
-        return self._cancelled
+        with self._lock:
+            return self._cancelled
 
     def cancel(self) -> bool:
         """Cancel the operation if it has not completed yet."""
 
-        if self._done:
-            return False
-        if self._cancel_callback is not None:
-            return self._cancel_callback(self)
-        self._set_cancelled()
-        return True
+        with self._lock:
+            if self._done:
+                return False
+            cancel_callback = self._cancel_callback
+        if cancel_callback is not None:
+            return cancel_callback(self)
+        return self._set_cancelled(raise_if_done=False)
 
     def result(self) -> T:
         """Return the operation result, or raise its completion exception."""
 
-        if not self._done:
-            raise InvalidStateError("operation result is not ready")
-        if self._exception is not None:
-            raise self._exception
-        return cast(T, self._result)
+        with self._lock:
+            if not self._done:
+                raise InvalidStateError("operation result is not ready")
+            exception = self._exception
+            result = self._result
+        if exception is not None:
+            raise exception
+        return cast(T, result)
 
     def exception(self) -> BaseException | None:
         """Return the operation exception, or None for successful completion."""
 
-        if not self._done:
-            raise InvalidStateError("operation exception is not ready")
-        return self._exception
+        with self._lock:
+            if not self._done:
+                raise InvalidStateError("operation exception is not ready")
+            return self._exception
 
     def add_done_callback(self, callback: _DoneCallback) -> None:
         """Register `callback` to run when the operation completes."""
 
-        if self._done:
+        with self._lock:
+            if self._done:
+                run_now = True
+            else:
+                self._callbacks.append(callback)
+                run_now = False
+        if run_now:
             callback(self)
-            return
-        self._callbacks.append(callback)
 
     def remove_done_callback(self, callback: _DoneCallback) -> int:
         """Remove matching done callbacks and return the number removed."""
 
-        removed = 0
-        kept: list[_DoneCallback] = []
-        for stored_callback in self._callbacks:
-            if stored_callback is callback:
-                removed += 1
-            else:
-                kept.append(stored_callback)
-        self._callbacks = kept
-        return removed
+        with self._lock:
+            removed = 0
+            kept: list[_DoneCallback] = []
+            for stored_callback in self._callbacks:
+                if stored_callback is callback:
+                    removed += 1
+                else:
+                    kept.append(stored_callback)
+            self._callbacks = kept
+            return removed
 
     def _set_cancel_callback(self, callback: _CancelCallback) -> None:
-        self._cancel_callback = callback
+        with self._lock:
+            self._cancel_callback = callback
 
     def _set_result(self, result: T) -> None:
-        if self._done:
-            raise InvalidStateError("operation already done")
-        self._result = result
-        self._done = True
-        self._run_done_callbacks()
+        self._finish(result=result)
 
     def _set_exception(self, exc: BaseException) -> None:
-        if self._done:
-            raise InvalidStateError("operation already done")
-        self._exception = exc
-        self._done = True
-        self._run_done_callbacks()
+        self._finish(exception=exc)
 
-    def _set_cancelled(self) -> None:
-        self._cancelled = True
-        self._set_exception(CancelledError())
+    def _set_cancelled(self, *, raise_if_done: bool = True) -> bool:
+        return self._finish(exception=CancelledError(), cancelled=True, raise_if_done=raise_if_done)
 
-    def _run_done_callbacks(self) -> None:
-        callbacks = self._callbacks[:]
-        self._callbacks.clear()
+    def _finish(
+        self,
+        *,
+        result: T | None = None,
+        exception: BaseException | None = None,
+        cancelled: bool = False,
+        raise_if_done: bool = True,
+    ) -> bool:
+        with self._lock:
+            if self._done:
+                if raise_if_done:
+                    raise InvalidStateError("operation already done")
+                return False
+            self._result = result
+            self._exception = exception
+            self._cancelled = cancelled
+            self._done = True
+            callbacks = self._callbacks[:]
+            self._callbacks.clear()
+        self._run_done_callbacks(callbacks)
+        return True
+
+    def _run_done_callbacks(self, callbacks: list[_DoneCallback]) -> None:
         for callback in callbacks:
             callback(self)
 
@@ -205,6 +230,7 @@ class SelectorProactor:
     ) -> None:
         if completion_callback is not None and wakeup_callback is not None:
             raise TypeError("use either completion_callback or wakeup_callback, not both")
+        self._lock = threading.RLock()
         self._selector = selector if selector is not None else selectors.DefaultSelector()
         self._fd_operations: dict[int, _FdEntry] = {}
         self._closed = False
@@ -218,7 +244,8 @@ class SelectorProactor:
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
         """Set the callback invoked when backend completions may be ready."""
 
-        self._completion_callback = callback
+        with self._lock:
+            self._completion_callback = callback
 
     def set_wakeup_callback(self, callback: _CompletionCallback | None) -> None:
         """Set the callback invoked when backend completions may be ready."""
@@ -228,7 +255,8 @@ class SelectorProactor:
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
 
-        return bool(self._fd_operations)
+        with self._lock:
+            return bool(self._fd_operations)
 
     def get_time(self) -> float:
         """Return the proactor clock value."""
@@ -238,17 +266,20 @@ class SelectorProactor:
     def set_clock(self, clock: _Clock) -> None:
         """Set the clock used for deadline-oriented waits."""
 
-        self._clock = clock
+        with self._lock:
+            self._clock = clock
 
     def close(self) -> None:
         """Close selector and wakeup resources."""
 
-        if self._closed:
-            return
-        self._closed = True
-        self._selector.close()
-        self._wakeup_reader.close()
-        self._wakeup_writer.close()
+        self.break_wait()
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._selector.close()
+            self._wakeup_reader.close()
+            self._wakeup_writer.close()
 
     def break_wait(self) -> None:
         """Interrupt a thread blocked in `wait` without completing operations."""
@@ -261,8 +292,9 @@ class SelectorProactor:
     def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
         """Wait until `deadline` for ready operations and return those completed."""
 
-        self._check_open()
-        completed = self._poll(deadline)
+        with self._lock:
+            self._check_open()
+            completed = self._poll(deadline)
         if completed:
             self._notify_completion()
         return completed
@@ -315,8 +347,11 @@ class SelectorProactor:
 
         try:
             add_reader(wakeup_fd)
-            for fd in self._fd_operations:
-                mask = self._selector_mask_for_fd(fd)
+            with self._lock:
+                registered_fds = list(self._fd_operations)
+            for fd in registered_fds:
+                with self._lock:
+                    mask = self._selector_mask_for_fd(fd)
                 if mask & selectors.EVENT_READ:
                     add_reader(fd)
                 if mask & selectors.EVENT_WRITE:
@@ -471,16 +506,17 @@ class SelectorProactor:
         operation: Operation[T],
         attempt: Callable[[], T],
     ) -> None:
-        self._check_open()
-        self._check_socket(sock)
-        fd = sock.fileno()
-        self._check_fd_operation_available(fd, event)
-        if self._try_complete_operation(operation, attempt):
-            return
-        self._reserve_fd_operation(fd, event, operation)
-        operation._attempt = attempt
-        operation._set_cancel_callback(self._cancel_operation)
-        self._update_selector_registration(fd)
+        with self._lock:
+            self._check_open()
+            self._check_socket(sock)
+            fd = sock.fileno()
+            self._check_fd_operation_available(fd, event)
+            if self._try_complete_operation(operation, attempt):
+                return
+            self._reserve_fd_operation(fd, event, operation)
+            operation._attempt = attempt
+            operation._set_cancel_callback(self._cancel_operation)
+            self._update_selector_registration(fd)
         self.break_wait()
 
     def _try_complete_operation(self, operation: Operation[T], attempt: Callable[[], T]) -> bool:
@@ -511,12 +547,13 @@ class SelectorProactor:
             entry.writer = operation
 
     def _cancel_operation(self, operation: Operation[Any]) -> bool:
-        removed = self._remove_operation(operation)
+        with self._lock:
+            removed = self._remove_operation(operation)
         if not removed:
             return False
-        operation._set_cancelled()
+        cancelled = operation._set_cancelled(raise_if_done=False)
         self.break_wait()
-        return True
+        return cancelled
 
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
@@ -603,7 +640,8 @@ class SelectorProactor:
                 return
 
     def _notify_completion(self) -> None:
-        callback = self._completion_callback
+        with self._lock:
+            callback = self._completion_callback
         if callback is not None:
             callback()
 
@@ -634,19 +672,53 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._completed_ready = threading.Event()
         self._worker_started = False
         self._worker_stop = threading.Event()
+        self._mutation_condition = threading.Condition()
+        self._mutation_requested = False
         self._worker = threading.Thread(target=self._worker_main, name="tealetio-selector-proactor", daemon=True)
 
     def close(self) -> None:
         """Stop the worker thread and close selector resources."""
 
-        if self._closed:
-            return
         self._worker_stop.set()
         self._completed_ready.set()
-        self.break_wait()
+        self._begin_worker_mutation()
+        try:
+            if self._closed:
+                return
+        finally:
+            self._end_worker_mutation()
         if self._worker_started and threading.current_thread() is not self._worker:
             self._worker.join()
         super().close()
+
+    def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
+        """Set the callback invoked when backend completions may be ready."""
+
+        self._begin_worker_mutation()
+        try:
+            super().set_completion_callback(callback)
+        finally:
+            self._end_worker_mutation()
+
+    def _submit_socket_operation(
+        self,
+        sock: socket.socket,
+        event: int,
+        operation: Operation[T],
+        attempt: Callable[[], T],
+    ) -> None:
+        self._begin_worker_mutation()
+        try:
+            super()._submit_socket_operation(sock, event, operation, attempt)
+        finally:
+            self._end_worker_mutation()
+
+    def _cancel_operation(self, operation: Operation[Any]) -> bool:
+        self._begin_worker_mutation()
+        try:
+            return super()._cancel_operation(operation)
+        finally:
+            self._end_worker_mutation()
 
     def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
         """Return completed operations, waiting only for queued completions."""
@@ -686,15 +758,20 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._notify_completion()
 
     def _ensure_worker_started(self) -> None:
-        if self._worker_started:
-            return
-        self._worker_started = True
-        self._worker.start()
+        with self._lock:
+            if self._worker_started:
+                return
+            self._worker_started = True
+            self._worker.start()
 
     def _worker_main(self) -> None:
         while not self._worker_stop.is_set():
+            self._wait_for_worker_mutations()
+            if self._worker_stop.is_set():
+                return
             try:
-                completed = self._poll(None)
+                with self._lock:
+                    completed = self._poll(None)
             except (OSError, ValueError, RuntimeError):
                 return
             if completed:
@@ -710,6 +787,25 @@ class ThreadedSelectorProactor(SelectorProactor):
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         self._completed_ready.wait(timeout)
+
+    def _begin_worker_mutation(self) -> None:
+        with self._mutation_condition:
+            self._mutation_requested = True
+        self.break_wait()
+        self._lock.acquire()
+
+    def _end_worker_mutation(self) -> None:
+        try:
+            self._lock.release()
+        finally:
+            with self._mutation_condition:
+                self._mutation_requested = False
+                self._mutation_condition.notify_all()
+
+    def _wait_for_worker_mutations(self) -> None:
+        with self._mutation_condition:
+            while self._mutation_requested and not self._worker_stop.is_set():
+                self._mutation_condition.wait()
 
 
 class ProactorScheduler(BaseScheduler):

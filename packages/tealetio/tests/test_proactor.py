@@ -468,6 +468,74 @@ class TestThreadedSelectorProactor:
         finally:
             proactor.close()
 
+    def test_submit_wakes_worker_before_mutating_selector(self):
+        proactor = ThreadedSelectorProactor()
+        reader, writer = socket.socketpair()
+        operation: Operation[bytes] | None = None
+        error: BaseException | None = None
+
+        def submit() -> None:
+            nonlocal operation, error
+            try:
+                operation = proactor.recv(reader, 1)
+            except BaseException as exc:  # pragma: no cover - assertion reports it
+                error = exc
+
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            assert proactor.wait(0) == []
+
+            thread = threading.Thread(target=submit)
+            thread.start()
+            thread.join(1.0)
+
+            assert thread.is_alive() is False
+            assert error is None
+            assert operation is not None
+
+            writer.send(b"x")
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert operation.result() == b"x"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_wakes_worker_before_mutating_selector(self):
+        proactor = ThreadedSelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 1)
+            assert proactor.wait(0) == []
+
+            thread = threading.Thread(target=operation.cancel)
+            thread.start()
+            thread.join(1.0)
+
+            assert thread.is_alive() is False
+            assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_set_completion_callback_wakes_worker_before_locking(self):
+        proactor = ThreadedSelectorProactor()
+        try:
+            assert proactor.wait(0) == []
+
+            thread = threading.Thread(target=lambda: proactor.set_completion_callback(lambda: None))
+            thread.start()
+            thread.join(1.0)
+
+            assert thread.is_alive() is False
+        finally:
+            proactor.close()
+
     def test_async_scheduler_drives_threaded_backend(self):
         async def run() -> bytes:
             scheduler = AsyncProactorScheduler(ThreadedSelectorProactor)

@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed `run_asyncio_in_tealet(...)` to choose the hosted asyncio loop from
   the active scheduler type by default, using the proactor loop for proactor
   schedulers and the selector loop for selector schedulers.
+- Protected proactor operation completion state and threaded selector-proactor
+  mutations for free-threaded Python builds.
 - Relaxed the `tealet` dependency to the compatible `0.1` range
   (`tealet>=0.1.0rc2,<0.2`) instead of pinning one release candidate exactly.
 - Optimised `await_()` coroutine handling so coroutine await protocols are driven
