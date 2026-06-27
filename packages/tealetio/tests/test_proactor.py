@@ -416,6 +416,10 @@ class TestSelectorProactor:
 
 
 class TestThreadedSelectorProactor:
+    def test_requires_selector_with_select_released(self):
+        with pytest.raises(TypeError, match="select_released"):
+            ThreadedSelectorProactor(selector=selectors.SelectSelector())
+
     def test_worker_thread_signals_completion(self):
         callback_threads: list[int] = []
         main_thread = threading.get_ident()

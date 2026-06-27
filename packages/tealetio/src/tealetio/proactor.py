@@ -46,6 +46,46 @@ _CompletionCallback = Callable[[], object]
 _Clock = Callable[[], float]
 
 
+class _SelectReleasedSelector(Protocol):
+    def select_released(
+        self, timeout: float | None = None, lock: Any | None = None
+    ) -> list[tuple[selectors.SelectorKey, int]]: ...
+
+
+class _ReleasedSelectSelector(selectors.SelectSelector):
+    """Select selector that snapshots fd sets before releasing a caller lock."""
+
+    def select_released(
+        self, timeout: float | None = None, lock: Any | None = None
+    ) -> list[tuple[selectors.SelectorKey, int]]:
+        timeout = None if timeout is None else max(timeout, 0)
+        selector = cast(Any, self)
+        readers = frozenset(selector._readers)
+        writers = frozenset(selector._writers)
+        ready: list[tuple[selectors.SelectorKey, int]] = []
+
+        if lock is not None:
+            lock.release()
+        try:
+            try:
+                readable, writable, _ = selector._select(readers, writers, [], timeout)
+            except InterruptedError:
+                return ready
+        finally:
+            if lock is not None:
+                lock.acquire()
+
+        readable = frozenset(readable)
+        writable = frozenset(writable)
+        fd_to_key_get = selector._fd_to_key.get
+        for fd in readable | writable:
+            key = fd_to_key_get(fd)
+            if key:
+                events = (fd in readable and selectors.EVENT_READ) | (fd in writable and selectors.EVENT_WRITE)
+                ready.append((key, events & key.events))
+        return ready
+
+
 class Proactor(Protocol):
     """Minimal completion-oriented IO backend used by `ProactorScheduler`."""
 
@@ -301,11 +341,11 @@ class SelectorProactor:
 
     def _poll(self, deadline: float | None = None) -> list[Operation[Any]]:
         timeout = self._timeout_until_deadline(deadline)
-        self._lock.release()
-        try:
+        select_released = getattr(self._selector, "select_released", None)
+        if select_released is None:
             events = self._selector.select(timeout)
-        finally:
-            self._lock.acquire()
+        else:
+            events = cast(_SelectReleasedSelector, self._selector).select_released(timeout, self._lock)
         completed: list[Operation[Any]] = []
         wakeup_fd = self._wakeup_reader.fileno()
         for key, mask in events:
@@ -670,6 +710,10 @@ class ThreadedSelectorProactor(SelectorProactor):
         completion_callback: _CompletionCallback | None = None,
         wakeup_callback: _CompletionCallback | None = None,
     ) -> None:
+        if selector is None:
+            selector = _ReleasedSelectSelector()
+        elif not hasattr(selector, "select_released"):
+            raise TypeError("ThreadedSelectorProactor requires a selector with select_released()")
         super().__init__(selector, completion_callback=completion_callback, wakeup_callback=wakeup_callback)
         self._completed: deque[Operation[Any]] = deque()
         self._completed_lock = threading.Lock()
