@@ -29,13 +29,17 @@ Implemented:
 - Driving is layered through `BaseDrivingMixin`, with `SyncDrivingMixin` adding
   the blocking `run*` facade and `AsyncDrivingMixin` keeping asyncio-hosted
   schedulers on the `arun*` facade.
-- `Scheduler` is the default concrete synchronous scheduler implementation and
-  is backed by a proactor.
+- `Scheduler` is an alias for the default concrete synchronous scheduler
+  implementation and is backed by a proactor.
 - `ProactorScheduler` is the shared abstract proactor core.
   `SyncProactorScheduler` accepts a custom proactor factory for synchronous
   driving, and `AsyncProactorScheduler` uses the same proactor core with async
   driving. `BasicScheduler` keeps the no-IO cooperative scheduling core for
   tests and pure scheduling work.
+- `SelectorScheduler` is the shared abstract selector core.
+  `SyncSelectorScheduler` and `AsyncSelectorScheduler` apply the same driving
+  split to selector readiness. `TealetHostedScheduler` is the specialised sync
+  selector scheduler used by the tealet-hosted asyncio runner.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
 - `Scheduler` and `AsyncScheduler` can be used directly as factories. They share
   the common scheduler/task/timer APIs from `BaseScheduler`, while implementing
@@ -46,7 +50,7 @@ Implemented:
   - `add_writer(...)`
   - `remove_writer(...)`
   `tealetio.asyncio.AsyncScheduler` delegates these hooks to the running asyncio loop.
-  `tealetio.selector.SelectorScheduler` implements them through its native selector reactor.
+  Concrete selector schedulers implement them through their native selector reactor.
   Selector readiness waits (`wait_readable(...)` and `wait_writable(...)`) are
   layered on top of one-shot reader/writer callbacks that wake tealet `Event`
   waiters.
@@ -557,7 +561,7 @@ Return behavior:
 ### tealetio.asyncio.run_asyncio_in_tealet(...)
 
 - Creates a temporary `tealetio.runner.Runner` with a
-  `tealetio.selector.SelectorScheduler` by default.
+  `tealetio.asyncio.TealetHostedScheduler` by default.
 - Disables the outer tealet runner's SIGINT handler by default so the inner
   `asyncio.Runner` can install its normal interrupt handler.
 - Creates a temporary `asyncio.Runner` whose default loop is
@@ -595,7 +599,7 @@ Return behavior:
   - `RuntimeError` indicating Python 3.11+ is required
 - `tealetio.asyncio.run_asyncio_in_tealet(...)` with a non-selector scheduler and
   no custom loop factory:
-  - `RuntimeError` indicating that a `SelectorScheduler` is required
+  - `RuntimeError` indicating that a selector scheduler is required
 - invalid factory return values:
   - Factories are duck typed; failures surface naturally when required scheduler
     operations are used.
@@ -758,9 +762,9 @@ Status: Initial Unix selector prototype implemented.
 - A tealet-hosted asyncio loop may be feasible if the asyncio loop's raw
   blocking points can be delegated to the outer tealet scheduler.
 - `tealetio.asyncio.TealetSelectorEventLoop` is an experimental
-  `asyncio.SelectorEventLoop` subclass hosted by `tealetio.selector.SelectorScheduler`.
+  `asyncio.SelectorEventLoop` subclass hosted by `tealetio.asyncio.TealetHostedScheduler`.
 - The implementation uses a selector adapter whose fd registration is backed by
-  `SelectorScheduler.add_reader(...)` and `add_writer(...)`; when asyncio's
+  `TealetHostedScheduler.add_reader(...)` and `add_writer(...)`; when asyncio's
   selector would block, the pump tealet parks on a scheduler `Event` and wakes
   from fd readiness, a scheduler timer, or asyncio's self-pipe.
 - The critical hook is file-descriptor readiness. Asyncio selector loops use

@@ -16,7 +16,7 @@ from tealetio import (
     PriorityTask,
     Runner,
     Scheduler,
-    SelectorScheduler,
+    TealetHostedScheduler,
     TealetSelectorEventLoop,
     asyncio_get_current,
     get_current,
@@ -1058,7 +1058,7 @@ class TestRunHelper:
     def test_run_asyncio_in_tealet_closes_factory_scheduler(self):
         closed = False
 
-        class ClosingSelectorScheduler(SelectorScheduler):
+        class ClosingSelectorScheduler(TealetHostedScheduler):
             def close(self) -> None:
                 nonlocal closed
                 closed = True

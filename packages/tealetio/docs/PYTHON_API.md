@@ -19,7 +19,7 @@ Common imports can use the package root:
 
 ```python
 from tealetio import Event, Future, Scheduler, gather, run, sleep, spawn, wait_for
-from tealetio import AsyncRunner, AsyncScheduler, SelectorScheduler
+from tealetio import AsyncRunner, AsyncScheduler, SyncSelectorScheduler
 ```
 
 Submodule imports remain supported when code wants to make the implementation
@@ -30,15 +30,18 @@ from tealetio.scheduler import Scheduler
 from tealetio.runner import run
 ```
 
-`Scheduler` is the default synchronous scheduler and is backed by a proactor.
+`Scheduler` is an alias for the default synchronous scheduler and is backed by a proactor.
 Use `SyncProactorScheduler` directly when you want to provide a custom proactor
 factory for synchronous driving, and use `AsyncProactorScheduler` for the same
 proactor-backed IO model under an async driving facade. `ProactorScheduler` is
-the shared abstract proactor core. Use `BasicScheduler` when you deliberately
-want the small no-IO driver that only waits for timers and explicit scheduler
-wakeups. The shared task, timer, future, and callback behaviour lives in the
-cooperative scheduling core; the blocking and asyncio-hosted run loops are
-separate driving facades.
+the shared abstract proactor core. Likewise, `SelectorScheduler` is the shared
+abstract selector core, with `SyncSelectorScheduler` and `AsyncSelectorScheduler`
+as concrete driving variants. `TealetHostedScheduler` is the specialised sync
+selector scheduler used by `run_asyncio_in_tealet(...)`. Use `BasicScheduler`
+when you deliberately want the small no-IO driver that only waits for timers and
+explicit scheduler wakeups. The shared task, timer, future, and callback
+behaviour lives in the cooperative scheduling core; the blocking and
+asyncio-hosted run loops are separate driving facades.
 
 Proactors expose both `wait(deadline=None)` and `await wait_async(deadline=None)`.
 The synchronous form blocks the current thread; the async form waits through the

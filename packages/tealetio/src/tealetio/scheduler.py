@@ -1855,8 +1855,4 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
         self._wait_thread()
 
 
-_SyncProactorScheduler = importlib.import_module(".proactor", __package__).SyncProactorScheduler
-
-
-class Scheduler(_SyncProactorScheduler):
-    """Default synchronous scheduler backed by a proactor."""
+Scheduler = importlib.import_module(".proactor", __package__).SyncProactorScheduler

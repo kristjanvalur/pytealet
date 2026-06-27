@@ -343,13 +343,18 @@ class BaseScheduler:
     ...
 
 
-class Scheduler(BaseScheduler):
-    # current no-IO scheduler; waits on a thread event plus timers
+class BasicScheduler(BaseScheduler):
+  # no-IO scheduler; waits on a thread event plus timers
     ...
 
 
 class SelectorScheduler(BaseScheduler):
-    # Unix-first scheduler; waits on selectors plus timers plus wakeups
+  # shared selector readiness core
+  ...
+
+
+class SyncSelectorScheduler(SelectorScheduler):
+  # synchronous selector driver; waits on selectors plus timers plus wakeups
     ...
 ```
 
@@ -431,8 +436,8 @@ This leads to three coexistence modes worth keeping distinct:
   dependency and a separate event-loop family.
 
 The concrete first experiment is now narrow and Unix-first:
-`tealetio.selector.SelectorScheduler` provides selector-backed readiness callbacks
-and socket helpers, and `tealetio.asyncio.TealetSelectorEventLoop` provides an
+`tealetio.selector.SyncSelectorScheduler` provides selector-backed readiness
+callbacks and socket helpers, and `tealetio.asyncio.TealetSelectorEventLoop` provides an
 experimental tealet-aware selector adapter for `asyncio.SelectorEventLoop`.
 Asyncio timers, self-pipe wakeups, and socket readiness can share the host
 scheduler's blocking point. `tealetio.asyncio.run_asyncio_in_tealet(...)` wraps
@@ -494,11 +499,12 @@ The most realistic combined shape is the current direction in `tealetio`:
 
 - `BaseScheduler` owns runnable tasks, timers, futures, callbacks, and wait
   cleanup rules.
-- `Scheduler` provides the no-IO synchronous driver.
-- `SelectorScheduler` adds selector-backed readiness and socket helpers.
+- `Scheduler` is the default synchronous scheduler alias backed by a proactor.
+- `SelectorScheduler` is the shared selector readiness core, with
+  `SyncSelectorScheduler` and `AsyncSelectorScheduler` as concrete drivers.
 - `AsyncScheduler` embeds tealet work inside an existing asyncio loop.
 - `TealetSelectorEventLoop` explores the opposite direction by letting asyncio's
-  selector wait be hosted by a selector-backed tealet scheduler.
+  selector wait be hosted by `TealetHostedScheduler`.
 
 That keeps the implementation modular while leaving room for future policy
 objects, such as priority runnable queues or deeper await-token interpretation.
@@ -513,7 +519,7 @@ The best default direction is:
 3. Let asyncio remain the top-level reactor for general-purpose IO integration.
 4. Embed tealet scheduling as a guest inside asyncio when applications already
    live in asyncio.
-5. Use `SelectorScheduler` and `TealetSelectorEventLoop` for explicit
+5. Use `TealetHostedScheduler` and `TealetSelectorEventLoop` for explicit
    tealet-hosted asyncio experiments, with clear same-thread and selector-loop
    constraints.
 6. Make cancellation, context propagation, and thread ownership explicit rather
