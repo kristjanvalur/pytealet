@@ -649,6 +649,17 @@ class _FakeUringRing:
             self.completions.append(completion)
 
 
+class _DeferredUringRing(_FakeUringRing):
+    def submit_recv(self, fd: int, n: int, user_data: int) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_recv.append((fd, n, user_data))
+
+    def complete_recv(self, data: bytes = b"hello") -> None:
+        user_data = self.submitted_recv[-1][2]
+        self._deliver({"user_data": user_data, "res": len(data), "flags": 0, "result": data})
+
+
 class TestUringProactor:
     def test_initializes_ring_with_entries_and_flags(self):
         created: list[_FakeUringRing] = []
@@ -713,13 +724,13 @@ class TestUringProactor:
 
         assert asyncio.run(run()) == []
 
-    def test_break_wait_delegates_to_ring(self):
+    def test_break_wait_wakes_proactor_waiters_without_ring_wakeup(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             proactor.break_wait()
 
             assert isinstance(proactor.ring, _FakeUringRing)
-            assert proactor.ring.break_count == 1
+            assert proactor.ring.break_count == 0
         finally:
             proactor.close()
 
@@ -743,15 +754,43 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_wait_async_completes_from_worker_queue(self):
+    def test_wait_async_completes_from_callback_wakeup(self, monkeypatch):
         async def run() -> bytes:
-            proactor = UringProactor(ring_factory=_FakeUringRing)
+            created: list[_DeferredUringRing] = []
+
+            def ring_factory(entries: int, flags: int) -> _DeferredUringRing:
+                ring = _DeferredUringRing(entries, flags)
+                created.append(ring)
+                return ring
+
+            proactor = UringProactor(ring_factory=ring_factory)
             reader, writer = socket.socketpair()
             try:
+                loop = asyncio.get_running_loop()
+                call_soon_threadsafe_calls: list[object] = []
+                original_call_soon_threadsafe = loop.call_soon_threadsafe
+
+                def call_soon_threadsafe(callback, *args, context=None):
+                    call_soon_threadsafe_calls.append(callback)
+                    return original_call_soon_threadsafe(callback, *args, context=context)
+
+                def run_in_executor(*args, **kwargs):
+                    raise AssertionError("UringProactor.wait_async should not use an executor")
+
+                monkeypatch.setattr(loop, "call_soon_threadsafe", call_soon_threadsafe)
+                monkeypatch.setattr(loop, "run_in_executor", run_in_executor)
                 reader.setblocking(False)
                 operation = proactor.recv(reader, 5)
+                waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
+                await asyncio.sleep(0)
 
-                assert await proactor.wait_async(proactor.get_time() + 1.0) == [operation]
+                thread = threading.Thread(target=created[0].complete_recv)
+                thread.start()
+
+                assert await asyncio.wait_for(waiter, 1.0) == [operation]
+                thread.join(1.0)
+                assert thread.is_alive() is False
+                assert call_soon_threadsafe_calls
                 return operation.result()
             finally:
                 reader.close()

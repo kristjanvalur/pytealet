@@ -821,6 +821,8 @@ class UringProactor:
         self._pending: dict[int, _UringEntry] = {}
         self._completed: deque[Operation[Any]] = deque()
         self._completed_ready = threading.Event()
+        self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
+        self._async_wait_ready: _asyncio.Event | None = None
         self._ring.callback = self._deliver_uring_completion
         try:
             self._ring.start()
@@ -838,8 +840,7 @@ class UringProactor:
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
         """Set the callback invoked when backend completions may be ready."""
 
-        with self._lock:
-            self._completion_callback = callback
+        self._completion_callback = callback
 
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
@@ -869,17 +870,22 @@ class UringProactor:
             for entry in self._pending.values():
                 entry.operation._set_cancelled(raise_if_done=False)
             self._pending.clear()
-            self._completed_ready.set()
+        self.break_wait()
         self._ring.callback = None
         self._ring.close()
 
     def break_wait(self) -> None:
         """Interrupt a thread blocked in `wait` without completing operations."""
 
-        try:
-            self._ring.break_wait()
-        except RuntimeError:
-            pass
+        with self._lock:
+            self._completed_ready.set()
+            loop = self._async_wait_loop
+            event = self._async_wait_ready
+        if loop is not None and event is not None:
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                pass
 
     def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
         """Wait until completed operations are queued and return them."""
@@ -895,24 +901,39 @@ class UringProactor:
             timeout = self._timeout_until_deadline(deadline)
             if timeout == 0:
                 return []
-            self._wait_for_completed(timeout)
+            if not self._wait_for_completed(timeout):
+                return []
+            return self._drain_completed()
 
     async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
         """Wait asynchronously until completed operations are queued."""
 
         self._check_open()
         loop = _asyncio.get_running_loop()
-        while True:
-            completed = self._drain_completed()
-            if completed or deadline == 0:
-                return completed
-            if not self.has_pending_operations():
-                return []
+        completed = self._drain_completed()
+        if completed or deadline == 0:
+            return completed
+        if not self.has_pending_operations():
+            return []
 
-            timeout = self._timeout_until_deadline(deadline)
-            if timeout == 0:
-                return []
-            await loop.run_in_executor(None, self._wait_for_completed, timeout)
+        timeout = self._timeout_until_deadline(deadline)
+        if timeout == 0:
+            return []
+        ready = self._get_async_wait_event(loop)
+        ready.clear()
+        completed = self._drain_completed()
+        if completed:
+            return completed
+        if not self.has_pending_operations():
+            return []
+        try:
+            if timeout is None:
+                await ready.wait()
+            else:
+                await compat.wait_for_timeout(ready.wait(), timeout)
+        except _asyncio.TimeoutError:
+            return []
+        return self._drain_completed()
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
@@ -996,7 +1017,7 @@ class UringProactor:
     def _queue_completed(self, completed: list[Operation[Any]]) -> None:
         with self._lock:
             self._completed.extend(completed)
-            self._completed_ready.set()
+        self.break_wait()
         self._notify_completion()
 
     def _drain_completed(self) -> list[Operation[Any]]:
@@ -1007,8 +1028,17 @@ class UringProactor:
                 self._completed_ready.clear()
         return completed
 
-    def _wait_for_completed(self, timeout: float | None) -> None:
-        self._completed_ready.wait(timeout)
+    def _wait_for_completed(self, timeout: float | None) -> bool:
+        return self._completed_ready.wait(timeout)
+
+    def _get_async_wait_event(self, loop: _asyncio.AbstractEventLoop) -> _asyncio.Event:
+        with self._lock:
+            if self._async_wait_loop is loop and self._async_wait_ready is not None:
+                return self._async_wait_ready
+            ready = _asyncio.Event()
+            self._async_wait_loop = loop
+            self._async_wait_ready = ready
+            return ready
 
     def _deliver_uring_completion(self, completion: dict[str, object]) -> None:
         completed: list[Operation[Any]] = []
