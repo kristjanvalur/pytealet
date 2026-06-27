@@ -1,8 +1,13 @@
 import errno
+from importlib import resources
 
 import pytest
 
 import uring_api
+
+
+def test_package_is_marked_as_typed():
+    assert resources.files("uring_api").joinpath("py.typed").is_file()
 
 
 def test_probe_returns_structured_result():

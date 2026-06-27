@@ -10,7 +10,7 @@ from collections import deque
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
-from typing import Any, Generic, Protocol, TypeVar, cast
+from typing import Any, Generic, NoReturn, Protocol, TypeVar, cast
 
 from . import compat
 from .locks import Event
@@ -34,6 +34,7 @@ __all__ = [
     "SelectorProactor",
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",
+    "UringProactor",
 ]
 
 
@@ -45,6 +46,27 @@ _DoneCallback = Callable[["Operation[Any]"], object]
 _CancelCallback = Callable[["Operation[Any]"], bool]
 _CompletionCallback = Callable[[], object]
 _Clock = Callable[[], float]
+
+
+class _UringRing(Protocol):
+    fd: int
+    features: int
+    sq_entries: int
+    cq_entries: int
+    closed: bool
+
+    def close(self) -> None: ...
+
+
+_UringRingFactory = Callable[[int, int], _UringRing]
+
+
+def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
+    try:
+        import uring_api
+    except ImportError as exc:
+        raise RuntimeError("UringProactor requires the uring-api package") from exc
+    return cast(_UringRing, uring_api.Ring(entries=entries, flags=flags))
 
 
 class Proactor(Protocol):
@@ -227,15 +249,12 @@ class SelectorProactor:
         selector: selectors.BaseSelector | None = None,
         *,
         completion_callback: _CompletionCallback | None = None,
-        wakeup_callback: _CompletionCallback | None = None,
     ) -> None:
-        if completion_callback is not None and wakeup_callback is not None:
-            raise TypeError("use either completion_callback or wakeup_callback, not both")
         self._lock = threading.RLock()
         self._selector = selector if selector is not None else compat.released_default_selector()
         self._fd_operations: dict[int, _FdEntry] = {}
         self._closed = False
-        self._completion_callback = completion_callback if completion_callback is not None else wakeup_callback
+        self._completion_callback = completion_callback
         self._clock = time.monotonic
         self._wakeup_reader, self._wakeup_writer = socket.socketpair()
         self._wakeup_reader.setblocking(False)
@@ -245,13 +264,7 @@ class SelectorProactor:
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
         """Set the callback invoked when backend completions may be ready."""
 
-        with self._lock:
-            self._completion_callback = callback
-
-    def set_wakeup_callback(self, callback: _CompletionCallback | None) -> None:
-        """Set the callback invoked when backend completions may be ready."""
-
-        self.set_completion_callback(callback)
+        self._completion_callback = callback
 
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
@@ -267,8 +280,7 @@ class SelectorProactor:
     def set_clock(self, clock: _Clock) -> None:
         """Set the clock used for deadline-oriented waits."""
 
-        with self._lock:
-            self._clock = clock
+        self._clock = clock
 
     def close(self) -> None:
         """Close selector and wakeup resources."""
@@ -677,13 +689,12 @@ class ThreadedSelectorProactor(SelectorProactor):
         selector: selectors.BaseSelector | None = None,
         *,
         completion_callback: _CompletionCallback | None = None,
-        wakeup_callback: _CompletionCallback | None = None,
     ) -> None:
         if selector is None:
             selector = compat.released_default_selector()
         elif not hasattr(selector, "select_released"):
             raise TypeError("ThreadedSelectorProactor requires a selector with select_released()")
-        super().__init__(selector, completion_callback=completion_callback, wakeup_callback=wakeup_callback)
+        super().__init__(selector, completion_callback=completion_callback)
         self._completed: deque[Operation[Any]] = deque()
         self._completed_lock = threading.Lock()
         self._completed_ready = threading.Event()
@@ -767,6 +778,160 @@ class ThreadedSelectorProactor(SelectorProactor):
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         self._completed_ready.wait(timeout)
+
+
+class UringProactor:
+    """io_uring-backed proactor shell using the current `uring_api` ring lifecycle.
+
+    The native wrapper currently exposes ring creation and teardown only. This
+    class gives schedulers a real `io_uring` owner now, while socket operation
+    submission waits for the lower-level SQE/CQE API to land.
+    """
+
+    def __init__(
+        self,
+        entries: int = 8,
+        flags: int = 0,
+        *,
+        completion_callback: _CompletionCallback | None = None,
+        ring_factory: _UringRingFactory | None = None,
+    ) -> None:
+        if ring_factory is None:
+            ring_factory = _default_uring_ring_factory
+        self._lock = threading.RLock()
+        self._ring = ring_factory(entries, flags)
+        self._closed = False
+        self._completion_callback = completion_callback
+        self._clock = time.monotonic
+        self._wakeup = threading.Event()
+
+    @property
+    def ring(self) -> _UringRing:
+        """Return the low-level `uring_api.Ring` object owned by this proactor."""
+
+        return self._ring
+
+    def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
+        """Set the callback invoked when backend completions may be ready."""
+
+        self._completion_callback = callback
+
+    def has_pending_operations(self) -> bool:
+        """Return True if operations are waiting for backend completion."""
+
+        return False
+
+    def get_time(self) -> float:
+        """Return the proactor clock value."""
+
+        return self._clock()
+
+    def set_clock(self, clock: _Clock) -> None:
+        """Set the clock used for deadline-oriented waits."""
+
+        self._clock = clock
+
+    def close(self) -> None:
+        """Close the owned `io_uring` ring."""
+
+        self.break_wait()
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._ring.close()
+
+    def break_wait(self) -> None:
+        """Interrupt a thread blocked in `wait` without completing operations."""
+
+        self._wakeup.set()
+
+    def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
+        """Wait until `deadline` and return completed operations.
+
+        No native operations can complete yet, but the wait behaviour already
+        matches scheduler expectations for timers and cross-thread wakeups.
+        """
+
+        with self._lock:
+            self._check_open()
+            timeout = self._timeout_until_deadline(deadline)
+        if timeout == 0:
+            return []
+        if timeout is None and not self.has_pending_operations():
+            return []
+        self._wakeup.wait(timeout)
+        self._wakeup.clear()
+        return []
+
+    async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
+        """Wait asynchronously until `deadline` and return completed operations."""
+
+        with self._lock:
+            self._check_open()
+            timeout = self._timeout_until_deadline(deadline)
+        if timeout == 0:
+            return []
+        if timeout is None and not self.has_pending_operations():
+            return []
+        loop = _asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.wait, deadline)
+        return []
+
+    def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+        """Submit a socket receive operation."""
+
+        return self._raise_unsupported("recv")
+
+    def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
+        """Submit a socket receive-into operation."""
+
+        return self._raise_unsupported("recv_into")
+
+    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
+        """Submit a datagram receive operation."""
+
+        return self._raise_unsupported("recvfrom")
+
+    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
+        """Submit a datagram receive-into operation."""
+
+        return self._raise_unsupported("recvfrom_into")
+
+    def sendall(self, sock: socket.socket, data: Any) -> Operation[None]:
+        """Submit a socket send-all operation."""
+
+        return self._raise_unsupported("sendall")
+
+    def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
+        """Submit a datagram send operation."""
+
+        return self._raise_unsupported("sendto")
+
+    def accept(self, sock: socket.socket) -> Operation[tuple[socket.socket, Any]]:
+        """Submit a socket accept operation."""
+
+        return self._raise_unsupported("accept")
+
+    def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
+        """Submit a non-blocking socket connect operation."""
+
+        return self._raise_unsupported("connect")
+
+    def _timeout_until_deadline(self, deadline: float | None) -> float | None:
+        if deadline is None:
+            return None
+        if deadline == 0:
+            return 0.0
+        return max(0.0, deadline - self.get_time())
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("proactor is closed")
+
+    def _raise_unsupported(self, operation: str) -> NoReturn:
+        self._check_open()
+        raise NotImplementedError(f"UringProactor does not yet support {operation} operations")
 
 
 class ProactorScheduler(BaseScheduler):

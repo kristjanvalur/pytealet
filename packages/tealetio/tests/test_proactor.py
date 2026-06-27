@@ -17,6 +17,7 @@ from tealetio.proactor import (
     SelectorProactor,
     SyncProactorScheduler,
     ThreadedSelectorProactor,
+    UringProactor,
 )
 
 
@@ -272,32 +273,12 @@ class TestSelectorProactor:
 
     def test_break_wait_does_not_notify_callback(self):
         seen: list[str] = []
-        proactor = SelectorProactor(wakeup_callback=lambda: seen.append("wake"))
+        proactor = SelectorProactor(completion_callback=lambda: seen.append("wake"))
         try:
             proactor.break_wait()
             assert proactor.wait(0) == []
             assert seen == []
         finally:
-            proactor.close()
-
-    def test_set_wakeup_callback_replaces_callback(self):
-        seen: list[str] = []
-        proactor = SelectorProactor(wakeup_callback=lambda: seen.append("old"))
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = proactor.recv(reader, 1)
-            seen.clear()
-
-            proactor.set_wakeup_callback(lambda: seen.append("new"))
-            writer.send(b"x")
-
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
-            assert seen == ["new"]
-        finally:
-            reader.close()
-            writer.close()
             proactor.close()
 
     def test_set_completion_callback_replaces_callback(self):
@@ -320,13 +301,9 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_completion_and_wakeup_callbacks_are_mutually_exclusive(self):
-        with pytest.raises(TypeError, match="either completion_callback or wakeup_callback"):
-            SelectorProactor(completion_callback=lambda: None, wakeup_callback=lambda: None)
-
     def test_completion_notifies_callback(self):
         seen: list[str] = []
-        proactor = SelectorProactor(wakeup_callback=lambda: seen.append("wake"))
+        proactor = SelectorProactor(completion_callback=lambda: seen.append("wake"))
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -345,7 +322,7 @@ class TestSelectorProactor:
 
     def test_cancel_wakes_wait_without_notifying_callback(self):
         seen: list[str] = []
-        proactor = SelectorProactor(wakeup_callback=lambda: seen.append("wake"))
+        proactor = SelectorProactor(completion_callback=lambda: seen.append("wake"))
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -607,6 +584,112 @@ class TestThreadedSelectorProactor:
                 scheduler.close()
 
         assert asyncio.run(run()) == b"hello"
+
+
+class _FakeUringRing:
+    def __init__(self, entries: int, flags: int) -> None:
+        self.entries = entries
+        self.flags = flags
+        self.fd = 99
+        self.features = 123
+        self.sq_entries = entries
+        self.cq_entries = entries * 2
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestUringProactor:
+    def test_initializes_ring_with_entries_and_flags(self):
+        created: list[_FakeUringRing] = []
+
+        def ring_factory(entries: int, flags: int) -> _FakeUringRing:
+            ring = _FakeUringRing(entries, flags)
+            created.append(ring)
+            return ring
+
+        proactor = UringProactor(entries=32, flags=7, ring_factory=ring_factory)
+        try:
+            assert proactor.ring is created[0]
+            assert proactor.ring.fd == 99
+            assert proactor.ring.sq_entries == 32
+            assert proactor.ring.cq_entries == 64
+            assert created[0].flags == 7
+        finally:
+            proactor.close()
+
+        assert created[0].closed is True
+
+    def test_clock_can_be_replaced(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            proactor.set_clock(lambda: 42.0)
+
+            assert proactor.get_time() == 42.0
+        finally:
+            proactor.close()
+
+    def test_wait_respects_deadline_without_pending_operations(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            proactor.set_clock(lambda: 100.0)
+
+            assert proactor.wait(100.0) == []
+            assert proactor.wait(None) == []
+        finally:
+            proactor.close()
+
+    def test_break_wait_releases_blocking_wait(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        result: list[list[Operation[object]]] = []
+        thread = threading.Thread(target=lambda: result.append(proactor.wait(proactor.get_time() + 10.0)))
+        try:
+            thread.start()
+            proactor.break_wait()
+            thread.join(1.0)
+
+            assert thread.is_alive() is False
+            assert result == [[]]
+        finally:
+            proactor.close()
+
+    def test_wait_async_respects_deadline(self):
+        async def run() -> list[Operation[object]]:
+            proactor = UringProactor(ring_factory=_FakeUringRing)
+            try:
+                return await proactor.wait_async(proactor.get_time())
+            finally:
+                proactor.close()
+
+        assert asyncio.run(run()) == []
+
+    def test_socket_operations_are_explicitly_unsupported(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            with pytest.raises(NotImplementedError, match="recv operations"):
+                proactor.recv(reader, 1)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_operations_reject_closed_proactor(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            proactor.close()
+
+            with pytest.raises(RuntimeError, match="closed"):
+                proactor.recv(reader, 1)
+            with pytest.raises(RuntimeError, match="closed"):
+                proactor.wait(0)
+        finally:
+            reader.close()
+            writer.close()
 
 
 class TestProactorScheduler:
