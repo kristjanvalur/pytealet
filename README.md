@@ -69,7 +69,7 @@ That runs the non-mutating checks:
 ```bash
 uvx ruff format --check .
 uvx ruff check .
-uvx ty check
+uv run --all-packages --with ty ty check
 ```
 
 Use `make fix` to apply Ruff formatting and autofixes. The `ty` configuration
@@ -79,7 +79,7 @@ often use deliberately dynamic or type-unsafe probes.
 You can also run the type checker directly:
 
 ```bash
-uvx ty check
+uv run --all-packages --with ty ty check
 ```
 
 ### Release Process

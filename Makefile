@@ -59,7 +59,7 @@ lint:
 	uvx ruff check .
 
 typecheck:
-	uvx ty check
+	uv run --all-packages --with ty ty check
 
 check: format-check lint typecheck
 
