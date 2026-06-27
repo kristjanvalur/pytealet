@@ -321,12 +321,15 @@ class TealetProactorEventLoop(_proactor_events.BaseProactorEventLoop):
     def run_forever(self) -> None:
         """Run the loop while polling the host tealetio proactor."""
 
-        getattr(self, "_loop_self_reading")()
+        loop_self_reading = getattr(self, "_loop_self_reading", None)
+        if loop_self_reading is not None:
+            loop_self_reading()
         try:
             super().run_forever()
         finally:
-            if self._self_reading_future is not None:
-                self._self_reading_future.cancel()
+            self_reading_future = getattr(self, "_self_reading_future", None)
+            if self_reading_future is not None:
+                self_reading_future.cancel()
                 self._self_reading_future = None
 
 
