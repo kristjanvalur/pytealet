@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import errno
+import itertools
 import selectors
 import socket
 import threading
@@ -43,7 +44,6 @@ class InvalidStateError(Exception):
 
 
 _DoneCallback = Callable[["Operation[Any]"], object]
-_CancelCallback = Callable[["Operation[Any]"], bool]
 _CompletionCallback = Callable[[], object]
 _Clock = Callable[[], float]
 
@@ -56,6 +56,14 @@ class _UringRing(Protocol):
     closed: bool
 
     def close(self) -> None: ...
+
+    def break_wait(self) -> None: ...
+
+    def submit_recv(self, fd: int, n: int, user_data: int) -> None: ...
+
+    def submit_send(self, fd: int, data: Any, user_data: int) -> None: ...
+
+    def wait(self, timeout: float | None = None) -> dict[str, object] | None: ...
 
 
 _UringRingFactory = Callable[[int, int], _UringRing]
@@ -75,6 +83,8 @@ class Proactor(Protocol):
     def close(self) -> None: ...
 
     def break_wait(self) -> None: ...
+
+    def cancel_operation(self, operation: Operation[Any]) -> bool: ...
 
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None: ...
 
@@ -111,16 +121,16 @@ ProactorFactory = Callable[[], Proactor]
 class Operation(Generic[T]):
     """Future-shaped IO operation owned by a proactor backend."""
 
-    def __init__(self, *, kind: str, fileobj: object | None = None) -> None:
+    def __init__(self, *, kind: str, fileobj: object | None = None, proactor: Proactor | None = None) -> None:
         self.kind = kind
         self.fileobj = fileobj
+        self._proactor = proactor
         self._lock = threading.Lock()
         self._done = False
         self._cancelled = False
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] = []
-        self._cancel_callback: _CancelCallback | None = None
         self._attempt: Callable[[], T] | None = None
 
     def done(self) -> bool:
@@ -141,9 +151,9 @@ class Operation(Generic[T]):
         with self._lock:
             if self._done:
                 return False
-            cancel_callback = self._cancel_callback
-        if cancel_callback is not None:
-            return cancel_callback(self)
+            proactor = self._proactor
+        if proactor is not None:
+            return proactor.cancel_operation(self)
         return self._set_cancelled(raise_if_done=False)
 
     def result(self) -> T:
@@ -192,10 +202,6 @@ class Operation(Generic[T]):
             self._callbacks = kept
             return removed
 
-    def _set_cancel_callback(self, callback: _CancelCallback) -> None:
-        with self._lock:
-            self._cancel_callback = callback
-
     def _set_result(self, result: T) -> None:
         self._finish(result=result)
 
@@ -239,6 +245,14 @@ class _FdEntry:
 
     def empty(self) -> bool:
         return self.reader is None and self.writer is None
+
+
+@dataclass
+class _UringEntry:
+    operation: Operation[Any]
+    kind: str
+    data: memoryview | None = None
+    offset: int = 0
 
 
 class SelectorProactor:
@@ -398,7 +412,7 @@ class SelectorProactor:
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        operation = Operation[bytes](kind="recv", fileobj=sock)
+        operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
 
         def attempt() -> bytes:
             return sock.recv(n)
@@ -409,7 +423,7 @@ class SelectorProactor:
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""
 
-        operation = Operation[int](kind="recv_into", fileobj=sock)
+        operation = Operation[int](kind="recv_into", fileobj=sock, proactor=self)
 
         def attempt() -> int:
             return sock.recv_into(buf)
@@ -420,7 +434,7 @@ class SelectorProactor:
     def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
         """Submit a datagram receive operation."""
 
-        operation = Operation[tuple[bytes, Any]](kind="recvfrom", fileobj=sock)
+        operation = Operation[tuple[bytes, Any]](kind="recvfrom", fileobj=sock, proactor=self)
 
         def attempt() -> tuple[bytes, Any]:
             return sock.recvfrom(bufsize)
@@ -431,7 +445,7 @@ class SelectorProactor:
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
         """Submit a datagram receive-into operation."""
 
-        operation = Operation[tuple[int, Any]](kind="recvfrom_into", fileobj=sock)
+        operation = Operation[tuple[int, Any]](kind="recvfrom_into", fileobj=sock, proactor=self)
 
         def attempt() -> tuple[int, Any]:
             if nbytes:
@@ -444,7 +458,7 @@ class SelectorProactor:
     def send(self, sock: socket.socket, data: Any) -> Operation[int]:
         """Submit a socket send operation."""
 
-        operation = Operation[int](kind="send", fileobj=sock)
+        operation = Operation[int](kind="send", fileobj=sock, proactor=self)
 
         def attempt() -> int:
             return sock.send(data)
@@ -455,7 +469,7 @@ class SelectorProactor:
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
 
-        operation = Operation[int](kind="sendto", fileobj=sock)
+        operation = Operation[int](kind="sendto", fileobj=sock, proactor=self)
 
         def attempt() -> int:
             return sock.sendto(data, address)
@@ -466,7 +480,7 @@ class SelectorProactor:
     def sendall(self, sock: socket.socket, data: Any) -> Operation[None]:
         """Submit a socket send-all operation."""
 
-        operation = Operation[None](kind="sendall", fileobj=sock)
+        operation = Operation[None](kind="sendall", fileobj=sock, proactor=self)
         view = memoryview(data)
         offset = 0
 
@@ -485,7 +499,7 @@ class SelectorProactor:
     def accept(self, sock: socket.socket) -> Operation[tuple[socket.socket, Any]]:
         """Submit a socket accept operation."""
 
-        operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock)
+        operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock, proactor=self)
 
         def attempt() -> tuple[socket.socket, Any]:
             conn, address = sock.accept()
@@ -498,7 +512,7 @@ class SelectorProactor:
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
         """Submit a non-blocking socket connect operation."""
 
-        operation = Operation[None](kind="connect", fileobj=sock)
+        operation = Operation[None](kind="connect", fileobj=sock, proactor=self)
         started = False
 
         def attempt() -> None:
@@ -540,7 +554,6 @@ class SelectorProactor:
                 return
             self._reserve_fd_operation(fd, event, operation)
             operation._attempt = attempt
-            operation._set_cancel_callback(self._cancel_operation)
             self._update_selector_registration(fd)
         self.break_wait()
 
@@ -571,7 +584,7 @@ class SelectorProactor:
         else:
             entry.writer = operation
 
-    def _cancel_operation(self, operation: Operation[Any]) -> bool:
+    def cancel_operation(self, operation: Operation[Any]) -> bool:
         with self._lock:
             removed = self._remove_operation(operation)
         if not removed:
@@ -781,12 +794,7 @@ class ThreadedSelectorProactor(SelectorProactor):
 
 
 class UringProactor:
-    """io_uring-backed proactor shell using the current `uring_api` ring lifecycle.
-
-    The native wrapper currently exposes ring creation and teardown only. This
-    class gives schedulers a real `io_uring` owner now, while socket operation
-    submission waits for the lower-level SQE/CQE API to land.
-    """
+    """io_uring-backed proactor using the current `uring_api` ring lifecycle."""
 
     def __init__(
         self,
@@ -804,6 +812,8 @@ class UringProactor:
         self._completion_callback = completion_callback
         self._clock = time.monotonic
         self._wakeup = threading.Event()
+        self._next_user_data = itertools.count(1)
+        self._pending: dict[int, _UringEntry] = {}
 
     @property
     def ring(self) -> _UringRing:
@@ -819,7 +829,7 @@ class UringProactor:
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
 
-        return False
+        return bool(self._pending)
 
     def get_time(self) -> float:
         """Return the proactor clock value."""
@@ -839,49 +849,69 @@ class UringProactor:
             if self._closed:
                 return
             self._closed = True
+            for entry in self._pending.values():
+                entry.operation._set_cancelled(raise_if_done=False)
+            self._pending.clear()
             self._ring.close()
 
     def break_wait(self) -> None:
         """Interrupt a thread blocked in `wait` without completing operations."""
 
         self._wakeup.set()
+        try:
+            self._ring.break_wait()
+        except RuntimeError:
+            pass
 
     def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
-        """Wait until `deadline` and return completed operations.
+        """Wait until `deadline` and return completed operations."""
 
-        No native operations can complete yet, but the wait behaviour already
-        matches scheduler expectations for timers and cross-thread wakeups.
-        """
-
-        with self._lock:
-            self._check_open()
-            timeout = self._timeout_until_deadline(deadline)
-        if timeout == 0:
-            return []
-        if timeout is None and not self.has_pending_operations():
-            return []
-        self._wakeup.wait(timeout)
-        self._wakeup.clear()
-        return []
+        completed: list[Operation[Any]] = []
+        while not completed:
+            with self._lock:
+                self._check_open()
+                has_pending = bool(self._pending)
+                timeout = self._timeout_until_deadline(deadline)
+            if timeout == 0:
+                return []
+            if not has_pending:
+                if timeout is None:
+                    return []
+                self._wakeup.wait(timeout)
+                self._wakeup.clear()
+                return []
+            completion = self._ring.wait(self._bounded_wait_timeout(timeout))
+            if completion is not None:
+                self._complete_uring_operation(completion, completed)
+                continue
+            if self._wakeup.is_set():
+                self._wakeup.clear()
+                return []
+            if deadline is not None and self._timeout_until_deadline(deadline) == 0:
+                return []
+        if completed:
+            self._notify_completion()
+        return completed
 
     async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
         """Wait asynchronously until `deadline` and return completed operations."""
 
-        with self._lock:
-            self._check_open()
-            timeout = self._timeout_until_deadline(deadline)
-        if timeout == 0:
-            return []
-        if timeout is None and not self.has_pending_operations():
-            return []
         loop = _asyncio.get_running_loop()
-        await loop.run_in_executor(None, self.wait, deadline)
-        return []
+        return await loop.run_in_executor(None, self.wait, deadline)
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        return self._raise_unsupported("recv")
+        operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
+        with self._lock:
+            user_data = next(self._next_user_data)
+            self._pending[user_data] = _UringEntry(operation=operation, kind="recv")
+            try:
+                self._ring.submit_recv(sock.fileno(), n, user_data)
+            except BaseException:
+                self._pending.pop(user_data, None)
+                raise
+        return operation
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""
@@ -901,7 +931,15 @@ class UringProactor:
     def sendall(self, sock: socket.socket, data: Any) -> Operation[None]:
         """Submit a socket send-all operation."""
 
-        return self._raise_unsupported("sendall")
+        operation = Operation[None](kind="sendall", fileobj=sock, proactor=self)
+        payload = memoryview(data)
+        with self._lock:
+            if not payload:
+                self._check_open()
+                operation._set_result(None)
+                return operation
+            self._submit_sendall_locked(sock, operation, payload, 0)
+        return operation
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
@@ -928,6 +966,83 @@ class UringProactor:
     def _check_open(self) -> None:
         if self._closed:
             raise RuntimeError("proactor is closed")
+
+    def _bounded_wait_timeout(self, timeout: float | None) -> float:
+        if timeout is None:
+            return 0.05
+        return min(timeout, 0.05)
+
+    def cancel_operation(self, operation: Operation[Any]) -> bool:
+        # TODO: submit IORING_OP_ASYNC_CANCEL once the native wrapper exposes it.
+        with self._lock:
+            for user_data, entry in list(self._pending.items()):
+                if entry.operation is operation:
+                    del self._pending[user_data]
+                    cancelled = operation._set_cancelled(raise_if_done=False)
+                    self.break_wait()
+                    return cancelled
+        return False
+
+    def _submit_sendall_locked(
+        self,
+        sock: socket.socket,
+        operation: Operation[None],
+        data: memoryview,
+        offset: int,
+    ) -> None:
+        user_data = next(self._next_user_data)
+        self._pending[user_data] = _UringEntry(operation=operation, kind="sendall", data=data, offset=offset)
+        try:
+            self._ring.submit_send(sock.fileno(), data[offset:], user_data)
+        except BaseException:
+            self._pending.pop(user_data, None)
+            raise
+
+    def _complete_uring_operation(
+        self,
+        completion: dict[str, object],
+        completed: list[Operation[Any]],
+    ) -> None:
+        user_data = cast(int, completion["user_data"])
+        res = cast(int, completion["res"])
+        with self._lock:
+            entry = self._pending.pop(user_data, None)
+        if entry is None or entry.operation.done():
+            return
+        if res < 0:
+            entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            completed.append(entry.operation)
+            return
+        if entry.kind == "recv":
+            result = completion["result"]
+            if not isinstance(result, bytes):
+                entry.operation._set_exception(RuntimeError("recv completion did not return bytes"))
+            else:
+                entry.operation._set_result(result)
+            completed.append(entry.operation)
+            return
+        if entry.kind == "sendall":
+            if res == 0:
+                entry.operation._set_exception(BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
+                completed.append(entry.operation)
+                return
+            assert entry.data is not None
+            offset = entry.offset + res
+            if offset >= len(entry.data):
+                entry.operation._set_result(None)
+                completed.append(entry.operation)
+                return
+            sock = cast(socket.socket, entry.operation.fileobj)
+            with self._lock:
+                self._submit_sendall_locked(sock, cast(Operation[None], entry.operation), entry.data, offset)
+            return
+        entry.operation._set_exception(RuntimeError(f"unsupported uring operation kind: {entry.kind}"))
+        completed.append(entry.operation)
+
+    def _notify_completion(self) -> None:
+        callback = self._completion_callback
+        if callback is not None:
+            callback()
 
     def _raise_unsupported(self, operation: str) -> NoReturn:
         self._check_open()

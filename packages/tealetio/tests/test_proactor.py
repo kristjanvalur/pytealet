@@ -595,9 +595,35 @@ class _FakeUringRing:
         self.sq_entries = entries
         self.cq_entries = entries * 2
         self.closed = False
+        self.completions: list[dict[str, object]] = []
+        self.submitted_recv: list[tuple[int, int, int]] = []
+        self.submitted_send: list[tuple[int, object, int]] = []
 
     def close(self) -> None:
         self.closed = True
+
+    def break_wait(self) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.completions.append({"user_data": 0, "res": 0, "flags": 0, "result": None})
+
+    def submit_recv(self, fd: int, n: int, user_data: int) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_recv.append((fd, n, user_data))
+        self.completions.append({"user_data": user_data, "res": 5, "flags": 0, "result": b"hello"})
+
+    def submit_send(self, fd: int, data: object, user_data: int) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_send.append((fd, data, user_data))
+        self.completions.append({"user_data": user_data, "res": len(payload), "flags": 0, "result": len(payload)})
+
+    def wait(self, timeout: float | None = None) -> dict[str, object] | None:
+        if not self.completions:
+            return None
+        return self.completions.pop(0)
 
 
 class TestUringProactor:
@@ -664,14 +690,35 @@ class TestUringProactor:
 
         assert asyncio.run(run()) == []
 
-    def test_socket_operations_are_explicitly_unsupported(self):
+    def test_recv_completes_from_ring_completion(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
 
-            with pytest.raises(NotImplementedError, match="recv operations"):
-                proactor.recv(reader, 1)
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert operation.result() == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_sendall_completes_from_ring_completion(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            operation = proactor.sendall(writer, payload)
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert operation.result() is None
+            assert isinstance(proactor.ring, _FakeUringRing)
+            submitted = proactor.ring.submitted_send[0][1]
+            assert isinstance(submitted, memoryview)
+            assert submitted.obj is payload
+            assert bytes(submitted) == b"hello"
         finally:
             reader.close()
             writer.close()
@@ -685,6 +732,8 @@ class TestUringProactor:
 
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.recv(reader, 1)
+            with pytest.raises(RuntimeError, match="closed"):
+                proactor.sendall(writer, b"")
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.wait(0)
         finally:
