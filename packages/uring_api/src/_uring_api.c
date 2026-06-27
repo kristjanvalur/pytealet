@@ -33,9 +33,15 @@ typedef struct {
     PyObject *pending;
     UringApiMutex receive_mutex;
     unsigned long long next_wakeup_data;
-    bool receive_waiting;
+    unsigned int receive_state;
     bool initialized;
 } UringApiRing;
+
+typedef enum {
+    URING_API_RECEIVE_IDLE = 0,
+    URING_API_RECEIVE_WAITING = 1,
+    URING_API_RECEIVE_DELIVERING = 2,
+} UringApiReceiveState;
 
 typedef enum {
     URING_API_PENDING_RECV = 1,
@@ -233,23 +239,35 @@ static void pending_discard(UringApiRing *self, unsigned long long user_data) {
     Py_XDECREF(ignored);
 }
 
-static int receive_wait_begin(UringApiRing *self) {
+static int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     int ret = 0;
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
-    if (self->receive_waiting) {
+    if (from_delivery_thread) {
+        if (self->receive_state != URING_API_RECEIVE_DELIVERING) {
+            PyErr_SetString(PyExc_RuntimeError, "delivery thread is not active");
+            ret = -1;
+        }
+    } else if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
+        PyErr_SetString(PyExc_RuntimeError, "delivery thread is active");
+        ret = -1;
+    } else if (self->receive_state != URING_API_RECEIVE_IDLE) {
         PyErr_SetString(PyExc_RuntimeError, "another wait is already active");
         ret = -1;
     } else {
-        self->receive_waiting = true;
+        self->receive_state = URING_API_RECEIVE_WAITING;
     }
     Py_END_CRITICAL_SECTION();
     return ret;
 }
 
-static void receive_wait_end(UringApiRing *self) {
+static void receive_wait_end(UringApiRing *self, bool from_delivery_thread) {
+    if (from_delivery_thread) {
+        return;
+    }
+
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
-    self->receive_waiting = false;
+    self->receive_state = URING_API_RECEIVE_IDLE;
     Py_END_CRITICAL_SECTION();
 }
 
@@ -340,7 +358,7 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
         PyDict_Clear(self->pending);
     }
     self->next_wakeup_data = ULLONG_MAX;
-    self->receive_waiting = false;
+    self->receive_state = URING_API_RECEIVE_IDLE;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -379,7 +397,7 @@ static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(igno
     if (self->pending) {
         PyDict_Clear(self->pending);
     }
-    self->receive_waiting = false;
+    self->receive_state = URING_API_RECEIVE_IDLE;
     Py_RETURN_NONE;
 }
 
@@ -396,7 +414,7 @@ static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) {
     if (self->pending) {
         PyDict_Clear(self->pending);
     }
-    self->receive_waiting = false;
+    self->receive_state = URING_API_RECEIVE_IDLE;
     Py_RETURN_NONE;
 }
 
@@ -612,26 +630,16 @@ static PyObject *build_cqe_result(UringApiRing *self, struct io_uring_cqe *cqe) 
     return result;
 }
 
-static PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"timeout", NULL};
+static PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
+                                        bool from_delivery_thread) {
     struct io_uring_cqe *cqe = NULL;
-    struct __kernel_timespec timeout;
-    PyObject *timeout_obj = Py_None;
     PyObject *result;
-    int timeout_kind;
     int ret;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", keywords, &timeout_obj)) {
-        return NULL;
-    }
     if (ring_check_open(self) < 0) {
         return NULL;
     }
-    timeout_kind = parse_timeout(timeout_obj, &timeout);
-    if (timeout_kind < 0) {
-        return NULL;
-    }
-    if (receive_wait_begin(self) < 0) {
+    if (receive_wait_begin(self, from_delivery_thread) < 0) {
         return NULL;
     }
 
@@ -640,36 +648,55 @@ static PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject 
         Py_BEGIN_ALLOW_THREADS
         ret = io_uring_wait_cqe(&self->ring, &cqe);
         Py_END_ALLOW_THREADS
-    } else if (timeout.tv_sec == 0 && timeout.tv_nsec == 0) {
+    } else if (timeout->tv_sec == 0 && timeout->tv_nsec == 0) {
         ret = io_uring_peek_cqe(&self->ring, &cqe);
     } else {
         Py_BEGIN_ALLOW_THREADS
-        ret = io_uring_wait_cqe_timeout(&self->ring, &cqe, &timeout);
+        ret = io_uring_wait_cqe_timeout(&self->ring, &cqe, timeout);
         Py_END_ALLOW_THREADS
     }
 
     if (ret < 0) {
         int errnum = normalize_ret_errno(ret);
         if (errnum == EAGAIN || errnum == ETIME || errnum == ETIMEDOUT) {
-            receive_wait_end(self);
+            receive_wait_end(self, from_delivery_thread);
             Py_RETURN_NONE;
         }
         errno = errnum;
         PyErr_SetFromErrno(PyExc_OSError);
-        receive_wait_end(self);
+        receive_wait_end(self, from_delivery_thread);
         return NULL;
     }
     if (!cqe) {
-        receive_wait_end(self);
+        receive_wait_end(self, from_delivery_thread);
         Py_RETURN_NONE;
     }
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     result = build_cqe_result(self, cqe);
     io_uring_cqe_seen(&self->ring, cqe);
-    self->receive_waiting = false;
+    if (!from_delivery_thread) {
+        self->receive_state = URING_API_RECEIVE_IDLE;
+    }
     Py_END_CRITICAL_SECTION();
     return result;
+}
+
+static PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"timeout", NULL};
+    struct __kernel_timespec timeout;
+    PyObject *timeout_obj = Py_None;
+    int timeout_kind;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", keywords, &timeout_obj)) {
+        return NULL;
+    }
+    timeout_kind = parse_timeout(timeout_obj, &timeout);
+    if (timeout_kind < 0) {
+        return NULL;
+    }
+
+    return UringApiRing_wait_impl(self, timeout_kind, &timeout, false);
 }
 
 static PyObject *UringApiRing_get_fd(UringApiRing *self, void *closure) {
