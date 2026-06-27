@@ -38,8 +38,8 @@ Implemented:
   tests and pure scheduling work.
 - `SelectorScheduler` is the shared abstract selector core.
   `SyncSelectorScheduler` and `AsyncSelectorScheduler` apply the same driving
-  split to selector readiness. `TealetHostedScheduler` is the specialised sync
-  selector scheduler used by the tealet-hosted asyncio runner.
+  split to selector readiness. The tealet-hosted asyncio runner uses
+  `SyncSelectorScheduler` with `TealetSelectorEventLoop`'s forwarding selector.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
 - `Scheduler` and `AsyncScheduler` can be used directly as factories. They share
   the common scheduler/task/timer APIs from `BaseScheduler`, while implementing
@@ -561,7 +561,7 @@ Return behavior:
 ### tealetio.asyncio.run_asyncio_in_tealet(...)
 
 - Creates a temporary `tealetio.runner.Runner` with a
-  `tealetio.asyncio.TealetHostedScheduler` by default.
+  `tealetio.selector.SyncSelectorScheduler` by default.
 - Disables the outer tealet runner's SIGINT handler by default so the inner
   `asyncio.Runner` can install its normal interrupt handler.
 - Creates a temporary `asyncio.Runner` whose default loop is
@@ -775,9 +775,9 @@ Status: Initial Unix selector prototype implemented.
 - A tealet-hosted asyncio loop may be feasible if the asyncio loop's raw
   blocking points can be delegated to the outer tealet scheduler.
 - `tealetio.asyncio.TealetSelectorEventLoop` is an experimental
-  `asyncio.SelectorEventLoop` subclass hosted by `tealetio.asyncio.TealetHostedScheduler`.
+  `asyncio.SelectorEventLoop` subclass hosted by `tealetio.selector.SyncSelectorScheduler`.
 - The implementation uses a selector adapter whose fd registration is backed by
-  `TealetHostedScheduler.add_reader(...)` and `add_writer(...)`; when asyncio's
+  `SyncSelectorScheduler.add_reader(...)` and `add_writer(...)`; when asyncio's
   selector would block, the pump tealet parks on a scheduler `Event` and wakes
   from fd readiness, a scheduler timer, or asyncio's self-pipe.
 - The critical hook is file-descriptor readiness. Asyncio selector loops use

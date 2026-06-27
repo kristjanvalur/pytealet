@@ -504,7 +504,7 @@ The most realistic combined shape is the current direction in `tealetio`:
   `SyncSelectorScheduler` and `AsyncSelectorScheduler` as concrete drivers.
 - `AsyncScheduler` embeds tealet work inside an existing asyncio loop.
 - `TealetSelectorEventLoop` explores the opposite direction by letting asyncio's
-  selector wait be hosted by `TealetHostedScheduler`.
+  selector wait be hosted by `SyncSelectorScheduler`.
 
 That keeps the implementation modular while leaving room for future policy
 objects, such as priority runnable queues or deeper await-token interpretation.
@@ -519,9 +519,9 @@ The best default direction is:
 3. Let asyncio remain the top-level reactor for general-purpose IO integration.
 4. Embed tealet scheduling as a guest inside asyncio when applications already
    live in asyncio.
-5. Use `TealetHostedScheduler` and `TealetSelectorEventLoop` for explicit
-   tealet-hosted asyncio experiments, with clear same-thread and selector-loop
-   constraints.
+5. Use `SyncSelectorScheduler` and `TealetSelectorEventLoop` for explicit
+  tealet-hosted asyncio experiments, with clear same-thread and selector-loop
+  constraints.
 6. Make cancellation, context propagation, and thread ownership explicit rather
    than implicit.
 

@@ -32,7 +32,6 @@ T = TypeVar("T")
 __all__ = [
     "AsyncRunner",
     "AsyncScheduler",
-    "TealetHostedScheduler",
     "TealetSelectorEventLoop",
     "asyncio_get_current",
     "run_async",
@@ -170,10 +169,6 @@ class TealetSelectorEventLoop(_asyncio.SelectorEventLoop):
             scheduler = current
         self._tealet_scheduler = scheduler
         super().__init__(selector=_SchedulerSelectorAdapter(scheduler))
-
-
-class TealetHostedScheduler(SyncSelectorScheduler):
-    """Synchronous selector scheduler for hosting an asyncio loop inside tealet."""
 
 
 class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI):
@@ -433,7 +428,7 @@ def run_asyncio_in_tealet(
     /,
     *,
     context: contextvars.Context | None = None,
-    scheduler_factory: Callable[[], TealetHostedScheduler] | None = None,
+    scheduler_factory: Callable[[], SyncSelectorScheduler] | None = None,
     loop_factory: Callable[[], _asyncio.AbstractEventLoop] | None = None,
     debug: bool | None = None,
     handle_sigint: bool = False,
@@ -441,13 +436,13 @@ def run_asyncio_in_tealet(
     """Run one asyncio entry under a temporary sync selector scheduler."""
 
     tealet_runner = TealetRunner(
-        scheduler_factory=scheduler_factory or TealetHostedScheduler,
+        scheduler_factory=scheduler_factory or SyncSelectorScheduler,
         debug=debug,
         handle_sigint=handle_sigint,
     )
 
     def run_inside_tealet():
-        scheduler = cast(TealetHostedScheduler, tealet_runner.get_scheduler())
+        scheduler = cast(SyncSelectorScheduler, tealet_runner.get_scheduler())
 
         def tealet_loop_factory() -> _asyncio.AbstractEventLoop:
             if loop_factory is not None:
