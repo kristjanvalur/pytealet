@@ -28,6 +28,7 @@ from tealetio import (
     RunnableQueue,
     Scheduler,
     AsyncSelectorScheduler,
+    SyncProactorScheduler,
     SelectorScheduler,
     SyncSelectorScheduler,
     StubTaskFactory,
@@ -36,6 +37,7 @@ from tealetio import (
     TASK_PRIORITY_HIGH,
     TASK_PRIORITY_IDLE,
     TASK_PRIORITY_LOW,
+    TealetProactorEventLoop,
     TealetSelectorEventLoop,
     Task,
     TimeoutError,
@@ -1856,6 +1858,68 @@ class TestSchedulerAccessors:
 
         def run_asyncio() -> str:
             loop = TealetSelectorEventLoop(s)
+            worker: threading.Thread | None = None
+            try:
+                asyncio.set_event_loop(loop)
+
+                async def main() -> str:
+                    nonlocal worker
+                    future = loop.create_future()
+
+                    def complete() -> None:
+                        loop.call_soon_threadsafe(future.set_result, "thread")
+
+                    worker = threading.Thread(target=complete)
+                    worker.start()
+                    return await future
+
+                return loop.run_until_complete(main())
+            finally:
+                if worker is not None:
+                    worker.join(timeout=1.0)
+                asyncio.set_event_loop(None)
+                loop.close()
+
+        try:
+            assert s.run_until_complete(run_asyncio) == "thread"
+        finally:
+            s.close()
+
+    def test_tealet_proactor_event_loop_runs_asyncio_socket_recv(self):
+        s = SyncProactorScheduler()
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def run_asyncio() -> bytes:
+                loop = TealetProactorEventLoop()
+                try:
+                    asyncio.set_event_loop(loop)
+
+                    async def main() -> bytes:
+                        loop.call_later(0.001, writer.send, b"hello")
+                        return await loop.sock_recv(reader, 5)
+
+                    return loop.run_until_complete(main())
+                finally:
+                    asyncio.set_event_loop(None)
+                    loop.close()
+
+            assert s.run_until_complete(run_asyncio) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_tealet_proactor_event_loop_call_soon_threadsafe(self):
+        s = SyncProactorScheduler()
+        set_scheduler(s)
+
+        def run_asyncio() -> str:
+            loop = TealetProactorEventLoop()
             worker: threading.Thread | None = None
             try:
                 asyncio.set_event_loop(loop)

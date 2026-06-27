@@ -505,6 +505,9 @@ The most realistic combined shape is the current direction in `tealetio`:
 - `AsyncScheduler` embeds tealet work inside an existing asyncio loop.
 - `TealetSelectorEventLoop` explores the opposite direction by letting asyncio's
   selector wait be hosted by `SyncSelectorScheduler`.
+- `TealetProactorEventLoop` is the analogous proactor experiment: asyncio sees
+  a `BaseProactorEventLoop`, while `ForwardingProactor` delegates operations and
+  waits to a host tealet proactor scheduler.
 
 That keeps the implementation modular while leaving room for future policy
 objects, such as priority runnable queues or deeper await-token interpretation.
@@ -521,7 +524,8 @@ The best default direction is:
    live in asyncio.
 5. Use `SyncSelectorScheduler` and `TealetSelectorEventLoop` for explicit
   tealet-hosted asyncio experiments, with clear same-thread and selector-loop
-  constraints.
+  constraints. Use `SyncProactorScheduler` and `TealetProactorEventLoop` when
+  exercising the proactor-shaped variant.
 6. Make cancellation, context propagation, and thread ownership explicit rather
    than implicit.
 

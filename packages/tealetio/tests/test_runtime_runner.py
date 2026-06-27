@@ -17,6 +17,8 @@ from tealetio import (
     Runner,
     Scheduler,
     SyncSelectorScheduler,
+    SyncProactorScheduler,
+    TealetProactorEventLoop,
     TealetSelectorEventLoop,
     asyncio_get_current,
     get_current,
@@ -1034,6 +1036,19 @@ class TestRunHelper:
         loop = run_asyncio_in_tealet(entry())
 
         assert isinstance(loop, TealetSelectorEventLoop)
+        assert loop.is_closed() is True
+
+    def test_run_asyncio_in_tealet_helper_can_use_tealet_proactor_loop(self):
+        async def entry() -> asyncio.AbstractEventLoop:
+            return asyncio.get_running_loop()
+
+        loop = run_asyncio_in_tealet(
+            entry(),
+            scheduler_factory=SyncProactorScheduler,
+            loop_factory=TealetProactorEventLoop,
+        )
+
+        assert isinstance(loop, TealetProactorEventLoop)
         assert loop.is_closed() is True
 
     def test_run_asyncio_in_tealet_helper_sets_loop_debug_flag(self):

@@ -40,6 +40,8 @@ Implemented:
   `SyncSelectorScheduler` and `AsyncSelectorScheduler` apply the same driving
   split to selector readiness. The tealet-hosted asyncio runner uses
   `SyncSelectorScheduler` with `TealetSelectorEventLoop`'s forwarding selector.
+- `ForwardingProactor` and `TealetProactorEventLoop` provide the analogous
+  proactor-shaped tealet-hosted asyncio experiment for `SyncProactorScheduler`.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
 - `Scheduler` and `AsyncScheduler` can be used directly as factories. They share
   the common scheduler/task/timer APIs from `BaseScheduler`, while implementing
@@ -567,6 +569,9 @@ Return behavior:
 - Creates a temporary `asyncio.Runner` whose default loop is
   `tealetio.asyncio.TealetSelectorEventLoop` hosted by the active selector
   scheduler.
+- A caller can provide `scheduler_factory=SyncProactorScheduler` and
+  `loop_factory=TealetProactorEventLoop` to run the same helper through the
+  proactor-shaped forwarding path.
 - Runs the coroutine/awaitable using the same entry semantics as
   `asyncio.Runner.run(...)` inside the tealet-hosted asyncio loop.
 - Restores prior scheduler binding after completion and closes the default
@@ -770,7 +775,7 @@ Status: Implemented.
 
 6. Tealet-Hosted Asyncio Loop Experiment
 
-Status: Initial Unix selector prototype implemented.
+Status: Initial Unix selector and proactor-shaped prototypes implemented.
 
 - A tealet-hosted asyncio loop may be feasible if the asyncio loop's raw
   blocking points can be delegated to the outer tealet scheduler.
@@ -788,6 +793,13 @@ Status: Initial Unix selector prototype implemented.
   scheduler. When asyncio would block in its selector, the pump tealet should
   park until the outer scheduler observes fd readiness, a timer deadline, or an
   explicit wakeup.
+- `tealetio.asyncio.TealetProactorEventLoop` is an experimental
+  `asyncio.proactor_events.BaseProactorEventLoop` subclass hosted by a
+  `tealetio.proactor.ProactorScheduler`. `ForwardingProactor` converts host
+  tealetio `Operation` objects into asyncio `Future` objects and implements the
+  proactor-loop `select(timeout)` hook by waiting on the host proactor. This is
+  mainly useful for proving the shape; selector-based asyncio remains the more
+  portable hosted mode.
 - Many higher-level asyncio mechanisms can then remain delegated to their
   existing implementations: socket transports/protocols, `loop.sock_*` helpers,
   DNS helpers that use threads, `run_in_executor`, and callback scheduling.

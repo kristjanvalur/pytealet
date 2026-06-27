@@ -38,7 +38,10 @@ the shared abstract proactor core. Likewise, `SelectorScheduler` is the shared
 abstract selector core, with `SyncSelectorScheduler` and `AsyncSelectorScheduler`
 as concrete driving variants. `run_asyncio_in_tealet(...)` uses
 `SyncSelectorScheduler` with `TealetSelectorEventLoop`'s forwarding selector for
-the tealet-hosted asyncio experiment. Use `BasicScheduler`
+the default tealet-hosted asyncio experiment. It can also host an explicit
+`TealetProactorEventLoop` with `SyncProactorScheduler`; in that mode
+`ForwardingProactor` presents asyncio's proactor shape while delegating socket
+operations to the host tealet proactor. Use `BasicScheduler`
 when you deliberately want the small no-IO driver that only waits for timers and
 explicit scheduler wakeups. The shared task, timer, future, and callback
 behaviour lives in the cooperative scheduling core; the blocking and

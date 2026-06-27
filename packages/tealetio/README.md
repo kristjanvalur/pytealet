@@ -105,7 +105,7 @@ The common API is available directly from `tealetio`:
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - runnable scheduling policies: `FifoRunnableQueue`, `PrescheduledRunnableQueue`, `PriorityRunnableQueue`
 - rendezvous communication: `Channel`
-- asyncio coexistence helpers: `asyncio_get_current`, `run_in_asyncio`, `run_asyncio_in_tealet`, `TealetSelectorEventLoop`
+- asyncio coexistence helpers: `asyncio_get_current`, `run_in_asyncio`, `run_asyncio_in_tealet`, `ForwardingProactor`, `TealetSelectorEventLoop`, `TealetProactorEventLoop`
 
 If you prefer explicit homes, submodules such as `tealetio.scheduler`,
 `tealetio.tasks`, `tealetio.locks`, `tealetio.runner`, `tealetio.selector`, and
@@ -119,6 +119,9 @@ facades.
 `SyncSelectorScheduler` and `AsyncSelectorScheduler` as concrete variants.
 `run_asyncio_in_tealet(...)` uses `SyncSelectorScheduler` with
 `TealetSelectorEventLoop`'s forwarding selector to host asyncio inside tealet.
+For explicit proactor experiments, pass `SyncProactorScheduler` and
+`TealetProactorEventLoop` so asyncio's proactor-shaped wait delegates to the
+host tealet proactor through `ForwardingProactor`.
 `BasicScheduler` remains available for tests and pure scheduling experiments
 that intentionally avoid IO support. Internally, tealetio keeps cooperative
 scheduling mechanics separate from the sync and async driving facades, so custom
