@@ -38,8 +38,8 @@ Implemented:
   tests and pure scheduling work.
 - `SelectorScheduler` is the shared abstract selector core.
   `SyncSelectorScheduler` and `AsyncSelectorScheduler` apply the same driving
-  split to selector readiness. The tealet-hosted asyncio runner uses
-  `SyncSelectorScheduler` with `TealetSelectorEventLoop`'s `ForwardingSelector`.
+  split to selector readiness. The tealet-hosted asyncio runner chooses a
+  forwarding loop based on the created scheduler type.
 - `ForwardingSelector`, `ForwardingProactor`, `TealetSelectorEventLoop`, and
   `TealetProactorEventLoop` provide explicit tealet-hosted asyncio experiments
   for selector-backed and proactor-backed schedulers.
@@ -563,16 +563,16 @@ Return behavior:
 
 ### tealetio.asyncio.run_asyncio_in_tealet(...)
 
-- Creates a temporary `tealetio.runner.Runner` with a
-  `tealetio.selector.SyncSelectorScheduler` by default.
+- Creates a temporary `tealetio.runner.Runner`. By default this uses
+  `tealetio.scheduler.Scheduler`, so the hosted asyncio loop is proactor-shaped
+  unless a selector scheduler factory is supplied.
 - Disables the outer tealet runner's SIGINT handler by default so the inner
   `asyncio.Runner` can install its normal interrupt handler.
-- Creates a temporary `asyncio.Runner` whose default loop is
-  `tealetio.asyncio.TealetSelectorEventLoop` hosted by the active selector
-  scheduler.
-- A caller can provide `scheduler_factory=SyncProactorScheduler` and
-  `loop_factory=TealetProactorEventLoop` to run the same helper through the
-  proactor-shaped forwarding path.
+- Creates a temporary `asyncio.Runner` whose default loop is chosen from the
+  active scheduler: `TealetProactorEventLoop` for proactor schedulers and
+  `TealetSelectorEventLoop` for selector schedulers.
+- A caller can still provide `loop_factory=...` to override that automatic
+  selection.
 - Runs the coroutine/awaitable using the same entry semantics as
   `asyncio.Runner.run(...)` inside the tealet-hosted asyncio loop.
 - Restores prior scheduler binding after completion and closes the default
@@ -603,9 +603,9 @@ Return behavior:
   - `RuntimeError` indicating Python 3.11+ is required
 - `tealetio.asyncio.run_asyncio_in_tealet(...)` without `asyncio.Runner`:
   - `RuntimeError` indicating Python 3.11+ is required
-- `tealetio.asyncio.run_asyncio_in_tealet(...)` with a non-selector scheduler and
-  no custom loop factory:
-  - `RuntimeError` indicating that a selector scheduler is required
+- `tealetio.asyncio.run_asyncio_in_tealet(...)` with a non-selector,
+  non-proactor scheduler and no custom loop factory:
+  - `RuntimeError` indicating that a selector or proactor scheduler is required
 - invalid factory return values:
   - Factories are duck typed; failures surface naturally when required scheduler
     operations are used.

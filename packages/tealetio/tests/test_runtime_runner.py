@@ -17,7 +17,6 @@ from tealetio import (
     Runner,
     Scheduler,
     SyncSelectorScheduler,
-    SyncProactorScheduler,
     TealetProactorEventLoop,
     TealetSelectorEventLoop,
     asyncio_get_current,
@@ -1029,26 +1028,36 @@ class TestRunHelper:
 
         assert run_asyncio_in_tealet(entry()) == ("peer", "entry")
 
-    def test_run_asyncio_in_tealet_helper_uses_tealet_selector_loop(self):
+    def test_run_asyncio_in_tealet_helper_uses_tealet_proactor_loop_by_default(self):
         async def entry() -> asyncio.AbstractEventLoop:
             return asyncio.get_running_loop()
 
         loop = run_asyncio_in_tealet(entry())
 
+        assert isinstance(loop, TealetProactorEventLoop)
+        assert loop.is_closed() is True
+
+    def test_run_asyncio_in_tealet_helper_uses_tealet_selector_loop_for_selector_scheduler(self):
+        async def entry() -> asyncio.AbstractEventLoop:
+            return asyncio.get_running_loop()
+
+        loop = run_asyncio_in_tealet(entry(), scheduler_factory=SyncSelectorScheduler)
+
         assert isinstance(loop, TealetSelectorEventLoop)
         assert loop.is_closed() is True
 
-    def test_run_asyncio_in_tealet_helper_can_use_tealet_proactor_loop(self):
+    def test_run_asyncio_in_tealet_helper_respects_explicit_loop_factory(self):
         async def entry() -> asyncio.AbstractEventLoop:
             return asyncio.get_running_loop()
 
         loop = run_asyncio_in_tealet(
             entry(),
-            scheduler_factory=SyncProactorScheduler,
-            loop_factory=TealetProactorEventLoop,
+            scheduler_factory=SyncSelectorScheduler,
+            loop_factory=asyncio.new_event_loop,
         )
 
-        assert isinstance(loop, TealetProactorEventLoop)
+        assert not isinstance(loop, TealetSelectorEventLoop)
+        assert not isinstance(loop, TealetProactorEventLoop)
         assert loop.is_closed() is True
 
     def test_run_asyncio_in_tealet_helper_sets_loop_debug_flag(self):

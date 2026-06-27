@@ -522,10 +522,10 @@ The best default direction is:
 3. Let asyncio remain the top-level reactor for general-purpose IO integration.
 4. Embed tealet scheduling as a guest inside asyncio when applications already
    live in asyncio.
-5. Use `SyncSelectorScheduler` and `TealetSelectorEventLoop` for explicit
-  tealet-hosted asyncio experiments, with clear same-thread and selector-loop
-  constraints. Use `SyncProactorScheduler` and `TealetProactorEventLoop` when
-  exercising the proactor-shaped variant.
+5. Use `run_asyncio_in_tealet(...)` for explicit tealet-hosted asyncio
+  experiments; it chooses `TealetProactorEventLoop` for proactor schedulers and
+  `TealetSelectorEventLoop` for selector schedulers. Keep the same-thread and
+  loop-family constraints explicit.
 6. Make cancellation, context propagation, and thread ownership explicit rather
    than implicit.
 

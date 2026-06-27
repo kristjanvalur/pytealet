@@ -28,7 +28,7 @@ from .tasks import (
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
 from .proactor import Operation, Proactor, ProactorScheduler
-from .selector import SelectorScheduler, SyncSelectorScheduler
+from .selector import SelectorScheduler
 
 T = TypeVar("T")
 
@@ -592,10 +592,10 @@ def run_asyncio_in_tealet(
     debug: bool | None = None,
     handle_sigint: bool = False,
 ):
-    """Run one asyncio entry under a temporary sync selector scheduler."""
+    """Run one asyncio entry under a temporary sync scheduler."""
 
     tealet_runner = TealetRunner(
-        scheduler_factory=scheduler_factory or SyncSelectorScheduler,
+        scheduler_factory=scheduler_factory,
         debug=debug,
         handle_sigint=handle_sigint,
     )
@@ -607,7 +607,12 @@ def run_asyncio_in_tealet(
         def tealet_loop_factory() -> _asyncio.AbstractEventLoop:
             if loop_factory is not None:
                 return loop_factory()
-            loop = TealetSelectorEventLoop()
+            if isinstance(scheduler, ProactorScheduler):
+                loop = TealetProactorEventLoop(scheduler.proactor)
+            elif isinstance(scheduler, SelectorScheduler):
+                loop = TealetSelectorEventLoop(scheduler)
+            else:
+                raise RuntimeError("run_asyncio_in_tealet requires a selector or proactor scheduler")
             _asyncio.set_event_loop(loop)
             return loop
 

@@ -117,11 +117,9 @@ If you prefer explicit homes, submodules such as `tealetio.scheduler`,
 facades.
 `SelectorScheduler` follows the same pattern for selector readiness, with
 `SyncSelectorScheduler` and `AsyncSelectorScheduler` as concrete variants.
-`run_asyncio_in_tealet(...)` uses `SyncSelectorScheduler` with
-`TealetSelectorEventLoop`'s `ForwardingSelector` to host asyncio inside tealet.
-For explicit proactor experiments, pass `SyncProactorScheduler` and
-`TealetProactorEventLoop` so asyncio's proactor-shaped wait delegates to the
-host tealet proactor through `ForwardingProactor`.
+`run_asyncio_in_tealet(...)` chooses its hosted asyncio loop from the scheduler:
+proactor schedulers use `TealetProactorEventLoop`, and selector schedulers use
+`TealetSelectorEventLoop` with `ForwardingSelector`.
 `BasicScheduler` remains available for tests and pure scheduling experiments
 that intentionally avoid IO support. Internally, tealetio keeps cooperative
 scheduling mechanics separate from the sync and async driving facades, so custom
