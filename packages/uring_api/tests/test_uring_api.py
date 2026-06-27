@@ -9,6 +9,12 @@ import pytest
 import uring_api
 
 
+def require_uring():
+    probe = uring_api.probe()
+    if not probe.available:
+        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+
+
 def test_package_is_marked_as_typed():
     assert resources.files("uring_api").joinpath("py.typed").is_file()
 
@@ -32,9 +38,7 @@ def test_probe_returns_structured_result():
 
 
 def test_ring_lifecycle_when_available():
-    probe = uring_api.probe()
-    if not probe.available:
-        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+    require_uring()
 
     with uring_api.Ring() as ring:
         assert ring.fd >= 0
@@ -66,9 +70,7 @@ def test_ring_raises_oserror_or_initializes():
 
 
 def test_ring_recv_completion_when_available():
-    probe = uring_api.probe()
-    if not probe.available:
-        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+    require_uring()
 
     reader, writer = socket.socketpair()
     try:
@@ -90,9 +92,7 @@ def test_ring_recv_completion_when_available():
 
 
 def test_ring_send_completion_when_available():
-    probe = uring_api.probe()
-    if not probe.available:
-        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+    require_uring()
 
     reader, writer = socket.socketpair()
     try:
@@ -113,10 +113,35 @@ def test_ring_send_completion_when_available():
         writer.close()
 
 
+def test_ring_socketpair_round_trip_when_available():
+    require_uring()
+
+    left, right = socket.socketpair()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        with uring_api.Ring() as ring:
+            ring.submit_recv(left.fileno(), 4, 130)
+            ring.submit_send(right.fileno(), b"ping", 131)
+
+            completions = []
+            while len(completions) < 2:
+                completion = ring.wait(1.0)
+                assert completion is not None
+                completions.append(completion)
+
+        by_user_data = {completion["user_data"]: completion for completion in completions}
+        assert by_user_data[130]["res"] == 4
+        assert by_user_data[130]["result"] == b"ping"
+        assert by_user_data[131]["res"] == 4
+        assert by_user_data[131]["result"] == 4
+    finally:
+        left.close()
+        right.close()
+
+
 def test_ring_break_wait_interrupts_wait_when_available():
-    probe = uring_api.probe()
-    if not probe.available:
-        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+    require_uring()
 
     with uring_api.Ring() as ring:
         results: list[object] = []
@@ -133,9 +158,7 @@ def test_ring_break_wait_interrupts_wait_when_available():
 
 
 def test_ring_rejects_concurrent_wait_when_available():
-    probe = uring_api.probe()
-    if not probe.available:
-        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+    require_uring()
 
     with uring_api.Ring() as ring:
         started = threading.Event()
@@ -175,9 +198,7 @@ def test_ring_rejects_concurrent_wait_when_available():
 
 
 def test_ring_delivery_thread_invokes_callback_when_available():
-    probe = uring_api.probe()
-    if not probe.available:
-        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+    require_uring()
 
     reader, writer = socket.socketpair()
     try:
@@ -215,10 +236,42 @@ def test_ring_delivery_thread_invokes_callback_when_available():
         writer.close()
 
 
+def test_ring_delivery_thread_delivers_socketpair_round_trip_when_available():
+    require_uring()
+
+    left, right = socket.socketpair()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        delivered = threading.Event()
+        completions: list[dict[str, object]] = []
+
+        def callback(completion):
+            completions.append(completion)
+            if len(completions) == 2:
+                delivered.set()
+
+        with uring_api.Ring() as ring:
+            ring.callback = callback
+            ring.start()
+            ring.submit_recv(left.fileno(), 4, 132)
+            ring.submit_send(right.fileno(), b"pong", 133)
+
+            assert delivered.wait(1.0)
+            ring.stop()
+
+        by_user_data = {completion["user_data"]: completion for completion in completions}
+        assert by_user_data[132]["res"] == 4
+        assert by_user_data[132]["result"] == b"pong"
+        assert by_user_data[133]["res"] == 4
+        assert by_user_data[133]["result"] == 4
+    finally:
+        left.close()
+        right.close()
+
+
 def test_ring_delivery_thread_writes_unraisable_and_exits_when_callback_fails():
-    probe = uring_api.probe()
-    if not probe.available:
-        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+    require_uring()
 
     reader, writer = socket.socketpair()
     old_hook = sys.unraisablehook
@@ -251,3 +304,43 @@ def test_ring_delivery_thread_writes_unraisable_and_exits_when_callback_fails():
         sys.unraisablehook = old_hook
         reader.close()
         writer.close()
+
+
+def test_ring_callback_property_validation_when_available():
+    require_uring()
+
+    def callback(completion):
+        return None
+
+    with uring_api.Ring() as ring:
+        assert ring.callback is None
+        ring.callback = callback
+        assert ring.callback is callback
+        ring.callback = None
+        assert ring.callback is None
+
+        with pytest.raises(TypeError, match="callback must be callable or None"):
+            ring.callback = object()
+        with pytest.raises(TypeError, match="cannot delete callback"):
+            del ring.callback
+
+
+def test_ring_delivery_thread_requires_callback_when_available():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        with pytest.raises(RuntimeError, match="delivery callback is not set"):
+            ring.start()
+
+
+def test_ring_rejects_callback_change_while_delivery_thread_runs_when_available():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        ring.callback = lambda completion: None
+        ring.start()
+        try:
+            with pytest.raises(RuntimeError, match="cannot change callback while delivery thread is running"):
+                ring.callback = lambda completion: None
+        finally:
+            ring.stop()

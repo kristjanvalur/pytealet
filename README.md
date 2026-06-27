@@ -10,6 +10,7 @@ This repository also contains higher-level packages built on top of core `tealet
 
 - [`tealetio`](packages/tealetio/): a synchronous, asyncio-like runtime for tealet, including schedulers, tasks, futures, locks, queues, selector helpers, and asyncio coexistence.
 - [`tealet-greenlet`](packages/tealet-greenlet/): an experimental greenlet emulation layer via tealet, including greenlet-compatible imports and upstream-style compatibility tests.
+- [`uring-api`](packages/uring_api/): a Linux `io_uring` experiment exposing native ring probing, socket send/recv submission, completion waiting, and callback-thread delivery.
 
 ## About
 
@@ -140,6 +141,25 @@ Run the package tests from the workspace root:
 uv run --active --package tealet-greenlet python -m pytest packages/tealet-greenlet/tests/
 ```
 
+### Linux io_uring Package
+
+The `uring-api` workspace package is a standalone Linux `io_uring` wrapper used
+to develop native proactor ideas independently of `tealetio`. It links against
+system `liburing` and currently exposes ring probing, socket send/recv helpers,
+completion waiting, and direct callback-thread delivery.
+
+Install the system headers before building it on Debian/Ubuntu-style systems:
+
+```bash
+sudo apt install liburing-dev
+```
+
+Run the standalone package tests from the workspace root:
+
+```bash
+uv run --active --package uring-api python -m pytest packages/uring_api/tests/
+```
+
 ### Runtime Frame Introspection Toggle
 
 Need to inspect dormant tealet frames while debugging? The extension exposes a module-level runtime switch for dormant-frame exposure:
@@ -177,6 +197,7 @@ Detailed API references live in the `docs/` folder:
 - [docs/C_API.md](docs/C_API.md) for the capsule-based C API (`pytealet_capi.h`)
 - [packages/tealetio/docs/PYTHON_API.md](packages/tealetio/docs/PYTHON_API.md) for scheduler, task/future, lock, selector, runner, and asyncio APIs
 - [packages/tealet-greenlet/docs/PYTHON_API.md](packages/tealet-greenlet/docs/PYTHON_API.md) for the greenlet compatibility package
+- [packages/uring_api/README.md](packages/uring_api/README.md) for the standalone Linux `io_uring` wrapper
 
 ## Supported Python and Platforms
 
@@ -246,9 +267,10 @@ pytealet/
 ├── packages/
 │   ├── tealetio/             # Optional scheduler/asyncio package built on tealet
 │   │   └── docs/             # tealetio-specific API and design docs
-│   └── tealet-greenlet/      # Greenlet compatibility package built on tealet
-│       ├── docs/             # tealet-greenlet-specific API and architecture docs
-│       └── tests/            # Legacy and upstream-compat greenlet tests
+│   ├── tealet-greenlet/      # Greenlet compatibility package built on tealet
+│   │   ├── docs/             # tealet-greenlet-specific API and architecture docs
+│   │   └── tests/            # Legacy and upstream-compat greenlet tests
+│   └── uring_api/            # Standalone Linux io_uring wrapper experiment
 ├── pyproject.toml
 └── README.md
 ```

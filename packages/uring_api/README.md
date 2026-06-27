@@ -2,9 +2,10 @@
 
 `uring-api` is a small Python wrapper around Linux `io_uring`.
 
-The first goal is deliberately modest: expose enough of the native ring lifecycle
-to probe availability and build higher-level completion abstractions in Python.
-It does not implement an event loop, scheduler, or asyncio compatibility layer.
+The goal is deliberately modest: expose enough of the native ring lifecycle,
+socket send/recv submission, completion waiting, and callback delivery to build
+higher-level completion abstractions in Python. It does not implement an event
+loop, scheduler, or asyncio compatibility layer.
 
 ## Quick Check
 
@@ -16,6 +17,38 @@ print(uring_api.probe())
 with uring_api.Ring() as ring:
     print(ring.fd)
 ```
+
+## Socket I/O
+
+`Ring` currently exposes `submit_recv()`, `submit_send()`, and `wait()` for
+minimal socket-oriented experiments. Each submitted operation carries a
+`user_data` value which comes back with its completion.
+
+```python
+import socket
+import uring_api
+
+reader, writer = socket.socketpair()
+try:
+    reader.setblocking(False)
+    writer.setblocking(False)
+
+    with uring_api.Ring() as ring:
+        ring.submit_recv(reader.fileno(), 5, 100)
+        writer.send(b"hello")
+
+        completion = ring.wait(1.0)
+
+    assert completion is not None
+    print(completion["user_data"], completion["res"], completion["result"])
+finally:
+    reader.close()
+    writer.close()
+```
+
+For sends, `uring-api` keeps the exported buffer alive until the kernel reports
+the completion. That avoids copying the outgoing payload into an internal bytes
+object just to keep memory valid.
 
 ## Checking Availability
 
@@ -132,7 +165,7 @@ with uring_api.Ring() as ring:
     ring.callback = delivered
     ring.start()
     try:
-        ...
+        ring.submit_recv(fd, 4096, 200)
     finally:
         ring.stop()
 ```
@@ -156,9 +189,8 @@ Typical starting points:
 | Concurrent client work | 64-256 | Enough room for batches without large memory pressure. |
 | Server-style I/O | 512-4096 | Needs deliberate resource-limit checks and backpressure. |
 
-For now, `uring-api` does not register fixed buffers or provide operation
-submission helpers. When those are added, ring entries and registered buffers
-should be configured separately:
+For now, `uring-api` does not register fixed buffers. When those are added, ring
+entries and registered buffers should be configured separately:
 
 - ring entries control how many operations can be submitted or completed at
   once;
