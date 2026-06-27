@@ -8,7 +8,6 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from contextlib import contextmanager
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, cast
@@ -45,17 +44,6 @@ _DoneCallback = Callable[["Operation[Any]"], object]
 _CancelCallback = Callable[["Operation[Any]"], bool]
 _CompletionCallback = Callable[[], object]
 _Clock = Callable[[], float]
-
-
-@contextmanager
-def released(lock: threading.RLock):
-    """Release `lock` for a blocking call, then reacquire it."""
-
-    lock.release()
-    try:
-        yield
-    finally:
-        lock.acquire()
 
 
 class Proactor(Protocol):
@@ -103,7 +91,7 @@ class Operation(Generic[T]):
     def __init__(self, *, kind: str, fileobj: object | None = None) -> None:
         self.kind = kind
         self.fileobj = fileobj
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()
         self._done = False
         self._cancelled = False
         self._result: T | None = None
@@ -313,8 +301,11 @@ class SelectorProactor:
 
     def _poll(self, deadline: float | None = None) -> list[Operation[Any]]:
         timeout = self._timeout_until_deadline(deadline)
-        with released(self._lock):
+        self._lock.release()
+        try:
             events = self._selector.select(timeout)
+        finally:
+            self._lock.acquire()
         completed: list[Operation[Any]] = []
         wakeup_fd = self._wakeup_reader.fileno()
         for key, mask in events:
