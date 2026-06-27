@@ -113,7 +113,9 @@ If you prefer explicit homes, submodules such as `tealetio.scheduler`,
 
 `Scheduler` is the normal synchronous scheduler and uses a proactor backend.
 `BasicScheduler` remains available for tests and pure scheduling experiments
-that intentionally avoid IO support.
+that intentionally avoid IO support. Internally, tealetio keeps cooperative
+scheduling mechanics separate from the sync and async driving facades, so custom
+schedulers can share task behaviour while choosing their own wait point.
 
 ## Asyncio Model
 

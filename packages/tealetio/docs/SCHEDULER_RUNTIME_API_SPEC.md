@@ -26,7 +26,13 @@ Implemented:
   - `tealetio.asyncio.run_in_asyncio(...)`
   - `tealetio.asyncio.run_asyncio_in_tealet(...)`
 - `BaseScheduler` contains shared cooperative scheduling mechanics.
-- `Scheduler` is the concrete synchronous scheduler implementation.
+- Driving is layered through `BaseDrivingMixin`, with `SyncDrivingMixin` adding
+  the blocking `run*` facade and `AsyncDrivingMixin` keeping asyncio-hosted
+  schedulers on the `arun*` facade.
+- `Scheduler` is the default concrete synchronous scheduler implementation and
+  is backed by a proactor.
+- `ProactorScheduler` accepts a custom proactor factory. `BasicScheduler` keeps
+  the no-IO cooperative scheduling core for tests and pure scheduling work.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
 - `Scheduler` and `AsyncScheduler` can be used directly as factories. They share
   the common scheduler/task/timer APIs from `BaseScheduler`, while implementing

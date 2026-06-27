@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 from .locks import Event
-from .scheduler import BaseScheduler, RunnableQueueFactory, SyncSchedulerDrivingAPI
+from .scheduler import BaseScheduler, RunnableQueueFactory, SyncDrivingMixin, SyncSchedulerDrivingAPI
 
 T = TypeVar("T")
 
@@ -573,7 +573,7 @@ class SelectorProactor:
             raise ValueError("socket is closed")
 
 
-class ProactorScheduler(BaseScheduler, SyncSchedulerDrivingAPI):
+class ProactorScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
     """Synchronous scheduler whose IO wait point is a proactor backend."""
 
     def __init__(

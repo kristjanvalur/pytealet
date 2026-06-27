@@ -14,6 +14,8 @@ def test_top_level_exports_public_scheduler_api():
         "AsyncRunner",
         "AsyncScheduler",
         "AsyncSchedulerDrivingAPI",
+        "AsyncDrivingMixin",
+        "BaseDrivingMixin",
         "BaseRunner",
         "BaseScheduler",
         "BasicScheduler",
@@ -54,6 +56,7 @@ def test_top_level_exports_public_scheduler_api():
         "Semaphore",
         "Shield",
         "StubTaskFactory",
+        "SyncDrivingMixin",
         "SyncSchedulerDrivingAPI",
         "TASK_PRIORITY_CRITICAL",
         "TASK_PRIORITY_DEFAULT",
@@ -111,6 +114,9 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.TASK_PRIORITY_IDLE is tealetio.tasks.TASK_PRIORITY_IDLE
     assert tealetio.Scheduler is tealetio.scheduler.Scheduler
     assert tealetio.BaseScheduler is tealetio.scheduler.BaseScheduler
+    assert tealetio.BaseDrivingMixin is tealetio.scheduler.BaseDrivingMixin
+    assert tealetio.SyncDrivingMixin is tealetio.scheduler.SyncDrivingMixin
+    assert tealetio.AsyncDrivingMixin is tealetio.scheduler.AsyncDrivingMixin
     assert tealetio.BasicScheduler is tealetio.scheduler.BasicScheduler
     assert tealetio.Runner is tealetio.runner.Runner
     assert tealetio.SelectorScheduler is tealetio.selector.SelectorScheduler

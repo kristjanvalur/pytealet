@@ -12,6 +12,7 @@ from typing import Any, Callable, TypeVar, cast
 from . import compat
 from .locks import Event, TimeoutError
 from .scheduler import (
+    AsyncDrivingMixin,
     BaseScheduler,
     CoreSchedulerDrivingAPI,
     RunnableQueueFactory,
@@ -20,7 +21,6 @@ from .scheduler import (
 )
 from .tasks import (
     CancelledError,
-    Future,
     _copy_context_without_current_task,
     get_current,
 )
@@ -177,7 +177,7 @@ class TealetSelectorEventLoop(_asyncio.SelectorEventLoop):
         super().__init__(selector=_SchedulerSelectorAdapter(scheduler))
 
 
-class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
+class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI):
     """Cooperative scheduler for asyncio-hosted driving."""
 
     def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
@@ -321,26 +321,6 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
 
     async def _driver_yield(self) -> None:
         await _asyncio.sleep(0)
-
-    def run(self, *, yield_every: int | None = None) -> None:
-        """Raise because AsyncScheduler must be driven from an asyncio task."""
-
-        raise NotImplementedError("AsyncScheduler does not support run(); use arun()")
-
-    def run_forever(self, *, yield_every: int | None = None) -> None:
-        """Raise because AsyncScheduler must be driven from an asyncio task."""
-
-        raise NotImplementedError("AsyncScheduler does not support run_forever(); use arun_forever()")
-
-    def run_until_complete(
-        self,
-        future: Future[T] | Callable[[], T],
-        *,
-        yield_every: int | None = None,
-    ) -> T:
-        """Raise because AsyncScheduler must be driven from an asyncio task."""
-
-        raise NotImplementedError("AsyncScheduler does not support run_until_complete(); use arun_until_complete()")
 
 
 class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
