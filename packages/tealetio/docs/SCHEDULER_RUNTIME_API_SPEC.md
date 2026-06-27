@@ -729,6 +729,11 @@ Status: Implemented.
   portable low-level IO seam. They are useful for selector loops, and also map
   well to completion-oriented or external IO managers that wake callbacks when
   operations become ready or complete.
+- Treat `Proactor.set_completion_callback(...)` as the proactor wake seam for
+  async hosting. Thread-backed proactors should invoke it when completions are
+  queued; `AsyncProactorScheduler` installs a callback that wakes the host
+  asyncio loop with `loop.call_soon_threadsafe(...)`. `break_wait()` remains the
+  explicit interruption path and does not imply an IO completion.
 - Keep blocking convenience waits such as `wait_readable(...)` and
   `wait_writable(...)` layered over that callback seam, rather than maintaining
   a separate readiness-wait registration path.

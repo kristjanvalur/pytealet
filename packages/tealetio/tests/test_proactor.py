@@ -278,6 +278,30 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_set_completion_callback_replaces_callback(self):
+        seen: list[str] = []
+        proactor = SelectorProactor(completion_callback=lambda: seen.append("old"))
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 1)
+            seen.clear()
+
+            proactor.set_completion_callback(lambda: seen.append("new"))
+            writer.send(b"x")
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert seen == ["new"]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_completion_and_wakeup_callbacks_are_mutually_exclusive(self):
+        with pytest.raises(TypeError, match="either completion_callback or wakeup_callback"):
+            SelectorProactor(completion_callback=lambda: None, wakeup_callback=lambda: None)
+
     def test_completion_notifies_callback(self):
         seen: list[str] = []
         proactor = SelectorProactor(wakeup_callback=lambda: seen.append("wake"))
@@ -547,3 +571,35 @@ class TestProactorScheduler:
                 scheduler.close()
 
         assert asyncio.run(run()) == b"hello"
+
+    def test_async_proactor_scheduler_installs_loop_completion_callback(self, monkeypatch):
+        async def run() -> bool:
+            stored_callback = None
+
+            class TrackingProactor(SelectorProactor):
+                def set_completion_callback(self, callback):
+                    nonlocal stored_callback
+                    stored_callback = callback
+                    super().set_completion_callback(callback)
+
+            scheduler = AsyncProactorScheduler(TrackingProactor)
+            try:
+                loop = asyncio.get_running_loop()
+                calls = 0
+                original_call_soon_threadsafe = loop.call_soon_threadsafe
+
+                def call_soon_threadsafe(callback, *args, context=None):
+                    nonlocal calls
+                    calls += 1
+                    return original_call_soon_threadsafe(callback, *args, context=context)
+
+                monkeypatch.setattr(loop, "call_soon_threadsafe", call_soon_threadsafe)
+                scheduler.bind_loop(loop)
+                assert stored_callback is not None
+                stored_callback()
+                await asyncio.sleep(0)
+                return calls == 1
+            finally:
+                scheduler.close()
+
+        assert asyncio.run(run()) is True

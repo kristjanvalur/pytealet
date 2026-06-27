@@ -39,7 +39,7 @@ class InvalidStateError(Exception):
 
 _DoneCallback = Callable[["Operation[Any]"], object]
 _CancelCallback = Callable[["Operation[Any]"], bool]
-_WakeupCallback = Callable[[], object]
+_CompletionCallback = Callable[[], object]
 _Clock = Callable[[], float]
 
 
@@ -49,6 +49,8 @@ class Proactor(Protocol):
     def close(self) -> None: ...
 
     def break_wait(self) -> None: ...
+
+    def set_completion_callback(self, callback: _CompletionCallback | None) -> None: ...
 
     def get_time(self) -> float: ...
 
@@ -195,22 +197,30 @@ class SelectorProactor:
         self,
         selector: selectors.BaseSelector | None = None,
         *,
-        wakeup_callback: _WakeupCallback | None = None,
+        completion_callback: _CompletionCallback | None = None,
+        wakeup_callback: _CompletionCallback | None = None,
     ) -> None:
+        if completion_callback is not None and wakeup_callback is not None:
+            raise TypeError("use either completion_callback or wakeup_callback, not both")
         self._selector = selector if selector is not None else selectors.DefaultSelector()
         self._fd_operations: dict[int, _FdEntry] = {}
         self._closed = False
-        self._wakeup_callback = wakeup_callback
+        self._completion_callback = completion_callback if completion_callback is not None else wakeup_callback
         self._clock = time.monotonic
         self._wakeup_reader, self._wakeup_writer = socket.socketpair()
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
         self._selector.register(self._wakeup_reader.fileno(), selectors.EVENT_READ, None)
 
-    def set_wakeup_callback(self, callback: _WakeupCallback | None) -> None:
-        """Set the callback used to notify an owner that the proactor needs pumping."""
+    def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
+        """Set the callback invoked when backend completions may be ready."""
 
-        self._wakeup_callback = callback
+        self._completion_callback = callback
+
+    def set_wakeup_callback(self, callback: _CompletionCallback | None) -> None:
+        """Set the callback invoked when backend completions may be ready."""
+
+        self.set_completion_callback(callback)
 
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
@@ -263,7 +273,7 @@ class SelectorProactor:
             if mask & selectors.EVENT_WRITE:
                 self._step_fd_operation(fd, selectors.EVENT_WRITE, completed)
         if completed:
-            self._notify_wakeup()
+            self._notify_completion()
         return completed
 
     async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
@@ -566,8 +576,8 @@ class SelectorProactor:
             except OSError:
                 return
 
-    def _notify_wakeup(self) -> None:
-        callback = self._wakeup_callback
+    def _notify_completion(self) -> None:
+        callback = self._completion_callback
         if callback is not None:
             callback()
 
@@ -705,6 +715,42 @@ class SyncProactorScheduler(SyncDrivingMixin, ProactorScheduler, SyncSchedulerDr
 class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedulerDrivingAPI):
     """Async-hosted scheduler whose IO wait point is a proactor backend."""
 
+    def __init__(
+        self,
+        proactor_factory: ProactorFactory | None = None,
+        *,
+        runnable_queue_factory: RunnableQueueFactory | None = None,
+    ) -> None:
+        super().__init__(proactor_factory=proactor_factory, runnable_queue_factory=runnable_queue_factory)
+        self._wakeup_loop: _asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Bind this scheduler to an asyncio event loop clock and completion wakeups."""
+
+        if self._wakeup_loop is not None and self._wakeup_loop is not loop:
+            raise RuntimeError("AsyncProactorScheduler is already bound to a different event loop")
+        self._wakeup_loop = loop
+        self._time = loop.time
+
+        def wake_loop() -> None:
+            loop.call_soon_threadsafe(lambda: None)
+
+        self._proactor.set_completion_callback(wake_loop)
+
+    def _lazy_bind_running_loop(self) -> None:
+        if self._wakeup_loop is None:
+            self.bind_loop(_asyncio.get_running_loop())
+
+    def _before_arun(self) -> None:
+        self._lazy_bind_running_loop()
+
+    def close(self) -> None:
+        """Close proactor and scheduler-owned resources."""
+
+        self._proactor.set_completion_callback(None)
+        super().close()
+
     async def _driver_wait(self) -> None:
+        self._lazy_bind_running_loop()
         deadline = self._next_timer_deadline()
         await self._proactor.wait_async(deadline)
