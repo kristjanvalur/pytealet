@@ -4,7 +4,9 @@ import asyncio as _asyncio
 import errno
 import selectors
 import socket
+import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
@@ -30,6 +32,7 @@ __all__ = [
     "ProactorScheduler",
     "SelectorProactor",
     "SyncProactorScheduler",
+    "ThreadedSelectorProactor",
 ]
 
 
@@ -259,6 +262,12 @@ class SelectorProactor:
         """Wait until `deadline` for ready operations and return those completed."""
 
         self._check_open()
+        completed = self._poll(deadline)
+        if completed:
+            self._notify_completion()
+        return completed
+
+    def _poll(self, deadline: float | None = None) -> list[Operation[Any]]:
         timeout = self._timeout_until_deadline(deadline)
         events = self._selector.select(timeout)
         completed: list[Operation[Any]] = []
@@ -272,8 +281,6 @@ class SelectorProactor:
                 self._step_fd_operation(fd, selectors.EVENT_READ, completed)
             if mask & selectors.EVENT_WRITE:
                 self._step_fd_operation(fd, selectors.EVENT_WRITE, completed)
-        if completed:
-            self._notify_completion()
         return completed
 
     async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
@@ -590,6 +597,120 @@ class SelectorProactor:
             raise ValueError("socket must be non-blocking")
         if sock.fileno() < 0:
             raise ValueError("socket is closed")
+
+
+class ThreadedSelectorProactor(SelectorProactor):
+    """Selector proactor that polls readiness from a worker thread."""
+
+    def __init__(
+        self,
+        selector: selectors.BaseSelector | None = None,
+        *,
+        completion_callback: _CompletionCallback | None = None,
+        wakeup_callback: _CompletionCallback | None = None,
+    ) -> None:
+        super().__init__(selector, completion_callback=completion_callback, wakeup_callback=wakeup_callback)
+        self._completed: deque[Operation[Any]] = deque()
+        self._completed_lock = threading.Lock()
+        self._completed_ready = threading.Event()
+        self._worker_started = False
+        self._worker_stop = threading.Event()
+        self._worker = threading.Thread(target=self._worker_main, name="tealetio-selector-proactor", daemon=True)
+
+    def close(self) -> None:
+        """Stop the worker thread and close selector resources."""
+
+        if self._closed:
+            return
+        self._worker_stop.set()
+        self._completed_ready.set()
+        self.break_wait()
+        if self._worker_started and threading.current_thread() is not self._worker:
+            self._worker.join()
+        super().close()
+
+    def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
+        """Return completed operations, waiting only for queued completions."""
+
+        self._check_open()
+        self._ensure_worker_started()
+        completed = self._drain_completed()
+        if completed or deadline == 0:
+            return completed
+
+        timeout = self._timeout_until_deadline(deadline)
+        if timeout == 0:
+            return []
+        self._wait_for_completed(timeout)
+        return self._drain_completed()
+
+    async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
+        """Wait asynchronously until completed operations are queued."""
+
+        self._check_open()
+        self._ensure_worker_started()
+        completed = self._drain_completed()
+        if completed or deadline == 0:
+            return completed
+
+        timeout = self._timeout_until_deadline(deadline)
+        if timeout == 0:
+            return []
+        loop = _asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._wait_for_completed, timeout)
+        return self._drain_completed()
+
+    def _submit_socket_operation(
+        self,
+        sock: socket.socket,
+        event: int,
+        operation: Operation[T],
+        attempt: Callable[[], T],
+    ) -> None:
+        completed: list[Operation[Any]] = []
+        self._check_open()
+        self._check_socket(sock)
+        fd = sock.fileno()
+        self._reserve_fd_operation(fd, event, operation)
+        operation._attempt = attempt
+        operation._set_cancel_callback(self._cancel_operation)
+        self._update_selector_registration(fd)
+        self.break_wait()
+        self._step_fd_operation(fd, event, completed)
+        if completed:
+            self._queue_completed(completed)
+
+    def _queue_completed(self, completed: list[Operation[Any]]) -> None:
+        with self._completed_lock:
+            self._completed.extend(completed)
+            self._completed_ready.set()
+        self._notify_completion()
+
+    def _ensure_worker_started(self) -> None:
+        if self._worker_started:
+            return
+        self._worker_started = True
+        self._worker.start()
+
+    def _worker_main(self) -> None:
+        while not self._worker_stop.is_set():
+            try:
+                completed = self._poll(None)
+            except (OSError, ValueError, RuntimeError):
+                return
+            if completed:
+                self._queue_completed(completed)
+
+    def _drain_completed(self) -> list[Operation[Any]]:
+        with self._completed_lock:
+            completed = list(self._completed)
+            self._completed.clear()
+            if not self._completed:
+                self._completed_ready.clear()
+        return completed
+
+    def _wait_for_completed(self, timeout: float | None) -> None:
+        self._completed_ready.wait(timeout)
 
 
 class ProactorScheduler(BaseScheduler):

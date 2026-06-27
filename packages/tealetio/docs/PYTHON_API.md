@@ -55,6 +55,13 @@ can wake its event loop, for example with `loop.call_soon_threadsafe(...)`.
 `break_wait()` remains separate: it interrupts a blocking proactor wait without
 reporting an IO completion.
 
+`SelectorProactor` is the simple single-threaded selector-backed prototype.
+`ThreadedSelectorProactor` uses the same socket operation surface, but polls the
+selector from a worker thread and queues completions for `wait(...)` or
+`wait_async(...)`. That makes it useful for exercising the thread-callback shape
+expected from future OS-backed proactors without making the default selector
+prototype more complicated.
+
 ## Scheduler Accessors
 
 `tealetio.set_scheduler(scheduler)` binds a scheduler as current in the active

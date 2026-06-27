@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import selectors
 import socket
+import threading
 from concurrent.futures import CancelledError
 
 import pytest
@@ -15,6 +16,7 @@ from tealetio.proactor import (
     ProactorScheduler,
     SelectorProactor,
     SyncProactorScheduler,
+    ThreadedSelectorProactor,
 )
 
 
@@ -391,6 +393,83 @@ class TestSelectorProactor:
                 proactor.close()
 
         assert asyncio.run(run()) == []
+
+
+class TestThreadedSelectorProactor:
+    def test_worker_thread_signals_completion(self):
+        callback_threads: list[int] = []
+        main_thread = threading.get_ident()
+        proactor = ThreadedSelectorProactor(completion_callback=lambda: callback_threads.append(threading.get_ident()))
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            assert proactor.wait(0) == []
+
+            writer.send(b"hello")
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert operation.result() == b"hello"
+            assert callback_threads
+            assert callback_threads[0] != main_thread
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_immediate_completion_is_queued(self):
+        proactor = ThreadedSelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            operation = proactor.sendall(writer, b"hello")
+
+            assert proactor.wait(0) == [operation]
+            assert operation.result() is None
+            assert reader.recv(5) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_break_wait_does_not_notify_callback(self):
+        seen: list[str] = []
+        proactor = ThreadedSelectorProactor(completion_callback=lambda: seen.append("wake"))
+        try:
+            assert proactor.wait(0) == []
+            proactor.break_wait()
+
+            assert proactor.wait(proactor.get_time() + 0.01) == []
+            assert seen == []
+        finally:
+            proactor.close()
+
+    def test_async_scheduler_drives_threaded_backend(self):
+        async def run() -> bytes:
+            scheduler = AsyncProactorScheduler(ThreadedSelectorProactor)
+            set_scheduler(scheduler)
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+
+                def receive() -> bytes:
+                    return scheduler.sock_recv(reader, 5)
+
+                task = scheduler.spawn(receive)
+                await asyncio.sleep(0)
+                writer.send(b"hello")
+
+                return await scheduler.arun_until_complete(task)
+            finally:
+                reader.close()
+                writer.close()
+                scheduler.close()
+
+        assert asyncio.run(run()) == b"hello"
 
 
 class TestProactorScheduler:
