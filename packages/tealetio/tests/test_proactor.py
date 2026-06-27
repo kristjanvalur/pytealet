@@ -5,6 +5,7 @@ import selectors
 import socket
 import threading
 from concurrent.futures import CancelledError
+from typing import Any
 
 import pytest
 
@@ -21,7 +22,7 @@ from tealetio.proactor import (
 )
 
 
-def _wait_until_done(proactor: SelectorProactor, *operations: Operation[object]) -> list[Operation[object]]:
+def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
     completed = [operation for operation in operations if operation.done()]
     pending = {operation for operation in operations if not operation.done()}
     while pending:
@@ -595,35 +596,57 @@ class _FakeUringRing:
         self.sq_entries = entries
         self.cq_entries = entries * 2
         self.closed = False
+        self.running = False
+        self.callback = None
+        self.start_count = 0
+        self.stop_count = 0
+        self.break_count = 0
         self.completions: list[dict[str, object]] = []
         self.submitted_recv: list[tuple[int, int, int]] = []
         self.submitted_send: list[tuple[int, object, int]] = []
 
     def close(self) -> None:
+        self.stop()
         self.closed = True
+
+    def start(self) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.running = True
+        self.start_count += 1
+
+    def stop(self) -> None:
+        self.running = False
+        self.stop_count += 1
 
     def break_wait(self) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.completions.append({"user_data": 0, "res": 0, "flags": 0, "result": None})
+        self.break_count += 1
 
     def submit_recv(self, fd: int, n: int, user_data: int) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_recv.append((fd, n, user_data))
-        self.completions.append({"user_data": user_data, "res": 5, "flags": 0, "result": b"hello"})
+        self._deliver({"user_data": user_data, "res": 5, "flags": 0, "result": b"hello"})
 
-    def submit_send(self, fd: int, data: object, user_data: int) -> None:
+    def submit_send(self, fd: int, data: Any, user_data: int) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         self.submitted_send.append((fd, data, user_data))
-        self.completions.append({"user_data": user_data, "res": len(payload), "flags": 0, "result": len(payload)})
+        self._deliver({"user_data": user_data, "res": len(payload), "flags": 0, "result": len(payload)})
 
     def wait(self, timeout: float | None = None) -> dict[str, object] | None:
         if not self.completions:
             return None
         return self.completions.pop(0)
+
+    def _deliver(self, completion: dict[str, object]) -> None:
+        if self.running and self.callback is not None:
+            self.callback(completion)
+        else:
+            self.completions.append(completion)
 
 
 class TestUringProactor:
@@ -689,6 +712,53 @@ class TestUringProactor:
                 proactor.close()
 
         assert asyncio.run(run()) == []
+
+    def test_break_wait_delegates_to_ring(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            proactor.break_wait()
+
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.break_count == 1
+        finally:
+            proactor.close()
+
+    def test_ring_callback_signals_completion(self):
+        callback_called = threading.Event()
+
+        def on_completion() -> None:
+            callback_called.set()
+
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_callback=on_completion)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert operation.result() == b"hello"
+            assert callback_called.wait(1.0) is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_wait_async_completes_from_worker_queue(self):
+        async def run() -> bytes:
+            proactor = UringProactor(ring_factory=_FakeUringRing)
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                operation = proactor.recv(reader, 5)
+
+                assert await proactor.wait_async(proactor.get_time() + 1.0) == [operation]
+                return operation.result()
+            finally:
+                reader.close()
+                writer.close()
+                proactor.close()
+
+        assert asyncio.run(run()) == b"hello"
 
     def test_recv_completes_from_ring_completion(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
