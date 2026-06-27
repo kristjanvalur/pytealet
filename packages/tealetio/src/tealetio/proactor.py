@@ -4,6 +4,7 @@ import asyncio as _asyncio
 import errno
 import selectors
 import socket
+import time
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ class InvalidStateError(Exception):
 _DoneCallback = Callable[["Operation[Any]"], object]
 _CancelCallback = Callable[["Operation[Any]"], bool]
 _WakeupCallback = Callable[[], object]
+_Clock = Callable[[], float]
 
 
 class Proactor(Protocol):
@@ -39,11 +41,15 @@ class Proactor(Protocol):
 
     def break_wait(self) -> None: ...
 
+    def get_time(self) -> float: ...
+
+    def set_clock(self, clock: _Clock) -> None: ...
+
     def has_pending_operations(self) -> bool: ...
 
-    def wait(self, timeout: float | None = None) -> list[Operation[Any]]: ...
+    def wait(self, deadline: float | None = None) -> list[Operation[Any]]: ...
 
-    async def wait_async(self, timeout: float | None = None) -> list[Operation[Any]]: ...
+    async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]: ...
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]: ...
 
@@ -186,6 +192,7 @@ class SelectorProactor:
         self._fd_operations: dict[int, _FdEntry] = {}
         self._closed = False
         self._wakeup_callback = wakeup_callback
+        self._clock = time.monotonic
         self._wakeup_reader, self._wakeup_writer = socket.socketpair()
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
@@ -200,6 +207,16 @@ class SelectorProactor:
         """Return True if operations are waiting for backend completion."""
 
         return bool(self._fd_operations)
+
+    def get_time(self) -> float:
+        """Return the proactor clock value."""
+
+        return self._clock()
+
+    def set_clock(self, clock: _Clock) -> None:
+        """Set the clock used for deadline-oriented waits."""
+
+        self._clock = clock
 
     def close(self) -> None:
         """Close selector and wakeup resources."""
@@ -219,15 +236,11 @@ class SelectorProactor:
         except (BlockingIOError, OSError):
             pass
 
-    def poll(self) -> list[Operation[Any]]:
-        """Poll ready operations without blocking."""
-
-        return self.wait(0.0)
-
-    def wait(self, timeout: float | None = None) -> list[Operation[Any]]:
-        """Wait for ready operations and return the operations completed."""
+    def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
+        """Wait until `deadline` for ready operations and return those completed."""
 
         self._check_open()
+        timeout = self._timeout_until_deadline(deadline)
         events = self._selector.select(timeout)
         completed: list[Operation[Any]] = []
         wakeup_fd = self._wakeup_reader.fileno()
@@ -244,13 +257,17 @@ class SelectorProactor:
             self._notify_wakeup()
         return completed
 
-    async def wait_async(self, timeout: float | None = None) -> list[Operation[Any]]:
-        """Wait asynchronously for ready operations and return those completed."""
+    async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
+        """Wait asynchronously until `deadline` and return completed operations."""
 
         self._check_open()
-        completed = self.poll()
-        if completed or timeout == 0:
+        completed = self.wait(0)
+        if completed or deadline == 0:
             return completed
+
+        timeout = self._timeout_until_deadline(deadline)
+        if timeout == 0:
+            return []
 
         loop = _asyncio.get_running_loop()
         ready = loop.create_future()
@@ -290,7 +307,7 @@ class SelectorProactor:
                     loop.remove_reader(fd)
                 else:
                     loop.remove_writer(fd)
-        return self.poll()
+        return self.wait(0)
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
@@ -505,6 +522,13 @@ class SelectorProactor:
             mask |= selectors.EVENT_WRITE
         return mask
 
+    def _timeout_until_deadline(self, deadline: float | None) -> float | None:
+        if deadline is None:
+            return None
+        if deadline == 0:
+            return 0.0
+        return max(0.0, deadline - self.get_time())
+
     def _update_selector_registration(self, fd: int) -> None:
         if self._closed:
             return
@@ -562,6 +586,7 @@ class ProactorScheduler(BaseScheduler, SyncSchedulerDrivingAPI):
         if proactor_factory is None:
             proactor_factory = SelectorProactor
         self._proactor = proactor_factory()
+        self._proactor.set_clock(self.time)
 
     @property
     def proactor(self) -> Proactor:
@@ -585,8 +610,7 @@ class ProactorScheduler(BaseScheduler, SyncSchedulerDrivingAPI):
 
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()
-        timeout = None if deadline is None else self._delay_until(deadline)
-        self._proactor.wait(timeout)
+        self._proactor.wait(deadline)
 
     async def _driver_wait(self) -> None:
         self._wait_thread()

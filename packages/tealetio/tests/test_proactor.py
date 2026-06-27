@@ -15,7 +15,7 @@ def _wait_until_done(proactor: SelectorProactor, *operations: Operation[object])
     completed = [operation for operation in operations if operation.done()]
     pending = {operation for operation in operations if not operation.done()}
     while pending:
-        for operation in proactor.wait(1.0):
+        for operation in proactor.wait(proactor.get_time() + 1.0):
             completed.append(operation)
             pending.discard(operation)
     return completed
@@ -53,6 +53,15 @@ class TestOperation:
 
 
 class TestSelectorProactor:
+    def test_clock_can_be_replaced(self):
+        proactor = SelectorProactor()
+        try:
+            proactor.set_clock(lambda: 42.0)
+
+            assert proactor.get_time() == 42.0
+        finally:
+            proactor.close()
+
     def test_recv_completes_after_selector_wait(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -64,7 +73,7 @@ class TestSelectorProactor:
             assert operation.done() is False
 
             writer.send(b"hello")
-            assert proactor.wait(1.0) == [operation]
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
             assert operation.result() == b"hello"
         finally:
             reader.close()
@@ -82,7 +91,7 @@ class TestSelectorProactor:
             operation = proactor.recv_into(reader, buf)
             writer.send(b"world")
 
-            assert proactor.wait(1.0) == [operation]
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
             assert operation.result() == 5
             assert bytes(buf) == b"world"
         finally:
@@ -156,7 +165,7 @@ class TestSelectorProactor:
 
             receive_bytes_operation = proactor.recvfrom(receiver, 5)
             sender.sendto(b"again", receiver.getsockname())
-            assert proactor.wait(1.0) == [receive_bytes_operation]
+            assert proactor.wait(proactor.get_time() + 1.0) == [receive_bytes_operation]
             data, address = receive_bytes_operation.result()
             assert data == b"again"
             assert address[1] == sender.getsockname()[1]
@@ -213,7 +222,7 @@ class TestSelectorProactor:
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
 
             writer.send(b"x")
-            assert proactor.wait(1.0) == [operation]
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
         finally:
@@ -237,7 +246,7 @@ class TestSelectorProactor:
         proactor = SelectorProactor(wakeup_callback=lambda: seen.append("wake"))
         try:
             proactor.break_wait()
-            assert proactor.wait(0.0) == []
+            assert proactor.wait(0) == []
             assert seen == []
         finally:
             proactor.close()
@@ -255,7 +264,7 @@ class TestSelectorProactor:
             proactor.set_wakeup_callback(lambda: seen.append("new"))
             writer.send(b"x")
 
-            assert proactor.wait(1.0) == [operation]
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
             assert seen == ["new"]
         finally:
             reader.close()
@@ -274,7 +283,7 @@ class TestSelectorProactor:
 
             writer.send(b"x")
 
-            assert proactor.wait(1.0) == [operation]
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
             assert seen == ["wake"]
         finally:
             reader.close()
@@ -292,7 +301,7 @@ class TestSelectorProactor:
             seen.clear()
 
             assert operation.cancel() is True
-            proactor.wait(0.0)
+            proactor.wait(0)
             assert seen == []
         finally:
             reader.close()
@@ -307,7 +316,7 @@ class TestSelectorProactor:
                 reader.setblocking(False)
                 writer.setblocking(False)
                 operation = proactor.recv(reader, 5)
-                waiter = asyncio.create_task(proactor.wait_async(1.0))
+                waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
                 await asyncio.sleep(0)
 
                 writer.send(b"hello")
@@ -329,7 +338,7 @@ class TestSelectorProactor:
                 reader.setblocking(False)
                 writer.setblocking(False)
                 proactor.recv(reader, 1)
-                return await proactor.wait_async(0.001)
+                return await proactor.wait_async(proactor.get_time() + 0.001)
             finally:
                 reader.close()
                 writer.close()
@@ -341,7 +350,7 @@ class TestSelectorProactor:
         async def run() -> list[Operation[object]]:
             proactor = SelectorProactor()
             try:
-                waiter = asyncio.create_task(proactor.wait_async(1.0))
+                waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
                 await asyncio.sleep(0)
 
                 proactor.break_wait()
@@ -354,6 +363,15 @@ class TestSelectorProactor:
 
 
 class TestProactorScheduler:
+    def test_scheduler_clock_drives_proactor_clock(self):
+        scheduler = ProactorScheduler()
+        try:
+            scheduler._time = lambda: 24.0
+
+            assert scheduler.proactor.get_time() == 24.0
+        finally:
+            scheduler.close()
+
     def test_uses_proactor_factory(self):
         selector = selectors.SelectSelector()
         created: list[SelectorProactor] = []

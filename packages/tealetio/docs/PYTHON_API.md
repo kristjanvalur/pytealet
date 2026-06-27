@@ -35,10 +35,11 @@ Use `ProactorScheduler` directly when you want to provide a custom proactor
 factory, and use `BasicScheduler` when you deliberately want the small no-IO
 driver that only waits for timers and explicit scheduler wakeups.
 
-Proactors expose both `wait(timeout=None)` and `await wait_async(timeout=None)`.
+Proactors expose both `wait(deadline=None)` and `await wait_async(deadline=None)`.
 The synchronous form blocks the current thread; the async form waits through the
 running asyncio loop so future asyncio-hosted schedulers can pump tealetio-owned
-IO completions without blocking asyncio itself.
+IO completions without blocking asyncio itself. Deadlines use the proactor clock:
+`None` waits forever, and `0` always means poll without blocking.
 
 ## Scheduler Accessors
 
