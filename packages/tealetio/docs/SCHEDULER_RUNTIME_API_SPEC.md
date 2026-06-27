@@ -26,7 +26,23 @@ Implemented:
   - `tealetio.asyncio.run_in_asyncio(...)`
   - `tealetio.asyncio.run_asyncio_in_tealet(...)`
 - `BaseScheduler` contains shared cooperative scheduling mechanics.
-- `Scheduler` is the concrete synchronous scheduler implementation.
+- Driving is layered through `BaseDrivingMixin`, with `SyncDrivingMixin` adding
+  the blocking `run*` facade and `AsyncDrivingMixin` keeping asyncio-hosted
+  schedulers on the `arun*` facade.
+- `Scheduler` is an alias for the default concrete synchronous scheduler
+  implementation and is backed by a proactor.
+- `ProactorScheduler` is the shared abstract proactor core.
+  `SyncProactorScheduler` accepts a custom proactor factory for synchronous
+  driving, and `AsyncProactorScheduler` uses the same proactor core with async
+  driving. `BasicScheduler` keeps the no-IO cooperative scheduling core for
+  tests and pure scheduling work.
+- `SelectorScheduler` is the shared abstract selector core.
+  `SyncSelectorScheduler` and `AsyncSelectorScheduler` apply the same driving
+  split to selector readiness. The tealet-hosted asyncio runner chooses a
+  forwarding loop based on the created scheduler type.
+- `ForwardingSelector`, `ForwardingProactor`, `TealetSelectorEventLoop`, and
+  `TealetProactorEventLoop` provide explicit tealet-hosted asyncio experiments
+  for selector-backed and proactor-backed schedulers.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
 - `Scheduler` and `AsyncScheduler` can be used directly as factories. They share
   the common scheduler/task/timer APIs from `BaseScheduler`, while implementing
@@ -37,7 +53,7 @@ Implemented:
   - `add_writer(...)`
   - `remove_writer(...)`
   `tealetio.asyncio.AsyncScheduler` delegates these hooks to the running asyncio loop.
-  `tealetio.selector.SelectorScheduler` implements them through its native selector reactor.
+  Concrete selector schedulers implement them through their native selector reactor.
   Selector readiness waits (`wait_readable(...)` and `wait_writable(...)`) are
   layered on top of one-shot reader/writer callbacks that wake tealet `Event`
   waiters.
@@ -547,13 +563,16 @@ Return behavior:
 
 ### tealetio.asyncio.run_asyncio_in_tealet(...)
 
-- Creates a temporary `tealetio.runner.Runner` with a
-  `tealetio.selector.SelectorScheduler` by default.
+- Creates a temporary `tealetio.runner.Runner`. By default this uses
+  `tealetio.scheduler.Scheduler`, so the hosted asyncio loop is proactor-shaped
+  unless a selector scheduler factory is supplied.
 - Disables the outer tealet runner's SIGINT handler by default so the inner
   `asyncio.Runner` can install its normal interrupt handler.
-- Creates a temporary `asyncio.Runner` whose default loop is
-  `tealetio.asyncio.TealetSelectorEventLoop` hosted by the active selector
-  scheduler.
+- Creates a temporary `asyncio.Runner` whose default loop is chosen from the
+  active scheduler: `TealetProactorEventLoop` for proactor schedulers and
+  `TealetSelectorEventLoop` for selector schedulers.
+- A caller can still provide `loop_factory=...` to override that automatic
+  selection.
 - Runs the coroutine/awaitable using the same entry semantics as
   `asyncio.Runner.run(...)` inside the tealet-hosted asyncio loop.
 - Restores prior scheduler binding after completion and closes the default
@@ -584,9 +603,9 @@ Return behavior:
   - `RuntimeError` indicating Python 3.11+ is required
 - `tealetio.asyncio.run_asyncio_in_tealet(...)` without `asyncio.Runner`:
   - `RuntimeError` indicating Python 3.11+ is required
-- `tealetio.asyncio.run_asyncio_in_tealet(...)` with a non-selector scheduler and
-  no custom loop factory:
-  - `RuntimeError` indicating that a `SelectorScheduler` is required
+- `tealetio.asyncio.run_asyncio_in_tealet(...)` with a non-selector,
+  non-proactor scheduler and no custom loop factory:
+  - `RuntimeError` indicating that a selector or proactor scheduler is required
 - invalid factory return values:
   - Factories are duck typed; failures surface naturally when required scheduler
     operations are used.
@@ -716,6 +735,19 @@ Status: Implemented.
   portable low-level IO seam. They are useful for selector loops, and also map
   well to completion-oriented or external IO managers that wake callbacks when
   operations become ready or complete.
+- Treat `Proactor.set_completion_callback(...)` as the proactor wake seam for
+  async hosting. Thread-backed proactors should invoke it when completions are
+  queued; `AsyncProactorScheduler` installs a callback that wakes the host
+  asyncio loop with `loop.call_soon_threadsafe(...)`. `break_wait()` remains the
+  explicit interruption path and does not imply an IO completion.
+- Proactors may return an already-done `Operation` when submission itself can
+  complete the IO. This is the preferred short-circuit path: callers inspect the
+  operation directly, and the backend does not need to queue a completion or wake
+  a wait host.
+- `ThreadedSelectorProactor` is the selector-backed experiment for this shape:
+  a worker thread owns readiness polling, queues completed operations, and uses
+  the completion callback to wake an async host. `SelectorProactor` remains the
+  simpler single-threaded prototype.
 - Keep blocking convenience waits such as `wait_readable(...)` and
   `wait_writable(...)` layered over that callback seam, rather than maintaining
   a separate readiness-wait registration path.
@@ -744,14 +776,14 @@ Status: Implemented.
 
 6. Tealet-Hosted Asyncio Loop Experiment
 
-Status: Initial Unix selector prototype implemented.
+Status: Initial Unix selector and proactor-shaped prototypes implemented.
 
 - A tealet-hosted asyncio loop may be feasible if the asyncio loop's raw
   blocking points can be delegated to the outer tealet scheduler.
 - `tealetio.asyncio.TealetSelectorEventLoop` is an experimental
-  `asyncio.SelectorEventLoop` subclass hosted by `tealetio.selector.SelectorScheduler`.
-- The implementation uses a selector adapter whose fd registration is backed by
-  `SelectorScheduler.add_reader(...)` and `add_writer(...)`; when asyncio's
+  `asyncio.SelectorEventLoop` subclass hosted by `tealetio.selector.SyncSelectorScheduler`.
+- The implementation uses `ForwardingSelector`, whose fd registration is backed by
+  `SyncSelectorScheduler.add_reader(...)` and `add_writer(...)`; when asyncio's
   selector would block, the pump tealet parks on a scheduler `Event` and wakes
   from fd readiness, a scheduler timer, or asyncio's self-pipe.
 - The critical hook is file-descriptor readiness. Asyncio selector loops use
@@ -762,6 +794,13 @@ Status: Initial Unix selector prototype implemented.
   scheduler. When asyncio would block in its selector, the pump tealet should
   park until the outer scheduler observes fd readiness, a timer deadline, or an
   explicit wakeup.
+- `tealetio.asyncio.TealetProactorEventLoop` is an experimental
+  `asyncio.proactor_events.BaseProactorEventLoop` subclass hosted by a
+  `tealetio.proactor.ProactorScheduler`. `ForwardingProactor` converts host
+  tealetio `Operation` objects into asyncio `Future` objects and implements the
+  proactor-loop `select(timeout)` hook by waiting on the host proactor. This is
+  mainly useful for proving the shape; selector-based asyncio remains the more
+  portable hosted mode.
 - Many higher-level asyncio mechanisms can then remain delegated to their
   existing implementations: socket transports/protocols, `loop.sock_*` helpers,
   DNS helpers that use threads, `run_in_executor`, and callback scheduling.

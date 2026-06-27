@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio as _asyncio
+import asyncio.proactor_events as _proactor_events
 import contextvars
 import selectors
 import socket
-from abc import ABC
 from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any, Callable, TypeVar, cast
@@ -12,20 +12,22 @@ from typing import Any, Callable, TypeVar, cast
 from . import compat
 from .locks import Event, TimeoutError
 from .scheduler import (
+    AsyncDrivingMixin,
+    AsyncSchedulerDrivingAPI,
     BaseScheduler,
-    CoreSchedulerDrivingAPI,
     RunnableQueueFactory,
+    SyncSchedulerDrivingAPI,
     _current_scheduler,
     gather,
 )
 from .tasks import (
     CancelledError,
-    Future,
     _copy_context_without_current_task,
     get_current,
 )
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
+from .proactor import Operation, Proactor, ProactorScheduler
 from .selector import SelectorScheduler
 
 T = TypeVar("T")
@@ -33,7 +35,9 @@ T = TypeVar("T")
 __all__ = [
     "AsyncRunner",
     "AsyncScheduler",
-    "AsyncSchedulerDrivingAPI",
+    "ForwardingSelector",
+    "ForwardingProactor",
+    "TealetProactorEventLoop",
     "TealetSelectorEventLoop",
     "asyncio_get_current",
     "run_async",
@@ -49,11 +53,9 @@ def asyncio_get_current() -> _asyncio.Task[Any] | None:
     return _asyncio.current_task()
 
 
-class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
-    """Asyncio-hosted scheduler driver API."""
+class ForwardingSelector(selectors.BaseSelector):
+    """Asyncio selector facade backed by a tealetio selector scheduler."""
 
-
-class _SchedulerSelectorAdapter(selectors.BaseSelector):
     def __init__(self, scheduler: SelectorScheduler) -> None:
         self._scheduler = scheduler
         self._keys: dict[int, selectors.SelectorKey] = {}
@@ -174,10 +176,164 @@ class TealetSelectorEventLoop(_asyncio.SelectorEventLoop):
                 raise RuntimeError("TealetSelectorEventLoop requires a current SelectorScheduler")
             scheduler = current
         self._tealet_scheduler = scheduler
-        super().__init__(selector=_SchedulerSelectorAdapter(scheduler))
+        super().__init__(selector=ForwardingSelector(scheduler))
 
 
-class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
+class ForwardingProactor:
+    """Asyncio proactor facade backed by a tealetio proactor."""
+
+    def __init__(self, proactor: Proactor) -> None:
+        self._proactor = proactor
+        self._loop: _asyncio.AbstractEventLoop | None = None
+        self._closed = False
+
+    def set_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Bind the asyncio loop that owns Futures created by this proactor."""
+
+        self._loop = loop
+
+    def close(self) -> None:
+        """Detach from the host proactor without closing it."""
+
+        self._closed = True
+        self._loop = None
+
+    def get_map(self) -> Mapping[Any, Any]:
+        """Return an empty selector map for BaseEventLoop compatibility."""
+
+        return {}
+
+    def select(self, timeout: float | None = None) -> list[object]:
+        """Wait for host proactor completions and let Futures schedule callbacks."""
+
+        if self._closed:
+            return []
+        deadline = None if timeout is None else self._proactor.get_time() + timeout
+        self._proactor.wait(deadline)
+        return []
+
+    def recv(self, sock: socket.socket, n: int) -> _asyncio.Future[bytes]:
+        """Receive bytes through the host proactor."""
+
+        return self._future_from_operation(self._proactor.recv(sock, n))
+
+    def recv_into(self, sock: socket.socket, buf: Any) -> _asyncio.Future[int]:
+        """Receive bytes into `buf` through the host proactor."""
+
+        return self._future_from_operation(self._proactor.recv_into(sock, buf))
+
+    def recvfrom(self, sock: socket.socket, bufsize: int) -> _asyncio.Future[tuple[bytes, Any]]:
+        """Receive datagram bytes and address through the host proactor."""
+
+        return self._future_from_operation(self._proactor.recvfrom(sock, bufsize))
+
+    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> _asyncio.Future[tuple[int, Any]]:
+        """Receive datagram bytes into `buf` through the host proactor."""
+
+        return self._future_from_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
+
+    def send(self, sock: socket.socket, data: Any) -> _asyncio.Future[None]:
+        """Send all bytes through the host proactor."""
+
+        return self._future_from_operation(self._proactor.sendall(sock, data))
+
+    def sendto(self, sock: socket.socket, data: Any, flags: int, address: Any) -> _asyncio.Future[int]:
+        """Send datagram bytes through the host proactor."""
+
+        if flags:
+            future: _asyncio.Future[int] = self._require_loop().create_future()
+            future.set_exception(NotImplementedError("sendto flags are not supported by ForwardingProactor"))
+            return future
+        return self._future_from_operation(self._proactor.sendto(sock, data, address))
+
+    def accept(self, sock: socket.socket) -> _asyncio.Future[tuple[socket.socket, Any]]:
+        """Accept a socket through the host proactor."""
+
+        return self._future_from_operation(self._proactor.accept(sock))
+
+    def connect(self, sock: socket.socket, address: Any) -> _asyncio.Future[None]:
+        """Connect a socket through the host proactor."""
+
+        return self._future_from_operation(self._proactor.connect(sock, address))
+
+    def sendfile(self, sock: socket.socket, file: Any, offset: int, blocksize: int) -> _asyncio.Future[int]:
+        """Report that native proactor sendfile is not available."""
+
+        future: _asyncio.Future[int] = self._require_loop().create_future()
+        future.set_exception(_asyncio.SendfileNotAvailableError("ForwardingProactor does not support sendfile"))
+        return future
+
+    def _stop_serving(self, sock: socket.socket) -> None:
+        pass
+
+    def _future_from_operation(self, operation: Operation[T]) -> _asyncio.Future[T]:
+        loop = self._require_loop()
+        future: _asyncio.Future[T] = loop.create_future()
+
+        def complete_future() -> None:
+            if future.cancelled():
+                return
+            if operation.cancelled():
+                future.cancel()
+                return
+            try:
+                result = operation.result()
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+        def complete_operation(_operation: Operation[Any]) -> None:
+            try:
+                loop.call_soon_threadsafe(complete_future)
+            except RuntimeError:
+                pass
+
+        def cancel_operation(asyncio_future: _asyncio.Future[T]) -> None:
+            if asyncio_future.cancelled():
+                operation.cancel()
+
+        if operation.done():
+            complete_future()
+        else:
+            operation.add_done_callback(complete_operation)
+            future.add_done_callback(cancel_operation)
+        return future
+
+    def _require_loop(self) -> _asyncio.AbstractEventLoop:
+        if self._loop is None:
+            raise RuntimeError("ForwardingProactor is not bound to an asyncio loop")
+        return self._loop
+
+
+class TealetProactorEventLoop(_proactor_events.BaseProactorEventLoop):
+    """Asyncio proactor loop hosted by a tealetio proactor scheduler."""
+
+    def __init__(self, proactor: Proactor | None = None) -> None:
+        if proactor is None:
+            current = _current_scheduler()
+            if not isinstance(current, ProactorScheduler):
+                raise RuntimeError("TealetProactorEventLoop requires a current ProactorScheduler")
+            proactor = current.proactor
+        self._tealet_proactor = proactor
+        super().__init__(ForwardingProactor(proactor))
+
+    def run_forever(self) -> None:
+        """Run the loop while polling the host tealetio proactor."""
+
+        loop_self_reading = getattr(self, "_loop_self_reading", None)
+        if loop_self_reading is not None:
+            loop_self_reading()
+        try:
+            super().run_forever()
+        finally:
+            self_reading_future = getattr(self, "_self_reading_future", None)
+            if self_reading_future is not None:
+                self_reading_future.cancel()
+                self._self_reading_future = None
+
+
+class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI):
     """Cooperative scheduler for asyncio-hosted driving."""
 
     def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
@@ -322,26 +478,6 @@ class AsyncScheduler(BaseScheduler, AsyncSchedulerDrivingAPI):
     async def _driver_yield(self) -> None:
         await _asyncio.sleep(0)
 
-    def run(self, *, yield_every: int | None = None) -> None:
-        """Raise because AsyncScheduler must be driven from an asyncio task."""
-
-        raise NotImplementedError("AsyncScheduler does not support run(); use arun()")
-
-    def run_forever(self, *, yield_every: int | None = None) -> None:
-        """Raise because AsyncScheduler must be driven from an asyncio task."""
-
-        raise NotImplementedError("AsyncScheduler does not support run_forever(); use arun_forever()")
-
-    def run_until_complete(
-        self,
-        future: Future[T] | Callable[[], T],
-        *,
-        yield_every: int | None = None,
-    ) -> T:
-        """Raise because AsyncScheduler must be driven from an asyncio task."""
-
-        raise NotImplementedError("AsyncScheduler does not support run_until_complete(); use arun_until_complete()")
-
 
 class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
     """Run scheduler-backed entries from within an existing asyncio task."""
@@ -454,33 +590,41 @@ def run_asyncio_in_tealet(
     /,
     *,
     context: contextvars.Context | None = None,
-    scheduler_factory: Callable[[], SelectorScheduler] | None = None,
+    scheduler_factory: Callable[[], SyncSchedulerDrivingAPI] | None = None,
     loop_factory: Callable[[], _asyncio.AbstractEventLoop] | None = None,
     debug: bool | None = None,
     handle_sigint: bool = False,
 ):
-    """Run one asyncio entry under a temporary SelectorScheduler-owned tealet runner."""
+    """Run one asyncio entry under a temporary sync scheduler."""
 
     tealet_runner = TealetRunner(
-        scheduler_factory=scheduler_factory or SelectorScheduler,
+        scheduler_factory=scheduler_factory,
         debug=debug,
         handle_sigint=handle_sigint,
     )
 
     def run_inside_tealet():
-        scheduler = cast(SelectorScheduler, tealet_runner.get_scheduler())
+        scheduler = tealet_runner.get_scheduler()
+        if not isinstance(scheduler, BaseScheduler):
+            raise RuntimeError("run_asyncio_in_tealet requires a BaseScheduler-compatible scheduler")
+        base_scheduler = scheduler
 
         def tealet_loop_factory() -> _asyncio.AbstractEventLoop:
             if loop_factory is not None:
                 return loop_factory()
-            loop = TealetSelectorEventLoop()
+            if isinstance(scheduler, ProactorScheduler):
+                loop = TealetProactorEventLoop(scheduler.proactor)
+            elif isinstance(scheduler, SelectorScheduler):
+                loop = TealetSelectorEventLoop(scheduler)
+            else:
+                raise RuntimeError("run_asyncio_in_tealet requires a selector or proactor scheduler")
             _asyncio.set_event_loop(loop)
             return loop
 
         async def yield_to_tealet_scheduler() -> None:
             while True:
                 await _asyncio.sleep(0)
-                scheduler.sleep(0)
+                base_scheduler.sleep(0)
 
         async def wrapped_entry():
             yielder = _asyncio.create_task(yield_to_tealet_scheduler())

@@ -1,21 +1,32 @@
 from __future__ import annotations
 
+import asyncio as _asyncio
 import contextvars
 import errno
 import selectors
 import socket
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, cast
 
 from .locks import Event
-from .scheduler import BaseScheduler, Scheduler
+from .scheduler import (
+    AsyncDrivingMixin,
+    AsyncSchedulerDrivingAPI,
+    BaseScheduler,
+    RunnableQueueFactory,
+    SyncDrivingMixin,
+    SyncSchedulerDrivingAPI,
+)
 
 _FdCallback = tuple[Callable[..., object], tuple[object, ...], contextvars.Context]
 
 __all__ = [
+    "AsyncSelectorScheduler",
     "SelectorMixin",
     "SelectorScheduler",
+    "SyncSelectorScheduler",
 ]
 
 
@@ -29,7 +40,7 @@ class _FdCallbacks:
 
 
 class SelectorMixin:
-    """Selector-backed readiness waits for synchronous schedulers."""
+    """Selector-backed readiness waits for schedulers."""
 
     def __init__(self, selector: selectors.BaseSelector | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -360,6 +371,9 @@ class SelectorMixin:
         deadline = scheduler._next_timer_deadline()
         timeout = None if deadline is None else scheduler._delay_until(deadline)
         events = self._selector.select(timeout=timeout)
+        self._process_selector_events(events)
+
+    def _process_selector_events(self, events: list[tuple[selectors.SelectorKey, int]]) -> None:
         wakeup_fd = self._selector_wakeup_reader.fileno()
         for key, mask in events:
             fd = key.fd
@@ -376,8 +390,104 @@ class SelectorMixin:
         return bool(self._fd_callbacks) or BaseScheduler._has_pending_driver_work(cast(BaseScheduler, self))
 
 
-class SelectorScheduler(SelectorMixin, Scheduler):
+class SelectorScheduler(SelectorMixin, BaseScheduler, ABC):
+    """Shared selector-backed cooperative scheduling mechanics."""
+
+    def __init__(
+        self,
+        selector: selectors.BaseSelector | None = None,
+        *,
+        runnable_queue_factory: RunnableQueueFactory | None = None,
+    ) -> None:
+        super().__init__(selector=selector, runnable_queue_factory=runnable_queue_factory)
+
+    @abstractmethod
+    async def _driver_wait(self) -> None:
+        raise NotImplementedError
+
+
+class SyncSelectorScheduler(SyncDrivingMixin, SelectorScheduler, SyncSchedulerDrivingAPI):
     """Synchronous scheduler with selector-backed fd readiness waits."""
 
-    def __init__(self, selector: selectors.BaseSelector | None = None, *, runnable_queue_factory=None) -> None:
+    async def _driver_wait(self) -> None:
+        self._wait_thread()
+
+
+class AsyncSelectorScheduler(AsyncDrivingMixin, SelectorScheduler, AsyncSchedulerDrivingAPI):
+    """Async-hosted scheduler with selector-backed fd readiness waits."""
+
+    def __init__(
+        self,
+        selector: selectors.BaseSelector | None = None,
+        *,
+        runnable_queue_factory: RunnableQueueFactory | None = None,
+    ) -> None:
         super().__init__(selector=selector, runnable_queue_factory=runnable_queue_factory)
+        self._wakeup_loop: _asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Bind this scheduler to an asyncio event loop clock."""
+
+        if self._wakeup_loop is not None and self._wakeup_loop is not loop:
+            raise RuntimeError("AsyncSelectorScheduler is already bound to a different event loop")
+        self._wakeup_loop = loop
+        self._time = loop.time
+
+    def _lazy_bind_running_loop(self) -> None:
+        if self._wakeup_loop is None:
+            self.bind_loop(_asyncio.get_running_loop())
+
+    def _before_arun(self) -> None:
+        self._lazy_bind_running_loop()
+
+    async def _driver_wait(self) -> None:
+        loop = self._wakeup_loop
+        if loop is None:
+            self._lazy_bind_running_loop()
+            loop = self._wakeup_loop
+        assert loop is not None
+
+        deadline = self._next_timer_deadline()
+        if deadline is not None and deadline <= self.time():
+            self._process_selector_events(self._selector.select(timeout=0))
+            return
+
+        waiter = loop.create_future()
+
+        def wake() -> None:
+            if not waiter.done():
+                waiter.set_result(None)
+
+        registered: list[tuple[int, int]] = []
+        timeout = None if deadline is None else max(0.0, deadline - self.time())
+        try:
+            for key in self._selector.get_map().values():
+                try:
+                    if key.events & selectors.EVENT_READ:
+                        loop.add_reader(key.fd, wake)
+                        registered.append((key.fd, selectors.EVENT_READ))
+                    if key.events & selectors.EVENT_WRITE:
+                        loop.add_writer(key.fd, wake)
+                        registered.append((key.fd, selectors.EVENT_WRITE))
+                except (AttributeError, NotImplementedError) as exc:
+                    raise RuntimeError(
+                        "AsyncSelectorScheduler requires an asyncio event loop with add_reader/add_writer support"
+                    ) from exc
+            if timeout is None:
+                await waiter
+            else:
+                try:
+                    await _asyncio.wait_for(waiter, timeout)
+                except _asyncio.TimeoutError:
+                    pass
+        finally:
+            for fd, event in registered:
+                if event == selectors.EVENT_READ:
+                    loop.remove_reader(fd)
+                else:
+                    loop.remove_writer(fd)
+
+        self._process_selector_events(self._selector.select(timeout=0))
+
+    async def _driver_yield(self) -> None:
+        await _asyncio.sleep(0)

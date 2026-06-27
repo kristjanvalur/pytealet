@@ -1,0 +1,821 @@
+from __future__ import annotations
+
+import asyncio
+import selectors
+import socket
+import threading
+from concurrent.futures import CancelledError
+
+import pytest
+
+from tealetio import TimeoutError, set_scheduler, timeout
+from tealetio.proactor import (
+    AsyncProactorScheduler,
+    InvalidStateError,
+    Operation,
+    ProactorScheduler,
+    SelectorProactor,
+    SyncProactorScheduler,
+    ThreadedSelectorProactor,
+)
+
+
+def _wait_until_done(proactor: SelectorProactor, *operations: Operation[object]) -> list[Operation[object]]:
+    completed = [operation for operation in operations if operation.done()]
+    pending = {operation for operation in operations if not operation.done()}
+    while pending:
+        for operation in proactor.wait(proactor.get_time() + 1.0):
+            completed.append(operation)
+            pending.discard(operation)
+    return completed
+
+
+class TestOperation:
+    def test_operation_result_requires_completion(self):
+        operation: Operation[int] = Operation(kind="test")
+
+        with pytest.raises(InvalidStateError, match="result"):
+            operation.result()
+        with pytest.raises(InvalidStateError, match="exception"):
+            operation.exception()
+
+    def test_operation_callbacks_run_on_completion(self):
+        operation: Operation[int] = Operation(kind="test")
+        seen: list[int] = []
+
+        operation.add_done_callback(lambda op: seen.append(op.result()))
+        operation._set_result(42)
+        operation.add_done_callback(lambda op: seen.append(op.result() + 1))
+
+        assert seen == [42, 43]
+
+    def test_operation_cancel_completes_with_cancelled_error(self):
+        operation: Operation[int] = Operation(kind="test")
+
+        assert operation.cancel() is True
+        assert operation.done() is True
+        assert operation.cancelled() is True
+        assert operation.exception()
+
+        with pytest.raises(CancelledError):
+            operation.result()
+
+
+class TestSelectorProactor:
+    def test_clock_can_be_replaced(self):
+        proactor = SelectorProactor()
+        try:
+            proactor.set_clock(lambda: 42.0)
+
+            assert proactor.get_time() == 42.0
+        finally:
+            proactor.close()
+
+    def test_recv_completes_after_selector_wait(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            operation = proactor.recv(reader, 5)
+            assert operation.done() is False
+
+            writer.send(b"hello")
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert operation.result() == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_into_completes_buffer(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            buf = bytearray(5)
+
+            operation = proactor.recv_into(reader, buf)
+            writer.send(b"world")
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert operation.result() == 5
+            assert bytes(buf) == b"world"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_sendall_can_complete_immediately(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            operation = proactor.sendall(writer, b"hello")
+
+            assert operation.done() is True
+            assert operation.result() is None
+            assert reader.recv(5) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_ready_recv_completes_immediately_without_selector_registration(self):
+        selector = selectors.SelectSelector()
+        proactor = SelectorProactor(selector=selector)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.send(b"hello")
+
+            operation = proactor.recv(reader, 5)
+
+            assert operation.done() is True
+            assert operation.result() == b"hello"
+            with pytest.raises(KeyError):
+                selector.get_key(reader.fileno())
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_accept_and_connect_complete_after_pumping(self):
+        proactor = SelectorProactor()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: socket.socket | None = None
+        try:
+            server.setblocking(False)
+            client.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+
+            accept_operation = proactor.accept(server)
+            connect_operation = proactor.connect(client, server.getsockname())
+            completed = _wait_until_done(proactor, accept_operation, connect_operation)
+            accepted, address = accept_operation.result()
+
+            assert accept_operation in completed
+            assert connect_operation in completed
+            assert address[0] == "127.0.0.1"
+            assert connect_operation.result() is None
+        finally:
+            if accepted is not None:
+                accepted.close()
+            client.close()
+            server.close()
+            proactor.close()
+
+    def test_datagram_helpers(self):
+        proactor = SelectorProactor()
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            receiver.setblocking(False)
+            sender.setblocking(False)
+            receiver.bind(("127.0.0.1", 0))
+            buf = bytearray(5)
+
+            receive_operation = proactor.recvfrom_into(receiver, buf)
+            send_operation = proactor.sendto(sender, b"hello", receiver.getsockname())
+            _wait_until_done(proactor, receive_operation, send_operation)
+
+            count, address = receive_operation.result()
+            assert count == 5
+            assert bytes(buf) == b"hello"
+            assert address[1] == sender.getsockname()[1]
+            assert send_operation.result() == 5
+
+            receive_bytes_operation = proactor.recvfrom(receiver, 5)
+            sender.sendto(b"again", receiver.getsockname())
+            assert proactor.wait(proactor.get_time() + 1.0) == [receive_bytes_operation]
+            data, address = receive_bytes_operation.result()
+            assert data == b"again"
+            assert address[1] == sender.getsockname()[1]
+        finally:
+            sender.close()
+            receiver.close()
+            proactor.close()
+
+    def test_operation_cancel_removes_selector_registration(self):
+        selector = selectors.SelectSelector()
+        proactor = SelectorProactor(selector=selector)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 1)
+
+            assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
+            assert operation.cancel() is True
+            with pytest.raises(KeyError):
+                selector.get_key(reader.fileno())
+            assert operation.cancelled() is True
+            with pytest.raises(CancelledError):
+                operation.result()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_rejects_multiple_pending_operations_for_same_direction(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            proactor.recv(reader, 1)
+
+            with pytest.raises(RuntimeError, match="already pending"):
+                proactor.recv(reader, 1)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_uses_provided_selector(self):
+        selector = selectors.SelectSelector()
+        proactor = SelectorProactor(selector=selector)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            operation = proactor.recv(reader, 1)
+            assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
+
+            writer.send(b"x")
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            with pytest.raises(KeyError):
+                selector.get_key(reader.fileno())
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_rejects_blocking_socket(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            with pytest.raises(ValueError, match="non-blocking"):
+                proactor.recv(reader, 1)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_break_wait_does_not_notify_callback(self):
+        seen: list[str] = []
+        proactor = SelectorProactor(wakeup_callback=lambda: seen.append("wake"))
+        try:
+            proactor.break_wait()
+            assert proactor.wait(0) == []
+            assert seen == []
+        finally:
+            proactor.close()
+
+    def test_set_wakeup_callback_replaces_callback(self):
+        seen: list[str] = []
+        proactor = SelectorProactor(wakeup_callback=lambda: seen.append("old"))
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 1)
+            seen.clear()
+
+            proactor.set_wakeup_callback(lambda: seen.append("new"))
+            writer.send(b"x")
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert seen == ["new"]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_set_completion_callback_replaces_callback(self):
+        seen: list[str] = []
+        proactor = SelectorProactor(completion_callback=lambda: seen.append("old"))
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 1)
+            seen.clear()
+
+            proactor.set_completion_callback(lambda: seen.append("new"))
+            writer.send(b"x")
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert seen == ["new"]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_completion_and_wakeup_callbacks_are_mutually_exclusive(self):
+        with pytest.raises(TypeError, match="either completion_callback or wakeup_callback"):
+            SelectorProactor(completion_callback=lambda: None, wakeup_callback=lambda: None)
+
+    def test_completion_notifies_callback(self):
+        seen: list[str] = []
+        proactor = SelectorProactor(wakeup_callback=lambda: seen.append("wake"))
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 1)
+            seen.clear()
+
+            writer.send(b"x")
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert seen == ["wake"]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_wakes_wait_without_notifying_callback(self):
+        seen: list[str] = []
+        proactor = SelectorProactor(wakeup_callback=lambda: seen.append("wake"))
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 1)
+            seen.clear()
+
+            assert operation.cancel() is True
+            proactor.wait(0)
+            assert seen == []
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_wait_async_completes_operation(self):
+        async def run() -> bytes:
+            proactor = SelectorProactor()
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+                operation = proactor.recv(reader, 5)
+                waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
+                await asyncio.sleep(0)
+
+                writer.send(b"hello")
+
+                assert await waiter == [operation]
+                return operation.result()
+            finally:
+                reader.close()
+                writer.close()
+                proactor.close()
+
+        assert asyncio.run(run()) == b"hello"
+
+    def test_wait_async_falls_back_when_loop_cannot_watch_fds(self, monkeypatch):
+        async def run() -> bytes:
+            proactor = SelectorProactor()
+            reader, writer = socket.socketpair()
+            try:
+                loop = asyncio.get_running_loop()
+
+                def add_reader_unavailable(*args: object) -> None:
+                    raise NotImplementedError
+
+                monkeypatch.setattr(loop, "add_reader", add_reader_unavailable)
+                reader.setblocking(False)
+                writer.setblocking(False)
+                operation = proactor.recv(reader, 5)
+                waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
+                await asyncio.sleep(0)
+
+                writer.send(b"hello")
+
+                assert await asyncio.wait_for(waiter, 1.0) == [operation]
+                return operation.result()
+            finally:
+                reader.close()
+                writer.close()
+                proactor.close()
+
+        assert asyncio.run(run()) == b"hello"
+
+    def test_wait_async_timeout_returns_no_completions(self):
+        async def run() -> list[Operation[object]]:
+            proactor = SelectorProactor()
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+                proactor.recv(reader, 1)
+                return await proactor.wait_async(proactor.get_time() + 0.001)
+            finally:
+                reader.close()
+                writer.close()
+                proactor.close()
+
+        assert asyncio.run(run()) == []
+
+    def test_wait_async_break_wait_returns_no_completions(self):
+        async def run() -> list[Operation[object]]:
+            proactor = SelectorProactor()
+            try:
+                waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
+                await asyncio.sleep(0)
+
+                proactor.break_wait()
+
+                return await waiter
+            finally:
+                proactor.close()
+
+        assert asyncio.run(run()) == []
+
+
+class TestThreadedSelectorProactor:
+    def test_defaults_to_epoll_selector_when_available(self):
+        proactor = ThreadedSelectorProactor()
+        try:
+            if hasattr(selectors, "EpollSelector"):
+                assert isinstance(proactor._selector, selectors.EpollSelector)
+            assert hasattr(proactor._selector, "select_released")
+        finally:
+            proactor.close()
+
+    def test_requires_selector_with_select_released(self):
+        with pytest.raises(TypeError, match="select_released"):
+            ThreadedSelectorProactor(selector=selectors.SelectSelector())
+
+    def test_worker_thread_signals_completion(self):
+        callback_threads: list[int] = []
+        callback_called = threading.Event()
+        main_thread = threading.get_ident()
+
+        def on_completion() -> None:
+            callback_threads.append(threading.get_ident())
+            callback_called.set()
+
+        proactor = ThreadedSelectorProactor(completion_callback=on_completion)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            assert proactor.wait(0) == []
+
+            writer.send(b"hello")
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert operation.result() == b"hello"
+            assert callback_called.wait(1.0) is True
+            assert callback_threads
+            assert callback_threads[0] != main_thread
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_immediate_completion_returns_completed_operation_without_queueing(self):
+        proactor = ThreadedSelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            operation = proactor.sendall(writer, b"hello")
+
+            assert operation.done() is True
+            assert proactor.wait(0) == []
+            assert operation.result() is None
+            assert reader.recv(5) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_break_wait_does_not_notify_callback(self):
+        seen: list[str] = []
+        proactor = ThreadedSelectorProactor(completion_callback=lambda: seen.append("wake"))
+        try:
+            assert proactor.wait(0) == []
+            proactor.break_wait()
+
+            assert proactor.wait(proactor.get_time() + 0.01) == []
+            assert seen == []
+        finally:
+            proactor.close()
+
+    def test_submit_wakes_worker_before_mutating_selector(self):
+        proactor = ThreadedSelectorProactor()
+        reader, writer = socket.socketpair()
+        operation: Operation[bytes] | None = None
+        error: BaseException | None = None
+
+        def submit() -> None:
+            nonlocal operation, error
+            try:
+                operation = proactor.recv(reader, 1)
+            except BaseException as exc:  # pragma: no cover - assertion reports it
+                error = exc
+
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            assert proactor.wait(0) == []
+
+            thread = threading.Thread(target=submit)
+            thread.start()
+            thread.join(1.0)
+
+            assert thread.is_alive() is False
+            assert error is None
+            assert operation is not None
+
+            writer.send(b"x")
+
+            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            assert operation.result() == b"x"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_wakes_worker_before_mutating_selector(self):
+        proactor = ThreadedSelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 1)
+            assert proactor.wait(0) == []
+
+            thread = threading.Thread(target=operation.cancel)
+            thread.start()
+            thread.join(1.0)
+
+            assert thread.is_alive() is False
+            assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_set_completion_callback_wakes_worker_before_locking(self):
+        proactor = ThreadedSelectorProactor()
+        try:
+            assert proactor.wait(0) == []
+
+            thread = threading.Thread(target=lambda: proactor.set_completion_callback(lambda: None))
+            thread.start()
+            thread.join(1.0)
+
+            assert thread.is_alive() is False
+        finally:
+            proactor.close()
+
+    def test_async_scheduler_drives_threaded_backend(self):
+        async def run() -> bytes:
+            scheduler = AsyncProactorScheduler(ThreadedSelectorProactor)
+            set_scheduler(scheduler)
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+
+                def receive() -> bytes:
+                    return scheduler.sock_recv(reader, 5)
+
+                task = scheduler.spawn(receive)
+                await asyncio.sleep(0)
+                writer.send(b"hello")
+
+                return await scheduler.arun_until_complete(task)
+            finally:
+                reader.close()
+                writer.close()
+                scheduler.close()
+
+        assert asyncio.run(run()) == b"hello"
+
+
+class TestProactorScheduler:
+    def test_proactor_scheduler_is_abstract(self):
+        with pytest.raises(TypeError, match="abstract"):
+            ProactorScheduler()
+
+    def test_scheduler_clock_drives_proactor_clock(self):
+        scheduler = SyncProactorScheduler()
+        try:
+            scheduler._time = lambda: 24.0
+
+            assert scheduler.proactor.get_time() == 24.0
+        finally:
+            scheduler.close()
+
+    def test_uses_proactor_factory(self):
+        selector = selectors.SelectSelector()
+        created: list[SelectorProactor] = []
+
+        def factory() -> SelectorProactor:
+            proactor = SelectorProactor(selector=selector)
+            created.append(proactor)
+            return proactor
+
+        scheduler = SyncProactorScheduler(factory)
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def receive() -> bytes:
+                return scheduler.sock_recv(reader, 5)
+
+            def send() -> None:
+                scheduler.sleep(0.001)
+                scheduler.sock_sendall(writer, b"hello")
+
+            task = scheduler.spawn(receive)
+            scheduler.spawn(send)
+
+            assert len(created) == 1
+            assert scheduler.proactor is created[0]
+            assert scheduler.run_until_complete(task) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_socket_helpers(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            buf = bytearray(5)
+
+            def exchange() -> tuple[int, bytes]:
+                scheduler.sock_sendall(writer, b"world")
+                count = scheduler.sock_recv_into(reader, buf)
+                return count, bytes(buf)
+
+            task = scheduler.spawn(exchange)
+
+            assert scheduler.run_until_complete(task) == (5, b"world")
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_accept_and_connect(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            client.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+
+            def accept_and_read() -> bytes:
+                conn, _address = scheduler.sock_accept(server)
+                try:
+                    return scheduler.sock_recv(conn, 4)
+                finally:
+                    conn.close()
+
+            def connect_and_send() -> None:
+                scheduler.sock_connect(client, server.getsockname())
+                scheduler.sock_sendall(client, b"ping")
+
+            task = scheduler.spawn(accept_and_read)
+            scheduler.spawn(connect_and_send)
+
+            assert scheduler.run_until_complete(task) == b"ping"
+        finally:
+            client.close()
+            server.close()
+            scheduler.close()
+
+    def test_datagram_helpers(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            receiver.setblocking(False)
+            sender.setblocking(False)
+            receiver.bind(("127.0.0.1", 0))
+            buf = bytearray(5)
+
+            def receive() -> tuple[int, object]:
+                return scheduler.sock_recvfrom_into(receiver, buf)
+
+            def send() -> int:
+                scheduler.sleep(0.001)
+                return scheduler.sock_sendto(sender, b"hello", receiver.getsockname())
+
+            receive_task = scheduler.spawn(receive)
+            send_task = scheduler.spawn(send)
+
+            count, address = scheduler.run_until_complete(receive_task)
+            assert count == 5
+            assert bytes(buf) == b"hello"
+            assert address[1] == sender.getsockname()[1]
+            assert send_task.result() == 5
+        finally:
+            sender.close()
+            receiver.close()
+            scheduler.close()
+
+    def test_wait_operation_timeout_cancels_operation(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = scheduler.proactor.recv(reader, 1)
+
+            def wait_with_timeout() -> bool:
+                with pytest.raises(TimeoutError):
+                    with timeout(0.001):
+                        scheduler.wait_operation(operation)
+                return operation.cancelled() and not scheduler.proactor.has_pending_operations()
+
+            task = scheduler.spawn(wait_with_timeout)
+
+            assert scheduler.run_until_complete(task) is True
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_async_proactor_scheduler_drives_io_without_blocking_asyncio(self):
+        async def run() -> bytes:
+            scheduler = AsyncProactorScheduler()
+            set_scheduler(scheduler)
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+
+                def receive() -> bytes:
+                    return scheduler.sock_recv(reader, 5)
+
+                task = scheduler.spawn(receive)
+                await asyncio.sleep(0)
+                writer.send(b"hello")
+
+                return await scheduler.arun_until_complete(task)
+            finally:
+                reader.close()
+                writer.close()
+                scheduler.close()
+
+        assert asyncio.run(run()) == b"hello"
+
+    def test_async_proactor_scheduler_installs_loop_completion_callback(self, monkeypatch):
+        async def run() -> bool:
+            stored_callback = None
+
+            class TrackingProactor(SelectorProactor):
+                def set_completion_callback(self, callback):
+                    nonlocal stored_callback
+                    stored_callback = callback
+                    super().set_completion_callback(callback)
+
+            scheduler = AsyncProactorScheduler(TrackingProactor)
+            try:
+                loop = asyncio.get_running_loop()
+                calls = 0
+                original_call_soon_threadsafe = loop.call_soon_threadsafe
+
+                def call_soon_threadsafe(callback, *args, context=None):
+                    nonlocal calls
+                    calls += 1
+                    return original_call_soon_threadsafe(callback, *args, context=context)
+
+                monkeypatch.setattr(loop, "call_soon_threadsafe", call_soon_threadsafe)
+                scheduler.bind_loop(loop)
+                assert stored_callback is not None
+                stored_callback()
+                await asyncio.sleep(0)
+                return calls == 1
+            finally:
+                scheduler.close()
+
+        assert asyncio.run(run()) is True

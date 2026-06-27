@@ -11,12 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Published runnable queue policies (`FifoRunnableQueue`,
   `PrescheduledRunnableQueue`, and `PriorityRunnableQueue`) for explicit
   scheduler construction, including priority-scheduling applications.
+- Added a proactor IO layer with `Operation`, `Proactor`, `SelectorProactor`,
+  `ThreadedSelectorProactor`, and proactor-backed sync/async scheduler drivers.
+- Added selector-backed sync/async scheduler drivers that share a common
+  selector core while preserving the existing readiness API.
+- Added tealet-hosted asyncio loop adapters for both loop families:
+  `ForwardingSelector`/`TealetSelectorEventLoop` and
+  `ForwardingProactor`/`TealetProactorEventLoop`.
 - Added top-level `tealetio.await_()` for awaiting asyncio awaitables from the
   current scheduler task without reaching through the scheduler object.
 - Added integration coverage for multi-step async socket send/receive coroutines
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
+- Made `Scheduler` use the proactor-backed synchronous scheduler by default,
+  while keeping explicit selector-backed schedulers available.
+- Changed `run_asyncio_in_tealet(...)` to choose the hosted asyncio loop from
+  the active scheduler type by default, using the proactor loop for proactor
+  schedulers and the selector loop for selector schedulers.
+- Protected proactor operation completion state and threaded selector-proactor
+  mutations for free-threaded Python builds.
 - Relaxed the `tealet` dependency to the compatible `0.1` range
   (`tealet>=0.1.0rc2,<0.2`) instead of pinning one release candidate exactly.
 - Optimised `await_()` coroutine handling so coroutine await protocols are driven

@@ -8,14 +8,14 @@ os.environ.setdefault("PYTEALET_CHECK_STACK", "1")
 
 @pytest.fixture(autouse=True)
 def _reset_scheduler_tls():
-    from tealetio import Scheduler
+    from tealetio import BasicScheduler
     from tealetio.scheduler import _scheduler
 
-    _scheduler.instance = Scheduler()
+    _scheduler.instance = BasicScheduler()
     try:
         yield
     finally:
-        _scheduler.instance = Scheduler()
+        _scheduler.instance = BasicScheduler()
 
 
 def _make_scheduler_task_factory(name):

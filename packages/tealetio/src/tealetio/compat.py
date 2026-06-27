@@ -2,9 +2,105 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import math
+import select
+import selectors
 import socket
 import sys
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, cast
+
+
+class SelectReleasedSelector(Protocol):
+    def select_released(
+        self, timeout: float | None = None, lock: Any | None = None
+    ) -> list[tuple[selectors.SelectorKey, int]]: ...
+
+
+class _ReleasedSelectSelector(selectors.SelectSelector):
+    """Select selector that snapshots fd sets before releasing a caller lock."""
+
+    def select_released(
+        self, timeout: float | None = None, lock: Any | None = None
+    ) -> list[tuple[selectors.SelectorKey, int]]:
+        timeout = None if timeout is None else max(timeout, 0)
+        selector = cast(Any, self)
+        readers = frozenset(selector._readers)
+        writers = frozenset(selector._writers)
+        ready: list[tuple[selectors.SelectorKey, int]] = []
+
+        if lock is not None:
+            lock.release()
+        try:
+            try:
+                readable, writable, _ = selector._select(readers, writers, [], timeout)
+            except InterruptedError:
+                return ready
+        finally:
+            if lock is not None:
+                lock.acquire()
+
+        readable = frozenset(readable)
+        writable = frozenset(writable)
+        fd_to_key_get = selector._fd_to_key.get
+        for fd in readable | writable:
+            key = fd_to_key_get(fd)
+            if key:
+                events = (fd in readable and selectors.EVENT_READ) | (fd in writable and selectors.EVENT_WRITE)
+                ready.append((key, events & key.events))
+        return ready
+
+
+if hasattr(selectors, "EpollSelector"):
+
+    class _ReleasedEpollSelector(selectors.EpollSelector):
+        """Epoll selector that releases a caller lock only during epoll_wait."""
+
+        def select_released(
+            self, timeout: float | None = None, lock: Any | None = None
+        ) -> list[tuple[selectors.SelectorKey, int]]:
+            if timeout is None:
+                timeout = -1
+            elif timeout <= 0:
+                timeout = 0
+            else:
+                timeout = math.ceil(timeout * 1e3) * 1e-3
+
+            selector = cast(Any, self)
+            max_events = len(selector._fd_to_key) or 1
+            ready: list[tuple[selectors.SelectorKey, int]] = []
+
+            if lock is not None:
+                lock.release()
+            try:
+                try:
+                    fd_event_list = selector._selector.poll(timeout, max_events)
+                except InterruptedError:
+                    return ready
+            finally:
+                if lock is not None:
+                    lock.acquire()
+
+            fd_to_key = selector._fd_to_key
+            for fd, event in fd_event_list:
+                key = fd_to_key.get(fd)
+                if key:
+                    events = 0
+                    if event & (select.EPOLLIN | select.EPOLLPRI | select.EPOLLERR | select.EPOLLHUP):
+                        events |= selectors.EVENT_READ
+                    if event & (select.EPOLLOUT | select.EPOLLERR | select.EPOLLHUP):
+                        events |= selectors.EVENT_WRITE
+                    ready.append((key, events & key.events))
+            return ready
+
+else:
+    _ReleasedEpollSelector = None
+
+
+def released_default_selector() -> selectors.BaseSelector:
+    if _ReleasedEpollSelector is not None:
+        return _ReleasedEpollSelector()
+    return _ReleasedSelectSelector()
+
 
 if sys.version_info >= (3, 11):
 

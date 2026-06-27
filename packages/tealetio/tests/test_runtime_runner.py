@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import signal
 import sys
 import threading
@@ -16,7 +17,8 @@ from tealetio import (
     PriorityTask,
     Runner,
     Scheduler,
-    SelectorScheduler,
+    SyncSelectorScheduler,
+    TealetProactorEventLoop,
     TealetSelectorEventLoop,
     asyncio_get_current,
     get_current,
@@ -1012,6 +1014,35 @@ class TestRunHelper:
 
         assert run_asyncio_in_tealet(entry()) == "done"
 
+    def test_run_asyncio_in_tealet_requires_base_scheduler(self):
+        class MinimalSyncScheduler:
+            def main_context(self):
+                return contextlib.nullcontext()
+
+            def spawn(self, func, *, context=None, eager_start=None, **kwargs):
+                return func
+
+            def run_until_complete(self, target, *, yield_every=None):
+                if hasattr(target, "result"):
+                    return target.result()
+                return target()
+
+            def shutdown_default_executor(self, timeout=None):
+                return lambda: None
+
+            def close(self) -> None:
+                pass
+
+        async def entry() -> str:
+            return "done"
+
+        coroutine = entry()
+        try:
+            with pytest.raises(RuntimeError, match="BaseScheduler"):
+                run_asyncio_in_tealet(coroutine, scheduler_factory=MinimalSyncScheduler)
+        finally:
+            coroutine.close()
+
     def test_run_asyncio_in_tealet_yields_to_sibling_tealets(self):
         events: list[str] = []
 
@@ -1027,13 +1058,36 @@ class TestRunHelper:
 
         assert run_asyncio_in_tealet(entry()) == ("peer", "entry")
 
-    def test_run_asyncio_in_tealet_helper_uses_tealet_selector_loop(self):
+    def test_run_asyncio_in_tealet_helper_uses_tealet_proactor_loop_by_default(self):
         async def entry() -> asyncio.AbstractEventLoop:
             return asyncio.get_running_loop()
 
         loop = run_asyncio_in_tealet(entry())
 
+        assert isinstance(loop, TealetProactorEventLoop)
+        assert loop.is_closed() is True
+
+    def test_run_asyncio_in_tealet_helper_uses_tealet_selector_loop_for_selector_scheduler(self):
+        async def entry() -> asyncio.AbstractEventLoop:
+            return asyncio.get_running_loop()
+
+        loop = run_asyncio_in_tealet(entry(), scheduler_factory=SyncSelectorScheduler)
+
         assert isinstance(loop, TealetSelectorEventLoop)
+        assert loop.is_closed() is True
+
+    def test_run_asyncio_in_tealet_helper_respects_explicit_loop_factory(self):
+        async def entry() -> asyncio.AbstractEventLoop:
+            return asyncio.get_running_loop()
+
+        loop = run_asyncio_in_tealet(
+            entry(),
+            scheduler_factory=SyncSelectorScheduler,
+            loop_factory=asyncio.new_event_loop,
+        )
+
+        assert not isinstance(loop, TealetSelectorEventLoop)
+        assert not isinstance(loop, TealetProactorEventLoop)
         assert loop.is_closed() is True
 
     def test_run_asyncio_in_tealet_helper_sets_loop_debug_flag(self):
@@ -1058,7 +1112,7 @@ class TestRunHelper:
     def test_run_asyncio_in_tealet_closes_factory_scheduler(self):
         closed = False
 
-        class ClosingSelectorScheduler(SelectorScheduler):
+        class ClosingSelectorScheduler(SyncSelectorScheduler):
             def close(self) -> None:
                 nonlocal closed
                 closed = True

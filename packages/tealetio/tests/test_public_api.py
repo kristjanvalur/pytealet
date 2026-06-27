@@ -4,6 +4,7 @@ import tealetio.locks
 import tealetio.runner
 import tealetio.scheduler
 import tealetio.selector
+import tealetio.proactor
 import tealetio.tasks
 
 
@@ -11,10 +12,15 @@ def test_top_level_exports_public_scheduler_api():
     expected = {
         "ALL_COMPLETED",
         "AsyncRunner",
+        "AsyncProactorScheduler",
+        "AsyncSelectorScheduler",
         "AsyncScheduler",
         "AsyncSchedulerDrivingAPI",
+        "AsyncDrivingMixin",
+        "BaseDrivingMixin",
         "BaseRunner",
         "BaseScheduler",
+        "BasicScheduler",
         "Barrier",
         "BoundedSemaphore",
         "CancelledError",
@@ -28,6 +34,12 @@ def test_top_level_exports_public_scheduler_api():
         "FIRST_COMPLETED",
         "FIRST_EXCEPTION",
         "Future",
+        "ForwardingSelector",
+        "ForwardingProactor",
+        "Operation",
+        "Proactor",
+        "ProactorFactory",
+        "ProactorScheduler",
         "get_current",
         "InvalidStateError",
         "LifoQueue",
@@ -43,10 +55,14 @@ def test_top_level_exports_public_scheduler_api():
         "Runner",
         "Scheduler",
         "SelectorMixin",
+        "SelectorProactor",
         "SelectorScheduler",
         "Semaphore",
         "Shield",
         "StubTaskFactory",
+        "SyncProactorScheduler",
+        "SyncSelectorScheduler",
+        "SyncDrivingMixin",
         "SyncSchedulerDrivingAPI",
         "TASK_PRIORITY_CRITICAL",
         "TASK_PRIORITY_DEFAULT",
@@ -54,7 +70,9 @@ def test_top_level_exports_public_scheduler_api():
         "TASK_PRIORITY_IDLE",
         "TASK_PRIORITY_LOW",
         "TaskFactory",
+        "TealetProactorEventLoop",
         "TealetSelectorEventLoop",
+        "ThreadedSelectorProactor",
         "Task",
         "Timeout",
         "TimeoutError",
@@ -104,10 +122,32 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.TASK_PRIORITY_IDLE is tealetio.tasks.TASK_PRIORITY_IDLE
     assert tealetio.Scheduler is tealetio.scheduler.Scheduler
     assert tealetio.BaseScheduler is tealetio.scheduler.BaseScheduler
+    assert tealetio.BaseDrivingMixin is tealetio.scheduler.BaseDrivingMixin
+    assert tealetio.SyncDrivingMixin is tealetio.scheduler.SyncDrivingMixin
+    assert tealetio.AsyncDrivingMixin is tealetio.scheduler.AsyncDrivingMixin
+    assert tealetio.BasicScheduler is tealetio.scheduler.BasicScheduler
     assert tealetio.Runner is tealetio.runner.Runner
     assert tealetio.SelectorScheduler is tealetio.selector.SelectorScheduler
+    assert tealetio.SyncSelectorScheduler is tealetio.selector.SyncSelectorScheduler
+    assert tealetio.AsyncSelectorScheduler is tealetio.selector.AsyncSelectorScheduler
+    assert issubclass(tealetio.SyncSelectorScheduler, tealetio.SelectorScheduler)
+    assert issubclass(tealetio.AsyncSelectorScheduler, tealetio.SelectorScheduler)
+    assert tealetio.Operation is tealetio.proactor.Operation
+    assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
+    assert tealetio.SyncProactorScheduler is tealetio.proactor.SyncProactorScheduler
+    assert tealetio.AsyncProactorScheduler is tealetio.proactor.AsyncProactorScheduler
+    assert tealetio.Scheduler is tealetio.SyncProactorScheduler
+    assert issubclass(tealetio.SyncProactorScheduler, tealetio.ProactorScheduler)
+    assert issubclass(tealetio.AsyncProactorScheduler, tealetio.ProactorScheduler)
+    assert tealetio.SelectorProactor is tealetio.proactor.SelectorProactor
+    assert tealetio.ThreadedSelectorProactor is tealetio.proactor.ThreadedSelectorProactor
     assert tealetio.AsyncRunner is tealetio.asyncio.AsyncRunner
     assert tealetio.AsyncScheduler is tealetio.asyncio.AsyncScheduler
+    assert tealetio.ForwardingSelector is tealetio.asyncio.ForwardingSelector
+    assert tealetio.ForwardingProactor is tealetio.asyncio.ForwardingProactor
+    assert tealetio.TealetProactorEventLoop is tealetio.asyncio.TealetProactorEventLoop
+    assert tealetio.AsyncSchedulerDrivingAPI is tealetio.scheduler.AsyncSchedulerDrivingAPI
+    assert tealetio.asyncio.AsyncSchedulerDrivingAPI is tealetio.scheduler.AsyncSchedulerDrivingAPI
     assert tealetio.asyncio_get_current is tealetio.asyncio.asyncio_get_current
     assert tealetio.run is tealetio.runner.run
     assert tealetio.run_async is tealetio.asyncio.run_async

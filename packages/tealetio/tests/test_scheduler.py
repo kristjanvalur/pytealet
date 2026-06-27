@@ -27,17 +27,22 @@ from tealetio import (
     PriorityTask,
     RunnableQueue,
     Scheduler,
+    AsyncSelectorScheduler,
+    SyncProactorScheduler,
     SelectorScheduler,
+    SyncSelectorScheduler,
     StubTaskFactory,
     TASK_PRIORITY_CRITICAL,
     TASK_PRIORITY_DEFAULT,
     TASK_PRIORITY_HIGH,
     TASK_PRIORITY_IDLE,
     TASK_PRIORITY_LOW,
+    TealetProactorEventLoop,
     TealetSelectorEventLoop,
     Task,
     TimeoutError,
     AsyncScheduler,
+    BasicScheduler,
     as_completed,
     await_,
     create_task,
@@ -1107,7 +1112,7 @@ class TestSchedulerAccessors:
         assert task.result() == 42
 
     def test_selector_scheduler_run_in_executor_keeps_driver_alive(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         try:
@@ -1265,7 +1270,7 @@ class TestSchedulerAccessors:
         assert seen == ["resumed"]
 
     def test_selector_scheduler_wait_readable(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1302,7 +1307,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_selector_scheduler_wait_writable(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1340,7 +1345,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_selector_scheduler_wait_readable_timeout_removes_callback(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1363,7 +1368,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_selector_scheduler_sock_recv_and_sendall(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1388,7 +1393,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_selector_scheduler_sock_recv_into(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1415,7 +1420,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_selector_scheduler_sock_accept_connect(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1447,7 +1452,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_selector_scheduler_sock_datagram_helpers(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1497,8 +1502,9 @@ class TestSchedulerAccessors:
             receiver.close()
             s.close()
 
-    def test_scheduler_socket_helpers_require_selector_scheduler(self):
-        s = _new_scheduler()
+    def test_basic_scheduler_socket_helpers_require_io_capable_scheduler(self):
+        s = BasicScheduler()
+        set_scheduler(s)
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -1508,8 +1514,31 @@ class TestSchedulerAccessors:
             reader.close()
             _writer.close()
 
-    def test_scheduler_io_callbacks_require_io_capable_scheduler(self):
+    def test_scheduler_socket_helpers_use_default_proactor(self):
         s = _new_scheduler()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def receive() -> bytes:
+                return s.sock_recv(reader, 5)
+
+            def send() -> None:
+                s.sleep(0.001)
+                s.sock_sendall(writer, b"hello")
+
+            task = s.spawn(receive)
+            s.spawn(send)
+            assert s.run_until_complete(task) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_basic_scheduler_io_callbacks_require_io_capable_scheduler(self):
+        s = BasicScheduler()
+        set_scheduler(s)
         reader, _writer = socket.socketpair()
         try:
             with pytest.raises(NotImplementedError, match="reader callbacks"):
@@ -1524,8 +1553,12 @@ class TestSchedulerAccessors:
             reader.close()
             _writer.close()
 
+    def test_selector_scheduler_is_abstract(self):
+        with pytest.raises(TypeError, match="abstract"):
+            SelectorScheduler()
+
     def test_selector_scheduler_reader_writer_callbacks(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1560,10 +1593,62 @@ class TestSchedulerAccessors:
             writer.close()
             s.close()
 
+    def test_async_selector_scheduler_waits_for_socket_io(self):
+        async def run() -> bytes:
+            s = AsyncSelectorScheduler()
+            set_scheduler(s)
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+
+                def receive() -> bytes:
+                    s.wait_readable(reader)
+                    return reader.recv(5)
+
+                task = s.spawn(receive)
+                await asyncio.sleep(0)
+                writer.send(b"hello")
+
+                return await s.arun_until_complete(task)
+            finally:
+                reader.close()
+                writer.close()
+                s.close()
+
+        assert asyncio.run(run()) == b"hello"
+
+    def test_async_selector_scheduler_requires_loop_fd_watchers(self, monkeypatch):
+        async def run() -> None:
+            s = AsyncSelectorScheduler()
+            set_scheduler(s)
+            reader, writer = socket.socketpair()
+            try:
+                loop = asyncio.get_running_loop()
+
+                def add_reader_unavailable(*args: object) -> None:
+                    raise NotImplementedError
+
+                monkeypatch.setattr(loop, "add_reader", add_reader_unavailable)
+                reader.setblocking(False)
+
+                def receive() -> None:
+                    s.wait_readable(reader)
+
+                task = s.spawn(receive)
+                with pytest.raises(RuntimeError, match="add_reader/add_writer"):
+                    await s.arun_until_complete(task)
+            finally:
+                reader.close()
+                writer.close()
+                s.close()
+
+        asyncio.run(run())
+
     @pytest.mark.parametrize("selector_type", _SELECTOR_TYPES)
     def test_selector_scheduler_waits_for_socket_io_with_selector_type(self, selector_type):
         selector = selector_type()
-        s = SelectorScheduler(selector=selector)
+        s = SyncSelectorScheduler(selector=selector)
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1599,7 +1684,7 @@ class TestSchedulerAccessors:
     @pytest.mark.parametrize("selector_type", _SELECTOR_TYPES)
     def test_selector_scheduler_callbacks_handle_socket_io_with_selector_type(self, selector_type):
         selector = selector_type()
-        s = SelectorScheduler(selector=selector)
+        s = SyncSelectorScheduler(selector=selector)
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1636,7 +1721,7 @@ class TestSchedulerAccessors:
 
     def test_selector_scheduler_uses_provided_selector(self):
         selector = selectors.SelectSelector()
-        s = SelectorScheduler(selector=selector)
+        s = SyncSelectorScheduler(selector=selector)
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1662,7 +1747,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_selector_scheduler_remove_callbacks_wakes_selector(self, monkeypatch):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1689,7 +1774,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_selector_scheduler_reader_writer_callbacks_share_fd_entry(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1743,7 +1828,7 @@ class TestSchedulerAccessors:
         assert _tealet.get_tealet_factory() is original_factory
 
     def test_tealet_selector_event_loop_runs_asyncio_timer(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         def run_asyncio() -> str:
@@ -1766,7 +1851,7 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_tealet_selector_event_loop_runs_asyncio_socket_recv(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         reader, writer = socket.socketpair()
@@ -1795,11 +1880,73 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_tealet_selector_event_loop_call_soon_threadsafe(self):
-        s = SelectorScheduler()
+        s = SyncSelectorScheduler()
         set_scheduler(s)
 
         def run_asyncio() -> str:
             loop = TealetSelectorEventLoop(s)
+            worker: threading.Thread | None = None
+            try:
+                asyncio.set_event_loop(loop)
+
+                async def main() -> str:
+                    nonlocal worker
+                    future = loop.create_future()
+
+                    def complete() -> None:
+                        loop.call_soon_threadsafe(future.set_result, "thread")
+
+                    worker = threading.Thread(target=complete)
+                    worker.start()
+                    return await future
+
+                return loop.run_until_complete(main())
+            finally:
+                if worker is not None:
+                    worker.join(timeout=1.0)
+                asyncio.set_event_loop(None)
+                loop.close()
+
+        try:
+            assert s.run_until_complete(run_asyncio) == "thread"
+        finally:
+            s.close()
+
+    def test_tealet_proactor_event_loop_runs_asyncio_socket_recv(self):
+        s = SyncProactorScheduler()
+        set_scheduler(s)
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def run_asyncio() -> bytes:
+                loop = TealetProactorEventLoop()
+                try:
+                    asyncio.set_event_loop(loop)
+
+                    async def main() -> bytes:
+                        loop.call_later(0.001, writer.send, b"hello")
+                        return await loop.sock_recv(reader, 5)
+
+                    return loop.run_until_complete(main())
+                finally:
+                    asyncio.set_event_loop(None)
+                    loop.close()
+
+            assert s.run_until_complete(run_asyncio) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_tealet_proactor_event_loop_call_soon_threadsafe(self):
+        s = SyncProactorScheduler()
+        set_scheduler(s)
+
+        def run_asyncio() -> str:
+            loop = TealetProactorEventLoop()
             worker: threading.Thread | None = None
             try:
                 asyncio.set_event_loop(loop)

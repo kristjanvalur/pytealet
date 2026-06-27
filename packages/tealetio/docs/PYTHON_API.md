@@ -19,7 +19,7 @@ Common imports can use the package root:
 
 ```python
 from tealetio import Event, Future, Scheduler, gather, run, sleep, spawn, wait_for
-from tealetio import AsyncRunner, AsyncScheduler, SelectorScheduler
+from tealetio import AsyncRunner, AsyncScheduler, SyncSelectorScheduler
 ```
 
 Submodule imports remain supported when code wants to make the implementation
@@ -29,6 +29,45 @@ home explicit:
 from tealetio.scheduler import Scheduler
 from tealetio.runner import run
 ```
+
+`Scheduler` is an alias for the default synchronous scheduler and is backed by a proactor.
+Use `SyncProactorScheduler` directly when you want to provide a custom proactor
+factory for synchronous driving, and use `AsyncProactorScheduler` for the same
+proactor-backed IO model under an async driving facade. `ProactorScheduler` is
+the shared abstract proactor core. Likewise, `SelectorScheduler` is the shared
+abstract selector core, with `SyncSelectorScheduler` and `AsyncSelectorScheduler`
+as concrete driving variants. `run_asyncio_in_tealet(...)` chooses the hosted
+asyncio loop from the scheduler it creates: proactor schedulers use
+`TealetProactorEventLoop` with `ForwardingProactor`, while selector schedulers
+use `TealetSelectorEventLoop` with `ForwardingSelector`. Use `BasicScheduler`
+when you deliberately want the small no-IO driver that only waits for timers and
+explicit scheduler wakeups. The shared task, timer, future, and callback
+behaviour lives in the cooperative scheduling core; the blocking and
+asyncio-hosted run loops are separate driving facades.
+
+Proactors expose both `wait(deadline=None)` and `await wait_async(deadline=None)`.
+The synchronous form blocks the current thread; the async form waits through the
+running asyncio loop so future asyncio-hosted schedulers can pump tealetio-owned
+IO completions without blocking asyncio itself. Deadlines use the proactor clock:
+`None` waits forever, and `0` always means poll without blocking.
+
+An operation may also complete before it ever reaches the backend wait queue.
+In that case the proactor returns an already-done `Operation`, and callers can
+read its result directly without switching or waiting. Selector-backed proactors
+use this fast path for socket operations that succeed right away.
+
+Proactors also expose `set_completion_callback(callback)`. A real thread-backed
+proactor should call this callback when completions are queued so an async host
+can wake its event loop, for example with `loop.call_soon_threadsafe(...)`.
+`break_wait()` remains separate: it interrupts a blocking proactor wait without
+reporting an IO completion.
+
+`SelectorProactor` is the simple single-threaded selector-backed prototype.
+`ThreadedSelectorProactor` uses the same socket operation surface, but polls the
+selector from a worker thread and queues completions for `wait(...)` or
+`wait_async(...)`. That makes it useful for exercising the thread-callback shape
+expected from future OS-backed proactors without making the default selector
+prototype more complicated.
 
 ## Scheduler Accessors
 
