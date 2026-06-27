@@ -11,16 +11,25 @@ from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 from .locks import Event
-from .scheduler import BaseScheduler, RunnableQueueFactory, SyncDrivingMixin, SyncSchedulerDrivingAPI
+from .scheduler import (
+    AsyncDrivingMixin,
+    AsyncSchedulerDrivingAPI,
+    BaseScheduler,
+    RunnableQueueFactory,
+    SyncDrivingMixin,
+    SyncSchedulerDrivingAPI,
+)
 
 T = TypeVar("T")
 
 __all__ = [
     "Operation",
+    "AsyncProactorScheduler",
     "Proactor",
     "ProactorFactory",
     "ProactorScheduler",
     "SelectorProactor",
+    "SyncProactorScheduler",
 ]
 
 
@@ -573,8 +582,8 @@ class SelectorProactor:
             raise ValueError("socket is closed")
 
 
-class ProactorScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
-    """Synchronous scheduler whose IO wait point is a proactor backend."""
+class ProactorScheduler(BaseScheduler):
+    """Shared proactor-backed cooperative scheduling mechanics."""
 
     def __init__(
         self,
@@ -611,9 +620,6 @@ class ProactorScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()
         self._proactor.wait(deadline)
-
-    async def _driver_wait(self) -> None:
-        self._wait_thread()
 
     # -- Operation waits ----------------------------------------------
 
@@ -687,3 +693,18 @@ class ProactorScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI
 
     def _has_pending_driver_work(self) -> bool:
         return self._proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)
+
+
+class SyncProactorScheduler(SyncDrivingMixin, ProactorScheduler, SyncSchedulerDrivingAPI):
+    """Synchronous scheduler whose IO wait point is a proactor backend."""
+
+    async def _driver_wait(self) -> None:
+        self._wait_thread()
+
+
+class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedulerDrivingAPI):
+    """Async-hosted scheduler whose IO wait point is a proactor backend."""
+
+    async def _driver_wait(self) -> None:
+        deadline = self._next_timer_deadline()
+        await self._proactor.wait_async(deadline)

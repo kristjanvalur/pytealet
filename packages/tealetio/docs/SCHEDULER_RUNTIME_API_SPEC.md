@@ -31,8 +31,11 @@ Implemented:
   schedulers on the `arun*` facade.
 - `Scheduler` is the default concrete synchronous scheduler implementation and
   is backed by a proactor.
-- `ProactorScheduler` accepts a custom proactor factory. `BasicScheduler` keeps
-  the no-IO cooperative scheduling core for tests and pure scheduling work.
+- `ProactorScheduler` is the shared abstract proactor core.
+  `SyncProactorScheduler` accepts a custom proactor factory for synchronous
+  driving, and `AsyncProactorScheduler` uses the same proactor core with async
+  driving. `BasicScheduler` keeps the no-IO cooperative scheduling core for
+  tests and pure scheduling work.
 - `AsyncScheduler` is the concrete asyncio-hosted scheduler implementation.
 - `Scheduler` and `AsyncScheduler` can be used directly as factories. They share
   the common scheduler/task/timer APIs from `BaseScheduler`, while implementing

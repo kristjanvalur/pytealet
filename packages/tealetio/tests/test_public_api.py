@@ -12,6 +12,7 @@ def test_top_level_exports_public_scheduler_api():
     expected = {
         "ALL_COMPLETED",
         "AsyncRunner",
+        "AsyncProactorScheduler",
         "AsyncScheduler",
         "AsyncSchedulerDrivingAPI",
         "AsyncDrivingMixin",
@@ -56,6 +57,7 @@ def test_top_level_exports_public_scheduler_api():
         "Semaphore",
         "Shield",
         "StubTaskFactory",
+        "SyncProactorScheduler",
         "SyncDrivingMixin",
         "SyncSchedulerDrivingAPI",
         "TASK_PRIORITY_CRITICAL",
@@ -122,10 +124,16 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.SelectorScheduler is tealetio.selector.SelectorScheduler
     assert tealetio.Operation is tealetio.proactor.Operation
     assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
-    assert issubclass(tealetio.Scheduler, tealetio.ProactorScheduler)
+    assert tealetio.SyncProactorScheduler is tealetio.proactor.SyncProactorScheduler
+    assert tealetio.AsyncProactorScheduler is tealetio.proactor.AsyncProactorScheduler
+    assert issubclass(tealetio.Scheduler, tealetio.SyncProactorScheduler)
+    assert issubclass(tealetio.SyncProactorScheduler, tealetio.ProactorScheduler)
+    assert issubclass(tealetio.AsyncProactorScheduler, tealetio.ProactorScheduler)
     assert tealetio.SelectorProactor is tealetio.proactor.SelectorProactor
     assert tealetio.AsyncRunner is tealetio.asyncio.AsyncRunner
     assert tealetio.AsyncScheduler is tealetio.asyncio.AsyncScheduler
+    assert tealetio.AsyncSchedulerDrivingAPI is tealetio.scheduler.AsyncSchedulerDrivingAPI
+    assert tealetio.asyncio.AsyncSchedulerDrivingAPI is tealetio.scheduler.AsyncSchedulerDrivingAPI
     assert tealetio.asyncio_get_current is tealetio.asyncio.asyncio_get_current
     assert tealetio.run is tealetio.runner.run
     assert tealetio.run_async is tealetio.asyncio.run_async

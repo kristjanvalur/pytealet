@@ -99,7 +99,7 @@ assert asyncio.run(main()) == ["waiting", "done"]
 
 The common API is available directly from `tealetio`:
 
-- schedulers and runners: `Scheduler`, `ProactorScheduler`, `BasicScheduler`, `SelectorScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
+- schedulers and runners: `Scheduler`, `ProactorScheduler`, `SyncProactorScheduler`, `AsyncProactorScheduler`, `BasicScheduler`, `SelectorScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `Task`, `spawn`, `create_task`, `get_current`, `CancelledError`, `shield`
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
@@ -112,6 +112,9 @@ If you prefer explicit homes, submodules such as `tealetio.scheduler`,
 `tealetio.asyncio` define the same objects.
 
 `Scheduler` is the normal synchronous scheduler and uses a proactor backend.
+`ProactorScheduler` is the abstract shared proactor core, with
+`SyncProactorScheduler` and `AsyncProactorScheduler` providing concrete driving
+facades.
 `BasicScheduler` remains available for tests and pure scheduling experiments
 that intentionally avoid IO support. Internally, tealetio keeps cooperative
 scheduling mechanics separate from the sync and async driving facades, so custom

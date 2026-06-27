@@ -4,7 +4,6 @@ import asyncio as _asyncio
 import contextvars
 import selectors
 import socket
-from abc import ABC
 from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any, Callable, TypeVar, cast
@@ -13,8 +12,8 @@ from . import compat
 from .locks import Event, TimeoutError
 from .scheduler import (
     AsyncDrivingMixin,
+    AsyncSchedulerDrivingAPI,
     BaseScheduler,
-    CoreSchedulerDrivingAPI,
     RunnableQueueFactory,
     _current_scheduler,
     gather,
@@ -33,7 +32,6 @@ T = TypeVar("T")
 __all__ = [
     "AsyncRunner",
     "AsyncScheduler",
-    "AsyncSchedulerDrivingAPI",
     "TealetSelectorEventLoop",
     "asyncio_get_current",
     "run_async",
@@ -47,10 +45,6 @@ def asyncio_get_current() -> _asyncio.Task[Any] | None:
     if get_current() is not None:
         return None
     return _asyncio.current_task()
-
-
-class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
-    """Asyncio-hosted scheduler driver API."""
 
 
 class _SchedulerSelectorAdapter(selectors.BaseSelector):

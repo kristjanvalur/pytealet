@@ -53,6 +53,7 @@ DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
 
 __all__ = [
     "ALL_COMPLETED",
+    "AsyncSchedulerDrivingAPI",
     "AsyncDrivingMixin",
     "BaseScheduler",
     "BaseDrivingMixin",
@@ -469,6 +470,10 @@ class SyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
     This class is retained as a descriptive compatibility alias for callers
     that specifically require the synchronous convenience methods.
     """
+
+
+class AsyncSchedulerDrivingAPI(CoreSchedulerDrivingAPI, ABC):
+    """Asyncio-hosted scheduler driver API."""
 
 
 class BaseDrivingMixin:
@@ -1850,8 +1855,8 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
         self._wait_thread()
 
 
-_ProactorScheduler = importlib.import_module(".proactor", __package__).ProactorScheduler
+_SyncProactorScheduler = importlib.import_module(".proactor", __package__).SyncProactorScheduler
 
 
-class Scheduler(_ProactorScheduler):
+class Scheduler(_SyncProactorScheduler):
     """Default synchronous scheduler backed by a proactor."""

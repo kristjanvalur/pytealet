@@ -31,11 +31,14 @@ from tealetio.runner import run
 ```
 
 `Scheduler` is the default synchronous scheduler and is backed by a proactor.
-Use `ProactorScheduler` directly when you want to provide a custom proactor
-factory, and use `BasicScheduler` when you deliberately want the small no-IO
-driver that only waits for timers and explicit scheduler wakeups. The shared
-task, timer, future, and callback behaviour lives in the cooperative scheduling
-core; the blocking and asyncio-hosted run loops are separate driving facades.
+Use `SyncProactorScheduler` directly when you want to provide a custom proactor
+factory for synchronous driving, and use `AsyncProactorScheduler` for the same
+proactor-backed IO model under an async driving facade. `ProactorScheduler` is
+the shared abstract proactor core. Use `BasicScheduler` when you deliberately
+want the small no-IO driver that only waits for timers and explicit scheduler
+wakeups. The shared task, timer, future, and callback behaviour lives in the
+cooperative scheduling core; the blocking and asyncio-hosted run loops are
+separate driving facades.
 
 Proactors expose both `wait(deadline=None)` and `await wait_async(deadline=None)`.
 The synchronous form blocks the current thread; the async form waits through the

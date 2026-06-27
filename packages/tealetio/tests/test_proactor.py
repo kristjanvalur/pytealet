@@ -8,7 +8,14 @@ from concurrent.futures import CancelledError
 import pytest
 
 from tealetio import TimeoutError, set_scheduler, timeout
-from tealetio.proactor import InvalidStateError, Operation, ProactorScheduler, SelectorProactor
+from tealetio.proactor import (
+    AsyncProactorScheduler,
+    InvalidStateError,
+    Operation,
+    ProactorScheduler,
+    SelectorProactor,
+    SyncProactorScheduler,
+)
 
 
 def _wait_until_done(proactor: SelectorProactor, *operations: Operation[object]) -> list[Operation[object]]:
@@ -363,8 +370,12 @@ class TestSelectorProactor:
 
 
 class TestProactorScheduler:
+    def test_proactor_scheduler_is_abstract(self):
+        with pytest.raises(TypeError, match="abstract"):
+            ProactorScheduler()
+
     def test_scheduler_clock_drives_proactor_clock(self):
-        scheduler = ProactorScheduler()
+        scheduler = SyncProactorScheduler()
         try:
             scheduler._time = lambda: 24.0
 
@@ -381,7 +392,7 @@ class TestProactorScheduler:
             created.append(proactor)
             return proactor
 
-        scheduler = ProactorScheduler(factory)
+        scheduler = SyncProactorScheduler(factory)
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
         try:
@@ -407,7 +418,7 @@ class TestProactorScheduler:
             scheduler.close()
 
     def test_socket_helpers(self):
-        scheduler = ProactorScheduler()
+        scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
         try:
@@ -429,7 +440,7 @@ class TestProactorScheduler:
             scheduler.close()
 
     def test_accept_and_connect(self):
-        scheduler = ProactorScheduler()
+        scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -460,7 +471,7 @@ class TestProactorScheduler:
             scheduler.close()
 
     def test_datagram_helpers(self):
-        scheduler = ProactorScheduler()
+        scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -491,7 +502,7 @@ class TestProactorScheduler:
             scheduler.close()
 
     def test_wait_operation_timeout_cancels_operation(self):
-        scheduler = ProactorScheduler()
+        scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
         try:
@@ -512,3 +523,27 @@ class TestProactorScheduler:
             reader.close()
             writer.close()
             scheduler.close()
+
+    def test_async_proactor_scheduler_drives_io_without_blocking_asyncio(self):
+        async def run() -> bytes:
+            scheduler = AsyncProactorScheduler()
+            set_scheduler(scheduler)
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+
+                def receive() -> bytes:
+                    return scheduler.sock_recv(reader, 5)
+
+                task = scheduler.spawn(receive)
+                await asyncio.sleep(0)
+                writer.send(b"hello")
+
+                return await scheduler.arun_until_complete(task)
+            finally:
+                reader.close()
+                writer.close()
+                scheduler.close()
+
+        assert asyncio.run(run()) == b"hello"
