@@ -431,8 +431,14 @@ class TestThreadedSelectorProactor:
 
     def test_worker_thread_signals_completion(self):
         callback_threads: list[int] = []
+        callback_called = threading.Event()
         main_thread = threading.get_ident()
-        proactor = ThreadedSelectorProactor(completion_callback=lambda: callback_threads.append(threading.get_ident()))
+
+        def on_completion() -> None:
+            callback_threads.append(threading.get_ident())
+            callback_called.set()
+
+        proactor = ThreadedSelectorProactor(completion_callback=on_completion)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -444,6 +450,7 @@ class TestThreadedSelectorProactor:
 
             assert proactor.wait(proactor.get_time() + 1.0) == [operation]
             assert operation.result() == b"hello"
+            assert callback_called.wait(1.0) is True
             assert callback_threads
             assert callback_threads[0] != main_thread
         finally:
