@@ -511,6 +511,7 @@ class BaseDrivingMixin:
         with scheduler.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._before_arun()
             scheduler._running = True
+            scheduler._owner_thread = threading.get_ident()
             try:
                 while not self._arun_should_terminate():
                     scheduler._run_ready_batch(yield_every)
@@ -520,6 +521,7 @@ class BaseDrivingMixin:
                     if not self._arun_should_terminate():
                         await self._driver_wait()
             finally:
+                scheduler._owner_thread = None
                 scheduler._running = False
 
     async def arun_forever(self, *, yield_every: int | None = None) -> None:
@@ -532,6 +534,7 @@ class BaseDrivingMixin:
             self._before_arun()
             scheduler._stopping = False
             scheduler._running = True
+            scheduler._owner_thread = threading.get_ident()
             try:
                 while not scheduler._stopping:
                     scheduler._run_ready_batch(yield_every)
@@ -541,6 +544,7 @@ class BaseDrivingMixin:
                     if not scheduler._stopping:
                         await self._driver_wait()
             finally:
+                scheduler._owner_thread = None
                 scheduler._running = False
                 scheduler._stopping = False
 
@@ -568,6 +572,7 @@ class BaseDrivingMixin:
             self._before_arun()
             scheduler._stopping = False
             scheduler._running = True
+            scheduler._owner_thread = threading.get_ident()
             try:
                 while not target.done() and not scheduler._stopping:
                     scheduler._run_ready_batch(yield_every)
@@ -577,6 +582,7 @@ class BaseDrivingMixin:
                     if not target.done() and not scheduler._stopping:
                         await self._driver_wait()
             finally:
+                scheduler._owner_thread = None
                 scheduler._running = False
                 scheduler._stopping = False
 
@@ -1207,6 +1213,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._all_tasks: weakref.WeakSet[_tasks.Task] = weakref.WeakSet()
         self._runner = None
         self._running = False
+        self._owner_thread: int | None = None
         self._debug = False
         self._stopping = False
         self._threadsafe_callbacks: deque[
@@ -1477,11 +1484,15 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         callback: Callable[..., object],
         *args: object,
         context: contextvars.Context | None = None,
+        immediate: bool = False,
     ) -> None:
         """Schedule `callback(*args)` from another thread or driver context."""
 
         if context is None:
             context = contextvars.copy_context()
+        if immediate and self._owner_thread == threading.get_ident():
+            context.run(callback, *args)
+            return
         with self._threadsafe_lock:
             self._threadsafe_callbacks.append((callback, args, context))
         self._break_wait_threadsafe()
@@ -1816,9 +1827,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._verify_current_scheduler()
         with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._running = True
+            self._owner_thread = threading.get_ident()
             try:
                 return self._run_ready_batch(n)
             finally:
+                self._owner_thread = None
                 self._running = False
 
     @abstractmethod

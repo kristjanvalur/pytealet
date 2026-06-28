@@ -24,6 +24,7 @@ __all__ = [
     "QueueFull",
     "QueueShutDown",
     "Semaphore",
+    "ThreadsafeEvent",
     "Timeout",
     "TimeoutError",
     "timeout",
@@ -126,10 +127,6 @@ class Event:
         self._waiters: list[tealet.tealet] = []
         self._async_waiters: list[asyncio.Future[bool]] = []
         self._is_set = False
-        try:
-            self._scheduler: BaseScheduler | None = _get_current_scheduler()
-        except (AttributeError, RuntimeError):
-            self._scheduler = None
 
     def _link(self, t: tealet.tealet) -> None:
         assert t.link is None
@@ -164,8 +161,6 @@ class Event:
 
         current = tealet.current()
         sched = _get_current_scheduler()
-        if self._scheduler is None:
-            self._scheduler = sched
         try:
             sched._schedule(lambda: self._link(current))
         except BaseException as exc:
@@ -206,14 +201,75 @@ class Event:
                 waiter.set_result(True)
         self._async_waiters.clear()
 
-    def set_threadsafe(self) -> None:
-        """Set the event from another thread via the owning scheduler."""
+    def clear(self) -> None:
+        """Reset the event to the unset state."""
 
-        scheduler = self._scheduler
-        if scheduler is None:
-            scheduler = _get_current_scheduler()
-            self._scheduler = scheduler
-        scheduler.call_soon_threadsafe(self.set)
+        self._is_set = False
+
+
+class ThreadsafeEvent:
+    """Synchronous event whose `set` method is safe from another thread."""
+
+    def __init__(self) -> None:
+        self._waiters: list[tealet.tealet] = []
+        self._is_set = False
+        self._scheduler = _get_current_scheduler()
+
+    def _link(self, t: tealet.tealet) -> None:
+        assert t.link is None
+        assert t not in self._waiters
+        try:
+            t.link = self
+        except AttributeError:
+            pass  # main tealet may not have a ``link`` attribute
+        self._waiters.append(t)
+
+    def _query_waiting(self) -> bool:
+        return True
+
+    def _query_runnable(self) -> bool:
+        return False
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        try:
+            self._waiters.remove(t)
+            try:
+                t.link = None
+            except AttributeError:
+                pass  # main tealet may not have a ``link`` attribute
+        except ValueError:
+            pass
+
+    def swait(self) -> bool:
+        """Block the current tealet until the event is set."""
+
+        if self._is_set:
+            return True
+
+        current = tealet.current()
+        sched = _get_current_scheduler()
+        try:
+            sched._schedule(lambda: self._link(current))
+        except BaseException as exc:
+            self._unlink(current)
+            if isinstance(exc, RawTimeoutError) and self._is_set:
+                return True
+            raise
+
+        return True
+
+    def _set(self) -> None:
+        self._is_set = True
+        if self._waiters:
+            scheduler = self._scheduler
+            for waiter in self._waiters:
+                scheduler._make_runnable(waiter)
+        self._waiters.clear()
+
+    def set(self) -> None:
+        """Set the event, routing the wakeup through the owner scheduler if needed."""
+
+        self._scheduler.call_soon_threadsafe(self._set, immediate=True)
 
     def clear(self) -> None:
         """Reset the event to the unset state."""

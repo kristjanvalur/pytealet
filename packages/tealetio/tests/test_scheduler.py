@@ -2891,6 +2891,51 @@ class TestSchedulerExamples:
         assert seen == ["ran"]
         assert s.is_running() is False
 
+    def test_call_soon_threadsafe_immediate_runs_on_owner_thread(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def worker() -> None:
+            seen.append("before")
+            s.call_soon_threadsafe(seen.append, "callback", immediate=True)
+            seen.append("after")
+
+        s.spawn(worker)
+        s.run()
+
+        assert seen == ["before", "callback", "after"]
+
+    def test_call_soon_threadsafe_immediate_queues_from_other_thread(self):
+        s = _new_scheduler()
+        started = threading.Event()
+        seen: list[int] = []
+
+        s.call_later(60.0, lambda: None)
+        s.call_soon(started.set)
+
+        def run_forever_in_thread() -> None:
+            set_scheduler(s)
+            s.run_forever()
+
+        t = threading.Thread(target=run_forever_in_thread)
+        t.start()
+        try:
+            assert started.wait(timeout=1.0)
+            caller_thread = threading.get_ident()
+
+            def callback() -> None:
+                seen.append(threading.get_ident())
+                s.stop()
+
+            s.call_soon_threadsafe(callback, immediate=True)
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+            assert seen and seen[0] != caller_thread
+        finally:
+            s.call_soon_threadsafe(s.stop)
+            t.join(timeout=1.0)
+
     def test_stop_breaks_sleep_in_run_forever_via_call_soon_threadsafe(self):
         s = _new_scheduler()
         started = threading.Event()

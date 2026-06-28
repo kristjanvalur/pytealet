@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, NoReturn, Protocol, TypeVar, cast
 
 from . import compat
-from .locks import Event
+from .locks import ThreadsafeEvent
 from .scheduler import (
     AsyncDrivingMixin,
     AsyncSchedulerDrivingAPI,
@@ -1114,10 +1114,10 @@ class ProactorScheduler(BaseScheduler):
         if operation.done():
             return operation.result()
 
-        ready = Event()
+        ready = ThreadsafeEvent()
 
         def wake(_operation: Operation[Any]) -> None:
-            ready.set_threadsafe()
+            ready.set()
 
         operation.add_done_callback(wake)
         try:

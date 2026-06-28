@@ -1098,12 +1098,12 @@ class TestProactorScheduler:
 
     def test_wait_operation_wakes_event_on_scheduler_thread_from_uring_callback(self, monkeypatch):
         event_set_threads: list[int] = []
-        original_event = proactor_module.Event
+        original_event = proactor_module.ThreadsafeEvent
 
         class TrackingEvent(original_event):
-            def set(self) -> None:
+            def _set(self) -> None:
                 event_set_threads.append(threading.get_ident())
-                super().set()
+                super()._set()
 
         created: list[_DeferredUringRing] = []
 
@@ -1115,7 +1115,7 @@ class TestProactorScheduler:
         def proactor_factory() -> UringProactor:
             return UringProactor(ring_factory=ring_factory)
 
-        monkeypatch.setattr(proactor_module, "Event", TrackingEvent)
+        monkeypatch.setattr(proactor_module, "ThreadsafeEvent", TrackingEvent)
         scheduler = SyncProactorScheduler(proactor_factory)
         set_scheduler(scheduler)
         scheduler_thread = threading.get_ident()
