@@ -22,16 +22,21 @@ class build_ext(_build_ext):
         super().build_extensions()
 
     def _check_liburing_header(self) -> None:
+        if not self._can_compile("#include <liburing.h>\nint main(void) { return 0; }\n"):
+            raise RuntimeError(
+                "uring-api requires liburing development headers; install liburing-dev or an equivalent package"
+            )
+
+    def _can_compile(self, source: str) -> bool:
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = os.path.join(temp_dir, "check_liburing.c")
             with open(source_path, "w", encoding="utf-8") as source_file:
-                source_file.write("#include <liburing.h>\nint main(void) { return 0; }\n")
+                source_file.write(source)
             try:
                 self.compiler.compile([source_path], output_dir=temp_dir)
-            except Exception as exc:
-                raise RuntimeError(
-                    "uring-api requires liburing development headers; install liburing-dev or an equivalent package"
-                ) from exc
+            except Exception:
+                return False
+            return True
 
 
 class build_py(_build_py):

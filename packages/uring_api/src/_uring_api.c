@@ -16,6 +16,14 @@
 #define IO_URING_VERSION_MINOR 0
 #endif
 
+#define URING_API_LIBURING_AT_LEAST(major, minor)                                                                    \
+    (IO_URING_VERSION_MAJOR > (major) || (IO_URING_VERSION_MAJOR == (major) && IO_URING_VERSION_MINOR >= (minor)))
+
+#if URING_API_LIBURING_AT_LEAST(2, 5)
+#define URING_API_HAVE_DATA64 1
+#define URING_API_HAVE_RING_ENTRIES 1
+#endif
+
 #ifndef Py_BEGIN_CRITICAL_SECTION
 #define Py_BEGIN_CRITICAL_SECTION(op) {
 #define Py_END_CRITICAL_SECTION() }
@@ -39,6 +47,10 @@ typedef struct {
     PyObject *delivery_callback;
     UringApiMutex receive_mutex;
     PyThread_type_lock delivery_done_lock;
+#ifndef URING_API_HAVE_RING_ENTRIES
+    unsigned int sq_entries;
+    unsigned int cq_entries;
+#endif
     unsigned long long next_wakeup_data;
     unsigned long delivery_thread_id;
     unsigned int receive_state;
@@ -88,6 +100,40 @@ static PyObject *liburing_version_string(void) {
 
 static PyObject *liburing_version_info(void) {
     return Py_BuildValue("(ii)", IO_URING_VERSION_MAJOR, IO_URING_VERSION_MINOR);
+}
+
+static void sqe_set_data(UringApiRing *self, struct io_uring_sqe *sqe, unsigned long long user_data) {
+    (void)self;
+#ifdef URING_API_HAVE_DATA64
+    io_uring_sqe_set_data64(sqe, user_data);
+#else
+    sqe->user_data = user_data;
+#endif
+}
+
+static unsigned long long cqe_get_data(UringApiRing *self, struct io_uring_cqe *cqe) {
+    (void)self;
+#ifdef URING_API_HAVE_DATA64
+    return io_uring_cqe_get_data64(cqe);
+#else
+    return cqe->user_data;
+#endif
+}
+
+static unsigned int ring_sq_entries(UringApiRing *self) {
+#ifdef URING_API_HAVE_RING_ENTRIES
+    return self->ring.sq.ring_entries;
+#else
+    return self->sq_entries;
+#endif
+}
+
+static unsigned int ring_cq_entries(UringApiRing *self) {
+#ifdef URING_API_HAVE_RING_ENTRIES
+    return self->ring.cq.ring_entries;
+#else
+    return self->cq_entries;
+#endif
 }
 
 static int dict_set_owned(PyObject *dict, const char *key, PyObject *value) {
@@ -404,6 +450,10 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
     self->delivery_thread_id = 0;
+#ifndef URING_API_HAVE_RING_ENTRIES
+    self->sq_entries = 0;
+    self->cq_entries = 0;
+#endif
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -422,6 +472,10 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
     }
 
     self->initialized = true;
+#ifndef URING_API_HAVE_RING_ENTRIES
+    self->sq_entries = params.sq_entries;
+    self->cq_entries = params.cq_entries;
+#endif
     return 0;
 }
 
@@ -517,7 +571,7 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
             failed = 1;
         } else {
             io_uring_prep_recv(sqe, (int)fd, PyBytes_AS_STRING(buffer), (size_t)n, 0);
-            io_uring_sqe_set_data64(sqe, user_data);
+            sqe_set_data(self, sqe, user_data);
             if (submit_one(self) < 0) {
                 pending_discard(self, user_data);
                 failed = 1;
@@ -564,7 +618,7 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
             failed = 1;
         } else {
             io_uring_prep_send(sqe, (int)fd, view.buf, (size_t)view.len, 0);
-            io_uring_sqe_set_data64(sqe, user_data);
+            sqe_set_data(self, sqe, user_data);
             if (submit_one(self) < 0) {
                 pending_discard(self, user_data);
                 failed = 1;
@@ -601,7 +655,7 @@ static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED
                 failed = 1;
             } else {
                 io_uring_prep_nop(sqe);
-                io_uring_sqe_set_data64(sqe, user_data);
+                sqe_set_data(self, sqe, user_data);
                 if (submit_one(self) < 0) {
                     pending_discard(self, user_data);
                     failed = 1;
@@ -689,7 +743,7 @@ static PyObject *build_cqe_result(UringApiRing *self, struct io_uring_cqe *cqe) 
     PyObject *result = NULL;
     PyObject *payload = NULL;
     PyObject *pending_obj = NULL;
-    unsigned long long user_data = io_uring_cqe_get_data64(cqe);
+    unsigned long long user_data = cqe_get_data(self, cqe);
     int res = cqe->res;
     unsigned int flags = cqe->flags;
 
@@ -945,14 +999,14 @@ static PyObject *UringApiRing_get_sq_entries(UringApiRing *self, void *closure) 
     if (!self->initialized) {
         return PyLong_FromUnsignedLong(0);
     }
-    return PyLong_FromUnsignedLong(self->ring.sq.ring_entries);
+    return PyLong_FromUnsignedLong(ring_sq_entries(self));
 }
 
 static PyObject *UringApiRing_get_cq_entries(UringApiRing *self, void *closure) {
     if (!self->initialized) {
         return PyLong_FromUnsignedLong(0);
     }
-    return PyLong_FromUnsignedLong(self->ring.cq.ring_entries);
+    return PyLong_FromUnsignedLong(ring_cq_entries(self));
 }
 
 static PyObject *UringApiRing_get_closed(UringApiRing *self, void *closure) {
