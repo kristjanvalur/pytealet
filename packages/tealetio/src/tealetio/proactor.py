@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import errno
-import itertools
 import selectors
 import socket
 import threading
@@ -266,6 +265,7 @@ class _UringEntry:
     kind: str
     data: memoryview | None = None
     offset: int = 0
+    active: bool = True
 
 
 class SelectorProactor:
@@ -824,8 +824,7 @@ class UringProactor:
         self._closed = False
         self._completion_callback = completion_callback
         self._clock = time.monotonic
-        self._next_user_data = itertools.count(1)
-        self._pending: dict[int, _UringEntry] = {}
+        self._pending_count = 0
         self._completed: deque[Operation[Any]] = deque()
         self._completed_ready = threading.Event()
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
@@ -853,7 +852,7 @@ class UringProactor:
         """Return True if operations are waiting for backend completion."""
 
         with self._lock:
-            return bool(self._pending or self._completed)
+            return bool(self._pending_count or self._completed)
 
     def get_time(self) -> float:
         """Return the proactor clock value."""
@@ -874,9 +873,7 @@ class UringProactor:
             self._closed = True
         self._ring.stop()
         with self._lock:
-            for entry in self._pending.values():
-                entry.operation._set_cancelled(raise_if_done=False)
-            self._pending.clear()
+            self._pending_count = 0
         self.break_wait()
         self._ring.callback = None
         self._ring.close()
@@ -947,12 +944,13 @@ class UringProactor:
 
         operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
         with self._lock:
-            user_data = next(self._next_user_data)
-            self._pending[user_data] = _UringEntry(operation=operation, kind="recv")
+            entry = _UringEntry(operation=operation, kind="recv")
+            self._pending_count += 1
             try:
-                self._ring.submit_recv(sock.fileno(), n, user_data)
+                self._ring.submit_recv(sock.fileno(), n, entry)
             except BaseException:
-                self._pending.pop(user_data, None)
+                entry.active = False
+                self._pending_count -= 1
                 raise
         return operation
 
@@ -1013,12 +1011,11 @@ class UringProactor:
     def cancel_operation(self, operation: Operation[Any]) -> bool:
         # TODO: submit IORING_OP_ASYNC_CANCEL once the native wrapper exposes it.
         with self._lock:
-            for user_data, entry in list(self._pending.items()):
-                if entry.operation is operation:
-                    del self._pending[user_data]
-                    cancelled = operation._set_cancelled(raise_if_done=False)
-                    self.break_wait()
-                    return cancelled
+            cancelled = operation._set_cancelled(raise_if_done=False)
+            if cancelled and self._pending_count:
+                self._pending_count -= 1
+                self.break_wait()
+                return True
         return False
 
     def _queue_completed(self, completed: list[Operation[Any]]) -> None:
@@ -1059,23 +1056,28 @@ class UringProactor:
         data: memoryview,
         offset: int,
     ) -> None:
-        user_data = next(self._next_user_data)
-        self._pending[user_data] = _UringEntry(operation=operation, kind="sendall", data=data, offset=offset)
+        entry = _UringEntry(operation=operation, kind="sendall", data=data, offset=offset)
+        self._pending_count += 1
         try:
-            self._ring.submit_send(sock.fileno(), data[offset:], user_data)
+            self._ring.submit_send(sock.fileno(), data[offset:], entry)
         except BaseException:
-            self._pending.pop(user_data, None)
+            entry.active = False
+            self._pending_count -= 1
             raise
 
     def _complete_uring_operation(
         self,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        user_data = cast(int, completion.user_data)
+        entry = cast(_UringEntry, completion.user_data)
         res = completion.res
         with self._lock:
-            entry = self._pending.pop(user_data, None)
-        if entry is None or entry.operation.done():
+            if entry.active:
+                entry.active = False
+                self._pending_count -= 1
+            elif entry.operation.done():
+                return None
+        if entry.operation.done():
             return None
         if res < 0:
             entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
