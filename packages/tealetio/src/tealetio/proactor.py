@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import errno
+import os
 import selectors
 import socket
 import threading
@@ -45,6 +46,8 @@ class InvalidStateError(Exception):
 _DoneCallback = Callable[["Operation[Any]"], object]
 _CompletionCallback = Callable[[], object]
 _Clock = Callable[[], float]
+_DEFAULT_URING_COMPLETION_THREADS = 2
+_DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 
 
 class _UringRing(Protocol):
@@ -810,7 +813,7 @@ class ThreadedSelectorProactor(SelectorProactor):
 
 
 class UringProactor(ProactorBase):
-    """io_uring-backed proactor using a Python-owned completion service thread."""
+    """io_uring-backed proactor using Python-owned completion service threads."""
 
     def __init__(
         self,
@@ -819,25 +822,35 @@ class UringProactor(ProactorBase):
         *,
         completion_callback: _CompletionCallback | None = None,
         ring_factory: _UringRingFactory | None = None,
+        completion_threads: int = _DEFAULT_URING_COMPLETION_THREADS,
+        completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
     ) -> None:
+        if completion_threads <= 0:
+            raise ValueError("completion_threads must be at least 1")
         if ring_factory is None:
             ring_factory = _default_uring_ring_factory
         super().__init__(completion_callback=completion_callback)
         self._ring = ring_factory(entries, flags)
+        self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
         self._wake_condition = threading.Condition()
         self._wake_pending = False
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
         self._async_wait_event: _asyncio.Event | None = None
         self._ring.callback = self._deliver_uring_completion
-        self._service_thread = threading.Thread(target=self._ring.serve_completions, name="tealetio-uring")
+        self._service_threads = [
+            threading.Thread(target=self._service_thread_main, name=f"tealetio-uring-{index}")
+            for index in range(completion_threads)
+        ]
         try:
-            self._service_thread.start()
+            for thread in self._service_threads:
+                thread.start()
             self._wait_until_service_started()
         except BaseException:
             self._ring.stop_serving()
-            if self._service_thread.is_alive():
-                self._service_thread.join()
+            for thread in self._service_threads:
+                if thread.is_alive():
+                    thread.join()
             self._ring.callback = None
             self._ring.close()
             raise
@@ -848,9 +861,22 @@ class UringProactor(ProactorBase):
 
         return self._ring
 
+    def _service_thread_main(self) -> None:
+        self._apply_completion_thread_nice()
+        self._ring.serve_completions()
+
+    def _apply_completion_thread_nice(self) -> None:
+        nice = self._completion_thread_nice
+        if nice is None or not hasattr(os, "setpriority"):
+            return
+        try:
+            os.setpriority(os.PRIO_PROCESS, 0, nice)
+        except (AttributeError, OSError, PermissionError, ValueError):
+            return
+
     def _wait_until_service_started(self) -> None:
         deadline = time.monotonic() + 1.0
-        while not self._ring.running and self._service_thread.is_alive() and time.monotonic() < deadline:
+        while not self._ring.running and any(thread.is_alive() for thread in self._service_threads) and time.monotonic() < deadline:
             time.sleep(0.001)
         if not self._ring.running:
             raise RuntimeError("uring completion service failed to start")
@@ -867,7 +893,8 @@ class UringProactor(ProactorBase):
             return
         self._closed = True
         self._ring.stop_serving()
-        self._service_thread.join()
+        for thread in self._service_threads:
+            thread.join()
         self._pending_tokens.clear()
         self.break_wait()
         self._ring.callback = None

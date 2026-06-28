@@ -4,6 +4,7 @@ import asyncio
 import selectors
 import socket
 import threading
+import time
 from concurrent.futures import CancelledError
 from types import SimpleNamespace
 from typing import Any
@@ -738,6 +739,76 @@ class TestUringProactor:
             proactor.close()
 
         assert created[0].closed is True
+
+    def test_starts_default_completion_threads(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            assert isinstance(proactor.ring, _FakeUringRing)
+            deadline = time.monotonic() + 1.0
+            while proactor.ring.serve_count < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert proactor.ring.serve_count == 2
+        finally:
+            proactor.close()
+
+    def test_starts_configured_completion_threads(self):
+        proactor = UringProactor(
+            ring_factory=_FakeUringRing,
+            completion_threads=3,
+        )
+        try:
+            assert isinstance(proactor.ring, _FakeUringRing)
+            deadline = time.monotonic() + 1.0
+            while proactor.ring.serve_count < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert proactor.ring.serve_count == 3
+        finally:
+            proactor.close()
+
+    def test_validates_completion_thread_configuration(self):
+        with pytest.raises(ValueError, match="completion_threads must be at least 1"):
+            UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+
+    def test_applies_default_completion_thread_nice(self, monkeypatch: pytest.MonkeyPatch):
+        calls: list[tuple[int, int, int]] = []
+
+        def setpriority(which: int, who: int, priority: int) -> None:
+            calls.append((which, who, priority))
+
+        monkeypatch.setattr(proactor_module.os, "setpriority", setpriority)
+
+        proactor = UringProactor(
+            ring_factory=_FakeUringRing,
+            completion_threads=1,
+        )
+        try:
+            deadline = time.monotonic() + 1.0
+            while not calls and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert calls == [(proactor_module.os.PRIO_PROCESS, 0, -5)]
+        finally:
+            proactor.close()
+
+    def test_applies_configured_completion_thread_nice(self, monkeypatch: pytest.MonkeyPatch):
+        calls: list[tuple[int, int, int]] = []
+
+        def setpriority(which: int, who: int, priority: int) -> None:
+            calls.append((which, who, priority))
+
+        monkeypatch.setattr(proactor_module.os, "setpriority", setpriority)
+
+        proactor = UringProactor(
+            ring_factory=_FakeUringRing,
+            completion_threads=1,
+            completion_thread_nice=-5,
+        )
+        try:
+            deadline = time.monotonic() + 1.0
+            while not calls and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert calls == [(proactor_module.os.PRIO_PROCESS, 0, -5)]
+        finally:
+            proactor.close()
 
     def test_clock_can_be_replaced(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
