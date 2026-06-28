@@ -103,6 +103,18 @@ def test_probe_reports_requested_setup_flags():
         assert probe.active_flags & flags == flags
 
 
+def test_ring_accepts_setup_flags_when_probe_accepts_them():
+    require_uring()
+    flags = uring_api.IORING_SETUP_SINGLE_ISSUER
+    probe = uring_api.probe(flags=flags)
+    if not probe.available:
+        pytest.skip(f"setup flags are not accepted: errno={probe.errno} message={probe.message}")
+
+    with uring_api.Ring(entries=2, flags=flags) as ring:
+        assert ring.sq_entries > 0
+        assert ring.cq_entries > 0
+
+
 def test_import_succeeds_when_native_extension_is_unavailable():
     script = """
 import builtins
@@ -149,6 +161,24 @@ def test_c_api_client_can_import_capsule_and_probe():
     assert feature_flags & uring_api.C_API_FEATURE_CORE
     assert (major, minor) == uring_api.__compiled_liburing_version_info__
     assert isinstance(probe["available"], bool)
+
+
+def test_c_api_ring_new_accepts_setup_flags_when_probe_accepts_them():
+    require_uring()
+    flags = uring_api.IORING_SETUP_SINGLE_ISSUER
+    probe = uring_api.probe(flags=flags)
+    if not probe.available:
+        pytest.skip(f"setup flags are not accepted: errno={probe.errno} message={probe.message}")
+
+    client = build_c_api_client()
+    ring_check, fd, _features, sq_entries, cq_entries, closed, running = client.ring_summary(flags)
+
+    assert ring_check == 1
+    assert fd >= 0
+    assert sq_entries > 0
+    assert cq_entries > 0
+    assert closed == 0
+    assert running == 0
 
 
 def build_c_api_client():

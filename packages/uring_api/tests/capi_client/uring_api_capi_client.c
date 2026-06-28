@@ -45,16 +45,20 @@ static PyObject *client_probe(PyObject *module, PyObject *Py_UNUSED(ignored)) {
     return api->probe(2, 0);
 }
 
-static PyObject *client_ring_summary(PyObject *module, PyObject *Py_UNUSED(ignored)) {
+static PyObject *client_ring_summary(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *result;
+    unsigned int flags = 0;
 
     (void)module;
     if (!api) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    ring = api->ring_new(2, 0);
+    if (!PyArg_ParseTuple(args, "|I:ring_summary", &flags)) {
+        return NULL;
+    }
+    ring = api->ring_new(2, flags);
     if (!ring) {
         return NULL;
     }
@@ -257,7 +261,7 @@ static PyObject *client_submit_connect(PyObject *module, PyObject *args) {
 static PyMethodDef client_methods[] = {
     {"metadata", (PyCFunction)client_metadata, METH_NOARGS, NULL},
     {"probe", (PyCFunction)client_probe, METH_NOARGS, NULL},
-    {"ring_summary", (PyCFunction)client_ring_summary, METH_NOARGS, NULL},
+    {"ring_summary", (PyCFunction)client_ring_summary, METH_VARARGS, NULL},
     {"completion_summary", (PyCFunction)client_completion_summary, METH_O, NULL},
     {"set_c_callback", _PyCFunction_CAST(client_set_c_callback), METH_VARARGS, NULL},
     {"clear_c_callback", (PyCFunction)client_clear_c_callback, METH_O, NULL},

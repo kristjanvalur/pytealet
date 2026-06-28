@@ -155,6 +155,23 @@ with uring_api.Ring(entries=8) as ring:
 the actual submission and completion queues, so inspect `sq_entries` and
 `cq_entries` after initialisation if the exact capacity matters.
 
+Pass `flags=` to request setup modes that were accepted by `probe(flags=...)`:
+
+```python
+import uring_api
+
+flags = uring_api.IORING_SETUP_SINGLE_ISSUER
+
+if uring_api.probe(flags=flags).available:
+    with uring_api.Ring(entries=8, flags=flags) as ring:
+        ...
+```
+
+The constructor passes these flags to `io_uring_queue_init_params()` for the
+real ring. The application is still responsible for the contracts implied by
+each flag; for example, `IORING_SETUP_SINGLE_ISSUER` requires all submissions to
+come from the owning thread.
+
 If initialisation fails, the constructor raises `OSError`:
 
 ```python
