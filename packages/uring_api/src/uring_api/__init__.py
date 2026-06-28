@@ -12,6 +12,8 @@ try:
     from _uring_api import C_API_FEATURE_CORE as C_API_FEATURE_CORE
     from _uring_api import C_API_FEATURES as C_API_FEATURES
     from _uring_api import Completion as Completion
+    from _uring_api import DELIVERY_PRIORITY_ABOVE_NORMAL as DELIVERY_PRIORITY_ABOVE_NORMAL
+    from _uring_api import DELIVERY_PRIORITY_NORMAL as DELIVERY_PRIORITY_NORMAL
     from _uring_api import Ring as Ring
     from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
@@ -19,9 +21,11 @@ try:
     from _uring_api import probe as _probe
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
-    C_API_ABI_VERSION = 2
+    C_API_ABI_VERSION = 3
     C_API_FEATURE_CORE = 1 << 0
     C_API_FEATURES = 0
+    DELIVERY_PRIORITY_NORMAL = 0
+    DELIVERY_PRIORITY_ABOVE_NORMAL = 1
     __compiled_liburing_version__ = "unavailable"
     __compiled_liburing_version_info__ = (0, 0)
     __liburing_version__ = "unavailable"
@@ -111,6 +115,8 @@ __all__ = [
     "C_API_ABI_VERSION",
     "C_API_FEATURE_CORE",
     "C_API_FEATURES",
+    "DELIVERY_PRIORITY_ABOVE_NORMAL",
+    "DELIVERY_PRIORITY_NORMAL",
     "Completion",
     "Ring",
     "UringProbe",

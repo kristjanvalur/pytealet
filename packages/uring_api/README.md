@@ -158,20 +158,29 @@ The intended baseline is simple:
     `submit_connect()`, and `break_wait()`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
-- alternatively, `Ring.callback` plus `start()` can run a native delivery thread
-  that waits for completions and calls the callback directly.
+- alternatively, `Ring.callback` plus `start()` can run native delivery worker
+    threads that wait for completions and call the callback directly.
 
 `break_wait()` prepares and submits an internal NOP. When the reaper consumes that
 completion, `wait()` returns `None` rather than a user completion.
 
-The delivery thread uses the same receive side as `wait()`, so public `wait()`
-calls raise `RuntimeError` while it is running. `stop()` asks the thread to exit,
-wakes it with `break_wait()`, and waits until it has stopped. `close()` does the
-same before closing the ring. If the callback raises, the exception is reported
-as unraisable and the delivery thread exits.
+The delivery workers use the same receive side as `wait()`, so public `wait()`
+calls raise `RuntimeError` while they are running. `start(workers=1,
+priority=uring_api.DELIVERY_PRIORITY_ABOVE_NORMAL)` starts one or more detached
+pthread workers. Workers compete for an internal wait lock, so only one worker is
+inside `io_uring_wait_cqe()` at a time, while another worker can dispatch a
+completion callback. The priority value is best effort: positive values try to
+move the worker to `SCHED_RR` with the corresponding pthread priority, but Linux
+may ignore or reject that without elevated privileges. Use
+`DELIVERY_PRIORITY_NORMAL` to leave the scheduler policy unchanged.
+
+`stop()` asks the workers to exit, wakes the active waiter with `break_wait()`,
+and waits until they have stopped. `close()` does the same before closing the
+ring. If a callback raises, the exception is reported as unraisable and the
+worker group exits.
 
 Native C clients can register a worker-thread callback through the C API. When a
-C callback is present, the delivery thread calls it instead of `Ring.callback`;
+C callback is present, the delivery worker calls it instead of `Ring.callback`;
 otherwise it falls back to the Python callback property.
 
 ```python
@@ -184,7 +193,7 @@ def delivered(completion):
 
 with uring_api.Ring() as ring:
     ring.callback = delivered
-    ring.start()
+    ring.start(workers=2)
     try:
         ring.submit_recv(fd, bytearray(4096), 200)
     finally:
@@ -211,8 +220,8 @@ The capsule currently exposes:
     `ring_submit_send()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
     `ring_submit_accept()`, `ring_submit_connect()`, `ring_break_wait()`, and
     `ring_wait()`;
-- `ring_set_callback()`, `ring_set_c_callback()`, `ring_start()`, and
-    `ring_stop()` for delivery-thread control;
+- `ring_set_callback()`, `ring_set_c_callback()`, `ring_start(ring, workers,
+    priority)`, and `ring_stop()` for delivery-worker control;
 - `completion_check()`, `completion_user_data()`, `completion_res()`,
     `completion_flags()`, and `completion_result()` for native completion
     inspection.
@@ -222,7 +231,7 @@ describes the capsule API surface, not runtime kernel support for individual
 operations. Use `probe()` to check whether this process can create a ring. A C
 completion callback receives the ring object, the completion object, and the
 supplied `user_data`. Return `0` for success; return a negative value with a
-Python exception set to report an unraisable error and stop the delivery thread.
+Python exception set to report an unraisable error and stop the delivery worker group.
 
 ## Choosing Ring Sizes
 

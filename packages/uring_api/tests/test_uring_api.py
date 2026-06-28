@@ -43,9 +43,11 @@ def test_uring_api_get_include_points_to_header_dir():
 
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 2
+    assert uring_api.C_API_ABI_VERSION == 3
     assert uring_api.C_API_FEATURE_CORE == 1 << 0
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
+    assert uring_api.DELIVERY_PRIORITY_NORMAL == 0
+    assert uring_api.DELIVERY_PRIORITY_ABOVE_NORMAL > uring_api.DELIVERY_PRIORITY_NORMAL
 
 
 def test_probe_returns_structured_result():
@@ -660,6 +662,53 @@ def test_ring_delivery_thread_delivers_socketpair_round_trip_when_available():
         right.close()
 
 
+def test_ring_delivery_threads_can_dispatch_while_another_callback_blocks_when_available():
+    require_uring()
+
+    left, right = socket.socketpair()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        first_callback_blocking = threading.Event()
+        release_first_callback = threading.Event()
+        delivered_two = threading.Event()
+        completions: list[uring_api.Completion] = []
+        lock = threading.Lock()
+
+        def callback(completion):
+            with lock:
+                completions.append(completion)
+                count = len(completions)
+            if count == 1:
+                first_callback_blocking.set()
+                release_first_callback.wait(2.0)
+            elif count == 2:
+                delivered_two.set()
+                release_first_callback.set()
+
+        with uring_api.Ring() as ring:
+            ring.callback = callback
+            ring.start(workers=2, priority=uring_api.DELIVERY_PRIORITY_NORMAL)
+            first_buf = bytearray(1)
+            second_buf = bytearray(1)
+            ring.submit_recv(left.fileno(), first_buf, 140)
+            ring.submit_recv(left.fileno(), second_buf, 141)
+            right.send(b"xy")
+
+            assert first_callback_blocking.wait(1.0)
+            assert delivered_two.wait(1.0)
+            ring.stop()
+
+        by_user_data = {completion.user_data: completion for completion in completions}
+        assert by_user_data[140].result == 1
+        assert by_user_data[141].result == 1
+        assert {bytes(first_buf), bytes(second_buf)} == {b"x", b"y"}
+    finally:
+        release_first_callback.set()
+        left.close()
+        right.close()
+
+
 def test_ring_delivery_thread_writes_unraisable_and_exits_when_callback_fails():
     require_uring()
 
@@ -721,6 +770,17 @@ def test_ring_delivery_thread_requires_callback_when_available():
     with uring_api.Ring() as ring:
         with pytest.raises(RuntimeError, match="delivery callback is not set"):
             ring.start()
+
+
+def test_ring_start_validates_worker_count_and_priority_when_available():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        ring.callback = lambda completion: None
+        with pytest.raises(ValueError, match="workers must be at least 1"):
+            ring.start(workers=0)
+        with pytest.raises(ValueError, match="priority must be non-negative"):
+            ring.start(priority=-1)
 
 
 def test_ring_rejects_callback_change_while_delivery_thread_runs_when_available():
