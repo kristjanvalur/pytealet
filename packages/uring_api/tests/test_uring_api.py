@@ -55,6 +55,10 @@ def test_native_module_exports_c_api_constants():
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
 
 
+def test_native_module_exports_submission_queue_full_exception():
+    assert issubclass(uring_api.SubmissionQueueFull, RuntimeError)
+
+
 def test_probe_returns_structured_result():
     probe = uring_api.probe()
 

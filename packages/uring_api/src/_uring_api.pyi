@@ -9,6 +9,8 @@ C_API_ABI_VERSION: int
 C_API_FEATURE_CORE: int
 C_API_FEATURES: int
 
+class SubmissionQueueFull(RuntimeError): ...
+
 class Completion:
     @property
     def user_data(self) -> object: ...

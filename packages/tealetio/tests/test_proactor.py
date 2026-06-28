@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import uring_api
 
 import tealetio.proactor as proactor_module
 from tealetio import TimeoutError, set_scheduler, timeout
@@ -719,6 +720,18 @@ class _DeferredUringRing(_FakeUringRing):
         self._deliver(SimpleNamespace(user_data=user_data, res=len(data), flags=0, result=len(data)))
 
 
+class _BackpressuredUringRing(_DeferredUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.fail_next_recv = False
+
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> None:
+        if self.fail_next_recv:
+            self.fail_next_recv = False
+            raise uring_api.SubmissionQueueFull("no submission queue entries available")
+        super().submit_recv(fd, buf, user_data)
+
+
 class TestUringProactor:
     def test_initializes_ring_with_entries_and_flags(self):
         created: list[_FakeUringRing] = []
@@ -1013,6 +1026,57 @@ class TestUringProactor:
             assert proactor.has_pending_operations() is False
             with pytest.raises(CancelledError):
                 operation.result()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_submission_queue_full_defers_and_retries_after_completion(self):
+        proactor = UringProactor(ring_factory=_BackpressuredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            first = proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _BackpressuredUringRing)
+            assert len(proactor.ring.submitted_recv) == 1
+
+            proactor.ring.fail_next_recv = True
+            second = proactor.recv(reader, 5)
+            assert second.done() is False
+            assert proactor.has_pending_operations() is True
+            assert len(proactor.ring.submitted_recv) == 1
+
+            proactor.ring.complete_recv(b"first")
+            assert first.result() == b"first"
+            assert len(proactor.ring.submitted_recv) == 2
+
+            proactor.ring.complete_recv(b"again")
+            assert second.result() == b"again"
+            assert proactor.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_removes_deferred_submission(self):
+        proactor = UringProactor(ring_factory=_BackpressuredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            first = proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _BackpressuredUringRing)
+
+            proactor.ring.fail_next_recv = True
+            second = proactor.recv(reader, 5)
+            second.cancel()
+
+            assert second.cancelled() is True
+            proactor.ring.complete_recv(b"first")
+            assert first.result() == b"first"
+            assert len(proactor.ring.submitted_recv) == 1
+            assert proactor.has_pending_operations() is False
+            with pytest.raises(CancelledError):
+                second.result()
         finally:
             reader.close()
             writer.close()

@@ -13,6 +13,7 @@ try:
     from _uring_api import C_API_FEATURES as C_API_FEATURES
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring
+    from _uring_api import SubmissionQueueFull as SubmissionQueueFull
     from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
     from _uring_api import __liburing_version__ as __liburing_version__
@@ -36,6 +37,9 @@ except ImportError as exc:
     class Ring:  # type: ignore[no-redef]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+    class SubmissionQueueFull(RuntimeError):
+        """Raised when no submission queue entry is currently available."""
 
     def _probe(entries: int = 2, flags: int = 0) -> dict[str, Any]:
         if entries <= 0:
@@ -113,6 +117,7 @@ __all__ = [
     "C_API_FEATURES",
     "Completion",
     "Ring",
+    "SubmissionQueueFull",
     "UringProbe",
     "__compiled_liburing_version__",
     "__compiled_liburing_version_info__",

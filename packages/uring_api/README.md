@@ -7,6 +7,9 @@ socket send/recv submission, completion waiting, and callback delivery to build
 higher-level completion abstractions in Python. It does not implement an event
 loop, scheduler, or asyncio compatibility layer.
 
+Future work is tracked in [ROADMAP.md](ROADMAP.md), including queue resizing,
+provided buffers, and multishot server I/O.
+
 ## Quick Check
 
 ```python
@@ -54,6 +57,11 @@ finally:
 For sends, `uring-api` keeps the exported buffer alive until the kernel reports
 the completion. That avoids copying the outgoing payload into an internal bytes
 object just to keep memory valid.
+
+If the submission queue cannot provide another entry after flushing already
+prepared work to the kernel, submit methods raise `SubmissionQueueFull`. Treat
+that as backpressure rather than as a permanent ring failure: wait for
+completions, then retry or let a higher-level proactor defer the submission.
 
 ## Checking Availability
 

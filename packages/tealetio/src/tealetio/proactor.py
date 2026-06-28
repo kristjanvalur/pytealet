@@ -50,6 +50,14 @@ _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 
 
+def _is_uring_submission_queue_full(exc: BaseException) -> bool:
+    try:
+        import uring_api
+    except ImportError:
+        return False
+    return isinstance(exc, uring_api.SubmissionQueueFull)
+
+
 class _UringRing(Protocol):
     fd: int
     features: int
@@ -309,6 +317,7 @@ class _FdEntry:
 
 
 _UringEntryComplete = Callable[["UringProactor", "_UringEntry", "_UringCompletion"], Operation[Any] | None]
+_UringEntrySubmit = Callable[[], None]
 
 
 @dataclass
@@ -318,6 +327,12 @@ class _UringEntry:
     data: memoryview | None = None
     offset: int = 0
     active: bool = True
+
+
+@dataclass
+class _UringSubmission:
+    entry: _UringEntry
+    submit: _UringEntrySubmit
 
 
 class SelectorProactor(ProactorBase):
@@ -833,6 +848,8 @@ class UringProactor(ProactorBase):
         self._ring = ring_factory(entries, flags)
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
+        self._deferred_submissions: list[_UringSubmission] = []
+        self._retrying_deferred_submissions = False
         self._wake_condition = threading.Condition()
         self._wake_pending = False
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
@@ -884,7 +901,7 @@ class UringProactor(ProactorBase):
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
 
-        return bool(self._pending_tokens)
+        return bool(self._pending_tokens or self._deferred_submissions)
 
     def close(self) -> None:
         """Close the owned `io_uring` ring."""
@@ -896,6 +913,7 @@ class UringProactor(ProactorBase):
         for thread in self._service_threads:
             thread.join()
         self._pending_tokens.clear()
+        self._deferred_submissions.clear()
         self.break_wait()
         self._ring.callback = None
         self._ring.close()
@@ -981,14 +999,7 @@ class UringProactor(ProactorBase):
         operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
         data = memoryview(bytearray(n))
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv, data=data)
-        self._pending_tokens.append(None)
-        try:
-            self._ring.submit_recv(sock.fileno(), data, entry)
-        except BaseException:
-            entry.active = False
-            self._pending_tokens.pop()
-            self.break_wait()
-            raise
+        self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), data, entry))
         return operation
 
     def _complete_uring_recv(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[bytes]:
@@ -1002,14 +1013,7 @@ class UringProactor(ProactorBase):
 
         operation = Operation[int](kind="recv_into", fileobj=sock, proactor=self)
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv_into, data=memoryview(buf))
-        self._pending_tokens.append(None)
-        try:
-            self._ring.submit_recv(sock.fileno(), buf, entry)
-        except BaseException:
-            entry.active = False
-            self._pending_tokens.pop()
-            self.break_wait()
-            raise
+        self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), buf, entry))
         return operation
 
     def _complete_uring_recv_into(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
@@ -1087,14 +1091,7 @@ class UringProactor(ProactorBase):
         operation = Operation[int](kind="sendto", fileobj=sock, proactor=self)
         payload = memoryview(data)
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_sendto, data=payload)
-        self._pending_tokens.append(None)
-        try:
-            self._ring.submit_sendto(sock.fileno(), payload, address, entry)
-        except BaseException:
-            entry.active = False
-            self._pending_tokens.pop()
-            self.break_wait()
-            raise
+        self._submit_uring_entry(entry, lambda: self._ring.submit_sendto(sock.fileno(), payload, address, entry))
         return operation
 
     def _complete_uring_sendto(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
@@ -1107,14 +1104,7 @@ class UringProactor(ProactorBase):
 
         operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock, proactor=self)
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_accept)
-        self._pending_tokens.append(None)
-        try:
-            self._ring.submit_accept(sock.fileno(), entry)
-        except BaseException:
-            entry.active = False
-            self._pending_tokens.pop()
-            self.break_wait()
-            raise
+        self._submit_uring_entry(entry, lambda: self._ring.submit_accept(sock.fileno(), entry))
         return operation
 
     def _complete_uring_accept(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[tuple[socket.socket, Any]]:
@@ -1130,14 +1120,7 @@ class UringProactor(ProactorBase):
 
         operation = Operation[None](kind="connect", fileobj=sock, proactor=self)
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_connect)
-        self._pending_tokens.append(None)
-        try:
-            self._ring.submit_connect(sock.fileno(), address, entry)
-        except BaseException:
-            entry.active = False
-            self._pending_tokens.pop()
-            self.break_wait()
-            raise
+        self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
         return operation
 
     def _complete_uring_connect(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
@@ -1146,6 +1129,9 @@ class UringProactor(ProactorBase):
         return operation
 
     def cancel_operation(self, operation: Operation[Any]) -> None:
+        if self._cancel_deferred_operation(operation):
+            self.break_wait()
+            return
         # TODO: submit IORING_OP_ASYNC_CANCEL once the native wrapper exposes it.
         cancelled = operation._set_cancelled()
         if cancelled:
@@ -1153,8 +1139,47 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
         operation = self._complete_uring_operation(completion)
+        self._retry_deferred_submissions()
         if operation is not None:
             self._notify_completed()
+
+    def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
+        self._pending_tokens.append(None)
+        try:
+            submit()
+        except BaseException as exc:
+            self._pending_tokens.pop()
+            if _is_uring_submission_queue_full(exc):
+                self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
+                return False
+            entry.active = False
+            self.break_wait()
+            raise
+        return True
+
+    def _retry_deferred_submissions(self) -> None:
+        if self._retrying_deferred_submissions:
+            return
+        self._retrying_deferred_submissions = True
+        try:
+            while self._deferred_submissions:
+                submission = self._deferred_submissions.pop(0)
+                if submission.entry.operation.done():
+                    submission.entry.active = False
+                    continue
+                if not self._submit_uring_entry(submission.entry, submission.submit):
+                    break
+        finally:
+            self._retrying_deferred_submissions = False
+
+    def _cancel_deferred_operation(self, operation: Operation[Any]) -> bool:
+        for index, submission in enumerate(self._deferred_submissions):
+            if submission.entry.operation is operation:
+                del self._deferred_submissions[index]
+                submission.entry.active = False
+                operation._set_cancelled()
+                return True
+        return False
 
     def _submit_sendall(
         self,
@@ -1164,14 +1189,7 @@ class UringProactor(ProactorBase):
         offset: int,
     ) -> None:
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_sendall, data=data, offset=offset)
-        self._pending_tokens.append(None)
-        try:
-            self._ring.submit_send(sock.fileno(), data[offset:], entry)
-        except BaseException:
-            entry.active = False
-            self._pending_tokens.pop()
-            self.break_wait()
-            raise
+        self._submit_uring_entry(entry, lambda: self._ring.submit_send(sock.fileno(), data[offset:], entry))
 
     def _submit_recvmsg(
         self,
@@ -1181,14 +1199,7 @@ class UringProactor(ProactorBase):
         complete: _UringEntryComplete,
     ) -> None:
         entry = _UringEntry(operation=operation, complete=complete, data=data)
-        self._pending_tokens.append(None)
-        try:
-            self._ring.submit_recvmsg(sock.fileno(), data, entry)
-        except BaseException:
-            entry.active = False
-            self._pending_tokens.pop()
-            self.break_wait()
-            raise
+        self._submit_uring_entry(entry, lambda: self._ring.submit_recvmsg(sock.fileno(), data, entry))
 
     def _complete_uring_operation(
         self,

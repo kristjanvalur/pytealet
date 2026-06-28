@@ -85,6 +85,7 @@ typedef struct {
 
 static PyTypeObject UringApiRing_Type;
 static PyTypeObject UringApiCompletion_Type;
+static PyObject *UringApiSubmissionQueueFullError;
 
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
 static int UringApiRing_stop_delivery(UringApiRing *self);
@@ -585,7 +586,7 @@ static struct io_uring_sqe *get_sqe(UringApiRing *self) {
     }
     sqe = io_uring_get_sqe(&self->ring);
     if (!sqe) {
-        PyErr_SetString(PyExc_RuntimeError, "no submission queue entries available");
+        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
         return NULL;
     }
     return sqe;
@@ -1910,6 +1911,13 @@ static int uring_api_exec(PyObject *module) {
         return -1;
     }
     if (PyType_Ready(&UringApiRing_Type) < 0) {
+        return -1;
+    }
+    UringApiSubmissionQueueFullError = PyErr_NewException("_uring_api.SubmissionQueueFull", PyExc_RuntimeError, NULL);
+    if (!UringApiSubmissionQueueFullError) {
+        return -1;
+    }
+    if (PyModule_AddObjectRef(module, "SubmissionQueueFull", UringApiSubmissionQueueFullError) < 0) {
         return -1;
     }
     Py_INCREF(&UringApiCompletion_Type);
