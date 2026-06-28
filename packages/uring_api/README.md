@@ -81,6 +81,8 @@ if probe.available:
     print("compiled liburing:", probe.compiled_liburing_version)
     print("compiled liburing version info:", probe.compiled_liburing_version_info)
     print("features:", probe.features)
+    print("requested setup flags:", probe.requested_flags)
+    print("active setup flags:", probe.active_flags)
     print("sq entries:", probe.sq_entries)
     print("cq entries:", probe.cq_entries)
 else:
@@ -102,6 +104,27 @@ if not uring_api.is_available():
 startup diagnostics, but production code should still handle `OSError` when it
 creates the real ring because limits or sandbox policy may differ for larger
 settings.
+
+Pass setup flags to `probe(flags=...)` to check whether this build and kernel
+combination accepts a ring mode before using it for the real ring:
+
+```python
+import uring_api
+
+flags = uring_api.IORING_SETUP_SINGLE_ISSUER
+probe = uring_api.probe(flags=flags)
+
+if probe.available:
+    assert probe.active_flags & flags == flags
+else:
+    print("setup flags rejected:", probe.errno, probe.message)
+```
+
+`requested_flags` records the bitmask passed by the caller. `active_flags`
+records the flags reported by the successfully created temporary ring, or `0`
+when initialisation failed. Some flags also impose application-level contracts.
+For example, `IORING_SETUP_SINGLE_ISSUER` means callers must submit SQEs from a
+single owning thread even on kernels that reject or ignore the flag.
 
 The compiled liburing version fields report the header version used to build the
 binary extension. This is useful in CI because Linux distribution images can

@@ -8,6 +8,12 @@ __compiled_liburing_version_info__: tuple[int, int]
 C_API_ABI_VERSION: int
 C_API_FEATURE_CORE: int
 C_API_FEATURES: int
+IORING_SETUP_CQSIZE: int
+IORING_SETUP_CLAMP: int
+IORING_SETUP_COOP_TASKRUN: int
+IORING_SETUP_TASKRUN_FLAG: int
+IORING_SETUP_SINGLE_ISSUER: int
+IORING_SETUP_DEFER_TASKRUN: int
 
 class SubmissionQueueFull(RuntimeError): ...
 

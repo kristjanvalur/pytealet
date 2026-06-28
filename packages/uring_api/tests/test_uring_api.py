@@ -59,11 +59,22 @@ def test_native_module_exports_submission_queue_full_exception():
     assert issubclass(uring_api.SubmissionQueueFull, RuntimeError)
 
 
+def test_native_module_exports_setup_flag_constants():
+    assert uring_api.IORING_SETUP_CQSIZE == 1 << 3
+    assert uring_api.IORING_SETUP_CLAMP == 1 << 4
+    assert uring_api.IORING_SETUP_COOP_TASKRUN == 1 << 8
+    assert uring_api.IORING_SETUP_TASKRUN_FLAG == 1 << 9
+    assert uring_api.IORING_SETUP_SINGLE_ISSUER == 1 << 12
+    assert uring_api.IORING_SETUP_DEFER_TASKRUN == 1 << 13
+
+
 def test_probe_returns_structured_result():
     probe = uring_api.probe()
 
     assert isinstance(probe.available, bool)
     assert isinstance(probe.features, int)
+    assert probe.requested_flags == uring_api.DEFAULT_FLAGS
+    assert isinstance(probe.active_flags, int)
     assert isinstance(probe.sq_entries, int)
     assert isinstance(probe.cq_entries, int)
     assert probe.liburing_version
@@ -81,6 +92,15 @@ def test_probe_returns_structured_result():
     else:
         assert probe.errno is not None
         assert probe.message
+
+
+def test_probe_reports_requested_setup_flags():
+    flags = uring_api.IORING_SETUP_SINGLE_ISSUER
+    probe = uring_api.probe(flags=flags)
+
+    assert probe.requested_flags == flags
+    if probe.available:
+        assert probe.active_flags & flags == flags
 
 
 def test_import_succeeds_when_native_extension_is_unavailable():

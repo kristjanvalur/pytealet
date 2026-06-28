@@ -168,6 +168,18 @@ static int module_add_uint64_constant(PyObject *module, const char *name, unsign
     return 0;
 }
 
+static int module_add_setup_flag_constants(PyObject *module) {
+    if (module_add_uint64_constant(module, "IORING_SETUP_CQSIZE", IORING_SETUP_CQSIZE) < 0 ||
+        module_add_uint64_constant(module, "IORING_SETUP_CLAMP", IORING_SETUP_CLAMP) < 0 ||
+        module_add_uint64_constant(module, "IORING_SETUP_COOP_TASKRUN", IORING_SETUP_COOP_TASKRUN) < 0 ||
+        module_add_uint64_constant(module, "IORING_SETUP_TASKRUN_FLAG", IORING_SETUP_TASKRUN_FLAG) < 0 ||
+        module_add_uint64_constant(module, "IORING_SETUP_SINGLE_ISSUER", IORING_SETUP_SINGLE_ISSUER) < 0 ||
+        module_add_uint64_constant(module, "IORING_SETUP_DEFER_TASKRUN", IORING_SETUP_DEFER_TASKRUN) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
     (void)self;
     io_uring_sqe_set_data64(sqe, (unsigned long long)(uintptr_t)completion);
@@ -592,7 +604,8 @@ static struct io_uring_sqe *get_sqe(UringApiRing *self) {
     return sqe;
 }
 
-static PyObject *build_probe_result(bool available, int errnum, const char *message, struct io_uring_params *params) {
+static PyObject *build_probe_result(bool available, int errnum, const char *message, unsigned int requested_flags,
+                                    unsigned int active_flags, struct io_uring_params *params) {
     PyObject *result = PyDict_New();
     if (!result) {
         return NULL;
@@ -602,6 +615,8 @@ static PyObject *build_probe_result(bool available, int errnum, const char *mess
         dict_set_owned(result, "errno", errnum ? PyLong_FromLong(errnum) : Py_NewRef(Py_None)) < 0 ||
         dict_set_owned(result, "message", message ? PyUnicode_FromString(message) : Py_NewRef(Py_None)) < 0 ||
         dict_set_owned(result, "features", PyLong_FromUnsignedLong(params ? params->features : 0)) < 0 ||
+        dict_set_owned(result, "requested_flags", PyLong_FromUnsignedLong(requested_flags)) < 0 ||
+        dict_set_owned(result, "active_flags", PyLong_FromUnsignedLong(active_flags)) < 0 ||
         dict_set_owned(result, "sq_entries", PyLong_FromUnsignedLong(params ? params->sq_entries : 0)) < 0 ||
         dict_set_owned(result, "cq_entries", PyLong_FromUnsignedLong(params ? params->cq_entries : 0)) < 0 ||
         dict_set_owned(result, "liburing_version", liburing_version_string()) < 0 ||
@@ -616,6 +631,7 @@ static PyObject *build_probe_result(bool available, int errnum, const char *mess
 static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) {
     struct io_uring ring;
     struct io_uring_params params;
+    unsigned int requested_flags = flags;
     int ret;
 
     if (entries == 0) {
@@ -634,11 +650,12 @@ static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) 
 
     if (ret < 0) {
         int errnum = normalize_ret_errno(ret);
-        return build_probe_result(false, errnum, strerror(errnum), &params);
+        return build_probe_result(false, errnum, strerror(errnum), requested_flags, 0, &params);
     }
 
+    flags = ring.flags;
     io_uring_queue_exit(&ring);
-    return build_probe_result(true, 0, NULL, &params);
+    return build_probe_result(true, 0, NULL, requested_flags, flags, &params);
 }
 
 static PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs) {
@@ -1928,6 +1945,9 @@ static int uring_api_exec(PyObject *module) {
     Py_INCREF(&UringApiRing_Type);
     if (PyModule_AddObject(module, "Ring", (PyObject *)&UringApiRing_Type) < 0) {
         Py_DECREF(&UringApiRing_Type);
+        return -1;
+    }
+    if (module_add_setup_flag_constants(module) < 0) {
         return -1;
     }
 
