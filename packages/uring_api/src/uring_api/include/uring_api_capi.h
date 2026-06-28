@@ -46,8 +46,8 @@ typedef struct UringApi_CAPI {
     int (*ring_running)(PyObject *ring);
 
     /* Submission and receive operations. */
-    int (*ring_submit_recv)(PyObject *ring, int fd, Py_ssize_t n, unsigned long long user_data);
-    int (*ring_submit_send)(PyObject *ring, int fd, PyObject *data, unsigned long long user_data);
+    int (*ring_submit_recv)(PyObject *ring, int fd, Py_ssize_t n, PyObject *user_data);
+    int (*ring_submit_send)(PyObject *ring, int fd, PyObject *data, PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
@@ -59,7 +59,7 @@ typedef struct UringApi_CAPI {
 
     /* Completion helpers. Return borrowed scalars via output pointers and new references for PyObject *. */
     int (*completion_check)(PyObject *completion);
-    int (*completion_user_data)(PyObject *completion, unsigned long long *value);
+    PyObject *(*completion_user_data)(PyObject *completion);
     int (*completion_res)(PyObject *completion, int *value);
     int (*completion_flags)(PyObject *completion, unsigned int *value);
     PyObject *(*completion_result)(PyObject *completion);

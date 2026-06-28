@@ -625,13 +625,13 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         self.break_count += 1
 
-    def submit_recv(self, fd: int, n: int, user_data: int) -> None:
+    def submit_recv(self, fd: int, n: int, user_data: object = None) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_recv.append((fd, n, user_data))
         self._deliver(SimpleNamespace(user_data=user_data, res=5, flags=0, result=b"hello"))
 
-    def submit_send(self, fd: int, data: Any, user_data: int) -> None:
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)

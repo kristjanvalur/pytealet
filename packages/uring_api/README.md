@@ -22,7 +22,7 @@ with uring_api.Ring() as ring:
 
 `Ring` currently exposes `submit_recv()`, `submit_send()`, and `wait()` for
 minimal socket-oriented experiments. Each submitted operation carries a
-`user_data` value which comes back with its completion.
+Python `user_data` object which comes back with its completion.
 
 ```python
 import socket
@@ -34,13 +34,15 @@ try:
     writer.setblocking(False)
 
     with uring_api.Ring() as ring:
-        ring.submit_recv(reader.fileno(), 5, 100)
+        token = {"operation": "greeting"}
+        ring.submit_recv(reader.fileno(), 5, token)
         writer.send(b"hello")
 
         completion = ring.wait(1.0)
 
     assert completion is not None
-    print(completion.user_data, completion.res, completion.result)
+    assert completion.user_data is token
+    print(completion.res, completion.result)
 finally:
     reader.close()
     writer.close()

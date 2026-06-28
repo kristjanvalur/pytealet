@@ -65,15 +65,15 @@ class _UringRing(Protocol):
 
     def break_wait(self) -> None: ...
 
-    def submit_recv(self, fd: int, n: int, user_data: int) -> None: ...
+    def submit_recv(self, fd: int, n: int, user_data: object = None) -> None: ...
 
-    def submit_send(self, fd: int, data: Any, user_data: int) -> None: ...
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> None: ...
 
     def wait(self, timeout: float | None = None) -> "_UringCompletion" | None: ...
 
 
 class _UringCompletion(Protocol):
-    user_data: int
+    user_data: object
     res: int
     flags: int
     result: object
@@ -1071,7 +1071,7 @@ class UringProactor:
         self,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        user_data = completion.user_data
+        user_data = cast(int, completion.user_data)
         res = completion.res
         with self._lock:
             entry = self._pending.pop(user_data, None)

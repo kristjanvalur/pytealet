@@ -241,19 +241,20 @@ def test_ring_raises_oserror_or_initializes():
 def test_ring_recv_completion_when_available():
     require_uring()
 
+    token = object()
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
         writer.setblocking(False)
         with uring_api.Ring() as ring:
-            ring.submit_recv(reader.fileno(), 5, 123)
+            ring.submit_recv(reader.fileno(), 5, token)
             writer.send(b"hello")
 
             completion = ring.wait(1.0)
 
         assert completion is not None
         assert isinstance(completion, uring_api.Completion)
-        assert completion.user_data == 123
+        assert completion.user_data is token
         assert completion.res == 5
         assert completion.flags == 0
         assert completion.result == b"hello"
@@ -270,12 +271,13 @@ def test_ring_send_completion_when_available():
         reader.setblocking(False)
         writer.setblocking(False)
         with uring_api.Ring() as ring:
-            ring.submit_send(writer.fileno(), b"hello", 124)
+            token = {"operation": "send"}
+            ring.submit_send(writer.fileno(), b"hello", token)
 
             completion = ring.wait(1.0)
 
         assert completion is not None
-        assert completion.user_data == 124
+        assert completion.user_data is token
         assert completion.res == 5
         assert completion.result == 5
         assert reader.recv(5) == b"hello"

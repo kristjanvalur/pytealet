@@ -34,7 +34,7 @@ except ImportError as exc:
 
     @dataclass(frozen=True)
     class Completion:
-        user_data: int
+        user_data: object
         res: int
         flags: int
         result: object

@@ -35,13 +35,11 @@ typedef PyMutex UringApiMutex;
 typedef struct {
     PyObject_HEAD
     struct io_uring ring;
-    PyObject *pending;
     PyObject *delivery_callback;
     UringApi_CCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;
     UringApiMutex receive_mutex;
     PyThread_type_lock delivery_done_lock;
-    unsigned long long next_wakeup_data;
     unsigned long delivery_thread_id;
     unsigned int receive_state;
     bool delivery_stop_requested;
@@ -63,21 +61,16 @@ typedef enum {
 typedef struct {
     PyObject_HEAD
     UringApiPendingKind kind;
-    PyObject *buffer;
-    Py_buffer view;
-    bool has_view;
-} UringApiPending;
-
-typedef struct {
-    PyObject_HEAD
-    unsigned long long user_data;
+    PyObject *user_data;
     int res;
     unsigned int flags;
     PyObject *result;
+    PyObject *buffer;
+    Py_buffer view;
+    bool has_view;
 } UringApiCompletion;
 
 static PyTypeObject UringApiRing_Type;
-static PyTypeObject UringApiPending_Type;
 static PyTypeObject UringApiCompletion_Type;
 
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
@@ -92,8 +85,8 @@ static unsigned int UringApiCapi_RingSqEntries(PyObject *ring);
 static unsigned int UringApiCapi_RingCqEntries(PyObject *ring);
 static int UringApiCapi_RingClosed(PyObject *ring);
 static int UringApiCapi_RingRunning(PyObject *ring);
-static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, Py_ssize_t n, unsigned long long user_data);
-static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned long long user_data);
+static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, Py_ssize_t n, PyObject *user_data);
+static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, PyObject *user_data);
 static int UringApiCapi_RingBreakWait(PyObject *ring);
 static PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
 static int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
@@ -101,7 +94,7 @@ static int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCal
 static int UringApiCapi_RingStart(PyObject *ring);
 static int UringApiCapi_RingStop(PyObject *ring);
 static int UringApiCapi_CompletionCheck(PyObject *completion);
-static int UringApiCapi_CompletionUserData(PyObject *completion, unsigned long long *value);
+static PyObject *UringApiCapi_CompletionUserData(PyObject *completion);
 static int UringApiCapi_CompletionRes(PyObject *completion, int *value);
 static int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *value);
 static PyObject *UringApiCapi_CompletionResult(PyObject *completion);
@@ -156,14 +149,14 @@ static int module_add_uint64_constant(PyObject *module, const char *name, unsign
     return 0;
 }
 
-static void sqe_set_data(UringApiRing *self, struct io_uring_sqe *sqe, unsigned long long user_data) {
+static void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
     (void)self;
-    io_uring_sqe_set_data64(sqe, user_data);
+    io_uring_sqe_set_data64(sqe, (unsigned long long)(uintptr_t)completion);
 }
 
-static unsigned long long cqe_get_data(UringApiRing *self, struct io_uring_cqe *cqe) {
+static UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
     (void)self;
-    return io_uring_cqe_get_data64(cqe);
+    return (UringApiCompletion *)(uintptr_t)io_uring_cqe_get_data64(cqe);
 }
 
 static unsigned int ring_sq_entries(UringApiRing *self) {
@@ -214,58 +207,77 @@ static int ring_check_open(UringApiRing *self) {
     return 0;
 }
 
-static void UringApiPending_dealloc(UringApiPending *self) {
+static void UringApiCompletion_dealloc(UringApiCompletion *self) {
     if (self->has_view) {
         PyBuffer_Release(&self->view);
         self->has_view = false;
     }
     Py_CLEAR(self->buffer);
-    Py_TYPE(self)->tp_free((PyObject *)self);
-}
-
-static PyObject *UringApiPending_new(UringApiPendingKind kind, PyObject *buffer) {
-    UringApiPending *pending = PyObject_New(UringApiPending, &UringApiPending_Type);
-    if (!pending) {
-        return NULL;
-    }
-    pending->kind = kind;
-    pending->buffer = Py_NewRef(buffer);
-    pending->has_view = false;
-    return (PyObject *)pending;
-}
-
-static PyObject *UringApiPending_new_view(UringApiPendingKind kind, Py_buffer *view) {
-    UringApiPending *pending = PyObject_New(UringApiPending, &UringApiPending_Type);
-    if (!pending) {
-        return NULL;
-    }
-    pending->kind = kind;
-    pending->buffer = NULL;
-    pending->view = *view;
-    pending->has_view = true;
-    return (PyObject *)pending;
-}
-
-static void UringApiCompletion_dealloc(UringApiCompletion *self) {
+    Py_CLEAR(self->user_data);
     Py_CLEAR(self->result);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-static PyObject *UringApiCompletion_new_value(unsigned long long user_data, int res, unsigned int flags,
-                                              PyObject *result) {
+static PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data, PyObject *buffer) {
     UringApiCompletion *completion = PyObject_New(UringApiCompletion, &UringApiCompletion_Type);
     if (!completion) {
         return NULL;
     }
-    completion->user_data = user_data;
-    completion->res = res;
-    completion->flags = flags;
-    completion->result = Py_NewRef(result);
+    completion->kind = kind;
+    completion->user_data = Py_NewRef(user_data);
+    completion->res = 0;
+    completion->flags = 0;
+    completion->result = NULL;
+    completion->buffer = Py_XNewRef(buffer);
+    completion->has_view = false;
     return (PyObject *)completion;
 }
 
+static PyObject *UringApiCompletion_new_pending_view(PyObject *user_data, Py_buffer *view) {
+    UringApiCompletion *completion = (UringApiCompletion *)UringApiCompletion_new_pending(
+        URING_API_PENDING_SEND, user_data, NULL);
+    if (!completion) {
+        return NULL;
+    }
+    completion->view = *view;
+    completion->has_view = true;
+    return (PyObject *)completion;
+}
+
+static void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
+    if (self->has_view) {
+        PyBuffer_Release(&self->view);
+        self->has_view = false;
+    }
+    Py_CLEAR(self->buffer);
+}
+
+static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags) {
+    PyObject *payload;
+
+    self->res = res;
+    self->flags = flags;
+    if (self->kind == URING_API_PENDING_WAKE) {
+        UringApiCompletion_clear_pending_state(self);
+        return 1;
+    }
+    if (res >= 0 && self->kind == URING_API_PENDING_RECV) {
+        payload = PyBytes_FromStringAndSize(PyBytes_AS_STRING(self->buffer), res);
+    } else if (res >= 0 && self->kind == URING_API_PENDING_SEND) {
+        payload = PyLong_FromLong(res);
+    } else {
+        payload = Py_NewRef(Py_None);
+    }
+    if (!payload) {
+        return -1;
+    }
+    Py_XSETREF(self->result, payload);
+    UringApiCompletion_clear_pending_state(self);
+    return 0;
+}
+
 static PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void *closure) {
-    return PyLong_FromUnsignedLongLong(self->user_data);
+    return Py_NewRef(self->user_data);
 }
 
 static PyObject *UringApiCompletion_get_res(UringApiCompletion *self, void *closure) {
@@ -278,75 +290,6 @@ static PyObject *UringApiCompletion_get_flags(UringApiCompletion *self, void *cl
 
 static PyObject *UringApiCompletion_get_result(UringApiCompletion *self, void *closure) {
     return Py_NewRef(self->result);
-}
-
-static int pending_store(UringApiRing *self, unsigned long long user_data, UringApiPendingKind kind, PyObject *buffer) {
-    PyObject *key = NULL;
-    PyObject *pending = NULL;
-    int ret;
-
-    key = PyLong_FromUnsignedLongLong(user_data);
-    if (!key) {
-        return -1;
-    }
-    pending = UringApiPending_new(kind, buffer);
-    if (!pending) {
-        Py_DECREF(key);
-        return -1;
-    }
-    ret = PyDict_SetItem(self->pending, key, pending);
-    Py_DECREF(pending);
-    Py_DECREF(key);
-    return ret;
-}
-
-static int pending_store_view(UringApiRing *self, unsigned long long user_data, UringApiPendingKind kind,
-                              Py_buffer *view) {
-    PyObject *key = NULL;
-    PyObject *pending = NULL;
-    int ret;
-
-    key = PyLong_FromUnsignedLongLong(user_data);
-    if (!key) {
-        return -1;
-    }
-    pending = UringApiPending_new_view(kind, view);
-    if (!pending) {
-        Py_DECREF(key);
-        return -1;
-    }
-    ret = PyDict_SetItem(self->pending, key, pending);
-    if (ret < 0) {
-        ((UringApiPending *)pending)->has_view = false;
-    }
-    Py_DECREF(pending);
-    Py_DECREF(key);
-    return ret;
-}
-
-static PyObject *pending_pop(UringApiRing *self, unsigned long long user_data) {
-    PyObject *key = PyLong_FromUnsignedLongLong(user_data);
-    PyObject *pending;
-
-    if (!key) {
-        return NULL;
-    }
-    pending = PyDict_GetItemWithError(self->pending, key);
-    if (!pending) {
-        Py_DECREF(key);
-        if (!PyErr_Occurred()) {
-            Py_RETURN_NONE;
-        }
-        return NULL;
-    }
-    Py_INCREF(pending);
-    if (PyDict_DelItem(self->pending, key) < 0) {
-        Py_DECREF(key);
-        Py_DECREF(pending);
-        return NULL;
-    }
-    Py_DECREF(key);
-    return pending;
 }
 
 static int submit_one(UringApiRing *self) {
@@ -366,11 +309,6 @@ static int submit_one(UringApiRing *self) {
         return -1;
     }
     return 0;
-}
-
-static void pending_discard(UringApiRing *self, unsigned long long user_data) {
-    PyObject *ignored = pending_pop(self, user_data);
-    Py_XDECREF(ignored);
 }
 
 static int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
@@ -587,15 +525,6 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
         io_uring_queue_exit(&self->ring);
         self->initialized = false;
     }
-    if (self->pending == NULL) {
-        self->pending = PyDict_New();
-        if (!self->pending) {
-            return -1;
-        }
-    } else {
-        PyDict_Clear(self->pending);
-    }
-    self->next_wakeup_data = ULLONG_MAX;
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
     self->delivery_thread_id = 0;
@@ -626,7 +555,6 @@ static void UringApiRing_dealloc(UringApiRing *self) {
         io_uring_queue_exit(&self->ring);
         self->initialized = false;
     }
-    Py_CLEAR(self->pending);
     Py_CLEAR(self->delivery_callback);
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
@@ -644,9 +572,6 @@ static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(igno
     if (self->initialized) {
         io_uring_queue_exit(&self->ring);
         self->initialized = false;
-    }
-    if (self->pending) {
-        PyDict_Clear(self->pending);
     }
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
@@ -667,9 +592,6 @@ static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) {
         io_uring_queue_exit(&self->ring);
         self->initialized = false;
     }
-    if (self->pending) {
-        PyDict_Clear(self->pending);
-    }
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
     self->delivery_thread_id = 0;
@@ -682,10 +604,11 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
     PyObject *buffer = NULL;
     long fd;
     Py_ssize_t n;
-    unsigned long long user_data;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lnK", keywords, &fd, &n, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ln|O", keywords, &fd, &n, &user_data)) {
         return NULL;
     }
     if (fd < 0 || fd > INT_MAX) {
@@ -701,22 +624,23 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
     if (!buffer) {
         return NULL;
     }
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV, user_data, buffer);
+    if (!completion) {
+        Py_DECREF(buffer);
+        return NULL;
+    }
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else if (pending_store(self, user_data, URING_API_PENDING_RECV, buffer) < 0) {
-        failed = 1;
     } else {
         sqe = get_sqe(self);
         if (!sqe) {
-            pending_discard(self, user_data);
             failed = 1;
         } else {
             io_uring_prep_recv(sqe, (int)fd, PyBytes_AS_STRING(buffer), (size_t)n, 0);
-            sqe_set_data(self, sqe, user_data);
+            sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
-                pending_discard(self, user_data);
                 failed = 1;
             }
         }
@@ -725,6 +649,7 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
 
     Py_DECREF(buffer);
     if (failed) {
+        Py_DECREF(completion);
         return NULL;
     }
     Py_RETURN_NONE;
@@ -735,11 +660,11 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
     struct io_uring_sqe *sqe;
     Py_buffer view;
     long fd;
-    unsigned long long user_data;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
     int failed = 0;
-    bool view_transferred = false;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*K", keywords, &fd, &view, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|O", keywords, &fd, &view, &user_data)) {
         return NULL;
     }
     if (fd < 0 || fd > INT_MAX) {
@@ -748,32 +673,30 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
         return NULL;
     }
 
+    completion = UringApiCompletion_new_pending_view(user_data, &view);
+    if (!completion) {
+        PyBuffer_Release(&view);
+        return NULL;
+    }
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else if (pending_store_view(self, user_data, URING_API_PENDING_SEND, &view) < 0) {
-        failed = 1;
     } else {
-        view_transferred = true;
         sqe = get_sqe(self);
         if (!sqe) {
-            pending_discard(self, user_data);
             failed = 1;
         } else {
             io_uring_prep_send(sqe, (int)fd, view.buf, (size_t)view.len, 0);
-            sqe_set_data(self, sqe, user_data);
+            sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
-                pending_discard(self, user_data);
                 failed = 1;
             }
         }
     }
     Py_END_CRITICAL_SECTION();
 
-    if (!view_transferred) {
-        PyBuffer_Release(&view);
-    }
     if (failed) {
+        Py_DECREF(completion);
         return NULL;
     }
     Py_RETURN_NONE;
@@ -781,34 +704,33 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
 
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     struct io_uring_sqe *sqe;
-    unsigned long long user_data;
+    PyObject *completion = NULL;
     int failed = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
-        user_data = self->next_wakeup_data--;
-        if (pending_store(self, user_data, URING_API_PENDING_WAKE, Py_None) < 0) {
-            failed = 1;
-        } else {
+        completion = UringApiCompletion_new_pending(URING_API_PENDING_WAKE, Py_None, NULL);
+        if (completion) {
             sqe = get_sqe(self);
             if (!sqe) {
-                pending_discard(self, user_data);
                 failed = 1;
             } else {
                 io_uring_prep_nop(sqe);
-                sqe_set_data(self, sqe, user_data);
+                sqe_set_completion(self, sqe, completion);
                 if (submit_one(self) < 0) {
-                    pending_discard(self, user_data);
                     failed = 1;
                 }
             }
+        } else {
+            failed = 1;
         }
     }
     Py_END_CRITICAL_SECTION();
 
     if (failed) {
+        Py_XDECREF(completion);
         return NULL;
     }
     Py_RETURN_NONE;
@@ -883,41 +805,24 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
 }
 
 static PyObject *build_cqe_result(UringApiRing *self, struct io_uring_cqe *cqe) {
-    PyObject *result = NULL;
-    PyObject *payload = NULL;
-    PyObject *pending_obj = NULL;
-    unsigned long long user_data = cqe_get_data(self, cqe);
+    UringApiCompletion *completion = cqe_get_completion(self, cqe);
     int res = cqe->res;
     unsigned int flags = cqe->flags;
+    int completion_result;
 
-    pending_obj = pending_pop(self, user_data);
-    if (!pending_obj) {
+    if (!completion) {
+        Py_RETURN_NONE;
+    }
+    completion_result = UringApiCompletion_complete(completion, res, flags);
+    if (completion_result < 0) {
+        Py_DECREF(completion);
         return NULL;
     }
-    if (pending_obj != Py_None) {
-        UringApiPending *pending = (UringApiPending *)pending_obj;
-        if (pending->kind == URING_API_PENDING_WAKE) {
-            Py_DECREF(pending_obj);
-            Py_RETURN_NONE;
-        }
-        if (res >= 0 && pending->kind == URING_API_PENDING_RECV) {
-            payload = PyBytes_FromStringAndSize(PyBytes_AS_STRING(pending->buffer), res);
-        } else if (res >= 0 && pending->kind == URING_API_PENDING_SEND) {
-            payload = PyLong_FromLong(res);
-        } else {
-            payload = Py_NewRef(Py_None);
-        }
-    } else {
-        payload = Py_NewRef(Py_None);
+    if (completion_result > 0) {
+        Py_DECREF(completion);
+        Py_RETURN_NONE;
     }
-    Py_DECREF(pending_obj);
-    if (!payload) {
-        return NULL;
-    }
-
-    result = UringApiCompletion_new_value(user_data, res, flags, payload);
-    Py_DECREF(payload);
-    return result;
+    return (PyObject *)completion;
 }
 
 static PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
@@ -1304,12 +1209,12 @@ static int UringApiCapi_RingRunning(PyObject *ring) {
     return ((UringApiRing *)ring)->receive_state == URING_API_RECEIVE_DELIVERING;
 }
 
-static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, Py_ssize_t n, unsigned long long user_data) {
+static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, Py_ssize_t n, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = PyObject_CallMethod(ring, "submit_recv", "inK", fd, n, user_data);
+    result = PyObject_CallMethod(ring, "submit_recv", "inO", fd, n, user_data ? user_data : Py_None);
     if (!result) {
         return -1;
     }
@@ -1317,12 +1222,12 @@ static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, Py_ssize_t n, uns
     return 0;
 }
 
-static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned long long user_data) {
+static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = PyObject_CallMethod(ring, "submit_send", "iOK", fd, data, user_data);
+    result = PyObject_CallMethod(ring, "submit_send", "iOO", fd, data, user_data ? user_data : Py_None);
     if (!result) {
         return -1;
     }
@@ -1406,16 +1311,11 @@ static int UringApiCapi_RingStop(PyObject *ring) {
 
 static int UringApiCapi_CompletionCheck(PyObject *completion) { return completion_type_check(completion); }
 
-static int UringApiCapi_CompletionUserData(PyObject *completion, unsigned long long *value) {
+static PyObject *UringApiCapi_CompletionUserData(PyObject *completion) {
     if (!completion_type_check(completion)) {
-        return -1;
+        return NULL;
     }
-    if (!value) {
-        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
-        return -1;
-    }
-    *value = ((UringApiCompletion *)completion)->user_data;
-    return 0;
+    return Py_NewRef(((UringApiCompletion *)completion)->user_data);
 }
 
 static int UringApiCapi_CompletionRes(PyObject *completion, int *value) {
@@ -1487,14 +1387,6 @@ static PyTypeObject UringApiRing_Type = {
     .tp_new = PyType_GenericNew,
 };
 
-static PyTypeObject UringApiPending_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api._Pending",
-    .tp_basicsize = sizeof(UringApiPending),
-    .tp_dealloc = (destructor)UringApiPending_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_doc = "pending io_uring operation state",
-};
-
 static PyGetSetDef UringApiCompletion_getset[] = {
     {"user_data", (getter)UringApiCompletion_get_user_data, NULL, NULL, NULL},
     {"res", (getter)UringApiCompletion_get_res, NULL, NULL, NULL},
@@ -1523,9 +1415,6 @@ static int uring_api_exec(PyObject *module) {
     PyObject *version = NULL;
     PyObject *version_info = NULL;
 
-    if (PyType_Ready(&UringApiPending_Type) < 0) {
-        return -1;
-    }
     if (PyType_Ready(&UringApiCompletion_Type) < 0) {
         return -1;
     }

@@ -71,7 +71,7 @@ static PyObject *client_ring_summary(PyObject *module, PyObject *Py_UNUSED(ignor
 }
 
 static PyObject *client_completion_summary(PyObject *module, PyObject *completion) {
-    unsigned long long user_data;
+    PyObject *user_data;
     int res;
     unsigned int flags;
     PyObject *result;
@@ -85,15 +85,21 @@ static PyObject *client_completion_summary(PyObject *module, PyObject *completio
     if (api->completion_check(completion) <= 0) {
         return NULL;
     }
-    if (api->completion_user_data(completion, &user_data) < 0 || api->completion_res(completion, &res) < 0 ||
-        api->completion_flags(completion, &flags) < 0) {
+    user_data = api->completion_user_data(completion);
+    if (!user_data) {
+        return NULL;
+    }
+    if (api->completion_res(completion, &res) < 0 || api->completion_flags(completion, &flags) < 0) {
+        Py_DECREF(user_data);
         return NULL;
     }
     result = api->completion_result(completion);
     if (!result) {
+        Py_DECREF(user_data);
         return NULL;
     }
-    summary = Py_BuildValue("KiIO", user_data, res, flags, result);
+    summary = Py_BuildValue("OiIO", user_data, res, flags, result);
+    Py_DECREF(user_data);
     Py_DECREF(result);
     return summary;
 }
