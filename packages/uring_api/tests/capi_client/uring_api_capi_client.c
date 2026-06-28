@@ -150,6 +150,47 @@ static PyObject *client_clear_c_callback(PyObject *module, PyObject *ring) {
     Py_RETURN_NONE;
 }
 
+static PyObject *client_submit_recvmsg(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOO:submit_recvmsg", &ring, &fd, &buf, &user_data)) {
+        return NULL;
+    }
+    if (api->ring_submit_recvmsg(ring, fd, buf, user_data) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_submit_sendto(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *address;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOOO:submit_sendto", &ring, &fd, &data, &address, &user_data)) {
+        return NULL;
+    }
+    if (api->ring_submit_sendto(ring, fd, data, address, user_data) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef client_methods[] = {
     {"metadata", (PyCFunction)client_metadata, METH_NOARGS, NULL},
     {"probe", (PyCFunction)client_probe, METH_NOARGS, NULL},
@@ -157,6 +198,8 @@ static PyMethodDef client_methods[] = {
     {"completion_summary", (PyCFunction)client_completion_summary, METH_O, NULL},
     {"set_c_callback", _PyCFunction_CAST(client_set_c_callback), METH_VARARGS, NULL},
     {"clear_c_callback", (PyCFunction)client_clear_c_callback, METH_O, NULL},
+    {"submit_recvmsg", _PyCFunction_CAST(client_submit_recvmsg), METH_VARARGS, NULL},
+    {"submit_sendto", _PyCFunction_CAST(client_submit_sendto), METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL},
 };
 
@@ -173,11 +216,13 @@ static int client_exec(PyObject *module) {
     if ((api->feature_flags & URING_API_CAPI_FEATURE_PROBE) == 0 ||
         (api->feature_flags & URING_API_CAPI_FEATURE_RING) == 0 ||
         (api->feature_flags & URING_API_CAPI_FEATURE_C_CALLBACK) == 0 ||
-        (api->feature_flags & URING_API_CAPI_FEATURE_COMPLETION) == 0) {
+        (api->feature_flags & URING_API_CAPI_FEATURE_COMPLETION) == 0 ||
+        (api->feature_flags & URING_API_CAPI_FEATURE_DATAGRAM) == 0) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API feature set is incomplete");
         return -1;
     }
-    if (!api->probe || !api->ring_new || !api->ring_set_c_callback || !api->completion_result) {
+    if (!api->probe || !api->ring_new || !api->ring_set_c_callback || !api->completion_result ||
+        !api->ring_submit_recvmsg || !api->ring_submit_sendto) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

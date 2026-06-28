@@ -40,10 +40,12 @@ def test_native_module_exports_c_api_constants():
     assert uring_api.C_API_FEATURE_RING == 1 << 1
     assert uring_api.C_API_FEATURE_C_CALLBACK == 1 << 2
     assert uring_api.C_API_FEATURE_COMPLETION == 1 << 3
+    assert uring_api.C_API_FEATURE_DATAGRAM == 1 << 4
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_PROBE
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_RING
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_C_CALLBACK
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_COMPLETION
+    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_DATAGRAM
 
 
 def test_probe_returns_structured_result():
@@ -117,6 +119,7 @@ def test_c_api_client_can_import_capsule_and_probe():
     assert feature_flags & uring_api.C_API_FEATURE_RING
     assert feature_flags & uring_api.C_API_FEATURE_C_CALLBACK
     assert feature_flags & uring_api.C_API_FEATURE_COMPLETION
+    assert feature_flags & uring_api.C_API_FEATURE_DATAGRAM
     assert (major, minor) == uring_api.__compiled_liburing_version_info__
     assert isinstance(probe["available"], bool)
 
@@ -208,6 +211,38 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
         writer.close()
 
 
+def test_c_api_datagram_operations_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sender.setblocking(False)
+        receiver.setblocking(False)
+        sender.bind(("127.0.0.1", 0))
+        receiver.bind(("127.0.0.1", 0))
+        with uring_api.Ring() as ring:
+            buf = bytearray(5)
+            client.submit_recvmsg(ring, receiver.fileno(), buf, 230)
+            client.submit_sendto(ring, sender.fileno(), b"hello", receiver.getsockname(), 231)
+
+            first = ring.wait(1.0)
+            second = ring.wait(1.0)
+
+        assert first is not None
+        assert second is not None
+        by_user_data = {first.user_data: first, second.user_data: second}
+        recv_completion = by_user_data[230]
+        send_completion = by_user_data[231]
+        assert client.completion_summary(recv_completion) == (230, 5, 0, sender.getsockname())
+        assert client.completion_summary(send_completion) == (231, 5, 0, 5)
+        assert bytes(buf) == b"hello"
+    finally:
+        sender.close()
+        receiver.close()
+
+
 def test_ring_lifecycle_when_available():
     require_uring()
 
@@ -288,6 +323,60 @@ def test_ring_send_completion_when_available():
     finally:
         reader.close()
         writer.close()
+
+
+def test_ring_sendto_completion_when_available():
+    require_uring()
+
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        token = {"operation": "sendto"}
+        with uring_api.Ring() as ring:
+            ring.submit_sendto(sender.fileno(), b"hello", receiver.getsockname(), token)
+
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        assert completion.user_data is token
+        assert completion.res == 5
+        assert completion.result == 5
+        data, address = receiver.recvfrom(5)
+        assert data == b"hello"
+        assert address[1] == sender.getsockname()[1]
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_ring_recvmsg_completion_when_available():
+    require_uring()
+
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        buf = bytearray(5)
+        token = {"operation": "recvmsg"}
+        with uring_api.Ring() as ring:
+            ring.submit_recvmsg(receiver.fileno(), buf, token)
+            sender.sendto(b"world", receiver.getsockname())
+
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        assert completion.user_data is token
+        assert completion.res == 5
+        assert completion.result[1] == sender.getsockname()[1]
+        assert bytes(buf) == b"world"
+    finally:
+        sender.close()
+        receiver.close()
 
 
 def test_ring_socketpair_round_trip_when_available():

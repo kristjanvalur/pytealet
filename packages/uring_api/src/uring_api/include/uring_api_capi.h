@@ -19,6 +19,7 @@
 #define URING_API_CAPI_FEATURE_RING (1ull << 1)
 #define URING_API_CAPI_FEATURE_C_CALLBACK (1ull << 2)
 #define URING_API_CAPI_FEATURE_COMPLETION (1ull << 3)
+#define URING_API_CAPI_FEATURE_DATAGRAM (1ull << 4)
 
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completion, void *user_data);
 
@@ -48,6 +49,8 @@ typedef struct UringApi_CAPI {
     /* Submission and receive operations. */
     int (*ring_submit_recv)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
     int (*ring_submit_send)(PyObject *ring, int fd, PyObject *data, PyObject *user_data);
+    int (*ring_submit_recvmsg)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+    int (*ring_submit_sendto)(PyObject *ring, int fd, PyObject *data, PyObject *address, PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
@@ -64,7 +67,7 @@ typedef struct UringApi_CAPI {
     int (*completion_flags)(PyObject *completion, unsigned int *value);
     PyObject *(*completion_result)(PyObject *completion);
 
-    void *reserved[16];
+    void *reserved[14];
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

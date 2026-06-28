@@ -1,12 +1,16 @@
 #define PY_SSIZE_T_CLEAN
 
 #include <Python.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <liburing.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <pythread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
+#include <sys/socket.h>
 
 #include "uring_api_capi.h"
 
@@ -56,6 +60,8 @@ typedef enum {
     URING_API_PENDING_RECV = 1,
     URING_API_PENDING_SEND = 2,
     URING_API_PENDING_WAKE = 3,
+    URING_API_PENDING_SENDTO = 4,
+    URING_API_PENDING_RECVMSG = 5,
 } UringApiPendingKind;
 
 typedef struct {
@@ -67,7 +73,12 @@ typedef struct {
     PyObject *result;
     PyObject *buffer;
     Py_buffer view;
+    struct iovec iov;
+    struct msghdr msg;
+    struct sockaddr_storage addr;
+    socklen_t addrlen;
     bool has_view;
+    bool has_msghdr;
 } UringApiCompletion;
 
 static PyTypeObject UringApiRing_Type;
@@ -87,6 +98,9 @@ static int UringApiCapi_RingClosed(PyObject *ring);
 static int UringApiCapi_RingRunning(PyObject *ring);
 static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
 static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, PyObject *user_data);
+static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address,
+                                         PyObject *user_data);
 static int UringApiCapi_RingBreakWait(PyObject *ring);
 static PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
 static int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
@@ -101,7 +115,7 @@ static PyObject *UringApiCapi_CompletionResult(PyObject *completion);
 
 #define URING_API_CAPI_FEATURES                                                                                      \
     (URING_API_CAPI_FEATURE_PROBE | URING_API_CAPI_FEATURE_RING | URING_API_CAPI_FEATURE_C_CALLBACK |               \
-     URING_API_CAPI_FEATURE_COMPLETION)
+    URING_API_CAPI_FEATURE_COMPLETION | URING_API_CAPI_FEATURE_DATAGRAM)
 
 static int ring_type_check(PyObject *ring) {
     if (!PyObject_TypeCheck(ring, &UringApiRing_Type)) {
@@ -199,6 +213,145 @@ static int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int de
     return 0;
 }
 
+static int fd_socket_family(int fd, int *family) {
+    struct sockaddr_storage storage;
+    socklen_t storage_len = sizeof(storage);
+
+    memset(&storage, 0, sizeof(storage));
+    if (getsockname(fd, (struct sockaddr *)&storage, &storage_len) < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    *family = storage.ss_family;
+    return 0;
+}
+
+static int parse_port(PyObject *value, in_port_t *port) {
+    long port_value = PyLong_AsLong(value);
+    if (port_value == -1 && PyErr_Occurred()) {
+        return -1;
+    }
+    if (port_value < 0 || port_value > 65535) {
+        PyErr_SetString(PyExc_ValueError, "port must be between 0 and 65535");
+        return -1;
+    }
+    *port = htons((in_port_t)port_value);
+    return 0;
+}
+
+static int parse_numeric_sockaddr(int fd, PyObject *address, struct sockaddr_storage *storage, socklen_t *addrlen) {
+    int family;
+    PyObject *host_obj;
+    PyObject *port_obj;
+    const char *host;
+
+    if (fd_socket_family(fd, &family) < 0) {
+        return -1;
+    }
+    memset(storage, 0, sizeof(*storage));
+
+    if (family == AF_INET) {
+        struct sockaddr_in *addr = (struct sockaddr_in *)storage;
+        if (!PyTuple_Check(address) || PyTuple_GET_SIZE(address) != 2) {
+            PyErr_SetString(PyExc_TypeError, "AF_INET address must be a (host, port) tuple");
+            return -1;
+        }
+        host_obj = PyTuple_GET_ITEM(address, 0);
+        port_obj = PyTuple_GET_ITEM(address, 1);
+        host = PyUnicode_AsUTF8(host_obj);
+        if (!host) {
+            return -1;
+        }
+        addr->sin_family = AF_INET;
+        if (parse_port(port_obj, &addr->sin_port) < 0) {
+            return -1;
+        }
+        if (inet_pton(AF_INET, host, &addr->sin_addr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "AF_INET host must be a numeric address");
+            return -1;
+        }
+        *addrlen = sizeof(*addr);
+        return 0;
+    }
+
+    if (family == AF_INET6) {
+        struct sockaddr_in6 *addr = (struct sockaddr_in6 *)storage;
+        Py_ssize_t tuple_size;
+        unsigned long flowinfo = 0;
+        unsigned long scope_id = 0;
+        if (!PyTuple_Check(address)) {
+            PyErr_SetString(PyExc_TypeError, "AF_INET6 address must be a (host, port[, flowinfo[, scope_id]]) tuple");
+            return -1;
+        }
+        tuple_size = PyTuple_GET_SIZE(address);
+        if (tuple_size < 2 || tuple_size > 4) {
+            PyErr_SetString(PyExc_TypeError, "AF_INET6 address must be a (host, port[, flowinfo[, scope_id]]) tuple");
+            return -1;
+        }
+        host_obj = PyTuple_GET_ITEM(address, 0);
+        port_obj = PyTuple_GET_ITEM(address, 1);
+        host = PyUnicode_AsUTF8(host_obj);
+        if (!host) {
+            return -1;
+        }
+        if (tuple_size >= 3) {
+            flowinfo = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(address, 2));
+            if (flowinfo == (unsigned long)-1 && PyErr_Occurred()) {
+                return -1;
+            }
+        }
+        if (tuple_size >= 4) {
+            scope_id = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(address, 3));
+            if (scope_id == (unsigned long)-1 && PyErr_Occurred()) {
+                return -1;
+            }
+        }
+        if (flowinfo > UINT32_MAX || scope_id > UINT32_MAX) {
+            PyErr_SetString(PyExc_ValueError, "flowinfo and scope_id must fit in uint32_t");
+            return -1;
+        }
+        addr->sin6_family = AF_INET6;
+        if (parse_port(port_obj, &addr->sin6_port) < 0) {
+            return -1;
+        }
+        addr->sin6_flowinfo = htonl((uint32_t)flowinfo);
+        addr->sin6_scope_id = (uint32_t)scope_id;
+        if (inet_pton(AF_INET6, host, &addr->sin6_addr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "AF_INET6 host must be a numeric address");
+            return -1;
+        }
+        *addrlen = sizeof(*addr);
+        return 0;
+    }
+
+    PyErr_SetString(PyExc_NotImplementedError, "only AF_INET and AF_INET6 socket addresses are supported");
+    return -1;
+}
+
+static PyObject *sockaddr_to_object(struct sockaddr_storage *storage, socklen_t addrlen) {
+    char host[INET6_ADDRSTRLEN];
+
+    (void)addrlen;
+    if (storage->ss_family == AF_INET) {
+        struct sockaddr_in *addr = (struct sockaddr_in *)storage;
+        if (!inet_ntop(AF_INET, &addr->sin_addr, host, sizeof(host))) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return NULL;
+        }
+        return Py_BuildValue("si", host, (int)ntohs(addr->sin_port));
+    }
+    if (storage->ss_family == AF_INET6) {
+        struct sockaddr_in6 *addr = (struct sockaddr_in6 *)storage;
+        if (!inet_ntop(AF_INET6, &addr->sin6_addr, host, sizeof(host))) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return NULL;
+        }
+        return Py_BuildValue("sIII", host, (unsigned int)ntohs(addr->sin6_port),
+                             (unsigned int)ntohl(addr->sin6_flowinfo), (unsigned int)addr->sin6_scope_id);
+    }
+    Py_RETURN_NONE;
+}
+
 static int ring_check_open(UringApiRing *self) {
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
@@ -230,6 +383,7 @@ static PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObje
     completion->result = NULL;
     completion->buffer = Py_XNewRef(buffer);
     completion->has_view = false;
+    completion->has_msghdr = false;
     return (PyObject *)completion;
 }
 
@@ -240,6 +394,26 @@ static PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, P
     }
     completion->view = *view;
     completion->has_view = true;
+    return (PyObject *)completion;
+}
+
+static PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data,
+                                                        Py_buffer *view) {
+    UringApiCompletion *completion = (UringApiCompletion *)UringApiCompletion_new_pending_view(kind, user_data, view);
+    if (!completion) {
+        return NULL;
+    }
+    memset(&completion->iov, 0, sizeof(completion->iov));
+    memset(&completion->msg, 0, sizeof(completion->msg));
+    memset(&completion->addr, 0, sizeof(completion->addr));
+    completion->addrlen = sizeof(completion->addr);
+    completion->iov.iov_base = view->buf;
+    completion->iov.iov_len = (size_t)view->len;
+    completion->msg.msg_name = &completion->addr;
+    completion->msg.msg_namelen = completion->addrlen;
+    completion->msg.msg_iov = &completion->iov;
+    completion->msg.msg_iovlen = 1;
+    completion->has_msghdr = true;
     return (PyObject *)completion;
 }
 
@@ -260,8 +434,12 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
         UringApiCompletion_clear_pending_state(self);
         return 1;
     }
-    if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND)) {
+    if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
+                     self->kind == URING_API_PENDING_SENDTO)) {
         payload = PyLong_FromLong(res);
+    } else if (res >= 0 && self->kind == URING_API_PENDING_RECVMSG) {
+        self->addrlen = self->msg.msg_namelen;
+        payload = sockaddr_to_object(&self->addr, self->addrlen);
     } else {
         payload = Py_NewRef(Py_None);
     }
@@ -458,6 +636,8 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingRunning,
     UringApiCapi_RingSubmitRecv,
     UringApiCapi_RingSubmitSend,
+    UringApiCapi_RingSubmitRecvmsg,
+    UringApiCapi_RingSubmitSendto,
     UringApiCapi_RingBreakWait,
     UringApiCapi_RingWait,
     UringApiCapi_RingSetCallback,
@@ -496,6 +676,9 @@ static int uring_api_export_capi(PyObject *module) {
         return -1;
     }
     if (module_add_uint64_constant(module, "C_API_FEATURE_COMPLETION", URING_API_CAPI_FEATURE_COMPLETION) < 0) {
+        return -1;
+    }
+    if (module_add_uint64_constant(module, "C_API_FEATURE_DATAGRAM", URING_API_CAPI_FEATURE_DATAGRAM) < 0) {
         return -1;
     }
     if (module_add_uint64_constant(module, "C_API_FEATURES", URING_API_CAPI_FEATURES) < 0) {
@@ -675,6 +858,109 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
             failed = 1;
         } else {
             io_uring_prep_send(sqe, (int)fd, view.buf, (size_t)view.len, 0);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "data", "address", "user_data", NULL};
+    struct io_uring_sqe *sqe;
+    Py_buffer view;
+    long fd;
+    PyObject *address;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
+    UringApiCompletion *pending;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*O|O", keywords, &fd, &view, &address, &user_data)) {
+        return NULL;
+    }
+    if (fd < 0 || fd > INT_MAX) {
+        PyBuffer_Release(&view);
+        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending_view(URING_API_PENDING_SENDTO, user_data, &view);
+    if (!completion) {
+        PyBuffer_Release(&view);
+        return NULL;
+    }
+    pending = (UringApiCompletion *)completion;
+    if (parse_numeric_sockaddr((int)fd, address, &pending->addr, &pending->addrlen) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_sendto(sqe, (int)fd, view.buf, (size_t)view.len, 0, (struct sockaddr *)&pending->addr,
+                                 pending->addrlen);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buf", "user_data", NULL};
+    struct io_uring_sqe *sqe;
+    Py_buffer view;
+    long fd;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lw*|O", keywords, &fd, &view, &user_data)) {
+        return NULL;
+    }
+    if (fd < 0 || fd > INT_MAX) {
+        PyBuffer_Release(&view);
+        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending_recvmsg(URING_API_PENDING_RECVMSG, user_data, &view);
+    if (!completion) {
+        PyBuffer_Release(&view);
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_recvmsg(sqe, (int)fd, &((UringApiCompletion *)completion)->msg, 0);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
@@ -1223,6 +1509,33 @@ static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, P
     return 0;
 }
 
+static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_recvmsg", "iOO", fd, buf, user_data ? user_data : Py_None);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address,
+                                         PyObject *user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_sendto", "iOOO", fd, data, address, user_data ? user_data : Py_None);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
 static int UringApiCapi_RingBreakWait(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
@@ -1345,6 +1658,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a recv operation."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_VARARGS | METH_KEYWORDS,
      "Submit a send operation."},
+    {"submit_recvmsg", _PyCFunction_CAST(UringApiRing_submit_recvmsg), METH_VARARGS | METH_KEYWORDS,
+     "Submit a recvmsg operation."},
+    {"submit_sendto", _PyCFunction_CAST(UringApiRing_submit_sendto), METH_VARARGS | METH_KEYWORDS,
+     "Submit a sendto operation."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Interrupt a thread blocked in wait without producing a user completion."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,

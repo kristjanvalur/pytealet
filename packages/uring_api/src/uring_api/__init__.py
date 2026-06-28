@@ -11,6 +11,7 @@ try:
     from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
     from _uring_api import C_API_FEATURE_C_CALLBACK as C_API_FEATURE_C_CALLBACK
     from _uring_api import C_API_FEATURE_COMPLETION as C_API_FEATURE_COMPLETION
+    from _uring_api import C_API_FEATURE_DATAGRAM as C_API_FEATURE_DATAGRAM
     from _uring_api import C_API_FEATURE_PROBE as C_API_FEATURE_PROBE
     from _uring_api import C_API_FEATURE_RING as C_API_FEATURE_RING
     from _uring_api import C_API_FEATURES as C_API_FEATURES
@@ -25,6 +26,7 @@ except ImportError as exc:
     C_API_ABI_VERSION = 2
     C_API_FEATURE_C_CALLBACK = 1 << 2
     C_API_FEATURE_COMPLETION = 1 << 3
+    C_API_FEATURE_DATAGRAM = 1 << 4
     C_API_FEATURE_PROBE = 1 << 0
     C_API_FEATURE_RING = 1 << 1
     C_API_FEATURES = 0
@@ -117,6 +119,7 @@ __all__ = [
     "C_API_ABI_VERSION",
     "C_API_FEATURE_C_CALLBACK",
     "C_API_FEATURE_COMPLETION",
+    "C_API_FEATURE_DATAGRAM",
     "C_API_FEATURE_PROBE",
     "C_API_FEATURE_RING",
     "C_API_FEATURES",

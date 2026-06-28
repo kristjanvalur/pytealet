@@ -612,7 +612,9 @@ class _FakeUringRing:
         self.break_count = 0
         self.completions: list[SimpleNamespace] = []
         self.submitted_recv: list[tuple[int, object, object]] = []
+        self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
+        self.submitted_sendto: list[tuple[int, object, object, object]] = []
 
     def close(self) -> None:
         self.stop()
@@ -649,6 +651,21 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         self.submitted_send.append((fd, data, user_data))
+        self._deliver(SimpleNamespace(user_data=user_data, res=len(payload), flags=0, result=len(payload)))
+
+    def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = b"again" if getattr(getattr(user_data, "operation", None), "kind", None) == "recvfrom" else b"hello"
+        memoryview(buf)[: len(payload)] = payload
+        self.submitted_recvmsg.append((fd, buf, user_data))
+        self._deliver(SimpleNamespace(user_data=user_data, res=len(payload), flags=0, result=("127.0.0.1", 54321)))
+
+    def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_sendto.append((fd, data, address, user_data))
         self._deliver(SimpleNamespace(user_data=user_data, res=len(payload), flags=0, result=len(payload)))
 
     def wait(self, timeout: float | None = None) -> SimpleNamespace | None:
@@ -922,6 +939,78 @@ class TestUringProactor:
         finally:
             reader.close()
             writer.close()
+            proactor.close()
+
+    def test_recvfrom_into_completes_from_ring_completion(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            receiver.setblocking(False)
+            buf = bytearray(5)
+            operation = proactor.recvfrom_into(receiver, buf)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            count, address = operation.result()
+            assert count == 5
+            assert bytes(buf) == b"hello"
+            assert address == ("127.0.0.1", 54321)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            submitted = proactor.ring.submitted_recvmsg[0]
+            assert submitted[0] == receiver.fileno()
+            assert submitted[1] is not buf
+            assert submitted[1].obj is buf
+        finally:
+            receiver.close()
+            proactor.close()
+
+    def test_recvfrom_into_rejects_invalid_nbytes(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            receiver.setblocking(False)
+            with pytest.raises(ValueError, match="negative buffersize"):
+                proactor.recvfrom_into(receiver, bytearray(5), -1)
+            with pytest.raises(ValueError, match="nbytes is greater"):
+                proactor.recvfrom_into(receiver, bytearray(5), 6)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_recvmsg == []
+        finally:
+            receiver.close()
+            proactor.close()
+
+    def test_recvfrom_allocates_buffer_for_ring_completion(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            receiver.setblocking(False)
+            operation = proactor.recvfrom(receiver, 5)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            data, address = operation.result()
+            assert data == b"again"
+            assert address == ("127.0.0.1", 54321)
+        finally:
+            receiver.close()
+            proactor.close()
+
+    def test_sendto_completes_from_ring_completion(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sender.setblocking(False)
+            payload = b"hello"
+            address = ("127.0.0.1", 12345)
+            operation = proactor.sendto(sender, payload, address)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == 5
+            assert isinstance(proactor.ring, _FakeUringRing)
+            submitted = proactor.ring.submitted_sendto[0]
+            assert submitted[0] == sender.fileno()
+            assert submitted[1].obj is payload
+            assert submitted[2] == address
+        finally:
+            sender.close()
             proactor.close()
 
     def test_operations_reject_closed_proactor(self):
