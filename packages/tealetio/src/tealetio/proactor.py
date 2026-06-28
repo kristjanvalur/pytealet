@@ -806,13 +806,12 @@ class UringProactor:
     ) -> None:
         if ring_factory is None:
             ring_factory = _default_uring_ring_factory
-        self._lock = threading.RLock()
         self._ring = ring_factory(entries, flags)
         self._closed = False
         self._completion_callback = completion_callback
         self._clock = time.monotonic
         self._pending_tokens: list[None] = []
-        self._wake_condition = threading.Condition(self._lock)
+        self._wake_condition = threading.Condition()
         self._wake_pending = False
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
         self._async_wait_future: _asyncio.Future[None] | None = None
@@ -865,7 +864,7 @@ class UringProactor:
     def break_wait(self) -> None:
         """Interrupt a thread blocked in `wait` without completing operations."""
 
-        with self._lock:
+        with self._wake_condition:
             self._wake_pending = True
             self._wake_condition.notify_all()
             loop = self._async_wait_loop
@@ -916,7 +915,7 @@ class UringProactor:
         except _asyncio.TimeoutError:
             return
         finally:
-            with self._lock:
+            with self._wake_condition:
                 if self._async_wait_future is future:
                     self._async_wait_future = None
                 if future.done() and not future.cancelled():
@@ -926,15 +925,15 @@ class UringProactor:
         """Submit a socket receive operation."""
 
         operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
-        with self._lock:
-            entry = _UringEntry(operation=operation, kind="recv")
-            self._pending_tokens.append(None)
-            try:
-                self._ring.submit_recv(sock.fileno(), n, entry)
-            except BaseException:
-                entry.active = False
-                self._pending_tokens.pop()
-                raise
+        entry = _UringEntry(operation=operation, kind="recv")
+        self._pending_tokens.append(None)
+        try:
+            self._ring.submit_recv(sock.fileno(), n, entry)
+        except BaseException:
+            entry.active = False
+            self._pending_tokens.pop()
+            self.break_wait()
+            raise
         return operation
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
@@ -957,12 +956,11 @@ class UringProactor:
 
         operation = Operation[None](kind="sendall", fileobj=sock, proactor=self)
         payload = memoryview(data)
-        with self._lock:
-            if not payload:
-                self._check_open()
-                operation._set_result(None)
-                return operation
-            self._submit_sendall_locked(sock, operation, payload, 0)
+        if not payload:
+            self._check_open()
+            operation._set_result(None)
+            return operation
+        self._submit_sendall(sock, operation, payload, 0)
         return operation
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -1005,7 +1003,7 @@ class UringProactor:
         self._notify_completion()
 
     def _wait_for_completed(self, timeout: float | None) -> None:
-        with self._lock:
+        with self._wake_condition:
             if self._wake_pending:
                 self._wake_pending = False
                 return
@@ -1013,7 +1011,7 @@ class UringProactor:
             self._wake_pending = False
 
     def _get_async_wait_future(self, loop: _asyncio.AbstractEventLoop) -> _asyncio.Future[None]:
-        with self._lock:
+        with self._wake_condition:
             if self._wake_pending:
                 self._wake_pending = False
                 future = loop.create_future()
@@ -1037,7 +1035,7 @@ class UringProactor:
         if operation is not None:
             self._notify_completed()
 
-    def _submit_sendall_locked(
+    def _submit_sendall(
         self,
         sock: socket.socket,
         operation: Operation[None],
@@ -1051,6 +1049,7 @@ class UringProactor:
         except BaseException:
             entry.active = False
             self._pending_tokens.pop()
+            self.break_wait()
             raise
 
     def _complete_uring_operation(
@@ -1086,8 +1085,7 @@ class UringProactor:
                 entry.operation._set_result(None)
                 return entry.operation
             sock = cast(socket.socket, entry.operation.fileobj)
-            with self._lock:
-                self._submit_sendall_locked(sock, cast(Operation[None], entry.operation), entry.data, offset)
+            self._submit_sendall(sock, cast(Operation[None], entry.operation), entry.data, offset)
             return None
         entry.operation._set_exception(RuntimeError(f"unsupported uring operation kind: {entry.kind}"))
         return entry.operation
