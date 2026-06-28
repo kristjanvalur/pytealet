@@ -166,6 +166,34 @@ jobs:
           fi
           grep -F "uring-api requires liburing >= 2.4" build.log
 
+      - name: Verify missing native extension probe fallback
+        run: |
+          fallback_root="$(mktemp -d)"
+          fallback_venv="$fallback_root/venv"
+          pure_src="$fallback_root/src"
+          uv venv --python 3.14t "$fallback_venv"
+          mkdir -p "$pure_src"
+          cp -R packages/uring_api/src/uring_api "$pure_src/"
+          PYTHONPATH="$pure_src" "$fallback_venv/bin/python" - <<'PY'
+          import errno
+          import uring_api
+
+          probe = uring_api.probe()
+          print(probe)
+          assert probe.available is False
+          assert probe.errno == errno.ENOSYS
+          assert probe.message and "native extension is unavailable" in probe.message
+          assert probe.compiled_liburing_version_info == (0, 0)
+          assert uring_api.C_API_FEATURES == 0
+          assert uring_api.is_available() is False
+          try:
+              uring_api.Ring()
+          except RuntimeError as exc:
+              assert "native extension is unavailable" in str(exc)
+          else:
+              raise AssertionError("Ring unexpectedly initialized without _uring_api")
+          PY
+
   non-linux-build-failure:
     name: uring-api expected source build failure (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
