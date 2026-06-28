@@ -11,13 +11,14 @@
 
 #include <stdint.h>
 
-#define URING_API_CAPI_ABI_VERSION 2u
+#define URING_API_CAPI_ABI_VERSION 1u
 #define URING_API_CAPI_CAPSULE_NAME "_uring_api._C_API"
 
 /* Feature flags published in UringApi_CAPI.feature_flags. */
 #define URING_API_CAPI_FEATURE_PROBE (1ull << 0)
 #define URING_API_CAPI_FEATURE_RING (1ull << 1)
 #define URING_API_CAPI_FEATURE_C_CALLBACK (1ull << 2)
+#define URING_API_CAPI_FEATURE_COMPLETION (1ull << 3)
 
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completion, void *user_data);
 
@@ -55,6 +56,13 @@ typedef struct UringApi_CAPI {
     int (*ring_set_c_callback)(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data);
     int (*ring_start)(PyObject *ring);
     int (*ring_stop)(PyObject *ring);
+
+    /* Completion helpers. Return borrowed scalars via output pointers and new references for PyObject *. */
+    int (*completion_check)(PyObject *completion);
+    int (*completion_user_data)(PyObject *completion, unsigned long long *value);
+    int (*completion_res)(PyObject *completion, int *value);
+    int (*completion_flags)(PyObject *completion, unsigned int *value);
+    PyObject *(*completion_result)(PyObject *completion);
 
     void *reserved[16];
 } UringApi_CAPI;

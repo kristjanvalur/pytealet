@@ -5,6 +5,7 @@ import selectors
 import socket
 import threading
 from concurrent.futures import CancelledError
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -601,7 +602,7 @@ class _FakeUringRing:
         self.start_count = 0
         self.stop_count = 0
         self.break_count = 0
-        self.completions: list[dict[str, object]] = []
+        self.completions: list[SimpleNamespace] = []
         self.submitted_recv: list[tuple[int, int, int]] = []
         self.submitted_send: list[tuple[int, object, int]] = []
 
@@ -628,21 +629,21 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_recv.append((fd, n, user_data))
-        self._deliver({"user_data": user_data, "res": 5, "flags": 0, "result": b"hello"})
+        self._deliver(SimpleNamespace(user_data=user_data, res=5, flags=0, result=b"hello"))
 
     def submit_send(self, fd: int, data: Any, user_data: int) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         self.submitted_send.append((fd, data, user_data))
-        self._deliver({"user_data": user_data, "res": len(payload), "flags": 0, "result": len(payload)})
+        self._deliver(SimpleNamespace(user_data=user_data, res=len(payload), flags=0, result=len(payload)))
 
-    def wait(self, timeout: float | None = None) -> dict[str, object] | None:
+    def wait(self, timeout: float | None = None) -> SimpleNamespace | None:
         if not self.completions:
             return None
         return self.completions.pop(0)
 
-    def _deliver(self, completion: dict[str, object]) -> None:
+    def _deliver(self, completion: SimpleNamespace) -> None:
         if self.running and self.callback is not None:
             self.callback(completion)
         else:
@@ -657,7 +658,7 @@ class _DeferredUringRing(_FakeUringRing):
 
     def complete_recv(self, data: bytes = b"hello") -> None:
         user_data = self.submitted_recv[-1][2]
-        self._deliver({"user_data": user_data, "res": len(data), "flags": 0, "result": data})
+        self._deliver(SimpleNamespace(user_data=user_data, res=len(data), flags=0, result=data))
 
 
 class TestUringProactor:

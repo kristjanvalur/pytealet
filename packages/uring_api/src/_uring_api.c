@@ -68,8 +68,17 @@ typedef struct {
     bool has_view;
 } UringApiPending;
 
+typedef struct {
+    PyObject_HEAD
+    unsigned long long user_data;
+    int res;
+    unsigned int flags;
+    PyObject *result;
+} UringApiCompletion;
+
 static PyTypeObject UringApiRing_Type;
 static PyTypeObject UringApiPending_Type;
+static PyTypeObject UringApiCompletion_Type;
 
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
 static int UringApiRing_stop_delivery(UringApiRing *self);
@@ -91,13 +100,27 @@ static int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
 static int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data);
 static int UringApiCapi_RingStart(PyObject *ring);
 static int UringApiCapi_RingStop(PyObject *ring);
+static int UringApiCapi_CompletionCheck(PyObject *completion);
+static int UringApiCapi_CompletionUserData(PyObject *completion, unsigned long long *value);
+static int UringApiCapi_CompletionRes(PyObject *completion, int *value);
+static int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *value);
+static PyObject *UringApiCapi_CompletionResult(PyObject *completion);
 
 #define URING_API_CAPI_FEATURES                                                                                      \
-    (URING_API_CAPI_FEATURE_PROBE | URING_API_CAPI_FEATURE_RING | URING_API_CAPI_FEATURE_C_CALLBACK)
+    (URING_API_CAPI_FEATURE_PROBE | URING_API_CAPI_FEATURE_RING | URING_API_CAPI_FEATURE_C_CALLBACK |               \
+     URING_API_CAPI_FEATURE_COMPLETION)
 
 static int ring_type_check(PyObject *ring) {
     if (!PyObject_TypeCheck(ring, &UringApiRing_Type)) {
         PyErr_SetString(PyExc_TypeError, "ring must be an _uring_api.Ring instance");
+        return 0;
+    }
+    return 1;
+}
+
+static int completion_type_check(PyObject *completion) {
+    if (!PyObject_TypeCheck(completion, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be an _uring_api.Completion instance");
         return 0;
     }
     return 1;
@@ -221,6 +244,40 @@ static PyObject *UringApiPending_new_view(UringApiPendingKind kind, Py_buffer *v
     pending->view = *view;
     pending->has_view = true;
     return (PyObject *)pending;
+}
+
+static void UringApiCompletion_dealloc(UringApiCompletion *self) {
+    Py_CLEAR(self->result);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *UringApiCompletion_new_value(unsigned long long user_data, int res, unsigned int flags,
+                                              PyObject *result) {
+    UringApiCompletion *completion = PyObject_New(UringApiCompletion, &UringApiCompletion_Type);
+    if (!completion) {
+        return NULL;
+    }
+    completion->user_data = user_data;
+    completion->res = res;
+    completion->flags = flags;
+    completion->result = Py_NewRef(result);
+    return (PyObject *)completion;
+}
+
+static PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void *closure) {
+    return PyLong_FromUnsignedLongLong(self->user_data);
+}
+
+static PyObject *UringApiCompletion_get_res(UringApiCompletion *self, void *closure) {
+    return PyLong_FromLong(self->res);
+}
+
+static PyObject *UringApiCompletion_get_flags(UringApiCompletion *self, void *closure) {
+    return PyLong_FromUnsignedLong(self->flags);
+}
+
+static PyObject *UringApiCompletion_get_result(UringApiCompletion *self, void *closure) {
+    return Py_NewRef(self->result);
 }
 
 static int pending_store(UringApiRing *self, unsigned long long user_data, UringApiPendingKind kind, PyObject *buffer) {
@@ -472,6 +529,11 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSetCCallback,
     UringApiCapi_RingStart,
     UringApiCapi_RingStop,
+    UringApiCapi_CompletionCheck,
+    UringApiCapi_CompletionUserData,
+    UringApiCapi_CompletionRes,
+    UringApiCapi_CompletionFlags,
+    UringApiCapi_CompletionResult,
     {NULL},
 };
 
@@ -496,6 +558,9 @@ static int uring_api_export_capi(PyObject *module) {
         return -1;
     }
     if (module_add_uint64_constant(module, "C_API_FEATURE_C_CALLBACK", URING_API_CAPI_FEATURE_C_CALLBACK) < 0) {
+        return -1;
+    }
+    if (module_add_uint64_constant(module, "C_API_FEATURE_COMPLETION", URING_API_CAPI_FEATURE_COMPLETION) < 0) {
         return -1;
     }
     if (module_add_uint64_constant(module, "C_API_FEATURES", URING_API_CAPI_FEATURES) < 0) {
@@ -850,19 +915,7 @@ static PyObject *build_cqe_result(UringApiRing *self, struct io_uring_cqe *cqe) 
         return NULL;
     }
 
-    result = PyDict_New();
-    if (!result) {
-        Py_DECREF(payload);
-        return NULL;
-    }
-    if (dict_set_owned(result, "user_data", PyLong_FromUnsignedLongLong(user_data)) < 0 ||
-        dict_set_owned(result, "res", PyLong_FromLong(res)) < 0 ||
-        dict_set_owned(result, "flags", PyLong_FromUnsignedLong(flags)) < 0 ||
-        PyDict_SetItemString(result, "result", payload) < 0) {
-        Py_DECREF(payload);
-        Py_DECREF(result);
-        return NULL;
-    }
+    result = UringApiCompletion_new_value(user_data, res, flags, payload);
     Py_DECREF(payload);
     return result;
 }
@@ -1351,6 +1404,51 @@ static int UringApiCapi_RingStop(PyObject *ring) {
     return 0;
 }
 
+static int UringApiCapi_CompletionCheck(PyObject *completion) { return completion_type_check(completion); }
+
+static int UringApiCapi_CompletionUserData(PyObject *completion, unsigned long long *value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
+        return -1;
+    }
+    *value = ((UringApiCompletion *)completion)->user_data;
+    return 0;
+}
+
+static int UringApiCapi_CompletionRes(PyObject *completion, int *value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
+        return -1;
+    }
+    *value = ((UringApiCompletion *)completion)->res;
+    return 0;
+}
+
+static int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
+        return -1;
+    }
+    *value = ((UringApiCompletion *)completion)->flags;
+    return 0;
+}
+
+static PyObject *UringApiCapi_CompletionResult(PyObject *completion) {
+    if (!completion_type_check(completion)) {
+        return NULL;
+    }
+    return Py_NewRef(((UringApiCompletion *)completion)->result);
+}
+
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"start", (PyCFunction)UringApiRing_start, METH_NOARGS, "Start the delivery callback thread."},
@@ -1397,6 +1495,23 @@ static PyTypeObject UringApiPending_Type = {
     .tp_doc = "pending io_uring operation state",
 };
 
+static PyGetSetDef UringApiCompletion_getset[] = {
+    {"user_data", (getter)UringApiCompletion_get_user_data, NULL, NULL, NULL},
+    {"res", (getter)UringApiCompletion_get_res, NULL, NULL, NULL},
+    {"flags", (getter)UringApiCompletion_get_flags, NULL, NULL, NULL},
+    {"result", (getter)UringApiCompletion_get_result, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+static PyTypeObject UringApiCompletion_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.Completion",
+    .tp_basicsize = sizeof(UringApiCompletion),
+    .tp_dealloc = (destructor)UringApiCompletion_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "io_uring completion result",
+    .tp_getset = UringApiCompletion_getset,
+};
+
 static PyMethodDef uring_api_methods[] = {
     {"probe", _PyCFunction_CAST(uring_api_probe), METH_VARARGS | METH_KEYWORDS,
      "Probe whether a minimal io_uring instance can be created."},
@@ -1411,7 +1526,15 @@ static int uring_api_exec(PyObject *module) {
     if (PyType_Ready(&UringApiPending_Type) < 0) {
         return -1;
     }
+    if (PyType_Ready(&UringApiCompletion_Type) < 0) {
+        return -1;
+    }
     if (PyType_Ready(&UringApiRing_Type) < 0) {
+        return -1;
+    }
+    Py_INCREF(&UringApiCompletion_Type);
+    if (PyModule_AddObject(module, "Completion", (PyObject *)&UringApiCompletion_Type) < 0) {
+        Py_DECREF(&UringApiCompletion_Type);
         return -1;
     }
     Py_INCREF(&UringApiRing_Type);

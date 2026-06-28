@@ -1,6 +1,6 @@
 from types import TracebackType
 from collections.abc import Callable
-from typing import Any, TypedDict
+from typing import Any
 
 __liburing_version__: str
 __compiled_liburing_version__: str
@@ -11,11 +11,15 @@ C_API_FEATURE_RING: int
 C_API_FEATURE_C_CALLBACK: int
 C_API_FEATURES: int
 
-class Completion(TypedDict):
-    user_data: int
-    res: int
-    flags: int
-    result: object
+class Completion:
+    @property
+    def user_data(self) -> int: ...
+    @property
+    def res(self) -> int: ...
+    @property
+    def flags(self) -> int: ...
+    @property
+    def result(self) -> object: ...
 
 class Ring:
     def __init__(self, entries: int = 8, flags: int = 0) -> None: ...

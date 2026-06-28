@@ -40,7 +40,7 @@ try:
         completion = ring.wait(1.0)
 
     assert completion is not None
-    print(completion["user_data"], completion["res"], completion["result"])
+    print(completion.user_data, completion.res, completion.result)
 finally:
     reader.close()
     writer.close()
@@ -173,7 +173,7 @@ import uring_api
 
 
 def delivered(completion):
-    print(completion["user_data"], completion["res"], completion["result"])
+    print(completion.user_data, completion.res, completion.result)
 
 
 with uring_api.Ring() as ring:
@@ -204,12 +204,16 @@ The capsule currently exposes:
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
     `ring_submit_send()`, `ring_break_wait()`, and `ring_wait()`;
 - `ring_set_callback()`, `ring_set_c_callback()`, `ring_start()`, and
-    `ring_stop()` for delivery-thread control.
+    `ring_stop()` for delivery-thread control;
+- `completion_check()`, `completion_user_data()`, `completion_res()`,
+    `completion_flags()`, and `completion_result()` for native completion
+    inspection.
 
 Check `URING_API_CAPI_FEATURE_PROBE`, `URING_API_CAPI_FEATURE_RING`, and
-`URING_API_CAPI_FEATURE_C_CALLBACK` before calling those groups of functions. A
-C completion callback receives the ring object, the completion dictionary, and
-the supplied `user_data`. Return `0` for success; return a negative value with a
+`URING_API_CAPI_FEATURE_C_CALLBACK` before calling those groups of functions.
+Check `URING_API_CAPI_FEATURE_COMPLETION` before using completion accessors. A C
+completion callback receives the ring object, the completion object, and the
+supplied `user_data`. Return `0` for success; return a negative value with a
 Python exception set to report an unraisable error and stop the delivery thread.
 
 ## Choosing Ring Sizes

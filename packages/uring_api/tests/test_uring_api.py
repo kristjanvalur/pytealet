@@ -35,13 +35,15 @@ def test_uring_api_get_include_points_to_header_dir():
 
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 2
+    assert uring_api.C_API_ABI_VERSION == 1
     assert uring_api.C_API_FEATURE_PROBE == 1 << 0
     assert uring_api.C_API_FEATURE_RING == 1 << 1
     assert uring_api.C_API_FEATURE_C_CALLBACK == 1 << 2
+    assert uring_api.C_API_FEATURE_COMPLETION == 1 << 3
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_PROBE
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_RING
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_C_CALLBACK
+    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_COMPLETION
 
 
 def test_probe_returns_structured_result():
@@ -114,6 +116,7 @@ def test_c_api_client_can_import_capsule_and_probe():
     assert feature_flags & uring_api.C_API_FEATURE_PROBE
     assert feature_flags & uring_api.C_API_FEATURE_RING
     assert feature_flags & uring_api.C_API_FEATURE_C_CALLBACK
+    assert feature_flags & uring_api.C_API_FEATURE_COMPLETION
     assert (major, minor) == uring_api.__compiled_liburing_version_info__
     assert isinstance(probe["available"], bool)
 
@@ -190,11 +193,13 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
                 ring.stop()
                 client.clear_c_callback(ring)
 
-        by_user_data = {completion["user_data"]: completion for completion in c_deliveries}
-        assert by_user_data[220]["res"] == 4
-        assert by_user_data[220]["result"] == b"pong"
-        assert by_user_data[221]["res"] == 4
-        assert by_user_data[221]["result"] == 4
+        by_user_data = {completion.user_data: completion for completion in c_deliveries}
+        assert client.completion_summary(by_user_data[220]) == (220, 4, 0, b"pong")
+        assert client.completion_summary(by_user_data[221]) == (221, 4, 0, 4)
+        assert by_user_data[220].res == 4
+        assert by_user_data[220].result == b"pong"
+        assert by_user_data[221].res == 4
+        assert by_user_data[221].result == 4
         assert python_deliveries == []
     finally:
         reader.close()
@@ -247,9 +252,11 @@ def test_ring_recv_completion_when_available():
             completion = ring.wait(1.0)
 
         assert completion is not None
-        assert completion["user_data"] == 123
-        assert completion["res"] == 5
-        assert completion["result"] == b"hello"
+        assert isinstance(completion, uring_api.Completion)
+        assert completion.user_data == 123
+        assert completion.res == 5
+        assert completion.flags == 0
+        assert completion.result == b"hello"
     finally:
         reader.close()
         writer.close()
@@ -268,9 +275,9 @@ def test_ring_send_completion_when_available():
             completion = ring.wait(1.0)
 
         assert completion is not None
-        assert completion["user_data"] == 124
-        assert completion["res"] == 5
-        assert completion["result"] == 5
+        assert completion.user_data == 124
+        assert completion.res == 5
+        assert completion.result == 5
         assert reader.recv(5) == b"hello"
     finally:
         reader.close()
@@ -294,11 +301,11 @@ def test_ring_socketpair_round_trip_when_available():
                 assert completion is not None
                 completions.append(completion)
 
-        by_user_data = {completion["user_data"]: completion for completion in completions}
-        assert by_user_data[130]["res"] == 4
-        assert by_user_data[130]["result"] == b"ping"
-        assert by_user_data[131]["res"] == 4
-        assert by_user_data[131]["result"] == 4
+        by_user_data = {completion.user_data: completion for completion in completions}
+        assert by_user_data[130].res == 4
+        assert by_user_data[130].result == b"ping"
+        assert by_user_data[131].res == 4
+        assert by_user_data[131].result == 4
     finally:
         left.close()
         right.close()
@@ -369,7 +376,7 @@ def test_ring_delivery_thread_invokes_callback_when_available():
         reader.setblocking(False)
         writer.setblocking(False)
         delivered = threading.Event()
-        completions: list[dict[str, object]] = []
+        completions: list[uring_api.Completion] = []
 
         with uring_api.Ring() as ring:
             ring.callback = lambda completion: (completions.append(completion), delivered.set())
@@ -392,9 +399,9 @@ def test_ring_delivery_thread_invokes_callback_when_available():
             assert not ring.running
 
         assert completions
-        assert completions[0]["user_data"] == 125
-        assert completions[0]["res"] == 5
-        assert completions[0]["result"] == b"hello"
+        assert completions[0].user_data == 125
+        assert completions[0].res == 5
+        assert completions[0].result == b"hello"
     finally:
         reader.close()
         writer.close()
@@ -408,7 +415,7 @@ def test_ring_delivery_thread_delivers_socketpair_round_trip_when_available():
         left.setblocking(False)
         right.setblocking(False)
         delivered = threading.Event()
-        completions: list[dict[str, object]] = []
+        completions: list[uring_api.Completion] = []
 
         def callback(completion):
             completions.append(completion)
@@ -424,11 +431,11 @@ def test_ring_delivery_thread_delivers_socketpair_round_trip_when_available():
             assert delivered.wait(1.0)
             ring.stop()
 
-        by_user_data = {completion["user_data"]: completion for completion in completions}
-        assert by_user_data[132]["res"] == 4
-        assert by_user_data[132]["result"] == b"pong"
-        assert by_user_data[133]["res"] == 4
-        assert by_user_data[133]["result"] == 4
+        by_user_data = {completion.user_data: completion for completion in completions}
+        assert by_user_data[132].res == 4
+        assert by_user_data[132].result == b"pong"
+        assert by_user_data[133].res == 4
+        assert by_user_data[133].result == 4
     finally:
         left.close()
         right.close()

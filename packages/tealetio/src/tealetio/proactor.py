@@ -54,7 +54,7 @@ class _UringRing(Protocol):
     sq_entries: int
     cq_entries: int
     closed: bool
-    callback: Callable[[dict[str, object]], object] | None
+    callback: Callable[["_UringCompletion"], object] | None
     running: bool
 
     def close(self) -> None: ...
@@ -69,7 +69,14 @@ class _UringRing(Protocol):
 
     def submit_send(self, fd: int, data: Any, user_data: int) -> None: ...
 
-    def wait(self, timeout: float | None = None) -> dict[str, object] | None: ...
+    def wait(self, timeout: float | None = None) -> "_UringCompletion" | None: ...
+
+
+class _UringCompletion(Protocol):
+    user_data: int
+    res: int
+    flags: int
+    result: object
 
 
 _UringRingFactory = Callable[[int, int], _UringRing]
@@ -1040,11 +1047,10 @@ class UringProactor:
             self._async_wait_ready = ready
             return ready
 
-    def _deliver_uring_completion(self, completion: dict[str, object]) -> None:
-        completed: list[Operation[Any]] = []
-        self._complete_uring_operation(completion, completed)
-        if completed:
-            self._queue_completed(completed)
+    def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
+        operation = self._complete_uring_operation(completion)
+        if operation is not None:
+            self._queue_completed([operation])
 
     def _submit_sendall_locked(
         self,
@@ -1063,44 +1069,39 @@ class UringProactor:
 
     def _complete_uring_operation(
         self,
-        completion: dict[str, object],
-        completed: list[Operation[Any]],
-    ) -> None:
-        user_data = cast(int, completion["user_data"])
-        res = cast(int, completion["res"])
+        completion: _UringCompletion,
+    ) -> Operation[Any] | None:
+        user_data = completion.user_data
+        res = completion.res
         with self._lock:
             entry = self._pending.pop(user_data, None)
         if entry is None or entry.operation.done():
-            return
+            return None
         if res < 0:
             entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
-            completed.append(entry.operation)
-            return
+            return entry.operation
         if entry.kind == "recv":
-            result = completion["result"]
+            result = completion.result
             if not isinstance(result, bytes):
                 entry.operation._set_exception(RuntimeError("recv completion did not return bytes"))
             else:
                 entry.operation._set_result(result)
-            completed.append(entry.operation)
-            return
+            return entry.operation
         if entry.kind == "sendall":
             if res == 0:
                 entry.operation._set_exception(BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
-                completed.append(entry.operation)
-                return
+                return entry.operation
             assert entry.data is not None
             offset = entry.offset + res
             if offset >= len(entry.data):
                 entry.operation._set_result(None)
-                completed.append(entry.operation)
-                return
+                return entry.operation
             sock = cast(socket.socket, entry.operation.fileobj)
             with self._lock:
                 self._submit_sendall_locked(sock, cast(Operation[None], entry.operation), entry.data, offset)
-            return
+            return None
         entry.operation._set_exception(RuntimeError(f"unsupported uring operation kind: {entry.kind}"))
-        completed.append(entry.operation)
+        return entry.operation
 
     def _notify_completion(self) -> None:
         with self._lock:

@@ -70,6 +70,34 @@ static PyObject *client_ring_summary(PyObject *module, PyObject *Py_UNUSED(ignor
     return result;
 }
 
+static PyObject *client_completion_summary(PyObject *module, PyObject *completion) {
+    unsigned long long user_data;
+    int res;
+    unsigned int flags;
+    PyObject *result;
+    PyObject *summary;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (api->completion_check(completion) <= 0) {
+        return NULL;
+    }
+    if (api->completion_user_data(completion, &user_data) < 0 || api->completion_res(completion, &res) < 0 ||
+        api->completion_flags(completion, &flags) < 0) {
+        return NULL;
+    }
+    result = api->completion_result(completion);
+    if (!result) {
+        return NULL;
+    }
+    summary = Py_BuildValue("KiIO", user_data, res, flags, result);
+    Py_DECREF(result);
+    return summary;
+}
+
 static PyObject *client_set_c_callback(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *sink;
@@ -120,6 +148,7 @@ static PyMethodDef client_methods[] = {
     {"metadata", (PyCFunction)client_metadata, METH_NOARGS, NULL},
     {"probe", (PyCFunction)client_probe, METH_NOARGS, NULL},
     {"ring_summary", (PyCFunction)client_ring_summary, METH_NOARGS, NULL},
+    {"completion_summary", (PyCFunction)client_completion_summary, METH_O, NULL},
     {"set_c_callback", _PyCFunction_CAST(client_set_c_callback), METH_VARARGS, NULL},
     {"clear_c_callback", (PyCFunction)client_clear_c_callback, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -137,11 +166,12 @@ static int client_exec(PyObject *module) {
     }
     if ((api->feature_flags & URING_API_CAPI_FEATURE_PROBE) == 0 ||
         (api->feature_flags & URING_API_CAPI_FEATURE_RING) == 0 ||
-        (api->feature_flags & URING_API_CAPI_FEATURE_C_CALLBACK) == 0) {
+        (api->feature_flags & URING_API_CAPI_FEATURE_C_CALLBACK) == 0 ||
+        (api->feature_flags & URING_API_CAPI_FEATURE_COMPLETION) == 0) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API feature set is incomplete");
         return -1;
     }
-    if (!api->probe || !api->ring_new || !api->ring_set_c_callback) {
+    if (!api->probe || !api->ring_new || !api->ring_set_c_callback || !api->completion_result) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }
