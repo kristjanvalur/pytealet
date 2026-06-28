@@ -1,8 +1,14 @@
 import errno
+import importlib.util
 from importlib import resources
+from pathlib import Path
+import shlex
 import socket
 import subprocess
 import sys
+import sysconfig
+import tempfile
+import textwrap
 import threading
 
 import pytest
@@ -18,6 +24,20 @@ def require_uring():
 
 def test_package_is_marked_as_typed():
     assert resources.files("uring_api").joinpath("py.typed").is_file()
+
+
+def test_uring_api_get_include_points_to_header_dir():
+    include_dir = Path(uring_api.get_include())
+    header = include_dir / "uring_api_capi.h"
+
+    assert include_dir.is_dir()
+    assert header.is_file()
+
+
+def test_native_module_exports_c_api_constants():
+    assert uring_api.C_API_ABI_VERSION == 1
+    assert uring_api.C_API_FEATURE_PROBE == 1 << 0
+    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_PROBE
 
 
 def test_probe_returns_structured_result():
@@ -77,6 +97,139 @@ else:
     raise AssertionError("Ring unexpectedly initialized")
 """
     subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_c_api_client_can_import_capsule_and_probe():
+    include_dir = Path(uring_api.get_include())
+    python_include = sysconfig.get_path("include")
+    extension_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    cc = sysconfig.get_config_var("CC") or "cc"
+
+    source = textwrap.dedent(
+        r'''
+        #define PY_SSIZE_T_CLEAN
+        #include <Python.h>
+        #include "uring_api_capi.h"
+
+        #ifndef _PyCFunction_CAST
+        #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
+        #endif
+
+        static const UringApi_CAPI *api = NULL;
+
+        static PyObject *client_probe(PyObject *module, PyObject *Py_UNUSED(ignored)) {
+            PyObject *probe;
+            PyObject *available;
+            PyObject *result;
+
+            (void)module;
+            if (api == NULL) {
+                PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+                return NULL;
+            }
+            probe = api->probe(2, 0);
+            if (probe == NULL) {
+                return NULL;
+            }
+            available = PyDict_GetItemString(probe, "available");
+            if (available == NULL) {
+                Py_DECREF(probe);
+                PyErr_SetString(PyExc_AssertionError, "probe result did not include availability");
+                return NULL;
+            }
+            result = Py_BuildValue("IIKIIi", api->abi_version, api->struct_size,
+                                   (unsigned long long)api->feature_flags,
+                                   api->compiled_liburing_major, api->compiled_liburing_minor,
+                                   PyObject_IsTrue(available));
+            Py_DECREF(probe);
+            return result;
+        }
+
+        static PyMethodDef client_methods[] = {
+            {"probe", _PyCFunction_CAST(client_probe), METH_NOARGS, NULL},
+            {NULL, NULL, 0, NULL},
+        };
+
+        static int client_exec(PyObject *module) {
+            (void)module;
+            api = UringApi_Import();
+            if (api == NULL) {
+                return -1;
+            }
+            if (api->abi_version != URING_API_CAPI_ABI_VERSION) {
+                PyErr_SetString(PyExc_RuntimeError, "unexpected uring-api C API ABI version");
+                return -1;
+            }
+            if ((api->feature_flags & URING_API_CAPI_FEATURE_PROBE) == 0) {
+                PyErr_SetString(PyExc_RuntimeError, "uring-api C API probe feature is missing");
+                return -1;
+            }
+            if (api->probe == NULL) {
+                PyErr_SetString(PyExc_RuntimeError, "uring-api C API probe function is missing");
+                return -1;
+            }
+            return 0;
+        }
+
+        static PyModuleDef_Slot client_slots[] = {
+            {Py_mod_exec, client_exec},
+        #if defined(Py_mod_gil)
+            {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+        #endif
+            {0, NULL},
+        };
+
+        static struct PyModuleDef client_module = {
+            PyModuleDef_HEAD_INIT,
+            "_uring_api_capi_test_client",
+            NULL,
+            0,
+            client_methods,
+            client_slots,
+            NULL,
+            NULL,
+            NULL,
+        };
+
+        PyMODINIT_FUNC PyInit__uring_api_capi_test_client(void) {
+            return PyModuleDef_Init(&client_module);
+        }
+        '''
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        source_path = temp_path / "_uring_api_capi_test_client.c"
+        extension_path = temp_path / f"_uring_api_capi_test_client{extension_suffix}"
+        source_path.write_text(source, encoding="utf-8")
+        subprocess.run(
+            [
+                *shlex.split(cc),
+                "-shared",
+                "-fPIC",
+                "-I",
+                python_include,
+                "-I",
+                str(include_dir),
+                str(source_path),
+                "-o",
+                str(extension_path),
+            ],
+            check=True,
+        )
+        spec = importlib.util.spec_from_file_location("_uring_api_capi_test_client", extension_path)
+        assert spec is not None
+        assert spec.loader is not None
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+
+    abi_version, struct_size, feature_flags, major, minor, available = client.probe()
+
+    assert abi_version == uring_api.C_API_ABI_VERSION
+    assert struct_size > 0
+    assert feature_flags & uring_api.C_API_FEATURE_PROBE
+    assert (major, minor) == uring_api.__compiled_liburing_version_info__
+    assert isinstance(available, int)
 
 
 def test_ring_lifecycle_when_available():

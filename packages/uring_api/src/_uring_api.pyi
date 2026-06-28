@@ -5,6 +5,9 @@ from typing import Any, TypedDict
 __liburing_version__: str
 __compiled_liburing_version__: str
 __compiled_liburing_version_info__: tuple[int, int]
+C_API_ABI_VERSION: int
+C_API_FEATURE_PROBE: int
+C_API_FEATURES: int
 
 class Completion(TypedDict):
     user_data: int

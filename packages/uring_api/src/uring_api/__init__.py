@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import errno as _errno
+from importlib import resources
 from typing import Any
 
 try:
+    from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
+    from _uring_api import C_API_FEATURE_PROBE as C_API_FEATURE_PROBE
+    from _uring_api import C_API_FEATURES as C_API_FEATURES
     from _uring_api import Ring as Ring
     from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
@@ -14,6 +18,9 @@ try:
     from _uring_api import probe as _probe
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
+    C_API_ABI_VERSION = 1
+    C_API_FEATURE_PROBE = 1 << 0
+    C_API_FEATURES = 0
     __compiled_liburing_version__ = "unavailable"
     __compiled_liburing_version_info__ = (0, 0)
     __liburing_version__ = "unavailable"
@@ -84,14 +91,24 @@ def is_available() -> bool:
     return probe().available
 
 
+def get_include() -> str:
+    """Returns the installed include directory for C API clients."""
+
+    return str(resources.files("uring_api").joinpath("include"))
+
+
 __all__ = [
     "DEFAULT_ENTRIES",
     "DEFAULT_FLAGS",
+    "C_API_ABI_VERSION",
+    "C_API_FEATURE_PROBE",
+    "C_API_FEATURES",
     "Ring",
     "UringProbe",
     "__compiled_liburing_version__",
     "__compiled_liburing_version_info__",
     "__liburing_version__",
+    "get_include",
     "is_available",
     "probe",
 ]

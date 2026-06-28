@@ -8,6 +8,8 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "uring_api_capi.h"
+
 #if !defined(IO_URING_VERSION_MAJOR) || !defined(IO_URING_VERSION_MINOR)
 #error "uring-api requires liburing >= 2.4 development headers"
 #elif IO_URING_VERSION_MAJOR < 2 || (IO_URING_VERSION_MAJOR == 2 && IO_URING_VERSION_MINOR < 4)
@@ -86,6 +88,18 @@ static PyObject *liburing_version_string(void) {
 
 static PyObject *liburing_version_info(void) {
     return Py_BuildValue("(ii)", IO_URING_VERSION_MAJOR, IO_URING_VERSION_MINOR);
+}
+
+static int module_add_uint64_constant(PyObject *module, const char *name, unsigned long long value) {
+    PyObject *value_obj = PyLong_FromUnsignedLongLong(value);
+    if (!value_obj) {
+        return -1;
+    }
+    if (PyModule_AddObject(module, name, value_obj) < 0) {
+        Py_DECREF(value_obj);
+        return -1;
+    }
+    return 0;
 }
 
 static void sqe_set_data(UringApiRing *self, struct io_uring_sqe *sqe, unsigned long long user_data) {
@@ -361,14 +375,13 @@ static PyObject *build_probe_result(bool available, int errnum, const char *mess
     return result;
 }
 
-static PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs) {
+static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) {
     struct io_uring ring;
     struct io_uring_params params;
-    unsigned int entries;
-    unsigned int flags;
     int ret;
 
-    if (parse_entries_flags(args, kwargs, 2, &entries, &flags) < 0) {
+    if (entries == 0) {
+        PyErr_SetString(PyExc_ValueError, "entries must be between 1 and UINT_MAX");
         return NULL;
     }
 
@@ -388,6 +401,53 @@ static PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwarg
 
     io_uring_queue_exit(&ring);
     return build_probe_result(true, 0, NULL, &params);
+}
+
+static PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs) {
+    unsigned int entries;
+    unsigned int flags;
+
+    if (parse_entries_flags(args, kwargs, 2, &entries, &flags) < 0) {
+        return NULL;
+    }
+    return uring_api_probe_impl(entries, flags);
+}
+
+static PyObject *UringApiCapi_Probe(unsigned int entries, unsigned int flags) {
+    return uring_api_probe_impl(entries, flags);
+}
+
+static const UringApi_CAPI uring_api_capi_table = {
+    URING_API_CAPI_ABI_VERSION,
+    sizeof(UringApi_CAPI),
+    URING_API_CAPI_FEATURE_PROBE,
+    IO_URING_VERSION_MAJOR,
+    IO_URING_VERSION_MINOR,
+    UringApiCapi_Probe,
+    {NULL},
+};
+
+static int uring_api_export_capi(PyObject *module) {
+    PyObject *capsule;
+
+    capsule = PyCapsule_New((void *)&uring_api_capi_table, URING_API_CAPI_CAPSULE_NAME, NULL);
+    if (!capsule) {
+        return -1;
+    }
+    if (PyModule_AddObject(module, "_C_API", capsule) < 0) {
+        Py_DECREF(capsule);
+        return -1;
+    }
+    if (PyModule_AddIntConstant(module, "C_API_ABI_VERSION", (long)URING_API_CAPI_ABI_VERSION) < 0) {
+        return -1;
+    }
+    if (module_add_uint64_constant(module, "C_API_FEATURE_PROBE", URING_API_CAPI_FEATURE_PROBE) < 0) {
+        return -1;
+    }
+    if (module_add_uint64_constant(module, "C_API_FEATURES", URING_API_CAPI_FEATURE_PROBE) < 0) {
+        return -1;
+    }
+    return 0;
 }
 
 static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1120,6 +1180,10 @@ static int uring_api_exec(PyObject *module) {
     }
     if (PyModule_AddObject(module, "__compiled_liburing_version_info__", version_info) < 0) {
         Py_DECREF(version_info);
+        return -1;
+    }
+
+    if (uring_api_export_capi(module) < 0) {
         return -1;
     }
 

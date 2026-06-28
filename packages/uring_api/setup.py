@@ -62,11 +62,12 @@ class build_py(_build_py):
 setup(
     package_dir={"": "src"},
     packages=find_packages("src"),
-    package_data={"uring_api": ["py.typed"]},
+    package_data={"uring_api": ["py.typed", "include/uring_api_capi.h"]},
     ext_modules=[
         Extension(
             "_uring_api",
             sources=["src/_uring_api.c"],
+            include_dirs=["src/uring_api/include"],
             libraries=["uring"],
             extra_compile_args=["-std=c17", "-Wall", "-Wextra", "-Wno-unused-parameter"],
         ),

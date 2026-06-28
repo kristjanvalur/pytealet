@@ -184,6 +184,22 @@ with uring_api.Ring() as ring:
 `close()` is still an owner-coordinated shutdown operation for submissions. Do
 not close a ring while another thread may submit new user operations.
 
+## C API
+
+Native clients can include `uring_api_capi.h` and import `_uring_api._C_API` with
+`PyCapsule_Import()`. Use `uring_api.get_include()` to find the installed header
+directory when compiling an extension module.
+
+The capsule currently exposes:
+
+- `abi_version`, `struct_size`, and `feature_flags` for compatibility checks;
+- `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
+    visibility;
+- `probe(entries, flags)`, which returns a new reference to the same structured
+    dictionary as `_uring_api.probe()`.
+
+Check `URING_API_CAPI_FEATURE_PROBE` before calling `probe()`.
+
 ## Choosing Ring Sizes
 
 Ring sizing is about queue depth, not payload buffer size. A modest application
