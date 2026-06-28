@@ -295,10 +295,13 @@ class _FdEntry:
         return self.reader is None and self.writer is None
 
 
+_UringEntryComplete = Callable[["UringProactor", "_UringEntry", int], Operation[Any] | None]
+
+
 @dataclass
 class _UringEntry:
     operation: Operation[Any]
-    kind: str
+    complete: _UringEntryComplete
     data: memoryview | None = None
     offset: int = 0
     active: bool = True
@@ -927,7 +930,7 @@ class UringProactor(ProactorBase):
 
         operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
         data = memoryview(bytearray(n))
-        entry = _UringEntry(operation=operation, kind="recv", data=data)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv, data=data)
         self._pending_tokens.append(None)
         try:
             self._ring.submit_recv(sock.fileno(), data, entry)
@@ -938,11 +941,17 @@ class UringProactor(ProactorBase):
             raise
         return operation
 
+    def _complete_uring_recv(self, entry: _UringEntry, res: int) -> Operation[bytes]:
+        assert entry.data is not None
+        operation = cast(Operation[bytes], entry.operation)
+        operation._set_result(entry.data[:res].tobytes())
+        return operation
+
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""
 
         operation = Operation[int](kind="recv_into", fileobj=sock, proactor=self)
-        entry = _UringEntry(operation=operation, kind="recv_into", data=memoryview(buf))
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv_into, data=memoryview(buf))
         self._pending_tokens.append(None)
         try:
             self._ring.submit_recv(sock.fileno(), buf, entry)
@@ -951,6 +960,11 @@ class UringProactor(ProactorBase):
             self._pending_tokens.pop()
             self.break_wait()
             raise
+        return operation
+
+    def _complete_uring_recv_into(self, entry: _UringEntry, res: int) -> Operation[int]:
+        operation = cast(Operation[int], entry.operation)
+        operation._set_result(res)
         return operation
 
     def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
@@ -975,6 +989,20 @@ class UringProactor(ProactorBase):
         self._submit_sendall(sock, operation, payload, 0)
         return operation
 
+    def _complete_uring_sendall(self, entry: _UringEntry, res: int) -> Operation[None] | None:
+        operation = cast(Operation[None], entry.operation)
+        if res == 0:
+            operation._set_exception(BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
+            return operation
+        assert entry.data is not None
+        offset = entry.offset + res
+        if offset >= len(entry.data):
+            operation._set_result(None)
+            return operation
+        sock = cast(socket.socket, operation.fileobj)
+        self._submit_sendall(sock, operation, entry.data, offset)
+        return None
+
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
 
@@ -993,8 +1021,7 @@ class UringProactor(ProactorBase):
     def cancel_operation(self, operation: Operation[Any]) -> None:
         # TODO: submit IORING_OP_ASYNC_CANCEL once the native wrapper exposes it.
         cancelled = operation._set_cancelled()
-        if cancelled and self._pending_tokens:
-            self._pending_tokens.pop()
+        if cancelled:
             self.break_wait()
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
@@ -1009,7 +1036,7 @@ class UringProactor(ProactorBase):
         data: memoryview,
         offset: int,
     ) -> None:
-        entry = _UringEntry(operation=operation, kind="sendall", data=data, offset=offset)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_sendall, data=data, offset=offset)
         self._pending_tokens.append(None)
         try:
             self._ring.submit_send(sock.fileno(), data[offset:], entry)
@@ -1025,37 +1052,15 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
-        if entry.active:
-            entry.active = False
-            self._pending_tokens.pop()
-        elif entry.operation.done():
-            return None
+        assert entry.active
+        entry.active = False
+        self._pending_tokens.pop()
         if entry.operation.done():
-            return None
+            return entry.operation
         if res < 0:
             entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return entry.operation
-        if entry.kind == "recv":
-            assert entry.data is not None
-            entry.operation._set_result(entry.data[:res].tobytes())
-            return entry.operation
-        if entry.kind == "recv_into":
-            entry.operation._set_result(res)
-            return entry.operation
-        if entry.kind == "sendall":
-            if res == 0:
-                entry.operation._set_exception(BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
-                return entry.operation
-            assert entry.data is not None
-            offset = entry.offset + res
-            if offset >= len(entry.data):
-                entry.operation._set_result(None)
-                return entry.operation
-            sock = cast(socket.socket, entry.operation.fileobj)
-            self._submit_sendall(sock, cast(Operation[None], entry.operation), entry.data, offset)
-            return None
-        entry.operation._set_exception(RuntimeError(f"unsupported uring operation kind: {entry.kind}"))
-        return entry.operation
+        return entry.complete(self, entry, res)
 
     def _raise_unsupported(self, operation: str) -> NoReturn:
         self._check_open()

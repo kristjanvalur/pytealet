@@ -636,7 +636,8 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         view = memoryview(buf)
-        payload = b"world" if getattr(user_data, "kind", None) == "recv_into" else b"hello"
+        operation = getattr(user_data, "operation", None)
+        payload = b"world" if getattr(operation, "kind", None) == "recv_into" else b"hello"
         if len(view) >= len(payload):
             view[: len(payload)] = payload
         self.submitted_recv.append((fd, buf, user_data))
@@ -866,6 +867,37 @@ class TestUringProactor:
             submitted = proactor.ring.submitted_recv[0]
             assert submitted[0] == reader.fileno()
             assert submitted[1] is buf
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancelled_operation_consumes_pending_token_on_ring_completion(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+
+            operation.cancel()
+            assert operation.cancelled() is True
+            assert proactor.has_pending_operations() is True
+            proactor.wait(proactor.get_time() + 1.0)
+
+            released = threading.Event()
+            thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
+            thread.start()
+            thread.join(0.05)
+            assert thread.is_alive() is True
+
+            assert isinstance(proactor.ring, _DeferredUringRing)
+            proactor.ring.complete_recv()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert released.is_set()
+            assert proactor.has_pending_operations() is False
+            with pytest.raises(CancelledError):
+                operation.result()
         finally:
             reader.close()
             writer.close()
