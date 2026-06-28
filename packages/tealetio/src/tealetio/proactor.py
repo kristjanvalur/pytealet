@@ -809,7 +809,7 @@ class UringProactor:
         self._wake_condition = threading.Condition()
         self._wake_pending = False
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
-        self._async_wait_future: _asyncio.Future[None] | None = None
+        self._async_wait_event: _asyncio.Event | None = None
         self._ring.callback = self._deliver_uring_completion
         try:
             self._ring.start()
@@ -863,10 +863,11 @@ class UringProactor:
             self._wake_pending = True
             self._wake_condition.notify_all()
             loop = self._async_wait_loop
-            future = self._async_wait_future
-        if loop is not None and future is not None:
+            event = self._async_wait_event
+        if event is not None:
+            assert loop is not None
             try:
-                loop.call_soon_threadsafe(self._wake_async_waiter, future)
+                loop.call_soon_threadsafe(event.set)
             except RuntimeError:
                 pass
 
@@ -874,25 +875,6 @@ class UringProactor:
         """Wait until completed operations are signalled."""
 
         self._check_open()
-        while True:
-            if deadline == 0:
-                return
-            if not self.has_pending_operations():
-                return
-
-            timeout = self._timeout_until_deadline(deadline)
-            if timeout == 0:
-                return
-            if not self.has_pending_operations():
-                return
-            self._wait_for_completed(timeout)
-            return
-
-    async def wait_async(self, deadline: float | None = None) -> None:
-        """Wait asynchronously until completed operations are signalled."""
-
-        self._check_open()
-        loop = _asyncio.get_running_loop()
         if deadline == 0:
             return
         if not self.has_pending_operations():
@@ -901,20 +883,44 @@ class UringProactor:
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        future = self._get_async_wait_future(loop)
+        if not self.has_pending_operations():
+            return
+        self._wait_for_completed(timeout)
+
+    async def wait_async(self, deadline: float | None = None) -> None:
+        """Wait asynchronously until completed operations are signalled."""
+
+        self._check_open()
+        if deadline == 0:
+            return
+        if not self.has_pending_operations():
+            return
+
+        timeout = self._timeout_until_deadline(deadline)
+        if timeout == 0:
+            return
+        loop = _asyncio.get_running_loop()
+        event = _asyncio.Event()
+        with self._wake_condition:
+            if self._wake_pending or not self.has_pending_operations():
+                self._wake_pending = False
+                return
+            assert self._async_wait_event is None
+            self._async_wait_loop = loop
+            self._async_wait_event = event
         try:
             if timeout is None:
-                await future
+                await event.wait()
             else:
-                await compat.wait_for_timeout(future, timeout)
+                await compat.wait_for_timeout(event.wait(), timeout)
         except _asyncio.TimeoutError:
             return
         finally:
             with self._wake_condition:
-                if self._async_wait_future is future:
-                    self._async_wait_future = None
-                if future.done() and not future.cancelled():
-                    self._wake_pending = False
+                assert self._async_wait_event is event
+                self._async_wait_event = None
+                self._async_wait_loop = None
+                self._wake_pending = False
 
     def _notify_completed(self) -> None:
         self.break_wait()
@@ -922,31 +928,8 @@ class UringProactor:
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         with self._wake_condition:
-            if self._wake_pending:
-                self._wake_pending = False
-                return
-            self._wake_condition.wait(timeout)
+            self._wake_condition.wait_for(lambda: self._wake_pending, timeout)
             self._wake_pending = False
-
-    def _get_async_wait_future(self, loop: _asyncio.AbstractEventLoop) -> _asyncio.Future[None]:
-        with self._wake_condition:
-            if self._wake_pending:
-                self._wake_pending = False
-                future = loop.create_future()
-                future.set_result(None)
-                return future
-            if not self.has_pending_operations():
-                future = loop.create_future()
-                future.set_result(None)
-                return future
-            future = loop.create_future()
-            self._async_wait_loop = loop
-            self._async_wait_future = future
-            return future
-
-    def _wake_async_waiter(self, future: _asyncio.Future[None]) -> None:
-        if not future.done():
-            future.set_result(None)
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
