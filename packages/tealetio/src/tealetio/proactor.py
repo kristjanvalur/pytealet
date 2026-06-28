@@ -6,7 +6,6 @@ import selectors
 import socket
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
@@ -106,9 +105,9 @@ class Proactor(Protocol):
 
     def has_pending_operations(self) -> bool: ...
 
-    def wait(self, deadline: float | None = None) -> list[Operation[Any]]: ...
+    def wait(self, deadline: float | None = None) -> None: ...
 
-    async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]: ...
+    async def wait_async(self, deadline: float | None = None) -> None: ...
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]: ...
 
@@ -329,15 +328,14 @@ class SelectorProactor:
         except (BlockingIOError, OSError):
             pass
 
-    def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
-        """Wait until `deadline` for ready operations and return those completed."""
+    def wait(self, deadline: float | None = None) -> None:
+        """Wait until `deadline` and drive ready operations."""
 
         with self._lock:
             self._check_open()
             completed = self._poll(deadline)
         if completed:
             self._notify_completion()
-        return completed
 
     def _poll(self, deadline: float | None = None) -> list[Operation[Any]]:
         timeout = self._timeout_until_deadline(deadline)
@@ -359,17 +357,17 @@ class SelectorProactor:
                 self._step_fd_operation(fd, selectors.EVENT_WRITE, completed)
         return completed
 
-    async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
-        """Wait asynchronously until `deadline` and return completed operations."""
+    async def wait_async(self, deadline: float | None = None) -> None:
+        """Wait asynchronously until `deadline` and drive ready operations."""
 
         self._check_open()
-        completed = self.wait(0)
-        if completed or deadline == 0:
-            return completed
+        self.wait(0)
+        if deadline == 0 or not self.has_pending_operations():
+            return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
-            return []
+            return
 
         loop = _asyncio.get_running_loop()
         ready = loop.create_future()
@@ -381,7 +379,7 @@ class SelectorProactor:
         registered: list[tuple[int, int]] = []
         wakeup_fd = self._wakeup_reader.fileno()
 
-        async def wait_in_executor() -> list[Operation[Any]]:
+        async def wait_in_executor() -> None:
             return await loop.run_in_executor(None, self.wait, deadline)
 
         def add_reader(fd: int) -> None:
@@ -411,7 +409,7 @@ class SelectorProactor:
         except NotImplementedError:
             fallback_to_executor = True
         except _asyncio.TimeoutError:
-            return []
+            return
         finally:
             for fd, event in registered:
                 if event == selectors.EVENT_READ:
@@ -419,8 +417,9 @@ class SelectorProactor:
                 else:
                     loop.remove_writer(fd)
         if fallback_to_executor:
-            return await wait_in_executor()
-        return self.wait(0)
+            await wait_in_executor()
+            return
+        self.wait(0)
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
@@ -691,8 +690,7 @@ class SelectorProactor:
                 return
 
     def _notify_completion(self) -> None:
-        with self._lock:
-            callback = self._completion_callback
+        callback = self._completion_callback
         if callback is not None:
             callback()
 
@@ -721,8 +719,6 @@ class ThreadedSelectorProactor(SelectorProactor):
         elif not hasattr(selector, "select_released"):
             raise TypeError("ThreadedSelectorProactor requires a selector with select_released()")
         super().__init__(selector, completion_callback=completion_callback)
-        self._completed: deque[Operation[Any]] = deque()
-        self._completed_lock = threading.Lock()
         self._completed_ready = threading.Event()
         self._worker_started = False
         self._worker_stop = threading.Event()
@@ -740,41 +736,40 @@ class ThreadedSelectorProactor(SelectorProactor):
             self._worker.join()
         super().close()
 
-    def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
-        """Return completed operations, waiting only for queued completions."""
+    def wait(self, deadline: float | None = None) -> None:
+        """Wait until completed operations are signalled."""
 
         self._check_open()
         self._ensure_worker_started()
-        completed = self._drain_completed()
-        if completed or deadline == 0:
-            return completed
+        if deadline == 0 or not self.has_pending_operations():
+            return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
-            return []
+            return
+        self._completed_ready.clear()
+        if not self.has_pending_operations():
+            return
         self._wait_for_completed(timeout)
-        return self._drain_completed()
+        self._completed_ready.clear()
 
-    async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
-        """Wait asynchronously until completed operations are queued."""
+    async def wait_async(self, deadline: float | None = None) -> None:
+        """Wait asynchronously until completed operations are signalled."""
 
         self._check_open()
         self._ensure_worker_started()
-        completed = self._drain_completed()
-        if completed or deadline == 0:
-            return completed
+        if deadline == 0 or not self.has_pending_operations():
+            return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
-            return []
+            return
         loop = _asyncio.get_running_loop()
         await loop.run_in_executor(None, self._wait_for_completed, timeout)
-        return self._drain_completed()
+        self._completed_ready.clear()
 
-    def _queue_completed(self, completed: list[Operation[Any]]) -> None:
-        with self._completed_lock:
-            self._completed.extend(completed)
-            self._completed_ready.set()
+    def _notify_completed(self) -> None:
+        self._completed_ready.set()
         self._notify_completion()
 
     def _ensure_worker_started(self) -> None:
@@ -792,15 +787,7 @@ class ThreadedSelectorProactor(SelectorProactor):
             except (OSError, ValueError, RuntimeError):
                 return
             if completed:
-                self._queue_completed(completed)
-
-    def _drain_completed(self) -> list[Operation[Any]]:
-        with self._completed_lock:
-            completed = list(self._completed)
-            self._completed.clear()
-            if not self._completed:
-                self._completed_ready.clear()
-        return completed
+                self._notify_completed()
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         self._completed_ready.wait(timeout)
@@ -824,11 +811,11 @@ class UringProactor:
         self._closed = False
         self._completion_callback = completion_callback
         self._clock = time.monotonic
-        self._pending_count = 0
-        self._completed: deque[Operation[Any]] = deque()
-        self._completed_ready = threading.Event()
+        self._pending_tokens: list[None] = []
+        self._wake_condition = threading.Condition(self._lock)
+        self._wake_pending = False
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
-        self._async_wait_ready: _asyncio.Event | None = None
+        self._async_wait_future: _asyncio.Future[None] | None = None
         self._ring.callback = self._deliver_uring_completion
         try:
             self._ring.start()
@@ -851,8 +838,7 @@ class UringProactor:
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
 
-        with self._lock:
-            return bool(self._pending_count or self._completed)
+        return bool(self._pending_tokens)
 
     def get_time(self) -> float:
         """Return the proactor clock value."""
@@ -867,13 +853,11 @@ class UringProactor:
     def close(self) -> None:
         """Close the owned `io_uring` ring."""
 
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
+        if self._closed:
+            return
+        self._closed = True
         self._ring.stop()
-        with self._lock:
-            self._pending_count = 0
+        self._pending_tokens.clear()
         self.break_wait()
         self._ring.callback = None
         self._ring.close()
@@ -882,62 +866,61 @@ class UringProactor:
         """Interrupt a thread blocked in `wait` without completing operations."""
 
         with self._lock:
-            self._completed_ready.set()
+            self._wake_pending = True
+            self._wake_condition.notify_all()
             loop = self._async_wait_loop
-            event = self._async_wait_ready
-        if loop is not None and event is not None:
+            future = self._async_wait_future
+        if loop is not None and future is not None:
             try:
-                loop.call_soon_threadsafe(event.set)
+                loop.call_soon_threadsafe(self._wake_async_waiter, future)
             except RuntimeError:
                 pass
 
-    def wait(self, deadline: float | None = None) -> list[Operation[Any]]:
-        """Wait until completed operations are queued and return them."""
+    def wait(self, deadline: float | None = None) -> None:
+        """Wait until completed operations are signalled."""
 
         self._check_open()
         while True:
-            completed = self._drain_completed()
-            if completed or deadline == 0:
-                return completed
+            if deadline == 0:
+                return
             if not self.has_pending_operations():
-                return []
+                return
 
             timeout = self._timeout_until_deadline(deadline)
             if timeout == 0:
-                return []
-            if not self._wait_for_completed(timeout):
-                return []
-            return self._drain_completed()
+                return
+            if not self.has_pending_operations():
+                return
+            self._wait_for_completed(timeout)
+            return
 
-    async def wait_async(self, deadline: float | None = None) -> list[Operation[Any]]:
-        """Wait asynchronously until completed operations are queued."""
+    async def wait_async(self, deadline: float | None = None) -> None:
+        """Wait asynchronously until completed operations are signalled."""
 
         self._check_open()
         loop = _asyncio.get_running_loop()
-        completed = self._drain_completed()
-        if completed or deadline == 0:
-            return completed
+        if deadline == 0:
+            return
         if not self.has_pending_operations():
-            return []
+            return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
-            return []
-        ready = self._get_async_wait_event(loop)
-        ready.clear()
-        completed = self._drain_completed()
-        if completed:
-            return completed
-        if not self.has_pending_operations():
-            return []
+            return
+        future = self._get_async_wait_future(loop)
         try:
             if timeout is None:
-                await ready.wait()
+                await future
             else:
-                await compat.wait_for_timeout(ready.wait(), timeout)
+                await compat.wait_for_timeout(future, timeout)
         except _asyncio.TimeoutError:
-            return []
-        return self._drain_completed()
+            return
+        finally:
+            with self._lock:
+                if self._async_wait_future is future:
+                    self._async_wait_future = None
+                if future.done() and not future.cancelled():
+                    self._wake_pending = False
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
@@ -945,12 +928,12 @@ class UringProactor:
         operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
         with self._lock:
             entry = _UringEntry(operation=operation, kind="recv")
-            self._pending_count += 1
+            self._pending_tokens.append(None)
             try:
                 self._ring.submit_recv(sock.fileno(), n, entry)
             except BaseException:
                 entry.active = False
-                self._pending_count -= 1
+                self._pending_tokens.pop()
                 raise
         return operation
 
@@ -1010,44 +993,49 @@ class UringProactor:
 
     def cancel_operation(self, operation: Operation[Any]) -> bool:
         # TODO: submit IORING_OP_ASYNC_CANCEL once the native wrapper exposes it.
-        with self._lock:
-            cancelled = operation._set_cancelled(raise_if_done=False)
-            if cancelled and self._pending_count:
-                self._pending_count -= 1
-                self.break_wait()
-                return True
+        cancelled = operation._set_cancelled(raise_if_done=False)
+        if cancelled and self._pending_tokens:
+            self._pending_tokens.pop()
+            self.break_wait()
+            return True
         return False
 
-    def _queue_completed(self, completed: list[Operation[Any]]) -> None:
-        with self._lock:
-            self._completed.extend(completed)
+    def _notify_completed(self) -> None:
         self.break_wait()
         self._notify_completion()
 
-    def _drain_completed(self) -> list[Operation[Any]]:
+    def _wait_for_completed(self, timeout: float | None) -> None:
         with self._lock:
-            completed = list(self._completed)
-            self._completed.clear()
-            if not self._completed:
-                self._completed_ready.clear()
-        return completed
+            if self._wake_pending:
+                self._wake_pending = False
+                return
+            self._wake_condition.wait(timeout)
+            self._wake_pending = False
 
-    def _wait_for_completed(self, timeout: float | None) -> bool:
-        return self._completed_ready.wait(timeout)
-
-    def _get_async_wait_event(self, loop: _asyncio.AbstractEventLoop) -> _asyncio.Event:
+    def _get_async_wait_future(self, loop: _asyncio.AbstractEventLoop) -> _asyncio.Future[None]:
         with self._lock:
-            if self._async_wait_loop is loop and self._async_wait_ready is not None:
-                return self._async_wait_ready
-            ready = _asyncio.Event()
+            if self._wake_pending:
+                self._wake_pending = False
+                future = loop.create_future()
+                future.set_result(None)
+                return future
+            if not self.has_pending_operations():
+                future = loop.create_future()
+                future.set_result(None)
+                return future
+            future = loop.create_future()
             self._async_wait_loop = loop
-            self._async_wait_ready = ready
-            return ready
+            self._async_wait_future = future
+            return future
+
+    def _wake_async_waiter(self, future: _asyncio.Future[None]) -> None:
+        if not future.done():
+            future.set_result(None)
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
         operation = self._complete_uring_operation(completion)
         if operation is not None:
-            self._queue_completed([operation])
+            self._notify_completed()
 
     def _submit_sendall_locked(
         self,
@@ -1057,12 +1045,12 @@ class UringProactor:
         offset: int,
     ) -> None:
         entry = _UringEntry(operation=operation, kind="sendall", data=data, offset=offset)
-        self._pending_count += 1
+        self._pending_tokens.append(None)
         try:
             self._ring.submit_send(sock.fileno(), data[offset:], entry)
         except BaseException:
             entry.active = False
-            self._pending_count -= 1
+            self._pending_tokens.pop()
             raise
 
     def _complete_uring_operation(
@@ -1071,12 +1059,11 @@ class UringProactor:
     ) -> Operation[Any] | None:
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
-        with self._lock:
-            if entry.active:
-                entry.active = False
-                self._pending_count -= 1
-            elif entry.operation.done():
-                return None
+        if entry.active:
+            entry.active = False
+            self._pending_tokens.pop()
+        elif entry.operation.done():
+            return None
         if entry.operation.done():
             return None
         if res < 0:
@@ -1106,8 +1093,7 @@ class UringProactor:
         return entry.operation
 
     def _notify_completion(self) -> None:
-        with self._lock:
-            callback = self._completion_callback
+        callback = self._completion_callback
         if callback is not None:
             callback()
 

@@ -27,9 +27,11 @@ def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) ->
     completed = [operation for operation in operations if operation.done()]
     pending = {operation for operation in operations if not operation.done()}
     while pending:
-        for operation in proactor.wait(proactor.get_time() + 1.0):
-            completed.append(operation)
-            pending.discard(operation)
+        proactor.wait(proactor.get_time() + 1.0)
+        for operation in list(pending):
+            if operation.done():
+                completed.append(operation)
+                pending.discard(operation)
     return completed
 
 
@@ -85,7 +87,7 @@ class TestSelectorProactor:
             assert operation.done() is False
 
             writer.send(b"hello")
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == b"hello"
         finally:
             reader.close()
@@ -103,7 +105,7 @@ class TestSelectorProactor:
             operation = proactor.recv_into(reader, buf)
             writer.send(b"world")
 
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
             assert bytes(buf) == b"world"
         finally:
@@ -197,7 +199,7 @@ class TestSelectorProactor:
 
             receive_bytes_operation = proactor.recvfrom(receiver, 5)
             sender.sendto(b"again", receiver.getsockname())
-            assert proactor.wait(proactor.get_time() + 1.0) == [receive_bytes_operation]
+            proactor.wait(proactor.get_time() + 1.0)
             data, address = receive_bytes_operation.result()
             assert data == b"again"
             assert address[1] == sender.getsockname()[1]
@@ -254,7 +256,8 @@ class TestSelectorProactor:
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
 
             writer.send(b"x")
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.done() is True
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
         finally:
@@ -278,7 +281,7 @@ class TestSelectorProactor:
         proactor = SelectorProactor(completion_callback=lambda: seen.append("wake"))
         try:
             proactor.break_wait()
-            assert proactor.wait(0) == []
+            proactor.wait(0)
             assert seen == []
         finally:
             proactor.close()
@@ -296,7 +299,8 @@ class TestSelectorProactor:
             proactor.set_completion_callback(lambda: seen.append("new"))
             writer.send(b"x")
 
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.done() is True
             assert seen == ["new"]
         finally:
             reader.close()
@@ -315,7 +319,8 @@ class TestSelectorProactor:
 
             writer.send(b"x")
 
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.done() is True
             assert seen == ["wake"]
         finally:
             reader.close()
@@ -353,7 +358,7 @@ class TestSelectorProactor:
 
                 writer.send(b"hello")
 
-                assert await waiter == [operation]
+                await waiter
                 return operation.result()
             finally:
                 reader.close()
@@ -381,7 +386,7 @@ class TestSelectorProactor:
 
                 writer.send(b"hello")
 
-                assert await asyncio.wait_for(waiter, 1.0) == [operation]
+                await asyncio.wait_for(waiter, 1.0)
                 return operation.result()
             finally:
                 reader.close()
@@ -390,24 +395,25 @@ class TestSelectorProactor:
 
         assert asyncio.run(run()) == b"hello"
 
-    def test_wait_async_timeout_returns_no_completions(self):
-        async def run() -> list[Operation[object]]:
+    def test_wait_async_timeout_returns_without_completions(self):
+        async def run() -> bool:
             proactor = SelectorProactor()
             reader, writer = socket.socketpair()
             try:
                 reader.setblocking(False)
                 writer.setblocking(False)
-                proactor.recv(reader, 1)
-                return await proactor.wait_async(proactor.get_time() + 0.001)
+                operation = proactor.recv(reader, 1)
+                await proactor.wait_async(proactor.get_time() + 0.001)
+                return operation.done()
             finally:
                 reader.close()
                 writer.close()
                 proactor.close()
 
-        assert asyncio.run(run()) == []
+        assert asyncio.run(run()) is False
 
-    def test_wait_async_break_wait_returns_no_completions(self):
-        async def run() -> list[Operation[object]]:
+    def test_wait_async_break_wait_returns_without_completions(self):
+        async def run() -> None:
             proactor = SelectorProactor()
             try:
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
@@ -415,11 +421,11 @@ class TestSelectorProactor:
 
                 proactor.break_wait()
 
-                return await waiter
+                await waiter
             finally:
                 proactor.close()
 
-        assert asyncio.run(run()) == []
+        asyncio.run(run())
 
 
 class TestThreadedSelectorProactor:
@@ -451,11 +457,12 @@ class TestThreadedSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.recv(reader, 5)
-            assert proactor.wait(0) == []
+            proactor.wait(0)
+            assert operation.done() is False
 
             writer.send(b"hello")
 
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == b"hello"
             assert callback_called.wait(1.0) is True
             assert callback_threads
@@ -475,7 +482,7 @@ class TestThreadedSelectorProactor:
             operation = proactor.sendall(writer, b"hello")
 
             assert operation.done() is True
-            assert proactor.wait(0) == []
+            proactor.wait(0)
             assert operation.result() is None
             assert reader.recv(5) == b"hello"
         finally:
@@ -487,10 +494,10 @@ class TestThreadedSelectorProactor:
         seen: list[str] = []
         proactor = ThreadedSelectorProactor(completion_callback=lambda: seen.append("wake"))
         try:
-            assert proactor.wait(0) == []
+            proactor.wait(0)
             proactor.break_wait()
 
-            assert proactor.wait(proactor.get_time() + 0.01) == []
+            proactor.wait(proactor.get_time() + 0.01)
             assert seen == []
         finally:
             proactor.close()
@@ -511,7 +518,7 @@ class TestThreadedSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            assert proactor.wait(0) == []
+            proactor.wait(0)
 
             thread = threading.Thread(target=submit)
             thread.start()
@@ -523,7 +530,7 @@ class TestThreadedSelectorProactor:
 
             writer.send(b"x")
 
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == b"x"
         finally:
             reader.close()
@@ -537,7 +544,7 @@ class TestThreadedSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.recv(reader, 1)
-            assert proactor.wait(0) == []
+            proactor.wait(0)
 
             thread = threading.Thread(target=operation.cancel)
             thread.start()
@@ -553,7 +560,7 @@ class TestThreadedSelectorProactor:
     def test_set_completion_callback_wakes_worker_before_locking(self):
         proactor = ThreadedSelectorProactor()
         try:
-            assert proactor.wait(0) == []
+            proactor.wait(0)
 
             thread = threading.Thread(target=lambda: proactor.set_completion_callback(lambda: None))
             thread.start()
@@ -603,8 +610,8 @@ class _FakeUringRing:
         self.stop_count = 0
         self.break_count = 0
         self.completions: list[SimpleNamespace] = []
-        self.submitted_recv: list[tuple[int, int, int]] = []
-        self.submitted_send: list[tuple[int, object, int]] = []
+        self.submitted_recv: list[tuple[int, int, object]] = []
+        self.submitted_send: list[tuple[int, object, object]] = []
 
     def close(self) -> None:
         self.stop()
@@ -651,7 +658,7 @@ class _FakeUringRing:
 
 
 class _DeferredUringRing(_FakeUringRing):
-    def submit_recv(self, fd: int, n: int, user_data: int) -> None:
+    def submit_recv(self, fd: int, n: int, user_data: object = None) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_recv.append((fd, n, user_data))
@@ -696,34 +703,59 @@ class TestUringProactor:
         try:
             proactor.set_clock(lambda: 100.0)
 
-            assert proactor.wait(100.0) == []
-            assert proactor.wait(None) == []
+            proactor.wait(100.0)
+            proactor.wait(None)
         finally:
             proactor.close()
 
     def test_break_wait_releases_blocking_wait(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
-        result: list[list[Operation[object]]] = []
-        thread = threading.Thread(target=lambda: result.append(proactor.wait(proactor.get_time() + 10.0)))
+        released = threading.Event()
+        thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
         try:
             thread.start()
             proactor.break_wait()
             thread.join(1.0)
 
             assert thread.is_alive() is False
-            assert result == [[]]
+            assert released.is_set()
         finally:
             proactor.close()
 
+    def test_break_wait_coalesces_until_wait_consumes_it(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        released = threading.Event()
+        try:
+            reader.setblocking(False)
+            proactor.recv(reader, 5)
+            proactor.break_wait()
+            proactor.break_wait()
+
+            proactor.wait(proactor.get_time() + 1.0)
+            thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
+            thread.start()
+            thread.join(0.05)
+            assert thread.is_alive() is True
+
+            proactor.break_wait()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert released.is_set()
+        finally:
+            proactor.close()
+            reader.close()
+            writer.close()
+
     def test_wait_async_respects_deadline(self):
-        async def run() -> list[Operation[object]]:
+        async def run() -> None:
             proactor = UringProactor(ring_factory=_FakeUringRing)
             try:
-                return await proactor.wait_async(proactor.get_time())
+                await proactor.wait_async(proactor.get_time())
             finally:
                 proactor.close()
 
-        assert asyncio.run(run()) == []
+        asyncio.run(run())
 
     def test_break_wait_wakes_proactor_waiters_without_ring_wakeup(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -747,7 +779,7 @@ class TestUringProactor:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
 
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == b"hello"
             assert callback_called.wait(1.0) is True
         finally:
@@ -788,7 +820,7 @@ class TestUringProactor:
                 thread = threading.Thread(target=created[0].complete_recv)
                 thread.start()
 
-                assert await asyncio.wait_for(waiter, 1.0) == [operation]
+                await asyncio.wait_for(waiter, 1.0)
                 thread.join(1.0)
                 assert thread.is_alive() is False
                 assert call_soon_threadsafe_calls
@@ -807,7 +839,7 @@ class TestUringProactor:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
 
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == b"hello"
         finally:
             reader.close()
@@ -822,7 +854,7 @@ class TestUringProactor:
             payload = b"hello"
             operation = proactor.sendall(writer, payload)
 
-            assert proactor.wait(proactor.get_time() + 1.0) == [operation]
+            proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_send[0][1]
