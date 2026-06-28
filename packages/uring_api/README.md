@@ -158,33 +158,34 @@ The intended baseline is simple:
     `submit_connect()`, and `break_wait()`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
-- alternatively, `Ring.callback` plus `start()` can run native delivery worker
-    threads that wait for completions and call the callback directly.
+- alternatively, callers may start their own Python threads and have each one
+    call `serve_completions()` to wait for completions and call the callback
+    directly.
 
 `break_wait()` prepares and submits an internal NOP. When the reaper consumes that
 completion, `wait()` returns `None` rather than a user completion.
 
-The delivery workers use the same receive side as `wait()`, so public `wait()`
-calls raise `RuntimeError` while they are running. `start(workers=1,
-priority=uring_api.DELIVERY_PRIORITY_ABOVE_NORMAL)` starts one or more detached
-pthread workers. Workers compete for an internal wait lock, so only one worker is
-inside `io_uring_wait_cqe()` at a time, while another worker can dispatch a
-completion callback. The priority value is best effort: positive values try to
-move the worker to `SCHED_RR` with the corresponding pthread priority, but Linux
-may ignore or reject that without elevated privileges. Use
-`DELIVERY_PRIORITY_NORMAL` to leave the scheduler policy unchanged.
+Serving workers use the same receive side as `wait()`, so public `wait()` calls
+raise `RuntimeError` while they are running. Each worker calls
+`serve_completions()`, then loops until `stop_serving()` asks the service to
+exit. Workers compete for an internal wait lock, so only one worker is inside
+`io_uring_wait_cqe()` at a time, while another worker can dispatch a completion
+callback.
 
-`stop()` asks the workers to exit, wakes the active waiter with `break_wait()`,
-and waits until they have stopped. `close()` does the same before closing the
-ring. If a callback raises, the exception is reported as unraisable and the
-worker group exits.
+`stop_serving()` asks workers to exit and wakes the active waiter with
+`break_wait()`. The caller owns the threads, so the caller must join them before
+closing the ring; `close()` and `__exit__()` raise while completion service is
+still active. `reset_serving()` clears the stop flag so a fresh set of workers
+can enter `serve_completions()` again. If a callback raises, the exception is
+reported as unraisable and the worker group exits.
 
 Native C clients can register a worker-thread callback through the C API. When a
-C callback is present, the delivery worker calls it instead of `Ring.callback`;
+C callback is present, the serving worker calls it instead of `Ring.callback`;
 otherwise it falls back to the Python callback property.
 
 ```python
 import uring_api
+import threading
 
 
 def delivered(completion):
@@ -193,11 +194,15 @@ def delivered(completion):
 
 with uring_api.Ring() as ring:
     ring.callback = delivered
-    ring.start(workers=2)
+    threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+    for thread in threads:
+        thread.start()
     try:
         ring.submit_recv(fd, bytearray(4096), 200)
     finally:
-        ring.stop()
+        ring.stop_serving()
+        for thread in threads:
+            thread.join()
 ```
 
 `close()` is still an owner-coordinated shutdown operation for submissions. Do
@@ -220,8 +225,9 @@ The capsule currently exposes:
     `ring_submit_send()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
     `ring_submit_accept()`, `ring_submit_connect()`, `ring_break_wait()`, and
     `ring_wait()`;
-- `ring_set_callback()`, `ring_set_c_callback()`, `ring_start(ring, workers,
-    priority)`, and `ring_stop()` for delivery-worker control;
+- `ring_set_callback()`, `ring_set_c_callback()`, `ring_serve_completions()`,
+    `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
+    control;
 - `completion_check()`, `completion_user_data()`, `completion_res()`,
     `completion_flags()`, and `completion_result()` for native completion
     inspection.
@@ -231,7 +237,7 @@ describes the capsule API surface, not runtime kernel support for individual
 operations. Use `probe()` to check whether this process can create a ring. A C
 completion callback receives the ring object, the completion object, and the
 supplied `user_data`. Return `0` for success; return a negative value with a
-Python exception set to report an unraisable error and stop the delivery worker group.
+Python exception set to report an unraisable error and stop the serving worker group.
 
 ## Choosing Ring Sizes
 

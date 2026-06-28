@@ -11,15 +11,11 @@
 
 #include <stdint.h>
 
-#define URING_API_CAPI_ABI_VERSION 3u
+#define URING_API_CAPI_ABI_VERSION 4u
 #define URING_API_CAPI_CAPSULE_NAME "_uring_api._C_API"
 
 /* Feature flags published in UringApi_CAPI.feature_flags. */
 #define URING_API_CAPI_FEATURE_CORE (1ull << 0)
-
-/* Best-effort delivery worker priority values accepted by ring_start(). */
-#define URING_API_DELIVERY_PRIORITY_NORMAL 0
-#define URING_API_DELIVERY_PRIORITY_ABOVE_NORMAL 1
 
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completion, void *user_data);
 
@@ -56,11 +52,12 @@ typedef struct UringApi_CAPI {
     int (*ring_break_wait)(PyObject *ring);
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
-    /* Callback thread control. C callback is preferred over Python callback when both are set. */
+    /* Completion service control. C callback is preferred over Python callback when both are set. */
     int (*ring_set_callback)(PyObject *ring, PyObject *callback);
     int (*ring_set_c_callback)(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data);
-    int (*ring_start)(PyObject *ring, unsigned int workers, int priority);
-    int (*ring_stop)(PyObject *ring);
+    int (*ring_serve_completions)(PyObject *ring);
+    int (*ring_stop_serving)(PyObject *ring);
+    int (*ring_reset_serving)(PyObject *ring);
 
     /* Completion helpers. Return borrowed scalars via output pointers and new references for PyObject *. */
     int (*completion_check)(PyObject *completion);

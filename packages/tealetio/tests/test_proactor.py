@@ -607,8 +607,9 @@ class _FakeUringRing:
         self.closed = False
         self.running = False
         self.callback = None
-        self.start_count = 0
-        self.stop_count = 0
+        self.serve_count = 0
+        self.stop_serving_count = 0
+        self._stop_serving_event = threading.Event()
         self.break_count = 0
         self.completions: list[SimpleNamespace] = []
         self.accepted_peers: list[socket.socket] = []
@@ -620,21 +621,26 @@ class _FakeUringRing:
         self.submitted_connect: list[tuple[int, object, object]] = []
 
     def close(self) -> None:
-        self.stop()
+        self.stop_serving()
         for peer in self.accepted_peers:
             peer.close()
         self.accepted_peers.clear()
         self.closed = True
 
-    def start(self) -> None:
+    def serve_completions(self) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.running = True
-        self.start_count += 1
-
-    def stop(self) -> None:
+        self.serve_count += 1
+        self._stop_serving_event.wait()
         self.running = False
-        self.stop_count += 1
+
+    def stop_serving(self) -> None:
+        self._stop_serving_event.set()
+        self.stop_serving_count += 1
+
+    def reset_serving(self) -> None:
+        self._stop_serving_event.clear()
 
     def break_wait(self) -> None:
         if self.closed:

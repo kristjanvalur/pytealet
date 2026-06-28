@@ -6,9 +6,7 @@
 #include <liburing.h>
 #include <limits.h>
 #include <netinet/in.h>
-#include <pthread.h>
 #include <pythread.h>
-#include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -45,12 +43,8 @@ typedef struct {
     UringApi_CCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;
     UringApiMutex receive_mutex;
-    PyThread_type_lock delivery_done_lock;
     PyThread_type_lock delivery_wait_lock;
-    pthread_t *delivery_threads;
-    unsigned int delivery_worker_count;
     unsigned int delivery_active_workers;
-    int delivery_priority;
     unsigned int receive_state;
     bool delivery_stop_requested;
     bool initialized;
@@ -116,8 +110,9 @@ static int UringApiCapi_RingBreakWait(PyObject *ring);
 static PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
 static int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
 static int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data);
-static int UringApiCapi_RingStart(PyObject *ring, unsigned int workers, int priority);
-static int UringApiCapi_RingStop(PyObject *ring);
+static int UringApiCapi_RingServeCompletions(PyObject *ring);
+static int UringApiCapi_RingStopServing(PyObject *ring);
+static int UringApiCapi_RingResetServing(PyObject *ring);
 static int UringApiCapi_CompletionCheck(PyObject *completion);
 static PyObject *UringApiCapi_CompletionUserData(PyObject *completion);
 static int UringApiCapi_CompletionRes(PyObject *completion, int *value);
@@ -519,11 +514,11 @@ static int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     if (from_delivery_thread) {
         if (self->receive_state != URING_API_RECEIVE_DELIVERING) {
-            PyErr_SetString(PyExc_RuntimeError, "delivery thread is not active");
+            PyErr_SetString(PyExc_RuntimeError, "completion service is not active");
             ret = -1;
         }
     } else if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
-        PyErr_SetString(PyExc_RuntimeError, "delivery thread is active");
+        PyErr_SetString(PyExc_RuntimeError, "completion service is active");
         ret = -1;
     } else if (self->receive_state != URING_API_RECEIVE_IDLE) {
         PyErr_SetString(PyExc_RuntimeError, "another wait is already active");
@@ -557,63 +552,27 @@ static bool delivery_is_running_locked(UringApiRing *self) {
     return self->receive_state == URING_API_RECEIVE_DELIVERING;
 }
 
-static bool delivery_is_current_worker_locked(UringApiRing *self) {
-    pthread_t current = pthread_self();
-    unsigned int index;
+static int delivery_check_not_running(UringApiRing *self) {
+    int ret = 0;
 
-    for (index = 0; index < self->delivery_worker_count; index++) {
-        if (pthread_equal(self->delivery_threads[index], current)) {
-            return true;
-        }
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    if (delivery_is_running_locked(self)) {
+        PyErr_SetString(PyExc_RuntimeError, "completion service is active");
+        ret = -1;
     }
-    return false;
+    Py_END_CRITICAL_SECTION();
+    return ret;
 }
 
 static void delivery_mark_exited(UringApiRing *self) {
-    PyThread_type_lock lock = NULL;
-    pthread_t *threads = NULL;
-
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     if (self->delivery_active_workers > 0) {
         self->delivery_active_workers--;
     }
     if (self->delivery_active_workers == 0 && self->receive_state == URING_API_RECEIVE_DELIVERING) {
         self->receive_state = URING_API_RECEIVE_IDLE;
-        self->delivery_stop_requested = false;
-        self->delivery_worker_count = 0;
-        self->delivery_priority = URING_API_DELIVERY_PRIORITY_NORMAL;
-        threads = self->delivery_threads;
-        self->delivery_threads = NULL;
-        lock = self->delivery_done_lock;
     }
     Py_END_CRITICAL_SECTION();
-
-    PyMem_Free(threads);
-    if (lock) {
-        PyThread_release_lock(lock);
-    }
-}
-
-static void delivery_apply_thread_priority(pthread_t thread, int priority) {
-    struct sched_param param;
-    int min_priority;
-    int max_priority;
-
-    if (priority <= URING_API_DELIVERY_PRIORITY_NORMAL) {
-        return;
-    }
-
-    min_priority = sched_get_priority_min(SCHED_RR);
-    max_priority = sched_get_priority_max(SCHED_RR);
-    if (min_priority < 0 || max_priority < min_priority) {
-        return;
-    }
-
-    param.sched_priority = min_priority + priority - 1;
-    if (param.sched_priority > max_priority) {
-        param.sched_priority = max_priority;
-    }
-    (void)pthread_setschedparam(thread, SCHED_RR, &param);
 }
 
 static struct io_uring_sqe *get_sqe(UringApiRing *self) {
@@ -721,8 +680,9 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingWait,
     UringApiCapi_RingSetCallback,
     UringApiCapi_RingSetCCallback,
-    UringApiCapi_RingStart,
-    UringApiCapi_RingStop,
+    UringApiCapi_RingServeCompletions,
+    UringApiCapi_RingStopServing,
+    UringApiCapi_RingResetServing,
     UringApiCapi_CompletionCheck,
     UringApiCapi_CompletionUserData,
     UringApiCapi_CompletionRes,
@@ -751,13 +711,6 @@ static int uring_api_export_capi(PyObject *module) {
     if (module_add_uint64_constant(module, "C_API_FEATURES", URING_API_CAPI_FEATURES) < 0) {
         return -1;
     }
-    if (PyModule_AddIntConstant(module, "DELIVERY_PRIORITY_NORMAL", URING_API_DELIVERY_PRIORITY_NORMAL) < 0) {
-        return -1;
-    }
-    if (PyModule_AddIntConstant(module, "DELIVERY_PRIORITY_ABOVE_NORMAL",
-                                URING_API_DELIVERY_PRIORITY_ABOVE_NORMAL) < 0) {
-        return -1;
-    }
     return 0;
 }
 
@@ -771,7 +724,7 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
         return -1;
     }
 
-    if (UringApiRing_stop_delivery(self) < 0) {
+    if (delivery_check_not_running(self) < 0) {
         return -1;
     }
 
@@ -781,9 +734,7 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
     }
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
-    self->delivery_worker_count = 0;
     self->delivery_active_workers = 0;
-    self->delivery_priority = URING_API_DELIVERY_PRIORITY_NORMAL;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -814,21 +765,15 @@ static void UringApiRing_dealloc(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
-    if (self->delivery_done_lock) {
-        PyThread_free_lock(self->delivery_done_lock);
-        self->delivery_done_lock = NULL;
-    }
     if (self->delivery_wait_lock) {
         PyThread_free_lock(self->delivery_wait_lock);
         self->delivery_wait_lock = NULL;
     }
-    PyMem_Free(self->delivery_threads);
-    self->delivery_threads = NULL;
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
-    if (UringApiRing_stop_delivery(self) < 0) {
+    if (delivery_check_not_running(self) < 0) {
         return NULL;
     }
     if (self->initialized) {
@@ -837,9 +782,7 @@ static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(igno
     }
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
-    self->delivery_worker_count = 0;
     self->delivery_active_workers = 0;
-    self->delivery_priority = URING_API_DELIVERY_PRIORITY_NORMAL;
     Py_RETURN_NONE;
 }
 
@@ -849,7 +792,7 @@ static PyObject *UringApiRing_enter(UringApiRing *self, PyObject *Py_UNUSED(igno
 }
 
 static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) {
-    if (UringApiRing_stop_delivery(self) < 0) {
+    if (delivery_check_not_running(self) < 0) {
         return NULL;
     }
     if (self->initialized) {
@@ -858,9 +801,7 @@ static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) {
     }
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
-    self->delivery_worker_count = 0;
     self->delivery_active_workers = 0;
-    self->delivery_priority = URING_API_DELIVERY_PRIORITY_NORMAL;
     Py_RETURN_NONE;
 }
 
@@ -1196,24 +1137,15 @@ static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED
 }
 
 static int UringApiRing_stop_delivery(UringApiRing *self) {
-    PyThread_type_lock lock = NULL;
     PyObject *wakeup = NULL;
     bool running;
-    bool same_thread;
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     running = delivery_is_running_locked(self);
-    same_thread = running && delivery_is_current_worker_locked(self);
-    if (running) {
-        self->delivery_stop_requested = true;
-        lock = self->delivery_done_lock;
-    }
+    self->delivery_stop_requested = true;
     Py_END_CRITICAL_SECTION();
 
     if (!running) {
-        return 0;
-    }
-    if (same_thread) {
         return 0;
     }
 
@@ -1222,18 +1154,29 @@ static int UringApiRing_stop_delivery(UringApiRing *self) {
         return -1;
     }
     Py_DECREF(wakeup);
-
-    if (lock) {
-        Py_BEGIN_ALLOW_THREADS
-        PyThread_acquire_lock(lock, WAIT_LOCK);
-        Py_END_ALLOW_THREADS
-        PyThread_release_lock(lock);
-    }
     return 0;
 }
 
-static PyObject *UringApiRing_stop(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+static PyObject *UringApiRing_stop_serving(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     if (UringApiRing_stop_delivery(self) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    int failed = 0;
+
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    if (delivery_is_running_locked(self)) {
+        PyErr_SetString(PyExc_RuntimeError, "completion service is active");
+        failed = 1;
+    } else {
+        self->delivery_stop_requested = false;
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -1406,9 +1349,40 @@ static void delivery_request_stop_and_wake(UringApiRing *self) {
     Py_DECREF(wakeup);
 }
 
-static void *UringApiRing_delivery_thread(void *arg) {
-    UringApiRing *self = (UringApiRing *)arg;
-    PyGILState_STATE gil_state = PyGILState_Ensure();
+static PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    PyThread_type_lock wait_lock = NULL;
+    bool failed = false;
+    bool wait_failed = false;
+
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    if (!self->initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        failed = true;
+    } else if (!self->delivery_callback && !self->c_delivery_callback) {
+        PyErr_SetString(PyExc_RuntimeError, "delivery callback is not set");
+        failed = true;
+    } else if (self->receive_state != URING_API_RECEIVE_IDLE && self->receive_state != URING_API_RECEIVE_DELIVERING) {
+        PyErr_SetString(PyExc_RuntimeError, "another wait is already active");
+        failed = true;
+    } else {
+        if (!self->delivery_wait_lock) {
+            self->delivery_wait_lock = PyThread_allocate_lock();
+        }
+        if (!self->delivery_wait_lock) {
+            PyErr_NoMemory();
+            failed = true;
+        } else {
+            wait_lock = self->delivery_wait_lock;
+            self->receive_state = URING_API_RECEIVE_DELIVERING;
+            self->delivery_active_workers++;
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        return NULL;
+    }
+    (void)wait_lock;
 
     while (!delivery_should_stop(self)) {
         UringApi_CCompletionCallback c_callback;
@@ -1416,8 +1390,8 @@ static void *UringApiRing_delivery_thread(void *arg) {
         PyObject *result = UringApiRing_wait_impl(self, 0, NULL, true);
 
         if (!result) {
-            PyErr_WriteUnraisable((PyObject *)self);
             delivery_request_stop(self);
+            wait_failed = true;
             break;
         }
         if (result == Py_None) {
@@ -1455,132 +1429,7 @@ static void *UringApiRing_delivery_thread(void *arg) {
     }
 
     delivery_mark_exited(self);
-    Py_DECREF(self);
-    PyGILState_Release(gil_state);
-    return NULL;
-}
-
-static PyObject *UringApiRing_start(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"workers", "priority", NULL};
-    PyThread_type_lock lock = NULL;
-    bool allocated_lock = false;
-    bool allocated_wait_lock = false;
-    bool failed = false;
-    pthread_t *threads = NULL;
-    pthread_attr_t attr;
-    unsigned int workers = 1;
-    unsigned int started = 0;
-    int priority = URING_API_DELIVERY_PRIORITY_ABOVE_NORMAL;
-    int attr_initialized = 0;
-    int thread_ret = 0;
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|Ii:start", keywords, &workers, &priority)) {
-        return NULL;
-    }
-    if (workers == 0) {
-        PyErr_SetString(PyExc_ValueError, "workers must be at least 1");
-        return NULL;
-    }
-    if (priority < URING_API_DELIVERY_PRIORITY_NORMAL) {
-        PyErr_SetString(PyExc_ValueError, "priority must be non-negative");
-        return NULL;
-    }
-    threads = PyMem_Calloc(workers, sizeof(pthread_t));
-    if (!threads) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    if (pthread_attr_init(&attr) == 0) {
-        attr_initialized = 1;
-        (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    }
-
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
-    if (!self->initialized) {
-        PyErr_SetString(PyExc_RuntimeError, "ring is closed");
-        failed = true;
-    } else if (!self->delivery_callback && !self->c_delivery_callback) {
-        PyErr_SetString(PyExc_RuntimeError, "delivery callback is not set");
-        failed = true;
-    } else if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
-        PyErr_SetString(PyExc_RuntimeError, "delivery thread is already running");
-        failed = true;
-    } else if (self->receive_state != URING_API_RECEIVE_IDLE) {
-        PyErr_SetString(PyExc_RuntimeError, "another wait is already active");
-        failed = true;
-    } else {
-        if (!self->delivery_done_lock) {
-            self->delivery_done_lock = PyThread_allocate_lock();
-            allocated_lock = true;
-        }
-        if (!self->delivery_wait_lock) {
-            self->delivery_wait_lock = PyThread_allocate_lock();
-            allocated_wait_lock = true;
-        }
-        if (!self->delivery_done_lock || !self->delivery_wait_lock) {
-            PyErr_NoMemory();
-            failed = true;
-        } else {
-            lock = self->delivery_done_lock;
-            PyThread_acquire_lock(lock, WAIT_LOCK);
-        }
-    }
-    if (!failed) {
-        self->receive_state = URING_API_RECEIVE_DELIVERING;
-        self->delivery_stop_requested = false;
-        self->delivery_threads = threads;
-        self->delivery_worker_count = workers;
-        self->delivery_active_workers = 0;
-        self->delivery_priority = priority;
-        threads = NULL;
-        while (started < workers) {
-            Py_INCREF(self);
-            thread_ret = pthread_create(&self->delivery_threads[started], attr_initialized ? &attr : NULL,
-                                        UringApiRing_delivery_thread, self);
-            if (thread_ret != 0) {
-                Py_DECREF(self);
-                self->delivery_stop_requested = true;
-                self->delivery_worker_count = started;
-                errno = thread_ret;
-                PyErr_SetFromErrno(PyExc_OSError);
-                failed = true;
-                break;
-            }
-            delivery_apply_thread_priority(self->delivery_threads[started], priority);
-            self->delivery_active_workers++;
-            started++;
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (attr_initialized) {
-        (void)pthread_attr_destroy(&attr);
-    }
-    PyMem_Free(threads);
-
-    if (failed) {
-        if (started == 0 && lock) {
-            Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
-            self->receive_state = URING_API_RECEIVE_IDLE;
-            self->delivery_stop_requested = false;
-            self->delivery_worker_count = 0;
-            self->delivery_active_workers = 0;
-            self->delivery_priority = URING_API_DELIVERY_PRIORITY_NORMAL;
-            PyMem_Free(self->delivery_threads);
-            self->delivery_threads = NULL;
-            Py_END_CRITICAL_SECTION();
-            PyThread_release_lock(lock);
-        } else if (started > 0) {
-            (void)UringApiRing_stop_delivery(self);
-        }
-        if (allocated_lock && self->delivery_done_lock && started == 0) {
-            PyThread_free_lock(self->delivery_done_lock);
-            self->delivery_done_lock = NULL;
-        }
-        if (allocated_wait_lock && self->delivery_wait_lock && started == 0) {
-            PyThread_free_lock(self->delivery_wait_lock);
-            self->delivery_wait_lock = NULL;
-        }
+    if (wait_failed) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -1591,7 +1440,7 @@ static int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApi_CComple
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     if (delivery_is_running_locked(self)) {
-        PyErr_SetString(PyExc_RuntimeError, "cannot change callback while delivery thread is running");
+        PyErr_SetString(PyExc_RuntimeError, "cannot change callback while completion service is active");
         ret = -1;
     } else {
         self->c_delivery_callback = callback;
@@ -1689,7 +1538,7 @@ static int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *
     callback = value == Py_None ? NULL : Py_NewRef(value);
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     if (delivery_is_running_locked(self)) {
-        PyErr_SetString(PyExc_RuntimeError, "cannot change callback while delivery thread is running");
+        PyErr_SetString(PyExc_RuntimeError, "cannot change callback while completion service is active");
         ret = -1;
     } else {
         old_callback = self->delivery_callback;
@@ -1901,12 +1750,12 @@ static int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCal
     return UringApiRing_set_c_callback_impl((UringApiRing *)ring, callback, user_data);
 }
 
-static int UringApiCapi_RingStart(PyObject *ring, unsigned int workers, int priority) {
+static int UringApiCapi_RingServeCompletions(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = PyObject_CallMethod(ring, "start", "Ii", workers, priority);
+    result = UringApiRing_serve_completions((UringApiRing *)ring, NULL);
     if (!result) {
         return -1;
     }
@@ -1914,12 +1763,25 @@ static int UringApiCapi_RingStart(PyObject *ring, unsigned int workers, int prio
     return 0;
 }
 
-static int UringApiCapi_RingStop(PyObject *ring) {
+static int UringApiCapi_RingStopServing(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = UringApiRing_stop((UringApiRing *)ring, NULL);
+    result = UringApiRing_stop_serving((UringApiRing *)ring, NULL);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static int UringApiCapi_RingResetServing(PyObject *ring) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = UringApiRing_reset_serving((UringApiRing *)ring, NULL);
     if (!result) {
         return -1;
     }
@@ -1969,9 +1831,11 @@ static PyObject *UringApiCapi_CompletionResult(PyObject *completion) {
 
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
-    {"start", _PyCFunction_CAST(UringApiRing_start), METH_VARARGS | METH_KEYWORDS,
-     "Start delivery callback worker threads."},
-    {"stop", (PyCFunction)UringApiRing_stop, METH_NOARGS, "Stop the delivery callback thread."},
+    {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
+     "Serve completions until stop_serving is called."},
+    {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
+    {"reset_serving", (PyCFunction)UringApiRing_reset_serving, METH_NOARGS,
+     "Clear the completion service stop flag."},
     {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
      "Submit a recv operation."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_VARARGS | METH_KEYWORDS,

@@ -22,6 +22,13 @@ def require_uring():
         pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
 
 
+def wait_until_running(ring: uring_api.Ring) -> None:
+    deadline = time.monotonic() + 1.0
+    while not ring.running and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ring.running
+
+
 def connect_to_listener(server: socket.socket) -> socket.socket:
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client.setblocking(False)
@@ -43,11 +50,9 @@ def test_uring_api_get_include_points_to_header_dir():
 
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 3
+    assert uring_api.C_API_ABI_VERSION == 4
     assert uring_api.C_API_FEATURE_CORE == 1 << 0
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
-    assert uring_api.DELIVERY_PRIORITY_NORMAL == 0
-    assert uring_api.DELIVERY_PRIORITY_ABOVE_NORMAL > uring_api.DELIVERY_PRIORITY_NORMAL
 
 
 def test_probe_returns_structured_result():
@@ -183,7 +188,8 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
         with uring_api.Ring() as ring:
             client.set_c_callback(ring, c_deliveries)
             ring.callback = python_deliveries.append
-            ring.start()
+            thread = threading.Thread(target=client.serve_completions, args=(ring,))
+            thread.start()
             try:
                 buf = bytearray(4)
                 ring.submit_recv(reader.fileno(), buf, 220)
@@ -192,7 +198,9 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
                 while len(c_deliveries) < 2 and time.monotonic() < deadline:
                     time.sleep(0.01)
             finally:
-                ring.stop()
+                client.stop_serving(ring)
+                thread.join(1.0)
+                assert not thread.is_alive()
                 client.clear_c_callback(ring)
 
         by_user_data = {completion.user_data: completion for completion in c_deliveries}
@@ -585,7 +593,7 @@ def test_ring_rejects_concurrent_wait_when_available():
     assert results == [None]
 
 
-def test_ring_delivery_thread_invokes_callback_when_available():
+def test_ring_serve_completions_invokes_callback_when_available():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -597,10 +605,11 @@ def test_ring_delivery_thread_invokes_callback_when_available():
 
         with uring_api.Ring() as ring:
             ring.callback = lambda completion: (completions.append(completion), delivered.set())
-            ring.start()
-            assert ring.running
+            thread = threading.Thread(target=ring.serve_completions)
+            thread.start()
+            wait_until_running(ring)
 
-            with pytest.raises(RuntimeError, match="delivery thread is active"):
+            with pytest.raises(RuntimeError, match="completion service is active"):
                 ring.wait(0)
 
             buf = bytearray(5)
@@ -608,12 +617,18 @@ def test_ring_delivery_thread_invokes_callback_when_available():
             writer.send(b"hello")
             assert delivered.wait(1.0)
 
-            ring.stop()
+            ring.stop_serving()
+            thread.join(1.0)
+            assert not thread.is_alive()
             assert not ring.running
 
-            ring.start()
-            assert ring.running
-            ring.stop()
+            ring.reset_serving()
+            thread = threading.Thread(target=ring.serve_completions)
+            thread.start()
+            wait_until_running(ring)
+            ring.stop_serving()
+            thread.join(1.0)
+            assert not thread.is_alive()
             assert not ring.running
 
         assert completions
@@ -626,7 +641,7 @@ def test_ring_delivery_thread_invokes_callback_when_available():
         writer.close()
 
 
-def test_ring_delivery_thread_delivers_socketpair_round_trip_when_available():
+def test_ring_serve_completions_delivers_socketpair_round_trip_when_available():
     require_uring()
 
     left, right = socket.socketpair()
@@ -643,13 +658,16 @@ def test_ring_delivery_thread_delivers_socketpair_round_trip_when_available():
 
         with uring_api.Ring() as ring:
             ring.callback = callback
-            ring.start()
+            thread = threading.Thread(target=ring.serve_completions)
+            thread.start()
             recv_buf = bytearray(4)
             ring.submit_recv(left.fileno(), recv_buf, 132)
             ring.submit_send(right.fileno(), b"pong", 133)
 
             assert delivered.wait(1.0)
-            ring.stop()
+            ring.stop_serving()
+            thread.join(1.0)
+            assert not thread.is_alive()
 
         by_user_data = {completion.user_data: completion for completion in completions}
         assert by_user_data[132].res == 4
@@ -662,7 +680,7 @@ def test_ring_delivery_thread_delivers_socketpair_round_trip_when_available():
         right.close()
 
 
-def test_ring_delivery_threads_can_dispatch_while_another_callback_blocks_when_available():
+def test_ring_serving_workers_can_dispatch_while_another_callback_blocks_when_available():
     require_uring()
 
     left, right = socket.socketpair()
@@ -688,7 +706,9 @@ def test_ring_delivery_threads_can_dispatch_while_another_callback_blocks_when_a
 
         with uring_api.Ring() as ring:
             ring.callback = callback
-            ring.start(workers=2, priority=uring_api.DELIVERY_PRIORITY_NORMAL)
+            threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+            for thread in threads:
+                thread.start()
             first_buf = bytearray(1)
             second_buf = bytearray(1)
             ring.submit_recv(left.fileno(), first_buf, 140)
@@ -697,7 +717,10 @@ def test_ring_delivery_threads_can_dispatch_while_another_callback_blocks_when_a
 
             assert first_callback_blocking.wait(1.0)
             assert delivered_two.wait(1.0)
-            ring.stop()
+            ring.stop_serving()
+            for thread in threads:
+                thread.join(1.0)
+                assert not thread.is_alive()
 
         by_user_data = {completion.user_data: completion for completion in completions}
         assert by_user_data[140].result == 1
@@ -709,7 +732,7 @@ def test_ring_delivery_threads_can_dispatch_while_another_callback_blocks_when_a
         right.close()
 
 
-def test_ring_delivery_thread_writes_unraisable_and_exits_when_callback_fails():
+def test_ring_serve_completions_writes_unraisable_and_exits_when_callback_fails():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -730,12 +753,14 @@ def test_ring_delivery_thread_writes_unraisable_and_exits_when_callback_fails():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             ring.callback = fail_callback
-            ring.start()
+            thread = threading.Thread(target=ring.serve_completions)
+            thread.start()
             ring.submit_recv(reader.fileno(), bytearray(1), 126)
             writer.send(b"x")
 
             assert unraisable.wait(1.0)
-            ring.stop()
+            thread.join(1.0)
+            assert not thread.is_alive()
             assert not ring.running
 
         assert reports == [ring]
@@ -764,33 +789,48 @@ def test_ring_callback_property_validation_when_available():
             del ring.callback
 
 
-def test_ring_delivery_thread_requires_callback_when_available():
+def test_ring_serve_completions_requires_callback_when_available():
     require_uring()
 
     with uring_api.Ring() as ring:
         with pytest.raises(RuntimeError, match="delivery callback is not set"):
-            ring.start()
+            ring.serve_completions()
 
 
-def test_ring_start_validates_worker_count_and_priority_when_available():
+def test_ring_reset_serving_clears_stop_flag_when_available():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        calls = 0
+
+        def callback(completion):
+            nonlocal calls
+            calls += 1
+
+        ring.callback = callback
+        ring.stop_serving()
+        ring.serve_completions()
+        assert calls == 0
+        ring.reset_serving()
+        thread = threading.Thread(target=ring.serve_completions)
+        thread.start()
+        wait_until_running(ring)
+        ring.stop_serving()
+        thread.join(1.0)
+        assert not thread.is_alive()
+
+
+def test_ring_rejects_callback_change_while_completion_service_runs_when_available():
     require_uring()
 
     with uring_api.Ring() as ring:
         ring.callback = lambda completion: None
-        with pytest.raises(ValueError, match="workers must be at least 1"):
-            ring.start(workers=0)
-        with pytest.raises(ValueError, match="priority must be non-negative"):
-            ring.start(priority=-1)
-
-
-def test_ring_rejects_callback_change_while_delivery_thread_runs_when_available():
-    require_uring()
-
-    with uring_api.Ring() as ring:
-        ring.callback = lambda completion: None
-        ring.start()
+        thread = threading.Thread(target=ring.serve_completions)
+        thread.start()
         try:
-            with pytest.raises(RuntimeError, match="cannot change callback while delivery thread is running"):
+            with pytest.raises(RuntimeError, match="cannot change callback while completion service is active"):
                 ring.callback = lambda completion: None
         finally:
-            ring.stop()
+            ring.stop_serving()
+            thread.join(1.0)
+            assert not thread.is_alive()

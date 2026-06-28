@@ -58,9 +58,11 @@ class _UringRing(Protocol):
 
     def close(self) -> None: ...
 
-    def start(self) -> None: ...
+    def serve_completions(self) -> None: ...
 
-    def stop(self) -> None: ...
+    def stop_serving(self) -> None: ...
+
+    def reset_serving(self) -> None: ...
 
     def break_wait(self) -> None: ...
 
@@ -808,7 +810,7 @@ class ThreadedSelectorProactor(SelectorProactor):
 
 
 class UringProactor(ProactorBase):
-    """io_uring-backed proactor using the ring's delivery callback thread."""
+    """io_uring-backed proactor using a Python-owned completion service thread."""
 
     def __init__(
         self,
@@ -828,9 +830,14 @@ class UringProactor(ProactorBase):
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
         self._async_wait_event: _asyncio.Event | None = None
         self._ring.callback = self._deliver_uring_completion
+        self._service_thread = threading.Thread(target=self._ring.serve_completions, name="tealetio-uring")
         try:
-            self._ring.start()
+            self._service_thread.start()
+            self._wait_until_service_started()
         except BaseException:
+            self._ring.stop_serving()
+            if self._service_thread.is_alive():
+                self._service_thread.join()
             self._ring.callback = None
             self._ring.close()
             raise
@@ -840,6 +847,13 @@ class UringProactor(ProactorBase):
         """Return the low-level `uring_api.Ring` object owned by this proactor."""
 
         return self._ring
+
+    def _wait_until_service_started(self) -> None:
+        deadline = time.monotonic() + 1.0
+        while not self._ring.running and self._service_thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.001)
+        if not self._ring.running:
+            raise RuntimeError("uring completion service failed to start")
 
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
@@ -852,7 +866,8 @@ class UringProactor(ProactorBase):
         if self._closed:
             return
         self._closed = True
-        self._ring.stop()
+        self._ring.stop_serving()
+        self._service_thread.join()
         self._pending_tokens.clear()
         self.break_wait()
         self._ring.callback = None
