@@ -27,6 +27,11 @@ def test_probe_returns_structured_result():
     assert isinstance(probe.sq_entries, int)
     assert isinstance(probe.cq_entries, int)
     assert probe.liburing_version
+    assert probe.compiled_liburing_version == uring_api.__compiled_liburing_version__
+    assert probe.compiled_liburing_version == uring_api.__liburing_version__
+    assert probe.compiled_liburing_version_info == uring_api.__compiled_liburing_version_info__
+    assert len(probe.compiled_liburing_version_info) == 2
+    assert all(isinstance(part, int) for part in probe.compiled_liburing_version_info)
     if probe.available:
         assert probe.errno is None
         assert probe.message is None

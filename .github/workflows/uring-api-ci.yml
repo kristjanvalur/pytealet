@@ -21,13 +21,13 @@ on:
 jobs:
   test:
     name: uring-api Linux tests (py${{ matrix.python-version }})
-    # io_uring is Linux-only. Keep this workflow on Linux runners; future CI can
-    # expand this axis to cover different kernel/io_uring support levels.
+    # io_uring is Linux-only. This job is the Python compatibility gate for the
+    # package on the newest hosted Ubuntu image.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.13t", "3.14", "3.14t", "3.15", "3.15t"]
 
     steps:
       - name: Check out repository
@@ -57,3 +57,112 @@ jobs:
         run: |
           source .venv/bin/activate
           uv run --active --package uring-api python -m pytest packages/uring_api/tests/ -v
+
+  linux-source-build:
+    name: uring-api source build and probe (${{ matrix.os }})
+    # Hosted runners give us distro/liburing variation, but not arbitrary old
+    # kernels. Add self-hosted or nested-VM jobs later if we need true old-kernel
+    # runtime coverage.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-latest]
+        python-version: ["3.14t"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install liburing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev
+          uname -a
+          apt-cache policy liburing-dev liburing2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Check uv lockfile
+        run: uv lock --check
+
+      - name: Install Python ${{ matrix.python-version }} with uv
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Build uring-api sdist
+        run: uv build --package uring-api --sdist --python ${{ matrix.python-version }} -o dist/sdist
+
+      - name: Install uring-api from source distribution
+        run: |
+          uv venv --python ${{ matrix.python-version }} .venv
+          source .venv/bin/activate
+          uv pip install dist/sdist/uring_api-*.tar.gz
+
+      - name: Report io_uring probe
+        run: |
+          source .venv/bin/activate
+          python - <<'PY'
+          import platform
+          import uring_api
+
+          probe = uring_api.probe()
+          print("python:", platform.python_version(), platform.python_implementation())
+          print("kernel:", platform.release())
+          print("liburing:", probe.liburing_version)
+          print("compiled liburing:", probe.compiled_liburing_version)
+          print("compiled liburing info:", probe.compiled_liburing_version_info)
+          print("available:", probe.available)
+          print("features:", probe.features)
+          print("sq_entries:", probe.sq_entries)
+          print("cq_entries:", probe.cq_entries)
+          print("errno:", probe.errno)
+          print("message:", probe.message)
+          assert isinstance(probe.available, bool)
+          assert isinstance(probe.features, int)
+          assert probe.liburing_version
+          assert probe.compiled_liburing_version == uring_api.__compiled_liburing_version__
+          assert probe.compiled_liburing_version == uring_api.__liburing_version__
+          assert probe.compiled_liburing_version_info == uring_api.__compiled_liburing_version_info__
+          if probe.available:
+              assert probe.errno is None
+              assert probe.message is None
+              assert probe.sq_entries > 0
+              assert probe.cq_entries > 0
+          else:
+              assert probe.errno is not None
+              assert probe.message
+          PY
+
+  non-linux-build-failure:
+    name: uring-api expected source build failure (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        python-version: ["3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python ${{ matrix.python-version }} with uv
+        shell: bash
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Verify uring-api build fails clearly
+        shell: bash
+        run: |
+          set +e
+          uv build --package uring-api --wheel --python ${{ matrix.python-version }} > build.log 2>&1
+          status=$?
+          cat build.log
+          if [ "$status" -eq 0 ]; then
+            echo "uring-api unexpectedly built on a non-Linux runner" >&2
+            exit 1
+          fi
+          grep -F "uring-api only builds on Linux" build.log

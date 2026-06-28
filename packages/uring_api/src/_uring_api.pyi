@@ -3,6 +3,8 @@ from collections.abc import Callable
 from typing import Any, TypedDict
 
 __liburing_version__: str
+__compiled_liburing_version__: str
+__compiled_liburing_version_info__: tuple[int, int]
 
 class Completion(TypedDict):
     user_data: int

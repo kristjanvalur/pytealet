@@ -82,6 +82,10 @@ static PyObject *liburing_version_string(void) {
     return PyUnicode_FromFormat("%d.%d", IO_URING_VERSION_MAJOR, IO_URING_VERSION_MINOR);
 }
 
+static PyObject *liburing_version_info(void) {
+    return Py_BuildValue("(ii)", IO_URING_VERSION_MAJOR, IO_URING_VERSION_MINOR);
+}
+
 static int dict_set_owned(PyObject *dict, const char *key, PyObject *value) {
     int ret;
     if (!value) {
@@ -328,7 +332,9 @@ static PyObject *build_probe_result(bool available, int errnum, const char *mess
         dict_set_owned(result, "features", PyLong_FromUnsignedLong(params ? params->features : 0)) < 0 ||
         dict_set_owned(result, "sq_entries", PyLong_FromUnsignedLong(params ? params->sq_entries : 0)) < 0 ||
         dict_set_owned(result, "cq_entries", PyLong_FromUnsignedLong(params ? params->cq_entries : 0)) < 0 ||
-        dict_set_owned(result, "liburing_version", liburing_version_string()) < 0) {
+        dict_set_owned(result, "liburing_version", liburing_version_string()) < 0 ||
+        dict_set_owned(result, "compiled_liburing_version", liburing_version_string()) < 0 ||
+        dict_set_owned(result, "compiled_liburing_version_info", liburing_version_info()) < 0) {
         Py_DECREF(result);
         return NULL;
     }
@@ -1054,7 +1060,9 @@ static PyMethodDef uring_api_methods[] = {
 };
 
 static int uring_api_exec(PyObject *module) {
+    PyObject *legacy_version = NULL;
     PyObject *version = NULL;
+    PyObject *version_info = NULL;
 
     if (PyType_Ready(&UringApiPending_Type) < 0) {
         return -1;
@@ -1068,12 +1076,30 @@ static int uring_api_exec(PyObject *module) {
         return -1;
     }
 
+    legacy_version = liburing_version_string();
+    if (!legacy_version) {
+        return -1;
+    }
+    if (PyModule_AddObject(module, "__liburing_version__", legacy_version) < 0) {
+        Py_DECREF(legacy_version);
+        return -1;
+    }
+
     version = liburing_version_string();
     if (!version) {
         return -1;
     }
-    if (PyModule_AddObject(module, "__liburing_version__", version) < 0) {
+    if (PyModule_AddObject(module, "__compiled_liburing_version__", version) < 0) {
         Py_DECREF(version);
+        return -1;
+    }
+
+    version_info = liburing_version_info();
+    if (!version_info) {
+        return -1;
+    }
+    if (PyModule_AddObject(module, "__compiled_liburing_version_info__", version_info) < 0) {
+        Py_DECREF(version_info);
         return -1;
     }
 

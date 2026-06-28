@@ -65,7 +65,8 @@ probe = uring_api.probe()
 
 if probe.available:
     print("io_uring is available")
-    print("liburing:", probe.liburing_version)
+    print("compiled liburing:", probe.compiled_liburing_version)
+    print("compiled liburing version info:", probe.compiled_liburing_version_info)
     print("features:", probe.features)
     print("sq entries:", probe.sq_entries)
     print("cq entries:", probe.cq_entries)
@@ -88,6 +89,11 @@ if not uring_api.is_available():
 startup diagnostics, but production code should still handle `OSError` when it
 creates the real ring because limits or sandbox policy may differ for larger
 settings.
+
+The compiled liburing version fields report the header version used to build the
+binary extension. This is useful in CI because Linux distribution images can
+compile the same Python package against different liburing development packages
+while still running on the hosted runner's kernel.
 
 ## Initialising a Ring
 
