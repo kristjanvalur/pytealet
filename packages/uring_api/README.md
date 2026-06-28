@@ -69,26 +69,18 @@ completions, then retry or let a higher-level proactor defer the submission.
 successfully. The kernel, container sandbox, seccomp profile, and process limits
 can all affect whether a ring can actually be created.
 
-Use `probe()` when you want the reason as well as the answer:
+Use `probe()` when you want a compact availability and capability dictionary:
 
 ```python
 import uring_api
 
 probe = uring_api.probe()
 
-if probe.available:
+if probe:
     print("io_uring is available")
-    print("compiled liburing:", probe.compiled_liburing_version)
-    print("compiled liburing version info:", probe.compiled_liburing_version_info)
-    print("features:", probe.features)
-    print("requested setup flags:", probe.requested_flags)
-    print("active setup flags:", probe.active_flags)
-    print("sq entries:", probe.sq_entries)
-    print("cq entries:", probe.cq_entries)
+    print("capabilities:", probe)
 else:
     print("io_uring is not available")
-    print("errno:", probe.errno)
-    print("message:", probe.message)
 ```
 
 Use `is_available()` when you only need a boolean:
@@ -100,9 +92,11 @@ if not uring_api.is_available():
     raise RuntimeError("io_uring is not available in this environment")
 ```
 
-`probe()` creates a tiny temporary ring and closes it right away. It is useful for
-startup diagnostics, but production code should still handle `OSError` when it
-creates the real ring because limits or sandbox policy may differ for larger
+`probe()` creates a tiny temporary ring and closes it right away. If that fails,
+it returns an empty dictionary. If it succeeds, the dictionary contains
+`"available": True` plus named optional capabilities such as
+`"IORING_ACCEPT_MULTISHOT"`. Production code should still handle `OSError` when
+it creates the real ring because limits or sandbox policy may differ for larger
 settings.
 
 Pass setup flags to `probe(flags=...)` to check whether this build and kernel
@@ -114,17 +108,15 @@ import uring_api
 flags = uring_api.IORING_SETUP_SINGLE_ISSUER
 probe = uring_api.probe(flags=flags)
 
-if probe.available:
-    assert probe.active_flags & flags == flags
+if probe:
+    print("setup flags accepted")
 else:
-    print("setup flags rejected:", probe.errno, probe.message)
+    print("setup flags rejected")
 ```
 
-`requested_flags` records the bitmask passed by the caller. `active_flags`
-records the flags reported by the successfully created temporary ring, or `0`
-when initialisation failed. Some flags also impose application-level contracts.
-For example, `IORING_SETUP_SINGLE_ISSUER` means callers must submit SQEs from a
-single owning thread even on kernels that reject or ignore the flag.
+Some flags also impose application-level contracts. For example,
+`IORING_SETUP_SINGLE_ISSUER` means callers must submit SQEs from a single owning
+thread even on kernels that accept the flag.
 
 The compiled liburing version fields report the header version used to build the
 binary extension. This is useful in CI because Linux distribution images can
@@ -132,9 +124,15 @@ compile the same Python package against different liburing development packages
 while still running on the hosted runner's kernel.
 
 If the native extension cannot be imported after installation, importing
-`uring_api` still succeeds and `probe()` reports `available=False` with a
-message describing the import problem. Source builds with unsupported native
-dependencies warn and install the pure Python wrapper without `_uring_api`.
+`uring_api` still succeeds and `probe()` returns `{}`. Source builds with
+unsupported native dependencies warn and install the pure Python wrapper without
+`_uring_api`.
+
+The `IORING_ACCEPT_MULTISHOT` capability uses a runtime operation probe rather
+than a kernel version check. It creates a private temporary ring and loopback
+listener, submits one multishot accept request, connects a local client, and
+checks whether the first accept completion keeps the request armed. If the build
+headers do not expose the helper flag, the capability simply reports `False`.
 
 ## Initialising a Ring
 
@@ -162,7 +160,7 @@ import uring_api
 
 flags = uring_api.IORING_SETUP_SINGLE_ISSUER
 
-if uring_api.probe(flags=flags).available:
+if uring_api.probe(flags=flags):
     with uring_api.Ring(entries=8, flags=flags) as ring:
         ...
 ```
@@ -267,8 +265,8 @@ The capsule currently exposes:
 - `abi_version`, `struct_size`, and `feature_flags` for compatibility checks;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
-- `probe(entries, flags)`, which returns a new reference to the same structured
-    dictionary as `_uring_api.probe()`;
+- `probe(entries, flags)`, which returns a new reference to the same flat
+    availability and capability dictionary as `_uring_api.probe()`;
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
     `ring_submit_send()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
     `ring_submit_accept()`, `ring_submit_connect()`, `ring_break_wait()`, and
@@ -282,10 +280,12 @@ The capsule currently exposes:
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual
-operations. Use `probe()` to check whether this process can create a ring. A C
-completion callback receives the ring object, the completion object, and the
-supplied `user_data`. Return `0` for success; return a negative value with a
-Python exception set to report an unraisable error and stop the serving worker group.
+operations. Use `probe()` to check whether this process can create a ring and to
+read runtime support for optional operation helpers from the returned flat
+dictionary. A C completion callback receives the ring object, the completion
+object, and the supplied `user_data`. Return `0` for success; return a negative
+value with a Python exception set to report an unraisable error and stop the
+serving worker group.
 
 ## Choosing Ring Sizes
 

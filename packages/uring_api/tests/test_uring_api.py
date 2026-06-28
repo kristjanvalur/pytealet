@@ -18,8 +18,8 @@ import uring_api
 
 def require_uring():
     probe = uring_api.probe()
-    if not probe.available:
-        pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
+    if not probe:
+        pytest.skip("io_uring is not available")
 
 
 def wait_until_running(ring: uring_api.Ring) -> None:
@@ -50,7 +50,7 @@ def test_uring_api_get_include_points_to_header_dir():
 
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 4
+    assert uring_api.C_API_ABI_VERSION == 1
     assert uring_api.C_API_FEATURE_CORE == 1 << 0
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
 
@@ -71,44 +71,25 @@ def test_native_module_exports_setup_flag_constants():
 def test_probe_returns_structured_result():
     probe = uring_api.probe()
 
-    assert isinstance(probe.available, bool)
-    assert isinstance(probe.features, int)
-    assert probe.requested_flags == uring_api.DEFAULT_FLAGS
-    assert isinstance(probe.active_flags, int)
-    assert isinstance(probe.sq_entries, int)
-    assert isinstance(probe.cq_entries, int)
-    assert probe.liburing_version
-    assert probe.compiled_liburing_version == uring_api.__compiled_liburing_version__
-    assert probe.compiled_liburing_version == uring_api.__liburing_version__
-    assert probe.compiled_liburing_version_info == uring_api.__compiled_liburing_version_info__
-    assert len(probe.compiled_liburing_version_info) == 2
-    assert all(isinstance(part, int) for part in probe.compiled_liburing_version_info)
-    assert probe.compiled_liburing_version_info >= (2, 4)
-    if probe.available:
-        assert probe.errno is None
-        assert probe.message is None
-        assert probe.sq_entries > 0
-        assert probe.cq_entries > 0
-    else:
-        assert probe.errno is not None
-        assert probe.message
+    assert set(probe) == {"available", "IORING_ACCEPT_MULTISHOT"}
+    assert probe["available"] is True
+    assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
 
 
 def test_probe_reports_requested_setup_flags():
     flags = uring_api.IORING_SETUP_SINGLE_ISSUER
     probe = uring_api.probe(flags=flags)
 
-    assert probe.requested_flags == flags
-    if probe.available:
-        assert probe.active_flags & flags == flags
+    if probe:
+        assert probe["available"] is True
 
 
 def test_ring_accepts_setup_flags_when_probe_accepts_them():
     require_uring()
     flags = uring_api.IORING_SETUP_SINGLE_ISSUER
     probe = uring_api.probe(flags=flags)
-    if not probe.available:
-        pytest.skip(f"setup flags are not accepted: errno={probe.errno} message={probe.message}")
+    if not probe:
+        pytest.skip("setup flags are not accepted")
 
     with uring_api.Ring(entries=2, flags=flags) as ring:
         assert ring.sq_entries > 0
@@ -135,10 +116,7 @@ sys.modules.pop("_uring_api", None)
 import uring_api
 
 probe = uring_api.probe()
-assert probe.available is False
-assert probe.errno == errno.ENOSYS
-assert probe.message and "simulated missing native extension" in probe.message
-assert probe.compiled_liburing_version_info == (0, 0)
+assert probe == {}
 assert uring_api.is_available() is False
 try:
     uring_api.Ring()
@@ -160,15 +138,15 @@ def test_c_api_client_can_import_capsule_and_probe():
     assert struct_size > 0
     assert feature_flags & uring_api.C_API_FEATURE_CORE
     assert (major, minor) == uring_api.__compiled_liburing_version_info__
-    assert isinstance(probe["available"], bool)
+    assert probe == uring_api.probe()
 
 
 def test_c_api_ring_new_accepts_setup_flags_when_probe_accepts_them():
     require_uring()
     flags = uring_api.IORING_SETUP_SINGLE_ISSUER
     probe = uring_api.probe(flags=flags)
-    if not probe.available:
-        pytest.skip(f"setup flags are not accepted: errno={probe.errno} message={probe.message}")
+    if not probe:
+        pytest.skip("setup flags are not accepted")
 
     client = build_c_api_client()
     ring_check, fd, _features, sq_entries, cq_entries, closed, running = client.ring_summary(flags)

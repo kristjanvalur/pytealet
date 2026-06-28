@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include "uring_api_capi.h"
 
@@ -90,6 +91,7 @@ static PyObject *UringApiSubmissionQueueFullError;
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
 static int UringApiRing_stop_delivery(UringApiRing *self);
 static bool delivery_should_stop(UringApiRing *self);
+static PyObject *build_capability_dict(void);
 
 static PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags);
 static int UringApiCapi_RingCheck(PyObject *ring);
@@ -206,6 +208,20 @@ static int dict_set_owned(PyObject *dict, const char *key, PyObject *value) {
     ret = PyDict_SetItemString(dict, key, value);
     Py_DECREF(value);
     return ret;
+}
+
+static PyObject *build_feature_probe_result(bool available, int errnum, const char *message) {
+    PyObject *result = PyDict_New();
+    if (!result) {
+        return NULL;
+    }
+    if (PyDict_SetItemString(result, "available", available ? Py_True : Py_False) < 0 ||
+        dict_set_owned(result, "errno", errnum ? PyLong_FromLong(errnum) : Py_NewRef(Py_None)) < 0 ||
+        dict_set_owned(result, "message", message ? PyUnicode_FromString(message) : Py_NewRef(Py_None)) < 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
 }
 
 static int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int default_entries, unsigned int *entries,
@@ -604,24 +620,18 @@ static struct io_uring_sqe *get_sqe(UringApiRing *self) {
     return sqe;
 }
 
-static PyObject *build_probe_result(bool available, int errnum, const char *message, unsigned int requested_flags,
-                                    unsigned int active_flags, struct io_uring_params *params) {
-    PyObject *result = PyDict_New();
+static PyObject *build_probe_result(bool available) {
+    PyObject *result;
+
+    if (!available) {
+        return PyDict_New();
+    }
+
+    result = build_capability_dict();
     if (!result) {
         return NULL;
     }
-
-    if (PyDict_SetItemString(result, "available", available ? Py_True : Py_False) < 0 ||
-        dict_set_owned(result, "errno", errnum ? PyLong_FromLong(errnum) : Py_NewRef(Py_None)) < 0 ||
-        dict_set_owned(result, "message", message ? PyUnicode_FromString(message) : Py_NewRef(Py_None)) < 0 ||
-        dict_set_owned(result, "features", PyLong_FromUnsignedLong(params ? params->features : 0)) < 0 ||
-        dict_set_owned(result, "requested_flags", PyLong_FromUnsignedLong(requested_flags)) < 0 ||
-        dict_set_owned(result, "active_flags", PyLong_FromUnsignedLong(active_flags)) < 0 ||
-        dict_set_owned(result, "sq_entries", PyLong_FromUnsignedLong(params ? params->sq_entries : 0)) < 0 ||
-        dict_set_owned(result, "cq_entries", PyLong_FromUnsignedLong(params ? params->cq_entries : 0)) < 0 ||
-        dict_set_owned(result, "liburing_version", liburing_version_string()) < 0 ||
-        dict_set_owned(result, "compiled_liburing_version", liburing_version_string()) < 0 ||
-        dict_set_owned(result, "compiled_liburing_version_info", liburing_version_info()) < 0) {
+    if (PyDict_SetItemString(result, "available", Py_True) < 0) {
         Py_DECREF(result);
         return NULL;
     }
@@ -631,7 +641,6 @@ static PyObject *build_probe_result(bool available, int errnum, const char *mess
 static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) {
     struct io_uring ring;
     struct io_uring_params params;
-    unsigned int requested_flags = flags;
     int ret;
 
     if (entries == 0) {
@@ -649,13 +658,11 @@ static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) 
     Py_END_ALLOW_THREADS
 
     if (ret < 0) {
-        int errnum = normalize_ret_errno(ret);
-        return build_probe_result(false, errnum, strerror(errnum), requested_flags, 0, &params);
+        return build_probe_result(false);
     }
 
-    flags = ring.flags;
     io_uring_queue_exit(&ring);
-    return build_probe_result(true, 0, NULL, requested_flags, flags, &params);
+    return build_probe_result(true);
 }
 
 static PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs) {
@@ -666,6 +673,165 @@ static PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwarg
         return NULL;
     }
     return uring_api_probe_impl(entries, flags);
+}
+
+static void close_if_open(int *fd) {
+    if (*fd >= 0) {
+        close(*fd);
+        *fd = -1;
+    }
+}
+
+static PyObject *uring_api_probe_accept_multishot_impl(void) {
+#ifndef IORING_ACCEPT_MULTISHOT
+    return build_feature_probe_result(false, ENOSYS,
+                                      "liburing headers do not define IORING_ACCEPT_MULTISHOT");
+#else
+    struct io_uring ring;
+    struct io_uring_sqe *sqe;
+    struct io_uring_cqe *cqe = NULL;
+    struct __kernel_timespec timeout;
+    struct sockaddr_in listen_addr;
+    struct sockaddr_storage accepted_addr;
+    socklen_t listen_addrlen = sizeof(listen_addr);
+    socklen_t accepted_addrlen = sizeof(accepted_addr);
+    int server_fd = -1;
+    int client_fd = -1;
+    int accepted_fd = -1;
+    int optval = 1;
+    int ret;
+    PyObject *result;
+
+    memset(&ring, 0, sizeof(ring));
+    ret = io_uring_queue_init(8, &ring, 0);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        return build_feature_probe_result(false, errnum, strerror(errnum));
+    }
+
+    server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (server_fd < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+    (void)setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
+    memset(&listen_addr, 0, sizeof(listen_addr));
+    listen_addr.sin_family = AF_INET;
+    listen_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    listen_addr.sin_port = 0;
+    if (bind(server_fd, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+    if (listen(server_fd, 1) < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+    if (getsockname(server_fd, (struct sockaddr *)&listen_addr, &listen_addrlen) < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+
+    sqe = io_uring_get_sqe(&ring);
+    if (!sqe) {
+        result = build_feature_probe_result(false, EBUSY, "no submission queue entry available for probe");
+        goto cleanup;
+    }
+    memset(&accepted_addr, 0, sizeof(accepted_addr));
+    io_uring_prep_multishot_accept(sqe, server_fd, (struct sockaddr *)&accepted_addr, &accepted_addrlen,
+                                   SOCK_CLOEXEC);
+    io_uring_sqe_set_data64(sqe, 1);
+    ret = io_uring_submit(&ring);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        goto cleanup;
+    }
+
+    client_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (client_fd < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+    if (connect(client_fd, (struct sockaddr *)&listen_addr, listen_addrlen) < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+
+    timeout.tv_sec = 1;
+    timeout.tv_nsec = 0;
+    ret = io_uring_wait_cqe_timeout(&ring, &cqe, &timeout);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        goto cleanup;
+    }
+    if (!cqe) {
+        result = build_feature_probe_result(false, ETIMEDOUT, "multishot accept probe timed out");
+        goto cleanup;
+    }
+    if (cqe->res < 0) {
+        int errnum = -cqe->res;
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        io_uring_cqe_seen(&ring, cqe);
+        goto cleanup;
+    }
+
+    accepted_fd = cqe->res;
+    if (cqe->flags & IORING_CQE_F_MORE) {
+        result = build_feature_probe_result(true, 0, NULL);
+    } else {
+        result = build_feature_probe_result(false, EOPNOTSUPP, "accept completed without IORING_CQE_F_MORE");
+    }
+    io_uring_cqe_seen(&ring, cqe);
+
+cleanup:
+    close_if_open(&accepted_fd);
+    close_if_open(&client_fd);
+    close_if_open(&server_fd);
+    io_uring_queue_exit(&ring);
+    return result;
+#endif
+}
+
+static int add_bool_from_feature_probe(PyObject *capabilities, const char *name, PyObject *probe_result) {
+    PyObject *available;
+    int truth;
+
+    available = PyDict_GetItemString(probe_result, "available");
+    if (!available) {
+        PyErr_SetString(PyExc_RuntimeError, "feature probe result is missing 'available'");
+        return -1;
+    }
+    truth = PyObject_IsTrue(available);
+    if (truth < 0) {
+        return -1;
+    }
+    return PyDict_SetItemString(capabilities, name, truth ? Py_True : Py_False);
+}
+
+static PyObject *build_capability_dict(void) {
+    PyObject *capabilities;
+    PyObject *probe_result;
+
+    capabilities = PyDict_New();
+    if (!capabilities) {
+        return NULL;
+    }
+
+    probe_result = uring_api_probe_accept_multishot_impl();
+    if (!probe_result) {
+        Py_DECREF(capabilities);
+        return NULL;
+    }
+    if (add_bool_from_feature_probe(capabilities, "IORING_ACCEPT_MULTISHOT", probe_result) < 0) {
+        Py_DECREF(probe_result);
+        Py_DECREF(capabilities);
+        return NULL;
+    }
+    Py_DECREF(probe_result);
+    return capabilities;
 }
 
 static PyObject *UringApiCapi_Probe(unsigned int entries, unsigned int flags) {

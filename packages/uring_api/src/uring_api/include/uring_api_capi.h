@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 
-#define URING_API_CAPI_ABI_VERSION 4u
+#define URING_API_CAPI_ABI_VERSION 1u
 #define URING_API_CAPI_CAPSULE_NAME "_uring_api._C_API"
 
 /* Feature flags published in UringApi_CAPI.feature_flags. */
@@ -26,7 +26,7 @@ typedef struct UringApi_CAPI {
     uint32_t compiled_liburing_major;
     uint32_t compiled_liburing_minor;
 
-    /* Return a new dict matching _uring_api.probe(entries, flags). */
+    /* Return a new dict matching _uring_api.probe(entries, flags), including capabilities. */
     PyObject *(*probe)(unsigned int entries, unsigned int flags);
 
     /* Ring lifecycle. Return new references where PyObject * is returned. */
