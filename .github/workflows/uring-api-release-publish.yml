@@ -1,0 +1,121 @@
+name: uring-api Build And Publish
+
+"on":
+  release:
+    types:
+      - published
+  push:
+    tags:
+      - "uring-api-v*"
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: Build uring-api manylinux wheels
+    if: >-
+      github.event_name != 'release' ||
+      startsWith(github.event.release.tag_name, 'uring-api-v')
+    runs-on: ubuntu-latest
+    env:
+      CIBW_ARCHS_LINUX: "x86_64 aarch64"
+      CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-*"
+      CIBW_BUILD_FRONTEND: "build[uv]"
+      CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+      CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+      CIBW_SKIP: "*-musllinux*"
+      CIBW_TEST_COMMAND: >-
+        python -c "import pathlib, sysconfig, uring_api; suffix = sysconfig.get_config_var('EXT_SUFFIX'); native = pathlib.Path(sysconfig.get_paths()['purelib']) / ('_uring_api' + suffix); assert native.is_file(); assert uring_api.C_API_FEATURES != 0; assert uring_api.__compiled_liburing_version_info__ >= (2, 4); print('uring-api wheel smoke ok', uring_api.__compiled_liburing_version__)"
+      CIBW_BEFORE_ALL_LINUX: >-
+        git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing &&
+        /tmp/liburing/configure --prefix=/usr/local &&
+        make -C /tmp/liburing -j$(nproc) &&
+        make -C /tmp/liburing install &&
+        ldconfig
+      CIBW_ENVIRONMENT_LINUX: >-
+        PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+        LD_LIBRARY_PATH=/usr/local/lib
+        LIBRARY_PATH=/usr/local/lib
+        C_INCLUDE_PATH=/usr/local/include
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build manylinux wheels
+        uses: pypa/cibuildwheel@v3.4.1
+        with:
+          package-dir: packages/uring_api
+          output-dir: wheelhouse
+
+      - name: Upload uring-api wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: uring-api-manylinux-wheels
+          path: wheelhouse/*.whl
+
+  build_sdist:
+    name: Build uring-api sdist
+    if: >-
+      github.event_name != 'release' ||
+      startsWith(github.event.release.tag_name, 'uring-api-v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Check uv lockfile
+        run: uv lock --check
+
+      - name: Install Python 3.14 with uv
+        run: uv python install 3.14
+
+      - name: Build uring-api sdist
+        run: uv build --package uring-api --sdist --python 3.14 --out-dir dist/uring-api/sdist
+
+      - name: Upload uring-api sdist artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: uring-api-sdist
+          path: dist/uring-api/sdist/*.tar.gz
+
+  publish_pypi:
+    name: Publish uring-api to PyPI
+    needs:
+      - build_wheels
+      - build_sdist
+    runs-on: ubuntu-latest
+    environment: pypi-uring-api
+    if: >-
+      github.event_name == 'release' &&
+      github.event.action == 'published' &&
+      startsWith(github.event.release.tag_name, 'uring-api-v')
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+
+      - name: Flatten dist tree
+        run: |
+          mkdir -p publish-dist
+          find dist -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} publish-dist/ \;
+          ls -la publish-dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: publish-dist/
+          print-hash: true

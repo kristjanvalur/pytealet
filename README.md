@@ -91,6 +91,7 @@ canonical publish trigger:
 - `tealet`: `tealet-vX.Y.Z` or `vX.Y.Z`
 - `tealetio`: `tealetio-vX.Y.Z`
 - `tealet-greenlet`: `tealet-greenlet-vX.Y.Z`
+- `uring-api`: `uring-api-vX.Y.Z`
 
 Sibling packages should declare compatibility ranges for their dependency on the
 base `tealet` package, not exact pins. For the current `0.1` line, use
