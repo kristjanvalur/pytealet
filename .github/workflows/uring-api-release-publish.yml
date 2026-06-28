@@ -28,7 +28,7 @@ jobs:
       CIBW_BEFORE_ALL_LINUX: >-
         git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing &&
         /tmp/liburing/configure --prefix=/usr/local &&
-        make -C /tmp/liburing -j$(nproc) &&
+        make -C /tmp/liburing -j$(nproc) library &&
         make -C /tmp/liburing install &&
         ldconfig
       CIBW_ENVIRONMENT_LINUX: >-
