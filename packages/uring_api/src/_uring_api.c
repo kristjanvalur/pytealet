@@ -19,7 +19,7 @@
 #define URING_API_LIBURING_AT_LEAST(major, minor)                                                                    \
     (IO_URING_VERSION_MAJOR > (major) || (IO_URING_VERSION_MAJOR == (major) && IO_URING_VERSION_MINOR >= (minor)))
 
-#if URING_API_LIBURING_AT_LEAST(2, 5)
+#if URING_API_LIBURING_AT_LEAST(2, 4)
 #define URING_API_HAVE_DATA64 1
 #define URING_API_HAVE_RING_ENTRIES 1
 #endif
