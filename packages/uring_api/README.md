@@ -95,6 +95,11 @@ binary extension. This is useful in CI because Linux distribution images can
 compile the same Python package against different liburing development packages
 while still running on the hosted runner's kernel.
 
+If the native extension cannot be imported after installation, importing
+`uring_api` still succeeds and `probe()` reports `available=False` with a
+message describing the import problem. Source builds with unsupported headers
+fail earlier and ask for a newer `liburing-dev`.
+
 ## Initialising a Ring
 
 The current wrapper exposes the native ring lifecycle. A ring is a file
@@ -260,6 +265,12 @@ profiles opt-in and explicit.
 ```bash
 sudo apt install liburing-dev
 ```
+
+The package requires `liburing >= 2.4`. Older headers do not expose the version
+macros we use for build-time validation, and they also predate the data and ring
+entry helpers used by the extension. On Ubuntu, that means `ubuntu-23.10` or
+newer from distro packages; `ubuntu-22.04` needs a newer liburing installed from
+another source.
 
 The extension uses multi-phase module initialisation and declares itself safe to
 import without enabling the GIL on free-threaded CPython builds.

@@ -3,13 +3,41 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno as _errno
 from typing import Any
 
-from _uring_api import Ring as Ring
-from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
-from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
-from _uring_api import __liburing_version__ as __liburing_version__
-from _uring_api import probe as _probe
+try:
+    from _uring_api import Ring as Ring
+    from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
+    from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
+    from _uring_api import __liburing_version__ as __liburing_version__
+    from _uring_api import probe as _probe
+except ImportError as exc:
+    _native_import_error: ImportError | None = exc
+    __compiled_liburing_version__ = "unavailable"
+    __compiled_liburing_version_info__ = (0, 0)
+    __liburing_version__ = "unavailable"
+
+    class Ring:  # type: ignore[no-redef]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+    def _probe(entries: int = 2, flags: int = 0) -> dict[str, Any]:
+        if entries <= 0:
+            raise ValueError("entries must be between 1 and UINT_MAX")
+        return {
+            "available": False,
+            "errno": _errno.ENOSYS,
+            "message": f"uring-api native extension is unavailable: {_native_import_error}",
+            "features": 0,
+            "sq_entries": 0,
+            "cq_entries": 0,
+            "liburing_version": __liburing_version__,
+            "compiled_liburing_version": __compiled_liburing_version__,
+            "compiled_liburing_version_info": __compiled_liburing_version_info__,
+        }
+else:
+    _native_import_error = None
 
 DEFAULT_ENTRIES = 8
 DEFAULT_FLAGS = 0

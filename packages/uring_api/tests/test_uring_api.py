@@ -1,6 +1,7 @@
 import errno
 from importlib import resources
 import socket
+import subprocess
 import sys
 import threading
 
@@ -32,6 +33,7 @@ def test_probe_returns_structured_result():
     assert probe.compiled_liburing_version_info == uring_api.__compiled_liburing_version_info__
     assert len(probe.compiled_liburing_version_info) == 2
     assert all(isinstance(part, int) for part in probe.compiled_liburing_version_info)
+    assert probe.compiled_liburing_version_info >= (2, 4)
     if probe.available:
         assert probe.errno is None
         assert probe.message is None
@@ -40,6 +42,41 @@ def test_probe_returns_structured_result():
     else:
         assert probe.errno is not None
         assert probe.message
+
+
+def test_import_succeeds_when_native_extension_is_unavailable():
+    script = """
+import builtins
+import errno
+import sys
+
+original_import = builtins.__import__
+
+def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "_uring_api":
+        raise ImportError("simulated missing native extension")
+    return original_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = blocked_import
+sys.modules.pop("uring_api", None)
+sys.modules.pop("_uring_api", None)
+
+import uring_api
+
+probe = uring_api.probe()
+assert probe.available is False
+assert probe.errno == errno.ENOSYS
+assert probe.message and "simulated missing native extension" in probe.message
+assert probe.compiled_liburing_version_info == (0, 0)
+assert uring_api.is_available() is False
+try:
+    uring_api.Ring()
+except RuntimeError as exc:
+    assert "native extension is unavailable" in str(exc)
+else:
+    raise AssertionError("Ring unexpectedly initialized")
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def test_ring_lifecycle_when_available():

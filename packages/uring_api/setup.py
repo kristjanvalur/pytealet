@@ -22,9 +22,21 @@ class build_ext(_build_ext):
         super().build_extensions()
 
     def _check_liburing_header(self) -> None:
-        if not self._can_compile("#include <liburing.h>\nint main(void) { return 0; }\n"):
+        source = """
+#include <liburing.h>
+
+#if !defined(IO_URING_VERSION_MAJOR) || !defined(IO_URING_VERSION_MINOR)
+#error "uring-api requires liburing >= 2.4 development headers"
+#elif IO_URING_VERSION_MAJOR < 2 || (IO_URING_VERSION_MAJOR == 2 && IO_URING_VERSION_MINOR < 4)
+#error "uring-api requires liburing >= 2.4 development headers"
+#endif
+
+int main(void) { return 0; }
+"""
+        if not self._can_compile(source):
             raise RuntimeError(
-                "uring-api requires liburing development headers; install liburing-dev or an equivalent package"
+                "uring-api requires liburing >= 2.4 development headers; install a recent liburing-dev or "
+                "equivalent package"
             )
 
     def _can_compile(self, source: str) -> bool:
