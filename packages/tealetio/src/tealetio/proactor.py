@@ -95,7 +95,7 @@ class Proactor(Protocol):
 
     def break_wait(self) -> None: ...
 
-    def cancel_operation(self, operation: Operation[Any]) -> bool: ...
+    def cancel_operation(self, operation: Operation[Any]) -> None: ...
 
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None: ...
 
@@ -141,40 +141,37 @@ class Operation(Generic[T]):
         self._cancelled = False
         self._result: T | None = None
         self._exception: BaseException | None = None
-        self._callbacks: list[_DoneCallback] = []
+        self._callbacks: list[_DoneCallback] | None = []
         self._attempt: Callable[[], T] | None = None
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
 
-        with self._lock:
-            return self._done
+        return self._done
 
     def cancelled(self) -> bool:
         """Return True if the operation completed by cancellation."""
 
-        with self._lock:
-            return self._cancelled
+        return self._cancelled
 
-    def cancel(self) -> bool:
+    def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
 
-        with self._lock:
-            if self._done:
-                return False
-            proactor = self._proactor
+        if self._done:
+            return
+        proactor = self._proactor
         if proactor is not None:
-            return proactor.cancel_operation(self)
-        return self._set_cancelled(raise_if_done=False)
+            proactor.cancel_operation(self)
+            return
+        self._set_cancelled()
 
     def result(self) -> T:
         """Return the operation result, or raise its completion exception."""
 
-        with self._lock:
-            if not self._done:
-                raise InvalidStateError("operation result is not ready")
-            exception = self._exception
-            result = self._result
+        if not self._done:
+            raise InvalidStateError("operation result is not ready")
+        exception = self._exception
+        result = self._result
         if exception is not None:
             raise exception
         return cast(T, result)
@@ -182,10 +179,9 @@ class Operation(Generic[T]):
     def exception(self) -> BaseException | None:
         """Return the operation exception, or None for successful completion."""
 
-        with self._lock:
-            if not self._done:
-                raise InvalidStateError("operation exception is not ready")
-            return self._exception
+        if not self._done:
+            raise InvalidStateError("operation exception is not ready")
+        return self._exception
 
     def add_done_callback(self, callback: _DoneCallback) -> None:
         """Register `callback` to run when the operation completes."""
@@ -194,6 +190,7 @@ class Operation(Generic[T]):
             if self._done:
                 run_now = True
             else:
+                assert self._callbacks is not None
                 self._callbacks.append(callback)
                 run_now = False
         if run_now:
@@ -203,6 +200,8 @@ class Operation(Generic[T]):
         """Remove matching done callbacks and return the number removed."""
 
         with self._lock:
+            if self._callbacks is None:
+                return 0
             removed = 0
             kept: list[_DoneCallback] = []
             for stored_callback in self._callbacks:
@@ -219,8 +218,8 @@ class Operation(Generic[T]):
     def _set_exception(self, exc: BaseException) -> None:
         self._finish(exception=exc)
 
-    def _set_cancelled(self, *, raise_if_done: bool = True) -> bool:
-        return self._finish(exception=CancelledError(), cancelled=True, raise_if_done=raise_if_done)
+    def _set_cancelled(self) -> bool:
+        return self._finish(exception=CancelledError(), cancelled=True)
 
     def _finish(
         self,
@@ -228,25 +227,22 @@ class Operation(Generic[T]):
         result: T | None = None,
         exception: BaseException | None = None,
         cancelled: bool = False,
-        raise_if_done: bool = True,
     ) -> bool:
         with self._lock:
             if self._done:
-                if raise_if_done:
-                    raise InvalidStateError("operation already done")
-                return False
+                if cancelled:
+                    return False
+                raise InvalidStateError("operation already done")
             self._result = result
             self._exception = exception
             self._cancelled = cancelled
             self._done = True
-            callbacks = self._callbacks[:]
-            self._callbacks.clear()
-        self._run_done_callbacks(callbacks)
-        return True
-
-    def _run_done_callbacks(self, callbacks: list[_DoneCallback]) -> None:
+            callbacks = self._callbacks
+            self._callbacks = None
+        assert callbacks is not None
         for callback in callbacks:
             callback(self)
+        return True
 
 
 @dataclass
@@ -596,14 +592,13 @@ class SelectorProactor:
         else:
             entry.writer = operation
 
-    def cancel_operation(self, operation: Operation[Any]) -> bool:
+    def cancel_operation(self, operation: Operation[Any]) -> None:
         with self._lock:
             removed = self._remove_operation(operation)
         if not removed:
-            return False
-        cancelled = operation._set_cancelled(raise_if_done=False)
+            return
+        operation._set_cancelled()
         self.break_wait()
-        return cancelled
 
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
@@ -921,6 +916,38 @@ class UringProactor:
                 if future.done() and not future.cancelled():
                     self._wake_pending = False
 
+    def _notify_completed(self) -> None:
+        self.break_wait()
+        self._notify_completion()
+
+    def _wait_for_completed(self, timeout: float | None) -> None:
+        with self._wake_condition:
+            if self._wake_pending:
+                self._wake_pending = False
+                return
+            self._wake_condition.wait(timeout)
+            self._wake_pending = False
+
+    def _get_async_wait_future(self, loop: _asyncio.AbstractEventLoop) -> _asyncio.Future[None]:
+        with self._wake_condition:
+            if self._wake_pending:
+                self._wake_pending = False
+                future = loop.create_future()
+                future.set_result(None)
+                return future
+            if not self.has_pending_operations():
+                future = loop.create_future()
+                future.set_result(None)
+                return future
+            future = loop.create_future()
+            self._async_wait_loop = loop
+            self._async_wait_future = future
+            return future
+
+    def _wake_async_waiter(self, future: _asyncio.Future[None]) -> None:
+        if not future.done():
+            future.set_result(None)
+
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
@@ -989,46 +1016,12 @@ class UringProactor:
         if self._closed:
             raise RuntimeError("proactor is closed")
 
-    def cancel_operation(self, operation: Operation[Any]) -> bool:
+    def cancel_operation(self, operation: Operation[Any]) -> None:
         # TODO: submit IORING_OP_ASYNC_CANCEL once the native wrapper exposes it.
-        cancelled = operation._set_cancelled(raise_if_done=False)
+        cancelled = operation._set_cancelled()
         if cancelled and self._pending_tokens:
             self._pending_tokens.pop()
             self.break_wait()
-            return True
-        return False
-
-    def _notify_completed(self) -> None:
-        self.break_wait()
-        self._notify_completion()
-
-    def _wait_for_completed(self, timeout: float | None) -> None:
-        with self._wake_condition:
-            if self._wake_pending:
-                self._wake_pending = False
-                return
-            self._wake_condition.wait(timeout)
-            self._wake_pending = False
-
-    def _get_async_wait_future(self, loop: _asyncio.AbstractEventLoop) -> _asyncio.Future[None]:
-        with self._wake_condition:
-            if self._wake_pending:
-                self._wake_pending = False
-                future = loop.create_future()
-                future.set_result(None)
-                return future
-            if not self.has_pending_operations():
-                future = loop.create_future()
-                future.set_result(None)
-                return future
-            future = loop.create_future()
-            self._async_wait_loop = loop
-            self._async_wait_future = future
-            return future
-
-    def _wake_async_waiter(self, future: _asyncio.Future[None]) -> None:
-        if not future.done():
-            future.set_result(None)
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
         operation = self._complete_uring_operation(completion)

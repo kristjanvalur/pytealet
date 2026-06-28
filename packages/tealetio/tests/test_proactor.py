@@ -57,7 +57,7 @@ class TestOperation:
     def test_operation_cancel_completes_with_cancelled_error(self):
         operation: Operation[int] = Operation(kind="test")
 
-        assert operation.cancel() is True
+        operation.cancel()
         assert operation.done() is True
         assert operation.cancelled() is True
         assert operation.exception()
@@ -218,7 +218,7 @@ class TestSelectorProactor:
             operation = proactor.recv(reader, 1)
 
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
-            assert operation.cancel() is True
+            operation.cancel()
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
             assert operation.cancelled() is True
@@ -337,7 +337,7 @@ class TestSelectorProactor:
             operation = proactor.recv(reader, 1)
             seen.clear()
 
-            assert operation.cancel() is True
+            operation.cancel()
             proactor.wait(0)
             assert seen == []
         finally:
