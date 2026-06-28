@@ -1,5 +1,6 @@
 """Build the _uring_api C extension."""
 
+from glob import glob
 import os
 import platform
 import tempfile
@@ -12,16 +13,28 @@ from setuptools.command.build_py import build_py as _build_py
 class build_ext(_build_ext):
     """Validate the Linux/liburing build environment before compiling."""
 
-    def run(self):
-        if platform.system() != "Linux":
-            raise RuntimeError("uring-api only builds on Linux because io_uring and liburing are Linux-specific")
-        super().run()
-
     def build_extensions(self):
-        self._check_liburing_header()
+        if platform.system() != "Linux":
+            self._skip_native_extension("io_uring and liburing are Linux-specific")
+            return
+        if not self._check_liburing_header():
+            self._skip_native_extension(
+                "liburing >= 2.4 development headers are required; probe() will report the native extension as "
+                "unavailable"
+            )
+            return
         super().build_extensions()
 
-    def _check_liburing_header(self) -> None:
+    def _skip_native_extension(self, reason: str) -> None:
+        self.warn(f"uring-api native extension skipped: {reason}")
+        self.extensions = []
+        self.distribution.ext_modules = []
+        if self.build_lib:
+            for artifact in glob(os.path.join(self.build_lib, "_uring_api*")):
+                if os.path.isfile(artifact) and not artifact.endswith(".pyi"):
+                    os.remove(artifact)
+
+    def _check_liburing_header(self) -> bool:
         source = """
 #include <liburing.h>
 
@@ -33,11 +46,7 @@ class build_ext(_build_ext):
 
 int main(void) { return 0; }
 """
-        if not self._can_compile(source):
-            raise RuntimeError(
-                "uring-api requires liburing >= 2.4 development headers; install a recent liburing-dev or "
-                "equivalent package"
-            )
+        return self._can_compile(source)
 
     def _can_compile(self, source: str) -> bool:
         with tempfile.TemporaryDirectory() as temp_dir:

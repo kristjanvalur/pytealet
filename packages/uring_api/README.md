@@ -97,8 +97,8 @@ while still running on the hosted runner's kernel.
 
 If the native extension cannot be imported after installation, importing
 `uring_api` still succeeds and `probe()` reports `available=False` with a
-message describing the import problem. Source builds with unsupported headers
-fail earlier and ask for a newer `liburing-dev`.
+message describing the import problem. Source builds with unsupported native
+dependencies warn and install the pure Python wrapper without `_uring_api`.
 
 ## Initialising a Ring
 
@@ -282,11 +282,11 @@ profiles opt-in and explicit.
 sudo apt install liburing-dev
 ```
 
-The package requires `liburing >= 2.4`. Older headers do not expose the version
-macros we use for build-time validation, and they also predate the data and ring
-entry helpers used by the extension. On Ubuntu, that means `ubuntu-23.10` or
-newer from distro packages; `ubuntu-22.04` needs a newer liburing installed from
-another source.
+The native extension requires `liburing >= 2.4`. Older headers do not expose the
+version macros we use for build-time validation, and they also predate the data
+and ring entry helpers used by the extension. On Ubuntu, that means
+`ubuntu-23.10` or newer from distro packages; `ubuntu-22.04` needs a newer
+liburing installed from another source to build `_uring_api`.
 
 The extension uses multi-phase module initialisation and declares itself safe to
 import without enabling the GIL on free-threaded CPython builds.

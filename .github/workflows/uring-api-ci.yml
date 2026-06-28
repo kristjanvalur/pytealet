@@ -134,8 +134,8 @@ jobs:
               assert probe.message
           PY
 
-  old-liburing-build-failure:
-    name: uring-api expected old-liburing build failure
+  old-liburing-pure-python-fallback:
+    name: uring-api old-liburing pure Python fallback
     runs-on: ubuntu-22.04
 
     steps:
@@ -154,27 +154,19 @@ jobs:
       - name: Install Python 3.14t with uv
         run: uv python install 3.14t
 
-      - name: Verify uring-api build fails clearly with old liburing
+      - name: Build uring-api without native extension
         run: |
-          set +e
-          uv build --package uring-api --wheel --python 3.14t > build.log 2>&1
-          status=$?
+          uv build --package uring-api --wheel --python 3.14t -o dist/old-liburing --clear > build.log 2>&1
           cat build.log
-          if [ "$status" -eq 0 ]; then
-            echo "uring-api unexpectedly built with liburing older than 2.4" >&2
-            exit 1
-          fi
-          grep -F "uring-api requires liburing >= 2.4" build.log
+          grep -F "uring-api native extension skipped: liburing >= 2.4 development headers are required" build.log
 
-      - name: Verify missing native extension probe fallback
+      - name: Verify installed missing native extension probe fallback
         run: |
           fallback_root="$(mktemp -d)"
           fallback_venv="$fallback_root/venv"
-          pure_src="$fallback_root/src"
           uv venv --python 3.14t "$fallback_venv"
-          mkdir -p "$pure_src"
-          cp -R packages/uring_api/src/uring_api "$pure_src/"
-          PYTHONPATH="$pure_src" "$fallback_venv/bin/python" - <<'PY'
+          uv pip install --python "$fallback_venv/bin/python" dist/old-liburing/uring_api-*.whl
+          "$fallback_venv/bin/python" - <<'PY'
           import errno
           import uring_api
 
@@ -194,8 +186,8 @@ jobs:
               raise AssertionError("Ring unexpectedly initialized without _uring_api")
           PY
 
-  non-linux-build-failure:
-    name: uring-api expected source build failure (${{ matrix.os }})
+  non-linux-pure-python-fallback:
+    name: uring-api non-Linux pure Python fallback (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -214,15 +206,29 @@ jobs:
         shell: bash
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Verify uring-api build fails clearly
+      - name: Build and install uring-api without native extension
         shell: bash
         run: |
-          set +e
-          uv build --package uring-api --wheel --python ${{ matrix.python-version }} > build.log 2>&1
-          status=$?
+          uv build --package uring-api --wheel --python ${{ matrix.python-version }} -o dist/non-linux --clear > build.log 2>&1
           cat build.log
-          if [ "$status" -eq 0 ]; then
-            echo "uring-api unexpectedly built on a non-Linux runner" >&2
-            exit 1
+          grep -F "uring-api native extension skipped: io_uring and liburing are Linux-specific" build.log
+          uv venv --python ${{ matrix.python-version }} .venv-fallback
+          if [ -x .venv-fallback/bin/python ]; then
+            fallback_python=.venv-fallback/bin/python
+          else
+            fallback_python=.venv-fallback/Scripts/python.exe
           fi
-          grep -F "uring-api only builds on Linux" build.log
+          uv pip install --python "$fallback_python" dist/non-linux/uring_api-*.whl
+          "$fallback_python" - <<'PY'
+          import errno
+          import uring_api
+
+          probe = uring_api.probe()
+          print(probe)
+          assert probe.available is False
+          assert probe.errno == errno.ENOSYS
+          assert probe.message and "native extension is unavailable" in probe.message
+          assert probe.compiled_liburing_version_info == (0, 0)
+          assert uring_api.C_API_FEATURES == 0
+          assert uring_api.is_available() is False
+          PY
