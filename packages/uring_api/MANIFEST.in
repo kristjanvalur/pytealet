@@ -1,2 +1,3 @@
 include src/_uring_api.pyi
 include src/uring_api/include/uring_api_capi.h
+include tests/capi_client/uring_api_capi_client.c

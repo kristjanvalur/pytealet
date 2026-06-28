@@ -37,6 +37,8 @@ typedef struct {
     struct io_uring ring;
     PyObject *pending;
     PyObject *delivery_callback;
+    UringApi_CCompletionCallback c_delivery_callback;
+    void *c_delivery_callback_user_data;
     UringApiMutex receive_mutex;
     PyThread_type_lock delivery_done_lock;
     unsigned long long next_wakeup_data;
@@ -71,6 +73,35 @@ static PyTypeObject UringApiPending_Type;
 
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
 static int UringApiRing_stop_delivery(UringApiRing *self);
+
+static PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags);
+static int UringApiCapi_RingCheck(PyObject *ring);
+static int UringApiCapi_RingClose(PyObject *ring);
+static int UringApiCapi_RingFd(PyObject *ring);
+static unsigned int UringApiCapi_RingFeatures(PyObject *ring);
+static unsigned int UringApiCapi_RingSqEntries(PyObject *ring);
+static unsigned int UringApiCapi_RingCqEntries(PyObject *ring);
+static int UringApiCapi_RingClosed(PyObject *ring);
+static int UringApiCapi_RingRunning(PyObject *ring);
+static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, Py_ssize_t n, unsigned long long user_data);
+static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned long long user_data);
+static int UringApiCapi_RingBreakWait(PyObject *ring);
+static PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
+static int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
+static int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data);
+static int UringApiCapi_RingStart(PyObject *ring);
+static int UringApiCapi_RingStop(PyObject *ring);
+
+#define URING_API_CAPI_FEATURES                                                                                      \
+    (URING_API_CAPI_FEATURE_PROBE | URING_API_CAPI_FEATURE_RING | URING_API_CAPI_FEATURE_C_CALLBACK)
+
+static int ring_type_check(PyObject *ring) {
+    if (!PyObject_TypeCheck(ring, &UringApiRing_Type)) {
+        PyErr_SetString(PyExc_TypeError, "ring must be an _uring_api.Ring instance");
+        return 0;
+    }
+    return 1;
+}
 
 static int normalize_ret_errno(int ret) {
     if (ret < 0) {
@@ -420,10 +451,27 @@ static PyObject *UringApiCapi_Probe(unsigned int entries, unsigned int flags) {
 static const UringApi_CAPI uring_api_capi_table = {
     URING_API_CAPI_ABI_VERSION,
     sizeof(UringApi_CAPI),
-    URING_API_CAPI_FEATURE_PROBE,
+    URING_API_CAPI_FEATURES,
     IO_URING_VERSION_MAJOR,
     IO_URING_VERSION_MINOR,
     UringApiCapi_Probe,
+    UringApiCapi_RingNew,
+    UringApiCapi_RingCheck,
+    UringApiCapi_RingClose,
+    UringApiCapi_RingFd,
+    UringApiCapi_RingFeatures,
+    UringApiCapi_RingSqEntries,
+    UringApiCapi_RingCqEntries,
+    UringApiCapi_RingClosed,
+    UringApiCapi_RingRunning,
+    UringApiCapi_RingSubmitRecv,
+    UringApiCapi_RingSubmitSend,
+    UringApiCapi_RingBreakWait,
+    UringApiCapi_RingWait,
+    UringApiCapi_RingSetCallback,
+    UringApiCapi_RingSetCCallback,
+    UringApiCapi_RingStart,
+    UringApiCapi_RingStop,
     {NULL},
 };
 
@@ -444,7 +492,13 @@ static int uring_api_export_capi(PyObject *module) {
     if (module_add_uint64_constant(module, "C_API_FEATURE_PROBE", URING_API_CAPI_FEATURE_PROBE) < 0) {
         return -1;
     }
-    if (module_add_uint64_constant(module, "C_API_FEATURES", URING_API_CAPI_FEATURE_PROBE) < 0) {
+    if (module_add_uint64_constant(module, "C_API_FEATURE_RING", URING_API_CAPI_FEATURE_RING) < 0) {
+        return -1;
+    }
+    if (module_add_uint64_constant(module, "C_API_FEATURE_C_CALLBACK", URING_API_CAPI_FEATURE_C_CALLBACK) < 0) {
+        return -1;
+    }
+    if (module_add_uint64_constant(module, "C_API_FEATURES", URING_API_CAPI_FEATURES) < 0) {
         return -1;
     }
     return 0;
@@ -509,6 +563,8 @@ static void UringApiRing_dealloc(UringApiRing *self) {
     }
     Py_CLEAR(self->pending);
     Py_CLEAR(self->delivery_callback);
+    self->c_delivery_callback = NULL;
+    self->c_delivery_callback_user_data = NULL;
     if (self->delivery_done_lock) {
         PyThread_free_lock(self->delivery_done_lock);
         self->delivery_done_lock = NULL;
@@ -885,14 +941,25 @@ static PyObject *delivery_get_callback(UringApiRing *self) {
     return callback;
 }
 
+static int delivery_get_c_callback(UringApiRing *self, UringApi_CCompletionCallback *callback, void **user_data) {
+    int found;
+
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    *callback = self->c_delivery_callback;
+    *user_data = self->c_delivery_callback_user_data;
+    found = *callback != NULL;
+    Py_END_CRITICAL_SECTION();
+    return found;
+}
+
 static void UringApiRing_delivery_thread(void *arg) {
     UringApiRing *self = (UringApiRing *)arg;
     PyGILState_STATE gil_state = PyGILState_Ensure();
 
     while (!delivery_should_stop(self)) {
-        PyObject *callback;
+        UringApi_CCompletionCallback c_callback;
+        void *c_callback_user_data;
         PyObject *result = UringApiRing_wait_impl(self, 0, NULL, true);
-        PyObject *call_result;
 
         if (!result) {
             PyErr_WriteUnraisable((PyObject *)self);
@@ -903,20 +970,30 @@ static void UringApiRing_delivery_thread(void *arg) {
             continue;
         }
 
-        callback = delivery_get_callback(self);
-        if (!callback) {
+        if (delivery_get_c_callback(self, &c_callback, &c_callback_user_data)) {
+            int callback_ret = c_callback((PyObject *)self, result, c_callback_user_data);
             Py_DECREF(result);
-            PyErr_WriteUnraisable((PyObject *)self);
-            break;
+            if (callback_ret < 0) {
+                PyErr_WriteUnraisable((PyObject *)self);
+                break;
+            }
+        } else {
+            PyObject *callback = delivery_get_callback(self);
+            PyObject *call_result;
+            if (!callback) {
+                Py_DECREF(result);
+                PyErr_WriteUnraisable((PyObject *)self);
+                break;
+            }
+            call_result = PyObject_CallOneArg(callback, result);
+            Py_DECREF(callback);
+            Py_DECREF(result);
+            if (!call_result) {
+                PyErr_WriteUnraisable((PyObject *)self);
+                break;
+            }
+            Py_DECREF(call_result);
         }
-        call_result = PyObject_CallOneArg(callback, result);
-        Py_DECREF(callback);
-        Py_DECREF(result);
-        if (!call_result) {
-            PyErr_WriteUnraisable((PyObject *)self);
-            break;
-        }
-        Py_DECREF(call_result);
     }
 
     delivery_mark_exited(self);
@@ -934,7 +1011,7 @@ static PyObject *UringApiRing_start(UringApiRing *self, PyObject *Py_UNUSED(igno
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
         failed = true;
-    } else if (!self->delivery_callback) {
+    } else if (!self->delivery_callback && !self->c_delivery_callback) {
         PyErr_SetString(PyExc_RuntimeError, "delivery callback is not set");
         failed = true;
     } else if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
@@ -984,6 +1061,21 @@ static PyObject *UringApiRing_start(UringApiRing *self, PyObject *Py_UNUSED(igno
         return NULL;
     }
     Py_RETURN_NONE;
+}
+
+static int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApi_CCompletionCallback callback, void *user_data) {
+    int ret = 0;
+
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    if (delivery_is_running_locked(self)) {
+        PyErr_SetString(PyExc_RuntimeError, "cannot change callback while delivery thread is running");
+        ret = -1;
+    } else {
+        self->c_delivery_callback = callback;
+        self->c_delivery_callback_user_data = callback ? user_data : NULL;
+    }
+    Py_END_CRITICAL_SECTION();
+    return ret;
 }
 
 static PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1085,6 +1177,178 @@ static int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *
     Py_XDECREF(callback);
     Py_XDECREF(old_callback);
     return ret;
+}
+
+static PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags) {
+    PyObject *args = Py_BuildValue("(II)", entries, flags);
+    PyObject *ring;
+
+    if (!args) {
+        return NULL;
+    }
+    ring = PyObject_CallObject((PyObject *)&UringApiRing_Type, args);
+    Py_DECREF(args);
+    return ring;
+}
+
+static int UringApiCapi_RingCheck(PyObject *ring) { return ring_type_check(ring); }
+
+static int UringApiCapi_RingClose(PyObject *ring) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = UringApiRing_close((UringApiRing *)ring, NULL);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static int UringApiCapi_RingFd(PyObject *ring) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (!((UringApiRing *)ring)->initialized) {
+        return -1;
+    }
+    return ((UringApiRing *)ring)->ring.ring_fd;
+}
+
+static unsigned int UringApiCapi_RingFeatures(PyObject *ring) {
+    if (!ring_type_check(ring) || !((UringApiRing *)ring)->initialized) {
+        return 0;
+    }
+    return ((UringApiRing *)ring)->ring.features;
+}
+
+static unsigned int UringApiCapi_RingSqEntries(PyObject *ring) {
+    if (!ring_type_check(ring) || !((UringApiRing *)ring)->initialized) {
+        return 0;
+    }
+    return ring_sq_entries((UringApiRing *)ring);
+}
+
+static unsigned int UringApiCapi_RingCqEntries(PyObject *ring) {
+    if (!ring_type_check(ring) || !((UringApiRing *)ring)->initialized) {
+        return 0;
+    }
+    return ring_cq_entries((UringApiRing *)ring);
+}
+
+static int UringApiCapi_RingClosed(PyObject *ring) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return !((UringApiRing *)ring)->initialized;
+}
+
+static int UringApiCapi_RingRunning(PyObject *ring) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return ((UringApiRing *)ring)->receive_state == URING_API_RECEIVE_DELIVERING;
+}
+
+static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, Py_ssize_t n, unsigned long long user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_recv", "inK", fd, n, user_data);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned long long user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_send", "iOK", fd, data, user_data);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static int UringApiCapi_RingBreakWait(PyObject *ring) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = UringApiRing_break_wait((UringApiRing *)ring, NULL);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
+    struct __kernel_timespec timeout_value;
+    int timeout_kind;
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    if (timeout < 0.0) {
+        return UringApiRing_wait_impl((UringApiRing *)ring, 0, NULL, false);
+    }
+    timeout_value.tv_sec = (long long)timeout;
+    timeout_value.tv_nsec = (long long)((timeout - (double)timeout_value.tv_sec) * 1000000000.0);
+    if (timeout_value.tv_nsec < 0) {
+        timeout_value.tv_nsec = 0;
+    }
+    if (timeout_value.tv_nsec > 999999999) {
+        timeout_value.tv_nsec = 999999999;
+    }
+    timeout_kind = timeout == 0.0 ? 2 : 1;
+    return UringApiRing_wait_impl((UringApiRing *)ring, timeout_kind, &timeout_value, false);
+}
+
+static int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return UringApiRing_set_callback((UringApiRing *)ring, callback ? callback : Py_None, NULL);
+}
+
+static int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return UringApiRing_set_c_callback_impl((UringApiRing *)ring, callback, user_data);
+}
+
+static int UringApiCapi_RingStart(PyObject *ring) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = UringApiRing_start((UringApiRing *)ring, NULL);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static int UringApiCapi_RingStop(PyObject *ring) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = UringApiRing_stop((UringApiRing *)ring, NULL);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
 }
 
 static PyMethodDef UringApiRing_methods[] = {

@@ -9,7 +9,9 @@ from typing import Any
 
 try:
     from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
+    from _uring_api import C_API_FEATURE_C_CALLBACK as C_API_FEATURE_C_CALLBACK
     from _uring_api import C_API_FEATURE_PROBE as C_API_FEATURE_PROBE
+    from _uring_api import C_API_FEATURE_RING as C_API_FEATURE_RING
     from _uring_api import C_API_FEATURES as C_API_FEATURES
     from _uring_api import Ring as Ring
     from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
@@ -18,8 +20,10 @@ try:
     from _uring_api import probe as _probe
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
-    C_API_ABI_VERSION = 1
+    C_API_ABI_VERSION = 2
+    C_API_FEATURE_C_CALLBACK = 1 << 2
     C_API_FEATURE_PROBE = 1 << 0
+    C_API_FEATURE_RING = 1 << 1
     C_API_FEATURES = 0
     __compiled_liburing_version__ = "unavailable"
     __compiled_liburing_version_info__ = (0, 0)
@@ -101,7 +105,9 @@ __all__ = [
     "DEFAULT_ENTRIES",
     "DEFAULT_FLAGS",
     "C_API_ABI_VERSION",
+    "C_API_FEATURE_C_CALLBACK",
     "C_API_FEATURE_PROBE",
+    "C_API_FEATURE_RING",
     "C_API_FEATURES",
     "Ring",
     "UringProbe",

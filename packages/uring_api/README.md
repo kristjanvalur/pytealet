@@ -164,6 +164,10 @@ wakes it with `break_wait()`, and waits until it has stopped. `close()` does the
 same before closing the ring. If the callback raises, the exception is reported
 as unraisable and the delivery thread exits.
 
+Native C clients can register a worker-thread callback through the C API. When a
+C callback is present, the delivery thread calls it instead of `Ring.callback`;
+otherwise it falls back to the Python callback property.
+
 ```python
 import uring_api
 
@@ -196,9 +200,17 @@ The capsule currently exposes:
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
 - `probe(entries, flags)`, which returns a new reference to the same structured
-    dictionary as `_uring_api.probe()`.
+    dictionary as `_uring_api.probe()`;
+- `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
+    `ring_submit_send()`, `ring_break_wait()`, and `ring_wait()`;
+- `ring_set_callback()`, `ring_set_c_callback()`, `ring_start()`, and
+    `ring_stop()` for delivery-thread control.
 
-Check `URING_API_CAPI_FEATURE_PROBE` before calling `probe()`.
+Check `URING_API_CAPI_FEATURE_PROBE`, `URING_API_CAPI_FEATURE_RING`, and
+`URING_API_CAPI_FEATURE_C_CALLBACK` before calling those groups of functions. A
+C completion callback receives the ring object, the completion dictionary, and
+the supplied `user_data`. Return `0` for success; return a negative value with a
+Python exception set to report an unraisable error and stop the delivery thread.
 
 ## Choosing Ring Sizes
 

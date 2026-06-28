@@ -8,7 +8,7 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
-import textwrap
+import time
 import threading
 
 import pytest
@@ -35,9 +35,13 @@ def test_uring_api_get_include_points_to_header_dir():
 
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 1
+    assert uring_api.C_API_ABI_VERSION == 2
     assert uring_api.C_API_FEATURE_PROBE == 1 << 0
+    assert uring_api.C_API_FEATURE_RING == 1 << 1
+    assert uring_api.C_API_FEATURE_C_CALLBACK == 1 << 2
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_PROBE
+    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_RING
+    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_C_CALLBACK
 
 
 def test_probe_returns_structured_result():
@@ -100,108 +104,30 @@ else:
 
 
 def test_c_api_client_can_import_capsule_and_probe():
+    client = build_c_api_client()
+
+    abi_version, struct_size, feature_flags, major, minor = client.metadata()
+    probe = client.probe()
+
+    assert abi_version == uring_api.C_API_ABI_VERSION
+    assert struct_size > 0
+    assert feature_flags & uring_api.C_API_FEATURE_PROBE
+    assert feature_flags & uring_api.C_API_FEATURE_RING
+    assert feature_flags & uring_api.C_API_FEATURE_C_CALLBACK
+    assert (major, minor) == uring_api.__compiled_liburing_version_info__
+    assert isinstance(probe["available"], bool)
+
+
+def build_c_api_client():
     include_dir = Path(uring_api.get_include())
     python_include = sysconfig.get_path("include")
     extension_suffix = sysconfig.get_config_var("EXT_SUFFIX")
     cc = sysconfig.get_config_var("CC") or "cc"
-
-    source = textwrap.dedent(
-        r'''
-        #define PY_SSIZE_T_CLEAN
-        #include <Python.h>
-        #include "uring_api_capi.h"
-
-        #ifndef _PyCFunction_CAST
-        #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
-        #endif
-
-        static const UringApi_CAPI *api = NULL;
-
-        static PyObject *client_probe(PyObject *module, PyObject *Py_UNUSED(ignored)) {
-            PyObject *probe;
-            PyObject *available;
-            PyObject *result;
-
-            (void)module;
-            if (api == NULL) {
-                PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
-                return NULL;
-            }
-            probe = api->probe(2, 0);
-            if (probe == NULL) {
-                return NULL;
-            }
-            available = PyDict_GetItemString(probe, "available");
-            if (available == NULL) {
-                Py_DECREF(probe);
-                PyErr_SetString(PyExc_AssertionError, "probe result did not include availability");
-                return NULL;
-            }
-            result = Py_BuildValue("IIKIIi", api->abi_version, api->struct_size,
-                                   (unsigned long long)api->feature_flags,
-                                   api->compiled_liburing_major, api->compiled_liburing_minor,
-                                   PyObject_IsTrue(available));
-            Py_DECREF(probe);
-            return result;
-        }
-
-        static PyMethodDef client_methods[] = {
-            {"probe", _PyCFunction_CAST(client_probe), METH_NOARGS, NULL},
-            {NULL, NULL, 0, NULL},
-        };
-
-        static int client_exec(PyObject *module) {
-            (void)module;
-            api = UringApi_Import();
-            if (api == NULL) {
-                return -1;
-            }
-            if (api->abi_version != URING_API_CAPI_ABI_VERSION) {
-                PyErr_SetString(PyExc_RuntimeError, "unexpected uring-api C API ABI version");
-                return -1;
-            }
-            if ((api->feature_flags & URING_API_CAPI_FEATURE_PROBE) == 0) {
-                PyErr_SetString(PyExc_RuntimeError, "uring-api C API probe feature is missing");
-                return -1;
-            }
-            if (api->probe == NULL) {
-                PyErr_SetString(PyExc_RuntimeError, "uring-api C API probe function is missing");
-                return -1;
-            }
-            return 0;
-        }
-
-        static PyModuleDef_Slot client_slots[] = {
-            {Py_mod_exec, client_exec},
-        #if defined(Py_mod_gil)
-            {Py_mod_gil, Py_MOD_GIL_NOT_USED},
-        #endif
-            {0, NULL},
-        };
-
-        static struct PyModuleDef client_module = {
-            PyModuleDef_HEAD_INIT,
-            "_uring_api_capi_test_client",
-            NULL,
-            0,
-            client_methods,
-            client_slots,
-            NULL,
-            NULL,
-            NULL,
-        };
-
-        PyMODINIT_FUNC PyInit__uring_api_capi_test_client(void) {
-            return PyModuleDef_Init(&client_module);
-        }
-        '''
-    )
+    source_path = Path(__file__).parent / "capi_client" / "uring_api_capi_client.c"
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        source_path = temp_path / "_uring_api_capi_test_client.c"
         extension_path = temp_path / f"_uring_api_capi_test_client{extension_suffix}"
-        source_path.write_text(source, encoding="utf-8")
         subprocess.run(
             [
                 *shlex.split(cc),
@@ -222,14 +148,57 @@ def test_c_api_client_can_import_capsule_and_probe():
         assert spec.loader is not None
         client = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(client)
+        return client
 
-    abi_version, struct_size, feature_flags, major, minor, available = client.probe()
 
-    assert abi_version == uring_api.C_API_ABI_VERSION
-    assert struct_size > 0
-    assert feature_flags & uring_api.C_API_FEATURE_PROBE
-    assert (major, minor) == uring_api.__compiled_liburing_version_info__
-    assert isinstance(available, int)
+def test_c_api_client_can_create_ring_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    is_ring, fd, features, sq_entries, cq_entries, closed, running = client.ring_summary()
+
+    assert is_ring == 1
+    assert fd >= 0
+    assert features >= 0
+    assert sq_entries > 0
+    assert cq_entries > 0
+    assert closed == 0
+    assert running == 0
+
+
+def test_c_api_callback_is_preferred_over_python_callback_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    c_deliveries = []
+    python_deliveries = []
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            client.set_c_callback(ring, c_deliveries)
+            ring.callback = python_deliveries.append
+            ring.start()
+            try:
+                ring.submit_recv(reader.fileno(), 4, 220)
+                ring.submit_send(writer.fileno(), b"pong", 221)
+                deadline = time.monotonic() + 2.0
+                while len(c_deliveries) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            finally:
+                ring.stop()
+                client.clear_c_callback(ring)
+
+        by_user_data = {completion["user_data"]: completion for completion in c_deliveries}
+        assert by_user_data[220]["res"] == 4
+        assert by_user_data[220]["result"] == b"pong"
+        assert by_user_data[221]["res"] == 4
+        assert by_user_data[221]["result"] == 4
+        assert python_deliveries == []
+    finally:
+        reader.close()
+        writer.close()
 
 
 def test_ring_lifecycle_when_available():
