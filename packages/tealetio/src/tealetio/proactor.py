@@ -1115,21 +1115,15 @@ class ProactorScheduler(BaseScheduler):
             return operation.result()
 
         ready = Event()
-        active = True
 
         def wake(_operation: Operation[Any]) -> None:
-            nonlocal active
-            if not active:
-                return
-            active = False
-            ready.set()
+            ready.set_threadsafe()
 
         operation.add_done_callback(wake)
         try:
             ready.swait()
         finally:
-            if active:
-                active = False
+            if not operation.done():
                 operation.remove_done_callback(wake)
                 operation.cancel()
         return operation.result()

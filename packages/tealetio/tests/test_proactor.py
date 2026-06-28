@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+import tealetio.proactor as proactor_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.proactor import (
     AsyncProactorScheduler,
@@ -1090,6 +1091,53 @@ class TestProactorScheduler:
             task = scheduler.spawn(wait_with_timeout)
 
             assert scheduler.run_until_complete(task) is True
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_wait_operation_wakes_event_on_scheduler_thread_from_uring_callback(self, monkeypatch):
+        event_set_threads: list[int] = []
+        original_event = proactor_module.Event
+
+        class TrackingEvent(original_event):
+            def set(self) -> None:
+                event_set_threads.append(threading.get_ident())
+                super().set()
+
+        created: list[_DeferredUringRing] = []
+
+        def ring_factory(entries: int, flags: int) -> _DeferredUringRing:
+            ring = _DeferredUringRing(entries, flags)
+            created.append(ring)
+            return ring
+
+        def proactor_factory() -> UringProactor:
+            return UringProactor(ring_factory=ring_factory)
+
+        monkeypatch.setattr(proactor_module, "Event", TrackingEvent)
+        scheduler = SyncProactorScheduler(proactor_factory)
+        set_scheduler(scheduler)
+        scheduler_thread = threading.get_ident()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def receive() -> bytes:
+                return scheduler.sock_recv(reader, 5)
+
+            def complete_from_worker() -> None:
+                scheduler.sleep(0.001)
+                thread = threading.Thread(target=created[0].complete_recv)
+                thread.start()
+                thread.join(1.0)
+                assert thread.is_alive() is False
+
+            receive_task = scheduler.spawn(receive)
+            scheduler.spawn(complete_from_worker)
+
+            assert scheduler.run_until_complete(receive_task) == b"hello"
+            assert event_set_threads == [scheduler_thread]
         finally:
             reader.close()
             writer.close()
