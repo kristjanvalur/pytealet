@@ -72,6 +72,8 @@ class _UringRing(Protocol):
 
     def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> None: ...
 
+    def submit_accept(self, fd: int, user_data: object = None) -> None: ...
+
     def wait(self, timeout: float | None = None) -> "_UringCompletion" | None: ...
 
 
@@ -1059,7 +1061,25 @@ class UringProactor(ProactorBase):
     def accept(self, sock: socket.socket) -> Operation[tuple[socket.socket, Any]]:
         """Submit a socket accept operation."""
 
-        return self._raise_unsupported("accept")
+        operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock, proactor=self)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_accept)
+        self._pending_tokens.append(None)
+        try:
+            self._ring.submit_accept(sock.fileno(), entry)
+        except BaseException:
+            entry.active = False
+            self._pending_tokens.pop()
+            self.break_wait()
+            raise
+        return operation
+
+    def _complete_uring_accept(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[tuple[socket.socket, Any]]:
+        fd, address = cast(tuple[int, Any], completion.result)
+        conn = socket.socket(fileno=fd)
+        conn.setblocking(False)
+        operation = cast(Operation[tuple[socket.socket, Any]], entry.operation)
+        operation._set_result((conn, address))
+        return operation
 
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
         """Submit a non-blocking socket connect operation."""

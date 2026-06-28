@@ -22,6 +22,14 @@ def require_uring():
         pytest.skip(f"io_uring is not available: errno={probe.errno} message={probe.message}")
 
 
+def connect_to_listener(server: socket.socket) -> socket.socket:
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.setblocking(False)
+    err = client.connect_ex(server.getsockname())
+    assert err in {0, errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY}
+    return client
+
+
 def test_package_is_marked_as_typed():
     assert resources.files("uring_api").joinpath("py.typed").is_file()
 
@@ -36,6 +44,7 @@ def test_uring_api_get_include_points_to_header_dir():
 
 def test_native_module_exports_c_api_constants():
     assert uring_api.C_API_ABI_VERSION == 2
+    assert uring_api.C_API_FEATURE_ACCEPT == 1 << 5
     assert uring_api.C_API_FEATURE_PROBE == 1 << 0
     assert uring_api.C_API_FEATURE_RING == 1 << 1
     assert uring_api.C_API_FEATURE_C_CALLBACK == 1 << 2
@@ -46,6 +55,7 @@ def test_native_module_exports_c_api_constants():
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_C_CALLBACK
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_COMPLETION
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_DATAGRAM
+    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_ACCEPT
 
 
 def test_probe_returns_structured_result():
@@ -120,6 +130,7 @@ def test_c_api_client_can_import_capsule_and_probe():
     assert feature_flags & uring_api.C_API_FEATURE_C_CALLBACK
     assert feature_flags & uring_api.C_API_FEATURE_COMPLETION
     assert feature_flags & uring_api.C_API_FEATURE_DATAGRAM
+    assert feature_flags & uring_api.C_API_FEATURE_ACCEPT
     assert (major, minor) == uring_api.__compiled_liburing_version_info__
     assert isinstance(probe["available"], bool)
 
@@ -243,6 +254,39 @@ def test_c_api_datagram_operations_when_available():
         receiver.close()
 
 
+def test_c_api_accept_operation_when_available():
+    require_uring()
+
+    client_api = build_c_api_client()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = None
+    accepted = None
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        with uring_api.Ring() as ring:
+            client_api.submit_accept(ring, server.fileno(), 240)
+            client = connect_to_listener(server)
+
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        user_data, res, flags, result = client_api.completion_summary(completion)
+        accepted_fd, address = result
+        accepted = socket.socket(fileno=accepted_fd)
+        assert user_data == 240
+        assert res == accepted_fd
+        assert flags == 0
+        assert address == client.getsockname()
+    finally:
+        if accepted is not None:
+            accepted.close()
+        if client is not None:
+            client.close()
+        server.close()
+
+
 def test_ring_lifecycle_when_available():
     require_uring()
 
@@ -323,6 +367,38 @@ def test_ring_send_completion_when_available():
     finally:
         reader.close()
         writer.close()
+
+
+def test_ring_accept_completion_when_available():
+    require_uring()
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = None
+    accepted = None
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        token = {"operation": "accept"}
+        with uring_api.Ring() as ring:
+            ring.submit_accept(server.fileno(), token)
+            client = connect_to_listener(server)
+
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        accepted_fd, address = completion.result
+        accepted = socket.socket(fileno=accepted_fd)
+        assert completion.user_data is token
+        assert completion.res == accepted_fd
+        assert completion.flags == 0
+        assert address == client.getsockname()
+    finally:
+        if accepted is not None:
+            accepted.close()
+        if client is not None:
+            client.close()
+        server.close()
 
 
 def test_ring_sendto_completion_when_available():

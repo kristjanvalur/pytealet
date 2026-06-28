@@ -9,6 +9,7 @@ from typing import Any
 
 try:
     from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
+    from _uring_api import C_API_FEATURE_ACCEPT as C_API_FEATURE_ACCEPT
     from _uring_api import C_API_FEATURE_C_CALLBACK as C_API_FEATURE_C_CALLBACK
     from _uring_api import C_API_FEATURE_COMPLETION as C_API_FEATURE_COMPLETION
     from _uring_api import C_API_FEATURE_DATAGRAM as C_API_FEATURE_DATAGRAM
@@ -24,6 +25,7 @@ try:
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
     C_API_ABI_VERSION = 2
+    C_API_FEATURE_ACCEPT = 1 << 5
     C_API_FEATURE_C_CALLBACK = 1 << 2
     C_API_FEATURE_COMPLETION = 1 << 3
     C_API_FEATURE_DATAGRAM = 1 << 4
@@ -117,6 +119,7 @@ __all__ = [
     "DEFAULT_ENTRIES",
     "DEFAULT_FLAGS",
     "C_API_ABI_VERSION",
+    "C_API_FEATURE_ACCEPT",
     "C_API_FEATURE_C_CALLBACK",
     "C_API_FEATURE_COMPLETION",
     "C_API_FEATURE_DATAGRAM",
