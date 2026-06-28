@@ -35,7 +35,7 @@ def test_uring_api_get_include_points_to_header_dir():
 
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 1
+    assert uring_api.C_API_ABI_VERSION == 2
     assert uring_api.C_API_FEATURE_PROBE == 1 << 0
     assert uring_api.C_API_FEATURE_RING == 1 << 1
     assert uring_api.C_API_FEATURE_C_CALLBACK == 1 << 2
@@ -184,7 +184,8 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
             ring.callback = python_deliveries.append
             ring.start()
             try:
-                ring.submit_recv(reader.fileno(), 4, 220)
+                buf = bytearray(4)
+                ring.submit_recv(reader.fileno(), buf, 220)
                 ring.submit_send(writer.fileno(), b"pong", 221)
                 deadline = time.monotonic() + 2.0
                 while len(c_deliveries) < 2 and time.monotonic() < deadline:
@@ -194,10 +195,11 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
                 client.clear_c_callback(ring)
 
         by_user_data = {completion.user_data: completion for completion in c_deliveries}
-        assert client.completion_summary(by_user_data[220]) == (220, 4, 0, b"pong")
+        assert client.completion_summary(by_user_data[220]) == (220, 4, 0, 4)
         assert client.completion_summary(by_user_data[221]) == (221, 4, 0, 4)
         assert by_user_data[220].res == 4
-        assert by_user_data[220].result == b"pong"
+        assert by_user_data[220].result == 4
+        assert bytes(buf) == b"pong"
         assert by_user_data[221].res == 4
         assert by_user_data[221].result == 4
         assert python_deliveries == []
@@ -246,8 +248,9 @@ def test_ring_recv_completion_when_available():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
+        buf = bytearray(5)
         with uring_api.Ring() as ring:
-            ring.submit_recv(reader.fileno(), 5, token)
+            ring.submit_recv(reader.fileno(), buf, token)
             writer.send(b"hello")
 
             completion = ring.wait(1.0)
@@ -257,7 +260,8 @@ def test_ring_recv_completion_when_available():
         assert completion.user_data is token
         assert completion.res == 5
         assert completion.flags == 0
-        assert completion.result == b"hello"
+        assert completion.result == 5
+        assert bytes(buf) == b"hello"
     finally:
         reader.close()
         writer.close()
@@ -293,8 +297,9 @@ def test_ring_socketpair_round_trip_when_available():
     try:
         left.setblocking(False)
         right.setblocking(False)
+        recv_buf = bytearray(4)
         with uring_api.Ring() as ring:
-            ring.submit_recv(left.fileno(), 4, 130)
+            ring.submit_recv(left.fileno(), recv_buf, 130)
             ring.submit_send(right.fileno(), b"ping", 131)
 
             completions = []
@@ -305,7 +310,8 @@ def test_ring_socketpair_round_trip_when_available():
 
         by_user_data = {completion.user_data: completion for completion in completions}
         assert by_user_data[130].res == 4
-        assert by_user_data[130].result == b"ping"
+        assert by_user_data[130].result == 4
+        assert bytes(recv_buf) == b"ping"
         assert by_user_data[131].res == 4
         assert by_user_data[131].result == 4
     finally:
@@ -388,7 +394,8 @@ def test_ring_delivery_thread_invokes_callback_when_available():
             with pytest.raises(RuntimeError, match="delivery thread is active"):
                 ring.wait(0)
 
-            ring.submit_recv(reader.fileno(), 5, 125)
+            buf = bytearray(5)
+            ring.submit_recv(reader.fileno(), buf, 125)
             writer.send(b"hello")
             assert delivered.wait(1.0)
 
@@ -403,7 +410,8 @@ def test_ring_delivery_thread_invokes_callback_when_available():
         assert completions
         assert completions[0].user_data == 125
         assert completions[0].res == 5
-        assert completions[0].result == b"hello"
+        assert completions[0].result == 5
+        assert bytes(buf) == b"hello"
     finally:
         reader.close()
         writer.close()
@@ -427,7 +435,8 @@ def test_ring_delivery_thread_delivers_socketpair_round_trip_when_available():
         with uring_api.Ring() as ring:
             ring.callback = callback
             ring.start()
-            ring.submit_recv(left.fileno(), 4, 132)
+            recv_buf = bytearray(4)
+            ring.submit_recv(left.fileno(), recv_buf, 132)
             ring.submit_send(right.fileno(), b"pong", 133)
 
             assert delivered.wait(1.0)
@@ -435,7 +444,8 @@ def test_ring_delivery_thread_delivers_socketpair_round_trip_when_available():
 
         by_user_data = {completion.user_data: completion for completion in completions}
         assert by_user_data[132].res == 4
-        assert by_user_data[132].result == b"pong"
+        assert by_user_data[132].result == 4
+        assert bytes(recv_buf) == b"pong"
         assert by_user_data[133].res == 4
         assert by_user_data[133].result == 4
     finally:
@@ -465,7 +475,7 @@ def test_ring_delivery_thread_writes_unraisable_and_exits_when_callback_fails():
         with uring_api.Ring() as ring:
             ring.callback = fail_callback
             ring.start()
-            ring.submit_recv(reader.fileno(), 1, 126)
+            ring.submit_recv(reader.fileno(), bytearray(1), 126)
             writer.send(b"x")
 
             assert unraisable.wait(1.0)

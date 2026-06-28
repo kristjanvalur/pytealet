@@ -22,7 +22,7 @@ try:
     from _uring_api import probe as _probe
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
-    C_API_ABI_VERSION = 1
+    C_API_ABI_VERSION = 2
     C_API_FEATURE_C_CALLBACK = 1 << 2
     C_API_FEATURE_COMPLETION = 1 << 3
     C_API_FEATURE_PROBE = 1 << 0

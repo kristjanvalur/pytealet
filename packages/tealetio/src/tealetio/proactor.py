@@ -64,7 +64,7 @@ class _UringRing(Protocol):
 
     def break_wait(self) -> None: ...
 
-    def submit_recv(self, fd: int, n: int, user_data: object = None) -> None: ...
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> None: ...
 
     def submit_send(self, fd: int, data: Any, user_data: object = None) -> None: ...
 
@@ -926,10 +926,11 @@ class UringProactor(ProactorBase):
         """Submit a socket receive operation."""
 
         operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
-        entry = _UringEntry(operation=operation, kind="recv")
+        data = memoryview(bytearray(n))
+        entry = _UringEntry(operation=operation, kind="recv", data=data)
         self._pending_tokens.append(None)
         try:
-            self._ring.submit_recv(sock.fileno(), n, entry)
+            self._ring.submit_recv(sock.fileno(), data, entry)
         except BaseException:
             entry.active = False
             self._pending_tokens.pop()
@@ -940,7 +941,17 @@ class UringProactor(ProactorBase):
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""
 
-        return self._raise_unsupported("recv_into")
+        operation = Operation[int](kind="recv_into", fileobj=sock, proactor=self)
+        entry = _UringEntry(operation=operation, kind="recv_into", data=memoryview(buf))
+        self._pending_tokens.append(None)
+        try:
+            self._ring.submit_recv(sock.fileno(), buf, entry)
+        except BaseException:
+            entry.active = False
+            self._pending_tokens.pop()
+            self.break_wait()
+            raise
+        return operation
 
     def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
         """Submit a datagram receive operation."""
@@ -1025,11 +1036,11 @@ class UringProactor(ProactorBase):
             entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return entry.operation
         if entry.kind == "recv":
-            result = completion.result
-            if not isinstance(result, bytes):
-                entry.operation._set_exception(RuntimeError("recv completion did not return bytes"))
-            else:
-                entry.operation._set_result(result)
+            assert entry.data is not None
+            entry.operation._set_result(entry.data[:res].tobytes())
+            return entry.operation
+        if entry.kind == "recv_into":
+            entry.operation._set_result(res)
             return entry.operation
         if entry.kind == "sendall":
             if res == 0:

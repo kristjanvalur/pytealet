@@ -21,8 +21,8 @@ with uring_api.Ring() as ring:
 ## Socket I/O
 
 `Ring` currently exposes `submit_recv()`, `submit_send()`, and `wait()` for
-minimal socket-oriented experiments. Each submitted operation carries a
-Python `user_data` object which comes back with its completion.
+minimal socket-oriented experiments. Each submitted operation carries a Python
+`user_data` object which comes back with its completion.
 
 ```python
 import socket
@@ -35,13 +35,15 @@ try:
 
     with uring_api.Ring() as ring:
         token = {"operation": "greeting"}
-        ring.submit_recv(reader.fileno(), 5, token)
+        buf = bytearray(5)
+        ring.submit_recv(reader.fileno(), buf, token)
         writer.send(b"hello")
 
         completion = ring.wait(1.0)
 
     assert completion is not None
     assert completion.user_data is token
+    assert bytes(buf) == b"hello"
     print(completion.res, completion.result)
 finally:
     reader.close()
@@ -182,7 +184,7 @@ with uring_api.Ring() as ring:
     ring.callback = delivered
     ring.start()
     try:
-        ring.submit_recv(fd, 4096, 200)
+        ring.submit_recv(fd, bytearray(4096), 200)
     finally:
         ring.stop()
 ```

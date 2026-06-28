@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 
-#define URING_API_CAPI_ABI_VERSION 1u
+#define URING_API_CAPI_ABI_VERSION 2u
 #define URING_API_CAPI_CAPSULE_NAME "_uring_api._C_API"
 
 /* Feature flags published in UringApi_CAPI.feature_flags. */
@@ -46,7 +46,7 @@ typedef struct UringApi_CAPI {
     int (*ring_running)(PyObject *ring);
 
     /* Submission and receive operations. */
-    int (*ring_submit_recv)(PyObject *ring, int fd, Py_ssize_t n, PyObject *user_data);
+    int (*ring_submit_recv)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
     int (*ring_submit_send)(PyObject *ring, int fd, PyObject *data, PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     PyObject *(*ring_wait)(PyObject *ring, double timeout);

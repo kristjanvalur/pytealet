@@ -610,7 +610,7 @@ class _FakeUringRing:
         self.stop_count = 0
         self.break_count = 0
         self.completions: list[SimpleNamespace] = []
-        self.submitted_recv: list[tuple[int, int, object]] = []
+        self.submitted_recv: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
 
     def close(self) -> None:
@@ -632,11 +632,15 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         self.break_count += 1
 
-    def submit_recv(self, fd: int, n: int, user_data: object = None) -> None:
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_recv.append((fd, n, user_data))
-        self._deliver(SimpleNamespace(user_data=user_data, res=5, flags=0, result=b"hello"))
+        view = memoryview(buf)
+        payload = b"world" if getattr(user_data, "kind", None) == "recv_into" else b"hello"
+        if len(view) >= len(payload):
+            view[: len(payload)] = payload
+        self.submitted_recv.append((fd, buf, user_data))
+        self._deliver(SimpleNamespace(user_data=user_data, res=5, flags=0, result=5))
 
     def submit_send(self, fd: int, data: Any, user_data: object = None) -> None:
         if self.closed:
@@ -658,14 +662,15 @@ class _FakeUringRing:
 
 
 class _DeferredUringRing(_FakeUringRing):
-    def submit_recv(self, fd: int, n: int, user_data: object = None) -> None:
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_recv.append((fd, n, user_data))
+        self.submitted_recv.append((fd, buf, user_data))
 
     def complete_recv(self, data: bytes = b"hello") -> None:
-        user_data = self.submitted_recv[-1][2]
-        self._deliver(SimpleNamespace(user_data=user_data, res=len(data), flags=0, result=data))
+        _fd, buf, user_data = self.submitted_recv[-1]
+        memoryview(buf)[: len(data)] = data
+        self._deliver(SimpleNamespace(user_data=user_data, res=len(data), flags=0, result=len(data)))
 
 
 class TestUringProactor:
@@ -841,6 +846,26 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_into_completes_from_ring_completion(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            buf = bytearray(5)
+            operation = proactor.recv_into(reader, buf)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == 5
+            assert bytes(buf) == b"world"
+            assert isinstance(proactor.ring, _FakeUringRing)
+            submitted = proactor.ring.submitted_recv[0]
+            assert submitted[0] == reader.fileno()
+            assert submitted[1] is buf
         finally:
             reader.close()
             writer.close()
