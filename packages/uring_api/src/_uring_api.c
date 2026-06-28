@@ -28,6 +28,10 @@ typedef char UringApiMutex;
 typedef PyMutex UringApiMutex;
 #endif
 
+#ifndef _PyCFunction_CAST
+#define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
+#endif
+
 typedef struct {
     PyObject_HEAD
     struct io_uring ring;
