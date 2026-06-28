@@ -74,6 +74,8 @@ class _UringRing(Protocol):
 
     def submit_accept(self, fd: int, user_data: object = None) -> None: ...
 
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> None: ...
+
     def wait(self, timeout: float | None = None) -> "_UringCompletion" | None: ...
 
 
@@ -1084,7 +1086,22 @@ class UringProactor(ProactorBase):
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
         """Submit a non-blocking socket connect operation."""
 
-        return self._raise_unsupported("connect")
+        operation = Operation[None](kind="connect", fileobj=sock, proactor=self)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_connect)
+        self._pending_tokens.append(None)
+        try:
+            self._ring.submit_connect(sock.fileno(), address, entry)
+        except BaseException:
+            entry.active = False
+            self._pending_tokens.pop()
+            self.break_wait()
+            raise
+        return operation
+
+    def _complete_uring_connect(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
+        operation = cast(Operation[None], entry.operation)
+        operation._set_result(None)
+        return operation
 
     def cancel_operation(self, operation: Operation[Any]) -> None:
         # TODO: submit IORING_OP_ASYNC_CANCEL once the native wrapper exposes it.

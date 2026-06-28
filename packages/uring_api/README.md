@@ -21,9 +21,9 @@ with uring_api.Ring() as ring:
 ## Socket I/O
 
 `Ring` currently exposes `submit_recv()`, `submit_send()`, `submit_recvmsg()`,
-`submit_sendto()`, `submit_accept()`, and `wait()` for minimal socket-oriented
-experiments. Each submitted operation carries a Python `user_data` object which
-comes back with its completion.
+`submit_sendto()`, `submit_accept()`, `submit_connect()`, and `wait()` for
+minimal socket-oriented experiments. Each submitted operation carries a Python
+`user_data` object which comes back with its completion.
 
 ```python
 import socket
@@ -155,7 +155,7 @@ The intended baseline is simple:
 - one thread may reap completions with `wait()`;
 - other threads may call submit-side methods such as `submit_recv()`,
     `submit_send()`, `submit_recvmsg()`, `submit_sendto()`, `submit_accept()`,
-    and `break_wait()`;
+    `submit_connect()`, and `break_wait()`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
 - alternatively, `Ring.callback` plus `start()` can run a native delivery thread
@@ -209,22 +209,20 @@ The capsule currently exposes:
     dictionary as `_uring_api.probe()`;
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
     `ring_submit_send()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
-    `ring_submit_accept()`, `ring_break_wait()`, and `ring_wait()`;
+    `ring_submit_accept()`, `ring_submit_connect()`, `ring_break_wait()`, and
+    `ring_wait()`;
 - `ring_set_callback()`, `ring_set_c_callback()`, `ring_start()`, and
     `ring_stop()` for delivery-thread control;
 - `completion_check()`, `completion_user_data()`, `completion_res()`,
     `completion_flags()`, and `completion_result()` for native completion
     inspection.
 
-Check `URING_API_CAPI_FEATURE_PROBE`, `URING_API_CAPI_FEATURE_RING`, and
-`URING_API_CAPI_FEATURE_C_CALLBACK` before calling those groups of functions.
-Check `URING_API_CAPI_FEATURE_COMPLETION` before using completion accessors. A C
+Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
+describes the capsule API surface, not runtime kernel support for individual
+operations. Use `probe()` to check whether this process can create a ring. A C
 completion callback receives the ring object, the completion object, and the
-supplied `user_data`. Check `URING_API_CAPI_FEATURE_DATAGRAM` before using
-`ring_submit_recvmsg()` or `ring_submit_sendto()`. Check
-`URING_API_CAPI_FEATURE_ACCEPT` before using `ring_submit_accept()`. Return `0`
-for success; return a negative value with a Python exception set to report an
-unraisable error and stop the delivery thread.
+supplied `user_data`. Return `0` for success; return a negative value with a
+Python exception set to report an unraisable error and stop the delivery thread.
 
 ## Choosing Ring Sizes
 

@@ -63,6 +63,7 @@ typedef enum {
     URING_API_PENDING_SENDTO = 4,
     URING_API_PENDING_RECVMSG = 5,
     URING_API_PENDING_ACCEPT = 6,
+    URING_API_PENDING_CONNECT = 7,
 } UringApiPendingKind;
 
 typedef struct {
@@ -103,6 +104,7 @@ static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf,
 static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address,
                                          PyObject *user_data);
 static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, PyObject *user_data);
+static int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
 static int UringApiCapi_RingBreakWait(PyObject *ring);
 static PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
 static int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
@@ -115,9 +117,7 @@ static int UringApiCapi_CompletionRes(PyObject *completion, int *value);
 static int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *value);
 static PyObject *UringApiCapi_CompletionResult(PyObject *completion);
 
-#define URING_API_CAPI_FEATURES                                                                                      \
-    (URING_API_CAPI_FEATURE_PROBE | URING_API_CAPI_FEATURE_RING | URING_API_CAPI_FEATURE_C_CALLBACK |               \
-    URING_API_CAPI_FEATURE_COMPLETION | URING_API_CAPI_FEATURE_DATAGRAM | URING_API_CAPI_FEATURE_ACCEPT)
+#define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
 
 static int ring_type_check(PyObject *ring) {
     if (!PyObject_TypeCheck(ring, &UringApiRing_Type)) {
@@ -458,6 +458,8 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
         if (payload) {
             payload = Py_BuildValue("iN", res, payload);
         }
+    } else if (res >= 0 && self->kind == URING_API_PENDING_CONNECT) {
+        payload = Py_NewRef(Py_None);
     } else {
         payload = Py_NewRef(Py_None);
     }
@@ -657,6 +659,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSubmitRecvmsg,
     UringApiCapi_RingSubmitSendto,
     UringApiCapi_RingSubmitAccept,
+    UringApiCapi_RingSubmitConnect,
     UringApiCapi_RingBreakWait,
     UringApiCapi_RingWait,
     UringApiCapi_RingSetCallback,
@@ -685,22 +688,7 @@ static int uring_api_export_capi(PyObject *module) {
     if (PyModule_AddIntConstant(module, "C_API_ABI_VERSION", (long)URING_API_CAPI_ABI_VERSION) < 0) {
         return -1;
     }
-    if (module_add_uint64_constant(module, "C_API_FEATURE_PROBE", URING_API_CAPI_FEATURE_PROBE) < 0) {
-        return -1;
-    }
-    if (module_add_uint64_constant(module, "C_API_FEATURE_RING", URING_API_CAPI_FEATURE_RING) < 0) {
-        return -1;
-    }
-    if (module_add_uint64_constant(module, "C_API_FEATURE_C_CALLBACK", URING_API_CAPI_FEATURE_C_CALLBACK) < 0) {
-        return -1;
-    }
-    if (module_add_uint64_constant(module, "C_API_FEATURE_COMPLETION", URING_API_CAPI_FEATURE_COMPLETION) < 0) {
-        return -1;
-    }
-    if (module_add_uint64_constant(module, "C_API_FEATURE_DATAGRAM", URING_API_CAPI_FEATURE_DATAGRAM) < 0) {
-        return -1;
-    }
-    if (module_add_uint64_constant(module, "C_API_FEATURE_ACCEPT", URING_API_CAPI_FEATURE_ACCEPT) < 0) {
+    if (module_add_uint64_constant(module, "C_API_FEATURE_CORE", URING_API_CAPI_FEATURE_CORE) < 0) {
         return -1;
     }
     if (module_add_uint64_constant(module, "C_API_FEATURES", URING_API_CAPI_FEATURES) < 0) {
@@ -1030,6 +1018,58 @@ static PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, 
             failed = 1;
         } else {
             io_uring_prep_accept(sqe, (int)fd, (struct sockaddr *)&pending->addr, &pending->addrlen, 0);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "address", "user_data", NULL};
+    struct io_uring_sqe *sqe;
+    long fd;
+    PyObject *address;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
+    UringApiCompletion *pending;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lO|O", keywords, &fd, &address, &user_data)) {
+        return NULL;
+    }
+    if (fd < 0 || fd > INT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_CONNECT, user_data, NULL);
+    if (!completion) {
+        return NULL;
+    }
+    pending = (UringApiCompletion *)completion;
+    if (parse_numeric_sockaddr((int)fd, address, &pending->addr, &pending->addrlen) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_connect(sqe, (int)fd, (struct sockaddr *)&pending->addr, pending->addrlen);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
@@ -1618,6 +1658,19 @@ static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, PyObject *user_
     return 0;
 }
 
+static int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_connect", "iOO", fd, address, user_data ? user_data : Py_None);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
 static int UringApiCapi_RingBreakWait(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
@@ -1746,6 +1799,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a sendto operation."},
     {"submit_accept", _PyCFunction_CAST(UringApiRing_submit_accept), METH_VARARGS | METH_KEYWORDS,
      "Submit an accept operation."},
+    {"submit_connect", _PyCFunction_CAST(UringApiRing_submit_connect), METH_VARARGS | METH_KEYWORDS,
+     "Submit a connect operation."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Interrupt a thread blocked in wait without producing a user completion."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,

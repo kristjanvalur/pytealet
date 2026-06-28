@@ -617,6 +617,7 @@ class _FakeUringRing:
         self.submitted_send: list[tuple[int, object, object]] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object]] = []
+        self.submitted_connect: list[tuple[int, object, object]] = []
 
     def close(self) -> None:
         self.stop()
@@ -680,6 +681,12 @@ class _FakeUringRing:
         self.accepted_peers.append(peer)
         self.submitted_accept.append((fd, user_data))
         self._deliver(SimpleNamespace(user_data=user_data, res=conn.fileno(), flags=0, result=(conn.detach(), "peer")))
+
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_connect.append((fd, address, user_data))
+        self._deliver(SimpleNamespace(user_data=user_data, res=0, flags=0, result=None))
 
     def wait(self, timeout: float | None = None) -> SimpleNamespace | None:
         if not self.completions:
@@ -1045,6 +1052,24 @@ class TestUringProactor:
             if conn is not None:
                 conn.close()
             server.close()
+            proactor.close()
+
+    def test_connect_completes_from_ring_completion(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setblocking(False)
+            address = ("127.0.0.1", 12345)
+            operation = proactor.connect(sock, address)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() is None
+            assert isinstance(proactor.ring, _FakeUringRing)
+            submitted = proactor.ring.submitted_connect[0]
+            assert submitted[0] == sock.fileno()
+            assert submitted[1] == address
+        finally:
+            sock.close()
             proactor.close()
 
     def test_operations_reject_closed_proactor(self):

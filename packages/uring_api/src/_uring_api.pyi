@@ -6,12 +6,7 @@ __liburing_version__: str
 __compiled_liburing_version__: str
 __compiled_liburing_version_info__: tuple[int, int]
 C_API_ABI_VERSION: int
-C_API_FEATURE_ACCEPT: int
-C_API_FEATURE_PROBE: int
-C_API_FEATURE_RING: int
-C_API_FEATURE_C_CALLBACK: int
-C_API_FEATURE_COMPLETION: int
-C_API_FEATURE_DATAGRAM: int
+C_API_FEATURE_CORE: int
 C_API_FEATURES: int
 
 class Completion:
@@ -51,6 +46,7 @@ class Ring:
     def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> None: ...
     def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> None: ...
     def submit_accept(self, fd: int, user_data: object = None) -> None: ...
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> None: ...
     def wait(self, timeout: float | None = None) -> Completion | None: ...
     def __enter__(self) -> Ring: ...
     def __exit__(

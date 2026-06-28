@@ -15,12 +15,7 @@
 #define URING_API_CAPI_CAPSULE_NAME "_uring_api._C_API"
 
 /* Feature flags published in UringApi_CAPI.feature_flags. */
-#define URING_API_CAPI_FEATURE_PROBE (1ull << 0)
-#define URING_API_CAPI_FEATURE_RING (1ull << 1)
-#define URING_API_CAPI_FEATURE_C_CALLBACK (1ull << 2)
-#define URING_API_CAPI_FEATURE_COMPLETION (1ull << 3)
-#define URING_API_CAPI_FEATURE_DATAGRAM (1ull << 4)
-#define URING_API_CAPI_FEATURE_ACCEPT (1ull << 5)
+#define URING_API_CAPI_FEATURE_CORE (1ull << 0)
 
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completion, void *user_data);
 
@@ -53,6 +48,7 @@ typedef struct UringApi_CAPI {
     int (*ring_submit_recvmsg)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
     int (*ring_submit_sendto)(PyObject *ring, int fd, PyObject *data, PyObject *address, PyObject *user_data);
     int (*ring_submit_accept)(PyObject *ring, int fd, PyObject *user_data);
+    int (*ring_submit_connect)(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
@@ -69,7 +65,7 @@ typedef struct UringApi_CAPI {
     int (*completion_flags)(PyObject *completion, unsigned int *value);
     PyObject *(*completion_result)(PyObject *completion);
 
-    void *reserved[13];
+    void *reserved[12];
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

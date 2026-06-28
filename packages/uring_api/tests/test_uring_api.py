@@ -44,18 +44,8 @@ def test_uring_api_get_include_points_to_header_dir():
 
 def test_native_module_exports_c_api_constants():
     assert uring_api.C_API_ABI_VERSION == 2
-    assert uring_api.C_API_FEATURE_ACCEPT == 1 << 5
-    assert uring_api.C_API_FEATURE_PROBE == 1 << 0
-    assert uring_api.C_API_FEATURE_RING == 1 << 1
-    assert uring_api.C_API_FEATURE_C_CALLBACK == 1 << 2
-    assert uring_api.C_API_FEATURE_COMPLETION == 1 << 3
-    assert uring_api.C_API_FEATURE_DATAGRAM == 1 << 4
-    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_PROBE
-    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_RING
-    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_C_CALLBACK
-    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_COMPLETION
-    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_DATAGRAM
-    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_ACCEPT
+    assert uring_api.C_API_FEATURE_CORE == 1 << 0
+    assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
 
 
 def test_probe_returns_structured_result():
@@ -125,12 +115,7 @@ def test_c_api_client_can_import_capsule_and_probe():
 
     assert abi_version == uring_api.C_API_ABI_VERSION
     assert struct_size > 0
-    assert feature_flags & uring_api.C_API_FEATURE_PROBE
-    assert feature_flags & uring_api.C_API_FEATURE_RING
-    assert feature_flags & uring_api.C_API_FEATURE_C_CALLBACK
-    assert feature_flags & uring_api.C_API_FEATURE_COMPLETION
-    assert feature_flags & uring_api.C_API_FEATURE_DATAGRAM
-    assert feature_flags & uring_api.C_API_FEATURE_ACCEPT
+    assert feature_flags & uring_api.C_API_FEATURE_CORE
     assert (major, minor) == uring_api.__compiled_liburing_version_info__
     assert isinstance(probe["available"], bool)
 
@@ -287,6 +272,33 @@ def test_c_api_accept_operation_when_available():
         server.close()
 
 
+def test_c_api_connect_operation_when_available():
+    require_uring()
+
+    client_api = build_c_api_client()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    accepted = None
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        client.setblocking(False)
+        with uring_api.Ring() as ring:
+            client_api.submit_connect(ring, client.fileno(), server.getsockname(), 241)
+
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        assert client_api.completion_summary(completion) == (241, 0, 0, None)
+        accepted, _address = server.accept()
+    finally:
+        if accepted is not None:
+            accepted.close()
+        client.close()
+        server.close()
+
+
 def test_ring_lifecycle_when_available():
     require_uring()
 
@@ -398,6 +410,36 @@ def test_ring_accept_completion_when_available():
             accepted.close()
         if client is not None:
             client.close()
+        server.close()
+
+
+def test_ring_connect_completion_when_available():
+    require_uring()
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    accepted = None
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        client.setblocking(False)
+        token = {"operation": "connect"}
+        with uring_api.Ring() as ring:
+            ring.submit_connect(client.fileno(), server.getsockname(), token)
+
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        assert completion.user_data is token
+        assert completion.res == 0
+        assert completion.flags == 0
+        assert completion.result is None
+        accepted, _address = server.accept()
+    finally:
+        if accepted is not None:
+            accepted.close()
+        client.close()
         server.close()
 
 
