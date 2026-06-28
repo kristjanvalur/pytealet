@@ -28,6 +28,7 @@ __all__ = [
     "Operation",
     "AsyncProactorScheduler",
     "Proactor",
+    "ProactorBase",
     "ProactorFactory",
     "ProactorScheduler",
     "SelectorProactor",
@@ -127,6 +128,46 @@ class Proactor(Protocol):
 
 
 ProactorFactory = Callable[[], Proactor]
+
+
+class ProactorBase:
+    """Shared helpers for concrete proactor backends."""
+
+    def __init__(self, *, completion_callback: _CompletionCallback | None = None) -> None:
+        self._closed = False
+        self._completion_callback = completion_callback
+        self._clock = time.monotonic
+
+    def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
+        """Set the callback invoked when backend completions may be ready."""
+
+        self._completion_callback = callback
+
+    def get_time(self) -> float:
+        """Return the proactor clock value."""
+
+        return self._clock()
+
+    def set_clock(self, clock: _Clock) -> None:
+        """Set the clock used for deadline-oriented waits."""
+
+        self._clock = clock
+
+    def _timeout_until_deadline(self, deadline: float | None) -> float | None:
+        if deadline is None:
+            return None
+        if deadline == 0:
+            return 0.0
+        return max(0.0, deadline - self.get_time())
+
+    def _notify_completion(self) -> None:
+        callback = self._completion_callback
+        if callback is not None:
+            callback()
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("proactor is closed")
 
 
 class Operation(Generic[T]):
@@ -263,7 +304,7 @@ class _UringEntry:
     active: bool = True
 
 
-class SelectorProactor:
+class SelectorProactor(ProactorBase):
     """Completion-oriented proactor prototype backed by a selector."""
 
     def __init__(
@@ -272,37 +313,20 @@ class SelectorProactor:
         *,
         completion_callback: _CompletionCallback | None = None,
     ) -> None:
+        super().__init__(completion_callback=completion_callback)
         self._lock = threading.RLock()
         self._selector = selector if selector is not None else compat.released_default_selector()
         self._fd_operations: dict[int, _FdEntry] = {}
-        self._closed = False
-        self._completion_callback = completion_callback
-        self._clock = time.monotonic
         self._wakeup_reader, self._wakeup_writer = socket.socketpair()
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
         self._selector.register(self._wakeup_reader.fileno(), selectors.EVENT_READ, None)
-
-    def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
-        """Set the callback invoked when backend completions may be ready."""
-
-        self._completion_callback = callback
 
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
 
         with self._lock:
             return bool(self._fd_operations)
-
-    def get_time(self) -> float:
-        """Return the proactor clock value."""
-
-        return self._clock()
-
-    def set_clock(self, clock: _Clock) -> None:
-        """Set the clock used for deadline-oriented waits."""
-
-        self._clock = clock
 
     def close(self) -> None:
         """Close selector and wakeup resources."""
@@ -649,13 +673,6 @@ class SelectorProactor:
             mask |= selectors.EVENT_WRITE
         return mask
 
-    def _timeout_until_deadline(self, deadline: float | None) -> float | None:
-        if deadline is None:
-            return None
-        if deadline == 0:
-            return 0.0
-        return max(0.0, deadline - self.get_time())
-
     def _update_selector_registration(self, fd: int) -> None:
         if self._closed:
             return
@@ -683,15 +700,6 @@ class SelectorProactor:
                 return
             except OSError:
                 return
-
-    def _notify_completion(self) -> None:
-        callback = self._completion_callback
-        if callback is not None:
-            callback()
-
-    def _check_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("proactor is closed")
 
     def _check_socket(self, sock: socket.socket) -> None:
         if sock.getblocking():
@@ -788,7 +796,7 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._completed_ready.wait(timeout)
 
 
-class UringProactor:
+class UringProactor(ProactorBase):
     """io_uring-backed proactor using the ring's delivery callback thread."""
 
     def __init__(
@@ -801,10 +809,8 @@ class UringProactor:
     ) -> None:
         if ring_factory is None:
             ring_factory = _default_uring_ring_factory
+        super().__init__(completion_callback=completion_callback)
         self._ring = ring_factory(entries, flags)
-        self._closed = False
-        self._completion_callback = completion_callback
-        self._clock = time.monotonic
         self._pending_tokens: list[None] = []
         self._wake_condition = threading.Condition()
         self._wake_pending = False
@@ -824,25 +830,10 @@ class UringProactor:
 
         return self._ring
 
-    def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
-        """Set the callback invoked when backend completions may be ready."""
-
-        self._completion_callback = callback
-
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
 
         return bool(self._pending_tokens)
-
-    def get_time(self) -> float:
-        """Return the proactor clock value."""
-
-        return self._clock()
-
-    def set_clock(self, clock: _Clock) -> None:
-        """Set the clock used for deadline-oriented waits."""
-
-        self._clock = clock
 
     def close(self) -> None:
         """Close the owned `io_uring` ring."""
@@ -988,17 +979,6 @@ class UringProactor:
 
         return self._raise_unsupported("connect")
 
-    def _timeout_until_deadline(self, deadline: float | None) -> float | None:
-        if deadline is None:
-            return None
-        if deadline == 0:
-            return 0.0
-        return max(0.0, deadline - self.get_time())
-
-    def _check_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("proactor is closed")
-
     def cancel_operation(self, operation: Operation[Any]) -> None:
         # TODO: submit IORING_OP_ASYNC_CANCEL once the native wrapper exposes it.
         cancelled = operation._set_cancelled()
@@ -1065,11 +1045,6 @@ class UringProactor:
             return None
         entry.operation._set_exception(RuntimeError(f"unsupported uring operation kind: {entry.kind}"))
         return entry.operation
-
-    def _notify_completion(self) -> None:
-        callback = self._completion_callback
-        if callback is not None:
-            callback()
 
     def _raise_unsupported(self, operation: str) -> NoReturn:
         self._check_open()
