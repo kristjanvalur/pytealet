@@ -109,12 +109,12 @@ jobs:
           probe = uring_api.probe()
           print("python:", platform.python_version(), platform.python_implementation())
           print("kernel:", platform.release())
-            print("liburing:", uring_api.__liburing_version__)
-            print("compiled liburing:", uring_api.__compiled_liburing_version__)
-            print("compiled liburing info:", uring_api.__compiled_liburing_version_info__)
-            print("probe:", probe)
-            assert isinstance(probe, dict)
-            if probe:
+          print("liburing:", uring_api.__liburing_version__)
+          print("compiled liburing:", uring_api.__compiled_liburing_version__)
+          print("compiled liburing info:", uring_api.__compiled_liburing_version_info__)
+          print("probe:", probe)
+          assert isinstance(probe, dict)
+          if probe:
               assert probe["available"] is True
               assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
           PY
