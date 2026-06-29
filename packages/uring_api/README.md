@@ -24,10 +24,11 @@ with uring_api.Ring() as ring:
 ## Socket I/O
 
 `Ring` currently exposes `submit_recv()`, `submit_send()`, `submit_recvmsg()`,
-`submit_sendto()`, `submit_sendmsg()`, `submit_accept()`, `submit_connect()`,
-`submit_shutdown()`, `submit_close()`, `submit_socket()`, and `wait()` for
-minimal socket-oriented experiments. Each submitted operation carries a Python
-`user_data` object which comes back with its completion.
+`submit_sendto()`, `submit_sendmsg()`, `submit_accept()`,
+`submit_accept_multishot()`, `submit_connect()`, `submit_shutdown()`,
+`submit_close()`, `submit_socket()`, and `wait()` for minimal socket-oriented
+experiments. Each submitted operation carries a Python `user_data` object which
+comes back with its completion.
 
 ```python
 import socket
@@ -214,7 +215,7 @@ The intended baseline is simple:
 - one thread may reap completions with `wait()`;
 - other threads may call submit-side methods such as `submit_recv()`,
     `submit_send()`, `submit_recvmsg()`, `submit_sendto()`, `submit_accept()`,
-    `submit_connect()`, and `break_wait()`;
+    `submit_accept_multishot()`, `submit_connect()`, and `break_wait()`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
 - alternatively, callers may start their own Python threads and have each one
@@ -282,8 +283,10 @@ The capsule currently exposes:
     availability and capability dictionary as `_uring_api.probe()`;
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
     `ring_submit_send()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
-    `ring_submit_accept()`, `ring_submit_connect()`, `ring_break_wait()`, and
-    `ring_wait()`;
+    `ring_submit_sendmsg()`, `ring_submit_accept()`,
+    `ring_submit_accept_multishot()`, `ring_submit_connect()`,
+    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_socket()`,
+    `ring_break_wait()`, and `ring_wait()`;
 - `ring_set_callback()`, `ring_set_c_callback()`, `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;

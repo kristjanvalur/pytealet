@@ -116,6 +116,7 @@ static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data,
 static int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address,
                                           unsigned int flags, PyObject *user_data);
 static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, PyObject *user_data);
+static int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, PyObject *user_data);
 static int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
 static int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data);
 static int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data);
@@ -1015,6 +1016,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSubmitSendto,
     UringApiCapi_RingSubmitSendmsg,
     UringApiCapi_RingSubmitAccept,
+    UringApiCapi_RingSubmitAcceptMultishot,
     UringApiCapi_RingSubmitConnect,
     UringApiCapi_RingSubmitShutdown,
     UringApiCapi_RingSubmitClose,
@@ -1440,6 +1442,53 @@ static PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, 
             failed = 1;
         } else {
             io_uring_prep_accept(sqe, (int)fd, (struct sockaddr *)&pending->addr, &pending->addrlen, 0);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+static PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "user_data", NULL};
+    struct io_uring_sqe *sqe;
+    long fd;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
+    UringApiCompletion *pending;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|O", keywords, &fd, &user_data)) {
+        return NULL;
+    }
+    if (fd < 0 || fd > INT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending_accept(user_data);
+    if (!completion) {
+        return NULL;
+    }
+    pending = (UringApiCompletion *)completion;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_multishot_accept(sqe, (int)fd, (struct sockaddr *)&pending->addr, &pending->addrlen, 0);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
@@ -2315,6 +2364,19 @@ static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, PyObject *user_
     return 0;
 }
 
+static int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, PyObject *user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_accept_multishot", "iO", fd, user_data ? user_data : Py_None);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
 static int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
@@ -2515,6 +2577,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a sendmsg operation."},
     {"submit_accept", _PyCFunction_CAST(UringApiRing_submit_accept), METH_VARARGS | METH_KEYWORDS,
      "Submit an accept operation."},
+    {"submit_accept_multishot", _PyCFunction_CAST(UringApiRing_submit_accept_multishot),
+     METH_VARARGS | METH_KEYWORDS, "Submit a multishot accept operation."},
     {"submit_connect", _PyCFunction_CAST(UringApiRing_submit_connect), METH_VARARGS | METH_KEYWORDS,
      "Submit a connect operation."},
     {"submit_cancel", _PyCFunction_CAST(UringApiRing_submit_cancel), METH_VARARGS | METH_KEYWORDS,

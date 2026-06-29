@@ -20,6 +20,7 @@ The wrapper currently exposes these socket-oriented operations:
 - `submit_sendto()` / `IORING_OP_SEND`
 - `submit_sendmsg()` / `IORING_OP_SENDMSG`
 - `submit_accept()` / `IORING_OP_ACCEPT`
+- `submit_accept_multishot()` / `IORING_OP_ACCEPT` with `IORING_ACCEPT_MULTISHOT`
 - `submit_connect()` / `IORING_OP_CONNECT`
 - `submit_shutdown()` / `IORING_OP_SHUTDOWN`
 - `submit_close()` / `IORING_OP_CLOSE`, for caller-owned raw fds
@@ -47,8 +48,9 @@ as plain one-shot operations:
   cancel flags are newer: `IORING_ASYNC_CANCEL_ALL`, `IORING_ASYNC_CANCEL_FD`,
   and `IORING_ASYNC_CANCEL_ANY` are available since kernel 5.19;
   `IORING_ASYNC_CANCEL_FD_FIXED` is available since kernel 6.0.
-- `submit_accept()` exposes one-shot accept only. Direct-descriptor accept needs
-  registered files, and multishot accept is available since kernel 5.19.
+- `submit_accept()` exposes one-shot accept. `submit_accept_multishot()` exposes
+  multishot accept, available since kernel 5.19. Direct-descriptor accept still
+  needs registered files and is not exposed yet.
 - `submit_recv()` and `submit_recvmsg()` expose one-shot receive only. Multishot
   receive is available since kernel 6.0, while receive/send polling hints such
   as `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY` are available
@@ -150,11 +152,12 @@ server-performance enhancer. One accept request can produce accepted sockets as
 connections arrive, again using `IORING_CQE_F_MORE` to indicate whether the
 request remains active.
 
-A low-level API could mirror multishot recv:
+The low-level API mirrors the planned multishot recv shape, using
+`submit_cancel()` for explicit teardown:
 
 ```python
 handle = ring.submit_accept_multishot(fd, user_data)
-handle.cancel()
+ring.submit_cancel(handle)
 ```
 
 At the `tealetio` layer, this likely wants a higher-level accept stream or a
