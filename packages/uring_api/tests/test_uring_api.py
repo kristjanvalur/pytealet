@@ -118,6 +118,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_SOCKET == 12
     assert uring_api.COMPLETION_KIND_RECV_MULTISHOT == 13
     assert uring_api.COMPLETION_KIND_SEND_ZC == 14
+    assert uring_api.COMPLETION_KIND_SENDMSG_ZC == 15
 
 
 def test_probe_returns_structured_result():
@@ -128,12 +129,14 @@ def test_probe_returns_structured_result():
         "IORING_ACCEPT_MULTISHOT",
         "IORING_RECV_MULTISHOT",
         "IORING_OP_SEND_ZC",
+        "IORING_OP_SENDMSG_ZC",
         "IORING_OP_SOCKET",
     }
     assert probe["available"] is True
     assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
     assert isinstance(probe["IORING_RECV_MULTISHOT"], bool)
     assert isinstance(probe["IORING_OP_SEND_ZC"], bool)
+    assert isinstance(probe["IORING_OP_SENDMSG_ZC"], bool)
     assert isinstance(probe["IORING_OP_SOCKET"], bool)
 
 
@@ -361,6 +364,36 @@ def test_c_api_sendmsg_operation_when_available():
         assert client.completion_summary(completion) == (244, 5, 0, 5)
         assert client.completion_sequence(completion) == 0
         assert completion.kind == uring_api.COMPLETION_KIND_SENDMSG
+        data, address = receiver.recvfrom(5)
+        assert data == b"hello"
+        assert address[1] == sender.getsockname()[1]
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_c_api_sendmsg_zc_operation_when_available():
+    require_uring_capability("IORING_OP_SENDMSG_ZC")
+
+    client = build_c_api_client()
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sender.setblocking(False)
+        receiver.setblocking(False)
+        sender.bind(("127.0.0.1", 0))
+        receiver.bind(("127.0.0.1", 0))
+        with uring_api.Ring() as ring:
+            client.submit_sendmsg_zc(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 245)
+            completion = ring.wait(1.0)
+            notification = ring.wait(1.0)
+
+        assert completion is not None
+        assert client.completion_summary(completion) == (245, 5, completion.flags, 5)
+        assert client.completion_sequence(completion) == 0
+        assert completion.kind == uring_api.COMPLETION_KIND_SENDMSG_ZC
+        assert not (completion.flags & uring_api.IORING_CQE_F_NOTIF)
+        assert notification is None
         data, address = receiver.recvfrom(5)
         assert data == b"hello"
         assert address[1] == sender.getsockname()[1]
@@ -787,6 +820,38 @@ def test_ring_send_zc_completion_when_available():
     finally:
         reader.close()
         writer.close()
+
+
+def test_ring_sendmsg_zc_completion_when_available():
+    require_uring_capability("IORING_OP_SENDMSG_ZC")
+
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sender.setblocking(False)
+        receiver.setblocking(False)
+        sender.bind(("127.0.0.1", 0))
+        receiver.bind(("127.0.0.1", 0))
+        with uring_api.Ring() as ring:
+            token = {"operation": "sendmsg_zc"}
+            pending = ring.submit_sendmsg_zc(sender.fileno(), b"hello", receiver.getsockname(), token)
+
+            completion = ring.wait(1.0)
+            notification = ring.wait(1.0)
+
+        assert completion is pending
+        assert completion.user_data is token
+        assert completion.kind == uring_api.COMPLETION_KIND_SENDMSG_ZC
+        assert completion.res == 5
+        assert completion.result == 5
+        assert not (completion.flags & uring_api.IORING_CQE_F_NOTIF)
+        assert notification is None
+        data, address = receiver.recvfrom(5)
+        assert data == b"hello"
+        assert address[1] == sender.getsockname()[1]
+    finally:
+        sender.close()
+        receiver.close()
 
 
 def test_ring_accept_completion_when_available():

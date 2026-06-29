@@ -23,6 +23,9 @@ The wrapper currently exposes these socket-oriented operations:
   until the internal `IORING_CQE_F_NOTIF` notification CQE arrives
 - `submit_sendto()` / `IORING_OP_SEND`
 - `submit_sendmsg()` / `IORING_OP_SENDMSG`
+- `submit_sendmsg_zc()` / `IORING_OP_SENDMSG_ZC`, retaining the submitted
+  `msghdr` buffer until the internal `IORING_CQE_F_NOTIF` notification CQE
+  arrives
 - `submit_accept()` / `IORING_OP_ACCEPT`
 - `submit_accept_multishot()` / `IORING_OP_ACCEPT` with `IORING_ACCEPT_MULTISHOT`
 - `submit_connect()` / `IORING_OP_CONNECT`
@@ -33,9 +36,9 @@ The wrapper currently exposes these socket-oriented operations:
 
 The local liburing headers also expose socket-relevant helpers that are not yet
 wrapped: `io_uring_prep_poll_add()` / `io_uring_prep_poll_remove()`, fixed-buffer
-and `sendmsg` zero-copy send helpers, and public provided-buffer management.
-`poll_*` and provided buffers are not socket-only, but they matter for
-high-throughput socket designs.
+zero-copy send helpers, and public provided-buffer management. `poll_*` and
+provided buffers are not socket-only, but they matter for high-throughput socket
+designs.
 
 ## Kernel Support Notes
 
@@ -67,10 +70,12 @@ as plain one-shot operations:
   operation CQE is delivered to Python; the separate `IORING_CQE_F_NOTIF`
   notification CQE is consumed internally because it only closes the retained
   buffer-lifetime window. The fixed-buffer variant does not fit the current
-  caller-owned buffer model, and `sendmsg_zc` remains a separate future surface.
-  `probe()` includes a targeted `"IORING_OP_SEND_ZC"` runtime capability entry
-  based on a small TCP loopback send because support varies by kernel and socket
-  family.
+  caller-owned buffer model.
+- `submit_sendmsg_zc()` exposes `io_uring_prep_sendmsg_zc()` with the same
+  operation-CQE plus notification-CQE lifetime split. `probe()` includes a
+  targeted `"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"` runtime capability
+  entry based on a UDP loopback `sendmsg_zc` send to a bound local receiver, so
+  the probe avoids TCP connection setup while still testing a real destination.
 - `submit_socket()` uses `IORING_OP_SOCKET`, which is a newer socket opcode even
   though the installed man page does not give a precise kernel version. `probe()`
   now includes a targeted `"IORING_OP_SOCKET"` runtime capability entry by

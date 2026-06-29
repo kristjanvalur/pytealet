@@ -22,6 +22,7 @@ try:
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
     from _uring_api import COMPLETION_KIND_SEND_ZC as COMPLETION_KIND_SEND_ZC
     from _uring_api import COMPLETION_KIND_SENDMSG as COMPLETION_KIND_SENDMSG
+    from _uring_api import COMPLETION_KIND_SENDMSG_ZC as COMPLETION_KIND_SENDMSG_ZC
     from _uring_api import COMPLETION_KIND_SENDTO as COMPLETION_KIND_SENDTO
     from _uring_api import COMPLETION_KIND_SHUTDOWN as COMPLETION_KIND_SHUTDOWN
     from _uring_api import COMPLETION_KIND_SOCKET as COMPLETION_KIND_SOCKET
@@ -62,6 +63,7 @@ except ImportError as exc:
     COMPLETION_KIND_SOCKET = 12
     COMPLETION_KIND_RECV_MULTISHOT = 13
     COMPLETION_KIND_SEND_ZC = 14
+    COMPLETION_KIND_SENDMSG_ZC = 15
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -159,6 +161,11 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_sendmsg(
+            self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_sendmsg_zc(
             self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error

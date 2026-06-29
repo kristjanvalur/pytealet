@@ -25,10 +25,11 @@ with uring_api.Ring() as ring:
 
 `Ring` currently exposes `submit_recv()`, `submit_recv_multishot()`,
 `submit_send()`, `submit_send_zc()`, `submit_recvmsg()`, `submit_sendto()`,
-`submit_sendmsg()`, `submit_accept()`, `submit_accept_multishot()`,
-`submit_connect()`, `submit_shutdown()`, `submit_close()`, `submit_socket()`,
-and `wait()` for minimal socket-oriented experiments. Each submitted operation
-carries a Python `user_data` object which comes back with its completion.
+`submit_sendmsg()`, `submit_sendmsg_zc()`, `submit_accept()`,
+`submit_accept_multishot()`, `submit_connect()`, `submit_shutdown()`,
+`submit_close()`, `submit_socket()`, and `wait()` for minimal socket-oriented
+experiments. Each submitted operation carries a Python `user_data` object which
+comes back with its completion.
 
 ```python
 import socket
@@ -59,9 +60,10 @@ finally:
 For sends, `uring-api` keeps the exported buffer alive until the kernel reports
 the completion. That avoids copying the outgoing payload into an internal bytes
 object just to keep memory valid. `submit_send_zc()` uses
-`IORING_OP_SEND_ZC`; its ordinary operation CQE is delivered as the submitted
-`Completion`, while the later `IORING_CQE_F_NOTIF` buffer-lifetime CQE is
-consumed internally and releases the retained buffer.
+`IORING_OP_SEND_ZC`, while `submit_sendmsg_zc()` uses `IORING_OP_SENDMSG_ZC` for
+the `sendmsg` shape. Their ordinary operation CQE is delivered as the submitted
+`Completion`; the later `IORING_CQE_F_NOTIF` buffer-lifetime CQE is consumed
+internally and releases the retained buffer.
 
 `submit_shutdown()` is a socket operation and mirrors `shutdown(fd, how)`.
 `submit_close()` is lower-level: pass only a raw fd whose ownership has already
@@ -77,10 +79,10 @@ worker threads dispatch completions out of order. Multishot completions are
 numbered from `0`; normal one-shot completions also report `sequence == 0`.
 
 The local liburing headers expose more socket-related operations than this
-wrapper currently publishes. The notable gaps are readiness polling, fixed-buffer
-and `sendmsg` zero-copy send variants, and public provided-buffer management.
-Those are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`,
-which remains a compact runtime availability check.
+wrapper currently publishes. The notable gaps are readiness polling,
+fixed-buffer zero-copy sends, and public provided-buffer management. Those are
+tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`, which
+remains a compact runtime availability check.
 
 If the submission queue cannot provide another entry after flushing already
 prepared work to the kernel, submit methods raise `SubmissionQueueFull`. Treat
@@ -120,9 +122,9 @@ if not uring_api.is_available():
 it returns an empty dictionary. If it succeeds, the dictionary contains
 `"available": True` plus named optional capabilities such as
 `"IORING_ACCEPT_MULTISHOT"`, `"IORING_RECV_MULTISHOT"`, and
-`"IORING_OP_SEND_ZC"`. Production code should still handle `OSError` when it
-creates the real ring because limits or sandbox policy may differ for larger
-settings.
+`"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"`. Production code should
+still handle `OSError` when it creates the real ring because limits or sandbox
+policy may differ for larger settings.
 
 Pass setup flags to `probe(flags=...)` to check whether this build and kernel
 combination accepts a ring mode before using it for the real ring:
@@ -151,8 +153,10 @@ while still running on the hosted runner's kernel.
 `submit_send_zc()` is best gated with `probe()["IORING_OP_SEND_ZC"]`. Unsupported
 systems may accept the submission and then report `ENOTSUP` or `EOPNOTSUPP` in
 the operation CQE, so checking a kernel version is less useful than submitting a
-small TCP loopback probe. If your CI image is expected to support it, make that
-expectation explicit:
+small runtime probe. `probe()` reports both `"IORING_OP_SEND_ZC"` and
+`"IORING_OP_SENDMSG_ZC"` for caller convenience, and derives both from the
+simpler `sendmsg_zc` UDP loopback probe with a bound local receiver. If your CI
+image is expected to support these operations, make that expectation explicit:
 
 ```bash
 uv run --active python - <<'PY'
@@ -160,7 +164,7 @@ import uring_api
 
 probe = uring_api.probe()
 print(probe)
-raise SystemExit(0 if probe.get("IORING_OP_SEND_ZC") else 1)
+raise SystemExit(0 if probe.get("IORING_OP_SEND_ZC") and probe.get("IORING_OP_SENDMSG_ZC") else 1)
 PY
 ```
 
@@ -248,8 +252,9 @@ The intended baseline is simple:
 - one thread may reap completions with `wait()`;
 - other threads may call submit-side methods such as `submit_recv()`,
     `submit_recv_multishot()`, `submit_send()`, `submit_send_zc()`,
-    `submit_recvmsg()`, `submit_sendto()`, `submit_accept()`,
-    `submit_accept_multishot()`, `submit_connect()`, and `break_wait()`;
+    `submit_recvmsg()`, `submit_sendto()`, `submit_sendmsg_zc()`,
+    `submit_accept()`, `submit_accept_multishot()`, `submit_connect()`, and
+    `break_wait()`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
 - alternatively, callers may start their own Python threads and have each one
@@ -318,9 +323,10 @@ The capsule currently exposes:
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
     `ring_submit_recv_multishot()`, `ring_submit_send()`,
     `ring_submit_send_zc()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
-    `ring_submit_sendmsg()`, `ring_submit_accept()`, `ring_submit_accept_multishot()`,
-    `ring_submit_connect()`, `ring_submit_shutdown()`, `ring_submit_close()`,
-    `ring_submit_socket()`, `ring_break_wait()`, and `ring_wait()`;
+    `ring_submit_sendmsg()`, `ring_submit_sendmsg_zc()`, `ring_submit_accept()`,
+    `ring_submit_accept_multishot()`, `ring_submit_connect()`,
+    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_socket()`,
+    `ring_break_wait()`, and `ring_wait()`;
 - `ring_set_callback()`, `ring_set_c_callback()`, `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;
