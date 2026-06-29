@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import os
 import selectors
 import socket
 import threading
@@ -17,6 +18,7 @@ import tealetio.proactor as proactor_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.proactor import (
     AsyncProactorScheduler,
+    ContinuousOperation,
     InvalidStateError,
     Operation,
     ProactorScheduler,
@@ -37,6 +39,14 @@ def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) ->
                 completed.append(operation)
                 pending.discard(operation)
     return completed
+
+
+def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) -> None:
+    deadline = proactor.get_time() + timeout
+    while not predicate():
+        if proactor.get_time() >= deadline:
+            raise TimeoutError("timed out waiting for uring condition")
+        proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
 class TestOperation:
@@ -68,6 +78,21 @@ class TestOperation:
 
         with pytest.raises(CancelledError):
             operation.result()
+
+    def test_continuous_operation_emits_results_before_completion(self):
+        operation: ContinuousOperation[int] = ContinuousOperation(kind="test")
+        seen: list[int] = []
+
+        operation.add_result_callback(seen.append)
+        operation._emit_result(1)
+        operation._emit_result(2)
+        operation._set_result(None)
+
+        assert seen == [1, 2]
+        assert operation.done() is True
+        assert operation.result() is None
+        with pytest.raises(InvalidStateError, match="already done"):
+            operation.add_result_callback(seen.append)
 
 
 class TestSelectorProactor:
@@ -173,12 +198,119 @@ class TestSelectorProactor:
             assert accept_operation in completed
             assert connect_operation in completed
             assert address[0] == "127.0.0.1"
+            assert accepted.getblocking() is False
+            assert os.get_inheritable(accepted.fileno()) is False
             assert connect_operation.result() is None
         finally:
             if accepted is not None:
                 accepted.close()
             client.close()
             server.close()
+            proactor.close()
+
+    def test_accept_many_emits_connections_until_cancelled(self):
+        proactor = SelectorProactor()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        clients: list[socket.socket] = []
+        accepted: list[tuple[socket.socket, Any]] = []
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+
+            operation = proactor.accept_many(server, accepted.append)
+            for _index in range(2):
+                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client.setblocking(False)
+                try:
+                    client.connect(server.getsockname())
+                except (BlockingIOError, InterruptedError):
+                    pass
+                clients.append(client)
+
+            while len(accepted) < 2:
+                proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.done() is False
+            assert [address[0] for _conn, address in accepted] == ["127.0.0.1", "127.0.0.1"]
+            assert [conn.getblocking() for conn, _address in accepted] == [False, False]
+            assert [os.get_inheritable(conn.fileno()) for conn, _address in accepted] == [False, False]
+            operation.cancel()
+            assert operation.cancelled() is True
+        finally:
+            for conn, _address in accepted:
+                conn.close()
+            for client in clients:
+                client.close()
+            server.close()
+            proactor.close()
+
+    def test_receive_many_emits_chunks_and_completes_on_eof(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, bytes]] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.receive_many(reader, 5, seen.append)
+
+            writer.send(b"hello")
+            while not seen:
+                proactor.wait(proactor.get_time() + 1.0)
+            writer.send(b"world")
+            while len(seen) < 2:
+                proactor.wait(proactor.get_time() + 1.0)
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done():
+                proactor.wait(proactor.get_time() + 1.0)
+
+            assert seen == [(0, b"hello"), (1, b"world"), (2, b"")]
+            assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recvall_collects_chunks_and_reports_progress(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        progress: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recvall(reader, 5, progress.append)
+
+            writer.send(b"hello")
+            while not progress:
+                proactor.wait(proactor.get_time() + 1.0)
+            writer.send(b"world")
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done():
+                proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.result() == b"helloworld"
+            assert progress == [5, 10]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_sendall_reports_progress(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        progress: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            operation = proactor.sendall(writer, b"hello", progress.append)
+
+            assert operation.result() is None
+            assert progress == [5]
+            assert reader.recv(5) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
             proactor.close()
 
     def test_datagram_helpers(self):
@@ -699,13 +831,18 @@ class _FakeUringRing:
         self.completions: list[SimpleNamespace] = []
         self.accepted_peers: list[socket.socket] = []
         self.submitted_recv: list[tuple[int, object, object]] = []
+        self.submitted_recv_multishot: list[tuple[int, int, int, object]] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
-        self.submitted_accept: list[tuple[int, object]] = []
+        self.submitted_accept: list[tuple[int, object, int]] = []
+        self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
         self.submitted_cancel: list[object] = []
         self.pending_recv: list[SimpleNamespace] = []
+        self.pending_recv_multishot: list[SimpleNamespace] = []
+        self.pending_accept_multishot: list[SimpleNamespace] = []
+        self.recv_multishot_sequence = 0
 
     def _completion(
         self,
@@ -714,8 +851,9 @@ class _FakeUringRing:
         res: int = 0,
         flags: int = 0,
         result: object = None,
+        sequence: int = 0,
     ) -> SimpleNamespace:
-        return SimpleNamespace(user_data=user_data, kind=kind, res=res, flags=flags, result=result)
+        return SimpleNamespace(user_data=user_data, kind=kind, res=res, flags=flags, result=result, sequence=sequence)
 
     def close(self) -> None:
         self.stop_serving()
@@ -758,6 +896,32 @@ class _FakeUringRing:
         self._deliver(completion)
         return completion
 
+    def submit_recv_multishot(
+        self,
+        fd: int,
+        buffer_size: int,
+        buffer_count: int,
+        user_data: object = None,
+        flags: int = 0,
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_recv_multishot.append((fd, buffer_size, buffer_count, user_data))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT)
+        self.pending_recv_multishot.append(completion)
+        return completion
+
+    def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
+        completion = self.pending_recv_multishot[-1]
+        completion.res = len(data)
+        completion.flags = uring_api.IORING_CQE_F_MORE if more else 0
+        completion.result = data
+        if sequence is None:
+            sequence = self.recv_multishot_sequence
+            self.recv_multishot_sequence += 1
+        completion.sequence = sequence
+        self._deliver(completion)
+
     def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -796,12 +960,12 @@ class _FakeUringRing:
         self._deliver(completion)
         return completion
 
-    def submit_accept(self, fd: int, user_data: object = None) -> SimpleNamespace:
+    def submit_accept(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
-        self.submitted_accept.append((fd, user_data))
+        self.submitted_accept.append((fd, user_data, flags))
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_ACCEPT,
@@ -810,6 +974,23 @@ class _FakeUringRing:
         )
         self._deliver(completion)
         return completion
+
+    def submit_accept_multishot(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_accept_multishot.append((fd, user_data, flags))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_ACCEPT)
+        self.pending_accept_multishot.append(completion)
+        return completion
+
+    def complete_accept_multishot(self, address: object = "peer", *, more: bool = True) -> None:
+        conn, peer = socket.socketpair()
+        self.accepted_peers.append(peer)
+        completion = self.pending_accept_multishot[-1]
+        completion.res = conn.fileno()
+        completion.flags = uring_api.IORING_CQE_F_MORE if more else 0
+        completion.result = (conn.detach(), address)
+        self._deliver(completion)
 
     def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
@@ -1507,13 +1688,156 @@ class TestUringProactor:
             conn, address = operation.result()
             assert address == "peer"
             assert conn.getblocking() is False
+            assert os.get_inheritable(conn.fileno()) is False
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_accept[0]
             assert submitted[0] == server.fileno()
+            assert submitted[2] & socket.SOCK_NONBLOCK
+            assert submitted[2] & socket.SOCK_CLOEXEC
         finally:
             if conn is not None:
                 conn.close()
             server.close()
+            proactor.close()
+
+    def test_accept_many_uses_multishot_accept(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            submitted = proactor.ring.submitted_accept_multishot[0]
+            assert submitted[0] == server.fileno()
+            assert submitted[2] & socket.SOCK_NONBLOCK
+            assert submitted[2] & socket.SOCK_CLOEXEC
+
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.done() is False
+            assert accepted[0][1] == "peer-1"
+            assert accepted[0][0].getblocking() is False
+            assert os.get_inheritable(accepted[0][0].fileno()) is False
+        finally:
+            for conn, _address in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_receive_many_uses_multishot_recv_and_finishes_on_eof(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, bytes]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.receive_many(reader, 5, seen.append)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            submitted = proactor.ring.submitted_recv_multishot[0]
+            assert submitted[0] == reader.fileno()
+            assert submitted[1] == 5
+
+            proactor.ring.complete_recv_multishot(b"hello")
+            proactor.wait(proactor.get_time() + 1.0)
+            proactor.ring.complete_recv_multishot(b"", more=False)
+            proactor.wait(proactor.get_time() + 1.0)
+
+            assert seen == [(0, b"hello"), (1, b"")]
+            assert operation.done() is True
+            assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recvall_collects_uring_multishot_receive_and_reports_progress(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        progress: list[int] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recvall(reader, 5, progress.append)
+            assert isinstance(proactor.ring, _FakeUringRing)
+
+            proactor.ring.complete_recv_multishot(b"world", sequence=1)
+            proactor.wait(proactor.get_time() + 1.0)
+            proactor.ring.complete_recv_multishot(b"hello", sequence=0)
+            proactor.wait(proactor.get_time() + 1.0)
+            proactor.ring.complete_recv_multishot(b"", more=False, sequence=2)
+            proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.result() == b"helloworld"
+            assert progress == [5, 10]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.requires_native_uring_recv_multishot
+    def test_native_receive_many_cancel_after_data_before_sender_close(self):
+        proactor = UringProactor()
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, bytes]] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.receive_many(reader, 5, seen.append)
+
+            writer.send(b"hello")
+            _wait_for_uring(proactor, lambda: seen == [(0, b"hello")])
+
+            operation.cancel()
+            _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
+
+            assert operation.cancelled() is True
+            assert seen == [(0, b"hello")]
+            with pytest.raises(CancelledError):
+                operation.result()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.requires_native_uring_recv_multishot
+    def test_native_recvall_cancel_after_data_before_sender_close(self):
+        proactor = UringProactor()
+        reader, writer = socket.socketpair()
+        progress: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recvall(reader, 5, progress.append)
+
+            writer.send(b"hello")
+            _wait_for_uring(proactor, lambda: progress == [5])
+
+            operation.cancel()
+            _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
+
+            assert operation.cancelled() is True
+            assert progress == [5]
+            with pytest.raises(CancelledError):
+                operation.result()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_sendall_reports_uring_progress(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        progress: list[int] = []
+        try:
+            writer.setblocking(False)
+            operation = proactor.sendall(writer, b"hello", progress.append)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() is None
+            assert progress == [5]
+        finally:
+            reader.close()
+            writer.close()
             proactor.close()
 
     def test_connect_completes_from_ring_completion(self):

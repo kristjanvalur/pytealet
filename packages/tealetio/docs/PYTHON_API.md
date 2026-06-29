@@ -56,6 +56,27 @@ In that case the proactor returns an already-done `Operation`, and callers can
 read its result directly without switching or waiting. Selector-backed proactors
 use this fast path for socket operations that succeed right away.
 
+Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
+callback)` emits `(conn, address)` for each accepted connection and remains
+active until it is cancelled or the backend reports a terminal error.
+`receive_many(sock, n, callback)` emits `(index, data)` pairs for each received
+byte chunk, where `index` is the ordinal position in the receive stream. EOF
+emits one final `(index, b"")` data point before the operation completes.
+Backends may run these result callbacks from any worker thread; code that needs
+thread affinity should marshal from the callback into the appropriate scheduler,
+event loop, or application thread.
+
+`recvall(sock, n, progress=None)` builds on `receive_many(...)` and returns a
+normal one-shot `Operation[bytes]`. It collects received chunks by their stream
+index, completes at EOF, and returns the concatenation in index order. When
+provided, `progress(total)` is called after each received non-empty chunk with
+the cumulative number of bytes received.
+
+`sendall(sock, data, progress=None)` also accepts an optional progress callback.
+Backends call `progress(total)` with the cumulative number of bytes sent as
+progress becomes observable. Some backends may only expose a single completion
+for the whole send, in which case they report one final total.
+
 Proactors also expose `set_completion_callback(callback)`. A real thread-backed
 proactor should call this callback when completions are queued so an async host
 can wake its event loop, for example with `loop.call_soon_threadsafe(...)`.

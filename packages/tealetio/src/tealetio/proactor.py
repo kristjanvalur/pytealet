@@ -28,6 +28,7 @@ from .scheduler import (
 T = TypeVar("T")
 
 __all__ = [
+    "ContinuousOperation",
     "Operation",
     "AsyncProactorScheduler",
     "Proactor",
@@ -47,9 +48,13 @@ class InvalidStateError(Exception):
 
 _DoneCallback = Callable[["Operation[Any]"], object]
 _CompletionCallback = Callable[[], object]
+_ResultCallback = Callable[[T], object]
+_ProgressCallback = Callable[[int], object]
 _Clock = Callable[[], float]
 _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
+_DEFAULT_URING_RECV_MANY_BUFFERS = 16
+_DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 
 
 _UringRing: TypeAlias = uring_api.Ring
@@ -61,6 +66,12 @@ _UringRingFactory = Callable[[int, int], _UringRing]
 
 def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
     return uring_api.Ring(entries=entries, flags=flags)
+
+
+def _configure_accepted_socket(sock: socket.socket) -> socket.socket:
+    sock.setblocking(False)
+    os.set_inheritable(sock.fileno(), False)
+    return sock
 
 
 class Proactor(Protocol):
@@ -94,13 +105,28 @@ class Proactor(Protocol):
 
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]: ...
 
-    def sendall(self, sock: socket.socket, data: Any) -> Operation[None]: ...
+    def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]: ...
+
+    def recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> Operation[bytes]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
     def accept(self, sock: socket.socket) -> Operation[tuple[socket.socket, Any]]: ...
 
+    def accept_many(
+        self,
+        sock: socket.socket,
+        callback: Callable[[tuple[socket.socket, Any]], object],
+    ) -> ContinuousOperation[tuple[socket.socket, Any]]: ...
+
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]: ...
+
+    def receive_many(
+        self,
+        sock: socket.socket,
+        n: int,
+        callback: Callable[[tuple[int, bytes]], object],
+    ) -> ContinuousOperation[tuple[int, bytes]]: ...
 
 
 ProactorFactory = Callable[[], Proactor]
@@ -154,6 +180,47 @@ class ProactorBase:
     def _check_open(self) -> None:
         if self._closed:
             raise RuntimeError("proactor is closed")
+
+    def receive_many(
+        self,
+        sock: socket.socket,
+        n: int,
+        callback: Callable[[tuple[int, bytes]], object],
+    ) -> ContinuousOperation[tuple[int, bytes]]:
+        raise NotImplementedError
+
+    def recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> Operation[bytes]:
+        """Receive chunks until EOF and complete with the full byte string."""
+
+        operation: _LinkedOperation[bytes] = _LinkedOperation(kind="recvall", fileobj=sock)
+        chunks: dict[int, bytes] = {}
+        total = 0
+
+        def on_result(result: tuple[int, bytes]) -> None:
+            nonlocal total
+            index, data = result
+            if not data:
+                return
+            chunks[index] = data
+            total += len(data)
+            if progress is not None:
+                progress(total)
+
+        stream = self.receive_many(sock, n, on_result)
+        operation._linked_operation = stream
+
+        def on_done(done_stream: Operation[Any]) -> None:
+            if done_stream.cancelled():
+                operation._set_cancelled()
+                return
+            exception = done_stream.exception()
+            if exception is not None:
+                operation._set_exception(exception)
+                return
+            operation._set_result(b"".join(chunks[index] for index in sorted(chunks)))
+
+        stream.add_done_callback(on_done)
+        return operation
 
 
 class Operation(Generic[T]):
@@ -273,10 +340,71 @@ class Operation(Generic[T]):
         return True
 
 
+class _LinkedOperation(Operation[T]):
+    """Operation whose cancellation propagates to another operation."""
+
+    def __init__(self, *, kind: str, fileobj: object | None = None) -> None:
+        super().__init__(kind=kind, fileobj=fileobj)
+        self._linked_operation: Operation[Any] | None = None
+
+    def cancel(self) -> None:
+        if self.done():
+            return
+        linked_operation = self._linked_operation
+        if linked_operation is not None and not linked_operation.done():
+            linked_operation.cancel()
+        self._set_cancelled()
+
+
+class ContinuousOperation(Operation[None], Generic[T]):
+    """Long-lived IO operation that emits multiple results before finishing.
+
+    Result callbacks may run on any backend worker thread. Callers that need
+    thread affinity must marshal from the callback into the desired thread or
+    event loop themselves.
+    """
+
+    def __init__(
+        self,
+        *,
+        kind: str,
+        fileobj: object | None = None,
+        proactor: Proactor | None = None,
+        result_callback: _ResultCallback[T] | None = None,
+    ) -> None:
+        super().__init__(kind=kind, fileobj=fileobj, proactor=proactor)
+        self._result_callbacks: list[_ResultCallback[T]] = []
+        self._continuous_step: Callable[[], _ContinuousStepResult] | None = None
+        if result_callback is not None:
+            self._result_callbacks.append(result_callback)
+
+    def add_result_callback(self, callback: _ResultCallback[T]) -> None:
+        """Register `callback` for each result produced by the operation."""
+
+        with self._lock:
+            if self._done:
+                raise InvalidStateError("continuous operation is already done")
+            self._result_callbacks.append(callback)
+
+    def _emit_result(self, result: T) -> None:
+        with self._lock:
+            if self._done:
+                return
+            callbacks = list(self._result_callbacks)
+        for callback in callbacks:
+            callback(result)
+
+
+@dataclass
+class _ContinuousStepResult:
+    progressed: bool = False
+    done: bool = False
+
+
 @dataclass
 class _FdEntry:
-    reader: Operation[Any] | None = None
-    writer: Operation[Any] | None = None
+    reader: Operation[Any] | ContinuousOperation[Any] | None = None
+    writer: Operation[Any] | ContinuousOperation[Any] | None = None
 
     def empty(self) -> bool:
         return self.reader is None and self.writer is None
@@ -292,6 +420,7 @@ class _UringEntry:
     complete: _UringEntryComplete
     data: memoryview | None = None
     offset: int = 0
+    progress: _ProgressCallback | None = None
     completion: _UringCompletion | None = None
     active: bool = True
 
@@ -471,7 +600,7 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
-    def sendall(self, sock: socket.socket, data: Any) -> Operation[None]:
+    def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]:
         """Submit a socket send-all operation."""
 
         operation = Operation[None](kind="sendall", fileobj=sock, proactor=self)
@@ -485,6 +614,8 @@ class SelectorProactor(ProactorBase):
                 if sent == 0:
                     raise BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes")
                 offset += sent
+                if progress is not None:
+                    progress(offset)
             return None
 
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
@@ -497,10 +628,41 @@ class SelectorProactor(ProactorBase):
 
         def attempt() -> tuple[socket.socket, Any]:
             conn, address = sock.accept()
-            conn.setblocking(False)
+            _configure_accepted_socket(conn)
             return conn, address
 
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
+        return operation
+
+    def accept_many(
+        self,
+        sock: socket.socket,
+        callback: Callable[[tuple[socket.socket, Any]], object],
+    ) -> ContinuousOperation[tuple[socket.socket, Any]]:
+        """Start accepting connections until the operation is cancelled or fails.
+
+        `callback` may run on any backend worker thread.
+        """
+
+        operation = ContinuousOperation[tuple[socket.socket, Any]](
+            kind="accept_many",
+            fileobj=sock,
+            proactor=self,
+            result_callback=callback,
+        )
+
+        def step() -> _ContinuousStepResult:
+            progressed = False
+            while True:
+                try:
+                    conn, address = sock.accept()
+                except (BlockingIOError, InterruptedError):
+                    return _ContinuousStepResult(progressed=progressed)
+                _configure_accepted_socket(conn)
+                operation._emit_result((conn, address))
+                progressed = True
+
+        self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
         return operation
 
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
@@ -532,6 +694,48 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
+    def receive_many(
+        self,
+        sock: socket.socket,
+        n: int,
+        callback: Callable[[tuple[int, bytes]], object],
+    ) -> ContinuousOperation[tuple[int, bytes]]:
+        """Start receiving byte chunks until EOF, cancellation, or failure.
+
+        `callback` may run on any backend worker thread. Each result is an
+        ordinal `(index, data)` pair; EOF emits a final empty data point before
+        completing the continuous operation.
+        """
+
+        if n <= 0:
+            raise ValueError("n must be positive")
+        operation = ContinuousOperation[tuple[int, bytes]](
+            kind="receive_many",
+            fileobj=sock,
+            proactor=self,
+            result_callback=callback,
+        )
+        sequence = 0
+
+        def step() -> _ContinuousStepResult:
+            nonlocal sequence
+            progressed = False
+            while True:
+                try:
+                    data = sock.recv(n)
+                except (BlockingIOError, InterruptedError):
+                    return _ContinuousStepResult(progressed=progressed)
+                if not data:
+                    operation._emit_result((sequence, b""))
+                    sequence += 1
+                    return _ContinuousStepResult(progressed=True, done=True)
+                operation._emit_result((sequence, data))
+                sequence += 1
+                progressed = True
+
+        self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
+        return operation
+
     def _submit_socket_operation(
         self,
         sock: socket.socket,
@@ -548,6 +752,23 @@ class SelectorProactor(ProactorBase):
                 return
             self._reserve_fd_operation(fd, event, operation)
             operation._attempt = attempt
+            self._update_selector_registration(fd)
+        self._after_selector_registration_changed()
+
+    def _submit_socket_continuous_operation(
+        self,
+        sock: socket.socket,
+        event: int,
+        operation: ContinuousOperation[T],
+        step: Callable[[], _ContinuousStepResult],
+    ) -> None:
+        with self._lock:
+            self._check_open()
+            self._check_socket(sock)
+            fd = sock.fileno()
+            self._check_fd_operation_available(fd, event)
+            self._reserve_fd_operation(fd, event, operation)
+            operation._continuous_step = step
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -609,6 +830,9 @@ class SelectorProactor(ProactorBase):
         operation = entry.reader if event == selectors.EVENT_READ else entry.writer
         if operation is None or operation.done():
             return
+        if isinstance(operation, ContinuousOperation):
+            self._step_continuous_fd_operation(fd, event, operation, completed)
+            return
         attempt = cast(Callable[[], Any], operation._attempt)
         assert attempt is not None
         try:
@@ -623,6 +847,33 @@ class SelectorProactor(ProactorBase):
             self._remove_operation(operation)
             operation._set_result(result)
         completed.append(operation)
+
+    def _step_continuous_fd_operation(
+        self,
+        fd: int,
+        event: int,
+        operation: ContinuousOperation[Any],
+        completed: list[Operation[Any]],
+    ) -> None:
+        step = operation._continuous_step
+        assert step is not None
+        try:
+            step_result = step()
+        except (BlockingIOError, InterruptedError):
+            self._update_selector_registration(fd)
+            return
+        except BaseException as exc:
+            self._remove_operation(operation)
+            operation._set_exception(exc)
+            completed.append(operation)
+            return
+        if step_result.done:
+            self._remove_operation(operation)
+            operation._set_result(None)
+        else:
+            self._update_selector_registration(fd)
+        if step_result.progressed or step_result.done:
+            completed.append(operation)
 
     def _selector_mask_for_fd(self, fd: int) -> int:
         entry = self._fd_operations.get(fd)
@@ -996,7 +1247,7 @@ class UringProactor(ProactorBase):
         operation._set_result((completion.res, completion.result))
         return operation
 
-    def sendall(self, sock: socket.socket, data: Any) -> Operation[None]:
+    def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]:
         """Submit a socket send-all operation."""
 
         operation = Operation[None](kind="sendall", fileobj=sock, proactor=self)
@@ -1005,7 +1256,7 @@ class UringProactor(ProactorBase):
             self._check_open()
             operation._set_result(None)
             return operation
-        self._submit_sendall(sock, operation, payload, 0)
+        self._submit_sendall(sock, operation, payload, 0, progress)
         return operation
 
     def _complete_uring_sendall(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None] | None:
@@ -1016,11 +1267,17 @@ class UringProactor(ProactorBase):
             return operation
         assert entry.data is not None
         offset = entry.offset + res
+        if entry.progress is not None:
+            try:
+                entry.progress(offset)
+            except BaseException as exc:
+                operation._set_exception(exc)
+                return operation
         if offset >= len(entry.data):
             operation._set_result(None)
             return operation
         sock = cast(socket.socket, operation.fileobj)
-        self._submit_sendall(sock, operation, entry.data, offset)
+        self._submit_sendall(sock, operation, entry.data, offset, entry.progress)
         return None
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -1042,15 +1299,52 @@ class UringProactor(ProactorBase):
 
         operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock, proactor=self)
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_accept)
-        self._submit_uring_entry(entry, lambda: self._ring.submit_accept(sock.fileno(), entry))
+        self._submit_uring_entry(entry, lambda: self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS))
         return operation
 
     def _complete_uring_accept(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[tuple[socket.socket, Any]]:
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        conn.setblocking(False)
+        _configure_accepted_socket(conn)
         operation = cast(Operation[tuple[socket.socket, Any]], entry.operation)
         operation._set_result((conn, address))
+        return operation
+
+    def accept_many(
+        self,
+        sock: socket.socket,
+        callback: Callable[[tuple[socket.socket, Any]], object],
+    ) -> ContinuousOperation[tuple[socket.socket, Any]]:
+        """Start a multishot accept operation.
+
+        `callback` may run on any uring completion service thread.
+        """
+
+        operation = ContinuousOperation[tuple[socket.socket, Any]](
+            kind="accept_many",
+            fileobj=sock,
+            proactor=self,
+            result_callback=callback,
+        )
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_accept_many)
+        self._submit_uring_entry(
+            entry,
+            lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
+        )
+        return operation
+
+    def _complete_uring_accept_many(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+    ) -> Operation[Any]:
+        fd, address = cast(tuple[int, Any], completion.result)
+        conn = socket.socket(fileno=fd)
+        _configure_accepted_socket(conn)
+        operation = cast(ContinuousOperation[tuple[socket.socket, Any]], entry.operation)
+        operation._emit_result((conn, address))
+        if not completion.flags & uring_api.IORING_CQE_F_MORE:
+            operation._set_result(None)
         return operation
 
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
@@ -1064,6 +1358,50 @@ class UringProactor(ProactorBase):
     def _complete_uring_connect(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
         operation = cast(Operation[None], entry.operation)
         operation._set_result(None)
+        return operation
+
+    def receive_many(
+        self,
+        sock: socket.socket,
+        n: int,
+        callback: Callable[[tuple[int, bytes]], object],
+    ) -> ContinuousOperation[tuple[int, bytes]]:
+        """Start a multishot receive operation that completes on EOF.
+
+        `callback` may run on any uring completion service thread. Each result
+        is an ordinal `(index, data)` pair; EOF emits a final empty data point
+        before completing the continuous operation.
+        """
+
+        if n <= 0:
+            raise ValueError("n must be positive")
+        operation = ContinuousOperation[tuple[int, bytes]](
+            kind="receive_many",
+            fileobj=sock,
+            proactor=self,
+            result_callback=callback,
+        )
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_receive_many)
+        self._submit_uring_entry(
+            entry,
+            lambda: self._ring.submit_recv_multishot(sock.fileno(), n, _DEFAULT_URING_RECV_MANY_BUFFERS, entry),
+        )
+        return operation
+
+    def _complete_uring_receive_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any]:
+        operation = cast(ContinuousOperation[tuple[int, bytes]], entry.operation)
+        if completion.res == 0:
+            operation._emit_result((completion.sequence, b""))
+            operation._set_result(None)
+            return operation
+        payload = completion.result
+        if isinstance(payload, bytes):
+            data = payload
+        else:
+            data = bytes(cast(Any, payload))
+        operation._emit_result((completion.sequence, data))
+        if not completion.flags & uring_api.IORING_CQE_F_MORE:
+            operation._set_result(None)
         return operation
 
     def cancel_operation(self, operation: Operation[Any]) -> None:
@@ -1148,8 +1486,15 @@ class UringProactor(ProactorBase):
         operation: Operation[None],
         data: memoryview,
         offset: int,
+        progress: _ProgressCallback | None,
     ) -> None:
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_sendall, data=data, offset=offset)
+        entry = _UringEntry(
+            operation=operation,
+            complete=UringProactor._complete_uring_sendall,
+            data=data,
+            offset=offset,
+            progress=progress,
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_send(sock.fileno(), data[offset:], entry))
 
     def _submit_recvmsg(
@@ -1255,6 +1600,11 @@ class ProactorScheduler(BaseScheduler):
 
         return self.wait_operation(self._proactor.recv(sock, n))
 
+    def sock_recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> bytes:
+        """Receive byte chunks until EOF and return their concatenation."""
+
+        return self.wait_operation(self._proactor.recvall(sock, n, progress))
+
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
         """Receive bytes from a non-blocking socket into `buf`."""
 
@@ -1270,10 +1620,10 @@ class ProactorScheduler(BaseScheduler):
 
         return self.wait_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
 
-    def sock_sendall(self, sock: socket.socket, data: Any) -> None:
+    def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> None:
         """Send all `data` through a non-blocking socket."""
 
-        return self.wait_operation(self._proactor.sendall(sock, data))
+        return self.wait_operation(self._proactor.sendall(sock, data, progress))
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
         """Send one datagram through a non-blocking socket."""
