@@ -5,8 +5,8 @@
  */
 
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #include "uring_api_capi.h"
+#include <Python.h>
 
 #ifndef _PyCFunction_CAST
 #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
@@ -486,13 +486,16 @@ static int client_exec(PyObject *module) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API feature set is incomplete");
         return -1;
     }
-    if (!api->probe || !api->ring_new || !api->ring_set_c_callback || !api->ring_serve_completions ||
-        !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_result ||
-        !api->completion_sequence || !api->ring_submit_recv_multishot || !api->ring_submit_recvmsg ||
-        !api->ring_submit_sendto || !api->ring_submit_send_zc || !api->ring_submit_accept ||
+    if (!api->probe || !api->ring_new || !api->ring_check || !api->ring_close || !api->ring_fd || !api->ring_features ||
+        !api->ring_sq_entries || !api->ring_cq_entries || !api->ring_closed || !api->ring_running ||
+        !api->ring_submit_recv || !api->ring_submit_recv_multishot || !api->ring_submit_send ||
+        !api->ring_submit_send_zc || !api->ring_submit_recvmsg || !api->ring_submit_sendto ||
+        !api->ring_submit_sendmsg || !api->ring_submit_sendmsg_zc || !api->ring_submit_accept ||
         !api->ring_submit_accept_multishot || !api->ring_submit_connect || !api->ring_submit_shutdown ||
-        !api->ring_submit_close || !api->ring_submit_sendmsg || !api->ring_submit_sendmsg_zc ||
-        !api->ring_submit_socket) {
+        !api->ring_submit_close || !api->ring_submit_socket || !api->ring_break_wait || !api->ring_wait ||
+        !api->ring_set_callback || !api->ring_set_c_callback || !api->ring_serve_completions ||
+        !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
+        !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }
