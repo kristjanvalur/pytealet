@@ -170,10 +170,10 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_accept(self, fd: int, user_data: object = None) -> Completion:
+        def submit_accept(self, fd: int, user_data: object = None, flags: int = 0) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_accept_multishot(self, fd: int, user_data: object = None) -> Completion:
+        def submit_accept_multishot(self, fd: int, user_data: object = None, flags: int = 0) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:

@@ -8,7 +8,7 @@ higher-level completion abstractions in Python. It does not implement an event
 loop, scheduler, or asyncio compatibility layer.
 
 Future work is tracked in [ROADMAP.md](ROADMAP.md), including queue resizing,
-provided buffers, and multishot server I/O.
+optional zero-copy receive models, and specialised kernel tuning.
 
 ## Quick Check
 
@@ -27,9 +27,12 @@ with uring_api.Ring() as ring:
 `submit_send()`, `submit_send_zc()`, `submit_recvmsg()`, `submit_sendto()`,
 `submit_sendmsg()`, `submit_sendmsg_zc()`, `submit_accept()`,
 `submit_accept_multishot()`, `submit_connect()`, `submit_shutdown()`,
-`submit_close()`, `submit_socket()`, and `wait()` for minimal socket-oriented
-experiments. Each submitted operation carries a Python `user_data` object which
-comes back with its completion.
+`submit_close()`, `submit_socket()`, and `wait()`. This is the complete baseline
+for Python-oriented socket I/O in `uring-api`: normal sends and receives,
+message-oriented operations, listener accept paths, connection setup, orderly
+shutdown, fd creation/close, cancellation, and the practical multishot server
+cases all have direct wrappers. Each submitted operation carries a Python
+`user_data` object which comes back with its completion.
 
 ```python
 import socket
@@ -66,6 +69,9 @@ the `sendmsg` shape. Their ordinary operation CQE is delivered as the submitted
 internally and releases the retained buffer.
 
 `submit_shutdown()` is a socket operation and mirrors `shutdown(fd, how)`.
+`submit_accept()` and `submit_accept_multishot()` accept optional accept flags;
+pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
+be ready for proactor ownership without a follow-up `fcntl()` call.
 `submit_close()` is lower-level: pass only a raw fd whose ownership has already
 been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
@@ -78,11 +84,15 @@ a `sequence` number so callback users can reconstruct receive order even when
 worker threads dispatch completions out of order. Multishot completions are
 numbered from `0`; normal one-shot completions also report `sequence == 0`.
 
-The local liburing headers expose more socket-related operations than this
-wrapper currently publishes. The notable gaps are readiness polling,
-fixed-buffer zero-copy sends, and public provided-buffer management. Those are
-tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`, which
-remains a compact runtime availability check.
+The local liburing headers expose more socket-adjacent operations than this
+wrapper publishes, but those are intentionally outside the core Python-oriented
+surface. Readiness polling is optional for a completion proactor, fixed-buffer
+send variants and public provided-buffer ownership are a poor fit for normal
+Python buffer lifetimes, and socket command or NAPI controls are specialised
+tuning hooks. The one receive-side extension still worth exploring is a
+zero-copy multishot receive model with explicit leased-buffer ownership. Those
+items are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`,
+which remains a compact runtime availability check.
 
 If the submission queue cannot provide another entry after flushing already
 prepared work to the kernel, submit methods raise `SubmissionQueueFull`. Treat

@@ -1,4 +1,5 @@
 import errno
+import fcntl
 import importlib.util
 import os
 from importlib import resources
@@ -36,6 +37,11 @@ def wait_until_running(ring: uring_api.Ring) -> None:
     while not ring.running and time.monotonic() < deadline:
         time.sleep(0.01)
     assert ring.running
+
+
+def assert_fd_nonblocking_cloexec(fd: int) -> None:
+    assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK
+    assert fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
 
 
 def connect_to_listener(server: socket.socket) -> socket.socket:
@@ -468,7 +474,7 @@ def test_c_api_accept_operation_when_available():
         server.bind(("127.0.0.1", 0))
         server.listen()
         with uring_api.Ring() as ring:
-            client_api.submit_accept(ring, server.fileno(), 240)
+            client_api.submit_accept(ring, server.fileno(), 240, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             client = connect_to_listener(server)
 
             completion = ring.wait(1.0)
@@ -476,6 +482,7 @@ def test_c_api_accept_operation_when_available():
         assert completion is not None
         user_data, res, flags, result = client_api.completion_summary(completion)
         accepted_fd, address = result
+        assert_fd_nonblocking_cloexec(accepted_fd)
         accepted = socket.socket(fileno=accepted_fd)
         assert user_data == 240
         assert res == accepted_fd
@@ -866,13 +873,14 @@ def test_ring_accept_completion_when_available():
         server.listen()
         token = {"operation": "accept"}
         with uring_api.Ring() as ring:
-            ring.submit_accept(server.fileno(), token)
+            ring.submit_accept(server.fileno(), token, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             client = connect_to_listener(server)
 
             completion = ring.wait(1.0)
 
         assert completion is not None
         accepted_fd, address = completion.result
+        assert_fd_nonblocking_cloexec(accepted_fd)
         accepted = socket.socket(fileno=accepted_fd)
         assert completion.user_data is token
         assert completion.res == accepted_fd
@@ -900,7 +908,9 @@ def test_ring_accept_multishot_completion_when_available():
         server.listen()
         token = {"operation": "accept-multishot"}
         with uring_api.Ring() as ring:
-            handle = ring.submit_accept_multishot(server.fileno(), token)
+            handle = ring.submit_accept_multishot(
+                server.fileno(), token, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
+            )
             clients.append(connect_to_listener(server))
             first = ring.wait(1.0)
             clients.append(connect_to_listener(server))
@@ -920,6 +930,7 @@ def test_ring_accept_multishot_completion_when_available():
                 assert completion.sequence == sequence
                 assert completion.flags & uring_api.IORING_CQE_F_MORE
                 accepted_fd, address = completion.result
+                assert_fd_nonblocking_cloexec(accepted_fd)
                 accepted.append(socket.socket(fileno=accepted_fd))
                 assert completion.res == accepted_fd
                 assert address == client.getsockname()

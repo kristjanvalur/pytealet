@@ -332,16 +332,17 @@ static PyObject *client_submit_accept(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
     int fd;
+    unsigned int flags = 0;
 
     (void)module;
     if (!api) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiO:submit_accept", &ring, &fd, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiO|I:submit_accept", &ring, &fd, &user_data, &flags)) {
         return NULL;
     }
-    if (api->ring_submit_accept(ring, fd, user_data) < 0) {
+    if (api->ring_submit_accept(ring, fd, flags, user_data) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -351,16 +352,17 @@ static PyObject *client_submit_accept_multishot(PyObject *module, PyObject *args
     PyObject *ring;
     PyObject *user_data;
     int fd;
+    unsigned int flags = 0;
 
     (void)module;
     if (!api) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiO:submit_accept_multishot", &ring, &fd, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiO|I:submit_accept_multishot", &ring, &fd, &user_data, &flags)) {
         return NULL;
     }
-    if (api->ring_submit_accept_multishot(ring, fd, user_data) < 0) {
+    if (api->ring_submit_accept_multishot(ring, fd, flags, user_data) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;

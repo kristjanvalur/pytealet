@@ -1,14 +1,18 @@
 # uring-api Roadmap
 
 `uring-api` currently targets a deliberately small `liburing >= 2.4` surface:
-ring creation, probe/version reporting, one-shot socket operations, completion
-waiting, and caller-owned completion service workers. This roadmap tracks newer
-liburing and kernel features that look worth exposing once the baseline API has
-settled.
+ring creation, probe/version reporting, Python-oriented socket operations,
+completion waiting, and caller-owned completion service workers. The basic
+socket I/O surface is now complete for the intended proactor baseline. This
+roadmap tracks newer liburing and kernel features that remain optional,
+specialised, or only worth exposing if they can keep a clear Python ownership
+model.
 
 The bias here is practical server I/O: features that improve socket throughput,
 reduce completion overhead, or let applications adapt queue pressure should come
-before broad opcode coverage.
+before broad opcode coverage. Remaining socket-adjacent work should not be read
+as a gap in the baseline API unless it supports a Python-friendly ownership
+contract.
 
 ## Current Socket Surface
 
@@ -34,11 +38,19 @@ The wrapper currently exposes these socket-oriented operations:
 - `submit_socket()` / `IORING_OP_SOCKET`, returning a caller-owned raw fd
 - `submit_cancel()` / `IORING_OP_ASYNC_CANCEL`, for pending request handles
 
-The local liburing headers also expose socket-relevant helpers that are not yet
-wrapped: `io_uring_prep_poll_add()` / `io_uring_prep_poll_remove()`, fixed-buffer
-zero-copy send helpers, and public provided-buffer management. `poll_*` and
-provided buffers are not socket-only, but they matter for high-throughput socket
-designs.
+This is the complete basic Python-oriented socket surface for the low-level
+package. It covers ordinary byte I/O, message I/O, zero-copy send lifetimes,
+listener accept, multishot accept, copied multishot receive, connection setup,
+shutdown, fd creation/close, and handle-based cancellation.
+
+The local liburing headers also expose socket-adjacent helpers that are not part
+of this baseline. `io_uring_prep_poll_add()` / `io_uring_prep_poll_remove()` are
+readiness APIs rather than core completion proactor operations. Fixed-buffer
+zero-copy sends and public provided-buffer rings require ownership contracts
+that do not map cleanly onto ordinary Python buffers. The remaining plausible
+receive-side extension is a zero-copy multishot receive API with explicit leased
+buffers, but that should be treated as a separate design rather than a missing
+piece of the baseline.
 
 ## Kernel Support Notes
 
@@ -48,24 +60,28 @@ version gates for the simple forms of `recv`, `send`, `sendto`, `recvmsg`,
 `sendmsg`, `accept`, `connect`, `shutdown`, `close`, `NOP` wakeups, completion
 waiting, or basic user-data cancellation.
 
-The caveats are attached to variants we either do not expose yet or expose only
-as plain one-shot operations:
+The caveats are attached to optional variants, specialised optimisations, or
+operations that intentionally stay outside the basic Python surface:
 
 - `submit_cancel()` uses basic user-data cancellation. The documented extended
   cancel flags are newer: `IORING_ASYNC_CANCEL_ALL`, `IORING_ASYNC_CANCEL_FD`,
   and `IORING_ASYNC_CANCEL_ANY` are available since kernel 5.19;
   `IORING_ASYNC_CANCEL_FD_FIXED` is available since kernel 6.0.
 - `submit_accept()` exposes one-shot accept. `submit_accept_multishot()` exposes
-  multishot accept, available since kernel 5.19. Direct-descriptor accept still
-  needs registered files and is not exposed yet.
+  multishot accept, available since kernel 5.19. Both accept methods expose
+  accept flags, so proactor users can request `SOCK_NONBLOCK | SOCK_CLOEXEC` for
+  accepted sockets. Direct-descriptor accept still needs registered files and is
+  not exposed because normal Python sockets use ordinary process fds.
 - `submit_recv()` and `submit_recvmsg()` expose one-shot receive.
   `submit_recv_multishot()` exposes multishot receive with internal buffer-ring
   ownership and `bytes` delivery. Multishot receive is available since kernel
   6.0. `probe()` includes a targeted `"IORING_RECV_MULTISHOT"` runtime
   capability entry because it is newer than multishot accept and depends on
-  provided-buffer support. Receive/send polling hints such as
+  provided-buffer support. A future zero-copy multishot receive API would need a
+  separate leased-buffer model. Receive/send polling hints such as
   `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY` are available
-  since kernel 5.19.
+  since kernel 5.19, but they are optimisation hints rather than required
+  baseline behaviour.
 - `submit_send_zc()` exposes basic `io_uring_prep_send_zc()`. The normal
   operation CQE is delivered to Python; the separate `IORING_CQE_F_NOTIF`
   notification CQE is consumed internally because it only closes the retained
@@ -121,34 +137,37 @@ Open design questions:
 - Should `UringProactor` default to a resize-friendly setup flag once resize is
   exposed?
 
-### 2. Provided buffers and buffer rings
+### 2. Optional zero-copy multishot receive
 
-Provided buffers are the foundation for efficient receive-heavy networking.
-They let the kernel select a buffer from a registered group and report the chosen
-buffer ID in the completion flags. Newer liburing releases improve buffer-ring
-management, including partial consumption support.
+Copied `submit_recv_multishot()` is already part of the baseline. It uses an
+internal provided-buffer ring, copies selected buffers into Python `bytes`, and
+recycles the kernel buffers right away. That keeps ownership simple and works
+well for a Python proactor.
 
-A low-level API should probably introduce an explicit buffer-pool object rather
-than hiding pinned memory behind socket methods:
+A later zero-copy receive API would need explicit leased-buffer ownership rather
+than exposing raw provided-buffer management as a general low-level primitive:
 
 ```python
-pool = ring.register_buffer_ring(buffer_size=16384, buffer_count=256)
-ring.submit_recv_buffer_select(fd, pool, user_data)
+handle = ring.submit_recv_multishot_zc(fd, buffer_size=16384, buffer_count=256, user_data=token)
+with completion.result as view:
+  process(memoryview(view))
 ```
 
-This should stay separate from ring sizing. Ring entries control queue depth;
-registered buffers control pinned payload memory and can hit `RLIMIT_MEMLOCK`.
+The result object would need to keep the selected buffer alive until the caller
+returns it. It also needs to account for active exported memoryviews before
+recycling the buffer back to the kernel. That is why public provided-buffer
+management is not part of the baseline API.
 
-### 3. Multishot receive
+### 3. Multishot receive status
 
 `io_uring_prep_recv_multishot()` is available since kernel 6.0 and pairs with
 provided buffers. One submission can produce many completions until the kernel
 clears `IORING_CQE_F_MORE`.
 
-This is a major performance feature, but it changes the current one-submission,
-one-completion model. The first Python API keeps lifetime simple by letting
-`_uring_api` own the provided-buffer ring internally, copy each selected buffer
-into a Python `bytes` object, and recycle the kernel buffer right away:
+This is a major performance feature, and the first Python API is implemented. It
+keeps lifetime simple by letting `_uring_api` own the provided-buffer ring
+internally, copy each selected buffer into a Python `bytes` object, and recycle
+the kernel buffer right away:
 
 ```python
 handle = ring.submit_recv_multishot(fd, buffer_size=16384, buffer_count=256, user_data=token)
@@ -163,14 +182,7 @@ weight.
 
 A later zero-copy API can expose leased buffer objects, but those objects must
 return buffers to the original operation before the kernel can reuse them. That
-is a separate ownership contract from the initial copied-`bytes` model. One
-possible shape is a dedicated Python buffer-group object that owns the provided
-buffer ring independently of the pending `Completion`, plus a per-result object
-that references the group and selected buffer ID. The per-result object would
-expose the buffer protocol so callers can create `memoryview` objects over the
-received bytes, and provide `close()` / context-manager methods to return the
-buffer to the group when the caller is done. Any such design must account for
-active exported memoryviews before recycling a buffer back to the kernel.
+is a separate ownership contract from the current copied-`bytes` model.
 
 The completion object still needs enough flag helpers to decode:
 
@@ -185,18 +197,18 @@ Kernel gates worth tracking:
 - `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY`: kernel 5.19;
 - recv bundles: kernel 6.10.
 
-### 4. Multishot accept
+### 4. Multishot accept status
 
 `io_uring_prep_multishot_accept()` is available since kernel 5.19 and is a clear
 server-performance enhancer. One accept request can produce accepted sockets as
 connections arrive, again using `IORING_CQE_F_MORE` to indicate whether the
 request remains active.
 
-The low-level API mirrors the planned multishot recv shape, using
-`submit_cancel()` for explicit teardown:
+The low-level API is implemented and uses `submit_cancel()` for explicit
+teardown:
 
 ```python
-handle = ring.submit_accept_multishot(fd, user_data)
+handle = ring.submit_accept_multishot(fd, user_data, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
 ring.submit_cancel(handle)
 ```
 
@@ -214,6 +226,8 @@ some file-I/O coordination patterns.
 For sockets, poll requests can support readiness-style APIs, backpressure, and
 integration points where a higher layer wants to wait for `POLLIN`, `POLLOUT`,
 or error/hangup readiness rather than submit an immediate recv/send operation.
+They are optional for the planned proactor because the core API submits real
+I/O operations and receives completions directly.
 `io_uring_prep_poll_multishot()` is especially relevant for servers because one
 registration can produce repeated CQEs, using `IORING_CQE_F_MORE` to show that
 the request remains active.
@@ -239,8 +253,9 @@ Open design questions:
 
 `io_uring_prep_cmd_sock()` arrived in liburing 2.5. It can expose async socket
 commands such as `SIOCINQ`, `SIOCOUTQ`, `getsockopt()`, and `setsockopt()`.
-These are useful for richer socket management, but less central than multishot
-I/O.
+These are useful for richer socket management, but they are not core proactor
+I/O. Common setup such as `bind()`, `listen()`, and most `setsockopt()` calls is
+normally done synchronously when creating the listener socket.
 
 Kernel support is command-specific. For example, the current man page documents
 `SIOCINQ` and `SETSOCKOPT` availability from kernel 6.7, while newer socket

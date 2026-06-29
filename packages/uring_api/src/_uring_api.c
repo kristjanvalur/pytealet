@@ -137,8 +137,8 @@ static int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data
                                           unsigned int flags, PyObject *user_data);
 static int UringApiCapi_RingSubmitSendmsgZc(PyObject *ring, int fd, PyObject *data, PyObject *address,
                                             unsigned int flags, PyObject *user_data);
-static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, PyObject *user_data);
-static int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, PyObject *user_data);
+static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
+static int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
 static int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
 static int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data);
 static int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data);
@@ -2006,15 +2006,16 @@ static PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *ar
 }
 
 static PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "user_data", NULL};
+    static char *keywords[] = {"fd", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     long fd;
+    unsigned int flags = 0;
     PyObject *user_data = Py_None;
     PyObject *completion = NULL;
     UringApiCompletion *pending;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|O", keywords, &fd, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|OI", keywords, &fd, &user_data, &flags)) {
         return NULL;
     }
     if (fd < 0 || fd > INT_MAX) {
@@ -2036,7 +2037,7 @@ static PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, 
         if (!sqe) {
             failed = 1;
         } else {
-            io_uring_prep_accept(sqe, (int)fd, (struct sockaddr *)&pending->addr, &pending->addrlen, 0);
+            io_uring_prep_accept(sqe, (int)fd, (struct sockaddr *)&pending->addr, &pending->addrlen, flags);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
@@ -2053,15 +2054,16 @@ static PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, 
 }
 
 static PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "user_data", NULL};
+    static char *keywords[] = {"fd", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     long fd;
+    unsigned int flags = 0;
     PyObject *user_data = Py_None;
     PyObject *completion = NULL;
     UringApiCompletion *pending;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|O", keywords, &fd, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|OI", keywords, &fd, &user_data, &flags)) {
         return NULL;
     }
     if (fd < 0 || fd > INT_MAX) {
@@ -2083,7 +2085,8 @@ static PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObje
         if (!sqe) {
             failed = 1;
         } else {
-            io_uring_prep_multishot_accept(sqe, (int)fd, (struct sockaddr *)&pending->addr, &pending->addrlen, 0);
+            io_uring_prep_multishot_accept(sqe, (int)fd, (struct sockaddr *)&pending->addr, &pending->addrlen,
+                                           flags);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
@@ -3008,12 +3011,12 @@ static int UringApiCapi_RingSubmitSendmsgZc(PyObject *ring, int fd, PyObject *da
     return 0;
 }
 
-static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, PyObject *user_data) {
+static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = PyObject_CallMethod(ring, "submit_accept", "iO", fd, user_data ? user_data : Py_None);
+    result = PyObject_CallMethod(ring, "submit_accept", "iOI", fd, user_data ? user_data : Py_None, flags);
     if (!result) {
         return -1;
     }
@@ -3021,12 +3024,12 @@ static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, PyObject *user_
     return 0;
 }
 
-static int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, PyObject *user_data) {
+static int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = PyObject_CallMethod(ring, "submit_accept_multishot", "iO", fd, user_data ? user_data : Py_None);
+    result = PyObject_CallMethod(ring, "submit_accept_multishot", "iOI", fd, user_data ? user_data : Py_None, flags);
     if (!result) {
         return -1;
     }
