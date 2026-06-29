@@ -47,9 +47,20 @@ typedef struct {
     PyThread_type_lock delivery_wait_lock;
     unsigned int delivery_active_workers;
     unsigned int receive_state;
+    unsigned short next_buf_group;
     bool delivery_stop_requested;
     bool initialized;
 } UringApiRing;
+
+typedef struct {
+    UringApiRing *ring;
+    struct io_uring_buf_ring *ring_buffer;
+    unsigned char *storage;
+    unsigned int buffer_size;
+    unsigned int buffer_count;
+    unsigned short group_id;
+    int mask;
+} UringApiRecvBufferPool;
 
 typedef enum {
     URING_API_RECEIVE_IDLE = 0,
@@ -70,6 +81,7 @@ typedef enum {
     URING_API_PENDING_CLOSE = 10,
     URING_API_PENDING_SENDMSG = 11,
     URING_API_PENDING_SOCKET = 12,
+    URING_API_PENDING_RECV_MULTISHOT = 13,
 } UringApiPendingKind;
 
 typedef struct {
@@ -80,6 +92,8 @@ typedef struct {
     unsigned int flags;
     PyObject *result;
     PyObject *buffer;
+    UringApiRecvBufferPool *recv_pool;
+    unsigned long long sequence;
     Py_buffer view;
     struct iovec iov;
     struct msghdr msg;
@@ -108,6 +122,8 @@ static unsigned int UringApiCapi_RingCqEntries(PyObject *ring);
 static int UringApiCapi_RingClosed(PyObject *ring);
 static int UringApiCapi_RingRunning(PyObject *ring);
 static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+static int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned int buffer_size,
+                                                unsigned int buffer_count, unsigned int flags, PyObject *user_data);
 static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                        PyObject *user_data);
 static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
@@ -133,6 +149,7 @@ static int UringApiCapi_CompletionCheck(PyObject *completion);
 static PyObject *UringApiCapi_CompletionUserData(PyObject *completion);
 static int UringApiCapi_CompletionRes(PyObject *completion, int *value);
 static int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *value);
+static int UringApiCapi_CompletionSequence(PyObject *completion, unsigned long long *value);
 static PyObject *UringApiCapi_CompletionResult(PyObject *completion);
 
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
@@ -204,6 +221,7 @@ static int module_add_cqe_flag_constants(PyObject *module) {
 
 static int module_add_completion_kind_constants(PyObject *module) {
     if (PyModule_AddIntConstant(module, "COMPLETION_KIND_RECV", URING_API_PENDING_RECV) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_RECV_MULTISHOT", URING_API_PENDING_RECV_MULTISHOT) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SEND", URING_API_PENDING_SEND) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_WAKE", URING_API_PENDING_WAKE) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SENDTO", URING_API_PENDING_SENDTO) < 0 ||
@@ -431,12 +449,90 @@ static int ring_check_open(UringApiRing *self) {
     return 0;
 }
 
+static bool is_power_of_two(unsigned long value) { return value != 0 && (value & (value - 1)) == 0; }
+
+static void UringApiRecvBufferPool_free(UringApiRecvBufferPool *pool) {
+    if (!pool) {
+        return;
+    }
+    if (pool->ring_buffer && pool->ring && pool->ring->initialized) {
+        (void)io_uring_free_buf_ring(&pool->ring->ring, pool->ring_buffer, pool->buffer_count, pool->group_id);
+    }
+    PyMem_Free(pool->storage);
+    Py_XDECREF((PyObject *)pool->ring);
+    PyMem_Free(pool);
+}
+
+static UringApiRecvBufferPool *UringApiRecvBufferPool_new(UringApiRing *ring, unsigned int buffer_size,
+                                                          unsigned int buffer_count) {
+    UringApiRecvBufferPool *pool;
+    size_t total_size;
+    int ret = 0;
+    unsigned int index;
+
+    if (buffer_size == 0) {
+        PyErr_SetString(PyExc_ValueError, "buffer_size must be positive");
+        return NULL;
+    }
+    if (!is_power_of_two(buffer_count) || buffer_count > USHRT_MAX + 1U) {
+        PyErr_SetString(PyExc_ValueError, "buffer_count must be a power of two no larger than 65536");
+        return NULL;
+    }
+    if ((size_t)buffer_count > SIZE_MAX / (size_t)buffer_size) {
+        PyErr_SetString(PyExc_ValueError, "buffer pool is too large");
+        return NULL;
+    }
+
+    pool = PyMem_Calloc(1, sizeof(*pool));
+    if (!pool) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    total_size = (size_t)buffer_count * (size_t)buffer_size;
+    pool->storage = PyMem_Malloc(total_size);
+    if (!pool->storage) {
+        UringApiRecvBufferPool_free(pool);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    pool->ring = ring;
+    Py_INCREF((PyObject *)ring);
+    pool->buffer_size = buffer_size;
+    pool->buffer_count = buffer_count;
+    pool->group_id = ring->next_buf_group++;
+    pool->mask = io_uring_buf_ring_mask(buffer_count);
+    pool->ring_buffer = io_uring_setup_buf_ring(&ring->ring, buffer_count, pool->group_id, 0, &ret);
+    if (!pool->ring_buffer) {
+        int errnum = normalize_ret_errno(ret);
+        UringApiRecvBufferPool_free(pool);
+        errno = errnum;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+
+    for (index = 0; index < buffer_count; index++) {
+        io_uring_buf_ring_add(pool->ring_buffer, pool->storage + ((size_t)index * buffer_size), buffer_size,
+                              (unsigned short)index, pool->mask, (int)index);
+    }
+    io_uring_buf_ring_advance(pool->ring_buffer, (int)buffer_count);
+    return pool;
+}
+
+static void UringApiRecvBufferPool_recycle(UringApiRecvBufferPool *pool, unsigned int buffer_id) {
+    io_uring_buf_ring_add(pool->ring_buffer, pool->storage + ((size_t)buffer_id * pool->buffer_size),
+                          pool->buffer_size, (unsigned short)buffer_id, pool->mask, 0);
+    io_uring_buf_ring_advance(pool->ring_buffer, 1);
+}
+
 static void UringApiCompletion_dealloc(UringApiCompletion *self) {
     if (self->has_view) {
         PyBuffer_Release(&self->view);
         self->has_view = false;
     }
     Py_CLEAR(self->buffer);
+    UringApiRecvBufferPool_free(self->recv_pool);
+    self->recv_pool = NULL;
     Py_CLEAR(self->user_data);
     Py_CLEAR(self->result);
     Py_TYPE(self)->tp_free((PyObject *)self);
@@ -453,6 +549,8 @@ static PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObje
     completion->flags = 0;
     completion->result = NULL;
     completion->buffer = Py_XNewRef(buffer);
+    completion->recv_pool = NULL;
+    completion->sequence = 0;
     completion->has_view = false;
     completion->has_msghdr = false;
     return (PyObject *)completion;
@@ -526,8 +624,12 @@ static PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *sourc
     completion->user_data = Py_NewRef(source->user_data);
     completion->res = source->res;
     completion->flags = source->flags;
-    completion->result = Py_XNewRef(source->result);
+    completion->result = source->result;
+    source->result = NULL;
     completion->buffer = NULL;
+    completion->recv_pool = NULL;
+    completion->sequence = source->sequence;
+    source->sequence++;
     memset(&completion->view, 0, sizeof(completion->view));
     memset(&completion->iov, 0, sizeof(completion->iov));
     memset(&completion->msg, 0, sizeof(completion->msg));
@@ -544,6 +646,41 @@ static void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
         self->has_view = false;
     }
     Py_CLEAR(self->buffer);
+    UringApiRecvBufferPool_free(self->recv_pool);
+    self->recv_pool = NULL;
+}
+
+static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *self, int res, unsigned int flags) {
+    unsigned int buffer_id;
+    PyObject *payload;
+
+    if (res < 0) {
+        Py_RETURN_NONE;
+    }
+    if (!(flags & IORING_CQE_F_BUFFER)) {
+        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion did not select a buffer");
+        return NULL;
+    }
+    buffer_id = flags >> IORING_CQE_BUFFER_SHIFT;
+    if (!self->recv_pool || buffer_id >= self->recv_pool->buffer_count) {
+        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion selected an invalid buffer");
+        return NULL;
+    }
+    if ((unsigned int)res > self->recv_pool->buffer_size) {
+        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion exceeds selected buffer size");
+        return NULL;
+    }
+
+    payload = PyBytes_FromStringAndSize((const char *)self->recv_pool->storage +
+                                            ((size_t)buffer_id * self->recv_pool->buffer_size),
+                                        (Py_ssize_t)res);
+    if (!payload) {
+        return NULL;
+    }
+    if (flags & IORING_CQE_F_MORE) {
+        UringApiRecvBufferPool_recycle(self->recv_pool, buffer_id);
+    }
+    return payload;
 }
 
 static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags) {
@@ -555,7 +692,9 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
         UringApiCompletion_clear_pending_state(self);
         return 1;
     }
-    if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
+    if (self->kind == URING_API_PENDING_RECV_MULTISHOT) {
+        payload = UringApiCompletion_recv_multishot_payload(self, res, flags);
+    } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
                      self->kind == URING_API_PENDING_SENDTO || self->kind == URING_API_PENDING_SENDMSG ||
                      self->kind == URING_API_PENDING_SOCKET)) {
         payload = PyLong_FromLong(res);
@@ -576,7 +715,9 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
         return -1;
     }
     Py_XSETREF(self->result, payload);
-    UringApiCompletion_clear_pending_state(self);
+    if (!(flags & IORING_CQE_F_MORE)) {
+        UringApiCompletion_clear_pending_state(self);
+    }
     return 0;
 }
 
@@ -601,6 +742,10 @@ static PyObject *UringApiCompletion_get_result(UringApiCompletion *self, void *c
         Py_RETURN_NONE;
     }
     return Py_NewRef(self->result);
+}
+
+static PyObject *UringApiCompletion_get_sequence(UringApiCompletion *self, void *closure) {
+    return PyLong_FromUnsignedLongLong(self->sequence);
 }
 
 static int submit_one(UringApiRing *self) {
@@ -1011,6 +1156,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingClosed,
     UringApiCapi_RingRunning,
     UringApiCapi_RingSubmitRecv,
+    UringApiCapi_RingSubmitRecvMultishot,
     UringApiCapi_RingSubmitSend,
     UringApiCapi_RingSubmitRecvmsg,
     UringApiCapi_RingSubmitSendto,
@@ -1032,6 +1178,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_CompletionUserData,
     UringApiCapi_CompletionRes,
     UringApiCapi_CompletionFlags,
+    UringApiCapi_CompletionSequence,
     UringApiCapi_CompletionResult,
     {NULL},
 };
@@ -1080,6 +1227,7 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
     self->delivery_active_workers = 0;
+    self->next_buf_group = 1;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -1128,6 +1276,7 @@ static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(igno
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
     self->delivery_active_workers = 0;
+    self->next_buf_group = 1;
     Py_RETURN_NONE;
 }
 
@@ -1186,6 +1335,68 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+static PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buffer_size", "buffer_count", "user_data", "flags", NULL};
+    struct io_uring_sqe *sqe;
+    long fd;
+    unsigned long buffer_size;
+    unsigned long buffer_count;
+    unsigned int flags = 0;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
+    UringApiCompletion *pending;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lkk|OI", keywords, &fd, &buffer_size, &buffer_count, &user_data,
+                                     &flags)) {
+        return NULL;
+    }
+    if (fd < 0 || fd > INT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
+        return NULL;
+    }
+    if (buffer_size > UINT_MAX || buffer_count > UINT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "buffer_size and buffer_count must fit in uint32_t");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_MULTISHOT, user_data, NULL);
+    if (!completion) {
+        return NULL;
+    }
+    pending = (UringApiCompletion *)completion;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        pending->recv_pool = UringApiRecvBufferPool_new(self, (unsigned int)buffer_size, (unsigned int)buffer_count);
+        if (!pending->recv_pool) {
+            failed = 1;
+        } else {
+            sqe = get_sqe(self);
+            if (!sqe) {
+                failed = 1;
+            } else {
+                io_uring_prep_recv_multishot(sqe, (int)fd, NULL, 0, (int)flags);
+                sqe->flags |= IOSQE_BUFFER_SELECT;
+                sqe->buf_group = pending->recv_pool->group_id;
+                sqe_set_completion(self, sqe, completion);
+                if (submit_one(self) < 0) {
+                    failed = 1;
+                }
             }
         }
     }
@@ -2294,6 +2505,21 @@ static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, Py
     return 0;
 }
 
+static int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned int buffer_size,
+                                                unsigned int buffer_count, unsigned int flags, PyObject *user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_recv_multishot", "iIIOI", fd, buffer_size, buffer_count,
+                                 user_data ? user_data : Py_None, flags);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
 static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                        PyObject *user_data) {
     PyObject *result;
@@ -2551,6 +2777,20 @@ static int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *valu
     return 0;
 }
 
+static int UringApiCapi_CompletionSequence(PyObject *completion, unsigned long long *value) {
+    UringApiCompletion *uring_completion;
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
+        return -1;
+    }
+    uring_completion = (UringApiCompletion *)completion;
+    *value = uring_completion->sequence;
+    return 1;
+}
+
 static PyObject *UringApiCapi_CompletionResult(PyObject *completion) {
     if (!completion_type_check(completion)) {
         return NULL;
@@ -2567,6 +2807,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Clear the completion service stop flag."},
     {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
      "Submit a recv operation."},
+    {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot),
+     METH_VARARGS | METH_KEYWORDS, "Submit a multishot recv operation."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_VARARGS | METH_KEYWORDS,
      "Submit a send operation."},
     {"submit_recvmsg", _PyCFunction_CAST(UringApiRing_submit_recvmsg), METH_VARARGS | METH_KEYWORDS,
@@ -2625,6 +2867,7 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {"res", (getter)UringApiCompletion_get_res, NULL, NULL, NULL},
     {"flags", (getter)UringApiCompletion_get_flags, NULL, NULL, NULL},
     {"result", (getter)UringApiCompletion_get_result, NULL, NULL, NULL},
+    {"sequence", (getter)UringApiCompletion_get_sequence, NULL, NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

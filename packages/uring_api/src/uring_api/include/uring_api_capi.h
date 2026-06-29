@@ -44,6 +44,8 @@ typedef struct UringApi_CAPI {
 
     /* Submission and receive operations. */
     int (*ring_submit_recv)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+    int (*ring_submit_recv_multishot)(PyObject *ring, int fd, unsigned int buffer_size, unsigned int buffer_count,
+                                      unsigned int flags, PyObject *user_data);
     int (*ring_submit_send)(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
     int (*ring_submit_recvmsg)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
     int (*ring_submit_sendto)(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
@@ -72,6 +74,7 @@ typedef struct UringApi_CAPI {
     PyObject *(*completion_user_data)(PyObject *completion);
     int (*completion_res)(PyObject *completion, int *value);
     int (*completion_flags)(PyObject *completion, unsigned int *value);
+    int (*completion_sequence)(PyObject *completion, unsigned long long *value);
     PyObject *(*completion_result)(PyObject *completion);
 
     void *reserved[8];

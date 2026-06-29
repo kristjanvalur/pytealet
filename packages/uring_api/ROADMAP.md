@@ -15,6 +15,8 @@ before broad opcode coverage.
 The wrapper currently exposes these socket-oriented operations:
 
 - `submit_recv()` / `IORING_OP_RECV`
+- `submit_recv_multishot()` / `IORING_OP_RECV` with `IORING_RECV_MULTISHOT`,
+  copying selected provided buffers into Python `bytes`
 - `submit_recvmsg()` / `IORING_OP_RECVMSG`
 - `submit_send()` / `IORING_OP_SEND`
 - `submit_sendto()` / `IORING_OP_SEND`
@@ -28,10 +30,9 @@ The wrapper currently exposes these socket-oriented operations:
 - `submit_cancel()` / `IORING_OP_ASYNC_CANCEL`, for pending request handles
 
 The local liburing headers also expose socket-relevant helpers that are not yet
-wrapped: `io_uring_prep_recv_multishot()`, `io_uring_prep_poll_add()` /
-`io_uring_prep_poll_remove()`, zero-copy send helpers, and provided-buffer
-management. `poll_*` and provided buffers are not socket-only, but they matter
-for high-throughput socket designs.
+wrapped: `io_uring_prep_poll_add()` / `io_uring_prep_poll_remove()`, zero-copy
+send helpers, and public provided-buffer management. `poll_*` and provided
+buffers are not socket-only, but they matter for high-throughput socket designs.
 
 ## Kernel Support Notes
 
@@ -51,10 +52,11 @@ as plain one-shot operations:
 - `submit_accept()` exposes one-shot accept. `submit_accept_multishot()` exposes
   multishot accept, available since kernel 5.19. Direct-descriptor accept still
   needs registered files and is not exposed yet.
-- `submit_recv()` and `submit_recvmsg()` expose one-shot receive only. Multishot
-  receive is available since kernel 6.0, while receive/send polling hints such
-  as `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY` are available
-  since kernel 5.19.
+- `submit_recv()` and `submit_recvmsg()` expose one-shot receive.
+  `submit_recv_multishot()` exposes multishot receive with internal buffer-ring
+  ownership and `bytes` delivery. Multishot receive is available since kernel
+  6.0, while receive/send polling hints such as `IORING_RECVSEND_POLL_FIRST`
+  and `IORING_CQE_F_SOCK_NONEMPTY` are available since kernel 5.19.
 - `submit_socket()` uses `IORING_OP_SOCKET`, which is a newer socket opcode even
   though the installed man page does not give a precise kernel version. `probe()`
   now includes a targeted `"IORING_OP_SOCKET"` runtime capability entry by
@@ -125,14 +127,26 @@ provided buffers. One submission can produce many completions until the kernel
 clears `IORING_CQE_F_MORE`.
 
 This is a major performance feature, but it changes the current one-submission,
-one-completion model. The Python API should make the lifetime explicit:
+one-completion model. The first Python API keeps lifetime simple by letting
+`_uring_api` own the provided-buffer ring internally, copy each selected buffer
+into a Python `bytes` object, and recycle the kernel buffer right away:
 
 ```python
-handle = ring.submit_recv_multishot(fd, buffer_group, user_data)
-handle.cancel()
+handle = ring.submit_recv_multishot(fd, buffer_size=16384, buffer_count=256, user_data=token)
+ring.submit_cancel(handle)
 ```
 
-The completion object will need to expose enough flag helpers to decode:
+Delivered multishot completions carry `sequence` numbers because worker thread
+delivery can be out of order even though CQEs are reaped in order. Recv
+multishot uses that value to reconstruct stream order; accept multishot carries
+the same ordinal for symmetry even though accept ordering has less semantic
+weight.
+
+A later zero-copy API can expose leased buffer objects, but those objects must
+return buffers to the original operation before the kernel can reuse them. That
+is a separate ownership contract from the initial copied-`bytes` model.
+
+The completion object still needs enough flag helpers to decode:
 
 - whether `IORING_CQE_F_MORE` is set;
 - the selected buffer ID;

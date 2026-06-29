@@ -23,12 +23,12 @@ with uring_api.Ring() as ring:
 
 ## Socket I/O
 
-`Ring` currently exposes `submit_recv()`, `submit_send()`, `submit_recvmsg()`,
-`submit_sendto()`, `submit_sendmsg()`, `submit_accept()`,
-`submit_accept_multishot()`, `submit_connect()`, `submit_shutdown()`,
-`submit_close()`, `submit_socket()`, and `wait()` for minimal socket-oriented
-experiments. Each submitted operation carries a Python `user_data` object which
-comes back with its completion.
+`Ring` currently exposes `submit_recv()`, `submit_recv_multishot()`,
+`submit_send()`, `submit_recvmsg()`, `submit_sendto()`, `submit_sendmsg()`,
+`submit_accept()`, `submit_accept_multishot()`, `submit_connect()`,
+`submit_shutdown()`, `submit_close()`, `submit_socket()`, and `wait()` for
+minimal socket-oriented experiments. Each submitted operation carries a Python
+`user_data` object which comes back with its completion.
 
 ```python
 import socket
@@ -66,11 +66,18 @@ been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
 same descriptor.
 
+`submit_recv_multishot()` owns an internal provided-buffer ring for the pending
+operation. Each receive CQE is copied into a new Python `bytes` object, the
+selected kernel buffer is recycled right away, and the delivered completion gets
+a `sequence` number so callback users can reconstruct receive order even when
+worker threads dispatch completions out of order. Multishot completions are
+numbered from `0`; normal one-shot completions also report `sequence == 0`.
+
 The local liburing headers expose more socket-related operations than this
-wrapper currently publishes. The notable gaps are multishot receive, readiness
-polling, zero-copy send variants, and provided buffer management. Those are
-tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`, which
-remains a compact runtime availability check.
+wrapper currently publishes. The notable gaps are readiness polling, zero-copy
+send variants, and public provided-buffer management. Those are tracked in
+[ROADMAP.md](ROADMAP.md) rather than implied by `probe()`, which remains a
+compact runtime availability check.
 
 If the submission queue cannot provide another entry after flushing already
 prepared work to the kernel, submit methods raise `SubmissionQueueFull`. Treat
@@ -214,8 +221,9 @@ The intended baseline is simple:
 
 - one thread may reap completions with `wait()`;
 - other threads may call submit-side methods such as `submit_recv()`,
-    `submit_send()`, `submit_recvmsg()`, `submit_sendto()`, `submit_accept()`,
-    `submit_accept_multishot()`, `submit_connect()`, and `break_wait()`;
+    `submit_recv_multishot()`, `submit_send()`, `submit_recvmsg()`,
+    `submit_sendto()`, `submit_accept()`, `submit_accept_multishot()`,
+    `submit_connect()`, and `break_wait()`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
 - alternatively, callers may start their own Python threads and have each one
@@ -282,17 +290,17 @@ The capsule currently exposes:
 - `probe(entries, flags)`, which returns a new reference to the same flat
     availability and capability dictionary as `_uring_api.probe()`;
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
-    `ring_submit_send()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
-    `ring_submit_sendmsg()`, `ring_submit_accept()`,
-    `ring_submit_accept_multishot()`, `ring_submit_connect()`,
-    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_socket()`,
-    `ring_break_wait()`, and `ring_wait()`;
+    `ring_submit_recv_multishot()`, `ring_submit_send()`,
+    `ring_submit_recvmsg()`, `ring_submit_sendto()`, `ring_submit_sendmsg()`,
+    `ring_submit_accept()`, `ring_submit_accept_multishot()`,
+    `ring_submit_connect()`, `ring_submit_shutdown()`, `ring_submit_close()`,
+    `ring_submit_socket()`, `ring_break_wait()`, and `ring_wait()`;
 - `ring_set_callback()`, `ring_set_c_callback()`, `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;
 - `completion_check()`, `completion_user_data()`, `completion_res()`,
-    `completion_flags()`, and `completion_result()` for native completion
-    inspection.
+    `completion_flags()`, `completion_sequence()`, and `completion_result()`
+    for native completion inspection.
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

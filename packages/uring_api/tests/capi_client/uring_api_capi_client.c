@@ -108,6 +108,25 @@ static PyObject *client_completion_summary(PyObject *module, PyObject *completio
     return summary;
 }
 
+static PyObject *client_completion_sequence(PyObject *module, PyObject *completion) {
+    unsigned long long sequence;
+    int ret;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    ret = api->completion_sequence(completion, &sequence);
+    if (ret < 0) {
+        return NULL;
+    }
+    if (ret == 0) {
+        Py_RETURN_NONE;
+    }
+    return PyLong_FromUnsignedLongLong(sequence);
+}
+
 static PyObject *client_set_c_callback(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *sink;
@@ -193,6 +212,29 @@ static PyObject *client_submit_recvmsg(PyObject *module, PyObject *args) {
         return NULL;
     }
     if (api->ring_submit_recvmsg(ring, fd, buf, user_data) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_submit_recv_multishot(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *user_data;
+    int fd;
+    unsigned int buffer_size;
+    unsigned int buffer_count;
+    unsigned int flags;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiIIIO:submit_recv_multishot", &ring, &fd, &buffer_size, &buffer_count, &flags,
+                          &user_data)) {
+        return NULL;
+    }
+    if (api->ring_submit_recv_multishot(ring, fd, buffer_size, buffer_count, flags, user_data) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -366,11 +408,13 @@ static PyMethodDef client_methods[] = {
     {"probe", (PyCFunction)client_probe, METH_NOARGS, NULL},
     {"ring_summary", (PyCFunction)client_ring_summary, METH_VARARGS, NULL},
     {"completion_summary", (PyCFunction)client_completion_summary, METH_O, NULL},
+    {"completion_sequence", (PyCFunction)client_completion_sequence, METH_O, NULL},
     {"set_c_callback", _PyCFunction_CAST(client_set_c_callback), METH_VARARGS, NULL},
     {"clear_c_callback", (PyCFunction)client_clear_c_callback, METH_O, NULL},
     {"serve_completions", (PyCFunction)client_serve_completions, METH_O, NULL},
     {"stop_serving", (PyCFunction)client_stop_serving, METH_O, NULL},
     {"reset_serving", (PyCFunction)client_reset_serving, METH_O, NULL},
+    {"submit_recv_multishot", _PyCFunction_CAST(client_submit_recv_multishot), METH_VARARGS, NULL},
     {"submit_recvmsg", _PyCFunction_CAST(client_submit_recvmsg), METH_VARARGS, NULL},
     {"submit_sendto", _PyCFunction_CAST(client_submit_sendto), METH_VARARGS, NULL},
     {"submit_sendmsg", _PyCFunction_CAST(client_submit_sendmsg), METH_VARARGS, NULL},
@@ -399,9 +443,10 @@ static int client_exec(PyObject *module) {
     }
     if (!api->probe || !api->ring_new || !api->ring_set_c_callback || !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_result ||
-        !api->ring_submit_recvmsg || !api->ring_submit_sendto || !api->ring_submit_accept ||
-        !api->ring_submit_accept_multishot || !api->ring_submit_connect || !api->ring_submit_shutdown ||
-        !api->ring_submit_close || !api->ring_submit_sendmsg || !api->ring_submit_socket) {
+        !api->completion_sequence || !api->ring_submit_recv_multishot || !api->ring_submit_recvmsg ||
+        !api->ring_submit_sendto || !api->ring_submit_accept || !api->ring_submit_accept_multishot ||
+        !api->ring_submit_connect || !api->ring_submit_shutdown || !api->ring_submit_close ||
+        !api->ring_submit_sendmsg || !api->ring_submit_socket) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }
