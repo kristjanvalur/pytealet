@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import selectors
 import socket
 import threading
@@ -703,6 +704,10 @@ class _FakeUringRing:
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
+        self.pending_recv: list[SimpleNamespace] = []
+
+    def _completion(self, user_data: object, res: int = 0, flags: int = 0, result: object = None) -> SimpleNamespace:
+        return SimpleNamespace(user_data=user_data, res=res, flags=flags, result=result)
 
     def close(self) -> None:
         self.stop_serving()
@@ -731,7 +736,7 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         self.break_count += 1
 
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> None:
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         view = memoryview(buf)
@@ -740,43 +745,56 @@ class _FakeUringRing:
         if len(view) >= len(payload):
             view[: len(payload)] = payload
         self.submitted_recv.append((fd, buf, user_data))
-        self._deliver(SimpleNamespace(user_data=user_data, res=5, flags=0, result=5))
+        completion = self._completion(user_data, res=5, result=5)
+        self.pending_recv.append(completion)
+        self._deliver(completion)
+        return completion
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> None:
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         self.submitted_send.append((fd, data, user_data))
-        self._deliver(SimpleNamespace(user_data=user_data, res=len(payload), flags=0, result=len(payload)))
+        completion = self._completion(user_data, res=len(payload), result=len(payload))
+        self._deliver(completion)
+        return completion
 
-    def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> None:
+    def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = b"again" if getattr(getattr(user_data, "operation", None), "kind", None) == "recvfrom" else b"hello"
         memoryview(buf)[: len(payload)] = payload
         self.submitted_recvmsg.append((fd, buf, user_data))
-        self._deliver(SimpleNamespace(user_data=user_data, res=len(payload), flags=0, result=("127.0.0.1", 54321)))
+        completion = self._completion(user_data, res=len(payload), result=("127.0.0.1", 54321))
+        self._deliver(completion)
+        return completion
 
-    def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> None:
+    def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         self.submitted_sendto.append((fd, data, address, user_data))
-        self._deliver(SimpleNamespace(user_data=user_data, res=len(payload), flags=0, result=len(payload)))
+        completion = self._completion(user_data, res=len(payload), result=len(payload))
+        self._deliver(completion)
+        return completion
 
-    def submit_accept(self, fd: int, user_data: object = None) -> None:
+    def submit_accept(self, fd: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
         self.submitted_accept.append((fd, user_data))
-        self._deliver(SimpleNamespace(user_data=user_data, res=conn.fileno(), flags=0, result=(conn.detach(), "peer")))
+        completion = self._completion(user_data, res=conn.fileno(), result=(conn.detach(), "peer"))
+        self._deliver(completion)
+        return completion
 
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> None:
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_connect.append((fd, address, user_data))
-        self._deliver(SimpleNamespace(user_data=user_data, res=0, flags=0, result=None))
+        completion = self._completion(user_data, res=0, result=None)
+        self._deliver(completion)
+        return completion
 
     def wait(self, timeout: float | None = None) -> SimpleNamespace | None:
         if not self.completions:
@@ -791,15 +809,22 @@ class _FakeUringRing:
 
 
 class _DeferredUringRing(_FakeUringRing):
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> None:
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_recv.append((fd, buf, user_data))
+        completion = self._completion(user_data)
+        self.pending_recv.append(completion)
+        return completion
 
     def complete_recv(self, data: bytes = b"hello") -> None:
         _fd, buf, user_data = self.submitted_recv[-1]
         memoryview(buf)[: len(data)] = data
-        self._deliver(SimpleNamespace(user_data=user_data, res=len(data), flags=0, result=len(data)))
+        completion = self.pending_recv[-1]
+        completion.res = len(data)
+        completion.flags = 0
+        completion.result = len(data)
+        self._deliver(completion)
 
 
 class _BackpressuredUringRing(_DeferredUringRing):
@@ -1155,6 +1180,21 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_uring_entry_keeps_pending_completion_handle(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _DeferredUringRing)
+            _fd, _buf, entry = proactor.ring.submitted_recv[-1]
+
+            assert entry.completion is proactor.ring.pending_recv[-1]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_recv_into_completes_from_ring_completion(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -1201,6 +1241,33 @@ class TestUringProactor:
             assert proactor.has_pending_operations() is False
             with pytest.raises(CancelledError):
                 operation.result()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_multishot_more_completion_keeps_uring_entry_active(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _DeferredUringRing)
+            _fd, buf, entry = proactor.ring.submitted_recv[-1]
+            memoryview(buf)[:5] = b"hello"
+
+            proactor.ring._deliver(
+                SimpleNamespace(user_data=entry, res=5, flags=uring_api.IORING_CQE_F_MORE, result=5)
+            )
+
+            assert operation.result() == b"hello"
+            assert entry.active is True
+            assert proactor.has_pending_operations() is True
+
+            proactor.ring._deliver(SimpleNamespace(user_data=entry, res=-errno.ECANCELED, flags=0, result=None))
+
+            assert entry.active is False
+            assert proactor.has_pending_operations() is False
         finally:
             reader.close()
             writer.close()

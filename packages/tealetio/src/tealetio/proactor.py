@@ -58,6 +58,14 @@ def _is_uring_submission_queue_full(exc: BaseException) -> bool:
     return isinstance(exc, uring_api.SubmissionQueueFull)
 
 
+def _is_uring_multishot_more(completion: _UringCompletion) -> bool:
+    try:
+        import uring_api
+    except ImportError:
+        return False
+    return bool(completion.flags & uring_api.IORING_CQE_F_MORE)
+
+
 class _UringRing(Protocol):
     fd: int
     features: int
@@ -77,17 +85,17 @@ class _UringRing(Protocol):
 
     def break_wait(self) -> None: ...
 
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> None: ...
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> _UringCompletion: ...
 
-    def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> None: ...
+    def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> _UringCompletion: ...
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> None: ...
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> _UringCompletion: ...
 
-    def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> None: ...
+    def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> _UringCompletion: ...
 
-    def submit_accept(self, fd: int, user_data: object = None) -> None: ...
+    def submit_accept(self, fd: int, user_data: object = None) -> _UringCompletion: ...
 
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> None: ...
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> _UringCompletion: ...
 
     def wait(self, timeout: float | None = None) -> "_UringCompletion" | None: ...
 
@@ -329,7 +337,7 @@ class _FdEntry:
 
 
 _UringEntryComplete = Callable[["UringProactor", "_UringEntry", "_UringCompletion"], Operation[Any] | None]
-_UringEntrySubmit = Callable[[], None]
+_UringEntrySubmit = Callable[[], _UringCompletion]
 
 
 @dataclass
@@ -338,6 +346,7 @@ class _UringEntry:
     complete: _UringEntryComplete
     data: memoryview | None = None
     offset: int = 0
+    completion: _UringCompletion | None = None
     active: bool = True
 
 
@@ -1129,7 +1138,7 @@ class UringProactor(ProactorBase):
     def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
         self._pending_tokens.append(None)
         try:
-            submit()
+            entry.completion = submit()
         except BaseException as exc:
             self._pending_tokens.pop()
             if _is_uring_submission_queue_full(exc):
@@ -1191,8 +1200,10 @@ class UringProactor(ProactorBase):
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
         assert entry.active
-        entry.active = False
-        self._pending_tokens.pop()
+        has_more = _is_uring_multishot_more(completion)
+        if not has_more:
+            entry.active = False
+            self._pending_tokens.pop()
         if entry.operation.done():
             return entry.operation
         if res < 0:

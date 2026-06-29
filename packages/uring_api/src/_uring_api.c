@@ -182,6 +182,13 @@ static int module_add_setup_flag_constants(PyObject *module) {
     return 0;
 }
 
+static int module_add_cqe_flag_constants(PyObject *module) {
+    if (module_add_uint64_constant(module, "IORING_CQE_F_MORE", IORING_CQE_F_MORE) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
     (void)self;
     io_uring_sqe_set_data64(sqe, (unsigned long long)(uintptr_t)completion);
@@ -461,6 +468,27 @@ static PyObject *UringApiCompletion_new_pending_accept(PyObject *user_data) {
     return (PyObject *)completion;
 }
 
+static PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source) {
+    UringApiCompletion *completion = PyObject_New(UringApiCompletion, &UringApiCompletion_Type);
+    if (!completion) {
+        return NULL;
+    }
+    completion->kind = source->kind;
+    completion->user_data = Py_NewRef(source->user_data);
+    completion->res = source->res;
+    completion->flags = source->flags;
+    completion->result = Py_XNewRef(source->result);
+    completion->buffer = NULL;
+    memset(&completion->view, 0, sizeof(completion->view));
+    memset(&completion->iov, 0, sizeof(completion->iov));
+    memset(&completion->msg, 0, sizeof(completion->msg));
+    memset(&completion->addr, 0, sizeof(completion->addr));
+    completion->addrlen = 0;
+    completion->has_view = false;
+    completion->has_msghdr = false;
+    return (PyObject *)completion;
+}
+
 static void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
     if (self->has_view) {
         PyBuffer_Release(&self->view);
@@ -515,6 +543,9 @@ static PyObject *UringApiCompletion_get_flags(UringApiCompletion *self, void *cl
 }
 
 static PyObject *UringApiCompletion_get_result(UringApiCompletion *self, void *closure) {
+    if (!self->result) {
+        Py_RETURN_NONE;
+    }
     return Py_NewRef(self->result);
 }
 
@@ -1034,7 +1065,7 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
         Py_DECREF(completion);
         return NULL;
     }
-    Py_RETURN_NONE;
+    return Py_NewRef(completion);
 }
 
 static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1081,7 +1112,7 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
         Py_DECREF(completion);
         return NULL;
     }
-    Py_RETURN_NONE;
+    return Py_NewRef(completion);
 }
 
 static PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1136,7 +1167,7 @@ static PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, 
         Py_DECREF(completion);
         return NULL;
     }
-    Py_RETURN_NONE;
+    return Py_NewRef(completion);
 }
 
 static PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1184,7 +1215,7 @@ static PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args,
         Py_DECREF(completion);
         return NULL;
     }
-    Py_RETURN_NONE;
+    return Py_NewRef(completion);
 }
 
 static PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1231,7 +1262,7 @@ static PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, 
         Py_DECREF(completion);
         return NULL;
     }
-    Py_RETURN_NONE;
+    return Py_NewRef(completion);
 }
 
 static PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1283,7 +1314,7 @@ static PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args,
         Py_DECREF(completion);
         return NULL;
     }
-    Py_RETURN_NONE;
+    return Py_NewRef(completion);
 }
 
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
@@ -1392,6 +1423,7 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
 
 static PyObject *build_cqe_result(UringApiRing *self, struct io_uring_cqe *cqe) {
     UringApiCompletion *completion = cqe_get_completion(self, cqe);
+    PyObject *delivered;
     int res = cqe->res;
     unsigned int flags = cqe->flags;
     int completion_result;
@@ -1401,12 +1433,23 @@ static PyObject *build_cqe_result(UringApiRing *self, struct io_uring_cqe *cqe) 
     }
     completion_result = UringApiCompletion_complete(completion, res, flags);
     if (completion_result < 0) {
-        Py_DECREF(completion);
+        if (!(flags & IORING_CQE_F_MORE)) {
+            Py_DECREF(completion);
+        }
         return NULL;
     }
     if (completion_result > 0) {
-        Py_DECREF(completion);
+        if (!(flags & IORING_CQE_F_MORE)) {
+            Py_DECREF(completion);
+        }
         Py_RETURN_NONE;
+    }
+    if (flags & IORING_CQE_F_MORE) {
+        delivered = UringApiCompletion_new_delivered_copy(completion);
+        if (!delivered) {
+            return NULL;
+        }
+        return delivered;
     }
     return (PyObject *)completion;
 }
@@ -2113,7 +2156,7 @@ static int uring_api_exec(PyObject *module) {
         Py_DECREF(&UringApiRing_Type);
         return -1;
     }
-    if (module_add_setup_flag_constants(module) < 0) {
+    if (module_add_setup_flag_constants(module) < 0 || module_add_cqe_flag_constants(module) < 0) {
         return -1;
     }
 

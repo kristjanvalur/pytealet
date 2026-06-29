@@ -68,6 +68,10 @@ def test_native_module_exports_setup_flag_constants():
     assert uring_api.IORING_SETUP_DEFER_TASKRUN == 1 << 13
 
 
+def test_native_module_exports_cqe_flag_constants():
+    assert uring_api.IORING_CQE_F_MORE == 1 << 1
+
+
 def test_probe_returns_structured_result():
     probe = uring_api.probe()
 
@@ -383,12 +387,19 @@ def test_ring_recv_completion_when_available():
         writer.setblocking(False)
         buf = bytearray(5)
         with uring_api.Ring() as ring:
-            ring.submit_recv(reader.fileno(), buf, token)
+            pending = ring.submit_recv(reader.fileno(), buf, token)
             writer.send(b"hello")
+
+            assert isinstance(pending, uring_api.Completion)
+            assert pending.user_data is token
+            assert pending.res == 0
+            assert pending.flags == 0
+            assert pending.result is None
 
             completion = ring.wait(1.0)
 
         assert completion is not None
+        assert completion is pending
         assert isinstance(completion, uring_api.Completion)
         assert completion.user_data is token
         assert completion.res == 5

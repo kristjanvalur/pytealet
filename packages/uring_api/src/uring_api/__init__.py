@@ -11,6 +11,7 @@ try:
     from _uring_api import C_API_FEATURE_CORE as C_API_FEATURE_CORE
     from _uring_api import C_API_FEATURES as C_API_FEATURES
     from _uring_api import Completion as Completion
+    from _uring_api import IORING_CQE_F_MORE as IORING_CQE_F_MORE
     from _uring_api import IORING_SETUP_CLAMP as IORING_SETUP_CLAMP
     from _uring_api import IORING_SETUP_COOP_TASKRUN as IORING_SETUP_COOP_TASKRUN
     from _uring_api import IORING_SETUP_CQSIZE as IORING_SETUP_CQSIZE
@@ -34,6 +35,7 @@ except ImportError as exc:
     IORING_SETUP_TASKRUN_FLAG = 1 << 9
     IORING_SETUP_SINGLE_ISSUER = 1 << 12
     IORING_SETUP_DEFER_TASKRUN = 1 << 13
+    IORING_CQE_F_MORE = 1 << 1
     __compiled_liburing_version__ = "unavailable"
     __compiled_liburing_version_info__ = (0, 0)
     __liburing_version__ = "unavailable"
@@ -88,6 +90,7 @@ __all__ = [
     "C_API_FEATURE_CORE",
     "C_API_FEATURES",
     "Completion",
+    "IORING_CQE_F_MORE",
     "IORING_SETUP_CLAMP",
     "IORING_SETUP_COOP_TASKRUN",
     "IORING_SETUP_CQSIZE",
