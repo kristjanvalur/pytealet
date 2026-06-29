@@ -8,6 +8,7 @@ import heapq
 import importlib
 import inspect
 import itertools
+import queue
 import socket
 import threading
 import time
@@ -1216,9 +1217,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._owner_thread: int | None = None
         self._debug = False
         self._stopping = False
-        self._threadsafe_callbacks: deque[
+        self._threadsafe_callbacks: queue.SimpleQueue[
             tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
-        ] = deque()
+        ] = queue.SimpleQueue()
         self._threadsafe_lock = threading.Lock()
         self._pending_executor_calls = 0
         self._pending_async_waits: set[tealet.tealet] = set()
@@ -1493,8 +1494,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if immediate and self._owner_thread == threading.get_ident():
             context.run(callback, *args)
             return
-        with self._threadsafe_lock:
-            self._threadsafe_callbacks.append((callback, args, context))
+        self._threadsafe_callbacks.put((callback, args, context))
         self._break_wait_threadsafe()
 
     def call_later(
@@ -1531,10 +1531,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def _drain_threadsafe_callbacks(self) -> None:
         while True:
-            with self._threadsafe_lock:
-                if not self._threadsafe_callbacks:
-                    return
-                callback, args, context = self._threadsafe_callbacks.popleft()
+            try:
+                callback, args, context = self._threadsafe_callbacks.get_nowait()
+            except queue.Empty:
+                return
             if context is None:
                 callback(*args)
             else:
@@ -1561,8 +1561,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return self._next_timer_deadline() is not None
 
     def _has_pending_driver_work(self) -> bool:
+        if not self._threadsafe_callbacks.empty():
+            return True
         with self._threadsafe_lock:
-            return bool(self._threadsafe_callbacks or self._pending_executor_calls)
+            return bool(self._pending_executor_calls)
 
     def _has_runnable_work(self) -> bool:
         return bool(self._runnable)
