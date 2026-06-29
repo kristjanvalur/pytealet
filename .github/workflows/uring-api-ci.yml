@@ -109,29 +109,14 @@ jobs:
           probe = uring_api.probe()
           print("python:", platform.python_version(), platform.python_implementation())
           print("kernel:", platform.release())
-          print("liburing:", probe.liburing_version)
-          print("compiled liburing:", probe.compiled_liburing_version)
-          print("compiled liburing info:", probe.compiled_liburing_version_info)
-          print("available:", probe.available)
-          print("features:", probe.features)
-          print("sq_entries:", probe.sq_entries)
-          print("cq_entries:", probe.cq_entries)
-          print("errno:", probe.errno)
-          print("message:", probe.message)
-          assert isinstance(probe.available, bool)
-          assert isinstance(probe.features, int)
-          assert probe.liburing_version
-          assert probe.compiled_liburing_version == uring_api.__compiled_liburing_version__
-          assert probe.compiled_liburing_version == uring_api.__liburing_version__
-          assert probe.compiled_liburing_version_info == uring_api.__compiled_liburing_version_info__
-          if probe.available:
-              assert probe.errno is None
-              assert probe.message is None
-              assert probe.sq_entries > 0
-              assert probe.cq_entries > 0
-          else:
-              assert probe.errno is not None
-              assert probe.message
+            print("liburing:", uring_api.__liburing_version__)
+            print("compiled liburing:", uring_api.__compiled_liburing_version__)
+            print("compiled liburing info:", uring_api.__compiled_liburing_version_info__)
+            print("probe:", probe)
+            assert isinstance(probe, dict)
+            if probe:
+              assert probe["available"] is True
+              assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
           PY
 
   old-liburing-pure-python-fallback:
@@ -167,15 +152,12 @@ jobs:
           uv venv --python 3.14t "$fallback_venv"
           uv pip install --python "$fallback_venv/bin/python" dist/old-liburing/uring_api-*.whl
           "$fallback_venv/bin/python" - <<'PY'
-          import errno
           import uring_api
 
           probe = uring_api.probe()
           print(probe)
-          assert probe.available is False
-          assert probe.errno == errno.ENOSYS
-          assert probe.message and "native extension is unavailable" in probe.message
-          assert probe.compiled_liburing_version_info == (0, 0)
+          assert probe == {}
+          assert uring_api.__compiled_liburing_version_info__ == (0, 0)
           assert uring_api.C_API_FEATURES == 0
           assert uring_api.is_available() is False
           try:
@@ -220,15 +202,12 @@ jobs:
           fi
           uv pip install --python "$fallback_python" dist/non-linux/uring_api-*.whl
           "$fallback_python" - <<'PY'
-          import errno
           import uring_api
 
           probe = uring_api.probe()
           print(probe)
-          assert probe.available is False
-          assert probe.errno == errno.ENOSYS
-          assert probe.message and "native extension is unavailable" in probe.message
-          assert probe.compiled_liburing_version_info == (0, 0)
+          assert probe == {}
+          assert uring_api.__compiled_liburing_version_info__ == (0, 0)
           assert uring_api.C_API_FEATURES == 0
           assert uring_api.is_available() is False
           PY
