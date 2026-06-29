@@ -879,6 +879,65 @@ cleanup:
 #endif
 }
 
+static PyObject *uring_api_probe_socket_impl(void) {
+    struct io_uring ring;
+    struct io_uring_sqe *sqe;
+    struct io_uring_cqe *cqe = NULL;
+    struct __kernel_timespec timeout;
+    int socket_fd = -1;
+    int ret;
+    PyObject *result;
+
+    memset(&ring, 0, sizeof(ring));
+    ret = io_uring_queue_init(2, &ring, 0);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        return build_feature_probe_result(false, errnum, strerror(errnum));
+    }
+
+    sqe = io_uring_get_sqe(&ring);
+    if (!sqe) {
+        result = build_feature_probe_result(false, EBUSY, "no submission queue entry available for probe");
+        goto cleanup;
+    }
+    io_uring_prep_socket(sqe, AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0, 0);
+    io_uring_sqe_set_data64(sqe, 1);
+    ret = io_uring_submit(&ring);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        goto cleanup;
+    }
+
+    timeout.tv_sec = 1;
+    timeout.tv_nsec = 0;
+    ret = io_uring_wait_cqe_timeout(&ring, &cqe, &timeout);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        goto cleanup;
+    }
+    if (!cqe) {
+        result = build_feature_probe_result(false, ETIMEDOUT, "socket probe timed out");
+        goto cleanup;
+    }
+    if (cqe->res < 0) {
+        int errnum = -cqe->res;
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        io_uring_cqe_seen(&ring, cqe);
+        goto cleanup;
+    }
+
+    socket_fd = cqe->res;
+    result = build_feature_probe_result(true, 0, NULL);
+    io_uring_cqe_seen(&ring, cqe);
+
+cleanup:
+    close_if_open(&socket_fd);
+    io_uring_queue_exit(&ring);
+    return result;
+}
+
 static int add_bool_from_feature_probe(PyObject *capabilities, const char *name, PyObject *probe_result) {
     PyObject *available;
     int truth;
@@ -910,6 +969,18 @@ static PyObject *build_capability_dict(void) {
         return NULL;
     }
     if (add_bool_from_feature_probe(capabilities, "IORING_ACCEPT_MULTISHOT", probe_result) < 0) {
+        Py_DECREF(probe_result);
+        Py_DECREF(capabilities);
+        return NULL;
+    }
+    Py_DECREF(probe_result);
+
+    probe_result = uring_api_probe_socket_impl();
+    if (!probe_result) {
+        Py_DECREF(capabilities);
+        return NULL;
+    }
+    if (add_bool_from_feature_probe(capabilities, "IORING_OP_SOCKET", probe_result) < 0) {
         Py_DECREF(probe_result);
         Py_DECREF(capabilities);
         return NULL;

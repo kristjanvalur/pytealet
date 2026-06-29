@@ -32,6 +32,38 @@ wrapped: `io_uring_prep_recv_multishot()`, `io_uring_prep_poll_add()` /
 management. `poll_*` and provided buffers are not socket-only, but they matter
 for high-throughput socket designs.
 
+## Kernel Support Notes
+
+Most currently exposed methods are baseline one-shot io_uring operations in the
+installed liburing documentation. The man pages do not call out special kernel
+version gates for the simple forms of `recv`, `send`, `sendto`, `recvmsg`,
+`sendmsg`, `accept`, `connect`, `shutdown`, `close`, `NOP` wakeups, completion
+waiting, or basic user-data cancellation.
+
+The caveats are attached to variants we either do not expose yet or expose only
+as plain one-shot operations:
+
+- `submit_cancel()` uses basic user-data cancellation. The documented extended
+  cancel flags are newer: `IORING_ASYNC_CANCEL_ALL`, `IORING_ASYNC_CANCEL_FD`,
+  and `IORING_ASYNC_CANCEL_ANY` are available since kernel 5.19;
+  `IORING_ASYNC_CANCEL_FD_FIXED` is available since kernel 6.0.
+- `submit_accept()` exposes one-shot accept only. Direct-descriptor accept needs
+  registered files, and multishot accept is available since kernel 5.19.
+- `submit_recv()` and `submit_recvmsg()` expose one-shot receive only. Multishot
+  receive is available since kernel 6.0, while receive/send polling hints such
+  as `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY` are available
+  since kernel 5.19.
+- `submit_socket()` uses `IORING_OP_SOCKET`, which is a newer socket opcode even
+  though the installed man page does not give a precise kernel version. `probe()`
+  now includes a targeted `"IORING_OP_SOCKET"` runtime capability entry by
+  submitting a private socket creation request and closing the returned fd if it
+  succeeds.
+
+Keep `probe()` focused on runtime capabilities that higher layers may need to
+branch on. Ring creation is the broad availability check; targeted entries are
+appropriate for operations that are either optional or known to vary across
+kernels and liburing builds.
+
 ## Priorities
 
 ### 1. Queue resizing
@@ -129,7 +161,38 @@ At the `tealetio` layer, this likely wants a higher-level accept stream or a
 server helper, not just `Operation[tuple[socket.socket, address]]`, because one
 submitted request produces multiple accepted sockets.
 
-### 5. Socket command operations
+### 5. Poll and readiness operations
+
+`io_uring_prep_poll_add()` and `io_uring_prep_poll_remove()` expose readiness
+notifications through the ring. They are not socket-specific: any pollable file
+descriptor can use them, so they may matter for sockets, pipes, terminals, and
+some file-I/O coordination patterns.
+
+For sockets, poll requests can support readiness-style APIs, backpressure, and
+integration points where a higher layer wants to wait for `POLLIN`, `POLLOUT`,
+or error/hangup readiness rather than submit an immediate recv/send operation.
+`io_uring_prep_poll_multishot()` is especially relevant for servers because one
+registration can produce repeated CQEs, using `IORING_CQE_F_MORE` to show that
+the request remains active.
+
+A first low-level API could keep this close to `poll(2)`:
+
+```python
+handle = ring.submit_poll(fd, mask, user_data)
+handle = ring.submit_poll_multishot(fd, mask, user_data)
+ring.submit_poll_remove(handle)
+```
+
+Open design questions:
+
+- Should poll completions expose the raw event mask only, or named helpers for
+  common readiness bits?
+- Should `submit_poll_remove()` be distinct from `submit_cancel()`, or should
+  the cancellation API grow typed helpers for poll requests?
+- Should multishot poll share the same pending-completion lifetime rules as
+  future multishot accept/recv APIs?
+
+### 6. Socket command operations
 
 `io_uring_prep_cmd_sock()` arrived in liburing 2.5. It can expose async socket
 commands such as `SIOCINQ`, `SIOCOUTQ`, `getsockopt()`, and `setsockopt()`.
@@ -140,7 +203,7 @@ Kernel support is command-specific. For example, the current man page documents
 `SIOCINQ` and `SETSOCKOPT` availability from kernel 6.7, while newer socket
 commands appear in later kernels.
 
-### 6. NAPI busy-poll tuning
+### 7. NAPI busy-poll tuning
 
 `io_uring_register_napi()` can reduce network round-trip latency for specialised
 network workloads. It should be an explicit low-level tuning API, not a default
@@ -153,20 +216,20 @@ ring.register_napi(timeout_us=50, prefer_busy_poll=True)
 ring.unregister_napi()
 ```
 
-### 7. Registered waits and wait regions
+### 8. Registered waits and wait regions
 
 Registered waits reduce repeated timeout/signal-mask copying for wait calls.
 This could matter once completion workers use more advanced wait strategies, but
 it is less urgent while `serve_completions()` blocks in a simple completion wait.
 
-### 8. Application-owned ring memory and memory sizing helpers
+### 9. Application-owned ring memory and memory sizing helpers
 
 liburing 2.5 added application-allocated ring memory through
 `io_uring_queue_init_mem()`, and later releases added helpers for sizing the
 required memory. This may be useful for hugepage placement or embedding, but it
 should wait until the socket performance surface is clearer.
 
-### 9. Breadth opcodes
+### 10. Breadth opcodes
 
 Futex, waitid, pipe operations, fixed file installation, bind/listen helpers,
 and similar additions are useful, but they are not the first server-socket
