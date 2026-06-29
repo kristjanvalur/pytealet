@@ -289,6 +289,44 @@ class TestSelectorProactor:
         finally:
             proactor.close()
 
+    def test_wait_without_pending_operations_waits_for_timeout(self):
+        proactor = SelectorProactor()
+        try:
+            start = time.monotonic()
+            proactor.wait(proactor.get_time() + 0.02)
+            assert time.monotonic() - start >= 0.01
+        finally:
+            proactor.close()
+
+    def test_wait_without_pending_operations_returns_on_break_wait(self):
+        proactor = SelectorProactor()
+        released = threading.Event()
+        try:
+            thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
+            thread.start()
+            thread.join(0.05)
+            assert thread.is_alive() is True
+
+            proactor.break_wait()
+
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert released.is_set()
+        finally:
+            proactor.close()
+
+    def test_wait_async_without_pending_operations_waits_for_timeout(self):
+        async def run() -> float:
+            proactor = SelectorProactor()
+            try:
+                start = time.monotonic()
+                await proactor.wait_async(proactor.get_time() + 0.02)
+                return time.monotonic() - start
+            finally:
+                proactor.close()
+
+        assert asyncio.run(run()) >= 0.01
+
     def test_set_completion_callback_replaces_callback(self):
         seen: list[str] = []
         proactor = SelectorProactor(completion_callback=lambda: seen.append("old"))
@@ -370,7 +408,7 @@ class TestSelectorProactor:
 
         assert asyncio.run(run()) == b"hello"
 
-    def test_wait_async_falls_back_when_loop_cannot_watch_fds(self, monkeypatch):
+    def test_wait_async_uses_proactor_selector_in_executor(self, monkeypatch):
         async def run() -> bytes:
             proactor = SelectorProactor()
             reader, writer = socket.socketpair()
@@ -378,7 +416,7 @@ class TestSelectorProactor:
                 loop = asyncio.get_running_loop()
 
                 def add_reader_unavailable(*args: object) -> None:
-                    raise NotImplementedError
+                    raise AssertionError("wait_async should not register fds on the asyncio loop")
 
                 monkeypatch.setattr(loop, "add_reader", add_reader_unavailable)
                 reader.setblocking(False)
@@ -502,6 +540,23 @@ class TestThreadedSelectorProactor:
 
             proactor.wait(proactor.get_time() + 0.01)
             assert seen == []
+        finally:
+            proactor.close()
+
+    def test_wait_without_pending_operations_returns_on_break_wait(self):
+        proactor = ThreadedSelectorProactor()
+        released = threading.Event()
+        try:
+            thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
+            thread.start()
+            thread.join(0.05)
+            assert thread.is_alive() is True
+
+            proactor.break_wait()
+
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert released.is_set()
         finally:
             proactor.close()
 
@@ -733,6 +788,48 @@ class _BackpressuredUringRing(_DeferredUringRing):
 
 
 class TestUringProactor:
+    def test_wait_without_pending_operations_waits_for_timeout(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            start = time.monotonic()
+            proactor.wait(proactor.get_time() + 0.02)
+            assert time.monotonic() - start >= 0.01
+        finally:
+            proactor.close()
+
+    def test_wait_without_pending_operations_returns_on_break_wait(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        released = threading.Event()
+        try:
+            thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
+            thread.start()
+            thread.join(0.05)
+            assert thread.is_alive() is True
+
+            proactor.break_wait()
+
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert released.is_set()
+        finally:
+            proactor.close()
+
+    def test_wait_async_without_pending_operations_returns_on_break_wait(self):
+        async def run() -> None:
+            proactor = UringProactor(ring_factory=_FakeUringRing)
+            try:
+                waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 10.0))
+                await asyncio.sleep(0)
+                assert waiter.done() is False
+
+                proactor.break_wait()
+
+                await asyncio.wait_for(waiter, 1.0)
+            finally:
+                proactor.close()
+
+        asyncio.run(run())
+
     def test_initializes_ring_with_entries_and_flags(self):
         created: list[_FakeUringRing] = []
 
@@ -832,13 +929,12 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_wait_respects_deadline_without_pending_operations(self):
+    def test_wait_returns_at_elapsed_deadline_without_pending_operations(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             proactor.set_clock(lambda: 100.0)
 
             proactor.wait(100.0)
-            proactor.wait(None)
         finally:
             proactor.close()
 

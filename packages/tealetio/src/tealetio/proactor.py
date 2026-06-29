@@ -362,7 +362,7 @@ class SelectorProactor(ProactorBase):
     def close(self) -> None:
         """Close selector and wakeup resources."""
 
-        self.break_wait()
+        self._wake_selector()
         with self._lock:
             if self._closed:
                 return
@@ -374,10 +374,18 @@ class SelectorProactor(ProactorBase):
     def break_wait(self) -> None:
         """Interrupt a thread blocked in `wait` without completing operations."""
 
+        self._wake_selector()
+
+    def _wake_selector(self) -> None:
+        """Wake a thread blocked in the selector."""
+
         try:
             self._wakeup_writer.send(b"\0")
         except (BlockingIOError, OSError):
             pass
+
+    def _after_selector_registration_changed(self) -> None:
+        pass
 
     def wait(self, deadline: float | None = None) -> None:
         """Wait until `deadline` and drive ready operations."""
@@ -389,31 +397,35 @@ class SelectorProactor(ProactorBase):
             self._notify_completion()
 
     def _poll(self, deadline: float | None = None) -> list[Operation[Any]]:
-        timeout = self._timeout_until_deadline(deadline)
         select_released = getattr(self._selector, "select_released", None)
-        if select_released is None:
-            events = self._selector.select(timeout)
-        else:
-            events = cast(compat.SelectReleasedSelector, self._selector).select_released(timeout, self._lock)
-        completed: list[Operation[Any]] = []
         wakeup_fd = self._wakeup_reader.fileno()
-        for key, mask in events:
-            fd = key.fd
-            if fd == wakeup_fd:
-                self._drain_wakeup()
-                continue
-            if mask & selectors.EVENT_READ:
-                self._step_fd_operation(fd, selectors.EVENT_READ, completed)
-            if mask & selectors.EVENT_WRITE:
-                self._step_fd_operation(fd, selectors.EVENT_WRITE, completed)
-        return completed
+        while True:
+            timeout = self._timeout_until_deadline(deadline)
+            if select_released is None:
+                events = self._selector.select(timeout)
+            else:
+                events = cast(compat.SelectReleasedSelector, self._selector).select_released(timeout, self._lock)
+            completed: list[Operation[Any]] = []
+            woke = False
+            for key, mask in events:
+                fd = key.fd
+                if fd == wakeup_fd:
+                    self._drain_wakeup()
+                    woke = True
+                    continue
+                if mask & selectors.EVENT_READ:
+                    self._step_fd_operation(fd, selectors.EVENT_READ, completed)
+                if mask & selectors.EVENT_WRITE:
+                    self._step_fd_operation(fd, selectors.EVENT_WRITE, completed)
+            if completed or woke or timeout == 0 or not events:
+                return completed
 
     async def wait_async(self, deadline: float | None = None) -> None:
         """Wait asynchronously until `deadline` and drive ready operations."""
 
         self._check_open()
-        self.wait(0)
-        if deadline == 0 or not self.has_pending_operations():
+        if deadline == 0:
+            self.wait(0)
             return
 
         timeout = self._timeout_until_deadline(deadline)
@@ -421,56 +433,7 @@ class SelectorProactor(ProactorBase):
             return
 
         loop = _asyncio.get_running_loop()
-        ready = loop.create_future()
-
-        def wake() -> None:
-            if not ready.done():
-                ready.set_result(None)
-
-        registered: list[tuple[int, int]] = []
-        wakeup_fd = self._wakeup_reader.fileno()
-
-        async def wait_in_executor() -> None:
-            return await loop.run_in_executor(None, self.wait, deadline)
-
-        def add_reader(fd: int) -> None:
-            loop.add_reader(fd, wake)
-            registered.append((fd, selectors.EVENT_READ))
-
-        def add_writer(fd: int) -> None:
-            loop.add_writer(fd, wake)
-            registered.append((fd, selectors.EVENT_WRITE))
-
-        fallback_to_executor = False
-        try:
-            add_reader(wakeup_fd)
-            with self._lock:
-                registered_fds = list(self._fd_operations)
-            for fd in registered_fds:
-                with self._lock:
-                    mask = self._selector_mask_for_fd(fd)
-                if mask & selectors.EVENT_READ:
-                    add_reader(fd)
-                if mask & selectors.EVENT_WRITE:
-                    add_writer(fd)
-            if timeout is None:
-                await ready
-            else:
-                await _asyncio.wait_for(ready, timeout)
-        except NotImplementedError:
-            fallback_to_executor = True
-        except _asyncio.TimeoutError:
-            return
-        finally:
-            for fd, event in registered:
-                if event == selectors.EVENT_READ:
-                    loop.remove_reader(fd)
-                else:
-                    loop.remove_writer(fd)
-        if fallback_to_executor:
-            await wait_in_executor()
-            return
-        self.wait(0)
+        await loop.run_in_executor(None, self.wait, deadline)
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
@@ -618,7 +581,7 @@ class SelectorProactor(ProactorBase):
             self._reserve_fd_operation(fd, event, operation)
             operation._attempt = attempt
             self._update_selector_registration(fd)
-        self.break_wait()
+        self._after_selector_registration_changed()
 
     def _try_complete_operation(self, operation: Operation[T], attempt: Callable[[], T]) -> bool:
         try:
@@ -653,7 +616,7 @@ class SelectorProactor(ProactorBase):
         if not removed:
             return
         operation._set_cancelled()
-        self.break_wait()
+        self._after_selector_registration_changed()
 
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
@@ -763,26 +726,32 @@ class ThreadedSelectorProactor(SelectorProactor):
 
         self._worker_stop.set()
         self._completed_ready.set()
-        self.break_wait()
+        self._wake_selector()
         if self._closed:
             return
         if self._worker_started and threading.current_thread() is not self._worker:
             self._worker.join()
         super().close()
 
+    def break_wait(self) -> None:
+        """Interrupt a thread blocked in `wait` without completing operations."""
+
+        self._completed_ready.set()
+
+    def _after_selector_registration_changed(self) -> None:
+        self._wake_selector()
+
     def wait(self, deadline: float | None = None) -> None:
         """Wait until completed operations are signalled."""
 
         self._check_open()
         self._ensure_worker_started()
-        if deadline == 0 or not self.has_pending_operations():
+        if deadline == 0:
+            self._completed_ready.clear()
             return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
-            return
-        self._completed_ready.clear()
-        if not self.has_pending_operations():
             return
         self._wait_for_completed(timeout)
         self._completed_ready.clear()
@@ -792,7 +761,7 @@ class ThreadedSelectorProactor(SelectorProactor):
 
         self._check_open()
         self._ensure_worker_started()
-        if deadline == 0 or not self.has_pending_operations():
+        if deadline == 0:
             return
 
         timeout = self._timeout_until_deadline(deadline)
@@ -851,7 +820,8 @@ class UringProactor(ProactorBase):
         self._deferred_submissions: list[_UringSubmission] = []
         self._retrying_deferred_submissions = False
         self._wake_condition = threading.Condition()
-        self._wake_pending = False
+        self._wake_generation = 0
+        self._seen_wake_generation = 0
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
         self._async_wait_event: _asyncio.Event | None = None
         self._ring.callback = self._deliver_uring_completion
@@ -922,7 +892,7 @@ class UringProactor(ProactorBase):
         """Interrupt a thread blocked in `wait` without completing operations."""
 
         with self._wake_condition:
-            self._wake_pending = True
+            self._wake_generation += 1
             self._wake_condition.notify_all()
             loop = self._async_wait_loop
             event = self._async_wait_event
@@ -939,13 +909,9 @@ class UringProactor(ProactorBase):
         self._check_open()
         if deadline == 0:
             return
-        if not self.has_pending_operations():
-            return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
-            return
-        if not self.has_pending_operations():
             return
         self._wait_for_completed(timeout)
 
@@ -955,8 +921,6 @@ class UringProactor(ProactorBase):
         self._check_open()
         if deadline == 0:
             return
-        if not self.has_pending_operations():
-            return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
@@ -964,9 +928,10 @@ class UringProactor(ProactorBase):
         loop = _asyncio.get_running_loop()
         event = _asyncio.Event()
         with self._wake_condition:
-            if self._wake_pending or not self.has_pending_operations():
-                self._wake_pending = False
+            if self._seen_wake_generation != self._wake_generation:
+                self._seen_wake_generation = self._wake_generation
                 return
+            start_generation = self._wake_generation
             assert self._async_wait_event is None
             self._async_wait_loop = loop
             self._async_wait_event = event
@@ -982,7 +947,8 @@ class UringProactor(ProactorBase):
                 assert self._async_wait_event is event
                 self._async_wait_event = None
                 self._async_wait_loop = None
-                self._wake_pending = False
+                if self._wake_generation != start_generation:
+                    self._seen_wake_generation = self._wake_generation
 
     def _notify_completed(self) -> None:
         self.break_wait()
@@ -990,8 +956,13 @@ class UringProactor(ProactorBase):
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         with self._wake_condition:
-            self._wake_condition.wait_for(lambda: self._wake_pending, timeout)
-            self._wake_pending = False
+            if self._seen_wake_generation != self._wake_generation:
+                self._seen_wake_generation = self._wake_generation
+                return
+            start_generation = self._wake_generation
+            self._wake_condition.wait_for(lambda: self._wake_generation != start_generation, timeout)
+            if self._wake_generation != start_generation:
+                self._seen_wake_generation = self._wake_generation
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
