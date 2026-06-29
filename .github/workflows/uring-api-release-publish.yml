@@ -1,9 +1,6 @@
 name: uring-api Build And Publish
 
 "on":
-  release:
-    types:
-      - published
   push:
     tags:
       - "uring-api-v*"
@@ -12,9 +9,6 @@ name: uring-api Build And Publish
 jobs:
   build_wheels:
     name: Build uring-api manylinux wheels
-    if: >-
-      github.event_name != 'release' ||
-      startsWith(github.event.release.tag_name, 'uring-api-v')
     runs-on: ubuntu-latest
     env:
       CIBW_ARCHS_LINUX: "x86_64 aarch64"
@@ -62,9 +56,6 @@ jobs:
 
   build_sdist:
     name: Build uring-api sdist
-    if: >-
-      github.event_name != 'release' ||
-      startsWith(github.event.release.tag_name, 'uring-api-v')
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -89,19 +80,18 @@ jobs:
           path: dist/uring-api/sdist/*.tar.gz
 
   publish_pypi:
-    name: Publish uring-api to PyPI
+    name: Publish uring-api to PyPI and GitHub Releases
     needs:
       - build_wheels
       - build_sdist
     runs-on: ubuntu-latest
     environment: pypi-uring-api
     if: >-
-      github.event_name == 'release' &&
-      github.event.action == 'published' &&
-      startsWith(github.event.release.tag_name, 'uring-api-v')
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/uring-api-v')
     permissions:
       id-token: write
-      contents: read
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -119,3 +109,22 @@ jobs:
         with:
           packages-dir: publish-dist/
           print-hash: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#uring-api-v}"
+          title="uring-api v${version}"
+          prerelease_args=()
+          case "$version" in
+            *a*|*b*|*rc*) prerelease_args+=(--prerelease) ;;
+          esac
+
+          notes="Release for packages/uring_api ${version}."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" publish-dist/* --clobber
+          else
+            gh release create "$tag" publish-dist/* --title "$title" --notes "$notes" "${prerelease_args[@]}"
+          fi
