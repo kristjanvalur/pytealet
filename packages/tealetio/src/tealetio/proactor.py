@@ -1092,7 +1092,11 @@ class UringProactor(ProactorBase):
 
     def _wait_until_service_started(self) -> None:
         deadline = time.monotonic() + 1.0
-        while not self._ring.running and any(thread.is_alive() for thread in self._service_threads) and time.monotonic() < deadline:
+        while (
+            not self._ring.running
+            and any(thread.is_alive() for thread in self._service_threads)
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.001)
         if not self._ring.running:
             raise RuntimeError("uring completion service failed to start")
@@ -1229,7 +1233,9 @@ class UringProactor(ProactorBase):
         self._submit_recvmsg(sock, operation, data, UringProactor._complete_uring_recvfrom)
         return operation
 
-    def _complete_uring_recvfrom(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[tuple[bytes, Any]]:
+    def _complete_uring_recvfrom(
+        self, entry: _UringEntry, completion: _UringCompletion
+    ) -> Operation[tuple[bytes, Any]]:
         assert entry.data is not None
         operation = cast(Operation[tuple[bytes, Any]], entry.operation)
         operation._set_result((entry.data[: completion.res].tobytes(), completion.result))
@@ -1313,7 +1319,9 @@ class UringProactor(ProactorBase):
         self._submit_uring_entry(entry, lambda: self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS))
         return operation
 
-    def _complete_uring_accept(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[tuple[socket.socket, Any]]:
+    def _complete_uring_accept(
+        self, entry: _UringEntry, completion: _UringCompletion
+    ) -> Operation[tuple[socket.socket, Any]]:
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
         _configure_accepted_socket(conn)

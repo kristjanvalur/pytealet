@@ -157,7 +157,9 @@ except ImportError as exc:
         def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0) -> Completion:
+        def submit_sendto(
+            self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_sendmsg(
