@@ -129,6 +129,14 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_SENDMSG_ZC == 15
 
 
+def test_public_star_exports_include_completion_kind_sendmsg_zc():
+    namespace: dict[str, object] = {}
+
+    exec("from uring_api import *", namespace)
+
+    assert namespace["COMPLETION_KIND_SENDMSG_ZC"] == uring_api.COMPLETION_KIND_SENDMSG_ZC
+
+
 def test_probe_returns_structured_result():
     probe = uring_api.probe()
 

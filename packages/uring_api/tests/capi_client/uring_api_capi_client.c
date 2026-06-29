@@ -121,9 +121,6 @@ static PyObject *client_completion_sequence(PyObject *module, PyObject *completi
     if (ret < 0) {
         return NULL;
     }
-    if (ret == 0) {
-        Py_RETURN_NONE;
-    }
     return PyLong_FromUnsignedLongLong(sequence);
 }
 

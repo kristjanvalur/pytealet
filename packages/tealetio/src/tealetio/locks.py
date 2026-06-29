@@ -247,7 +247,7 @@ class ThreadsafeEvent:
             return True
 
         current = tealet.current()
-        sched = _get_current_scheduler()
+        sched = self._scheduler
         try:
             sched._schedule(lambda: self._link(current))
         except BaseException as exc:
