@@ -72,6 +72,17 @@ def test_native_module_exports_cqe_flag_constants():
     assert uring_api.IORING_CQE_F_MORE == 1 << 1
 
 
+def test_native_module_exports_completion_kind_constants():
+    assert uring_api.COMPLETION_KIND_RECV == 1
+    assert uring_api.COMPLETION_KIND_SEND == 2
+    assert uring_api.COMPLETION_KIND_WAKE == 3
+    assert uring_api.COMPLETION_KIND_SENDTO == 4
+    assert uring_api.COMPLETION_KIND_RECVMSG == 5
+    assert uring_api.COMPLETION_KIND_ACCEPT == 6
+    assert uring_api.COMPLETION_KIND_CONNECT == 7
+    assert uring_api.COMPLETION_KIND_CANCEL == 8
+
+
 def test_probe_returns_structured_result():
     probe = uring_api.probe()
 
@@ -392,6 +403,7 @@ def test_ring_recv_completion_when_available():
 
             assert isinstance(pending, uring_api.Completion)
             assert pending.user_data is token
+            assert pending.kind == uring_api.COMPLETION_KIND_RECV
             assert pending.res == 0
             assert pending.flags == 0
             assert pending.result is None
@@ -406,6 +418,32 @@ def test_ring_recv_completion_when_available():
         assert completion.flags == 0
         assert completion.result == 5
         assert bytes(buf) == b"hello"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_cancel_unknown_completion_reports_cancel_completion_when_available():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        buf = bytearray(5)
+        with uring_api.Ring() as ring:
+            target = ring.submit_recv(reader.fileno(), buf, "target")
+            writer.send(b"hello")
+            assert ring.wait(1.0) is target
+
+            cancel = ring.submit_cancel(target)
+            completion = ring.wait(1.0)
+
+        assert completion is cancel
+        assert cancel.user_data is target
+        assert cancel.kind == uring_api.COMPLETION_KIND_CANCEL
+        assert cancel.res < 0
+        assert cancel.result is None
     finally:
         reader.close()
         writer.close()

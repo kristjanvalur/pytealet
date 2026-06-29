@@ -10,6 +10,14 @@ try:
     from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
     from _uring_api import C_API_FEATURE_CORE as C_API_FEATURE_CORE
     from _uring_api import C_API_FEATURES as C_API_FEATURES
+    from _uring_api import COMPLETION_KIND_ACCEPT as COMPLETION_KIND_ACCEPT
+    from _uring_api import COMPLETION_KIND_CANCEL as COMPLETION_KIND_CANCEL
+    from _uring_api import COMPLETION_KIND_CONNECT as COMPLETION_KIND_CONNECT
+    from _uring_api import COMPLETION_KIND_RECV as COMPLETION_KIND_RECV
+    from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
+    from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
+    from _uring_api import COMPLETION_KIND_SENDTO as COMPLETION_KIND_SENDTO
+    from _uring_api import COMPLETION_KIND_WAKE as COMPLETION_KIND_WAKE
     from _uring_api import Completion as Completion
     from _uring_api import IORING_CQE_F_MORE as IORING_CQE_F_MORE
     from _uring_api import IORING_SETUP_CLAMP as IORING_SETUP_CLAMP
@@ -29,6 +37,14 @@ except ImportError as exc:
     C_API_ABI_VERSION = 1
     C_API_FEATURE_CORE = 1 << 0
     C_API_FEATURES = 0
+    COMPLETION_KIND_RECV = 1
+    COMPLETION_KIND_SEND = 2
+    COMPLETION_KIND_WAKE = 3
+    COMPLETION_KIND_SENDTO = 4
+    COMPLETION_KIND_RECVMSG = 5
+    COMPLETION_KIND_ACCEPT = 6
+    COMPLETION_KIND_CONNECT = 7
+    COMPLETION_KIND_CANCEL = 8
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -43,6 +59,7 @@ except ImportError as exc:
     @dataclass(frozen=True)
     class Completion:
         user_data: object
+        kind: int
         res: int
         flags: int
         result: object
@@ -89,6 +106,14 @@ __all__ = [
     "C_API_ABI_VERSION",
     "C_API_FEATURE_CORE",
     "C_API_FEATURES",
+    "COMPLETION_KIND_ACCEPT",
+    "COMPLETION_KIND_CANCEL",
+    "COMPLETION_KIND_CONNECT",
+    "COMPLETION_KIND_RECV",
+    "COMPLETION_KIND_RECVMSG",
+    "COMPLETION_KIND_SEND",
+    "COMPLETION_KIND_SENDTO",
+    "COMPLETION_KIND_WAKE",
     "Completion",
     "IORING_CQE_F_MORE",
     "IORING_SETUP_CLAMP",

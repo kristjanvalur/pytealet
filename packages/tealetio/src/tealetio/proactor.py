@@ -66,6 +66,14 @@ def _is_uring_multishot_more(completion: _UringCompletion) -> bool:
     return bool(completion.flags & uring_api.IORING_CQE_F_MORE)
 
 
+def _is_uring_cancel_completion(completion: _UringCompletion) -> bool:
+    try:
+        import uring_api
+    except ImportError:
+        return False
+    return getattr(completion, "kind", None) == uring_api.COMPLETION_KIND_CANCEL
+
+
 class _UringRing(Protocol):
     fd: int
     features: int
@@ -97,11 +105,14 @@ class _UringRing(Protocol):
 
     def submit_connect(self, fd: int, address: Any, user_data: object = None) -> _UringCompletion: ...
 
+    def submit_cancel(self, completion: _UringCompletion) -> _UringCompletion: ...
+
     def wait(self, timeout: float | None = None) -> "_UringCompletion" | None: ...
 
 
 class _UringCompletion(Protocol):
     user_data: object
+    kind: int
     res: int
     flags: int
     result: object
@@ -225,6 +236,7 @@ class Operation(Generic[T]):
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] | None = []
         self._attempt: Callable[[], T] | None = None
+        self._cancel_target: object | None = None
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -352,7 +364,7 @@ class _UringEntry:
 
 @dataclass
 class _UringSubmission:
-    entry: _UringEntry
+    entry: _UringEntry | None
     submit: _UringEntrySubmit
 
 
@@ -1124,7 +1136,9 @@ class UringProactor(ProactorBase):
         if self._cancel_deferred_operation(operation):
             self.break_wait()
             return
-        # TODO: submit IORING_OP_ASYNC_CANCEL once the native wrapper exposes it.
+        cancel_target = operation._cancel_target
+        if cancel_target is not None:
+            self._submit_cancel(cast(_UringCompletion, cancel_target))
         cancelled = operation._set_cancelled()
         if cancelled:
             self.break_wait()
@@ -1147,6 +1161,19 @@ class UringProactor(ProactorBase):
             entry.active = False
             self.break_wait()
             raise
+        entry.operation._cancel_target = entry.completion
+        return True
+
+    def _submit_cancel(self, completion: _UringCompletion) -> bool:
+        try:
+            self._ring.submit_cancel(completion)
+        except BaseException as exc:
+            if _is_uring_submission_queue_full(exc):
+                self._deferred_submissions.append(
+                    _UringSubmission(entry=None, submit=lambda: self._ring.submit_cancel(completion))
+                )
+                return False
+            raise
         return True
 
     def _retry_deferred_submissions(self) -> None:
@@ -1156,19 +1183,30 @@ class UringProactor(ProactorBase):
         try:
             while self._deferred_submissions:
                 submission = self._deferred_submissions.pop(0)
-                if submission.entry.operation.done():
-                    submission.entry.active = False
+                entry = submission.entry
+                if entry is None:
+                    try:
+                        submission.submit()
+                    except BaseException as exc:
+                        if _is_uring_submission_queue_full(exc):
+                            self._deferred_submissions.append(submission)
+                            break
+                        raise
                     continue
-                if not self._submit_uring_entry(submission.entry, submission.submit):
+                if entry.operation.done():
+                    entry.active = False
+                    continue
+                if not self._submit_uring_entry(entry, submission.submit):
                     break
         finally:
             self._retrying_deferred_submissions = False
 
     def _cancel_deferred_operation(self, operation: Operation[Any]) -> bool:
         for index, submission in enumerate(self._deferred_submissions):
-            if submission.entry.operation is operation:
+            entry = submission.entry
+            if entry is not None and entry.operation is operation:
                 del self._deferred_submissions[index]
-                submission.entry.active = False
+                entry.active = False
                 operation._set_cancelled()
                 return True
         return False
@@ -1197,6 +1235,8 @@ class UringProactor(ProactorBase):
         self,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        if _is_uring_cancel_completion(completion):
+            return None
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
         assert entry.active

@@ -65,6 +65,7 @@ typedef enum {
     URING_API_PENDING_RECVMSG = 5,
     URING_API_PENDING_ACCEPT = 6,
     URING_API_PENDING_CONNECT = 7,
+    URING_API_PENDING_CANCEL = 8,
 } UringApiPendingKind;
 
 typedef struct {
@@ -184,6 +185,20 @@ static int module_add_setup_flag_constants(PyObject *module) {
 
 static int module_add_cqe_flag_constants(PyObject *module) {
     if (module_add_uint64_constant(module, "IORING_CQE_F_MORE", IORING_CQE_F_MORE) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int module_add_completion_kind_constants(PyObject *module) {
+    if (PyModule_AddIntConstant(module, "COMPLETION_KIND_RECV", URING_API_PENDING_RECV) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_SEND", URING_API_PENDING_SEND) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_WAKE", URING_API_PENDING_WAKE) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_SENDTO", URING_API_PENDING_SENDTO) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_RECVMSG", URING_API_PENDING_RECVMSG) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_ACCEPT", URING_API_PENDING_ACCEPT) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_CONNECT", URING_API_PENDING_CONNECT) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_CANCEL", URING_API_PENDING_CANCEL) < 0) {
         return -1;
     }
     return 0;
@@ -532,6 +547,10 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
 
 static PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void *closure) {
     return Py_NewRef(self->user_data);
+}
+
+static PyObject *UringApiCompletion_get_kind(UringApiCompletion *self, void *closure) {
+    return PyLong_FromLong((long)self->kind);
 }
 
 static PyObject *UringApiCompletion_get_res(UringApiCompletion *self, void *closure) {
@@ -1317,6 +1336,46 @@ static PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args,
     return Py_NewRef(completion);
 }
 
+static PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"completion", NULL};
+    struct io_uring_sqe *sqe;
+    PyObject *target_completion;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!", keywords, &UringApiCompletion_Type, &target_completion)) {
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_CANCEL, target_completion, NULL);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_cancel(sqe, target_completion, 0);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
@@ -2075,6 +2134,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit an accept operation."},
     {"submit_connect", _PyCFunction_CAST(UringApiRing_submit_connect), METH_VARARGS | METH_KEYWORDS,
      "Submit a connect operation."},
+    {"submit_cancel", _PyCFunction_CAST(UringApiRing_submit_cancel), METH_VARARGS | METH_KEYWORDS,
+     "Submit an async cancel operation targeting a pending completion."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Interrupt a thread blocked in wait without producing a user completion."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
@@ -2107,6 +2168,7 @@ static PyTypeObject UringApiRing_Type = {
 
 static PyGetSetDef UringApiCompletion_getset[] = {
     {"user_data", (getter)UringApiCompletion_get_user_data, NULL, NULL, NULL},
+    {"kind", (getter)UringApiCompletion_get_kind, NULL, NULL, NULL},
     {"res", (getter)UringApiCompletion_get_res, NULL, NULL, NULL},
     {"flags", (getter)UringApiCompletion_get_flags, NULL, NULL, NULL},
     {"result", (getter)UringApiCompletion_get_result, NULL, NULL, NULL},
@@ -2156,7 +2218,8 @@ static int uring_api_exec(PyObject *module) {
         Py_DECREF(&UringApiRing_Type);
         return -1;
     }
-    if (module_add_setup_flag_constants(module) < 0 || module_add_cqe_flag_constants(module) < 0) {
+    if (module_add_setup_flag_constants(module) < 0 || module_add_cqe_flag_constants(module) < 0 ||
+        module_add_completion_kind_constants(module) < 0) {
         return -1;
     }
 

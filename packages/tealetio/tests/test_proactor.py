@@ -704,10 +704,18 @@ class _FakeUringRing:
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
+        self.submitted_cancel: list[object] = []
         self.pending_recv: list[SimpleNamespace] = []
 
-    def _completion(self, user_data: object, res: int = 0, flags: int = 0, result: object = None) -> SimpleNamespace:
-        return SimpleNamespace(user_data=user_data, res=res, flags=flags, result=result)
+    def _completion(
+        self,
+        user_data: object,
+        kind: int = uring_api.COMPLETION_KIND_RECV,
+        res: int = 0,
+        flags: int = 0,
+        result: object = None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(user_data=user_data, kind=kind, res=res, flags=flags, result=result)
 
     def close(self) -> None:
         self.stop_serving()
@@ -755,7 +763,7 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         self.submitted_send.append((fd, data, user_data))
-        completion = self._completion(user_data, res=len(payload), result=len(payload))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload))
         self._deliver(completion)
         return completion
 
@@ -765,7 +773,12 @@ class _FakeUringRing:
         payload = b"again" if getattr(getattr(user_data, "operation", None), "kind", None) == "recvfrom" else b"hello"
         memoryview(buf)[: len(payload)] = payload
         self.submitted_recvmsg.append((fd, buf, user_data))
-        completion = self._completion(user_data, res=len(payload), result=("127.0.0.1", 54321))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_RECVMSG,
+            res=len(payload),
+            result=("127.0.0.1", 54321),
+        )
         self._deliver(completion)
         return completion
 
@@ -774,7 +787,12 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         self.submitted_sendto.append((fd, data, address, user_data))
-        completion = self._completion(user_data, res=len(payload), result=len(payload))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SENDTO,
+            res=len(payload),
+            result=len(payload),
+        )
         self._deliver(completion)
         return completion
 
@@ -784,7 +802,12 @@ class _FakeUringRing:
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
         self.submitted_accept.append((fd, user_data))
-        completion = self._completion(user_data, res=conn.fileno(), result=(conn.detach(), "peer"))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_ACCEPT,
+            res=conn.fileno(),
+            result=(conn.detach(), "peer"),
+        )
         self._deliver(completion)
         return completion
 
@@ -792,9 +815,17 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_connect.append((fd, address, user_data))
-        completion = self._completion(user_data, res=0, result=None)
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CONNECT, res=0, result=None)
         self._deliver(completion)
         return completion
+
+    def submit_cancel(self, completion: SimpleNamespace) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_cancel.append(completion)
+        cancel_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
+        self._deliver(cancel_completion)
+        return cancel_completion
 
     def wait(self, timeout: float | None = None) -> SimpleNamespace | None:
         if not self.completions:
@@ -831,12 +862,19 @@ class _BackpressuredUringRing(_DeferredUringRing):
     def __init__(self, entries: int = 8, flags: int = 0) -> None:
         super().__init__(entries, flags)
         self.fail_next_recv = False
+        self.fail_next_cancel = False
 
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> None:
         if self.fail_next_recv:
             self.fail_next_recv = False
             raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        super().submit_recv(fd, buf, user_data)
+        return super().submit_recv(fd, buf, user_data)
+
+    def submit_cancel(self, completion: SimpleNamespace) -> SimpleNamespace:
+        if self.fail_next_cancel:
+            self.fail_next_cancel = False
+            raise uring_api.SubmissionQueueFull("no submission queue entries available")
+        return super().submit_cancel(completion)
 
 
 class TestUringProactor:
@@ -1224,6 +1262,7 @@ class TestUringProactor:
 
             operation.cancel()
             assert operation.cancelled() is True
+            assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
             assert proactor.has_pending_operations() is True
             proactor.wait(proactor.get_time() + 1.0)
 
@@ -1319,6 +1358,32 @@ class TestUringProactor:
             assert proactor.has_pending_operations() is False
             with pytest.raises(CancelledError):
                 second.result()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_submission_queue_full_defers_cancel_request(self):
+        proactor = UringProactor(ring_factory=_BackpressuredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _BackpressuredUringRing)
+
+            proactor.ring.fail_next_cancel = True
+            operation.cancel()
+
+            assert operation.cancelled() is True
+            assert proactor.ring.submitted_cancel == []
+            assert proactor.has_pending_operations() is True
+
+            proactor.ring.complete_recv(b"hello")
+
+            assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
+            assert proactor.has_pending_operations() is False
+            with pytest.raises(CancelledError):
+                operation.result()
         finally:
             reader.close()
             writer.close()
