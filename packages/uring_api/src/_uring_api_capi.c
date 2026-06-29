@@ -404,7 +404,7 @@ static int UringApiCapi_CompletionSequence(PyObject *completion, unsigned long l
     }
     uring_completion = (UringApiCompletion *)completion;
     *value = uring_completion->sequence;
-    return 1;
+    return 0;
 }
 
 static PyObject *UringApiCapi_CompletionResult(PyObject *completion) {

@@ -284,7 +284,6 @@ static PyMethodDef uring_api_methods[] = {
 };
 
 static int uring_api_exec(PyObject *module) {
-    PyObject *legacy_version = NULL;
     PyObject *version = NULL;
     PyObject *version_info = NULL;
 
@@ -316,23 +315,16 @@ static int uring_api_exec(PyObject *module) {
         return -1;
     }
 
-    legacy_version = liburing_version_string();
-    if (!legacy_version) {
-        return -1;
-    }
-    if (PyModule_AddObject(module, "__liburing_version__", legacy_version) < 0) {
-        Py_DECREF(legacy_version);
-        return -1;
-    }
-
     version = liburing_version_string();
     if (!version) {
         return -1;
     }
-    if (PyModule_AddObject(module, "__compiled_liburing_version__", version) < 0) {
+    if (PyModule_AddObjectRef(module, "__liburing_version__", version) < 0 ||
+        PyModule_AddObjectRef(module, "__compiled_liburing_version__", version) < 0) {
         Py_DECREF(version);
         return -1;
     }
+    Py_DECREF(version);
 
     version_info = liburing_version_info();
     if (!version_info) {
