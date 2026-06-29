@@ -657,6 +657,9 @@ static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *s
     if (res < 0) {
         Py_RETURN_NONE;
     }
+    if (res == 0 && !(flags & IORING_CQE_F_BUFFER)) {
+        return PyBytes_FromStringAndSize("", 0);
+    }
     if (!(flags & IORING_CQE_F_BUFFER)) {
         PyErr_SetString(PyExc_RuntimeError, "recv multishot completion did not select a buffer");
         return NULL;
