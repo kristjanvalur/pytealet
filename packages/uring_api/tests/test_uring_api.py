@@ -84,6 +84,8 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_CANCEL == 8
     assert uring_api.COMPLETION_KIND_SHUTDOWN == 9
     assert uring_api.COMPLETION_KIND_CLOSE == 10
+    assert uring_api.COMPLETION_KIND_SENDMSG == 11
+    assert uring_api.COMPLETION_KIND_SOCKET == 12
 
 
 def test_probe_returns_structured_result():
@@ -281,7 +283,7 @@ def test_c_api_datagram_operations_when_available():
         with uring_api.Ring() as ring:
             buf = bytearray(5)
             client.submit_recvmsg(ring, receiver.fileno(), buf, 230)
-            client.submit_sendto(ring, sender.fileno(), b"hello", receiver.getsockname(), 231)
+            client.submit_sendto(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 231)
 
             first = ring.wait(1.0)
             second = ring.wait(1.0)
@@ -297,6 +299,64 @@ def test_c_api_datagram_operations_when_available():
     finally:
         sender.close()
         receiver.close()
+
+
+def test_c_api_sendmsg_operation_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sender.setblocking(False)
+        receiver.setblocking(False)
+        sender.bind(("127.0.0.1", 0))
+        receiver.bind(("127.0.0.1", 0))
+        with uring_api.Ring() as ring:
+            client.submit_sendmsg(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 244)
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        assert client.completion_summary(completion) == (244, 5, 0, 5)
+        assert completion.kind == uring_api.COMPLETION_KIND_SENDMSG
+        data, address = receiver.recvfrom(5)
+        assert data == b"hello"
+        assert address[1] == sender.getsockname()[1]
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_c_api_socket_operation_when_available():
+    require_uring()
+
+    client_api = build_c_api_client()
+    sock = None
+    with uring_api.Ring() as ring:
+        client_api.submit_socket(ring, socket.AF_INET, socket.SOCK_STREAM, 0, 0, 245)
+        completion = ring.wait(1.0)
+
+    assert completion is not None
+    assert completion.kind == uring_api.COMPLETION_KIND_SOCKET
+    if completion.res < 0:
+        errno_value = -completion.res
+        if errno_value in {errno.ENOSYS, errno.EOPNOTSUPP, errno.EINVAL}:
+            pytest.skip(f"IORING_OP_SOCKET is not supported: errno {errno_value}")
+    assert completion.res >= 0
+    try:
+        user_data, res, flags, result = client_api.completion_summary(completion)
+        assert user_data == 245
+        assert res == completion.res
+        assert flags == 0
+        assert result == completion.res
+        sock = socket.socket(fileno=completion.res)
+        assert sock.family == socket.AF_INET
+        assert sock.type & socket.SOCK_STREAM
+    finally:
+        if sock is not None:
+            sock.close()
+        elif completion.res >= 0:
+            os.close(completion.res)
 
 
 def test_c_api_accept_operation_when_available():
@@ -673,6 +733,64 @@ def test_ring_recvmsg_completion_when_available():
     finally:
         sender.close()
         receiver.close()
+
+
+def test_ring_sendmsg_completion_when_available():
+    require_uring()
+
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        token = {"operation": "sendmsg"}
+        with uring_api.Ring() as ring:
+            pending = ring.submit_sendmsg(sender.fileno(), b"hello", receiver.getsockname(), token)
+
+            completion = ring.wait(1.0)
+
+        assert completion is pending
+        assert completion.user_data is token
+        assert completion.kind == uring_api.COMPLETION_KIND_SENDMSG
+        assert completion.res == 5
+        assert completion.result == 5
+        data, address = receiver.recvfrom(5)
+        assert data == b"hello"
+        assert address[1] == sender.getsockname()[1]
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_ring_socket_completion_when_available():
+    require_uring()
+
+    sock = None
+    token = {"operation": "socket"}
+    with uring_api.Ring() as ring:
+        pending = ring.submit_socket(socket.AF_INET, socket.SOCK_STREAM, user_data=token)
+
+        completion = ring.wait(1.0)
+
+    assert completion is pending
+    assert completion.user_data is token
+    assert completion.kind == uring_api.COMPLETION_KIND_SOCKET
+    if completion.res < 0:
+        errno_value = -completion.res
+        if errno_value in {errno.ENOSYS, errno.EOPNOTSUPP, errno.EINVAL}:
+            pytest.skip(f"IORING_OP_SOCKET is not supported: errno {errno_value}")
+    assert completion.res >= 0
+    assert completion.result == completion.res
+    try:
+        sock = socket.socket(fileno=completion.res)
+        assert sock.family == socket.AF_INET
+        assert sock.type & socket.SOCK_STREAM
+    finally:
+        if sock is not None:
+            sock.close()
+        elif completion.res >= 0:
+            os.close(completion.res)
 
 
 def test_ring_socketpair_round_trip_when_available():

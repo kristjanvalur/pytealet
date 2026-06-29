@@ -24,10 +24,10 @@ with uring_api.Ring() as ring:
 ## Socket I/O
 
 `Ring` currently exposes `submit_recv()`, `submit_send()`, `submit_recvmsg()`,
-`submit_sendto()`, `submit_accept()`, `submit_connect()`, `submit_shutdown()`,
-`submit_close()`, and `wait()` for minimal socket-oriented experiments. Each
-submitted operation carries a Python `user_data` object which comes back with
-its completion.
+`submit_sendto()`, `submit_sendmsg()`, `submit_accept()`, `submit_connect()`,
+`submit_shutdown()`, `submit_close()`, `submit_socket()`, and `wait()` for
+minimal socket-oriented experiments. Each submitted operation carries a Python
+`user_data` object which comes back with its completion.
 
 ```python
 import socket
@@ -66,10 +66,10 @@ with `detach()`. Otherwise, Python and the kernel may both believe they own the
 same descriptor.
 
 The local liburing headers expose more socket-related operations than this
-wrapper currently publishes. The notable gaps are `sendmsg`, multishot receive,
-socket creation, readiness polling, zero-copy send variants, and provided buffer
-management. Those are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by
-`probe()`, which remains a compact runtime availability check.
+wrapper currently publishes. The notable gaps are multishot receive, readiness
+polling, zero-copy send variants, and provided buffer management. Those are
+tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`, which
+remains a compact runtime availability check.
 
 If the submission queue cannot provide another entry after flushing already
 prepared work to the kernel, submit methods raise `SubmissionQueueFull`. Treat

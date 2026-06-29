@@ -44,13 +44,18 @@ typedef struct UringApi_CAPI {
 
     /* Submission and receive operations. */
     int (*ring_submit_recv)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
-    int (*ring_submit_send)(PyObject *ring, int fd, PyObject *data, PyObject *user_data);
+    int (*ring_submit_send)(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
     int (*ring_submit_recvmsg)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
-    int (*ring_submit_sendto)(PyObject *ring, int fd, PyObject *data, PyObject *address, PyObject *user_data);
+    int (*ring_submit_sendto)(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                              PyObject *user_data);
+    int (*ring_submit_sendmsg)(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                               PyObject *user_data);
     int (*ring_submit_accept)(PyObject *ring, int fd, PyObject *user_data);
     int (*ring_submit_connect)(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
     int (*ring_submit_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
     int (*ring_submit_close)(PyObject *ring, int fd, PyObject *user_data);
+    int (*ring_submit_socket)(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
+                              PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
@@ -68,7 +73,7 @@ typedef struct UringApi_CAPI {
     int (*completion_flags)(PyObject *completion, unsigned int *value);
     PyObject *(*completion_result)(PyObject *completion);
 
-    void *reserved[10];
+    void *reserved[8];
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */
