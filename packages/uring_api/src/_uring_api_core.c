@@ -112,13 +112,9 @@ static UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_urin
     return (UringApiCompletion *)(uintptr_t)io_uring_cqe_get_data64(cqe);
 }
 
-static unsigned int ring_sq_entries(UringApiRing *self) {
-    return self->ring.sq.ring_entries;
-}
+static unsigned int ring_sq_entries(UringApiRing *self) { return self->ring.sq.ring_entries; }
 
-static unsigned int ring_cq_entries(UringApiRing *self) {
-    return self->ring.cq.ring_entries;
-}
+static unsigned int ring_cq_entries(UringApiRing *self) { return self->ring.cq.ring_entries; }
 
 static int dict_set_owned(PyObject *dict, const char *key, PyObject *value) {
     int ret;
@@ -384,8 +380,8 @@ static UringApiRecvBufferPool *UringApiRecvBufferPool_new(UringApiRing *ring, un
 }
 
 static void UringApiRecvBufferPool_recycle(UringApiRecvBufferPool *pool, unsigned int buffer_id) {
-    io_uring_buf_ring_add(pool->ring_buffer, pool->storage + ((size_t)buffer_id * pool->buffer_size),
-                          pool->buffer_size, (unsigned short)buffer_id, pool->mask, 0);
+    io_uring_buf_ring_add(pool->ring_buffer, pool->storage + ((size_t)buffer_id * pool->buffer_size), pool->buffer_size,
+                          (unsigned short)buffer_id, pool->mask, 0);
     io_uring_buf_ring_advance(pool->ring_buffer, 1);
 }
 
@@ -452,8 +448,7 @@ static PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind
 
 static PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObject *user_data,
                                                         Py_buffer *view) {
-    UringApiCompletion *completion = (UringApiCompletion *)UringApiCompletion_new_pending_view(
-        kind, user_data, view);
+    UringApiCompletion *completion = (UringApiCompletion *)UringApiCompletion_new_pending_view(kind, user_data, view);
     if (!completion) {
         return NULL;
     }
@@ -474,8 +469,8 @@ static bool is_zero_copy_send_kind(UringApiPendingKind kind) {
 }
 
 static PyObject *UringApiCompletion_new_pending_accept(PyObject *user_data) {
-    UringApiCompletion *completion = (UringApiCompletion *)UringApiCompletion_new_pending(
-        URING_API_PENDING_ACCEPT, user_data, NULL);
+    UringApiCompletion *completion =
+        (UringApiCompletion *)UringApiCompletion_new_pending(URING_API_PENDING_ACCEPT, user_data, NULL);
     if (!completion) {
         return NULL;
     }
@@ -551,9 +546,8 @@ static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *s
         return NULL;
     }
 
-    payload = PyBytes_FromStringAndSize((const char *)self->recv_pool->storage +
-                                            ((size_t)buffer_id * self->recv_pool->buffer_size),
-                                        (Py_ssize_t)res);
+    payload = PyBytes_FromStringAndSize(
+        (const char *)self->recv_pool->storage + ((size_t)buffer_id * self->recv_pool->buffer_size), (Py_ssize_t)res);
     if (!payload) {
         return NULL;
     }
@@ -575,8 +569,8 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT) {
         payload = UringApiCompletion_recv_multishot_payload(self, res, flags);
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
-                     is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
-                     self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET)) {
+                            is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
+                            self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET)) {
         payload = PyLong_FromLong(res);
     } else if (res >= 0 && self->kind == URING_API_PENDING_RECVMSG) {
         self->addrlen = self->msg.msg_namelen;
@@ -665,7 +659,7 @@ static int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     } else {
         self->receive_state = URING_API_RECEIVE_WAITING;
     }
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
     return ret;
 }
 
@@ -676,7 +670,7 @@ static void receive_wait_end(UringApiRing *self, bool from_delivery_thread) {
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     self->receive_state = URING_API_RECEIVE_IDLE;
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
 }
 
 static bool delivery_is_running_locked(UringApiRing *self) {
@@ -691,7 +685,7 @@ static int delivery_check_not_running(UringApiRing *self) {
         PyErr_SetString(PyExc_RuntimeError, "completion service is active");
         ret = -1;
     }
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
     return ret;
 }
 
@@ -703,7 +697,7 @@ static void delivery_mark_exited(UringApiRing *self) {
     if (self->delivery_active_workers == 0 && self->receive_state == URING_API_RECEIVE_DELIVERING) {
         self->receive_state = URING_API_RECEIVE_IDLE;
     }
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
 }
 
 static struct io_uring_sqe *get_sqe(UringApiRing *self) {
@@ -721,4 +715,3 @@ static struct io_uring_sqe *get_sqe(UringApiRing *self) {
     }
     return sqe;
 }
-

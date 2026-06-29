@@ -40,9 +40,9 @@ static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) 
     params.flags = flags;
 
     errno = 0;
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     ret = io_uring_queue_init_params(entries, &ring, &params);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
 
     if (ret < 0) {
         return build_probe_result(false);
@@ -71,8 +71,7 @@ static void close_if_open(int *fd) {
 
 static PyObject *uring_api_probe_accept_multishot_impl(void) {
 #ifndef IORING_ACCEPT_MULTISHOT
-    return build_feature_probe_result(false, ENOSYS,
-                                      "liburing headers do not define IORING_ACCEPT_MULTISHOT");
+    return build_feature_probe_result(false, ENOSYS, "liburing headers do not define IORING_ACCEPT_MULTISHOT");
 #else
     struct io_uring ring;
     struct io_uring_sqe *sqe;
@@ -126,8 +125,7 @@ static PyObject *uring_api_probe_accept_multishot_impl(void) {
         goto cleanup;
     }
     memset(&accepted_addr, 0, sizeof(accepted_addr));
-    io_uring_prep_multishot_accept(sqe, server_fd, (struct sockaddr *)&accepted_addr, &accepted_addrlen,
-                                   SOCK_CLOEXEC);
+    io_uring_prep_multishot_accept(sqe, server_fd, (struct sockaddr *)&accepted_addr, &accepted_addrlen, SOCK_CLOEXEC);
     io_uring_sqe_set_data64(sqe, 1);
     ret = io_uring_submit(&ring);
     if (ret < 0) {
@@ -604,4 +602,3 @@ static int uring_api_export_capi(PyObject *module) {
     }
     return 0;
 }
-

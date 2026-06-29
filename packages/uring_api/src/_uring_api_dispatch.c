@@ -47,7 +47,7 @@ static int UringApiRing_stop_delivery(UringApiRing *self) {
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     running = delivery_is_running_locked(self);
     self->delivery_stop_requested = true;
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
 
     if (!running) {
         return 0;
@@ -78,7 +78,7 @@ static PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *Py_UNU
     } else {
         self->delivery_stop_requested = false;
     }
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
 
     if (failed) {
         return NULL;
@@ -161,9 +161,9 @@ static PyObject *build_cqe_result(UringApiRing *self, struct io_uring_cqe *cqe) 
 }
 
 static void receive_wait_lock(UringApiRing *self) {
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     PyThread_acquire_lock(self->delivery_wait_lock, WAIT_LOCK);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
 }
 
 static void receive_wait_unlock(UringApiRing *self) { PyThread_release_lock(self->delivery_wait_lock); }
@@ -190,15 +190,15 @@ static PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, st
 
     errno = 0;
     if (timeout_kind == 0) {
-        Py_BEGIN_ALLOW_THREADS
+        Py_BEGIN_ALLOW_THREADS;
         ret = io_uring_wait_cqe(&self->ring, &cqe);
-        Py_END_ALLOW_THREADS
+        Py_END_ALLOW_THREADS;
     } else if (timeout->tv_sec == 0 && timeout->tv_nsec == 0) {
         ret = io_uring_peek_cqe(&self->ring, &cqe);
     } else {
-        Py_BEGIN_ALLOW_THREADS
+        Py_BEGIN_ALLOW_THREADS;
         ret = io_uring_wait_cqe_timeout(&self->ring, &cqe, timeout);
-        Py_END_ALLOW_THREADS
+        Py_END_ALLOW_THREADS;
     }
 
     if (ret < 0) {
@@ -232,7 +232,7 @@ static PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, st
     if (!from_delivery_thread) {
         self->receive_state = URING_API_RECEIVE_IDLE;
     }
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
     if (from_delivery_thread) {
         receive_wait_unlock(self);
     }
@@ -243,9 +243,8 @@ static bool delivery_should_stop(UringApiRing *self) {
     bool stop;
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
-    stop = self->delivery_stop_requested || self->receive_state != URING_API_RECEIVE_DELIVERING ||
-           !self->initialized;
-    Py_END_CRITICAL_SECTION();
+    stop = self->delivery_stop_requested || self->receive_state != URING_API_RECEIVE_DELIVERING || !self->initialized;
+    Py_END_CRITICAL_SECTION_MUTEX();
     return stop;
 }
 
@@ -254,7 +253,7 @@ static PyObject *delivery_get_callback(UringApiRing *self) {
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     callback = Py_XNewRef(self->delivery_callback);
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
     if (!callback) {
         PyErr_SetString(PyExc_RuntimeError, "delivery callback is not set");
     }
@@ -268,14 +267,14 @@ static int delivery_get_c_callback(UringApiRing *self, UringApi_CCompletionCallb
     *callback = self->c_delivery_callback;
     *user_data = self->c_delivery_callback_user_data;
     found = *callback != NULL;
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
     return found;
 }
 
 static void delivery_request_stop(UringApiRing *self) {
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     self->delivery_stop_requested = true;
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
 }
 
 static void delivery_request_stop_and_wake(UringApiRing *self) {
@@ -316,7 +315,7 @@ static PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py
             self->delivery_active_workers++;
         }
     }
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
 
     if (failed) {
         return NULL;
@@ -373,7 +372,8 @@ static PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py
     Py_RETURN_NONE;
 }
 
-static int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApi_CCompletionCallback callback, void *user_data) {
+static int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApi_CCompletionCallback callback,
+                                            void *user_data) {
     int ret = 0;
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
@@ -384,7 +384,7 @@ static int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApi_CComple
         self->c_delivery_callback = callback;
         self->c_delivery_callback_user_data = callback ? user_data : NULL;
     }
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
     return ret;
 }
 
@@ -404,4 +404,3 @@ static PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject 
 
     return UringApiRing_wait_impl(self, timeout_kind, &timeout, false);
 }
-

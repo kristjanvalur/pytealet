@@ -34,9 +34,9 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
     params.flags = flags;
 
     errno = 0;
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     ret = io_uring_queue_init_params(entries, &self->ring, &params);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
 
     if (ret < 0) {
         int errnum = normalize_ret_errno(ret);
@@ -98,4 +98,3 @@ static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) {
     self->delivery_active_workers = 0;
     Py_RETURN_NONE;
 }
-

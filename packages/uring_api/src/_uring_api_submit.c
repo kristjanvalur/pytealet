@@ -517,8 +517,7 @@ static PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObje
         if (!sqe) {
             failed = 1;
         } else {
-            io_uring_prep_multishot_accept(sqe, (int)fd, (struct sockaddr *)&pending->addr, &pending->addrlen,
-                                           flags);
+            io_uring_prep_multishot_accept(sqe, (int)fd, (struct sockaddr *)&pending->addr, &pending->addrlen, flags);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
@@ -732,8 +731,7 @@ static PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, 
     PyObject *completion = NULL;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ll|lIO", keywords, &domain, &type, &protocol, &flags,
-                                     &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ll|lIO", keywords, &domain, &type, &protocol, &flags, &user_data)) {
         return NULL;
     }
     if (domain < 0 || domain > INT_MAX) {
@@ -777,4 +775,3 @@ static PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, 
     }
     return Py_NewRef(completion);
 }
-

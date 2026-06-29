@@ -148,14 +148,14 @@ static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf,
     return 0;
 }
 
-static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address,
-                                         unsigned int flags, PyObject *user_data) {
+static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                                         PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = PyObject_CallMethod(ring, "submit_sendto", "iOOOI", fd, data, address, user_data ? user_data : Py_None,
-                                 flags);
+    result =
+        PyObject_CallMethod(ring, "submit_sendto", "iOOOI", fd, data, address, user_data ? user_data : Py_None, flags);
     if (!result) {
         return -1;
     }
@@ -163,8 +163,8 @@ static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data,
     return 0;
 }
 
-static int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address,
-                                          unsigned int flags, PyObject *user_data) {
+static int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                                          PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -408,9 +408,13 @@ static int UringApiCapi_CompletionSequence(PyObject *completion, unsigned long l
 }
 
 static PyObject *UringApiCapi_CompletionResult(PyObject *completion) {
+    PyObject *result;
     if (!completion_type_check(completion)) {
         return NULL;
     }
-    return Py_NewRef(((UringApiCompletion *)completion)->result);
+    result = ((UringApiCompletion *)completion)->result;
+    if (!result) {
+        Py_RETURN_NONE;
+    }
+    return Py_NewRef(result);
 }
-

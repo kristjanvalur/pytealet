@@ -663,6 +663,30 @@ def test_ring_recv_completion_when_available():
         writer.close()
 
 
+def test_c_api_completion_result_is_none_for_pending_completion_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        buf = bytearray(5)
+        with uring_api.Ring() as ring:
+            pending = ring.submit_recv(reader.fileno(), buf, 247)
+
+            assert client.completion_summary(pending) == (247, 0, 0, None)
+
+            writer.send(b"hello")
+            completion = ring.wait(1.0)
+
+        assert completion is pending
+        assert client.completion_summary(completion) == (247, 5, 0, 5)
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_ring_recv_multishot_completion_when_available():
     require_uring()
 

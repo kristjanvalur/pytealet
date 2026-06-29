@@ -42,13 +42,16 @@ typedef char UringApiMutex;
 typedef PyMutex UringApiMutex;
 #endif
 
+#ifndef Py_END_CRITICAL_SECTION_MUTEX
+#define Py_END_CRITICAL_SECTION_MUTEX() Py_END_CRITICAL_SECTION()
+#endif
+
 #ifndef _PyCFunction_CAST
 #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
 #endif
 
 typedef struct {
-    PyObject_HEAD
-    struct io_uring ring;
+    PyObject_HEAD struct io_uring ring;
     PyObject *delivery_callback;
     UringApi_CCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;
@@ -96,8 +99,7 @@ typedef enum {
 } UringApiPendingKind;
 
 typedef struct {
-    PyObject_HEAD
-    UringApiPendingKind kind;
+    PyObject_HEAD UringApiPendingKind kind;
     PyObject *user_data;
     int res;
     unsigned int flags;
@@ -135,15 +137,14 @@ static int UringApiCapi_RingRunning(PyObject *ring);
 static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
 static int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned int buffer_size,
                                                 unsigned int buffer_count, unsigned int flags, PyObject *user_data);
-static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags,
-                                       PyObject *user_data);
+static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
 static int UringApiCapi_RingSubmitSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                          unsigned int zc_flags, PyObject *user_data);
 static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
-static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address,
-                                         unsigned int flags, PyObject *user_data);
-static int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address,
-                                          unsigned int flags, PyObject *user_data);
+static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                                         PyObject *user_data);
+static int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                                          PyObject *user_data);
 static int UringApiCapi_RingSubmitSendmsgZc(PyObject *ring, int fd, PyObject *data, PyObject *address,
                                             unsigned int flags, PyObject *user_data);
 static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
@@ -188,12 +189,11 @@ static PyMethodDef UringApiRing_methods[] = {
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
-    {"reset_serving", (PyCFunction)UringApiRing_reset_serving, METH_NOARGS,
-     "Clear the completion service stop flag."},
+    {"reset_serving", (PyCFunction)UringApiRing_reset_serving, METH_NOARGS, "Clear the completion service stop flag."},
     {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
      "Submit a recv operation."},
-    {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot),
-     METH_VARARGS | METH_KEYWORDS, "Submit a multishot recv operation."},
+    {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_VARARGS | METH_KEYWORDS,
+     "Submit a multishot recv operation."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_VARARGS | METH_KEYWORDS,
      "Submit a send operation."},
     {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_VARARGS | METH_KEYWORDS,
@@ -208,8 +208,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a zero-copy sendmsg operation."},
     {"submit_accept", _PyCFunction_CAST(UringApiRing_submit_accept), METH_VARARGS | METH_KEYWORDS,
      "Submit an accept operation."},
-    {"submit_accept_multishot", _PyCFunction_CAST(UringApiRing_submit_accept_multishot),
-     METH_VARARGS | METH_KEYWORDS, "Submit a multishot accept operation."},
+    {"submit_accept_multishot", _PyCFunction_CAST(UringApiRing_submit_accept_multishot), METH_VARARGS | METH_KEYWORDS,
+     "Submit a multishot accept operation."},
     {"submit_connect", _PyCFunction_CAST(UringApiRing_submit_connect), METH_VARARGS | METH_KEYWORDS,
      "Submit a connect operation."},
     {"submit_cancel", _PyCFunction_CAST(UringApiRing_submit_cancel), METH_VARARGS | METH_KEYWORDS,
@@ -228,15 +228,15 @@ static PyMethodDef UringApiRing_methods[] = {
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};
 
-static PyGetSetDef UringApiRing_getset[] = {{"fd", (getter)UringApiRing_get_fd, NULL, NULL, NULL},
-                                            {"features", (getter)UringApiRing_get_features, NULL, NULL, NULL},
-                                            {"sq_entries", (getter)UringApiRing_get_sq_entries, NULL, NULL, NULL},
-                                            {"cq_entries", (getter)UringApiRing_get_cq_entries, NULL, NULL, NULL},
-                                            {"closed", (getter)UringApiRing_get_closed, NULL, NULL, NULL},
-                                            {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
-                                            {"callback", (getter)UringApiRing_get_callback,
-                                             (setter)UringApiRing_set_callback, NULL, NULL},
-                                            {NULL, NULL, NULL, NULL, NULL}};
+static PyGetSetDef UringApiRing_getset[] = {
+    {"fd", (getter)UringApiRing_get_fd, NULL, NULL, NULL},
+    {"features", (getter)UringApiRing_get_features, NULL, NULL, NULL},
+    {"sq_entries", (getter)UringApiRing_get_sq_entries, NULL, NULL, NULL},
+    {"cq_entries", (getter)UringApiRing_get_cq_entries, NULL, NULL, NULL},
+    {"closed", (getter)UringApiRing_get_closed, NULL, NULL, NULL},
+    {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
+    {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
+    {NULL, NULL, NULL, NULL, NULL}};
 
 static PyTypeObject UringApiRing_Type = {
     PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.Ring",
@@ -357,13 +357,13 @@ static PyModuleDef_Slot uring_api_slots[] = {{Py_mod_exec, uring_api_exec},
 #endif
 
 static struct PyModuleDef uring_api_module = {PyModuleDef_HEAD_INIT,
-                                             "_uring_api",
-                                             "Small wrapper around Linux io_uring.",
-                                             0,
-                                             uring_api_methods,
-                                             uring_api_slots,
-                                             NULL,
-                                             NULL,
-                                             NULL};
+                                              "_uring_api",
+                                              "Small wrapper around Linux io_uring.",
+                                              0,
+                                              uring_api_methods,
+                                              uring_api_slots,
+                                              NULL,
+                                              NULL,
+                                              NULL};
 
 PyMODINIT_FUNC PyInit__uring_api(void) { return PyModuleDef_Init(&uring_api_module); }

@@ -53,7 +53,7 @@ static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     callback = Py_XNewRef(self->delivery_callback);
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
     if (!callback) {
         Py_RETURN_NONE;
     }
@@ -84,9 +84,8 @@ static int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *
         self->delivery_callback = callback;
         callback = NULL;
     }
-    Py_END_CRITICAL_SECTION();
+    Py_END_CRITICAL_SECTION_MUTEX();
     Py_XDECREF(callback);
     Py_XDECREF(old_callback);
     return ret;
 }
-
