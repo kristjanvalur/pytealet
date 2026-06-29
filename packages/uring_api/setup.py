@@ -76,6 +76,15 @@ setup(
         Extension(
             "_uring_api",
             sources=["src/_uring_api.c"],
+            depends=[
+                "src/_uring_api_capi.c",
+                "src/_uring_api_core.c",
+                "src/_uring_api_dispatch.c",
+                "src/_uring_api_probe.c",
+                "src/_uring_api_properties.c",
+                "src/_uring_api_ring.c",
+                "src/_uring_api_submit.c",
+            ],
             include_dirs=["src/uring_api/include"],
             libraries=["uring"],
             extra_compile_args=["-std=c17", "-Wall", "-Wextra", "-Wno-unused-parameter"],
