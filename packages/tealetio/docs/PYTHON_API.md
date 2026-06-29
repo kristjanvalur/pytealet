@@ -59,14 +59,14 @@ use this fast path for socket operations that succeed right away.
 Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
 callback)` emits `(conn, address)` for each accepted connection and remains
 active until it is cancelled or the backend reports a terminal error.
-`receive_many(sock, n, callback)` emits `(index, data)` pairs for each received
+`recv_many(sock, n, callback)` emits `(index, data)` pairs for each received
 byte chunk, where `index` is the ordinal position in the receive stream. EOF
 emits one final `(index, b"")` data point before the operation completes.
 Backends may run these result callbacks from any worker thread; code that needs
 thread affinity should marshal from the callback into the appropriate scheduler,
 event loop, or application thread.
 
-`recvall(sock, n, progress=None)` builds on `receive_many(...)` and returns a
+`recvall(sock, n, progress=None)` builds on `recv_many(...)` and returns a
 normal one-shot `Operation[bytes]`. It collects received chunks by their stream
 index, completes at EOF, and returns the concatenation in index order. When
 provided, `progress(total)` is called after each received non-empty chunk with

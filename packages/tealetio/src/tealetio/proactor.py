@@ -121,7 +121,7 @@ class Proactor(Protocol):
 
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]: ...
 
-    def receive_many(
+    def recv_many(
         self,
         sock: socket.socket,
         n: int,
@@ -181,7 +181,7 @@ class ProactorBase:
         if self._closed:
             raise RuntimeError("proactor is closed")
 
-    def receive_many(
+    def recv_many(
         self,
         sock: socket.socket,
         n: int,
@@ -206,7 +206,7 @@ class ProactorBase:
             if progress is not None:
                 progress(total)
 
-        stream = self.receive_many(sock, n, on_result)
+        stream = self.recv_many(sock, n, on_result)
         operation._linked_operation = stream
 
         def on_done(done_stream: Operation[Any]) -> None:
@@ -694,7 +694,7 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
-    def receive_many(
+    def recv_many(
         self,
         sock: socket.socket,
         n: int,
@@ -710,7 +710,7 @@ class SelectorProactor(ProactorBase):
         if n <= 0:
             raise ValueError("n must be positive")
         operation = ContinuousOperation[tuple[int, bytes]](
-            kind="receive_many",
+            kind="recv_many",
             fileobj=sock,
             proactor=self,
             result_callback=callback,
@@ -1360,7 +1360,7 @@ class UringProactor(ProactorBase):
         operation._set_result(None)
         return operation
 
-    def receive_many(
+    def recv_many(
         self,
         sock: socket.socket,
         n: int,
@@ -1376,19 +1376,19 @@ class UringProactor(ProactorBase):
         if n <= 0:
             raise ValueError("n must be positive")
         operation = ContinuousOperation[tuple[int, bytes]](
-            kind="receive_many",
+            kind="recv_many",
             fileobj=sock,
             proactor=self,
             result_callback=callback,
         )
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_receive_many)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv_many)
         self._submit_uring_entry(
             entry,
             lambda: self._ring.submit_recv_multishot(sock.fileno(), n, _DEFAULT_URING_RECV_MANY_BUFFERS, entry),
         )
         return operation
 
-    def _complete_uring_receive_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any]:
+    def _complete_uring_recv_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any]:
         operation = cast(ContinuousOperation[tuple[int, bytes]], entry.operation)
         if completion.res == 0:
             operation._emit_result((completion.sequence, b""))

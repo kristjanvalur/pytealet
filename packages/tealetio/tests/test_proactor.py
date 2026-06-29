@@ -245,14 +245,14 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
-    def test_receive_many_emits_chunks_and_completes_on_eof(self):
+    def test_recv_many_emits_chunks_and_completes_on_eof(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         seen: list[tuple[int, bytes]] = []
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.receive_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, 5, seen.append)
 
             writer.send(b"hello")
             while not seen:
@@ -1726,13 +1726,13 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_receive_many_uses_multishot_recv_and_finishes_on_eof(self):
+    def test_recv_many_uses_multishot_recv_and_finishes_on_eof(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         seen: list[tuple[int, bytes]] = []
         try:
             reader.setblocking(False)
-            operation = proactor.receive_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, 5, seen.append)
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_recv_multishot[0]
             assert submitted[0] == reader.fileno()
@@ -1775,14 +1775,14 @@ class TestUringProactor:
             proactor.close()
 
     @pytest.mark.requires_native_uring_recv_multishot
-    def test_native_receive_many_cancel_after_data_before_sender_close(self):
+    def test_native_recv_many_cancel_after_data_before_sender_close(self):
         proactor = UringProactor()
         reader, writer = socket.socketpair()
         seen: list[tuple[int, bytes]] = []
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.receive_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, 5, seen.append)
 
             writer.send(b"hello")
             _wait_for_uring(proactor, lambda: seen == [(0, b"hello")])
