@@ -62,10 +62,18 @@ _UringCompletion: TypeAlias = uring_api.Completion
 
 
 _UringRingFactory = Callable[[int, int], _UringRing]
+_UringSendSubmit = Callable[[int, Any, object], _UringCompletion]
 
 
 def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
     return uring_api.Ring(entries=entries, flags=flags)
+
+
+def _probe_uring_send_zc(entries: int, flags: int) -> bool:
+    try:
+        return uring_api.probe(entries=entries, flags=flags).get("IORING_OP_SEND_ZC", False)
+    except (OSError, RuntimeError, NotImplementedError):
+        return False
 
 
 def _configure_accepted_socket(sock: socket.socket) -> socket.socket:
@@ -1035,6 +1043,9 @@ class UringProactor(ProactorBase):
             ring_factory = _default_uring_ring_factory
         super().__init__(completion_callback=completion_callback)
         self._ring = ring_factory(entries, flags)
+        self._submit_send: _UringSendSubmit = self._ring.submit_send
+        if _probe_uring_send_zc(entries, flags) and hasattr(self._ring, "submit_send_zc"):
+            self._submit_send = self._ring.submit_send_zc
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
@@ -1495,7 +1506,7 @@ class UringProactor(ProactorBase):
             offset=offset,
             progress=progress,
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_send(sock.fileno(), data[offset:], entry))
+        self._submit_uring_entry(entry, lambda: self._submit_send(sock.fileno(), data[offset:], entry))
 
     def _submit_recvmsg(
         self,

@@ -1039,6 +1039,26 @@ class _DeferredUringRing(_FakeUringRing):
         self._deliver(completion)
 
 
+class _ZeroCopyFakeUringRing(_FakeUringRing):
+    def __init__(self, entries: int, flags: int) -> None:
+        super().__init__(entries, flags)
+        self.submitted_send_zc: list[tuple[int, object, object]] = []
+
+    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_send_zc.append((fd, data, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SEND_ZC,
+            res=len(payload),
+            result=len(payload),
+        )
+        self._deliver(completion)
+        return completion
+
+
 class _BackpressuredUringRing(_DeferredUringRing):
     def __init__(self, entries: int = 8, flags: int = 0) -> None:
         super().__init__(entries, flags)
@@ -1599,6 +1619,46 @@ class TestUringProactor:
             assert isinstance(submitted, memoryview)
             assert submitted.obj is payload
             assert bytes(submitted) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_sendall_uses_send_zc_when_probe_supports_it(self, monkeypatch):
+        monkeypatch.setattr(proactor_module, "_probe_uring_send_zc", lambda entries, flags: True)
+        proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            operation = proactor.sendall(writer, payload)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() is None
+            assert isinstance(proactor.ring, _ZeroCopyFakeUringRing)
+            assert proactor.ring.submitted_send == []
+            submitted = proactor.ring.submitted_send_zc[0][1]
+            assert isinstance(submitted, memoryview)
+            assert submitted.obj is payload
+            assert bytes(submitted) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_sendall_uses_send_when_probe_lacks_send_zc(self, monkeypatch):
+        monkeypatch.setattr(proactor_module, "_probe_uring_send_zc", lambda entries, flags: False)
+        proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            operation = proactor.sendall(writer, b"hello")
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() is None
+            assert isinstance(proactor.ring, _ZeroCopyFakeUringRing)
+            assert len(proactor.ring.submitted_send) == 1
+            assert proactor.ring.submitted_send_zc == []
         finally:
             reader.close()
             writer.close()
