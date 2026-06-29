@@ -55,8 +55,11 @@ as plain one-shot operations:
 - `submit_recv()` and `submit_recvmsg()` expose one-shot receive.
   `submit_recv_multishot()` exposes multishot receive with internal buffer-ring
   ownership and `bytes` delivery. Multishot receive is available since kernel
-  6.0, while receive/send polling hints such as `IORING_RECVSEND_POLL_FIRST`
-  and `IORING_CQE_F_SOCK_NONEMPTY` are available since kernel 5.19.
+  6.0. `probe()` includes a targeted `"IORING_RECV_MULTISHOT"` runtime
+  capability entry because it is newer than multishot accept and depends on
+  provided-buffer support. Receive/send polling hints such as
+  `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY` are available
+  since kernel 5.19.
 - `submit_socket()` uses `IORING_OP_SOCKET`, which is a newer socket opcode even
   though the installed man page does not give a precise kernel version. `probe()`
   now includes a targeted `"IORING_OP_SOCKET"` runtime capability entry by
@@ -144,7 +147,14 @@ weight.
 
 A later zero-copy API can expose leased buffer objects, but those objects must
 return buffers to the original operation before the kernel can reuse them. That
-is a separate ownership contract from the initial copied-`bytes` model.
+is a separate ownership contract from the initial copied-`bytes` model. One
+possible shape is a dedicated Python buffer-group object that owns the provided
+buffer ring independently of the pending `Completion`, plus a per-result object
+that references the group and selected buffer ID. The per-result object would
+expose the buffer protocol so callers can create `memoryview` objects over the
+received bytes, and provide `close()` / context-manager methods to return the
+buffer to the group when the caller is done. Any such design must account for
+active exported memoryviews before recycling a buffer back to the kernel.
 
 The completion object still needs enough flag helpers to decode:
 

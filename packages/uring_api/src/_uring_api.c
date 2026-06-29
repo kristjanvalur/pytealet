@@ -1028,6 +1028,118 @@ cleanup:
 #endif
 }
 
+static PyObject *uring_api_probe_recv_multishot_impl(void) {
+    struct io_uring ring;
+    struct io_uring_sqe *sqe;
+    struct io_uring_cqe *cqe = NULL;
+    struct io_uring_buf_ring *ring_buffer = NULL;
+    struct __kernel_timespec timeout;
+    unsigned char storage[8];
+    int sockets[2] = {-1, -1};
+    int ret = 0;
+    int mask;
+    PyObject *result;
+
+    memset(&ring, 0, sizeof(ring));
+    ret = io_uring_queue_init(8, &ring, 0);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        return build_feature_probe_result(false, errnum, strerror(errnum));
+    }
+
+    ring_buffer = io_uring_setup_buf_ring(&ring, 1, 1, 0, &ret);
+    if (!ring_buffer) {
+        int errnum = normalize_ret_errno(ret);
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        goto cleanup;
+    }
+    mask = io_uring_buf_ring_mask(1);
+    io_uring_buf_ring_add(ring_buffer, storage, sizeof(storage), 0, mask, 0);
+    io_uring_buf_ring_advance(ring_buffer, 1);
+
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+
+    sqe = io_uring_get_sqe(&ring);
+    if (!sqe) {
+        result = build_feature_probe_result(false, EBUSY, "no submission queue entry available for probe");
+        goto cleanup;
+    }
+    io_uring_prep_recv_multishot(sqe, sockets[0], NULL, 0, 0);
+    sqe->flags |= IOSQE_BUFFER_SELECT;
+    sqe->buf_group = 1;
+    io_uring_sqe_set_data64(sqe, 1);
+    ret = io_uring_submit(&ring);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        goto cleanup;
+    }
+
+    if (send(sockets[1], "x", 1, 0) < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+
+    timeout.tv_sec = 1;
+    timeout.tv_nsec = 0;
+    ret = io_uring_wait_cqe_timeout(&ring, &cqe, &timeout);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        goto cleanup;
+    }
+    if (!cqe) {
+        result = build_feature_probe_result(false, ETIMEDOUT, "recv multishot probe timed out");
+        goto cleanup;
+    }
+    if (cqe->res < 0) {
+        int errnum = -cqe->res;
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        io_uring_cqe_seen(&ring, cqe);
+        cqe = NULL;
+        goto cleanup;
+    }
+    if (cqe->res != 1) {
+        result = build_feature_probe_result(false, EIO, "recv multishot probe returned an unexpected length");
+        io_uring_cqe_seen(&ring, cqe);
+        cqe = NULL;
+        goto cleanup;
+    }
+    if (!(cqe->flags & IORING_CQE_F_BUFFER)) {
+        result = build_feature_probe_result(false, EPROTO, "recv multishot probe did not select a buffer");
+        io_uring_cqe_seen(&ring, cqe);
+        cqe = NULL;
+        goto cleanup;
+    }
+    if (cqe->flags & IORING_CQE_F_MORE) {
+        result = build_feature_probe_result(true, 0, NULL);
+    } else {
+        result = build_feature_probe_result(false, EOPNOTSUPP, "recv completed without IORING_CQE_F_MORE");
+    }
+    io_uring_cqe_seen(&ring, cqe);
+    cqe = NULL;
+
+cleanup:
+    close_if_open(&sockets[1]);
+    if (cqe) {
+        io_uring_cqe_seen(&ring, cqe);
+    }
+    timeout.tv_sec = 0;
+    timeout.tv_nsec = 1000000;
+    if (io_uring_wait_cqe_timeout(&ring, &cqe, &timeout) == 0 && cqe) {
+        io_uring_cqe_seen(&ring, cqe);
+    }
+    close_if_open(&sockets[0]);
+    if (ring_buffer) {
+        (void)io_uring_free_buf_ring(&ring, ring_buffer, 1, 1);
+    }
+    io_uring_queue_exit(&ring);
+    return result;
+}
+
 static PyObject *uring_api_probe_socket_impl(void) {
     struct io_uring ring;
     struct io_uring_sqe *sqe;
@@ -1118,6 +1230,18 @@ static PyObject *build_capability_dict(void) {
         return NULL;
     }
     if (add_bool_from_feature_probe(capabilities, "IORING_ACCEPT_MULTISHOT", probe_result) < 0) {
+        Py_DECREF(probe_result);
+        Py_DECREF(capabilities);
+        return NULL;
+    }
+    Py_DECREF(probe_result);
+
+    probe_result = uring_api_probe_recv_multishot_impl();
+    if (!probe_result) {
+        Py_DECREF(capabilities);
+        return NULL;
+    }
+    if (add_bool_from_feature_probe(capabilities, "IORING_RECV_MULTISHOT", probe_result) < 0) {
         Py_DECREF(probe_result);
         Py_DECREF(capabilities);
         return NULL;

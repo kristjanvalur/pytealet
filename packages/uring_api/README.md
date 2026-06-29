@@ -116,9 +116,9 @@ if not uring_api.is_available():
 `probe()` creates a tiny temporary ring and closes it right away. If that fails,
 it returns an empty dictionary. If it succeeds, the dictionary contains
 `"available": True` plus named optional capabilities such as
-`"IORING_ACCEPT_MULTISHOT"`. Production code should still handle `OSError` when
-it creates the real ring because limits or sandbox policy may differ for larger
-settings.
+`"IORING_ACCEPT_MULTISHOT"` and `"IORING_RECV_MULTISHOT"`. Production code
+should still handle `OSError` when it creates the real ring because limits or
+sandbox policy may differ for larger settings.
 
 Pass setup flags to `probe(flags=...)` to check whether this build and kernel
 combination accepts a ring mode before using it for the real ring:
@@ -154,6 +154,12 @@ than a kernel version check. It creates a private temporary ring and loopback
 listener, submits one multishot accept request, connects a local client, and
 checks whether the first accept completion keeps the request armed. If the build
 headers do not expose the helper flag, the capability simply reports `False`.
+
+The `IORING_RECV_MULTISHOT` capability is also checked with a runtime operation
+probe because it requires newer kernel support than multishot accept. It creates
+a private socket pair and provided-buffer ring, submits one multishot receive,
+sends one byte, and reports `True` only if the first completion selects a buffer
+and keeps the request armed with `IORING_CQE_F_MORE`.
 
 ## Initialising a Ring
 

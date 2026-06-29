@@ -92,9 +92,10 @@ def test_native_module_exports_completion_kind_constants():
 def test_probe_returns_structured_result():
     probe = uring_api.probe()
 
-    assert set(probe) == {"available", "IORING_ACCEPT_MULTISHOT", "IORING_OP_SOCKET"}
+    assert set(probe) == {"available", "IORING_ACCEPT_MULTISHOT", "IORING_RECV_MULTISHOT", "IORING_OP_SOCKET"}
     assert probe["available"] is True
     assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
+    assert isinstance(probe["IORING_RECV_MULTISHOT"], bool)
     assert isinstance(probe["IORING_OP_SOCKET"], bool)
 
 
