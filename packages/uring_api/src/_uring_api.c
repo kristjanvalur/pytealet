@@ -30,19 +30,35 @@
 #error "uring-api requires liburing >= 2.4 development headers"
 #endif
 
+typedef struct UringApiRing UringApiRing;
+
 #ifndef Py_BEGIN_CRITICAL_SECTION
-#define Py_BEGIN_CRITICAL_SECTION(op) {
-#define Py_END_CRITICAL_SECTION() }
+#define URING_API_USE_PYTHREAD_RING_LOCK 1
+#define Py_BEGIN_CRITICAL_SECTION(op)                                                                                  \
+    {                                                                                                                  \
+        PyThread_type_lock _uring_api_critical_section_lock = ((UringApiRing *)(op))->ring_lock;                       \
+        PyThread_acquire_lock(_uring_api_critical_section_lock, WAIT_LOCK);
+#define Py_END_CRITICAL_SECTION()                                                                                      \
+    PyThread_release_lock(_uring_api_critical_section_lock);                                                           \
+    }
 #endif
 
 #ifndef Py_BEGIN_CRITICAL_SECTION_MUTEX
-typedef char UringApiMutex;
-#define Py_BEGIN_CRITICAL_SECTION_MUTEX(mutex) {
+#define URING_API_USE_PYTHREAD_MUTEX 1
+typedef PyThread_type_lock UringApiMutex;
+#define Py_BEGIN_CRITICAL_SECTION_MUTEX(mutex)                                                                         \
+    {                                                                                                                  \
+        PyThread_type_lock _uring_api_mutex = *(mutex);                                                                \
+        PyThread_acquire_lock(_uring_api_mutex, WAIT_LOCK);
 #else
 typedef PyMutex UringApiMutex;
 #endif
 
-#ifndef Py_END_CRITICAL_SECTION_MUTEX
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+#define Py_END_CRITICAL_SECTION_MUTEX()                                                                                \
+    PyThread_release_lock(_uring_api_mutex);                                                                           \
+    }
+#elif !defined(Py_END_CRITICAL_SECTION_MUTEX)
 #define Py_END_CRITICAL_SECTION_MUTEX() Py_END_CRITICAL_SECTION()
 #endif
 
@@ -50,11 +66,14 @@ typedef PyMutex UringApiMutex;
 #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
 #endif
 
-typedef struct {
+struct UringApiRing {
     PyObject_HEAD struct io_uring ring;
     PyObject *delivery_callback;
     UringApi_CCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+    PyThread_type_lock ring_lock;
+#endif
     UringApiMutex receive_mutex;
     PyThread_type_lock delivery_wait_lock;
     unsigned int delivery_active_workers;
@@ -62,7 +81,7 @@ typedef struct {
     unsigned short next_buf_group;
     bool delivery_stop_requested;
     bool initialized;
-} UringApiRing;
+};
 
 typedef struct {
     UringApiRing *ring;
@@ -120,6 +139,7 @@ static PyTypeObject UringApiRing_Type;
 static PyTypeObject UringApiCompletion_Type;
 static PyObject *UringApiSubmissionQueueFullError;
 
+static PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs);
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
 static int UringApiRing_stop_delivery(UringApiRing *self);
 static int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg);
@@ -253,7 +273,7 @@ static PyTypeObject UringApiRing_Type = {
     .tp_methods = UringApiRing_methods,
     .tp_getset = UringApiRing_getset,
     .tp_init = (initproc)UringApiRing_init,
-    .tp_new = PyType_GenericNew,
+    .tp_new = UringApiRing_new,
 };
 
 static PyGetSetDef UringApiCompletion_getset[] = {

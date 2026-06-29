@@ -6,11 +6,44 @@
  * extension translation unit.
  */
 
+static PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
+    UringApiRing *self = (UringApiRing *)type->tp_alloc(type, 0);
+
+    (void)args;
+    (void)kwargs;
+    if (!self) {
+        return NULL;
+    }
+
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+    self->ring_lock = PyThread_allocate_lock();
+    if (!self->ring_lock) {
+        PyErr_NoMemory();
+        PyObject_GC_Del(self);
+        return NULL;
+    }
+#endif
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+    self->receive_mutex = PyThread_allocate_lock();
+    if (!self->receive_mutex) {
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+        PyThread_free_lock(self->ring_lock);
+        self->ring_lock = NULL;
+#endif
+        PyErr_NoMemory();
+        PyObject_GC_Del(self);
+        return NULL;
+    }
+#endif
+    return (PyObject *)self;
+}
+
 static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     struct io_uring_params params;
     unsigned int entries;
     unsigned int flags;
     int ret;
+    int failed = 0;
 
     if (parse_entries_flags(args, kwargs, 8, &entries, &flags) < 0) {
         return -1;
@@ -20,6 +53,7 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
         return -1;
     }
 
+    Py_BEGIN_CRITICAL_SECTION(self);
     if (self->initialized) {
         io_uring_queue_exit(&self->ring);
         self->initialized = false;
@@ -42,11 +76,13 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
         int errnum = normalize_ret_errno(ret);
         errno = errnum;
         PyErr_SetFromErrno(PyExc_OSError);
-        return -1;
+        failed = 1;
+    } else {
+        self->initialized = true;
     }
+    Py_END_CRITICAL_SECTION();
 
-    self->initialized = true;
-    return 0;
+    return failed ? -1 : 0;
 }
 
 static void UringApiRing_dealloc(UringApiRing *self) {
@@ -63,6 +99,18 @@ static void UringApiRing_dealloc(UringApiRing *self) {
         PyThread_free_lock(self->delivery_wait_lock);
         self->delivery_wait_lock = NULL;
     }
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+    if (self->receive_mutex) {
+        PyThread_free_lock(self->receive_mutex);
+        self->receive_mutex = NULL;
+    }
+#endif
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+    if (self->ring_lock) {
+        PyThread_free_lock(self->ring_lock);
+        self->ring_lock = NULL;
+    }
+#endif
     PyObject_GC_Del(self);
 }
 
@@ -80,6 +128,7 @@ static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(igno
     if (delivery_check_not_running(self) < 0) {
         return NULL;
     }
+    Py_BEGIN_CRITICAL_SECTION(self);
     if (self->initialized) {
         io_uring_queue_exit(&self->ring);
         self->initialized = false;
@@ -88,6 +137,7 @@ static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(igno
     self->delivery_stop_requested = false;
     self->delivery_active_workers = 0;
     self->next_buf_group = 1;
+    Py_END_CRITICAL_SECTION();
     Py_RETURN_NONE;
 }
 

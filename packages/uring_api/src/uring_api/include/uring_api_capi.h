@@ -64,6 +64,11 @@ typedef struct UringApi_CAPI {
     int (*ring_submit_socket)(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
                               PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
+    /*
+     * Wait for one completion and return a new reference, or Py_None on timeout/no completion.
+     * timeout < 0 blocks indefinitely, timeout == 0 performs a non-blocking peek,
+     * and timeout > 0 waits for at most that many seconds.
+     */
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
     /* Completion service control. C callback is preferred over Python callback when both are set. */
