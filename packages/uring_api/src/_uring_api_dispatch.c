@@ -160,6 +160,14 @@ static PyObject *build_cqe_result(UringApiRing *self, struct io_uring_cqe *cqe) 
     return (PyObject *)completion;
 }
 
+static void receive_wait_lock(UringApiRing *self) {
+    Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(self->delivery_wait_lock, WAIT_LOCK);
+    Py_END_ALLOW_THREADS
+}
+
+static void receive_wait_unlock(UringApiRing *self) { PyThread_release_lock(self->delivery_wait_lock); }
+
 static PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                                         bool from_delivery_thread) {
     struct io_uring_cqe *cqe = NULL;
@@ -283,7 +291,6 @@ static void delivery_request_stop_and_wake(UringApiRing *self) {
 }
 
 static PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
-    PyThread_type_lock wait_lock = NULL;
     bool failed = false;
     bool wait_failed = false;
 
@@ -305,7 +312,6 @@ static PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py
             PyErr_NoMemory();
             failed = true;
         } else {
-            wait_lock = self->delivery_wait_lock;
             self->receive_state = URING_API_RECEIVE_DELIVERING;
             self->delivery_active_workers++;
         }
@@ -315,7 +321,6 @@ static PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py
     if (failed) {
         return NULL;
     }
-    (void)wait_lock;
 
     while (!delivery_should_stop(self)) {
         UringApi_CCompletionCallback c_callback;

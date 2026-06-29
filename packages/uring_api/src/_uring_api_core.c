@@ -669,14 +669,6 @@ static int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     return ret;
 }
 
-static void receive_wait_lock(UringApiRing *self) {
-    Py_BEGIN_ALLOW_THREADS
-    PyThread_acquire_lock(self->delivery_wait_lock, WAIT_LOCK);
-    Py_END_ALLOW_THREADS
-}
-
-static void receive_wait_unlock(UringApiRing *self) { PyThread_release_lock(self->delivery_wait_lock); }
-
 static void receive_wait_end(UringApiRing *self, bool from_delivery_thread) {
     if (from_delivery_thread) {
         return;
