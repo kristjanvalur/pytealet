@@ -819,11 +819,10 @@ class UringProactor(ProactorBase):
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
         self._retrying_deferred_submissions = False
-        self._wake_condition = threading.Condition()
-        self._wake_generation = 0
-        self._seen_wake_generation = 0
+        self._wait_ready = threading.Event()
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
-        self._async_wait_event: _asyncio.Event | None = None
+        self._async_wait_thread_id: int | None = None
+        self._async_wait_event = _asyncio.Event()
         self._ring.callback = self._deliver_uring_completion
         self._service_threads = [
             threading.Thread(target=self._service_thread_main, name=f"tealetio-uring-{index}")
@@ -891,17 +890,15 @@ class UringProactor(ProactorBase):
     def break_wait(self) -> None:
         """Interrupt a thread blocked in `wait` without completing operations."""
 
-        with self._wake_condition:
-            self._wake_generation += 1
-            self._wake_condition.notify_all()
-            loop = self._async_wait_loop
-            event = self._async_wait_event
-        if event is not None:
-            assert loop is not None
-            try:
-                loop.call_soon_threadsafe(event.set)
-            except RuntimeError:
-                pass
+        self._wait_ready.set()
+        loop = self._async_wait_loop
+        if loop is None or self._async_wait_thread_id == threading.get_ident():
+            self._async_wait_event.set()
+            return
+        try:
+            loop.call_soon_threadsafe(self._async_wait_event.set)
+        except RuntimeError:
+            pass
 
     def wait(self, deadline: float | None = None) -> None:
         """Wait until completed operations are signalled."""
@@ -926,43 +923,36 @@ class UringProactor(ProactorBase):
         if timeout == 0:
             return
         loop = _asyncio.get_running_loop()
-        event = _asyncio.Event()
-        with self._wake_condition:
-            if self._seen_wake_generation != self._wake_generation:
-                self._seen_wake_generation = self._wake_generation
-                return
-            start_generation = self._wake_generation
-            assert self._async_wait_event is None
+        if self._async_wait_loop is None:
             self._async_wait_loop = loop
-            self._async_wait_event = event
+            self._async_wait_thread_id = threading.get_ident()
+        elif self._async_wait_loop is not loop:
+            raise RuntimeError("UringProactor.wait_async() used from a different event loop")
+        if self._async_wait_event.is_set() or self._wait_ready.is_set():
+            self._async_wait_event.clear()
+            self._wait_ready.clear()
+            return
+        woken = False
         try:
             if timeout is None:
-                await event.wait()
+                await self._async_wait_event.wait()
             else:
-                await compat.wait_for_timeout(event.wait(), timeout)
+                await compat.wait_for_timeout(self._async_wait_event.wait(), timeout)
+            woken = True
         except _asyncio.TimeoutError:
             return
         finally:
-            with self._wake_condition:
-                assert self._async_wait_event is event
-                self._async_wait_event = None
-                self._async_wait_loop = None
-                if self._wake_generation != start_generation:
-                    self._seen_wake_generation = self._wake_generation
+            if woken:
+                self._async_wait_event.clear()
+                self._wait_ready.clear()
 
     def _notify_completed(self) -> None:
         self.break_wait()
         self._notify_completion()
 
     def _wait_for_completed(self, timeout: float | None) -> None:
-        with self._wake_condition:
-            if self._seen_wake_generation != self._wake_generation:
-                self._seen_wake_generation = self._wake_generation
-                return
-            start_generation = self._wake_generation
-            self._wake_condition.wait_for(lambda: self._wake_generation != start_generation, timeout)
-            if self._wake_generation != start_generation:
-                self._seen_wake_generation = self._wake_generation
+        if self._wait_ready.wait(timeout):
+            self._wait_ready.clear()
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""

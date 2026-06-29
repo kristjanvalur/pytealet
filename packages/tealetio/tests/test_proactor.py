@@ -814,10 +814,16 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_wait_async_without_pending_operations_returns_on_break_wait(self):
+    def test_wait_async_without_pending_operations_returns_on_break_wait(self, monkeypatch):
         async def run() -> None:
             proactor = UringProactor(ring_factory=_FakeUringRing)
             try:
+                loop = asyncio.get_running_loop()
+
+                def call_soon_threadsafe(*args, **kwargs):
+                    raise AssertionError("same-thread break_wait should set the asyncio event directly")
+
+                monkeypatch.setattr(loop, "call_soon_threadsafe", call_soon_threadsafe)
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 10.0))
                 await asyncio.sleep(0)
                 assert waiter.done() is False
