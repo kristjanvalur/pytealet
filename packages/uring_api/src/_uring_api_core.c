@@ -720,10 +720,18 @@ static void delivery_mark_exited(UringApiRing *self) {
 
 static struct io_uring_sqe *get_sqe(UringApiRing *self) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&self->ring);
+    int ret;
+
     if (sqe) {
         return sqe;
     }
-    if (submit_one(self) < 0) {
+
+    errno = 0;
+    ret = io_uring_submit(&self->ring);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        errno = errnum;
+        PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
     sqe = io_uring_get_sqe(&self->ring);

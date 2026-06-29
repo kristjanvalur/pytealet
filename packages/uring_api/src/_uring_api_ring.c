@@ -146,17 +146,4 @@ static PyObject *UringApiRing_enter(UringApiRing *self, PyObject *Py_UNUSED(igno
     return (PyObject *)self;
 }
 
-static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) {
-    if (delivery_check_not_running(self) < 0) {
-        return NULL;
-    }
-    if (self->initialized) {
-        io_uring_queue_exit(&self->ring);
-        self->initialized = false;
-    }
-    self->receive_state = URING_API_RECEIVE_IDLE;
-    self->delivery_stop_requested = false;
-    self->delivery_active_workers = 0;
-    self->next_buf_group = 1;
-    Py_RETURN_NONE;
-}
+static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) { return UringApiRing_close(self, NULL); }
