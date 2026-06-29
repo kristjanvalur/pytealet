@@ -10,7 +10,9 @@ import time
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
-from typing import Any, Generic, NoReturn, Protocol, TypeVar, cast
+from typing import Any, Generic, NoReturn, Protocol, TypeAlias, TypeVar, cast
+
+import uring_api
 
 from . import compat
 from .locks import ThreadsafeEvent
@@ -50,83 +52,15 @@ _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 
 
-def _is_uring_submission_queue_full(exc: BaseException) -> bool:
-    try:
-        import uring_api
-    except ImportError:
-        return False
-    return isinstance(exc, uring_api.SubmissionQueueFull)
-
-
-def _is_uring_multishot_more(completion: _UringCompletion) -> bool:
-    try:
-        import uring_api
-    except ImportError:
-        return False
-    return bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-
-
-def _is_uring_cancel_completion(completion: _UringCompletion) -> bool:
-    try:
-        import uring_api
-    except ImportError:
-        return False
-    return getattr(completion, "kind", None) == uring_api.COMPLETION_KIND_CANCEL
-
-
-class _UringRing(Protocol):
-    fd: int
-    features: int
-    sq_entries: int
-    cq_entries: int
-    closed: bool
-    callback: Callable[["_UringCompletion"], object] | None
-    running: bool
-
-    def close(self) -> None: ...
-
-    def serve_completions(self) -> None: ...
-
-    def stop_serving(self) -> None: ...
-
-    def reset_serving(self) -> None: ...
-
-    def break_wait(self) -> None: ...
-
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> _UringCompletion: ...
-
-    def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> _UringCompletion: ...
-
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> _UringCompletion: ...
-
-    def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> _UringCompletion: ...
-
-    def submit_accept(self, fd: int, user_data: object = None) -> _UringCompletion: ...
-
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> _UringCompletion: ...
-
-    def submit_cancel(self, completion: _UringCompletion) -> _UringCompletion: ...
-
-    def wait(self, timeout: float | None = None) -> "_UringCompletion" | None: ...
-
-
-class _UringCompletion(Protocol):
-    user_data: object
-    kind: int
-    res: int
-    flags: int
-    result: object
+_UringRing: TypeAlias = uring_api.Ring
+_UringCompletion: TypeAlias = uring_api.Completion
 
 
 _UringRingFactory = Callable[[int, int], _UringRing]
 
 
 def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
-    try:
-        import uring_api
-    except ImportError as exc:
-        raise RuntimeError("UringProactor requires the uring-api package") from exc
-    return cast(_UringRing, uring_api.Ring(entries=entries, flags=flags))
+    return uring_api.Ring(entries=entries, flags=flags)
 
 
 class Proactor(Protocol):
@@ -1153,11 +1087,12 @@ class UringProactor(ProactorBase):
         self._pending_tokens.append(None)
         try:
             entry.completion = submit()
-        except BaseException as exc:
+        except uring_api.SubmissionQueueFull:
             self._pending_tokens.pop()
-            if _is_uring_submission_queue_full(exc):
-                self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
-                return False
+            self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
+            return False
+        except BaseException:
+            self._pending_tokens.pop()
             entry.active = False
             self.break_wait()
             raise
@@ -1167,13 +1102,11 @@ class UringProactor(ProactorBase):
     def _submit_cancel(self, completion: _UringCompletion) -> bool:
         try:
             self._ring.submit_cancel(completion)
-        except BaseException as exc:
-            if _is_uring_submission_queue_full(exc):
-                self._deferred_submissions.append(
-                    _UringSubmission(entry=None, submit=lambda: self._ring.submit_cancel(completion))
-                )
-                return False
-            raise
+        except uring_api.SubmissionQueueFull:
+            self._deferred_submissions.append(
+                _UringSubmission(entry=None, submit=lambda: self._ring.submit_cancel(completion))
+            )
+            return False
         return True
 
     def _retry_deferred_submissions(self) -> None:
@@ -1187,11 +1120,9 @@ class UringProactor(ProactorBase):
                 if entry is None:
                     try:
                         submission.submit()
-                    except BaseException as exc:
-                        if _is_uring_submission_queue_full(exc):
-                            self._deferred_submissions.append(submission)
-                            break
-                        raise
+                    except uring_api.SubmissionQueueFull:
+                        self._deferred_submissions.append(submission)
+                        break
                     continue
                 if entry.operation.done():
                     entry.active = False
@@ -1235,12 +1166,12 @@ class UringProactor(ProactorBase):
         self,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        if _is_uring_cancel_completion(completion):
+        if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
             return None
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
         assert entry.active
-        has_more = _is_uring_multishot_more(completion)
+        has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         if not has_more:
             entry.active = False
             self._pending_tokens.pop()

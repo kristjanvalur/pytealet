@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
-from typing import Any
+from types import TracebackType
+from typing import TYPE_CHECKING, Any
 
 try:
     from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
@@ -66,6 +68,88 @@ except ImportError as exc:
 
     class Ring:  # type: ignore[no-redef]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
+        def fd(self) -> int:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
+        def features(self) -> int:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
+        def sq_entries(self) -> int:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
+        def cq_entries(self) -> int:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
+        def closed(self) -> bool:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
+        def running(self) -> bool:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
+        def callback(self) -> Callable[[Completion], object] | None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @callback.setter
+        def callback(self, value: Callable[[Completion], object] | None) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def close(self) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def serve_completions(self) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def stop_serving(self) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def reset_serving(self) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def break_wait(self) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_send(self, fd: int, data: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_accept(self, fd: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_cancel(self, completion: Completion) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def wait(self, timeout: float | None = None) -> Completion | None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def __enter__(self) -> Ring:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
     class SubmissionQueueFull(RuntimeError):
@@ -131,3 +215,7 @@ __all__ = [
     "is_available",
     "probe",
 ]
+
+if TYPE_CHECKING:
+    from _uring_api import Completion as Completion
+    from _uring_api import Ring as Ring

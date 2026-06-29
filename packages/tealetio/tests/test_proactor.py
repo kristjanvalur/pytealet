@@ -1296,14 +1296,28 @@ class TestUringProactor:
             memoryview(buf)[:5] = b"hello"
 
             proactor.ring._deliver(
-                SimpleNamespace(user_data=entry, res=5, flags=uring_api.IORING_CQE_F_MORE, result=5)
+                SimpleNamespace(
+                    user_data=entry,
+                    kind=uring_api.COMPLETION_KIND_RECV,
+                    res=5,
+                    flags=uring_api.IORING_CQE_F_MORE,
+                    result=5,
+                )
             )
 
             assert operation.result() == b"hello"
             assert entry.active is True
             assert proactor.has_pending_operations() is True
 
-            proactor.ring._deliver(SimpleNamespace(user_data=entry, res=-errno.ECANCELED, flags=0, result=None))
+            proactor.ring._deliver(
+                SimpleNamespace(
+                    user_data=entry,
+                    kind=uring_api.COMPLETION_KIND_RECV,
+                    res=-errno.ECANCELED,
+                    flags=0,
+                    result=None,
+                )
+            )
 
             assert entry.active is False
             assert proactor.has_pending_operations() is False

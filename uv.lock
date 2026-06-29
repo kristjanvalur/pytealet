@@ -366,6 +366,7 @@ source = { editable = "packages/tealetio" }
 dependencies = [
     { name = "asynkit" },
     { name = "tealet" },
+    { name = "uring-api" },
 ]
 
 [package.dev-dependencies]
@@ -378,6 +379,7 @@ dev = [
 requires-dist = [
     { name = "asynkit", specifier = ">=0.19.2" },
     { name = "tealet", editable = "." },
+    { name = "uring-api", editable = "packages/uring_api" },
 ]
 
 [package.metadata.requires-dev]
