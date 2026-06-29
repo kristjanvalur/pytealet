@@ -121,6 +121,8 @@ class Proactor(Protocol):
 
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None: ...
 
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None: ...
+
     def get_time(self) -> float: ...
 
     def set_clock(self, clock: _Clock) -> None: ...
@@ -158,11 +160,21 @@ class ProactorBase:
         self._closed = False
         self._completion_callback = completion_callback
         self._clock = time.monotonic
+        self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
 
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
         """Set the callback invoked when backend completions may be ready."""
 
         self._completion_callback = callback
+
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Bind this proactor to an asyncio event loop for async waits."""
+
+        if self._async_wait_loop is None:
+            self._async_wait_loop = loop
+            return
+        if self._async_wait_loop is not loop:
+            raise RuntimeError(f"{type(self).__name__} is already bound to a different event loop")
 
     def get_time(self) -> float:
         """Return the proactor clock value."""
@@ -432,7 +444,8 @@ class SelectorProactor(ProactorBase):
         if timeout == 0:
             return
 
-        loop = _asyncio.get_running_loop()
+        loop = self._async_wait_loop
+        assert loop is not None
         await loop.run_in_executor(None, self.wait, deadline)
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
@@ -760,6 +773,8 @@ class ThreadedSelectorProactor(SelectorProactor):
         """Wait asynchronously until completed operations are signalled."""
 
         self._check_open()
+        loop = self._async_wait_loop
+        assert loop is not None
         self._ensure_worker_started()
         if deadline == 0:
             return
@@ -767,7 +782,6 @@ class ThreadedSelectorProactor(SelectorProactor):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        loop = _asyncio.get_running_loop()
         await loop.run_in_executor(None, self._wait_for_completed, timeout)
         self._completed_ready.clear()
 
@@ -820,9 +834,8 @@ class UringProactor(ProactorBase):
         self._deferred_submissions: list[_UringSubmission] = []
         self._retrying_deferred_submissions = False
         self._wait_ready = threading.Event()
-        self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
         self._async_wait_thread_id: int | None = None
-        self._async_wait_event = _asyncio.Event()
+        self._async_wait_event: _asyncio.Event | None = None
         self._ring.callback = self._deliver_uring_completion
         self._service_threads = [
             threading.Thread(target=self._service_thread_main, name=f"tealetio-uring-{index}")
@@ -892,13 +905,26 @@ class UringProactor(ProactorBase):
 
         self._wait_ready.set()
         loop = self._async_wait_loop
+        event = self._async_wait_event
+        if event is None:
+            return
         if loop is None or self._async_wait_thread_id == threading.get_ident():
-            self._async_wait_event.set()
+            event.set()
             return
         try:
-            loop.call_soon_threadsafe(self._async_wait_event.set)
+            loop.call_soon_threadsafe(event.set)
         except RuntimeError:
             pass
+
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Bind this proactor to an asyncio event loop for async waits."""
+
+        if self._async_wait_loop is None:
+            super().bind_loop(loop)
+            self._async_wait_thread_id = threading.get_ident()
+            self._async_wait_event = _asyncio.Event()
+            return
+        super().bind_loop(loop)
 
     def wait(self, deadline: float | None = None) -> None:
         """Wait until completed operations are signalled."""
@@ -922,28 +948,24 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        loop = _asyncio.get_running_loop()
-        if self._async_wait_loop is None:
-            self._async_wait_loop = loop
-            self._async_wait_thread_id = threading.get_ident()
-        elif self._async_wait_loop is not loop:
-            raise RuntimeError("UringProactor.wait_async() used from a different event loop")
-        if self._async_wait_event.is_set() or self._wait_ready.is_set():
-            self._async_wait_event.clear()
+        event = self._async_wait_event
+        assert event is not None
+        if event.is_set() or self._wait_ready.is_set():
+            event.clear()
             self._wait_ready.clear()
             return
         woken = False
         try:
             if timeout is None:
-                await self._async_wait_event.wait()
+                await event.wait()
             else:
-                await compat.wait_for_timeout(self._async_wait_event.wait(), timeout)
+                await compat.wait_for_timeout(event.wait(), timeout)
             woken = True
         except _asyncio.TimeoutError:
             return
         finally:
             if woken:
-                self._async_wait_event.clear()
+                event.clear()
                 self._wait_ready.clear()
 
     def _notify_completed(self) -> None:
@@ -1316,6 +1338,7 @@ class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedule
             raise RuntimeError("AsyncProactorScheduler is already bound to a different event loop")
         self._wakeup_loop = loop
         self._time = loop.time
+        self._proactor.bind_loop(loop)
 
         def wake_loop() -> None:
             loop.call_soon_threadsafe(lambda: None)

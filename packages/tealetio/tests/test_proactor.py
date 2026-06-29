@@ -319,6 +319,7 @@ class TestSelectorProactor:
         async def run() -> float:
             proactor = SelectorProactor()
             try:
+                proactor.bind_loop(asyncio.get_running_loop())
                 start = time.monotonic()
                 await proactor.wait_async(proactor.get_time() + 0.02)
                 return time.monotonic() - start
@@ -326,6 +327,17 @@ class TestSelectorProactor:
                 proactor.close()
 
         assert asyncio.run(run()) >= 0.01
+
+    def test_wait_async_requires_bound_loop(self):
+        async def run() -> None:
+            proactor = SelectorProactor()
+            try:
+                with pytest.raises(AssertionError):
+                    await proactor.wait_async(proactor.get_time() + 0.001)
+            finally:
+                proactor.close()
+
+        asyncio.run(run())
 
     def test_set_completion_callback_replaces_callback(self):
         seen: list[str] = []
@@ -391,6 +403,7 @@ class TestSelectorProactor:
             proactor = SelectorProactor()
             reader, writer = socket.socketpair()
             try:
+                proactor.bind_loop(asyncio.get_running_loop())
                 reader.setblocking(False)
                 writer.setblocking(False)
                 operation = proactor.recv(reader, 5)
@@ -414,6 +427,7 @@ class TestSelectorProactor:
             reader, writer = socket.socketpair()
             try:
                 loop = asyncio.get_running_loop()
+                proactor.bind_loop(loop)
 
                 def add_reader_unavailable(*args: object) -> None:
                     raise AssertionError("wait_async should not register fds on the asyncio loop")
@@ -441,6 +455,7 @@ class TestSelectorProactor:
             proactor = SelectorProactor()
             reader, writer = socket.socketpair()
             try:
+                proactor.bind_loop(asyncio.get_running_loop())
                 reader.setblocking(False)
                 writer.setblocking(False)
                 operation = proactor.recv(reader, 1)
@@ -457,6 +472,7 @@ class TestSelectorProactor:
         async def run() -> None:
             proactor = SelectorProactor()
             try:
+                proactor.bind_loop(asyncio.get_running_loop())
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
                 await asyncio.sleep(0)
 
@@ -627,6 +643,17 @@ class TestThreadedSelectorProactor:
             assert thread.is_alive() is False
         finally:
             proactor.close()
+
+    def test_wait_async_requires_bound_loop(self):
+        async def run() -> None:
+            proactor = ThreadedSelectorProactor()
+            try:
+                with pytest.raises(AssertionError):
+                    await proactor.wait_async(proactor.get_time() + 0.001)
+            finally:
+                proactor.close()
+
+        asyncio.run(run())
 
     def test_async_scheduler_drives_threaded_backend(self):
         async def run() -> bytes:
@@ -819,6 +846,7 @@ class TestUringProactor:
             proactor = UringProactor(ring_factory=_FakeUringRing)
             try:
                 loop = asyncio.get_running_loop()
+                proactor.bind_loop(loop)
 
                 def call_soon_threadsafe(*args, **kwargs):
                     raise AssertionError("same-thread break_wait should set the asyncio event directly")
@@ -987,11 +1015,55 @@ class TestUringProactor:
         async def run() -> None:
             proactor = UringProactor(ring_factory=_FakeUringRing)
             try:
+                proactor.bind_loop(asyncio.get_running_loop())
+
                 await proactor.wait_async(proactor.get_time())
             finally:
                 proactor.close()
 
         asyncio.run(run())
+
+    def test_wait_async_requires_bound_loop(self):
+        async def run() -> None:
+            proactor = UringProactor(ring_factory=_FakeUringRing)
+            try:
+                with pytest.raises(AssertionError):
+                    await proactor.wait_async(proactor.get_time() + 0.001)
+            finally:
+                proactor.close()
+
+        asyncio.run(run())
+
+    def test_bind_loop_prepares_async_wait_state(self):
+        async def run() -> bool:
+            proactor = UringProactor(ring_factory=_FakeUringRing)
+            try:
+                loop = asyncio.get_running_loop()
+                assert proactor._async_wait_event is None
+
+                proactor.bind_loop(loop)
+
+                assert proactor._async_wait_loop is loop
+                assert proactor._async_wait_thread_id == threading.get_ident()
+                return proactor._async_wait_event is not None
+            finally:
+                proactor.close()
+
+        assert asyncio.run(run()) is True
+
+    def test_bind_loop_rejects_different_event_loop(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        first_loop = asyncio.new_event_loop()
+        second_loop = asyncio.new_event_loop()
+        try:
+            proactor.bind_loop(first_loop)
+
+            with pytest.raises(RuntimeError, match="already bound to a different event loop"):
+                proactor.bind_loop(second_loop)
+        finally:
+            first_loop.close()
+            second_loop.close()
+            proactor.close()
 
     def test_break_wait_wakes_proactor_waiters_without_ring_wakeup(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -1036,6 +1108,7 @@ class TestUringProactor:
             reader, writer = socket.socketpair()
             try:
                 loop = asyncio.get_running_loop()
+                proactor.bind_loop(loop)
                 call_soon_threadsafe_calls: list[object] = []
                 original_call_soon_threadsafe = loop.call_soon_threadsafe
 
@@ -1561,8 +1634,13 @@ class TestProactorScheduler:
     def test_async_proactor_scheduler_installs_loop_completion_callback(self, monkeypatch):
         async def run() -> bool:
             stored_callback = None
+            bound_loops = []
 
             class TrackingProactor(SelectorProactor):
+                def bind_loop(self, loop):
+                    bound_loops.append(loop)
+                    super().bind_loop(loop)
+
                 def set_completion_callback(self, callback):
                     nonlocal stored_callback
                     stored_callback = callback
@@ -1581,6 +1659,7 @@ class TestProactorScheduler:
 
                 monkeypatch.setattr(loop, "call_soon_threadsafe", call_soon_threadsafe)
                 scheduler.bind_loop(loop)
+                assert bound_loops == [loop]
                 assert stored_callback is not None
                 stored_callback()
                 await asyncio.sleep(0)
