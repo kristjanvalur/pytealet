@@ -386,6 +386,22 @@ static void UringApiRecvBufferPool_recycle(UringApiRecvBufferPool *pool, unsigne
 }
 
 static void UringApiCompletion_dealloc(UringApiCompletion *self) {
+    PyObject_GC_UnTrack(self);
+    (void)UringApiCompletion_clear(self);
+    PyObject_GC_Del(self);
+}
+
+static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit, void *arg) {
+    Py_VISIT(self->buffer);
+    if (self->recv_pool) {
+        Py_VISIT(self->recv_pool->ring);
+    }
+    Py_VISIT(self->user_data);
+    Py_VISIT(self->result);
+    return 0;
+}
+
+static int UringApiCompletion_clear(UringApiCompletion *self) {
     if (self->has_view) {
         PyBuffer_Release(&self->view);
         self->has_view = false;
@@ -395,11 +411,11 @@ static void UringApiCompletion_dealloc(UringApiCompletion *self) {
     self->recv_pool = NULL;
     Py_CLEAR(self->user_data);
     Py_CLEAR(self->result);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    return 0;
 }
 
 static PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data, PyObject *buffer) {
-    UringApiCompletion *completion = PyObject_New(UringApiCompletion, &UringApiCompletion_Type);
+    UringApiCompletion *completion = PyObject_GC_New(UringApiCompletion, &UringApiCompletion_Type);
     if (!completion) {
         return NULL;
     }
@@ -413,6 +429,7 @@ static PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObje
     completion->sequence = 0;
     completion->has_view = false;
     completion->has_msghdr = false;
+    PyObject_GC_Track(completion);
     return (PyObject *)completion;
 }
 
@@ -480,7 +497,7 @@ static PyObject *UringApiCompletion_new_pending_accept(PyObject *user_data) {
 }
 
 static PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source) {
-    UringApiCompletion *completion = PyObject_New(UringApiCompletion, &UringApiCompletion_Type);
+    UringApiCompletion *completion = PyObject_GC_New(UringApiCompletion, &UringApiCompletion_Type);
     if (!completion) {
         return NULL;
     }
@@ -501,6 +518,7 @@ static PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *sourc
     completion->addrlen = 0;
     completion->has_view = false;
     completion->has_msghdr = false;
+    PyObject_GC_Track(completion);
     return (PyObject *)completion;
 }
 

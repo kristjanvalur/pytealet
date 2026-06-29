@@ -1,5 +1,6 @@
 import errno
 import fcntl
+import gc
 import importlib.util
 import os
 from importlib import resources
@@ -10,8 +11,9 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
-import time
 import threading
+import time
+import weakref
 
 import pytest
 
@@ -164,6 +166,61 @@ def test_ring_accepts_setup_flags_when_probe_accepts_them():
     with uring_api.Ring(entries=2, flags=flags) as ring:
         assert ring.sq_entries > 0
         assert ring.cq_entries > 0
+
+
+def test_completion_user_data_cycles_are_collectable():
+    require_uring()
+
+    class Marker:
+        pass
+
+    reader, writer = connected_tcp_pair()
+    try:
+        ring = uring_api.Ring(entries=4)
+        try:
+            marker = Marker()
+            marker_ref = weakref.ref(marker)
+            user_data = [marker]
+            completion = ring.submit_recv(reader.fileno(), bytearray(8), user_data=user_data)
+            user_data.append(completion)
+            writer.send(b"x")
+            assert ring.wait(timeout=1.0).res == 1
+        finally:
+            ring.close()
+    finally:
+        reader.close()
+        writer.close()
+
+    del completion
+    del user_data
+    del marker
+    gc.collect()
+
+    assert marker_ref() is None
+
+
+def test_ring_callback_cycles_are_collectable():
+    require_uring()
+
+    class Marker:
+        pass
+
+    def make_cycle():
+        ring = uring_api.Ring(entries=4)
+        marker = Marker()
+        marker_ref = weakref.ref(marker)
+
+        def callback(_completion):
+            marker
+            ring.closed
+
+        ring.callback = callback
+        return marker_ref
+
+    marker_ref = make_cycle()
+    gc.collect()
+
+    assert marker_ref() is None
 
 
 def test_import_succeeds_when_native_extension_is_unavailable():

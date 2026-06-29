@@ -50,19 +50,30 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
 }
 
 static void UringApiRing_dealloc(UringApiRing *self) {
+    PyObject_GC_UnTrack(self);
     (void)UringApiRing_stop_delivery(self);
     if (self->initialized) {
         io_uring_queue_exit(&self->ring);
         self->initialized = false;
     }
-    Py_CLEAR(self->delivery_callback);
+    (void)UringApiRing_clear(self);
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
     if (self->delivery_wait_lock) {
         PyThread_free_lock(self->delivery_wait_lock);
         self->delivery_wait_lock = NULL;
     }
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    PyObject_GC_Del(self);
+}
+
+static int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
+    Py_VISIT(self->delivery_callback);
+    return 0;
+}
+
+static int UringApiRing_clear(UringApiRing *self) {
+    Py_CLEAR(self->delivery_callback);
+    return 0;
 }
 
 static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
@@ -96,5 +107,6 @@ static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) {
     self->receive_state = URING_API_RECEIVE_IDLE;
     self->delivery_stop_requested = false;
     self->delivery_active_workers = 0;
+    self->next_buf_group = 1;
     Py_RETURN_NONE;
 }

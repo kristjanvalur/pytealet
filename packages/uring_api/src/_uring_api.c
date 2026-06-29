@@ -122,8 +122,12 @@ static PyObject *UringApiSubmissionQueueFullError;
 
 static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
 static int UringApiRing_stop_delivery(UringApiRing *self);
+static int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg);
+static int UringApiRing_clear(UringApiRing *self);
 static bool delivery_should_stop(UringApiRing *self);
 static PyObject *build_capability_dict(void);
+static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit, void *arg);
+static int UringApiCompletion_clear(UringApiCompletion *self);
 
 static PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags);
 static int UringApiCapi_RingCheck(PyObject *ring);
@@ -242,7 +246,9 @@ static PyTypeObject UringApiRing_Type = {
     PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.Ring",
     .tp_basicsize = sizeof(UringApiRing),
     .tp_dealloc = (destructor)UringApiRing_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)UringApiRing_traverse,
+    .tp_clear = (inquiry)UringApiRing_clear,
     .tp_doc = "io_uring ring",
     .tp_methods = UringApiRing_methods,
     .tp_getset = UringApiRing_getset,
@@ -264,7 +270,9 @@ static PyTypeObject UringApiCompletion_Type = {
     PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.Completion",
     .tp_basicsize = sizeof(UringApiCompletion),
     .tp_dealloc = (destructor)UringApiCompletion_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)UringApiCompletion_traverse,
+    .tp_clear = (inquiry)UringApiCompletion_clear,
     .tp_doc = "io_uring completion result",
     .tp_getset = UringApiCompletion_getset,
 };
