@@ -66,6 +66,8 @@ typedef enum {
     URING_API_PENDING_ACCEPT = 6,
     URING_API_PENDING_CONNECT = 7,
     URING_API_PENDING_CANCEL = 8,
+    URING_API_PENDING_SHUTDOWN = 9,
+    URING_API_PENDING_CLOSE = 10,
 } UringApiPendingKind;
 
 typedef struct {
@@ -110,6 +112,8 @@ static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data,
                                          PyObject *user_data);
 static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, PyObject *user_data);
 static int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
+static int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data);
+static int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data);
 static int UringApiCapi_RingBreakWait(PyObject *ring);
 static PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
 static int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
@@ -198,7 +202,9 @@ static int module_add_completion_kind_constants(PyObject *module) {
         PyModule_AddIntConstant(module, "COMPLETION_KIND_RECVMSG", URING_API_PENDING_RECVMSG) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_ACCEPT", URING_API_PENDING_ACCEPT) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_CONNECT", URING_API_PENDING_CONNECT) < 0 ||
-        PyModule_AddIntConstant(module, "COMPLETION_KIND_CANCEL", URING_API_PENDING_CANCEL) < 0) {
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_CANCEL", URING_API_PENDING_CANCEL) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_SHUTDOWN", URING_API_PENDING_SHUTDOWN) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_CLOSE", URING_API_PENDING_CLOSE) < 0) {
         return -1;
     }
     return 0;
@@ -910,6 +916,8 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSubmitSendto,
     UringApiCapi_RingSubmitAccept,
     UringApiCapi_RingSubmitConnect,
+    UringApiCapi_RingSubmitShutdown,
+    UringApiCapi_RingSubmitClose,
     UringApiCapi_RingBreakWait,
     UringApiCapi_RingWait,
     UringApiCapi_RingSetCallback,
@@ -1361,6 +1369,101 @@ static PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, 
             failed = 1;
         } else {
             io_uring_prep_cancel(sqe, target_completion, 0);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+static PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "how", "user_data", NULL};
+    struct io_uring_sqe *sqe;
+    long fd;
+    long how;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ll|O", keywords, &fd, &how, &user_data)) {
+        return NULL;
+    }
+    if (fd < 0 || fd > INT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
+        return NULL;
+    }
+    if (how < 0 || how > INT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "how must fit in a non-negative int");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_SHUTDOWN, user_data, NULL);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_shutdown(sqe, (int)fd, (int)how);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+static PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "user_data", NULL};
+    struct io_uring_sqe *sqe;
+    long fd;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|O", keywords, &fd, &user_data)) {
+        return NULL;
+    }
+    if (fd < 0 || fd > INT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_CLOSE, user_data, NULL);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_close(sqe, (int)fd);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
@@ -1988,6 +2091,32 @@ static int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *addr
     return 0;
 }
 
+static int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_shutdown", "iiO", fd, how, user_data ? user_data : Py_None);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_close", "iO", fd, user_data ? user_data : Py_None);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
 static int UringApiCapi_RingBreakWait(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
@@ -2136,6 +2265,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a connect operation."},
     {"submit_cancel", _PyCFunction_CAST(UringApiRing_submit_cancel), METH_VARARGS | METH_KEYWORDS,
      "Submit an async cancel operation targeting a pending completion."},
+    {"submit_shutdown", _PyCFunction_CAST(UringApiRing_submit_shutdown), METH_VARARGS | METH_KEYWORDS,
+     "Submit a socket shutdown operation."},
+    {"submit_close", _PyCFunction_CAST(UringApiRing_submit_close), METH_VARARGS | METH_KEYWORDS,
+     "Submit a close operation for a caller-owned fd."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Interrupt a thread blocked in wait without producing a user completion."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,

@@ -24,9 +24,10 @@ with uring_api.Ring() as ring:
 ## Socket I/O
 
 `Ring` currently exposes `submit_recv()`, `submit_send()`, `submit_recvmsg()`,
-`submit_sendto()`, `submit_accept()`, `submit_connect()`, and `wait()` for
-minimal socket-oriented experiments. Each submitted operation carries a Python
-`user_data` object which comes back with its completion.
+`submit_sendto()`, `submit_accept()`, `submit_connect()`, `submit_shutdown()`,
+`submit_close()`, and `wait()` for minimal socket-oriented experiments. Each
+submitted operation carries a Python `user_data` object which comes back with
+its completion.
 
 ```python
 import socket
@@ -57,6 +58,18 @@ finally:
 For sends, `uring-api` keeps the exported buffer alive until the kernel reports
 the completion. That avoids copying the outgoing payload into an internal bytes
 object just to keep memory valid.
+
+`submit_shutdown()` is a socket operation and mirrors `shutdown(fd, how)`.
+`submit_close()` is lower-level: pass only a raw fd whose ownership has already
+been transferred away from Python objects such as `socket.socket`, for example
+with `detach()`. Otherwise, Python and the kernel may both believe they own the
+same descriptor.
+
+The local liburing headers expose more socket-related operations than this
+wrapper currently publishes. The notable gaps are `sendmsg`, multishot receive,
+socket creation, readiness polling, zero-copy send variants, and provided buffer
+management. Those are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by
+`probe()`, which remains a compact runtime availability check.
 
 If the submission queue cannot provide another entry after flushing already
 prepared work to the kernel, submit methods raise `SubmissionQueueFull`. Treat

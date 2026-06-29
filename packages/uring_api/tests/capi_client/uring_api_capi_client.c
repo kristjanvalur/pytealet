@@ -258,6 +258,45 @@ static PyObject *client_submit_connect(PyObject *module, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *client_submit_shutdown(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *user_data;
+    int fd;
+    int how;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiiO:submit_shutdown", &ring, &fd, &how, &user_data)) {
+        return NULL;
+    }
+    if (api->ring_submit_shutdown(ring, fd, how, user_data) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_submit_close(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiO:submit_close", &ring, &fd, &user_data)) {
+        return NULL;
+    }
+    if (api->ring_submit_close(ring, fd, user_data) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef client_methods[] = {
     {"metadata", (PyCFunction)client_metadata, METH_NOARGS, NULL},
     {"probe", (PyCFunction)client_probe, METH_NOARGS, NULL},
@@ -272,6 +311,8 @@ static PyMethodDef client_methods[] = {
     {"submit_sendto", _PyCFunction_CAST(client_submit_sendto), METH_VARARGS, NULL},
     {"submit_accept", _PyCFunction_CAST(client_submit_accept), METH_VARARGS, NULL},
     {"submit_connect", _PyCFunction_CAST(client_submit_connect), METH_VARARGS, NULL},
+    {"submit_shutdown", _PyCFunction_CAST(client_submit_shutdown), METH_VARARGS, NULL},
+    {"submit_close", _PyCFunction_CAST(client_submit_close), METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL},
 };
 
@@ -292,7 +333,7 @@ static int client_exec(PyObject *module) {
     if (!api->probe || !api->ring_new || !api->ring_set_c_callback || !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_result ||
         !api->ring_submit_recvmsg || !api->ring_submit_sendto || !api->ring_submit_accept ||
-        !api->ring_submit_connect) {
+        !api->ring_submit_connect || !api->ring_submit_shutdown || !api->ring_submit_close) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

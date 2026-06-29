@@ -1,5 +1,6 @@
 import errno
 import importlib.util
+import os
 from importlib import resources
 from pathlib import Path
 import shlex
@@ -81,6 +82,8 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_ACCEPT == 6
     assert uring_api.COMPLETION_KIND_CONNECT == 7
     assert uring_api.COMPLETION_KIND_CANCEL == 8
+    assert uring_api.COMPLETION_KIND_SHUTDOWN == 9
+    assert uring_api.COMPLETION_KIND_CLOSE == 10
 
 
 def test_probe_returns_structured_result():
@@ -356,6 +359,45 @@ def test_c_api_connect_operation_when_available():
         server.close()
 
 
+def test_c_api_shutdown_operation_when_available():
+    require_uring()
+
+    client_api = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            client_api.submit_shutdown(ring, writer.fileno(), socket.SHUT_WR, 242)
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        assert client_api.completion_summary(completion) == (242, 0, 0, None)
+        assert completion.kind == uring_api.COMPLETION_KIND_SHUTDOWN
+        assert reader.recv(1) == b""
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_c_api_close_operation_when_available():
+    require_uring()
+
+    client_api = build_c_api_client()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    with uring_api.Ring() as ring:
+        client_api.submit_close(ring, fd, 243)
+        completion = ring.wait(1.0)
+
+    assert completion is not None
+    assert client_api.completion_summary(completion) == (243, 0, 0, None)
+    assert completion.kind == uring_api.COMPLETION_KIND_CLOSE
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
 def test_ring_lifecycle_when_available():
     require_uring()
 
@@ -532,6 +574,51 @@ def test_ring_connect_completion_when_available():
             accepted.close()
         client.close()
         server.close()
+
+
+def test_ring_shutdown_completion_when_available():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        token = {"operation": "shutdown"}
+        with uring_api.Ring() as ring:
+            pending = ring.submit_shutdown(writer.fileno(), socket.SHUT_WR, token)
+            completion = ring.wait(1.0)
+
+        assert completion is pending
+        assert completion.user_data is token
+        assert completion.kind == uring_api.COMPLETION_KIND_SHUTDOWN
+        assert completion.res == 0
+        assert completion.flags == 0
+        assert completion.result is None
+        assert reader.recv(1) == b""
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_close_completion_when_available():
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    token = {"operation": "close"}
+    with uring_api.Ring() as ring:
+        pending = ring.submit_close(fd, token)
+        completion = ring.wait(1.0)
+
+    assert completion is pending
+    assert completion.user_data is token
+    assert completion.kind == uring_api.COMPLETION_KIND_CLOSE
+    assert completion.res == 0
+    assert completion.flags == 0
+    assert completion.result is None
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
 
 
 def test_ring_sendto_completion_when_available():

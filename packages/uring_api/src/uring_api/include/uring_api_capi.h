@@ -49,6 +49,8 @@ typedef struct UringApi_CAPI {
     int (*ring_submit_sendto)(PyObject *ring, int fd, PyObject *data, PyObject *address, PyObject *user_data);
     int (*ring_submit_accept)(PyObject *ring, int fd, PyObject *user_data);
     int (*ring_submit_connect)(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
+    int (*ring_submit_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
+    int (*ring_submit_close)(PyObject *ring, int fd, PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
@@ -66,7 +68,7 @@ typedef struct UringApi_CAPI {
     int (*completion_flags)(PyObject *completion, unsigned int *value);
     PyObject *(*completion_result)(PyObject *completion);
 
-    void *reserved[12];
+    void *reserved[10];
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */
