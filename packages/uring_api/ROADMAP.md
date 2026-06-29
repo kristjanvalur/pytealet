@@ -19,6 +19,8 @@ The wrapper currently exposes these socket-oriented operations:
   copying selected provided buffers into Python `bytes`
 - `submit_recvmsg()` / `IORING_OP_RECVMSG`
 - `submit_send()` / `IORING_OP_SEND`
+- `submit_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
+  until the internal `IORING_CQE_F_NOTIF` notification CQE arrives
 - `submit_sendto()` / `IORING_OP_SEND`
 - `submit_sendmsg()` / `IORING_OP_SENDMSG`
 - `submit_accept()` / `IORING_OP_ACCEPT`
@@ -30,9 +32,10 @@ The wrapper currently exposes these socket-oriented operations:
 - `submit_cancel()` / `IORING_OP_ASYNC_CANCEL`, for pending request handles
 
 The local liburing headers also expose socket-relevant helpers that are not yet
-wrapped: `io_uring_prep_poll_add()` / `io_uring_prep_poll_remove()`, zero-copy
-send helpers, and public provided-buffer management. `poll_*` and provided
-buffers are not socket-only, but they matter for high-throughput socket designs.
+wrapped: `io_uring_prep_poll_add()` / `io_uring_prep_poll_remove()`, fixed-buffer
+and `sendmsg` zero-copy send helpers, and public provided-buffer management.
+`poll_*` and provided buffers are not socket-only, but they matter for
+high-throughput socket designs.
 
 ## Kernel Support Notes
 
@@ -60,6 +63,14 @@ as plain one-shot operations:
   provided-buffer support. Receive/send polling hints such as
   `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY` are available
   since kernel 5.19.
+- `submit_send_zc()` exposes basic `io_uring_prep_send_zc()`. The normal
+  operation CQE is delivered to Python; the separate `IORING_CQE_F_NOTIF`
+  notification CQE is consumed internally because it only closes the retained
+  buffer-lifetime window. The fixed-buffer variant does not fit the current
+  caller-owned buffer model, and `sendmsg_zc` remains a separate future surface.
+  `probe()` includes a targeted `"IORING_OP_SEND_ZC"` runtime capability entry
+  based on a small TCP loopback send because support varies by kernel and socket
+  family.
 - `submit_socket()` uses `IORING_OP_SOCKET`, which is a newer socket opcode even
   though the installed man page does not give a precise kernel version. `probe()`
   now includes a targeted `"IORING_OP_SOCKET"` runtime capability entry by

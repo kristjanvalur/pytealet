@@ -284,6 +284,28 @@ static PyObject *client_submit_sendmsg(PyObject *module, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *client_submit_send_zc(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *user_data;
+    int fd;
+    unsigned int flags;
+    unsigned int zc_flags;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOIIO:submit_send_zc", &ring, &fd, &data, &flags, &zc_flags, &user_data)) {
+        return NULL;
+    }
+    if (api->ring_submit_send_zc(ring, fd, data, flags, zc_flags, user_data) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *client_submit_accept(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
@@ -418,6 +440,7 @@ static PyMethodDef client_methods[] = {
     {"submit_recvmsg", _PyCFunction_CAST(client_submit_recvmsg), METH_VARARGS, NULL},
     {"submit_sendto", _PyCFunction_CAST(client_submit_sendto), METH_VARARGS, NULL},
     {"submit_sendmsg", _PyCFunction_CAST(client_submit_sendmsg), METH_VARARGS, NULL},
+    {"submit_send_zc", _PyCFunction_CAST(client_submit_send_zc), METH_VARARGS, NULL},
     {"submit_accept", _PyCFunction_CAST(client_submit_accept), METH_VARARGS, NULL},
     {"submit_accept_multishot", _PyCFunction_CAST(client_submit_accept_multishot), METH_VARARGS, NULL},
     {"submit_connect", _PyCFunction_CAST(client_submit_connect), METH_VARARGS, NULL},
@@ -444,9 +467,9 @@ static int client_exec(PyObject *module) {
     if (!api->probe || !api->ring_new || !api->ring_set_c_callback || !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_result ||
         !api->completion_sequence || !api->ring_submit_recv_multishot || !api->ring_submit_recvmsg ||
-        !api->ring_submit_sendto || !api->ring_submit_accept || !api->ring_submit_accept_multishot ||
-        !api->ring_submit_connect || !api->ring_submit_shutdown || !api->ring_submit_close ||
-        !api->ring_submit_sendmsg || !api->ring_submit_socket) {
+        !api->ring_submit_sendto || !api->ring_submit_send_zc || !api->ring_submit_accept ||
+        !api->ring_submit_accept_multishot || !api->ring_submit_connect || !api->ring_submit_shutdown ||
+        !api->ring_submit_close || !api->ring_submit_sendmsg || !api->ring_submit_socket) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

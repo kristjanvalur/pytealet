@@ -82,6 +82,7 @@ typedef enum {
     URING_API_PENDING_SENDMSG = 11,
     URING_API_PENDING_SOCKET = 12,
     URING_API_PENDING_RECV_MULTISHOT = 13,
+    URING_API_PENDING_SEND_ZC = 14,
 } UringApiPendingKind;
 
 typedef struct {
@@ -126,6 +127,8 @@ static int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned
                                                 unsigned int buffer_count, unsigned int flags, PyObject *user_data);
 static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                        PyObject *user_data);
+static int UringApiCapi_RingSubmitSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                         unsigned int zc_flags, PyObject *user_data);
 static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
 static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address,
                                          unsigned int flags, PyObject *user_data);
@@ -213,7 +216,16 @@ static int module_add_setup_flag_constants(PyObject *module) {
 }
 
 static int module_add_cqe_flag_constants(PyObject *module) {
-    if (module_add_uint64_constant(module, "IORING_CQE_F_MORE", IORING_CQE_F_MORE) < 0) {
+    if (module_add_uint64_constant(module, "IORING_CQE_F_MORE", IORING_CQE_F_MORE) < 0 ||
+        module_add_uint64_constant(module, "IORING_CQE_F_NOTIF", IORING_CQE_F_NOTIF) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int module_add_recvsend_flag_constants(PyObject *module) {
+    if (module_add_uint64_constant(module, "IORING_SEND_ZC_REPORT_USAGE", IORING_SEND_ZC_REPORT_USAGE) < 0 ||
+        module_add_uint64_constant(module, "IORING_NOTIF_USAGE_ZC_COPIED", IORING_NOTIF_USAGE_ZC_COPIED) < 0) {
         return -1;
     }
     return 0;
@@ -232,7 +244,8 @@ static int module_add_completion_kind_constants(PyObject *module) {
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SHUTDOWN", URING_API_PENDING_SHUTDOWN) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_CLOSE", URING_API_PENDING_CLOSE) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SENDMSG", URING_API_PENDING_SENDMSG) < 0 ||
-        PyModule_AddIntConstant(module, "COMPLETION_KIND_SOCKET", URING_API_PENDING_SOCKET) < 0) {
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_SOCKET", URING_API_PENDING_SOCKET) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_SEND_ZC", URING_API_PENDING_SEND_ZC) < 0) {
         return -1;
     }
     return 0;
@@ -650,6 +663,14 @@ static void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
     self->recv_pool = NULL;
 }
 
+static bool UringApiCompletion_should_clear_pending_state(UringApiCompletion *self, int res, unsigned int flags) {
+    /* send_zc success has two CQEs: the operation result, then a NOTIF CQE that closes the buffer lifetime window. */
+    if (self->kind == URING_API_PENDING_SEND_ZC && res >= 0 && !(flags & IORING_CQE_F_NOTIF)) {
+        return false;
+    }
+    return !(flags & IORING_CQE_F_MORE);
+}
+
 static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *self, int res, unsigned int flags) {
     unsigned int buffer_id;
     PyObject *payload;
@@ -698,8 +719,8 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT) {
         payload = UringApiCompletion_recv_multishot_payload(self, res, flags);
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
-                     self->kind == URING_API_PENDING_SENDTO || self->kind == URING_API_PENDING_SENDMSG ||
-                     self->kind == URING_API_PENDING_SOCKET)) {
+                     self->kind == URING_API_PENDING_SEND_ZC || self->kind == URING_API_PENDING_SENDTO ||
+                     self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET)) {
         payload = PyLong_FromLong(res);
     } else if (res >= 0 && self->kind == URING_API_PENDING_RECVMSG) {
         self->addrlen = self->msg.msg_namelen;
@@ -718,7 +739,7 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
         return -1;
     }
     Py_XSETREF(self->result, payload);
-    if (!(flags & IORING_CQE_F_MORE)) {
+    if (UringApiCompletion_should_clear_pending_state(self, res, flags)) {
         UringApiCompletion_clear_pending_state(self);
     }
     return 0;
@@ -1199,6 +1220,109 @@ cleanup:
     return result;
 }
 
+static PyObject *uring_api_probe_send_zc_impl(void) {
+    struct io_uring ring;
+    struct io_uring_sqe *sqe;
+    struct io_uring_cqe *cqe = NULL;
+    struct __kernel_timespec timeout;
+    struct sockaddr_in listen_addr;
+    socklen_t listen_addrlen = sizeof(listen_addr);
+    int server_fd = -1;
+    int client_fd = -1;
+    int accepted_fd = -1;
+    int optval = 1;
+    int ret;
+    char payload = 'x';
+    PyObject *result;
+
+    memset(&ring, 0, sizeof(ring));
+    ret = io_uring_queue_init(2, &ring, 0);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        return build_feature_probe_result(false, errnum, strerror(errnum));
+    }
+
+    server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (server_fd < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+    (void)setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
+    memset(&listen_addr, 0, sizeof(listen_addr));
+    listen_addr.sin_family = AF_INET;
+    listen_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    listen_addr.sin_port = 0;
+    if (bind(server_fd, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0 || listen(server_fd, 1) < 0 ||
+        getsockname(server_fd, (struct sockaddr *)&listen_addr, &listen_addrlen) < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+
+    client_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (client_fd < 0 || connect(client_fd, (struct sockaddr *)&listen_addr, listen_addrlen) < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+    accepted_fd = accept(server_fd, NULL, NULL);
+    if (accepted_fd < 0) {
+        result = build_feature_probe_result(false, errno, strerror(errno));
+        goto cleanup;
+    }
+
+    sqe = io_uring_get_sqe(&ring);
+    if (!sqe) {
+        result = build_feature_probe_result(false, EBUSY, "no submission queue entry available for probe");
+        goto cleanup;
+    }
+    io_uring_prep_send_zc(sqe, client_fd, &payload, sizeof(payload), 0, 0);
+    io_uring_sqe_set_data64(sqe, 1);
+    ret = io_uring_submit(&ring);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        goto cleanup;
+    }
+
+    timeout.tv_sec = 1;
+    timeout.tv_nsec = 0;
+    ret = io_uring_wait_cqe_timeout(&ring, &cqe, &timeout);
+    if (ret < 0) {
+        int errnum = normalize_ret_errno(ret);
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+        goto cleanup;
+    }
+    if (!cqe) {
+        result = build_feature_probe_result(false, ETIMEDOUT, "send_zc probe timed out");
+        goto cleanup;
+    }
+    if (cqe->res < 0) {
+        int errnum = -cqe->res;
+        result = build_feature_probe_result(false, errnum, strerror(errnum));
+    } else if (cqe->res == (int)sizeof(payload)) {
+        result = build_feature_probe_result(true, 0, NULL);
+    } else {
+        result = build_feature_probe_result(false, EIO, "send_zc probe returned an unexpected length");
+    }
+    io_uring_cqe_seen(&ring, cqe);
+    cqe = NULL;
+
+cleanup:
+    if (cqe) {
+        io_uring_cqe_seen(&ring, cqe);
+    }
+    timeout.tv_sec = 0;
+    timeout.tv_nsec = 1000000;
+    if (io_uring_wait_cqe_timeout(&ring, &cqe, &timeout) == 0 && cqe) {
+        io_uring_cqe_seen(&ring, cqe);
+    }
+    close_if_open(&accepted_fd);
+    close_if_open(&client_fd);
+    close_if_open(&server_fd);
+    io_uring_queue_exit(&ring);
+    return result;
+}
+
 static int add_bool_from_feature_probe(PyObject *capabilities, const char *name, PyObject *probe_result) {
     PyObject *available;
     int truth;
@@ -1259,6 +1383,17 @@ static PyObject *build_capability_dict(void) {
         return NULL;
     }
     Py_DECREF(probe_result);
+    probe_result = uring_api_probe_send_zc_impl();
+    if (!probe_result) {
+        Py_DECREF(capabilities);
+        return NULL;
+    }
+    if (add_bool_from_feature_probe(capabilities, "IORING_OP_SEND_ZC", probe_result) < 0) {
+        Py_DECREF(probe_result);
+        Py_DECREF(capabilities);
+        return NULL;
+    }
+    Py_DECREF(probe_result);
     return capabilities;
 }
 
@@ -1285,6 +1420,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSubmitRecv,
     UringApiCapi_RingSubmitRecvMultishot,
     UringApiCapi_RingSubmitSend,
+    UringApiCapi_RingSubmitSendZc,
     UringApiCapi_RingSubmitRecvmsg,
     UringApiCapi_RingSubmitSendto,
     UringApiCapi_RingSubmitSendmsg,
@@ -1569,6 +1705,55 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
             failed = 1;
         } else {
             io_uring_prep_send(sqe, (int)fd, view.buf, (size_t)view.len, (int)flags);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+static PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "data", "user_data", "flags", "zc_flags", NULL};
+    struct io_uring_sqe *sqe;
+    Py_buffer view;
+    long fd;
+    unsigned int flags = 0;
+    unsigned int zc_flags = 0;
+    PyObject *user_data = Py_None;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|OII", keywords, &fd, &view, &user_data, &flags, &zc_flags)) {
+        return NULL;
+    }
+    if (fd < 0 || fd > INT_MAX) {
+        PyBuffer_Release(&view);
+        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending_view(URING_API_PENDING_SEND_ZC, user_data, &view);
+    if (!completion) {
+        PyBuffer_Release(&view);
+        return NULL;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_send_zc(sqe, (int)fd, view.buf, (size_t)view.len, (int)flags, zc_flags);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
@@ -2198,21 +2383,38 @@ static PyObject *build_cqe_result(UringApiRing *self, struct io_uring_cqe *cqe) 
     int completion_result;
 
     if (!completion) {
+        PyErr_SetString(PyExc_SystemError, "io_uring CQE is missing its completion object");
+        return NULL;
+    }
+    /* the zc notification is not a user-visible result; it only releases resources retained for the send. */
+    if (completion->kind == URING_API_PENDING_SEND_ZC && (flags & IORING_CQE_F_NOTIF)) {
+        UringApiCompletion_clear_pending_state(completion);
+        Py_DECREF(completion);
         Py_RETURN_NONE;
     }
     completion_result = UringApiCompletion_complete(completion, res, flags);
+    /* negative means we failed while converting the CQE into Python-visible completion state. */
     if (completion_result < 0) {
         if (!(flags & IORING_CQE_F_MORE)) {
             Py_DECREF(completion);
         }
         return NULL;
     }
+    /* positive means the CQE was handled internally, such as a wake completion for break_wait(). */
     if (completion_result > 0) {
         if (!(flags & IORING_CQE_F_MORE)) {
             Py_DECREF(completion);
         }
         Py_RETURN_NONE;
     }
+    /* the zc operation CQE is the real result. Successful sends keep the internal ref until the NOTIF CQE. */
+    if (completion->kind == URING_API_PENDING_SEND_ZC) {
+        if (res >= 0) {
+            return Py_NewRef(completion);
+        }
+        return (PyObject *)completion;
+    }
+    /* multishot CQEs with MORE are intermediate results, so return copies while the original remains armed. */
     if (flags & IORING_CQE_F_MORE) {
         delivered = UringApiCompletion_new_delivered_copy(completion);
         if (!delivered) {
@@ -2661,6 +2863,21 @@ static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, u
     return 0;
 }
 
+static int UringApiCapi_RingSubmitSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                         unsigned int zc_flags, PyObject *user_data) {
+    PyObject *result;
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = PyObject_CallMethod(ring, "submit_send_zc", "iOOII", fd, data, user_data ? user_data : Py_None, flags,
+                                 zc_flags);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
 static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
@@ -2938,6 +3155,8 @@ static PyMethodDef UringApiRing_methods[] = {
      METH_VARARGS | METH_KEYWORDS, "Submit a multishot recv operation."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_VARARGS | METH_KEYWORDS,
      "Submit a send operation."},
+    {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_VARARGS | METH_KEYWORDS,
+     "Submit a zero-copy send operation."},
     {"submit_recvmsg", _PyCFunction_CAST(UringApiRing_submit_recvmsg), METH_VARARGS | METH_KEYWORDS,
      "Submit a recvmsg operation."},
     {"submit_sendto", _PyCFunction_CAST(UringApiRing_submit_sendto), METH_VARARGS | METH_KEYWORDS,
@@ -3042,7 +3261,7 @@ static int uring_api_exec(PyObject *module) {
         return -1;
     }
     if (module_add_setup_flag_constants(module) < 0 || module_add_cqe_flag_constants(module) < 0 ||
-        module_add_completion_kind_constants(module) < 0) {
+        module_add_recvsend_flag_constants(module) < 0 || module_add_completion_kind_constants(module) < 0) {
         return -1;
     }
 

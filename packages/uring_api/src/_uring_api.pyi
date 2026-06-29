@@ -15,9 +15,13 @@ IORING_SETUP_TASKRUN_FLAG: int
 IORING_SETUP_SINGLE_ISSUER: int
 IORING_SETUP_DEFER_TASKRUN: int
 IORING_CQE_F_MORE: int
+IORING_CQE_F_NOTIF: int
+IORING_SEND_ZC_REPORT_USAGE: int
+IORING_NOTIF_USAGE_ZC_COPIED: int
 COMPLETION_KIND_RECV: int
 COMPLETION_KIND_RECV_MULTISHOT: int
 COMPLETION_KIND_SEND: int
+COMPLETION_KIND_SEND_ZC: int
 COMPLETION_KIND_WAKE: int
 COMPLETION_KIND_SENDTO: int
 COMPLETION_KIND_RECVMSG: int
@@ -73,6 +77,9 @@ class Ring:
         self, fd: int, buffer_size: int, buffer_count: int, user_data: object = None, flags: int = 0
     ) -> Completion: ...
     def submit_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion: ...
+    def submit_send_zc(
+        self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+    ) -> Completion: ...
     def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> Completion: ...
     def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0) -> Completion: ...
     def submit_sendmsg(

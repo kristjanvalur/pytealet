@@ -23,6 +23,14 @@ def require_uring():
         pytest.skip("io_uring is not available")
 
 
+def require_uring_capability(name: str) -> None:
+    probe = uring_api.probe()
+    if not probe:
+        pytest.skip("io_uring is not available")
+    if not probe.get(name, False):
+        pytest.skip(f"{name} is not supported")
+
+
 def wait_until_running(ring: uring_api.Ring) -> None:
     deadline = time.monotonic() + 1.0
     while not ring.running and time.monotonic() < deadline:
@@ -36,6 +44,22 @@ def connect_to_listener(server: socket.socket) -> socket.socket:
     err = client.connect_ex(server.getsockname())
     assert err in {0, errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY}
     return client
+
+
+def connected_tcp_pair() -> tuple[socket.socket, socket.socket]:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        writer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        writer.connect(server.getsockname())
+        reader, _address = server.accept()
+        reader.setblocking(False)
+        writer.setblocking(False)
+        return reader, writer
+    finally:
+        server.close()
 
 
 def test_package_is_marked_as_typed():
@@ -71,6 +95,12 @@ def test_native_module_exports_setup_flag_constants():
 
 def test_native_module_exports_cqe_flag_constants():
     assert uring_api.IORING_CQE_F_MORE == 1 << 1
+    assert uring_api.IORING_CQE_F_NOTIF == 1 << 3
+
+
+def test_native_module_exports_zero_copy_send_constants():
+    assert uring_api.IORING_SEND_ZC_REPORT_USAGE == 1 << 3
+    assert uring_api.IORING_NOTIF_USAGE_ZC_COPIED == 1 << 31
 
 
 def test_native_module_exports_completion_kind_constants():
@@ -87,15 +117,23 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_SENDMSG == 11
     assert uring_api.COMPLETION_KIND_SOCKET == 12
     assert uring_api.COMPLETION_KIND_RECV_MULTISHOT == 13
+    assert uring_api.COMPLETION_KIND_SEND_ZC == 14
 
 
 def test_probe_returns_structured_result():
     probe = uring_api.probe()
 
-    assert set(probe) == {"available", "IORING_ACCEPT_MULTISHOT", "IORING_RECV_MULTISHOT", "IORING_OP_SOCKET"}
+    assert set(probe) == {
+        "available",
+        "IORING_ACCEPT_MULTISHOT",
+        "IORING_RECV_MULTISHOT",
+        "IORING_OP_SEND_ZC",
+        "IORING_OP_SOCKET",
+    }
     assert probe["available"] is True
     assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
     assert isinstance(probe["IORING_RECV_MULTISHOT"], bool)
+    assert isinstance(probe["IORING_OP_SEND_ZC"], bool)
     assert isinstance(probe["IORING_OP_SOCKET"], bool)
 
 
@@ -329,6 +367,28 @@ def test_c_api_sendmsg_operation_when_available():
     finally:
         sender.close()
         receiver.close()
+
+
+def test_c_api_send_zc_operation_when_available():
+    require_uring_capability("IORING_OP_SEND_ZC")
+
+    client = build_c_api_client()
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring() as ring:
+            client.submit_send_zc(ring, writer.fileno(), b"hello", 0, 0, 246)
+            completion = ring.wait(1.0)
+            notification = ring.wait(1.0)
+
+        assert completion is not None
+        assert client.completion_summary(completion) == (246, 5, completion.flags, 5)
+        assert completion.kind == uring_api.COMPLETION_KIND_SEND_ZC
+        assert not (completion.flags & uring_api.IORING_CQE_F_NOTIF)
+        assert notification is None
+        assert reader.recv(5) == b"hello"
+    finally:
+        reader.close()
+        writer.close()
 
 
 def test_c_api_socket_operation_when_available():
@@ -698,6 +758,31 @@ def test_ring_send_completion_when_available():
         assert completion.user_data is token
         assert completion.res == 5
         assert completion.result == 5
+        assert reader.recv(5) == b"hello"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_send_zc_completion_when_available():
+    require_uring_capability("IORING_OP_SEND_ZC")
+
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring() as ring:
+            token = {"operation": "send_zc"}
+            pending = ring.submit_send_zc(writer.fileno(), b"hello", token)
+
+            completion = ring.wait(1.0)
+            notification = ring.wait(1.0)
+
+        assert completion is pending
+        assert completion.user_data is token
+        assert completion.kind == uring_api.COMPLETION_KIND_SEND_ZC
+        assert completion.res == 5
+        assert completion.result == 5
+        assert not (completion.flags & uring_api.IORING_CQE_F_NOTIF)
+        assert notification is None
         assert reader.recv(5) == b"hello"
     finally:
         reader.close()

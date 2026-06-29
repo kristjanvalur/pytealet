@@ -20,6 +20,7 @@ try:
     from _uring_api import COMPLETION_KIND_RECV_MULTISHOT as COMPLETION_KIND_RECV_MULTISHOT
     from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
+    from _uring_api import COMPLETION_KIND_SEND_ZC as COMPLETION_KIND_SEND_ZC
     from _uring_api import COMPLETION_KIND_SENDMSG as COMPLETION_KIND_SENDMSG
     from _uring_api import COMPLETION_KIND_SENDTO as COMPLETION_KIND_SENDTO
     from _uring_api import COMPLETION_KIND_SHUTDOWN as COMPLETION_KIND_SHUTDOWN
@@ -27,6 +28,9 @@ try:
     from _uring_api import COMPLETION_KIND_WAKE as COMPLETION_KIND_WAKE
     from _uring_api import Completion as Completion
     from _uring_api import IORING_CQE_F_MORE as IORING_CQE_F_MORE
+    from _uring_api import IORING_CQE_F_NOTIF as IORING_CQE_F_NOTIF
+    from _uring_api import IORING_NOTIF_USAGE_ZC_COPIED as IORING_NOTIF_USAGE_ZC_COPIED
+    from _uring_api import IORING_SEND_ZC_REPORT_USAGE as IORING_SEND_ZC_REPORT_USAGE
     from _uring_api import IORING_SETUP_CLAMP as IORING_SETUP_CLAMP
     from _uring_api import IORING_SETUP_COOP_TASKRUN as IORING_SETUP_COOP_TASKRUN
     from _uring_api import IORING_SETUP_CQSIZE as IORING_SETUP_CQSIZE
@@ -57,6 +61,7 @@ except ImportError as exc:
     COMPLETION_KIND_SENDMSG = 11
     COMPLETION_KIND_SOCKET = 12
     COMPLETION_KIND_RECV_MULTISHOT = 13
+    COMPLETION_KIND_SEND_ZC = 14
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -64,6 +69,9 @@ except ImportError as exc:
     IORING_SETUP_SINGLE_ISSUER = 1 << 12
     IORING_SETUP_DEFER_TASKRUN = 1 << 13
     IORING_CQE_F_MORE = 1 << 1
+    IORING_CQE_F_NOTIF = 1 << 3
+    IORING_SEND_ZC_REPORT_USAGE = 1 << 3
+    IORING_NOTIF_USAGE_ZC_COPIED = 1 << 31
     __compiled_liburing_version__ = "unavailable"
     __compiled_liburing_version_info__ = (0, 0)
     __liburing_version__ = "unavailable"
@@ -137,6 +145,11 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_send_zc(
+            self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> Completion:
@@ -233,6 +246,7 @@ __all__ = [
     "COMPLETION_KIND_RECV_MULTISHOT",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
+    "COMPLETION_KIND_SEND_ZC",
     "COMPLETION_KIND_SENDMSG",
     "COMPLETION_KIND_SENDTO",
     "COMPLETION_KIND_SHUTDOWN",
@@ -240,6 +254,9 @@ __all__ = [
     "COMPLETION_KIND_WAKE",
     "Completion",
     "IORING_CQE_F_MORE",
+    "IORING_CQE_F_NOTIF",
+    "IORING_NOTIF_USAGE_ZC_COPIED",
+    "IORING_SEND_ZC_REPORT_USAGE",
     "IORING_SETUP_CLAMP",
     "IORING_SETUP_COOP_TASKRUN",
     "IORING_SETUP_CQSIZE",
