@@ -3,8 +3,9 @@
 
 /* private implementation header; not part of the public C API. */
 
-#include "uring_api_capi.h"
 #include "uring_api_common.h"
+
+#include "uring_api_capi.h"
 
 PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags);
 int UringApiCapi_RingCheck(PyObject *ring);

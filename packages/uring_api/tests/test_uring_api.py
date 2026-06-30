@@ -90,7 +90,9 @@ def test_public_capi_header_compiles_without_liburing_headers():
         pytest.skip("C compiler is not available")
 
     include_dir = Path(uring_api.get_include())
-    python_include = sysconfig.get_paths()["include"]
+    python_include = Path(sysconfig.get_paths()["include"])
+    if not python_include.joinpath("Python.h").is_file():
+        pytest.skip("Python development headers are not available")
     source = '#include "uring_api_capi.h"\nstatic const unsigned int abi = URING_API_CAPI_ABI_VERSION;\n'
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -98,7 +100,7 @@ def test_public_capi_header_compiles_without_liburing_headers():
         object_path = Path(temp_dir) / "check_uring_api_capi.o"
         source_path.write_text(source, encoding="utf-8")
         subprocess.run(
-            [*cc_argv, "-c", str(source_path), "-o", str(object_path), "-I", str(include_dir), "-I", python_include],
+            [*cc_argv, "-c", str(source_path), "-o", str(object_path), "-I", str(include_dir), "-I", str(python_include)],
             check=True,
         )
 
