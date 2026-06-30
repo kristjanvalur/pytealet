@@ -833,7 +833,14 @@ def test_ring_recv_buf_eof_returns_empty_bytes_when_available():
         assert completion is pending
         assert completion.kind == uring_api.COMPLETION_KIND_RECV_BUF
         assert completion.res == 0
-        assert completion.result == b""
+        assert isinstance(completion.result, uring_api.BufView)
+        assert completion.result.length == 0
+        assert not completion.result
+        view = memoryview(completion.result)
+        try:
+            assert bytes(view) == b""
+        finally:
+            del view
     finally:
         reader.close()
         writer.close()
@@ -924,6 +931,21 @@ def test_buf_view_rejects_direct_instantiation():
 
     with pytest.raises(TypeError, match="cannot be instantiated directly"):
         uring_api.BufView()
+
+
+def test_buf_view_zero_length_is_falsy():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        buf_group = ring.create_buf_group(16, 4)
+        buf_view = ring.create_buf_view(buf_group, 0, 0)
+        assert buf_view.length == 0
+        assert not buf_view
+        view = memoryview(buf_view)
+        try:
+            assert bytes(view) == b""
+        finally:
+            del view
 
 
 def test_buf_view_memoryview_recycles_on_last_release():
@@ -1077,7 +1099,9 @@ def test_ring_recv_multishot_buf_eof_returns_empty_bytes_when_available():
         assert final.user_data is token
         assert final.sequence == 1
         assert final.res == 0
-        assert final.result == b""
+        assert isinstance(final.result, uring_api.BufView)
+        assert final.result.length == 0
+        assert not final.result
         assert not (final.flags & uring_api.IORING_CQE_F_MORE)
     finally:
         reader.close()

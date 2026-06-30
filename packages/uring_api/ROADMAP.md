@@ -150,9 +150,11 @@ Python proactor.
 
 Caller-owned provided-buffer receive is also implemented. `Ring.create_buf_group()`
 registers a provided-buffer ring, and `submit_recv_buf()` /
-`submit_recv_multishot_buf()` deliver leased read-only `BufView` objects as
-completion results. `BufView` keeps the selected buffer alive until the last
-exported `memoryview` is released, then recycles the buffer back to the ring:
+`submit_recv_multishot_buf()` deliver read-only `BufView` objects as completion
+results. Non-empty views keep the selected buffer alive until the last exported
+`memoryview` is released, then recycle the buffer back to the ring. EOF
+(`res == 0`) also returns an empty `BufView` with `length == 0` rather than
+`bytes`:
 
 ```python
 buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)

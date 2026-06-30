@@ -107,6 +107,9 @@ except ImportError as exc:
         buf_group: BufGroup | None
         recycled: bool
 
+        def __bool__(self) -> bool:
+            return self.length > 0
+
     class Ring:  # type: ignore[no-redef]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error

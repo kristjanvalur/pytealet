@@ -218,15 +218,15 @@ static PyObject *UringApiCompletion_recv_multishot_buf_payload(UringApiCompletio
         UringApiCompletion_recycle_selected_buffer(self, flags);
         Py_RETURN_NONE;
     }
+    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_RuntimeError, "provided-buffer recv completion has no buffer group");
+        return NULL;
+    }
     if (res == 0 && !(flags & IORING_CQE_F_BUFFER)) {
-        return PyBytes_FromStringAndSize("", 0);
+        return UringApiBufView_create_empty(self->buf_group);
     }
     if (!(flags & IORING_CQE_F_BUFFER)) {
         PyErr_SetString(PyExc_RuntimeError, "provided-buffer recv completion did not select a buffer");
-        return NULL;
-    }
-    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
-        PyErr_SetString(PyExc_RuntimeError, "provided-buffer recv completion has no buffer group");
         return NULL;
     }
     buffer_id = flags >> IORING_CQE_BUFFER_SHIFT;

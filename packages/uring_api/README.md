@@ -106,9 +106,11 @@ finally:
 ```
 
 `BufView` tracks active exported memoryviews and recycles the selected buffer
-back to the ring when the last export is released. `BufGroup` and `BufView`
-cannot be constructed directly; use `Ring.create_buf_group()` and let receive
-completions create the views.
+back to the ring when the last export is released. Provided-buffer completions
+always return `BufView`, including EOF (`completion.res == 0`), where the view
+has `length == 0` and is falsy. Detect stream end from `completion.res`, not
+from the result type. `BufGroup` and `BufView` cannot be constructed directly;
+use `Ring.create_buf_group()` and let receive completions create the views.
 
 The local liburing headers expose more socket-adjacent operations than this
 wrapper publishes, but those are intentionally outside the core Python-oriented
