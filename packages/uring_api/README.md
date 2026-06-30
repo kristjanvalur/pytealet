@@ -178,7 +178,10 @@ if not uring_api.is_available():
     raise RuntimeError("io_uring is not available in this environment")
 ```
 
-`probe()` creates a tiny temporary ring and closes it right away. If that fails,
+`probe()` creates a tiny temporary ring and closes it right away to test ring
+creation with the requested `entries` and `flags`. Targeted capability probes run
+once per process and are cached in static variables; later `probe()` calls reuse
+those results. If ring creation fails,
 it returns an empty dictionary. If it succeeds, the dictionary contains
 `"available": True` plus named optional capabilities such as
 `"IORING_ACCEPT_MULTISHOT"`, `"IORING_POLL_MULTISHOT"`, `"IORING_RECV_MULTISHOT"`, and

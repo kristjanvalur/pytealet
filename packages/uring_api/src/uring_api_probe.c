@@ -10,6 +10,22 @@
 
 static PyObject *build_capability_dict(void);
 
+/*
+ * Process-lifetime caches for probe work. Capability probes are expensive and do
+ * not depend on the caller's entries/flags, so run them once. Default
+ * availability (entries=2, flags=0) is cached separately because setup-flag
+ * probes still need a fresh queue_init attempt each time.
+ */
+static int capability_cache_ready = 0;
+static int capability_accept_multishot = 0;
+static int capability_poll_multishot = 0;
+static int capability_recv_multishot = 0;
+static int capability_socket = 0;
+static int capability_sendmsg_zc = 0;
+
+static int default_availability_cached = 0;
+static int default_availability = 0;
+
 static PyObject *build_probe_result(bool available) {
     PyObject *result;
 
@@ -28,14 +44,13 @@ static PyObject *build_probe_result(bool available) {
     return result;
 }
 
-static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) {
+static int probe_ring_availability(unsigned int entries, unsigned int flags) {
     struct io_uring ring;
     struct io_uring_params params;
     int ret;
 
-    if (entries == 0) {
-        PyErr_SetString(PyExc_ValueError, "entries must be between 1 and UINT_MAX");
-        return NULL;
+    if (entries == 2 && flags == 0 && default_availability_cached) {
+        return default_availability;
     }
 
     memset(&ring, 0, sizeof(ring));
@@ -48,11 +63,24 @@ static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) 
     Py_END_ALLOW_THREADS;
 
     if (ret < 0) {
-        return build_probe_result(false);
+        return 0;
     }
 
     io_uring_queue_exit(&ring);
-    return build_probe_result(true);
+    if (entries == 2 && flags == 0) {
+        default_availability_cached = 1;
+        default_availability = 1;
+    }
+    return 1;
+}
+
+static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) {
+    if (entries == 0) {
+        PyErr_SetString(PyExc_ValueError, "entries must be between 1 and UINT_MAX");
+        return NULL;
+    }
+
+    return build_probe_result(probe_ring_availability(entries, flags) != 0);
 }
 
 PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs) {
@@ -541,94 +569,78 @@ cleanup:
     return result;
 }
 
-static int add_bool_from_feature_probe(PyObject *capabilities, const char *name, PyObject *probe_result) {
+static int cache_feature_bool(PyObject *(*probe_fn)(void), int *cached_value) {
+    PyObject *probe_result;
     PyObject *available;
     int truth;
 
+    probe_result = probe_fn();
+    if (!probe_result) {
+        return -1;
+    }
     available = PyDict_GetItemString(probe_result, "available");
     if (!available) {
+        Py_DECREF(probe_result);
         PyErr_SetString(PyExc_RuntimeError, "feature probe result is missing 'available'");
         return -1;
     }
     truth = PyObject_IsTrue(available);
+    Py_DECREF(probe_result);
     if (truth < 0) {
         return -1;
     }
-    return PyDict_SetItemString(capabilities, name, truth ? Py_True : Py_False);
+    *cached_value = truth;
+    return 0;
+}
+
+static int ensure_capability_cache(void) {
+    if (capability_cache_ready) {
+        return 0;
+    }
+    if (cache_feature_bool(uring_api_probe_accept_multishot_impl, &capability_accept_multishot) < 0) {
+        return -1;
+    }
+    if (cache_feature_bool(uring_api_probe_poll_multishot_impl, &capability_poll_multishot) < 0) {
+        return -1;
+    }
+    if (cache_feature_bool(uring_api_probe_recv_multishot_impl, &capability_recv_multishot) < 0) {
+        return -1;
+    }
+    if (cache_feature_bool(uring_api_probe_socket_impl, &capability_socket) < 0) {
+        return -1;
+    }
+    if (cache_feature_bool(uring_api_probe_sendmsg_zc_impl, &capability_sendmsg_zc) < 0) {
+        return -1;
+    }
+    capability_cache_ready = 1;
+    return 0;
+}
+
+static int add_cached_bool(PyObject *capabilities, const char *name, int cached_value) {
+    return PyDict_SetItemString(capabilities, name, cached_value ? Py_True : Py_False);
 }
 
 static PyObject *build_capability_dict(void) {
     PyObject *capabilities;
-    PyObject *probe_result;
+
+    if (ensure_capability_cache() < 0) {
+        return NULL;
+    }
 
     capabilities = PyDict_New();
     if (!capabilities) {
         return NULL;
     }
 
-    probe_result = uring_api_probe_accept_multishot_impl();
-    if (!probe_result) {
+    if (add_cached_bool(capabilities, "IORING_ACCEPT_MULTISHOT", capability_accept_multishot) < 0 ||
+        add_cached_bool(capabilities, "IORING_POLL_MULTISHOT", capability_poll_multishot) < 0 ||
+        add_cached_bool(capabilities, "IORING_RECV_MULTISHOT", capability_recv_multishot) < 0 ||
+        add_cached_bool(capabilities, "IORING_OP_SOCKET", capability_socket) < 0 ||
+        add_cached_bool(capabilities, "IORING_OP_SEND_ZC", capability_sendmsg_zc) < 0 ||
+        add_cached_bool(capabilities, "IORING_OP_SENDMSG_ZC", capability_sendmsg_zc) < 0) {
         Py_DECREF(capabilities);
         return NULL;
     }
-    if (add_bool_from_feature_probe(capabilities, "IORING_ACCEPT_MULTISHOT", probe_result) < 0) {
-        Py_DECREF(probe_result);
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    Py_DECREF(probe_result);
-
-    probe_result = uring_api_probe_poll_multishot_impl();
-    if (!probe_result) {
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    if (add_bool_from_feature_probe(capabilities, "IORING_POLL_MULTISHOT", probe_result) < 0) {
-        Py_DECREF(probe_result);
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    Py_DECREF(probe_result);
-
-    probe_result = uring_api_probe_recv_multishot_impl();
-    if (!probe_result) {
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    if (add_bool_from_feature_probe(capabilities, "IORING_RECV_MULTISHOT", probe_result) < 0) {
-        Py_DECREF(probe_result);
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    Py_DECREF(probe_result);
-
-    probe_result = uring_api_probe_socket_impl();
-    if (!probe_result) {
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    if (add_bool_from_feature_probe(capabilities, "IORING_OP_SOCKET", probe_result) < 0) {
-        Py_DECREF(probe_result);
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    Py_DECREF(probe_result);
-    probe_result = uring_api_probe_sendmsg_zc_impl();
-    if (!probe_result) {
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    if (add_bool_from_feature_probe(capabilities, "IORING_OP_SEND_ZC", probe_result) < 0) {
-        Py_DECREF(probe_result);
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    if (add_bool_from_feature_probe(capabilities, "IORING_OP_SENDMSG_ZC", probe_result) < 0) {
-        Py_DECREF(probe_result);
-        Py_DECREF(capabilities);
-        return NULL;
-    }
-    Py_DECREF(probe_result);
     return capabilities;
 }
 

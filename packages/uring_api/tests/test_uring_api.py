@@ -219,6 +219,15 @@ def test_probe_returns_structured_result():
     assert isinstance(probe["IORING_OP_SOCKET"], bool)
 
 
+def test_probe_capabilities_are_stable_across_calls():
+    require_uring()
+
+    first = uring_api.probe()
+    second = uring_api.probe()
+
+    assert first == second
+
+
 def test_probe_reports_requested_setup_flags():
     flags = uring_api.IORING_SETUP_SINGLE_ISSUER
     probe = uring_api.probe(flags=flags)
