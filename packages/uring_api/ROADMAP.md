@@ -346,6 +346,36 @@ pending, which already throttles normal producer flow. A maximum deferred
 submission count can still be an opt-in overload guard for embedders or unusual
 producer patterns.
 
+### `UringProactor` submission threading and `IORING_SETUP_SINGLE_ISSUER`
+
+`tealetio.UringProactor` currently allows SQE submission from worker threads.
+Completion service threads retry the deferred submission queue after CQEs arrive
+(for example after `SubmissionQueueFull` or multishot `ENOBUFS` resubmit).
+Application code may also submit through the shared `uring_api.Ring` from other
+threads; the extension serialises access with `ring_lock`, but the kernel still
+sees the calling OS thread.
+
+`IORING_SETUP_SINGLE_ISSUER` is exposed as `uring_api.IORING_SETUP_SINGLE_ISSUER`
+and may be passed through `UringProactor(flags=...)` after `probe(flags=...)`
+accepts it. **`UringProactor` does not enable this flag by default.** The
+kernel enforces that every SQE comes from one owning thread; violating that
+returns `-EEXIST`.
+
+We considered routing all submissions through a single issuer thread via the
+deferred queue so the flag could be enabled safely. That model is **not** the
+current plan:
+
+- the kernel optimisation is only a hint and is hard to quantify for this stack;
+- marshaling every submit through Python thread hand-off adds latency, especially
+  for ENOBUFS resubmit and SQ-pressure retry where completion threads can retry
+  immediately today;
+- worker-thread and callback-thread submission is intentional for completion
+  workers, continuous-operation callbacks, and future threaded backends.
+
+Callers that want `IORING_SETUP_SINGLE_ISSUER` must guarantee one kernel-visible
+submitter themselves. A dedicated issuer thread that only drains a queue is a
+possible future experiment, not the default `UringProactor` shape.
+
 CQ resizing is different. It helps when completions accumulate faster than the
 application can reap them, especially in server workloads with bursts or
 multishot operations. The API should expose enough diagnostics to distinguish SQ

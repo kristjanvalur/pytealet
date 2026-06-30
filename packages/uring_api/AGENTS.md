@@ -142,6 +142,9 @@ not a permanent ring failure.
 
 `IORING_SETUP_SINGLE_ISSUER` and similar flags impose application contracts.
 Check `probe(flags=...)` before constructing a real `Ring(flags=...)`.
+`tealetio.UringProactor` does not default this flag; see
+`ROADMAP.md` (`UringProactor` submission threading and
+`IORING_SETUP_SINGLE_ISSUER`) for why worker-thread submission stays enabled.
 
 ## C Extension Layout
 
