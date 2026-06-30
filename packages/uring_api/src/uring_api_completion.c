@@ -166,6 +166,7 @@ PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *use
 PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view) {
     UringApiCompletion *completion = (UringApiCompletion *)UringApiCompletion_new_pending(kind, user_data, NULL);
     if (!completion) {
+        PyBuffer_Release(view);
         return NULL;
     }
     completion->view = *view;
