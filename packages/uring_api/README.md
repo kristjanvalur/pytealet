@@ -394,6 +394,7 @@ The capsule currently exposes:
     `ring_submit_sendmsg()`, `ring_submit_sendmsg_zc()`, `ring_submit_accept()`,
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
     `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_socket()`,
+    `ring_submit_poll()`, `ring_submit_poll_multishot()`, `ring_submit_poll_remove()`,
     `ring_break_wait()`, and `ring_wait()`;
 - `ring_set_callback()`, `ring_set_c_callback()`, `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
