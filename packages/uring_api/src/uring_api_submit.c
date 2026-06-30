@@ -570,146 +570,145 @@ PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int ty
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf", "user_data", NULL};
     Py_buffer view;
-    long fd;
+    int fd;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lw*|O", keywords, &fd, &view, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_recv_impl(self, (int)fd, &view, user_data);
+    return UringApiRing_submit_recv_impl(self, fd, &view, user_data);
 }
 
 PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buffer_size", "buffer_count", "user_data", "flags", NULL};
-    long fd;
-    unsigned long buffer_size;
-    unsigned long buffer_count;
+    int fd;
+    unsigned int buffer_size;
+    unsigned int buffer_count;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lkk|OI", keywords, &fd, &buffer_size, &buffer_count, &user_data,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iII|OI", keywords, &fd, &buffer_size, &buffer_count, &user_data,
                                      &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_recv_multishot_impl(self, (int)fd, (unsigned int)buffer_size, (unsigned int)buffer_count,
-                                                   flags, user_data);
+    return UringApiRing_submit_recv_multishot_impl(self, fd, buffer_size, buffer_count, flags, user_data);
 }
 
 PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "user_data", "flags", NULL};
     Py_buffer view;
-    long fd;
+    int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|OI", keywords, &fd, &view, &user_data, &flags)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OI", keywords, &fd, &view, &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_send_impl(self, (int)fd, &view, flags, user_data);
+    return UringApiRing_submit_send_impl(self, fd, &view, flags, user_data);
 }
 
 PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "user_data", "flags", "zc_flags", NULL};
     Py_buffer view;
-    long fd;
+    int fd;
     unsigned int flags = 0;
     unsigned int zc_flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|OII", keywords, &fd, &view, &user_data, &flags, &zc_flags)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OII", keywords, &fd, &view, &user_data, &flags, &zc_flags)) {
         return NULL;
     }
-    return UringApiRing_submit_send_zc_impl(self, (int)fd, &view, flags, zc_flags, user_data);
+    return UringApiRing_submit_send_zc_impl(self, fd, &view, flags, zc_flags, user_data);
 }
 
 PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
     Py_buffer view;
-    long fd;
+    int fd;
     unsigned int flags = 0;
     PyObject *address;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*O|OI", keywords, &fd, &view, &address, &user_data, &flags)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*O|OI", keywords, &fd, &view, &address, &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_sendto_impl(self, (int)fd, &view, address, flags, user_data);
+    return UringApiRing_submit_sendto_impl(self, fd, &view, address, flags, user_data);
 }
 
 PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf", "user_data", NULL};
     Py_buffer view;
-    long fd;
+    int fd;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lw*|O", keywords, &fd, &view, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_recvmsg_impl(self, (int)fd, &view, user_data);
+    return UringApiRing_submit_recvmsg_impl(self, fd, &view, user_data);
 }
 
 PyObject *UringApiRing_submit_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
     Py_buffer view;
-    long fd;
+    int fd;
     unsigned int flags = 0;
     PyObject *address = Py_None;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_sendmsg_impl(self, (int)fd, &view, address, flags, user_data);
+    return UringApiRing_submit_sendmsg_impl(self, fd, &view, address, flags, user_data);
 }
 
 PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
     Py_buffer view;
-    long fd;
+    int fd;
     unsigned int flags = 0;
     PyObject *address = Py_None;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_sendmsg_zc_impl(self, (int)fd, &view, address, flags, user_data);
+    return UringApiRing_submit_sendmsg_zc_impl(self, fd, &view, address, flags, user_data);
 }
 
 PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "user_data", "flags", NULL};
-    long fd;
+    int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|OI", keywords, &fd, &user_data, &flags)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|OI", keywords, &fd, &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_accept_impl(self, (int)fd, flags, user_data);
+    return UringApiRing_submit_accept_impl(self, fd, flags, user_data);
 }
 
 PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "user_data", "flags", NULL};
-    long fd;
+    int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|OI", keywords, &fd, &user_data, &flags)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|OI", keywords, &fd, &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_accept_multishot_impl(self, (int)fd, flags, user_data);
+    return UringApiRing_submit_accept_multishot_impl(self, fd, flags, user_data);
 }
 
 PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "address", "user_data", NULL};
-    long fd;
+    int fd;
     PyObject *address;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lO|O", keywords, &fd, &address, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO|O", keywords, &fd, &address, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_connect_impl(self, (int)fd, address, user_data);
+    return UringApiRing_submit_connect_impl(self, fd, address, user_data);
 }
 
 PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -724,37 +723,37 @@ PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObjec
 
 PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "how", "user_data", NULL};
-    long fd;
-    long how;
+    int fd;
+    int how;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ll|O", keywords, &fd, &how, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii|O", keywords, &fd, &how, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_shutdown_impl(self, (int)fd, (int)how, user_data);
+    return UringApiRing_submit_shutdown_impl(self, fd, how, user_data);
 }
 
 PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "user_data", NULL};
-    long fd;
+    int fd;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|O", keywords, &fd, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|O", keywords, &fd, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_close_impl(self, (int)fd, user_data);
+    return UringApiRing_submit_close_impl(self, fd, user_data);
 }
 
 PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"domain", "type", "protocol", "flags", "user_data", NULL};
-    long domain;
-    long type;
-    long protocol = 0;
+    int domain;
+    int type;
+    int protocol = 0;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ll|lIO", keywords, &domain, &type, &protocol, &flags, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii|iIO", keywords, &domain, &type, &protocol, &flags, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_socket_impl(self, (int)domain, (int)type, (int)protocol, flags, user_data);
+    return UringApiRing_submit_socket_impl(self, domain, type, protocol, flags, user_data);
 }
