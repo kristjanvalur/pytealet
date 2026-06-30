@@ -19,12 +19,10 @@ contract.
 The wrapper currently exposes these socket-oriented operations:
 
 - `submit_recv()` / `IORING_OP_RECV`
-- `submit_recv_multishot()` / `IORING_OP_RECV` with `IORING_RECV_MULTISHOT`,
-  copying selected provided buffers into Python `bytes`
 - `create_buf_group()` / caller-owned provided-buffer rings (`BufGroup`)
 - `submit_recv_buf()` / `IORING_OP_RECV` with caller-owned `BufGroup`, delivering
   leased read-only `BufView` results
-- `submit_recv_multishot_buf()` / `IORING_OP_RECV` with `IORING_RECV_MULTISHOT`
+- `submit_recv_multishot()` / `IORING_OP_RECV` with `IORING_RECV_MULTISHOT`
   and caller-owned `BufGroup`, delivering leased `BufView` results per CQE
 - `submit_recvmsg()` / `IORING_OP_RECVMSG`
 - `submit_send()` / `IORING_OP_SEND`
@@ -45,8 +43,8 @@ The wrapper currently exposes these socket-oriented operations:
 
 This is the complete basic Python-oriented socket surface for the low-level
 package. It covers ordinary byte I/O, message I/O, zero-copy send lifetimes,
-listener accept, multishot accept, copied multishot receive, caller-owned
-provided-buffer receive with leased `BufView` delivery, connection setup,
+listener accept, multishot accept, caller-owned provided-buffer receive with
+leased `BufView` delivery (one-shot and multishot), connection setup,
 shutdown, fd creation/close, and handle-based cancellation.
 
 The local liburing headers also expose socket-adjacent helpers that are not part
@@ -76,10 +74,9 @@ operations that intentionally stay outside the basic Python surface:
   accepted sockets. Direct-descriptor accept still needs registered files and is
   not exposed because normal Python sockets use ordinary process fds.
 - `submit_recv()` and `submit_recvmsg()` expose one-shot receive.
-  `submit_recv_multishot()` exposes multishot receive with internal buffer-ring
-  ownership and `bytes` delivery. `create_buf_group()`, `submit_recv_buf()`, and
-  `submit_recv_multishot_buf()` expose caller-owned provided-buffer rings and
-  leased `BufView` delivery. Multishot receive is available since kernel 6.0.
+  `create_buf_group()`, `submit_recv_buf()`, and `submit_recv_multishot()`
+  expose caller-owned provided-buffer rings and leased `BufView` delivery.
+  Multishot receive is available since kernel 6.0.
   `probe()` includes a targeted `"IORING_RECV_MULTISHOT"` runtime capability
   entry because it is newer than multishot accept and depends on provided-buffer
   support. Receive/send polling hints such as
@@ -143,18 +140,13 @@ Open design questions:
 
 ### 2. Provided-buffer receive status
 
-Copied `submit_recv_multishot()` is part of the baseline. It uses an internal
-provided-buffer ring, copies selected buffers into Python `bytes`, and recycles
-the kernel buffers right away. That keeps ownership simple and works well for a
-Python proactor.
-
-Caller-owned provided-buffer receive is also implemented. `Ring.create_buf_group()`
-registers a provided-buffer ring, and `submit_recv_buf()` /
-`submit_recv_multishot_buf()` deliver read-only `BufView` objects as completion
-results. Non-empty views keep the selected buffer alive until the last exported
-`memoryview` is released, then recycle the buffer back to the ring. EOF
-(`res == 0`) also returns an empty `BufView` with `length == 0` rather than
-`bytes`:
+Caller-owned provided-buffer receive is implemented. `Ring.create_buf_group()`
+registers a provided-buffer ring. `submit_recv_buf()` and
+`submit_recv_multishot()` both require that `BufGroup` and deliver read-only
+`BufView` completion results. Non-empty views keep the selected buffer alive
+until the last exported `memoryview` is released, then recycle the buffer back
+to the ring. EOF (`res == 0`) also returns an empty `BufView` with
+`length == 0` rather than `bytes`:
 
 ```python
 buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)
@@ -167,11 +159,11 @@ finally:
     del view
 ```
 
-Use `submit_recv_multishot_buf()` when one submission should produce many leased
-views until cancelled:
+Use `submit_recv_multishot()` when one submission should produce many leased
+views until EOF, cancellation, or `-ENOBUFS`:
 
 ```python
-handle = ring.submit_recv_multishot_buf(fd, buf_group, user_data=token)
+handle = ring.submit_recv_multishot(fd, buf_group, user_data=token)
 completion = ring.wait()
 view = memoryview(completion.result)
 try:
@@ -181,31 +173,27 @@ finally:
 ring.submit_cancel(handle)
 ```
 
+When the buffer ring is exhausted, multishot receive terminates with
+`-ENOBUFS`. Return leased buffers to the ring and submit a new multishot
+receive; higher layers such as `tealetio.UringProactor` resubmit automatically
+and surface buffer pressure to consumers.
+
 ### 3. Multishot receive status
 
 `io_uring_prep_recv_multishot()` is available since kernel 6.0 and pairs with
 provided buffers. One submission can produce many completions until the kernel
-clears `IORING_CQE_F_MORE`.
+clears `IORING_CQE_F_MORE`, the stream ends, the operation is cancelled, or the
+buffer ring runs dry.
 
-This is a major performance feature, and the first Python API is implemented. It
-keeps lifetime simple by letting `_uring_api` own the provided-buffer ring
-internally, copy each selected buffer into a Python `bytes` object, and recycle
-the kernel buffer right away:
+The Python API is implemented on the leased `BufView` model only. Delivered
+multishot completions carry `sequence` numbers because worker-thread delivery
+can be out of order even though CQEs are reaped in order. Recv multishot uses
+that value to reconstruct stream order across resubmits after `-ENOBUFS`; accept
+multishot carries the same ordinal for symmetry even though accept ordering has
+less semantic weight.
 
-```python
-handle = ring.submit_recv_multishot(fd, buffer_size=16384, buffer_count=256, user_data=token)
-ring.submit_cancel(handle)
-```
-
-Delivered multishot completions carry `sequence` numbers because worker thread
-delivery can be out of order even though CQEs are reaped in order. Recv
-multishot uses that value to reconstruct stream order; accept multishot carries
-the same ordinal for symmetry even though accept ordering has less semantic
-weight.
-
-Leased `BufView` results use a separate ownership contract from the copied-`bytes`
-model: callers must release exported memoryviews before the kernel buffer can be
-recycled.
+Callers must drop exported memoryviews (or call `memoryview.release()`) before
+the kernel buffer can be recycled.
 
 The completion object still needs enough flag helpers to decode:
 

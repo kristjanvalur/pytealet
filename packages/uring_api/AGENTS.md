@@ -102,7 +102,8 @@ in those tests.
   internally before the retained buffer is released.
 - `submit_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
   `BufView` completions, and assigns `completion.sequence` so out-of-order
-  callback delivery can be reconstructed.
+  callback delivery can be reconstructed. When the buffer ring is empty the
+  multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
 

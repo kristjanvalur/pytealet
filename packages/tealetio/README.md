@@ -102,7 +102,7 @@ The common API is available directly from `tealetio`:
 - schedulers and runners: `Scheduler`, `ProactorScheduler`, `SyncProactorScheduler`, `AsyncProactorScheduler`, `SelectorScheduler`, `SyncSelectorScheduler`, `AsyncSelectorScheduler`, `BasicScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `Task`, `spawn`, `create_task`, `get_current`, `CancelledError`, `shield`
 - IO operations: `Operation`, `ContinuousOperation`
-- proactor socket helpers: `sendall(..., progress=...)`, `recvall(..., progress=...)`, `accept_many(...)`, `recv_many(...)`
+- proactor socket helpers: `sendall(..., progress=...)`, `recvall(..., progress=...)`, `accept_many(...)`, `recv_many(...)`; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - runnable scheduling policies: `FifoRunnableQueue`, `PrescheduledRunnableQueue`, `PriorityRunnableQueue`
@@ -153,6 +153,22 @@ instead of being kept as pending exceptions. This avoids races where multiple
 pending exceptions can accumulate, and removes the need to track pending
 cancellations separately. These deviations are intentional, but the exact API
 shape remains subject to change before a stable release.
+
+## Uring-backed receive
+
+`UringProactor` (`tealetio.proactor`) shares one lazy `BufGroup` pool (16 KiB ×
+256 buffers by default) across `recv_many` / `recvall` operations on that
+proactor. `recv_many(sock, n, callback)` delivers borrowed `memoryview` chunks
+from leased kernel buffers. When the pool is exhausted, the callback receives
+`(RECV_MANY_BUFFER_PRESSURE, empty_view)`; the proactor resubmits multishot
+receive and continues stream indices from the failed completion's `sequence`.
+
+`recvall(...)` keeps chunk views until pressure arrives, then copies every held
+chunk to `bytes` so slots return to the shared pool before receive resumes.
+`SelectorProactor.recv_many` still wraps ordinary `recv()` data in short-lived
+views and does not use provided buffers.
+
+See [Python API reference](docs/PYTHON_API.md) for ownership details.
 
 ## Status
 
