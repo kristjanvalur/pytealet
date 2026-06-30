@@ -272,7 +272,8 @@ with `sequence` numbers, and `submit_poll_remove()` tears down the registration.
 the kernel-supported teardown path for multishot poll handles.
 
 The native C API (`uring_api_capi.h`) exposes `ring_submit_poll()`,
-`ring_submit_poll_multishot()`, and `ring_submit_poll_remove()` in ABI version 3.
+`ring_submit_poll_multishot()`, and `ring_submit_poll_remove()` in the C API
+vtable (ABI version 1 while the package remains unreleased).
 
 Remaining design questions:
 
