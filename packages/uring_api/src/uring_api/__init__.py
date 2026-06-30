@@ -19,6 +19,8 @@ try:
     from _uring_api import COMPLETION_KIND_CLOSE as COMPLETION_KIND_CLOSE
     from _uring_api import COMPLETION_KIND_RECV as COMPLETION_KIND_RECV
     from _uring_api import COMPLETION_KIND_RECV_MULTISHOT as COMPLETION_KIND_RECV_MULTISHOT
+    from _uring_api import COMPLETION_KIND_RECV_MULTISHOT_BUF as COMPLETION_KIND_RECV_MULTISHOT_BUF
+    from _uring_api import COMPLETION_KIND_RECV_BUF as COMPLETION_KIND_RECV_BUF
     from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
     from _uring_api import COMPLETION_KIND_SEND_ZC as COMPLETION_KIND_SEND_ZC
@@ -28,6 +30,8 @@ try:
     from _uring_api import COMPLETION_KIND_SHUTDOWN as COMPLETION_KIND_SHUTDOWN
     from _uring_api import COMPLETION_KIND_SOCKET as COMPLETION_KIND_SOCKET
     from _uring_api import COMPLETION_KIND_WAKE as COMPLETION_KIND_WAKE
+    from _uring_api import BufGroup as BufGroup
+    from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import IORING_CQE_F_MORE as IORING_CQE_F_MORE
     from _uring_api import IORING_CQE_F_NOTIF as IORING_CQE_F_NOTIF
@@ -65,7 +69,8 @@ except ImportError as exc:
     COMPLETION_KIND_RECV_MULTISHOT = 13
     COMPLETION_KIND_SEND_ZC = 14
     COMPLETION_KIND_SENDMSG_ZC = 15
-
+    COMPLETION_KIND_RECV_MULTISHOT_BUF = 16
+    COMPLETION_KIND_RECV_BUF = 17
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -88,6 +93,23 @@ except ImportError as exc:
         flags: int
         result: object
         sequence: int = 0
+
+    @dataclass(frozen=True)
+    class BufGroup:
+        buffer_size: int
+        buffer_count: int
+        group_id: int
+        ring: Ring | None
+
+    @dataclass(frozen=True)
+    class BufView:
+        length: int
+        buffer_id: int
+        buf_group: BufGroup | None
+        recycled: bool
+
+        def __bool__(self) -> bool:
+            return self.length > 0
 
     class Ring:  # type: ignore[no-redef]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -140,11 +162,30 @@ except ImportError as exc:
         def break_wait(self) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def create_buf_group(self, buffer_size: int, buffer_count: int) -> BufGroup:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def create_buf_view(self, buf_group: BufGroup, buffer_id: int, length: int) -> BufView:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def submit_recv_buf(self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_recv_multishot(
-            self, fd: int, buffer_size: int, buffer_count: int, user_data: object = None, flags: int = 0
+            self,
+            fd: int,
+            buffer_size: int = 16384,
+            buffer_count: int = 4,
+            user_data: object = None,
+            flags: int = 0,
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_recv_multishot_buf(
+            self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -238,6 +279,8 @@ class CompletionKind(enum.IntEnum):
     RECV_MULTISHOT = COMPLETION_KIND_RECV_MULTISHOT
     SEND_ZC = COMPLETION_KIND_SEND_ZC
     SENDMSG_ZC = COMPLETION_KIND_SENDMSG_ZC
+    RECV_MULTISHOT_BUF = COMPLETION_KIND_RECV_MULTISHOT_BUF
+    RECV_BUF = COMPLETION_KIND_RECV_BUF
 
 
 DEFAULT_ENTRIES = 8
@@ -274,6 +317,8 @@ __all__ = [
     "COMPLETION_KIND_CLOSE",
     "COMPLETION_KIND_RECV",
     "COMPLETION_KIND_RECV_MULTISHOT",
+    "COMPLETION_KIND_RECV_MULTISHOT_BUF",
+    "COMPLETION_KIND_RECV_BUF",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
     "COMPLETION_KIND_SEND_ZC",
@@ -283,6 +328,8 @@ __all__ = [
     "COMPLETION_KIND_SHUTDOWN",
     "COMPLETION_KIND_SOCKET",
     "COMPLETION_KIND_WAKE",
+    "BufGroup",
+    "BufView",
     "CompletionKind",
     "Completion",
     "IORING_CQE_F_MORE",
@@ -306,5 +353,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from _uring_api import BufGroup as BufGroup
+    from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring

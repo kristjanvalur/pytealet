@@ -3,6 +3,8 @@
  */
 
 #include "uring_api_ring.h"
+#include "uring_api_bufgroup.h"
+#include "uring_api_bufview.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
 #include "uring_api_submit.h"
@@ -239,10 +241,18 @@ static PyMethodDef UringApiRing_methods[] = {
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
     {"reset_serving", (PyCFunction)UringApiRing_reset_serving, METH_NOARGS, "Clear the completion service stop flag."},
+    {"create_buf_group", _PyCFunction_CAST(UringApiRing_create_buf_group), METH_VARARGS | METH_KEYWORDS,
+     "Create a provided-buffer group for multishot receive operations."},
+    {"create_buf_view", _PyCFunction_CAST(UringApiRing_create_buf_view), METH_VARARGS | METH_KEYWORDS,
+     "Create a read-only leased view into a buffer group slot."},
     {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
      "Submit a recv operation."},
+    {"submit_recv_buf", _PyCFunction_CAST(UringApiRing_submit_recv_buf), METH_VARARGS | METH_KEYWORDS,
+     "Submit a one-shot provided-buffer recv operation."},
     {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_VARARGS | METH_KEYWORDS,
      "Submit a multishot recv operation."},
+    {"submit_recv_multishot_buf", _PyCFunction_CAST(UringApiRing_submit_recv_multishot_buf),
+     METH_VARARGS | METH_KEYWORDS, "Submit a multishot provided-buffer recv operation."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_VARARGS | METH_KEYWORDS,
      "Submit a send operation."},
     {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_VARARGS | METH_KEYWORDS,

@@ -86,6 +86,8 @@ setup(
             sources=[
                 "src/uring_api_module.c",
                 "src/uring_api_capi.c",
+                "src/uring_api_bufgroup.c",
+                "src/uring_api_bufview.c",
                 "src/uring_api_completion.c",
                 "src/uring_api_core.c",
                 "src/uring_api_dispatch.c",
@@ -94,6 +96,8 @@ setup(
                 "src/uring_api_submit.c",
             ],
             depends=[
+                "src/uring_api_bufgroup.h",
+                "src/uring_api_bufview.h",
                 "src/uring_api_capi_impl.h",
                 "src/uring_api_completion.h",
                 "src/uring_api_common.h",

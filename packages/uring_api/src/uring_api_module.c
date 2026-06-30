@@ -2,6 +2,8 @@
  * Module definition for the _uring_api extension.
  */
 
+#include "uring_api_bufgroup.h"
+#include "uring_api_bufview.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 #include "uring_api_probe.h"
@@ -22,6 +24,12 @@ static int uring_api_exec(PyObject *module) {
     if (PyType_Ready(&UringApiCompletion_Type) < 0) {
         return -1;
     }
+    if (PyType_Ready(&UringApiBufGroup_Type) < 0) {
+        return -1;
+    }
+    if (PyType_Ready(&UringApiBufView_Type) < 0) {
+        return -1;
+    }
     if (PyType_Ready(&UringApiRing_Type) < 0) {
         return -1;
     }
@@ -35,6 +43,16 @@ static int uring_api_exec(PyObject *module) {
     Py_INCREF(&UringApiCompletion_Type);
     if (PyModule_AddObject(module, "Completion", (PyObject *)&UringApiCompletion_Type) < 0) {
         Py_DECREF(&UringApiCompletion_Type);
+        return -1;
+    }
+    Py_INCREF(&UringApiBufGroup_Type);
+    if (PyModule_AddObject(module, "BufGroup", (PyObject *)&UringApiBufGroup_Type) < 0) {
+        Py_DECREF(&UringApiBufGroup_Type);
+        return -1;
+    }
+    Py_INCREF(&UringApiBufView_Type);
+    if (PyModule_AddObject(module, "BufView", (PyObject *)&UringApiBufView_Type) < 0) {
+        Py_DECREF(&UringApiBufView_Type);
         return -1;
     }
     Py_INCREF(&UringApiRing_Type);

@@ -3,6 +3,7 @@
  */
 
 #include "uring_api_submit.h"
+#include "uring_api_bufgroup.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 
@@ -40,9 +41,69 @@ PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *v
     return Py_NewRef(completion);
 }
 
+PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
+    struct io_uring_sqe *sqe;
+    UringApiBufGroup *buf_group;
+    int fd;
+    unsigned int flags = 0;
+    PyObject *user_data = Py_None;
+    PyObject *buf_group_obj;
+    PyObject *completion = NULL;
+    UringApiCompletion *pending;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO!|OI", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
+                                     &user_data, &flags)) {
+        return NULL;
+    }
+    buf_group = (UringApiBufGroup *)buf_group_obj;
+    if (buf_group->ring != self) {
+        PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_BUF, user_data, NULL);
+    if (!completion) {
+        return NULL;
+    }
+    pending = (UringApiCompletion *)completion;
+    pending->buf_group = Py_NewRef(buf_group_obj);
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_recv(sqe, fd, NULL, (size_t)buf_group->buffer_size, (int)flags);
+            sqe->flags |= IOSQE_BUFFER_SELECT;
+            sqe->buf_group = buf_group->group_id;
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+#define URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_SIZE 16384U
+#define URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_COUNT 4U
+
 PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, unsigned int buffer_size,
                                                   unsigned int buffer_count, unsigned int flags, PyObject *user_data) {
     struct io_uring_sqe *sqe;
+    UringApiBufGroup *buf_group;
+    PyObject *buf_group_obj;
     PyObject *completion = NULL;
     UringApiCompletion *pending;
     int failed = 0;
@@ -57,21 +118,78 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, un
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
-        pending->recv_pool = UringApiRecvBufferPool_new(self, buffer_size, buffer_count);
-        if (!pending->recv_pool) {
+        buf_group_obj = UringApiBufGroup_create(self, buffer_size, buffer_count);
+        if (!buf_group_obj) {
             failed = 1;
         } else {
+            buf_group = (UringApiBufGroup *)buf_group_obj;
+            pending->buf_group = buf_group_obj;
             sqe = get_sqe(self);
             if (!sqe) {
                 failed = 1;
             } else {
                 io_uring_prep_recv_multishot(sqe, fd, NULL, 0, (int)flags);
                 sqe->flags |= IOSQE_BUFFER_SELECT;
-                sqe->buf_group = pending->recv_pool->group_id;
+                sqe->buf_group = buf_group->group_id;
                 sqe_set_completion(self, sqe, completion);
                 if (submit_one(self) < 0) {
                     failed = 1;
                 }
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_recv_multishot_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
+    struct io_uring_sqe *sqe;
+    UringApiBufGroup *buf_group;
+    int fd;
+    unsigned int flags = 0;
+    PyObject *user_data = Py_None;
+    PyObject *buf_group_obj;
+    PyObject *completion = NULL;
+    UringApiCompletion *pending;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO!|OI", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
+                                     &user_data, &flags)) {
+        return NULL;
+    }
+    buf_group = (UringApiBufGroup *)buf_group_obj;
+    if (buf_group->ring != self) {
+        PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_MULTISHOT_BUF, user_data, NULL);
+    if (!completion) {
+        return NULL;
+    }
+    pending = (UringApiCompletion *)completion;
+    pending->buf_group = Py_NewRef(buf_group_obj);
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_recv_multishot(sqe, fd, NULL, 0, (int)flags);
+            sqe->flags |= IOSQE_BUFFER_SELECT;
+            sqe->buf_group = buf_group->group_id;
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
             }
         }
     }
@@ -582,12 +700,12 @@ PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject 
 PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buffer_size", "buffer_count", "user_data", "flags", NULL};
     int fd;
-    unsigned int buffer_size;
-    unsigned int buffer_count;
+    unsigned int buffer_size = URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_SIZE;
+    unsigned int buffer_count = URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_COUNT;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iII|OI", keywords, &fd, &buffer_size, &buffer_count, &user_data,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|IIOI", keywords, &fd, &buffer_size, &buffer_count, &user_data,
                                      &flags)) {
         return NULL;
     }

@@ -107,6 +107,22 @@ in those tests.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
 
+### Provided-buffer receive (`BufGroup` / `BufView`)
+
+- Create pools with `Ring.create_buf_group()`; submit with `submit_recv_buf()`
+  or `submit_recv_multishot_buf()`. Neither `BufGroup` nor `BufView` is directly
+  instantiable.
+- A `BufGroup` must belong to the `Ring` that created it. Reject cross-ring use
+  with `ValueError`.
+- `_buf` completion paths always return `BufView`, never `b""`. EOF (`res == 0`)
+  yields an empty `BufView` (`length == 0`, falsy). Kernel-selected zero-length
+  buffers are still leased and recycle on `close()` / last `memoryview` release.
+- `BufView` buffer exports are read-only. Set `format` only when
+  `PyBUF_FORMAT` is requested. Recycle leased slots when exports drop to zero
+  or on explicit `close()`.
+- `tp_clear` / `tp_dealloc` must free provided-buffer rings and recycle leased
+  slots without raising exceptions during cyclic GC.
+
 ### Queue backpressure
 
 `SubmissionQueueFull` means the submission queue has no free SQE after flushing
@@ -137,6 +153,7 @@ Sources are split by concern under `src/`:
 | Ring lifecycle | `uring_api_ring.c`, `uring_api_core.c` |
 | Submit path | `uring_api_submit.c`, `uring_api_submit.h` |
 | Completions | `uring_api_completion.c` |
+| Provided buffers | `uring_api_bufgroup.c`, `uring_api_bufview.c` |
 | Probing | `uring_api_probe.c` |
 | Callback service | `uring_api_dispatch.c` |
 | C API capsule | `uring_api_capi.c`, `uring_api_capi_impl.h` |
@@ -156,6 +173,7 @@ constants and types live in `src/uring_api/__init__.py`.
 
 - Stable public kind values live in `URING_API_COMPLETION_KIND_*` macros
   (`uring_api_completion_kinds.h`). Internal pending kinds must stay aligned.
+  Provided-buffer kinds are `RECV_MULTISHOT_BUF` (16) and `RECV_BUF` (17).
 - `Completion.kind` on the native `Completion` object is an `int`. Export
   `CompletionKind` (`enum.IntEnum`) from `uring_api/__init__.py` only — not from
   `_uring_api.pyi` or the extension module namespace.
@@ -176,9 +194,7 @@ Keep this package narrow:
 - No broad liburing opcode surface without a clear Python ownership contract.
 
 Track wider kernel features and specialised tuning in `ROADMAP.md` rather than
-expanding the baseline API opportunistically. Provided-buffer / leased-buffer
-receive models belong here only when they have an explicit `BufGroup` /
-`BufView`-style ownership story (see `ROADMAP.md`).
+expanding the baseline API opportunistically.
 
 ## Documentation Hygiene
 

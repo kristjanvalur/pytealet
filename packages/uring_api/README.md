@@ -7,8 +7,9 @@ socket send/recv submission, completion waiting, and callback delivery to build
 higher-level completion abstractions in Python. It does not implement an event
 loop, scheduler, or asyncio compatibility layer.
 
-Future work is tracked in [ROADMAP.md](ROADMAP.md), including queue resizing,
-optional zero-copy receive models, and specialised kernel tuning.
+Future work is tracked in [ROADMAP.md](ROADMAP.md), including queue resizing
+and specialised kernel tuning. Caller-owned provided-buffer receive with leased
+`BufView` delivery is already part of the Python surface.
 
 ## Quick Check
 
@@ -24,15 +25,17 @@ with uring_api.Ring() as ring:
 ## Socket I/O
 
 `Ring` currently exposes `submit_recv()`, `submit_recv_multishot()`,
+`create_buf_group()`, `submit_recv_buf()`, `submit_recv_multishot_buf()`,
 `submit_send()`, `submit_send_zc()`, `submit_recvmsg()`, `submit_sendto()`,
 `submit_sendmsg()`, `submit_sendmsg_zc()`, `submit_accept()`,
 `submit_accept_multishot()`, `submit_connect()`, `submit_shutdown()`,
 `submit_close()`, `submit_socket()`, and `wait()`. This is the complete baseline
 for Python-oriented socket I/O in `uring-api`: normal sends and receives,
-message-oriented operations, listener accept paths, connection setup, orderly
-shutdown, fd creation/close, cancellation, and the practical multishot server
-cases all have direct wrappers. Each submitted operation carries a Python
-`user_data` object which comes back with its completion.
+copied and leased-buffer multishot receive, message-oriented operations,
+listener accept paths, connection setup, orderly shutdown, fd creation/close,
+cancellation, and the practical multishot server cases all have direct wrappers.
+Each submitted operation carries a Python `user_data` object which comes back
+with its completion.
 
 ```python
 import socket
@@ -84,13 +87,36 @@ a `sequence` number so callback users can reconstruct receive order even when
 worker threads dispatch completions out of order. Multishot completions are
 numbered from `0`; normal one-shot completions also report `sequence == 0`.
 
+For leased-buffer receive, create a caller-owned provided-buffer ring with
+`create_buf_group()` and submit with `submit_recv_buf()` or
+`submit_recv_multishot_buf()`. Completions return read-only `BufView` objects
+instead of copying into `bytes`. Export the payload with `memoryview(view)` and
+release the export before the kernel buffer is recycled:
+
+```python
+buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)
+pending = ring.submit_recv_buf(reader.fileno(), buf_group, token)
+completion = ring.wait(1.0)
+
+view = memoryview(completion.result)
+try:
+    process(view)
+finally:
+    del view
+```
+
+`BufView` tracks active exported memoryviews and recycles the selected buffer
+back to the ring when the last export is released. Provided-buffer completions
+always return `BufView`, including EOF (`completion.res == 0`), where the view
+has `length == 0` and is falsy. Detect stream end from `completion.res`, not
+from the result type. `BufGroup` and `BufView` cannot be constructed directly;
+use `Ring.create_buf_group()` and let receive completions create the views.
+
 The local liburing headers expose more socket-adjacent operations than this
 wrapper publishes, but those are intentionally outside the core Python-oriented
 surface. Readiness polling is optional for a completion proactor, fixed-buffer
-send variants and public provided-buffer ownership are a poor fit for normal
-Python buffer lifetimes, and socket command or NAPI controls are specialised
-tuning hooks. The one receive-side extension still worth exploring is a
-zero-copy multishot receive model with explicit leased-buffer ownership. Those
+send variants still need a different ownership contract than leased `BufView`
+receive, and socket command or NAPI controls are specialised tuning hooks. Those
 items are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`,
 which remains a compact runtime availability check.
 
@@ -261,7 +287,8 @@ The intended baseline is simple:
 
 - one thread may reap completions with `wait()`;
 - other threads may call submit-side methods such as `submit_recv()`,
-    `submit_recv_multishot()`, `submit_send()`, `submit_send_zc()`,
+    `submit_recv_multishot()`, `create_buf_group()`, `submit_recv_buf()`,
+    `submit_recv_multishot_buf()`, `submit_send()`, `submit_send_zc()`,
     `submit_recvmsg()`, `submit_sendto()`, `submit_sendmsg_zc()`,
     `submit_accept()`, `submit_accept_multishot()`, `submit_connect()`, and
     `break_wait()`;
@@ -369,21 +396,24 @@ Typical starting points:
 | Concurrent client work | 64-256 | Enough room for batches without large memory pressure. |
 | Server-style I/O | 512-4096 | Needs deliberate resource-limit checks and backpressure. |
 
-For now, `uring-api` does not register fixed buffers. When those are added, ring
-entries and registered buffers should be configured separately:
+Ring entries and provided-buffer pools should be configured separately:
 
 - ring entries control how many operations can be submitted or completed at
   once;
-- registered buffers control how much memory the kernel pins for direct I/O or
-  zero-copy style operation;
-- large registered buffer pools can exceed `RLIMIT_MEMLOCK` even when ring
+- `create_buf_group()` registers a provided-buffer ring whose storage stays
+  pinned for receive operations that select buffers from that group;
+- large provided-buffer pools can exceed `RLIMIT_MEMLOCK` even when ring
   creation itself succeeds.
+
+`uring-api` does not yet expose fixed-buffer registration for send-side fixed
+zero-copy variants. When that is added, treat it as a separate pool from
+caller-owned `BufGroup` rings.
 
 That distinction matters. During probing, a 64 MiB fixed-buffer pool exceeded a
 default 64 MiB memlock limit because the limit must cover the pinned payload
 memory plus kernel/accounting overhead.
 
-You can inspect the process limit before choosing future buffer-pool sizes:
+You can inspect the process limit before choosing `BufGroup` sizes:
 
 ```python
 import resource
@@ -394,8 +424,8 @@ print("memlock soft limit:", soft)
 print("memlock hard limit:", hard)
 ```
 
-For a future registered-buffer API, size the pool explicitly rather than
-assuming the largest useful value is safe:
+Size provided-buffer pools explicitly rather than assuming the largest useful
+value is safe:
 
 ```python
 buffer_size = 16 * 1024
@@ -405,7 +435,7 @@ pool_bytes = buffer_size * buffer_count
 print("planned pinned buffer pool:", pool_bytes)
 ```
 
-Good default profiles for that future layer would look something like:
+Good default `create_buf_group()` profiles would look something like:
 
 | Profile | Ring entries | Buffer size | Buffer count | Pinned bytes |
 | --- | ---: | ---: | ---: | ---: |
@@ -423,9 +453,9 @@ Containers may block `io_uring_setup()` even when the host kernel supports it.
 For example, Docker's default seccomp profile commonly rejects ring creation
 with `EPERM`. A less restricted profile may be required for development.
 
-Large future registered-buffer pools may also require raising `RLIMIT_MEMLOCK`.
-Prefer smaller buffers while developing the operation model, then make server
-profiles opt-in and explicit.
+Large `BufGroup` pools may also require raising `RLIMIT_MEMLOCK`. Prefer smaller
+buffers while developing the operation model, then make server profiles opt-in
+and explicit.
 
 ## Build Requirements
 

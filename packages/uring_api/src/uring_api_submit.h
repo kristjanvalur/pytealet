@@ -30,7 +30,9 @@ PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int ty
                                           PyObject *user_data);
 
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_recv_multishot_buf(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs);

@@ -80,16 +80,6 @@ struct UringApiRing {
     bool initialized;
 };
 
-typedef struct {
-    UringApiRing *ring;
-    struct io_uring_buf_ring *ring_buffer;
-    unsigned char *storage;
-    unsigned int buffer_size;
-    unsigned int buffer_count;
-    unsigned short group_id;
-    int mask;
-} UringApiRecvBufferPool;
-
 typedef enum {
     URING_API_RECEIVE_IDLE = 0,
     URING_API_RECEIVE_WAITING = 1,
@@ -112,6 +102,8 @@ typedef enum {
     URING_API_PENDING_RECV_MULTISHOT = URING_API_COMPLETION_KIND_RECV_MULTISHOT,
     URING_API_PENDING_SEND_ZC = URING_API_COMPLETION_KIND_SEND_ZC,
     URING_API_PENDING_SENDMSG_ZC = URING_API_COMPLETION_KIND_SENDMSG_ZC,
+    URING_API_PENDING_RECV_MULTISHOT_BUF = URING_API_COMPLETION_KIND_RECV_MULTISHOT_BUF,
+    URING_API_PENDING_RECV_BUF = URING_API_COMPLETION_KIND_RECV_BUF,
 } UringApiPendingKind;
 
 typedef struct {
@@ -121,7 +113,7 @@ typedef struct {
     unsigned int flags;
     PyObject *result;
     PyObject *buffer;
-    UringApiRecvBufferPool *recv_pool;
+    PyObject *buf_group;
     unsigned long long sequence;
     Py_buffer view;
     struct iovec iov;
