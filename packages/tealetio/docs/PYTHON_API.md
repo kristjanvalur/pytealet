@@ -91,13 +91,13 @@ are released by dropping recvall's references. When provided,
 cumulative number of bytes received.
 
 `recvgen(sock)` is a tealet-blocking generator that incrementally yields
-`(index, data)` chunks in stream-index order until EOF. It shares the same
-provided-buffer pressure policy as `recvall`: borrowed `memoryview` chunks stay
-unconverted until `RECV_MANY_BUFFER_PRESSURE` arrives, when every held view in
-the internal ready and out-of-order queues is copied to `bytes`. Out-of-order
-multishot completions are reordered before yield. The generator must be
-consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can block
-cooperatively. `ProactorScheduler.sock_recvgen(sock)` exposes the same
+`(index, data)` chunks in stream-index order until EOF, with each `data` as
+owned `bytes`. Chunks are copied when dequeued so borrowed kernel views are
+released promptly; queued views are also copied to `bytes` on
+`RECV_MANY_BUFFER_PRESSURE` so leased slots can return to the shared pool.
+Out-of-order multishot completions are reordered before yield. The generator
+must be consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can
+block cooperatively. `ProactorScheduler.sock_recvgen(sock)` exposes the same
 surface on scheduler instances.
 
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.

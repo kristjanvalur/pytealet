@@ -165,9 +165,8 @@ receive and continues stream indices from the failed completion's `sequence`.
 
 `recvall(...)` keeps chunk views until pressure arrives, then copies every held
 chunk to `bytes` so slots return to the shared pool before receive resumes.
-`recvgen(...)` / `sock_recvgen(...)` yield chunks incrementally in stream order
-with the same pressure policy, reordering out-of-order multishot completions
-before each yield.
+`recvgen(...)` / `sock_recvgen(...)` yield owned `bytes` chunks incrementally in
+stream order, copying on dequeue so leased views are released promptly.
 `SelectorProactor.recv_many` still wraps ordinary `recv()` data in short-lived
 views (up to 8 KiB per read) and does not use provided buffers.
 

@@ -83,19 +83,19 @@ def _exercise_recvgen_buffer(exercise: Any) -> Any:
 
 
 def test_recvgen_buffer_reorders_out_of_order_chunks():
-    def exercise() -> list[tuple[int, memoryview | bytes] | object]:
+    def exercise() -> list[tuple[int, bytes]]:
         buffer = proactor_module._RecvGenBuffer()
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((0, memoryview(b"a")))
         return [buffer.take_next(), buffer.take_next()]
 
     first, second = _exercise_recvgen_buffer(exercise)
-    assert first == (0, memoryview(b"a"))
-    assert second == (1, memoryview(b"b"))
+    assert first == (0, b"a")
+    assert second == (1, b"b")
 
 
 def test_recvgen_buffer_pressure_converts_all_held_views():
-    def exercise() -> list[tuple[int, memoryview | bytes]]:
+    def exercise() -> list[tuple[int, bytes]]:
         buffer = proactor_module._RecvGenBuffer()
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
@@ -110,14 +110,14 @@ def test_recvgen_buffer_pressure_converts_all_held_views():
 
 
 def test_recvgen_buffer_eof_stops_iteration():
-    def exercise() -> list[tuple[int, memoryview | bytes] | None]:
+    def exercise() -> list[tuple[int, bytes] | None]:
         buffer = proactor_module._RecvGenBuffer()
         buffer.on_result((0, memoryview(b"done")))
         buffer.on_result((1, memoryview(b"")))
         return [buffer.take_next(), buffer.take_next()]
 
     first, second = _exercise_recvgen_buffer(exercise)
-    assert first == (0, memoryview(b"done"))
+    assert first == (0, b"done")
     assert second is None
 
 
@@ -2034,7 +2034,7 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return [(index, bytes(chunk)) for index, chunk in scheduler.sock_recvgen(reader)]
+                return list(scheduler.sock_recvgen(reader))
 
             def deliver_chunks() -> None:
                 ring = scheduler.proactor.ring
@@ -2059,7 +2059,7 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return [(index, bytes(chunk)) for index, chunk in scheduler.sock_recvgen(reader)]
+                return list(scheduler.sock_recvgen(reader))
 
             def deliver_chunks() -> None:
                 ring = scheduler.proactor.ring
@@ -2322,7 +2322,7 @@ class TestProactorScheduler:
             writer.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return [(index, bytes(chunk)) for index, chunk in scheduler.sock_recvgen(reader)]
+                return list(scheduler.sock_recvgen(reader))
 
             def send_chunks() -> None:
                 scheduler.sock_sendall(writer, b"hello")

@@ -129,7 +129,7 @@ class Proactor(Protocol):
 
     def recvall(self, sock: socket.socket, progress: _ProgressCallback | None = None) -> Operation[bytes]: ...
 
-    def recvgen(self, sock: socket.socket) -> Iterator[tuple[int, memoryview | bytes]]: ...
+    def recvgen(self, sock: socket.socket) -> Iterator[tuple[int, bytes]]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
@@ -261,13 +261,16 @@ class _RecvGenBuffer:
                 self._out_of_order[index] = bytes(chunk)
         self._pending_views.clear()
 
-    def take_next(self) -> tuple[int, memoryview | bytes] | None:
+    def take_next(self) -> tuple[int, bytes] | None:
         while True:
             with self._lock:
                 if self._stream_error is not None:
                     raise self._stream_error
                 if self._ready:
-                    return self._ready.popleft()
+                    index, chunk = self._ready.popleft()
+                    if type(chunk) is memoryview:
+                        chunk = bytes(chunk)
+                    return index, chunk
                 if self._stream_done:
                     return None
             self._event.clear()
@@ -395,15 +398,15 @@ class ProactorBase:
         stream.add_done_callback(on_done)
         return operation
 
-    def recvgen(self, sock: socket.socket) -> Iterator[tuple[int, memoryview | bytes]]:
+    def recvgen(self, sock: socket.socket) -> Iterator[tuple[int, bytes]]:
         """Incrementally receive byte chunks until EOF as a blocking generator.
 
         Each ``recv_many`` chunk is reordered into stream-index order before it
-        is yielded. Borrowed ``memoryview`` chunks stay unconverted until
-        provided-buffer pressure arrives, when every held view is copied to
-        ``bytes`` so leased slots can return to the shared pool. The generator
-        must be consumed from a scheduler tealet so ``ThreadsafeEvent`` waits
-        can block cooperatively.
+        is yielded as ``bytes``. Chunks are copied when dequeued so borrowed
+        kernel views are released promptly; queued views are also copied to
+        ``bytes`` on provided-buffer pressure so leased slots can return to the
+        shared pool. The generator must be consumed from a scheduler tealet so
+        ``ThreadsafeEvent`` waits can block cooperatively.
         """
 
         buffer = _RecvGenBuffer()
@@ -1851,7 +1854,7 @@ class ProactorScheduler(BaseScheduler):
 
         return self.wait_operation(self._proactor.recvall(sock, progress))
 
-    def sock_recvgen(self, sock: socket.socket) -> Iterator[tuple[int, memoryview | bytes]]:
+    def sock_recvgen(self, sock: socket.socket) -> Iterator[tuple[int, bytes]]:
         """Incrementally receive byte chunks until EOF as a blocking generator."""
 
         return self._proactor.recvgen(sock)

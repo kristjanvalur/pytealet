@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
+- `recvgen` / `sock_recvgen` now yield `(index, bytes)` only, copying chunks on
+  dequeue (and flushing queued views on provided-buffer pressure) so consumers
+  do not hold borrowed kernel views.
 - Removed the `n` chunk-size argument from `recv_many`, `recvall`, `recvgen`,
   `sock_recvall`, and `sock_recvgen`; chunk sizes are backend-defined
   (`SelectorProactor` reads up to 8 KiB per `recv()`, `UringProactor` uses the
