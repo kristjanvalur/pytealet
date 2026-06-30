@@ -20,6 +20,14 @@ import pytest
 
 import uring_api
 
+# Mirror packages/uring_api/setup.py EXTENSION_C_COMPILE_ARGS.
+EXTENSION_C_COMPILE_ARGS = [
+    "-std=c17",
+    "-pedantic-errors",
+    "-Wall",
+    "-Wno-unused-function",
+]
+
 
 def require_uring():
     probe = uring_api.probe()
@@ -102,6 +110,7 @@ def test_public_capi_header_compiles_without_liburing_headers():
         subprocess.run(
             [
                 *cc_argv,
+                *EXTENSION_C_COMPILE_ARGS,
                 "-c",
                 str(source_path),
                 "-o",
@@ -266,6 +275,32 @@ def test_ring_callback_cycles_are_collectable():
     assert marker_ref() is None
 
 
+def test_buf_group_callback_cycles_are_collectable():
+    require_uring()
+
+    class Marker:
+        pass
+
+    def make_cycle():
+        ring = uring_api.Ring(entries=4)
+        buf_group = ring.create_buf_group(16, 4)
+        marker = Marker()
+        marker_ref = weakref.ref(marker)
+
+        def callback(_completion):
+            marker
+            buf_group.buffer_size
+            ring.closed
+
+        ring.callback = callback
+        return marker_ref
+
+    marker_ref = make_cycle()
+    gc.collect()
+
+    assert marker_ref() is None
+
+
 def test_import_succeeds_when_native_extension_is_unavailable():
     script = """
 import builtins
@@ -342,6 +377,7 @@ def build_c_api_client():
         subprocess.run(
             [
                 *shlex.split(cc),
+                *EXTENSION_C_COMPILE_ARGS,
                 "-shared",
                 "-fPIC",
                 "-I",

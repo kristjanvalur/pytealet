@@ -45,6 +45,22 @@ make format-c
 make format-c-check
 ```
 
+### C compile policy
+
+Match core `tealet` extension builds:
+
+```text
+-std=c17 -pedantic-errors -Wall -Wno-unused-function
+```
+
+`setup.py` defines `EXTENSION_C_COMPILE_ARGS`; keep
+`tests/test_uring_api.py` in sync. Ad-hoc compiles (`build_c_api_client()`,
+public header checks) must use the same flags.
+
+For intentional CPython `void*` slot conversions (for example `PyModuleDef_Slot`
+with `Py_mod_exec`), use the local pedantic pragma pattern from
+`uring_api_module.c` and `tests/capi_client/uring_api_capi_client.c`.
+
 ## Runtime Availability
 
 Import success does not imply `io_uring` works. Ring creation can fail because
@@ -91,6 +107,22 @@ in those tests.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
 
+### Provided-buffer receive (`BufGroup` / `BufView`)
+
+- Create pools with `Ring.create_buf_group()`; submit with `submit_recv_buf()`
+  or `submit_recv_multishot_buf()`. Neither `BufGroup` nor `BufView` is directly
+  instantiable.
+- A `BufGroup` must belong to the `Ring` that created it. Reject cross-ring use
+  with `ValueError`.
+- `_buf` completion paths always return `BufView`, never `b""`. EOF (`res == 0`)
+  yields an empty `BufView` (`length == 0`, falsy). Kernel-selected zero-length
+  buffers are still leased and recycle on `close()` / last `memoryview` release.
+- `BufView` buffer exports are read-only. Set `format` only when
+  `PyBUF_FORMAT` is requested. Recycle leased slots when exports drop to zero
+  or on explicit `close()`.
+- `tp_clear` / `tp_dealloc` must free provided-buffer rings and recycle leased
+  slots without raising exceptions during cyclic GC.
+
 ### Queue backpressure
 
 `SubmissionQueueFull` means the submission queue has no free SQE after flushing
@@ -121,6 +153,7 @@ Sources are split by concern under `src/`:
 | Ring lifecycle | `uring_api_ring.c`, `uring_api_core.c` |
 | Submit path | `uring_api_submit.c`, `uring_api_submit.h` |
 | Completions | `uring_api_completion.c` |
+| Provided buffers | `uring_api_bufgroup.c`, `uring_api_bufview.c` |
 | Probing | `uring_api_probe.c` |
 | Callback service | `uring_api_dispatch.c` |
 | C API capsule | `uring_api_capi.c`, `uring_api_capi_impl.h` |
@@ -147,9 +180,7 @@ Keep this package narrow:
 - No broad liburing opcode surface without a clear Python ownership contract.
 
 Track wider kernel features and specialised tuning in `ROADMAP.md` rather than
-expanding the baseline API opportunistically. Provided-buffer / leased-buffer
-receive models belong here only when they have an explicit `BufGroup` /
-`BufView`-style ownership story (see `ROADMAP.md`).
+expanding the baseline API opportunistically.
 
 ## Documentation Hygiene
 

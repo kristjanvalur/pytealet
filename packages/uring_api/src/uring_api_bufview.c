@@ -13,6 +13,29 @@
 #define BUFVIEW_END_CRITICAL_SECTION() Py_END_CRITICAL_SECTION()
 #endif
 
+static void UringApiBufView_recycle_quiet(UringApiBufView *self) {
+    UringApiBufGroup *buf_group;
+
+    if (!self->leased || self->recycled || self->export_count != 0) {
+        return;
+    }
+    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        self->recycled = true;
+        return;
+    }
+    buf_group = (UringApiBufGroup *)self->buf_group;
+    if (!buf_group->ring || !buf_group->ring->initialized || !buf_group->ring_buffer) {
+        self->recycled = true;
+        return;
+    }
+    Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
+    if (!self->recycled) {
+        UringApiBufGroup_recycle(buf_group, self->buffer_id);
+        self->recycled = true;
+    }
+    Py_END_CRITICAL_SECTION();
+}
+
 static int UringApiBufView_recycle_locked(UringApiBufView *self) {
     UringApiBufGroup *buf_group;
 
@@ -184,24 +207,17 @@ static int UringApiBufView_traverse(UringApiBufView *self, visitproc visit, void
 }
 
 static int UringApiBufView_clear(UringApiBufView *self) {
+    BUFVIEW_BEGIN_CRITICAL_SECTION(self);
+    UringApiBufView_recycle_quiet(self);
+    BUFVIEW_END_CRITICAL_SECTION();
     Py_CLEAR(self->buf_group);
     return 0;
 }
 
 static void UringApiBufView_dealloc(UringApiBufView *self) {
-    UringApiBufGroup *buf_group;
-
     PyObject_GC_UnTrack(self);
     BUFVIEW_BEGIN_CRITICAL_SECTION(self);
-    if (self->leased && !self->recycled && self->export_count == 0 && self->buf_group &&
-        PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
-        buf_group = (UringApiBufGroup *)self->buf_group;
-        if (buf_group->ring && buf_group->ring->initialized) {
-            Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
-            (void)UringApiBufView_recycle_locked(self);
-            Py_END_CRITICAL_SECTION();
-        }
-    }
+    UringApiBufView_recycle_quiet(self);
     BUFVIEW_END_CRITICAL_SECTION();
     (void)UringApiBufView_clear(self);
     PyObject_GC_Del(self);
