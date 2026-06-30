@@ -526,8 +526,10 @@ static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *s
     if (!payload) {
         return NULL;
     }
-    if (flags & IORING_CQE_F_MORE) {
+    if (flags & IORING_CQE_F_MORE && buf_group->ring && buf_group->ring->initialized) {
+        Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
         UringApiBufGroup_recycle(buf_group, buffer_id);
+        Py_END_CRITICAL_SECTION();
     }
     return payload;
 }
