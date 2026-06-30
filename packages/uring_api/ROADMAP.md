@@ -40,18 +40,20 @@ The wrapper currently exposes these socket-oriented operations:
 - `submit_close()` / `IORING_OP_CLOSE`, for caller-owned raw fds
 - `submit_socket()` / `IORING_OP_SOCKET`, returning a caller-owned raw fd
 - `submit_cancel()` / `IORING_OP_ASYNC_CANCEL`, for pending request handles
+- `submit_poll()` / `IORING_OP_POLL_ADD`
+- `submit_poll_multishot()` / `IORING_OP_POLL_ADD` with `IORING_POLL_MULTISHOT`
+- `submit_poll_remove()` / `IORING_OP_POLL_REMOVE`, for multishot poll handles
 
 This is the complete basic Python-oriented socket surface for the low-level
 package. It covers ordinary byte I/O, message I/O, zero-copy send lifetimes,
 listener accept, multishot accept, caller-owned provided-buffer receive with
 leased `BufView` delivery (one-shot and multishot), connection setup,
-shutdown, fd creation/close, and handle-based cancellation.
+shutdown, fd creation/close, handle-based cancellation, and readiness polling
+for any pollable file descriptor.
 
-The local liburing headers also expose socket-adjacent helpers that are not part
-of this baseline. `io_uring_prep_poll_add()` / `io_uring_prep_poll_remove()` are
-readiness APIs rather than core completion proactor operations. Fixed-buffer
-zero-copy sends still require a different ownership contract than caller-owned
-`BufGroup` rings and leased `BufView` results.
+The local liburing headers also expose helpers that are not part of this
+baseline. Fixed-buffer zero-copy sends still require a different ownership
+contract than caller-owned `BufGroup` rings and leased `BufView` results.
 
 ## Kernel Support Notes
 
@@ -98,6 +100,13 @@ operations that intentionally stay outside the basic Python surface:
   now includes a targeted `"IORING_OP_SOCKET"` runtime capability entry by
   submitting a private socket creation request and closing the returned fd if it
   succeeds.
+- `submit_poll()` exposes one-shot `io_uring_prep_poll_add()`. One-shot poll and
+  `submit_poll_remove()` are treated as baseline poll surface and are not probed
+  separately.
+- `submit_poll_multishot()` exposes `io_uring_prep_poll_multishot()`. `probe()`
+  includes a targeted `"IORING_POLL_MULTISHOT"` runtime capability entry because
+  multishot poll is newer than one-shot poll. Successful poll completions expose
+  the event mask as `result == res`.
 
 Keep `probe()` focused on runtime capabilities that higher layers may need to
 branch on. Ring creation is the broad availability check; targeted entries are
@@ -227,7 +236,7 @@ At the `tealetio` layer, this likely wants a higher-level accept stream or a
 server helper, not just `Operation[tuple[socket.socket, address]]`, because one
 submitted request produces multiple accepted sockets.
 
-### 5. Poll and readiness operations
+### 5. Poll and readiness status
 
 `io_uring_prep_poll_add()` and `io_uring_prep_poll_remove()` expose readiness
 notifications through the ring. They are not socket-specific: any pollable file
@@ -237,28 +246,40 @@ some file-I/O coordination patterns.
 For sockets, poll requests can support readiness-style APIs, backpressure, and
 integration points where a higher layer wants to wait for `POLLIN`, `POLLOUT`,
 or error/hangup readiness rather than submit an immediate recv/send operation.
-They are optional for the planned proactor because the core API submits real
+They remain optional for the planned proactor because the core API submits real
 I/O operations and receives completions directly.
 `io_uring_prep_poll_multishot()` is especially relevant for servers because one
 registration can produce repeated CQEs, using `IORING_CQE_F_MORE` to show that
 the request remains active.
 
-A first low-level API could keep this close to `poll(2)`:
+The low-level API is implemented and keeps the surface close to `poll(2)`:
 
 ```python
 handle = ring.submit_poll(fd, mask, user_data)
+completion = ring.wait()
+assert completion.result == completion.res  # event mask
+
 handle = ring.submit_poll_multishot(fd, mask, user_data)
+completion = ring.wait()
 ring.submit_poll_remove(handle)
 ```
 
-Open design questions:
+One-shot poll returns the pending handle as the delivered completion. Multishot
+poll follows the same delivered-copy lifetime rules as multishot accept and recv:
+the submitted handle stays pending, delivered completions are separate objects
+with `sequence` numbers, and `submit_poll_remove()` tears down the registration.
+`submit_poll_remove()` is distinct from `submit_cancel()` because poll removal is
+the kernel-supported teardown path for multishot poll handles.
 
-- Should poll completions expose the raw event mask only, or named helpers for
-  common readiness bits?
-- Should `submit_poll_remove()` be distinct from `submit_cancel()`, or should
-  the cancellation API grow typed helpers for poll requests?
-- Should multishot poll share the same pending-completion lifetime rules as
-  future multishot accept/recv APIs?
+The native C API (`uring_api_capi.h`) exposes `ring_submit_poll()`,
+`ring_submit_poll_multishot()`, and `ring_submit_poll_remove()` in ABI version 3.
+
+Remaining design questions:
+
+- Should poll completions grow named helpers for common readiness bits, or is the
+  raw event mask enough for the low-level package?
+- Should higher layers (`tealetio`, proactor helpers) wrap poll behind a
+  readiness stream API similar to multishot accept?
 
 ### 6. Socket command operations
 
