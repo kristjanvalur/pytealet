@@ -6,20 +6,28 @@
 #include "uring_api_common.h"
 
 typedef struct {
+    UringApiCompletionStateKind tag;
+} UringApiCompletionStateHeader;
+
+typedef struct {
+    UringApiCompletionStateKind tag;
     Py_buffer view;
     bool has_view;
 } UringApiCompletionViewState;
 
 typedef struct {
+    UringApiCompletionStateKind tag;
     PyObject *buf_group;
 } UringApiCompletionBufGroupState;
 
 typedef struct {
+    UringApiCompletionStateKind tag;
     struct sockaddr_storage addr;
     socklen_t addrlen;
 } UringApiCompletionSockaddrState;
 
 typedef struct {
+    UringApiCompletionStateKind tag;
     Py_buffer view;
     bool has_view;
     struct iovec iov;

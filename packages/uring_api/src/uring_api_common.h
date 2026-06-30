@@ -121,7 +121,6 @@ typedef struct {
     PyObject *result;
     unsigned long long sequence;
     bool multishot;
-    UringApiCompletionStateKind state_kind;
     void *state;
 } UringApiCompletion;
 
