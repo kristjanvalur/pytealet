@@ -133,6 +133,35 @@ def test_recvgen_buffer_allow_memview_yields_memoryviews():
     assert bytes(chunk) == b"a"
 
 
+def test_recvgen_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
+    """Regression: recv completion threads must wake a blocked take_next()."""
+
+    ready_to_wait = threading.Event()
+
+    def exercise() -> tuple[int, bytes]:
+        buffer = proactor_module._RecvGenBuffer()
+        real_swait = buffer._event.swait
+
+        def swait_and_signal() -> bool:
+            ready_to_wait.set()
+            return real_swait()
+
+        monkeypatch.setattr(buffer._event, "swait", swait_and_signal)
+
+        def producer() -> None:
+            assert ready_to_wait.wait(timeout=1.0)
+            buffer.on_result((0, memoryview(b"late")))
+
+        threading.Thread(target=producer, daemon=True).start()
+        item = buffer.take_next()
+        assert item is not None
+        index, chunk = item
+        assert type(chunk) is bytes
+        return index, chunk
+
+    assert _exercise_recvgen_buffer(exercise) == (0, b"late")
+
+
 def test_recvgen_buffer_allow_memview_pressure_token_precedes_flushed_queue():
     def exercise() -> list[tuple[int, memoryview | bytes | None] | None]:
         buffer = proactor_module._RecvGenBuffer(allow_memview=True)

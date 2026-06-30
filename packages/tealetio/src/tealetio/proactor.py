@@ -281,22 +281,32 @@ class _RecvGenBuffer:
                 self._out_of_order[index] = bytes(chunk)
         self._pending_views.clear()
 
+    def _has_waitable_work_locked(self) -> bool:
+        return self._stream_error is not None or self._pressure_pending or bool(self._ready) or self._stream_done
+
     def take_next(self) -> tuple[int, memoryview | bytes | None] | None:
         while True:
             with self._lock:
                 if self._stream_error is not None:
+                    self._event.clear()
                     raise self._stream_error
                 if self._pressure_pending:
                     self._pressure_pending = False
+                    if not self._has_waitable_work_locked():
+                        self._event.clear()
                     return RECV_MANY_BUFFER_PRESSURE, None
                 if self._ready:
                     index, chunk = self._ready.popleft()
                     if not self._allow_memview and type(chunk) is memoryview:
                         chunk = bytes(chunk)
+                    if not self._has_waitable_work_locked():
+                        self._event.clear()
                     return index, chunk
                 if self._stream_done:
+                    self._event.clear()
                     return None
-            self._event.clear()
+                if self._event._is_set:
+                    self._event.clear()
             self._event.swait()
 
     def close(self) -> None:
