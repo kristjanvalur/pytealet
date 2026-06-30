@@ -21,6 +21,11 @@ The wrapper currently exposes these socket-oriented operations:
 - `submit_recv()` / `IORING_OP_RECV`
 - `submit_recv_multishot()` / `IORING_OP_RECV` with `IORING_RECV_MULTISHOT`,
   copying selected provided buffers into Python `bytes`
+- `create_buf_group()` / caller-owned provided-buffer rings (`BufGroup`)
+- `submit_recv_buf()` / `IORING_OP_RECV` with caller-owned `BufGroup`, delivering
+  leased read-only `BufView` results
+- `submit_recv_multishot_buf()` / `IORING_OP_RECV` with `IORING_RECV_MULTISHOT`
+  and caller-owned `BufGroup`, delivering leased `BufView` results per CQE
 - `submit_recvmsg()` / `IORING_OP_RECVMSG`
 - `submit_send()` / `IORING_OP_SEND`
 - `submit_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
@@ -40,17 +45,15 @@ The wrapper currently exposes these socket-oriented operations:
 
 This is the complete basic Python-oriented socket surface for the low-level
 package. It covers ordinary byte I/O, message I/O, zero-copy send lifetimes,
-listener accept, multishot accept, copied multishot receive, connection setup,
+listener accept, multishot accept, copied multishot receive, caller-owned
+provided-buffer receive with leased `BufView` delivery, connection setup,
 shutdown, fd creation/close, and handle-based cancellation.
 
 The local liburing headers also expose socket-adjacent helpers that are not part
 of this baseline. `io_uring_prep_poll_add()` / `io_uring_prep_poll_remove()` are
 readiness APIs rather than core completion proactor operations. Fixed-buffer
-zero-copy sends and public provided-buffer rings require ownership contracts
-that do not map cleanly onto ordinary Python buffers. The remaining plausible
-receive-side extension is a zero-copy multishot receive API with explicit leased
-buffers, but that should be treated as a separate design rather than a missing
-piece of the baseline.
+zero-copy sends still require a different ownership contract than caller-owned
+`BufGroup` rings and leased `BufView` results.
 
 ## Kernel Support Notes
 
@@ -74,11 +77,12 @@ operations that intentionally stay outside the basic Python surface:
   not exposed because normal Python sockets use ordinary process fds.
 - `submit_recv()` and `submit_recvmsg()` expose one-shot receive.
   `submit_recv_multishot()` exposes multishot receive with internal buffer-ring
-  ownership and `bytes` delivery. Multishot receive is available since kernel
-  6.0. `probe()` includes a targeted `"IORING_RECV_MULTISHOT"` runtime
-  capability entry because it is newer than multishot accept and depends on
-  provided-buffer support. A future zero-copy multishot receive API would need a
-  separate leased-buffer model. Receive/send polling hints such as
+  ownership and `bytes` delivery. `create_buf_group()`, `submit_recv_buf()`, and
+  `submit_recv_multishot_buf()` expose caller-owned provided-buffer rings and
+  leased `BufView` delivery. Multishot receive is available since kernel 6.0.
+  `probe()` includes a targeted `"IORING_RECV_MULTISHOT"` runtime capability
+  entry because it is newer than multishot accept and depends on provided-buffer
+  support. Receive/send polling hints such as
   `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY` are available
   since kernel 5.19, but they are optimisation hints rather than required
   baseline behaviour.
@@ -137,26 +141,43 @@ Open design questions:
 - Should `UringProactor` default to a resize-friendly setup flag once resize is
   exposed?
 
-### 2. Optional zero-copy multishot receive
+### 2. Provided-buffer receive status
 
-Copied `submit_recv_multishot()` is already part of the baseline. It uses an
-internal provided-buffer ring, copies selected buffers into Python `bytes`, and
-recycles the kernel buffers right away. That keeps ownership simple and works
-well for a Python proactor.
+Copied `submit_recv_multishot()` is part of the baseline. It uses an internal
+provided-buffer ring, copies selected buffers into Python `bytes`, and recycles
+the kernel buffers right away. That keeps ownership simple and works well for a
+Python proactor.
 
-A later zero-copy receive API would need explicit leased-buffer ownership rather
-than exposing raw provided-buffer management as a general low-level primitive:
+Caller-owned provided-buffer receive is also implemented. `Ring.create_buf_group()`
+registers a provided-buffer ring, and `submit_recv_buf()` /
+`submit_recv_multishot_buf()` deliver leased read-only `BufView` objects as
+completion results. `BufView` keeps the selected buffer alive until the last
+exported `memoryview` is released, then recycles the buffer back to the ring:
+
+```python
+buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)
+pending = ring.submit_recv_buf(fd, buf_group, user_data=token)
+completion = ring.wait()
+view = memoryview(completion.result)
+try:
+    process(view)
+finally:
+    del view
+```
+
+Use `submit_recv_multishot_buf()` when one submission should produce many leased
+views until cancelled:
 
 ```python
 handle = ring.submit_recv_multishot_buf(fd, buf_group, user_data=token)
-with completion.result as view:
-  process(memoryview(view))
+completion = ring.wait()
+view = memoryview(completion.result)
+try:
+    process(view)
+finally:
+    del view
+ring.submit_cancel(handle)
 ```
-
-The result object would need to keep the selected buffer alive until the caller
-returns it. It also needs to account for active exported memoryviews before
-recycling the buffer back to the kernel. That is why public provided-buffer
-management is not part of the baseline API.
 
 ### 3. Multishot receive status
 
@@ -180,9 +201,9 @@ multishot uses that value to reconstruct stream order; accept multishot carries
 the same ordinal for symmetry even though accept ordering has less semantic
 weight.
 
-A later zero-copy API can expose leased buffer objects, but those objects must
-return buffers to the original operation before the kernel can reuse them. That
-is a separate ownership contract from the current copied-`bytes` model.
+Leased `BufView` results use a separate ownership contract from the copied-`bytes`
+model: callers must release exported memoryviews before the kernel buffer can be
+recycled.
 
 The completion object still needs enough flag helpers to decode:
 
