@@ -114,7 +114,7 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
         return NULL;
     }
 
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_MULTISHOT_BUF, user_data, NULL);
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_MULTISHOT, user_data, NULL);
     if (!completion) {
         return NULL;
     }

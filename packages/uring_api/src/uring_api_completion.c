@@ -251,7 +251,7 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
         UringApiCompletion_clear_pending_state(self);
         return 1;
     }
-    if (self->kind == URING_API_PENDING_RECV_MULTISHOT_BUF || self->kind == URING_API_PENDING_RECV_BUF) {
+    if (self->kind == URING_API_PENDING_RECV_MULTISHOT || self->kind == URING_API_PENDING_RECV_BUF) {
         payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags);
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||

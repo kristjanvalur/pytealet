@@ -163,7 +163,7 @@ def test_completion_kind_enum_matches_module_constants():
     assert uring_api.CompletionKind.SENDMSG_ZC == uring_api.COMPLETION_KIND_SENDMSG_ZC
     assert uring_api.CompletionKind(uring_api.COMPLETION_KIND_ACCEPT) is uring_api.CompletionKind.ACCEPT
     assert uring_api.CompletionKind.RECV_BUF == uring_api.COMPLETION_KIND_RECV_BUF
-    assert uring_api.CompletionKind.RECV_MULTISHOT_BUF == uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF
+    assert uring_api.CompletionKind.RECV_MULTISHOT == uring_api.COMPLETION_KIND_RECV_MULTISHOT
 
 
 def test_native_module_exports_completion_kind_constants():
@@ -182,8 +182,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_RECV_MULTISHOT == 13
     assert uring_api.COMPLETION_KIND_SEND_ZC == 14
     assert uring_api.COMPLETION_KIND_SENDMSG_ZC == 15
-    assert uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF == 16
-    assert uring_api.COMPLETION_KIND_RECV_BUF == 17
+    assert uring_api.COMPLETION_KIND_RECV_BUF == 16
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -716,7 +715,7 @@ def test_c_api_recv_multishot_operation_when_available():
                 pytest.skip(f"recv multishot is not supported: errno {errno_value}")
         user_data, kind, res, _flags, result = client_api.completion_summary(completion)
         assert user_data == 246
-        assert kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF
+        assert kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
         assert isinstance(result, uring_api.BufView)
         assert res == result.length
         view = memoryview(result)
@@ -1163,7 +1162,7 @@ def test_ring_recv_multishot_completion_when_available():
                     if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
                         pytest.skip(f"recv multishot is not supported: errno {errno_value}")
                 assert completion is not handle
-                assert completion.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF
+                assert completion.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
                 assert completion.user_data is token
                 assert completion.sequence == sequence
                 assert isinstance(completion.result, uring_api.BufView)
@@ -1226,7 +1225,7 @@ def test_ring_recv_multishot_eof_returns_empty_bufview_when_available():
         assert first.flags & uring_api.IORING_CQE_F_MORE
 
         assert final is handle
-        assert final.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF
+        assert final.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
         assert final.user_data is token
         assert final.sequence == 1
         assert final.res == 0
