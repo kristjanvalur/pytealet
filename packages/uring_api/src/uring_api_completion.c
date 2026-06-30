@@ -73,7 +73,7 @@ PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *use
         return NULL;
     }
     completion->kind = kind;
-    completion->user_data = Py_NewRef(user_data);
+    completion->user_data = Py_NewRef(user_data != NULL ? user_data : Py_None);
     completion->res = 0;
     completion->flags = 0;
     completion->result = NULL;
@@ -89,6 +89,7 @@ PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *use
 PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view) {
     UringApiCompletion *completion = (UringApiCompletion *)UringApiCompletion_new_pending(kind, user_data, NULL);
     if (!completion) {
+        PyBuffer_Release(view);
         return NULL;
     }
     completion->view = *view;
