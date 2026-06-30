@@ -3,6 +3,7 @@
  */
 
 #include "uring_api_dispatch.h"
+#include "uring_api_completion.h"
 #include "uring_api_core.h"
 
 static bool delivery_should_stop(UringApiRing *self);

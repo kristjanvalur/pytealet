@@ -1,0 +1,21 @@
+#ifndef URING_API_COMPLETION_H
+#define URING_API_COMPLETION_H
+
+/* private implementation header; not part of the public C API. */
+
+#include "uring_api_common.h"
+
+int completion_type_check(PyObject *completion);
+UringApiRecvBufferPool *UringApiRecvBufferPool_new(UringApiRing *ring, unsigned int buffer_size,
+                                                   unsigned int buffer_count);
+PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data, PyObject *buffer);
+PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
+PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
+PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
+bool is_zero_copy_send_kind(UringApiPendingKind kind);
+PyObject *UringApiCompletion_new_pending_accept(PyObject *user_data);
+PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source);
+void UringApiCompletion_clear_pending_state(UringApiCompletion *self);
+int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags);
+
+#endif

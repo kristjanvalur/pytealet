@@ -3,6 +3,7 @@
  */
 
 #include "uring_api_submit.h"
+#include "uring_api_completion.h"
 #include "uring_api_core.h"
 
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {

@@ -6,7 +6,6 @@
 #include "uring_api_common.h"
 
 int ring_type_check(PyObject *ring);
-int completion_type_check(PyObject *completion);
 int normalize_ret_errno(int ret);
 PyObject *liburing_version_string(void);
 PyObject *liburing_version_info(void);
@@ -24,26 +23,6 @@ int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int default_e
                         unsigned int *flags);
 int parse_numeric_sockaddr(int fd, PyObject *address, struct sockaddr_storage *storage, socklen_t *addrlen);
 int ring_check_open(UringApiRing *self);
-UringApiRecvBufferPool *UringApiRecvBufferPool_new(UringApiRing *ring, unsigned int buffer_size,
-                                                   unsigned int buffer_count);
-PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data, PyObject *buffer);
-PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
-PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
-PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
-bool is_zero_copy_send_kind(UringApiPendingKind kind);
-PyObject *UringApiCompletion_new_pending_accept(PyObject *user_data);
-PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source);
-void UringApiCompletion_clear_pending_state(UringApiCompletion *self);
-int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags);
-void UringApiCompletion_dealloc(UringApiCompletion *self);
-int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit, void *arg);
-int UringApiCompletion_clear(UringApiCompletion *self);
-PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void *closure);
-PyObject *UringApiCompletion_get_kind(UringApiCompletion *self, void *closure);
-PyObject *UringApiCompletion_get_res(UringApiCompletion *self, void *closure);
-PyObject *UringApiCompletion_get_flags(UringApiCompletion *self, void *closure);
-PyObject *UringApiCompletion_get_result(UringApiCompletion *self, void *closure);
-PyObject *UringApiCompletion_get_sequence(UringApiCompletion *self, void *closure);
 int submit_one(UringApiRing *self);
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread);
 void receive_wait_end(UringApiRing *self, bool from_delivery_thread);

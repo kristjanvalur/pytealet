@@ -3,9 +3,9 @@
  */
 
 #include "uring_api_capi_impl.h"
+#include "uring_api_completion.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
-#include "uring_api_properties.h"
 #include "uring_api_ring.h"
 
 PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags) {
