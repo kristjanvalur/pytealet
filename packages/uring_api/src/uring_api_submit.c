@@ -176,6 +176,76 @@ PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *v
     return Py_NewRef(completion);
 }
 
+PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
+                                          PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    completion = UringApiCompletion_new_pending_view(URING_API_PENDING_READ, user_data, view);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_read(sqe, fd, view->buf, (unsigned)view->len, (__u64)offset);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
+                                           PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    completion = UringApiCompletion_new_pending_view(URING_API_PENDING_WRITE, user_data, view);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_write(sqe, fd, view->buf, (unsigned)view->len, (__u64)offset);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
 PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                            unsigned int zc_flags, PyObject *user_data) {
     struct io_uring_sqe *sqe;
@@ -786,6 +856,32 @@ PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int ty
         return NULL;
     }
     return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_read(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buf", "offset", "user_data", NULL};
+    Py_buffer view;
+    int fd;
+    unsigned long long offset;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*K|O", keywords, &fd, &view, &offset, &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_submit_read_impl(self, fd, &view, offset, user_data);
+}
+
+PyObject *UringApiRing_submit_write(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "data", "offset", "user_data", NULL};
+    Py_buffer view;
+    int fd;
+    unsigned long long offset;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*K|O", keywords, &fd, &view, &offset, &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_submit_write_impl(self, fd, &view, offset, user_data);
 }
 
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {

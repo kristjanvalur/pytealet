@@ -187,6 +187,8 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_POLL == 17
     assert uring_api.COMPLETION_KIND_POLL_MULTISHOT == 18
     assert uring_api.COMPLETION_KIND_POLL_REMOVE == 19
+    assert uring_api.COMPLETION_KIND_READ == 20
+    assert uring_api.COMPLETION_KIND_WRITE == 21
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -1743,6 +1745,79 @@ def test_ring_close_completion_when_available():
     with pytest.raises(OSError) as excinfo:
         os.fstat(fd)
     assert excinfo.value.errno == errno.EBADF
+
+
+def test_ring_file_read_write_completion_when_available():
+    require_uring()
+
+    token = {"operation": "file"}
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        try:
+            with uring_api.Ring() as ring:
+                write_handle = ring.submit_write(fd, b"hello", 0, token)
+                write_completion = ring.wait(1.0)
+                assert write_completion is write_handle
+                assert write_completion.kind == uring_api.COMPLETION_KIND_WRITE
+                assert write_completion.user_data is token
+                assert write_completion.res == 5
+                assert write_completion.result == 5
+
+                buf = bytearray(5)
+                read_handle = ring.submit_read(fd, buf, 0, token)
+                read_completion = ring.wait(1.0)
+                assert read_completion is read_handle
+                assert read_completion.kind == uring_api.COMPLETION_KIND_READ
+                assert read_completion.user_data is token
+                assert read_completion.res == 5
+                assert read_completion.result == 5
+                assert bytes(buf) == b"hello"
+        finally:
+            os.close(fd)
+    finally:
+        os.unlink(path)
+
+
+def test_c_api_file_read_write_operation_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    token = 260
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        try:
+            with uring_api.Ring() as ring:
+                client.submit_write(ring, fd, 0, b"hello", token)
+                write_completion = ring.wait(1.0)
+                buf = bytearray(5)
+                client.submit_read(ring, fd, 0, buf, token)
+                read_completion = ring.wait(1.0)
+
+            assert write_completion is not None
+            assert read_completion is not None
+            assert client.completion_summary(write_completion) == (
+                token,
+                uring_api.COMPLETION_KIND_WRITE,
+                5,
+                0,
+                5,
+            )
+            assert client.completion_summary(read_completion) == (
+                token,
+                uring_api.COMPLETION_KIND_READ,
+                5,
+                0,
+                5,
+            )
+            assert bytes(buf) == b"hello"
+        finally:
+            os.close(fd)
+    finally:
+        os.unlink(path)
 
 
 def test_ring_sendto_completion_when_available():

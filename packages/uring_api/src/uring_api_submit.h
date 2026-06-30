@@ -8,6 +8,10 @@
 PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data);
 PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group,
                                                   unsigned int flags, PyObject *user_data);
+PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
+                                        PyObject *user_data);
+PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
+                                         PyObject *user_data);
 PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                         PyObject *user_data);
 PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
@@ -33,6 +37,8 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
 PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
                                           PyObject *user_data);
 
+PyObject *UringApiRing_submit_read(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_write(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs);

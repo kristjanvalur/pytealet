@@ -528,6 +528,7 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT || self->kind == URING_API_PENDING_RECV_BUF) {
         payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags);
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
+                            self->kind == URING_API_PENDING_READ || self->kind == URING_API_PENDING_WRITE ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
                             self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET ||
                             self->kind == URING_API_PENDING_POLL || self->kind == URING_API_PENDING_POLL_MULTISHOT)) {

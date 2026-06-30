@@ -681,6 +681,8 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSubmitPoll,
     UringApiCapi_RingSubmitPollMultishot,
     UringApiCapi_RingSubmitPollRemove,
+    UringApiCapi_RingSubmitRead,
+    UringApiCapi_RingSubmitWrite,
     UringApiCapi_RingBreakWait,
     UringApiCapi_RingWait,
     UringApiCapi_RingSetCallback,

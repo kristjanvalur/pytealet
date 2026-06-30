@@ -39,6 +39,9 @@ int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int prot
 int UringApiCapi_RingSubmitPoll(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
 int UringApiCapi_RingSubmitPollMultishot(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
 int UringApiCapi_RingSubmitPollRemove(PyObject *ring, PyObject *target_completion);
+int UringApiCapi_RingSubmitRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset, PyObject *user_data);
+int UringApiCapi_RingSubmitWrite(PyObject *ring, int fd, PyObject *data, unsigned long long offset,
+                                 PyObject *user_data);
 int UringApiCapi_RingBreakWait(PyObject *ring);
 PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
 int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);

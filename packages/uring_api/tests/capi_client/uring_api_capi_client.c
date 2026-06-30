@@ -424,6 +424,48 @@ static PyObject *client_submit_close(PyObject *module, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *client_submit_read(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf;
+    PyObject *user_data;
+    int fd;
+    unsigned long long offset;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiKOO:submit_read", &ring, &fd, &offset, &buf, &user_data)) {
+        return NULL;
+    }
+    if (api->ring_submit_read(ring, fd, buf, offset, user_data) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_submit_write(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *user_data;
+    int fd;
+    unsigned long long offset;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiKOO:submit_write", &ring, &fd, &offset, &data, &user_data)) {
+        return NULL;
+    }
+    if (api->ring_submit_write(ring, fd, data, offset, user_data) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *client_submit_socket(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
@@ -530,6 +572,8 @@ static PyMethodDef client_methods[] = {
     {"submit_poll", _PyCFunction_CAST(client_submit_poll), METH_VARARGS, NULL},
     {"submit_poll_multishot", _PyCFunction_CAST(client_submit_poll_multishot), METH_VARARGS, NULL},
     {"submit_poll_remove", _PyCFunction_CAST(client_submit_poll_remove), METH_VARARGS, NULL},
+    {"submit_read", _PyCFunction_CAST(client_submit_read), METH_VARARGS, NULL},
+    {"submit_write", _PyCFunction_CAST(client_submit_write), METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL},
 };
 
@@ -554,8 +598,8 @@ static int client_exec(PyObject *module) {
         !api->ring_submit_sendmsg || !api->ring_submit_sendmsg_zc || !api->ring_submit_accept ||
         !api->ring_submit_accept_multishot || !api->ring_submit_connect || !api->ring_submit_shutdown ||
         !api->ring_submit_close || !api->ring_submit_socket || !api->ring_submit_poll ||
-        !api->ring_submit_poll_multishot || !api->ring_submit_poll_remove || !api->ring_break_wait ||
-        !api->ring_wait ||
+        !api->ring_submit_poll_multishot || !api->ring_submit_poll_remove || !api->ring_submit_read ||
+        !api->ring_submit_write || !api->ring_break_wait || !api->ring_wait ||
         !api->ring_set_callback || !api->ring_set_c_callback || !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
         !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
