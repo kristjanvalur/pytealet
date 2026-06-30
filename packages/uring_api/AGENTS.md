@@ -157,6 +157,7 @@ Sources are split by concern under `src/`:
 | Probing | `uring_api_probe.c` |
 | Callback service | `uring_api_dispatch.c` |
 | C API capsule | `uring_api_capi.c`, `uring_api_capi_impl.h` |
+| Completion kinds | `uring_api/include/uring_api_completion_kinds.h` |
 
 Submission follows an `_impl` + thin Python wrapper pattern:
 
@@ -164,9 +165,22 @@ Submission follows an `_impl` + thin Python wrapper pattern:
 - `UringApiRing_submit_*(self, args, kwargs)` parse arguments and delegate.
 - The C API calls `_impl` functions directly where appropriate.
 
-Public native header: `src/uring_api/include/uring_api_capi.h`. Python stubs:
-`src/_uring_api.pyi`. High-level constants and types live in
-`src/uring_api/__init__.py`.
+Public native headers: `src/uring_api/include/uring_api_capi.h` and
+`uring_api_completion_kinds.h`. Python stubs: `src/_uring_api.pyi`. High-level
+constants and types live in `src/uring_api/__init__.py`.
+
+### Completion kinds and C API ABI
+
+- Stable public kind values live in `URING_API_COMPLETION_KIND_*` macros
+  (`uring_api_completion_kinds.h`). Internal pending kinds must stay aligned.
+  Provided-buffer kinds are `RECV_MULTISHOT_BUF` (16) and `RECV_BUF` (17).
+- `Completion.kind` on the native `Completion` object is an `int`. Export
+  `CompletionKind` (`enum.IntEnum`) from `uring_api/__init__.py` only — not from
+  `_uring_api.pyi` or the extension module namespace.
+- C API clients must check `abi_version` / `URING_API_CAPI_ABI_VERSION` before
+  use. Adding vtable entries requires bumping the ABI version, updating
+  `uring_api_capi.h`, `uring_api_probe.c`, `tests/capi_client/`, and tests that
+  assert the ABI constant.
 
 Preserve refcount and buffer-lifetime invariants when touching completion
 delivery or pending-operation state.
@@ -186,8 +200,8 @@ expanding the baseline API opportunistically.
 
 - Update `README.md` for user-visible API or behaviour changes.
 - Update `ROADMAP.md` when deferring or adopting new kernel/liburing features.
-- Update `src/_uring_api.pyi` and `uring_api_capi.h` together with C API
-  changes.
+- Update `src/_uring_api.pyi`, `uring_api_capi.h`, and
+  `uring_api_completion_kinds.h` together with C API or completion-kind changes.
 - Bump package version and `CHANGELOG.md` before release tags (`uring-api-vX.Y.Z`).
 
 ## References
