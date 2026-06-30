@@ -795,8 +795,11 @@ def test_ring_recv_buf_completion_when_available():
             assert isinstance(completion.result, uring_api.BufView)
             assert completion.result.length == 5
             assert completion.result.buf_group is buf_group
-            with memoryview(completion.result) as view:
+            view = memoryview(completion.result)
+            try:
                 assert bytes(view) == b"hello"
+            finally:
+                del view
             assert completion.result.recycled
     finally:
         reader.close()
