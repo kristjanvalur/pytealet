@@ -412,9 +412,7 @@ class ProactorBase:
                 if exception is not None:
                     operation._set_exception(exception)
                     return
-                operation._set_result(
-                    b"".join(bytes(chunks[index]) for index in sorted(chunks))
-                )
+                operation._set_result(b"".join(bytes(chunks[index]) for index in sorted(chunks)))
             finally:
                 _recvall_release_pending_views(chunks, pending_views)
 
@@ -1902,7 +1900,9 @@ class ProactorScheduler(BaseScheduler):
         return self.wait_operation(self._proactor.recvall(sock, progress))
 
     @overload
-    def sock_recvgen(self, sock: socket.socket, *, allow_memview: Literal[False] = False) -> Iterator[tuple[int, bytes]]: ...
+    def sock_recvgen(
+        self, sock: socket.socket, *, allow_memview: Literal[False] = False
+    ) -> Iterator[tuple[int, bytes]]: ...
 
     @overload
     def sock_recvgen(
