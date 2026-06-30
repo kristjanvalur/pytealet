@@ -23,6 +23,10 @@ PyObject *UringApiRing_submit_accept_impl(UringApiRing *self, int fd, unsigned i
 PyObject *UringApiRing_submit_accept_multishot_impl(UringApiRing *self, int fd, unsigned int flags,
                                                     PyObject *user_data);
 PyObject *UringApiRing_submit_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data);
+PyObject *UringApiRing_submit_poll_impl(UringApiRing *self, int fd, unsigned int poll_mask, PyObject *user_data);
+PyObject *UringApiRing_submit_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,
+                                                  PyObject *user_data);
+PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *target_completion);
 PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_completion);
 PyObject *UringApiRing_submit_shutdown_impl(UringApiRing *self, int fd, int how, PyObject *user_data);
 PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *user_data);
@@ -41,6 +45,9 @@ PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *args, PyO
 PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_poll(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_poll_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject *kwargs);

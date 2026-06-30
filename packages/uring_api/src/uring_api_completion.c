@@ -529,7 +529,8 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
         payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags);
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
-                            self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET)) {
+                            self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET ||
+                            self->kind == URING_API_PENDING_POLL || self->kind == URING_API_PENDING_POLL_MULTISHOT)) {
         payload = PyLong_FromLong(res);
     } else if (res >= 0 && self->kind == URING_API_PENDING_RECVMSG) {
         msg_state = UringApiCompletion_get_msg_state(self);

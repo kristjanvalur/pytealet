@@ -529,6 +529,109 @@ PyObject *UringApiRing_submit_connect_impl(UringApiRing *self, int fd, PyObject 
     return Py_NewRef(completion);
 }
 
+PyObject *UringApiRing_submit_poll_impl(UringApiRing *self, int fd, unsigned int poll_mask, PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_POLL, user_data);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_poll_add(sqe, fd, poll_mask);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,
+                                                  PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_POLL_MULTISHOT, user_data);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_poll_multishot(sqe, fd, poll_mask);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *target_completion) {
+    struct io_uring_sqe *sqe;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_POLL_REMOVE, target_completion);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)target_completion);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
 PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_completion) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
@@ -807,6 +910,40 @@ PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObje
         return NULL;
     }
     return UringApiRing_submit_connect_impl(self, fd, address, user_data);
+}
+
+PyObject *UringApiRing_submit_poll(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "mask", "user_data", NULL};
+    int fd;
+    unsigned int poll_mask;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iI|O", keywords, &fd, &poll_mask, &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_submit_poll_impl(self, fd, poll_mask, user_data);
+}
+
+PyObject *UringApiRing_submit_poll_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "mask", "user_data", NULL};
+    int fd;
+    unsigned int poll_mask;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iI|O", keywords, &fd, &poll_mask, &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_submit_poll_multishot_impl(self, fd, poll_mask, user_data);
+}
+
+PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"completion", NULL};
+    PyObject *target_completion;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!", keywords, &UringApiCompletion_Type, &target_completion)) {
+        return NULL;
+    }
+    return UringApiRing_submit_poll_remove_impl(self, target_completion);
 }
 
 PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs) {
