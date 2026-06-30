@@ -206,6 +206,11 @@ class Event:
 
         self._is_set = False
 
+    def is_set(self) -> bool:
+        """Return whether the event is currently set."""
+
+        return self._is_set
+
 
 class ThreadsafeEvent:
     """Synchronous event whose `set` method is safe from another thread."""
@@ -275,6 +280,11 @@ class ThreadsafeEvent:
         """Reset the event to the unset state."""
 
         self._is_set = False
+
+    def is_set(self) -> bool:
+        """Return whether the event is currently set."""
+
+        return self._is_set
 
 
 class Lock:

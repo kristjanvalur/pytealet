@@ -305,8 +305,8 @@ class _RecvGenBuffer:
                 if self._stream_done:
                     self._event.clear()
                     return None
-                if self._event._is_set:
-                    self._event.clear()
+                # discard any stale signal before blocking; clear() is idempotent
+                self._event.clear()
             self._event.swait()
 
     def close(self) -> None:
