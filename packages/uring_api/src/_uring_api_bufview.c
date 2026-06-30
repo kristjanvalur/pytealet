@@ -7,37 +7,12 @@
  */
 
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
-#define BUFVIEW_BEGIN_CRITICAL_SECTION(view)                                                                           \
-    {                                                                                                                  \
-        PyThread_type_lock _bufview_critical_section_lock = (view)->view_lock;                                         \
-        PyThread_acquire_lock(_bufview_critical_section_lock, WAIT_LOCK);
-#define BUFVIEW_END_CRITICAL_SECTION()                                                                                 \
-    PyThread_release_lock(_bufview_critical_section_lock);                                                             \
-    }
+#define BUFVIEW_BEGIN_CRITICAL_SECTION(view) {
+#define BUFVIEW_END_CRITICAL_SECTION() }
 #else
 #define BUFVIEW_BEGIN_CRITICAL_SECTION(view) Py_BEGIN_CRITICAL_SECTION(view)
 #define BUFVIEW_END_CRITICAL_SECTION() Py_END_CRITICAL_SECTION()
 #endif
-
-static int UringApiBufView_init_lock(UringApiBufView *self) {
-#ifdef URING_API_USE_PYTHREAD_RING_LOCK
-    self->view_lock = PyThread_allocate_lock();
-    if (!self->view_lock) {
-        PyErr_NoMemory();
-        return -1;
-    }
-#endif
-    return 0;
-}
-
-static void UringApiBufView_free_lock(UringApiBufView *self) {
-#ifdef URING_API_USE_PYTHREAD_RING_LOCK
-    if (self->view_lock) {
-        PyThread_free_lock(self->view_lock);
-        self->view_lock = NULL;
-    }
-#endif
-}
 
 static int UringApiBufView_recycle_locked(UringApiBufView *self) {
     UringApiBufGroup *buf_group;
@@ -200,7 +175,6 @@ static void UringApiBufView_dealloc(UringApiBufView *self) {
         }
     }
     BUFVIEW_END_CRITICAL_SECTION();
-    UringApiBufView_free_lock(self);
     (void)UringApiBufView_clear(self);
     PyObject_GC_Del(self);
 }
@@ -232,10 +206,6 @@ static PyObject *UringApiBufView_create(PyObject *buf_group_obj, unsigned int bu
 
     self = PyObject_GC_New(UringApiBufView, &UringApiBufView_Type);
     if (!self) {
-        return NULL;
-    }
-    if (UringApiBufView_init_lock(self) < 0) {
-        PyObject_GC_Del(self);
         return NULL;
     }
     self->buf_group = Py_NewRef(buf_group_obj);
