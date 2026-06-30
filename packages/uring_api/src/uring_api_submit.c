@@ -50,7 +50,6 @@ PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObj
     PyObject *user_data = Py_None;
     PyObject *buf_group_obj;
     PyObject *completion = NULL;
-    UringApiCompletion *pending;
     int failed = 0;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO!|OI", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
@@ -67,7 +66,6 @@ PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObj
     if (!completion) {
         return NULL;
     }
-    pending = (UringApiCompletion *)completion;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
@@ -100,7 +98,6 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
     struct io_uring_sqe *sqe;
     UringApiBufGroup *buf_group;
     PyObject *completion = NULL;
-    UringApiCompletion *pending;
     int failed = 0;
 
     if (!buf_group_obj || !PyObject_TypeCheck(buf_group_obj, &UringApiBufGroup_Type)) {
@@ -117,8 +114,7 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
     if (!completion) {
         return NULL;
     }
-    pending = (UringApiCompletion *)completion;
-    pending->multishot = true;
+    ((UringApiCompletion *)completion)->multishot = true;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
