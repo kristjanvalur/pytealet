@@ -541,6 +541,9 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
         if (payload) {
             payload = Py_BuildValue("iN", res, payload);
         }
+        if (flags & IORING_CQE_F_MORE) {
+            sockaddr_state->addrlen = sizeof(sockaddr_state->addr);
+        }
     } else if (res >= 0 && self->kind == URING_API_PENDING_CONNECT) {
         payload = Py_NewRef(Py_None);
     } else {
