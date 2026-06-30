@@ -77,6 +77,7 @@ static PyObject *client_ring_summary(PyObject *module, PyObject *args) {
 static PyObject *client_completion_summary(PyObject *module, PyObject *completion) {
     PyObject *user_data;
     int res;
+    int kind;
     unsigned int flags;
     PyObject *result;
     PyObject *summary;
@@ -93,7 +94,6 @@ static PyObject *client_completion_summary(PyObject *module, PyObject *completio
     if (!user_data) {
         return NULL;
     }
-    int kind;
     if (api->completion_res(completion, &res) < 0 || api->completion_flags(completion, &flags) < 0 ||
         api->completion_kind(completion, &kind) < 0) {
         Py_DECREF(user_data);
@@ -510,13 +510,19 @@ static void client_free(void *module) {
     Py_CLEAR(callback_sink);
 }
 
-static PyModuleDef_Slot client_slots[] = {
-    {Py_mod_exec, client_exec},
-#if defined(Py_mod_gil)
-    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+/* CPython API uses void* in module slots; this conversion is intentional. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 #endif
-    {0, NULL},
-};
+static PyModuleDef_Slot client_slots[] = {{Py_mod_exec, client_exec},
+#if defined(Py_mod_gil)
+                                          {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+                                          {0, NULL}};
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 static struct PyModuleDef client_module = {
     PyModuleDef_HEAD_INIT,

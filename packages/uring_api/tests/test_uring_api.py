@@ -20,6 +20,14 @@ import pytest
 
 import uring_api
 
+# Mirror packages/uring_api/setup.py EXTENSION_C_COMPILE_ARGS.
+EXTENSION_C_COMPILE_ARGS = [
+    "-std=c17",
+    "-pedantic-errors",
+    "-Wall",
+    "-Wno-unused-function",
+]
+
 
 def require_uring():
     probe = uring_api.probe()
@@ -105,7 +113,18 @@ def test_public_capi_header_compiles_without_liburing_headers():
         object_path = Path(temp_dir) / "check_uring_api_capi.o"
         source_path.write_text(source, encoding="utf-8")
         subprocess.run(
-            [*cc_argv, "-c", str(source_path), "-o", str(object_path), "-I", str(include_dir), "-I", str(python_include)],
+            [
+                *cc_argv,
+                *EXTENSION_C_COMPILE_ARGS,
+                "-c",
+                str(source_path),
+                "-o",
+                str(object_path),
+                "-I",
+                str(include_dir),
+                "-I",
+                str(python_include),
+            ],
             check=True,
         )
 
@@ -342,6 +361,7 @@ def build_c_api_client():
         subprocess.run(
             [
                 *shlex.split(cc),
+                *EXTENSION_C_COMPILE_ARGS,
                 "-shared",
                 "-fPIC",
                 "-I",
