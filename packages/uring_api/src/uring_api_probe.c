@@ -6,6 +6,8 @@
 #include "uring_api_capi_impl.h"
 #include "uring_api_core.h"
 
+static PyObject *build_capability_dict(void);
+
 static PyObject *build_probe_result(bool available) {
     PyObject *result;
 
@@ -466,7 +468,7 @@ static int add_bool_from_feature_probe(PyObject *capabilities, const char *name,
     return PyDict_SetItemString(capabilities, name, truth ? Py_True : Py_False);
 }
 
-PyObject *build_capability_dict(void) {
+static PyObject *build_capability_dict(void) {
     PyObject *capabilities;
     PyObject *probe_result;
 

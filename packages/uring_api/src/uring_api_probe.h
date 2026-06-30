@@ -6,7 +6,6 @@
 #include "uring_api_common.h"
 
 PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs);
-PyObject *build_capability_dict(void);
 int uring_api_export_capi(PyObject *module);
 
 #endif

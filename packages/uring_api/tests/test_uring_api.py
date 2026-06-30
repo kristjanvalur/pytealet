@@ -84,8 +84,9 @@ def test_uring_api_get_include_points_to_header_dir():
 
 
 def test_public_capi_header_compiles_without_liburing_headers():
-    cc = shutil.which(os.environ.get("CC", "cc"))
-    if not cc:
+    cc = os.environ.get("CC") or sysconfig.get_config_var("CC") or "cc"
+    cc_argv = shlex.split(cc)
+    if not cc_argv or not shutil.which(cc_argv[0]):
         pytest.skip("C compiler is not available")
 
     include_dir = Path(uring_api.get_include())
@@ -97,7 +98,7 @@ def test_public_capi_header_compiles_without_liburing_headers():
         object_path = Path(temp_dir) / "check_uring_api_capi.o"
         source_path.write_text(source, encoding="utf-8")
         subprocess.run(
-            [cc, "-c", str(source_path), "-o", str(object_path), "-I", str(include_dir), "-I", python_include],
+            [*cc_argv, "-c", str(source_path), "-o", str(object_path), "-I", str(include_dir), "-I", python_include],
             check=True,
         )
 
