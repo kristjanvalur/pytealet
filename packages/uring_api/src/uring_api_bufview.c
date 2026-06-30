@@ -55,6 +55,12 @@ static int UringApiBufView_getbuffer(PyObject *obj, Py_buffer *view, int flags) 
         buf_group = (UringApiBufGroup *)self->buf_group;
         buffer_base = buf_group->storage + ((size_t)self->buffer_id * buf_group->buffer_size);
         self->export_count++;
+        if (flags & PyBUF_ND) {
+            self->export_shape = (Py_ssize_t)self->length;
+        }
+        if (flags & PyBUF_STRIDES) {
+            self->export_stride = 1;
+        }
     }
     BUFVIEW_END_CRITICAL_SECTION();
 
@@ -71,7 +77,6 @@ static int UringApiBufView_getbuffer(PyObject *obj, Py_buffer *view, int flags) 
     view->internal = NULL;
 
     if (flags & PyBUF_ND) {
-        self->export_shape = (Py_ssize_t)self->length;
         view->ndim = 1;
         view->shape = &self->export_shape;
     } else {
@@ -80,7 +85,6 @@ static int UringApiBufView_getbuffer(PyObject *obj, Py_buffer *view, int flags) 
     }
 
     if (flags & PyBUF_STRIDES) {
-        self->export_stride = 1;
         view->strides = &self->export_stride;
     } else {
         view->strides = NULL;
