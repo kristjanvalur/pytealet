@@ -212,7 +212,6 @@ class _RecvGenBuffer:
         self._next_index = 0
         self._ready: deque[tuple[int, memoryview | bytes]] = deque()
         self._out_of_order: dict[int, memoryview | bytes] = {}
-        self._pending_views: set[int] = set()
         self._pressure_pending = False
         self._stream_done = False
         self._stream_error: BaseException | None = None
@@ -255,12 +254,10 @@ class _RecvGenBuffer:
     def _ingest(self, index: int, data: memoryview) -> bool:
         if index == self._next_index:
             self._ready.append((index, data))
-            self._pending_views.add(index)
             self._next_index += 1
             self._drain_out_of_order()
             return True
         self._out_of_order[index] = data
-        self._pending_views.add(index)
         return False
 
     def _drain_out_of_order(self) -> None:
@@ -279,7 +276,6 @@ class _RecvGenBuffer:
         for index, chunk in list(self._out_of_order.items()):
             if type(chunk) is memoryview:
                 self._out_of_order[index] = bytes(chunk)
-        self._pending_views.clear()
 
     def _has_waitable_work_locked(self) -> bool:
         return self._stream_error is not None or self._pressure_pending or bool(self._ready) or self._stream_done
@@ -318,7 +314,6 @@ class _RecvGenBuffer:
             stream = self._stream
             self._ready.clear()
             self._out_of_order.clear()
-            self._pending_views.clear()
         if stream is not None and not stream.done():
             proactor = stream._proactor
             if proactor is not None:
