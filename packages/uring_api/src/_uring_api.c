@@ -314,6 +314,7 @@ static PyGetSetDef UringApiBufGroup_getset[] = {
     {"buffer_size", (getter)UringApiBufGroup_get_buffer_size, NULL, NULL, NULL},
     {"buffer_count", (getter)UringApiBufGroup_get_buffer_count, NULL, NULL, NULL},
     {"group_id", (getter)UringApiBufGroup_get_group_id, NULL, NULL, NULL},
+    {"ring", (getter)UringApiBufGroup_get_ring, NULL, NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

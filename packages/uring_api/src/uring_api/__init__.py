@@ -96,6 +96,7 @@ except ImportError as exc:
         buffer_size: int
         buffer_count: int
         group_id: int
+        ring: Ring
 
     @dataclass(frozen=True)
     class BufView:

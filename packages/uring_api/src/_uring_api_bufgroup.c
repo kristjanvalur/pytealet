@@ -19,6 +19,13 @@ static PyObject *UringApiBufGroup_get_group_id(UringApiBufGroup *self, void *Py_
     return PyLong_FromUnsignedLong(self->group_id);
 }
 
+static PyObject *UringApiBufGroup_get_ring(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
+    if (!self->ring) {
+        Py_RETURN_NONE;
+    }
+    return Py_NewRef(self->ring);
+}
+
 static int UringApiBufGroup_traverse(UringApiBufGroup *self, visitproc visit, void *arg) {
     Py_VISIT(self->ring);
     return 0;

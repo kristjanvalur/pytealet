@@ -753,6 +753,23 @@ def test_c_api_completion_result_is_none_for_pending_completion_when_available()
         writer.close()
 
 
+def test_buf_group_exposes_creating_ring():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        buf_group = ring.create_buf_group(16, 4)
+        assert buf_group.ring is ring
+
+
+def test_buf_group_rejects_use_on_different_ring():
+    require_uring()
+
+    with uring_api.Ring() as ring_a, uring_api.Ring() as ring_b:
+        buf_group = ring_a.create_buf_group(16, 4)
+        with pytest.raises(ValueError, match="buf_group was not created by this ring"):
+            ring_b.submit_recv_multishot_zc(0, buf_group)
+
+
 def test_buf_view_rejects_direct_instantiation():
     require_uring()
 
