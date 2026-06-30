@@ -1686,11 +1686,11 @@ class UringProactor(ProactorBase):
             operation._emit_result((index, memoryview(b"")))
             operation._set_result(None)
             return operation
-        view = memoryview(completion.result)
+        chunk_view = memoryview(cast(Any, completion.result))
         try:
-            operation._emit_result((index, view))
+            operation._emit_result((index, chunk_view))
         finally:
-            del view
+            del chunk_view
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             operation._set_result(None)
         return operation
