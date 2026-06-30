@@ -99,6 +99,9 @@ typedef struct {
     unsigned int length;
     unsigned int export_count;
     bool recycled;
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+    PyThread_type_lock view_lock;
+#endif
 } UringApiBufView;
 
 typedef enum {
