@@ -114,6 +114,7 @@ typedef struct {
     PyObject *buffer;
     PyObject *buf_group;
     unsigned long long sequence;
+    bool multishot;
     Py_buffer view;
     struct iovec iov;
     struct msghdr msg;

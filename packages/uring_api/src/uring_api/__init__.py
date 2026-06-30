@@ -91,6 +91,7 @@ except ImportError as exc:
         flags: int
         result: object
         sequence: int = 0
+        multishot: bool = False
 
     @dataclass(frozen=True)
     class BufGroup:

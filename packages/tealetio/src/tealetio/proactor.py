@@ -10,7 +10,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import CancelledError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar, cast, overload
 
 import uring_api
@@ -61,6 +61,42 @@ _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 # ``recv_many`` result-callback index signalling provided-buffer pool pressure.
 RECV_MANY_BUFFER_PRESSURE = -1
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
+
+T_Cargo = TypeVar("T_Cargo")
+
+
+class _OrderedIngestBuffer(Generic[T_Cargo]):
+    """Hold out-of-order indexed items and release them in strict sequence."""
+
+    def __init__(self, *, start: int = 0) -> None:
+        self._next_emit = start
+        self._pending: dict[int, T_Cargo] = {}
+
+    def ingest(self, index: int, cargo: T_Cargo) -> list[tuple[int, T_Cargo]]:
+        """Accept one item and return any consecutive ready `(index, cargo)` pairs."""
+
+        if index != self._next_emit:
+            self._pending[index] = cargo
+            return []
+        return self._drain_from(index, cargo)
+
+    def map_pending(self, transform: Callable[[T_Cargo], T_Cargo]) -> None:
+        """Rewrite buffered items that are still waiting for earlier indices."""
+
+        for index in list(self._pending):
+            self._pending[index] = transform(self._pending[index])
+
+    def clear(self) -> None:
+        self._pending.clear()
+
+    def _drain_from(self, index: int, cargo: T_Cargo) -> list[tuple[int, T_Cargo]]:
+        ready: list[tuple[int, T_Cargo]] = [(index, cargo)]
+        self._next_emit = index + 1
+        while self._next_emit in self._pending:
+            next_index = self._next_emit
+            ready.append((next_index, self._pending.pop(next_index)))
+            self._next_emit += 1
+        return ready
 
 
 _UringRing: TypeAlias = uring_api.Ring
@@ -209,9 +245,8 @@ class _RecvGenBuffer:
         self._allow_memview = allow_memview
         self._lock = threading.Lock()
         self._event = ThreadsafeEvent()
-        self._next_index = 0
+        self._reorder = _OrderedIngestBuffer[memoryview]()
         self._ready: deque[tuple[int, memoryview | bytes]] = deque()
-        self._out_of_order: dict[int, memoryview | bytes] = {}
         self._pressure_pending = False
         self._stream_done = False
         self._stream_error: BaseException | None = None
@@ -243,28 +278,16 @@ class _RecvGenBuffer:
                 if self._allow_memview:
                     self._pressure_pending = True
                 notify = True
-            elif len(data) == 0:
-                self._stream_done = True
-                notify = True
             else:
                 notify = self._ingest(index, data)
         if notify:
             self._event.set()
 
     def _ingest(self, index: int, data: memoryview) -> bool:
-        if index == self._next_index:
-            self._ready.append((index, data))
-            self._next_index += 1
-            self._drain_out_of_order()
-            return True
-        self._out_of_order[index] = data
-        return False
-
-    def _drain_out_of_order(self) -> None:
-        while self._next_index in self._out_of_order:
-            data = self._out_of_order.pop(self._next_index)
-            self._ready.append((self._next_index, data))
-            self._next_index += 1
+        ready = self._reorder.ingest(index, data)
+        if ready:
+            self._ready.extend(ready)
+        return bool(ready)
 
     def _flush_all_views(self) -> None:
         flushed_ready: deque[tuple[int, memoryview | bytes]] = deque()
@@ -273,9 +296,7 @@ class _RecvGenBuffer:
                 chunk = bytes(chunk)
             flushed_ready.append((index, chunk))
         self._ready = flushed_ready
-        for index, chunk in list(self._out_of_order.items()):
-            if type(chunk) is memoryview:
-                self._out_of_order[index] = bytes(chunk)
+        self._reorder.map_pending(lambda chunk: bytes(chunk) if type(chunk) is memoryview else chunk)
 
     def _has_waitable_work_locked(self) -> bool:
         return self._stream_error is not None or self._pressure_pending or bool(self._ready) or self._stream_done
@@ -293,6 +314,11 @@ class _RecvGenBuffer:
                     return RECV_MANY_BUFFER_PRESSURE, None
                 if self._ready:
                     index, chunk = self._ready.popleft()
+                    if len(chunk) == 0:
+                        self._stream_done = True
+                        if not self._has_waitable_work_locked():
+                            self._event.clear()
+                        return None
                     if not self._allow_memview and type(chunk) is memoryview:
                         chunk = bytes(chunk)
                     if not self._has_waitable_work_locked():
@@ -313,7 +339,7 @@ class _RecvGenBuffer:
             self._closed = True
             stream = self._stream
             self._ready.clear()
-            self._out_of_order.clear()
+            self._reorder.clear()
         if stream is not None and not stream.done():
             proactor = stream._proactor
             if proactor is not None:
@@ -664,6 +690,15 @@ _UringEntrySubmit = Callable[[], _UringCompletion]
 
 
 @dataclass
+class _MultishotLegState:
+    """Per-leg state for deferred multishot termination handling."""
+
+    nonterminal_seen: int = 0
+    pending_final: _UringCompletion | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+@dataclass
 class _UringEntry:
     operation: Operation[Any]
     complete: _UringEntryComplete
@@ -674,6 +709,41 @@ class _UringEntry:
     active: bool = True
     stream_sequence: int = 0
     resubmit: _UringEntrySubmit | None = None
+    multishot_leg: _MultishotLegState | None = None
+
+    def completions_to_process(
+        self,
+        completion: _UringCompletion,
+    ) -> tuple[_UringCompletion | None, _UringCompletion | None]:
+        """Return which completions are ready for ``_complete_uring_operation``.
+
+        Non-multishot completions are always returned as ``(completion, None)``.
+        Multishot legs may defer a terminating completion (no ``F_MORE``) until
+        every earlier non-terminating completion in the leg has been observed.
+        When a deferred termination becomes ready, it is returned as the second
+        element alongside the completion that unblocked it.
+        """
+
+        if not completion.multishot:
+            return (completion, None)
+        leg = self.multishot_leg
+        assert leg is not None
+        with leg.lock:
+            if self.operation.done():
+                return (None, None)
+            is_termination = not bool(completion.flags & uring_api.IORING_CQE_F_MORE)
+            if is_termination:
+                if leg.nonterminal_seen < completion.sequence:
+                    leg.pending_final = completion
+                    return (None, None)
+                leg.pending_final = None
+                return (completion, None)
+            leg.nonterminal_seen += 1
+            pending = leg.pending_final
+            if pending is not None and leg.nonterminal_seen >= pending.sequence:
+                leg.pending_final = None
+                return (completion, pending)
+            return (completion, None)
 
 
 @dataclass
@@ -1599,25 +1669,35 @@ class UringProactor(ProactorBase):
             proactor=self,
             result_callback=callback,
         )
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_accept_many)
+        entry = _UringEntry(
+            operation=operation,
+            complete=UringProactor._deliver_uring_accept_many,
+            multishot_leg=_MultishotLegState(),
+        )
         self._submit_uring_entry(
             entry,
             lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
         )
         return operation
 
-    def _complete_uring_accept_many(
+    def _deliver_uring_accept_many(
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
-    ) -> Operation[Any]:
+    ) -> Operation[Any] | None:
+        operation = cast(ContinuousOperation[tuple[socket.socket, Any]], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
         _configure_accepted_socket(conn)
-        operation = cast(ContinuousOperation[tuple[socket.socket, Any]], entry.operation)
         operation._emit_result((conn, address))
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             operation._set_result(None)
+            self._deactivate_uring_entry(entry)
         return operation
 
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
@@ -1642,7 +1722,9 @@ class UringProactor(ProactorBase):
 
         `callback` may run on any uring completion service thread. Each result
         is an ordinal `(index, data)` pair with read-only `data` as a
-        `memoryview` into the leased kernel buffer. EOF emits a final empty
+        `memoryview` into the leased kernel buffer. Callback delivery may
+        arrive out of order across completion threads; consumers that need
+        stream order must reorder by index themselves. EOF emits a final empty
         view before completing the continuous operation. Chunk sizes come from
         the shared ``BufGroup`` pool, not from a caller argument.
 
@@ -1663,7 +1745,11 @@ class UringProactor(ProactorBase):
             proactor=self,
             result_callback=callback,
         )
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv_many)
+        entry = _UringEntry(
+            operation=operation,
+            complete=UringProactor._deliver_uring_recv_many,
+            multishot_leg=_MultishotLegState(),
+        )
 
         def submit_recv_many() -> _UringCompletion:
             return self._ring.submit_recv_multishot(sock.fileno(), self._get_recv_many_buf_group(), entry)
@@ -1672,33 +1758,42 @@ class UringProactor(ProactorBase):
         self._submit_uring_entry(entry, submit_recv_many)
         return operation
 
-    def _handle_recv_many_enobufs(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+    def _deliver_uring_recv_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
-        entry.stream_sequence += completion.sequence
-        operation._emit_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
-        resubmit = entry.resubmit
-        if resubmit is None:
-            operation._set_exception(RuntimeError("recv_many entry is missing its resubmit handler"))
-            return operation
-        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=resubmit))
-        self.break_wait()
-        return None
-
-    def _complete_uring_recv_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any]:
-        operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
+        res = completion.res
         index = entry.stream_sequence + completion.sequence
-        if completion.res == 0:
-            operation._emit_result((index, memoryview(b"")))
-            operation._set_result(None)
+
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            if res == -errno.ENOBUFS:
+                entry.stream_sequence += completion.sequence
+                if entry.multishot_leg is not None:
+                    entry.multishot_leg.nonterminal_seen = 0
+                operation._emit_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
+                resubmit = entry.resubmit
+                if resubmit is None:
+                    operation._set_exception(RuntimeError("recv_many entry is missing its resubmit handler"))
+                    return operation
+                self._deferred_submissions.append(_UringSubmission(entry=entry, submit=resubmit))
+                self.break_wait()
+                return None
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
-        chunk_view = memoryview(cast(Any, completion.result))
-        try:
-            operation._emit_result((index, chunk_view))
-        finally:
-            del chunk_view
-        if not completion.flags & uring_api.IORING_CQE_F_MORE:
+
+        if res == 0:
+            operation._emit_result((index, memoryview(b"")))
+        else:
+            operation._emit_result((index, memoryview(cast(Any, completion.result))))
+
+        if not bool(completion.flags & uring_api.IORING_CQE_F_MORE):
             operation._set_result(None)
+            self._deactivate_uring_entry(entry)
         return operation
+
+    def _deactivate_uring_entry(self, entry: _UringEntry) -> None:
+        if entry.active:
+            entry.active = False
+            self._pending_tokens.pop()
 
     def cancel_operation(self, operation: Operation[Any]) -> None:
         if self._cancel_deferred_operation(operation):
@@ -1712,9 +1807,20 @@ class UringProactor(ProactorBase):
             self.break_wait()
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
-        operation = self._complete_uring_operation(completion)
+        if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
+            self._retry_deferred_submissions()
+            return
+        entry = cast(_UringEntry, completion.user_data)
+        first, second = entry.completions_to_process(completion)
+        completed_operation: Operation[Any] | None = None
+        for pending in (first, second):
+            if pending is None:
+                continue
+            result = self._complete_uring_operation(pending)
+            if result is not None:
+                completed_operation = result
         self._retry_deferred_submissions()
-        if operation is not None:
+        if completed_operation is not None:
             self._notify_completed()
 
     def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
@@ -1808,20 +1914,19 @@ class UringProactor(ProactorBase):
         self,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
-            return None
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
         assert entry.active
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
+        if completion.multishot:
+            if entry.operation.done():
+                return entry.operation
+            return entry.complete(self, entry, completion)
         if not has_more:
-            entry.active = False
-            self._pending_tokens.pop()
+            self._deactivate_uring_entry(entry)
         if entry.operation.done():
             return entry.operation
         if res < 0:
-            if res == -errno.ENOBUFS and entry.complete is UringProactor._complete_uring_recv_many:
-                return self._handle_recv_many_enobufs(entry, completion)
             entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return entry.operation
         return entry.complete(self, entry, completion)

@@ -80,6 +80,7 @@ PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *use
     completion->buffer = Py_XNewRef(buffer);
     completion->buf_group = NULL;
     completion->sequence = 0;
+    completion->multishot = false;
     completion->has_view = false;
     completion->has_msghdr = false;
     PyObject_GC_Track(completion);
@@ -163,6 +164,7 @@ PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source) {
     completion->buf_group = NULL;
     completion->sequence = source->sequence;
     source->sequence++;
+    completion->multishot = source->multishot;
     memset(&completion->view, 0, sizeof(completion->view));
     memset(&completion->iov, 0, sizeof(completion->iov));
     memset(&completion->msg, 0, sizeof(completion->msg));
@@ -307,6 +309,10 @@ static PyObject *UringApiCompletion_get_sequence(UringApiCompletion *self, void 
     return PyLong_FromUnsignedLongLong(self->sequence);
 }
 
+static PyObject *UringApiCompletion_get_multishot(UringApiCompletion *self, void *closure) {
+    return PyBool_FromLong(self->multishot);
+}
+
 static PyGetSetDef UringApiCompletion_getset[] = {
     {"user_data", (getter)UringApiCompletion_get_user_data, NULL, NULL, NULL},
     {"kind", (getter)UringApiCompletion_get_kind, NULL, NULL, NULL},
@@ -314,6 +320,7 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {"flags", (getter)UringApiCompletion_get_flags, NULL, NULL, NULL},
     {"result", (getter)UringApiCompletion_get_result, NULL, NULL, NULL},
     {"sequence", (getter)UringApiCompletion_get_sequence, NULL, NULL, NULL},
+    {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

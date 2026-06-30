@@ -715,6 +715,7 @@ def test_c_api_recv_multishot_operation_when_available():
                 pytest.skip(f"recv multishot is not supported: errno {errno_value}")
         user_data, kind, res, _flags, result = client_api.completion_summary(completion)
         assert user_data == 246
+        assert completion.multishot is True
         assert kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
         assert isinstance(result, uring_api.BufView)
         assert res == result.length
@@ -1163,6 +1164,7 @@ def test_ring_recv_multishot_completion_when_available():
                         pytest.skip(f"recv multishot is not supported: errno {errno_value}")
                 assert completion is not handle
                 assert completion.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
+                assert completion.multishot is True
                 assert completion.user_data is token
                 assert completion.sequence == sequence
                 assert isinstance(completion.result, uring_api.BufView)
@@ -1214,6 +1216,7 @@ def test_ring_recv_multishot_eof_returns_empty_bufview_when_available():
             if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
                 pytest.skip(f"recv multishot is not supported: errno {errno_value}")
         assert first is not handle
+        assert first.multishot is True
         assert first.sequence == 0
         assert isinstance(first.result, uring_api.BufView)
         view = memoryview(first.result)
@@ -1226,6 +1229,7 @@ def test_ring_recv_multishot_eof_returns_empty_bufview_when_available():
 
         assert final is handle
         assert final.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
+        assert final.multishot is True
         assert final.user_data is token
         assert final.sequence == 1
         assert final.res == 0
@@ -1412,6 +1416,7 @@ def test_ring_accept_multishot_completion_when_available():
                         pytest.skip(f"IORING_ACCEPT_MULTISHOT is not supported: errno {errno_value}")
                 assert completion is not handle
                 assert completion.kind == uring_api.COMPLETION_KIND_ACCEPT
+                assert completion.multishot is True
                 assert completion.user_data is token
                 assert completion.sequence == sequence
                 assert completion.flags & uring_api.IORING_CQE_F_MORE

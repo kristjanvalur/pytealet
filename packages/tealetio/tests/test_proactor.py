@@ -34,6 +34,10 @@ def _recv_many_bytes(seen: list[tuple[int, memoryview]]) -> list[tuple[int, byte
     return [(index, bytes(data)) for index, data in seen]
 
 
+def _recv_many_bytes_sorted(seen: list[tuple[int, memoryview]]) -> list[tuple[int, bytes]]:
+    return sorted((index, bytes(data)) for index, data in seen if index != RECV_MANY_BUFFER_PRESSURE)
+
+
 def test_recvall_adopt_chunk_keeps_all_chunk_views():
     chunks: dict[int, memoryview | bytes] = {}
     pending: set[int] = set()
@@ -80,6 +84,75 @@ def _exercise_recvgen_buffer(exercise: Any) -> Any:
         return scheduler.run_until_complete(scheduler.spawn(exercise))
     finally:
         scheduler.close()
+
+
+def _multishot_test_completion(*, sequence: int = 0, more: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        multishot=True,
+        flags=uring_api.IORING_CQE_F_MORE if more else 0,
+        sequence=sequence,
+    )
+
+
+def _multishot_test_entry() -> proactor_module._UringEntry:
+    operation = ContinuousOperation(
+        kind="recv_many",
+        fileobj=socket.socketpair()[0],
+        proactor=None,
+        result_callback=lambda _result: None,
+    )
+    return proactor_module._UringEntry(
+        operation=operation,
+        complete=lambda *_args: None,
+        multishot_leg=proactor_module._MultishotLegState(),
+    )
+
+
+def test_uring_entry_omits_multishot_leg_for_one_shot_operations():
+    operation = Operation(kind="recv", fileobj=socket.socketpair()[0], proactor=None)
+    entry = proactor_module._UringEntry(operation=operation, complete=lambda *_args: None)
+    assert entry.multishot_leg is None
+
+
+def test_completions_to_process_passes_through_non_multishot():
+    entry = _multishot_test_entry()
+    completion = SimpleNamespace(multishot=False)
+    assert entry.completions_to_process(completion) == (completion, None)
+
+
+def test_completions_to_process_defers_out_of_order_termination():
+    entry = _multishot_test_entry()
+    terminal = _multishot_test_completion(sequence=2, more=False)
+    assert entry.completions_to_process(terminal) == (None, None)
+    assert entry.multishot_leg is not None
+    assert entry.multishot_leg.pending_final is terminal
+
+
+def test_completions_to_process_flushes_stored_termination():
+    entry = _multishot_test_entry()
+    terminal = _multishot_test_completion(sequence=2, more=False)
+    entry.completions_to_process(terminal)
+    first = _multishot_test_completion(sequence=0)
+    assert entry.completions_to_process(first) == (first, None)
+    second = _multishot_test_completion(sequence=1)
+    assert entry.completions_to_process(second) == (second, terminal)
+
+
+def test_ordered_ingest_buffer_returns_empty_when_out_of_order():
+    buffer = proactor_module._OrderedIngestBuffer[str]()
+    assert buffer.ingest(1, "b") == []
+
+
+def test_ordered_ingest_buffer_returns_single_ready_item():
+    buffer = proactor_module._OrderedIngestBuffer[str]()
+    assert buffer.ingest(0, "a") == [(0, "a")]
+
+
+def test_ordered_ingest_buffer_unclogs_pending_items():
+    buffer = proactor_module._OrderedIngestBuffer[str]()
+    assert buffer.ingest(1, "b") == []
+    assert buffer.ingest(2, "c") == []
+    assert buffer.ingest(0, "a") == [(0, "a"), (1, "b"), (2, "c")]
 
 
 def test_recvgen_buffer_reorders_out_of_order_chunks():
@@ -1052,8 +1125,18 @@ class _FakeUringRing:
         flags: int = 0,
         result: object = None,
         sequence: int = 0,
+        *,
+        multishot: bool = False,
     ) -> SimpleNamespace:
-        return SimpleNamespace(user_data=user_data, kind=kind, res=res, flags=flags, result=result, sequence=sequence)
+        return SimpleNamespace(
+            user_data=user_data,
+            kind=kind,
+            res=res,
+            flags=flags,
+            result=result,
+            sequence=sequence,
+            multishot=multishot,
+        )
 
     def close(self) -> None:
         self.stop_serving()
@@ -1114,35 +1197,49 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         self.submitted_recv_multishot.append((fd, buf_group, user_data))
         self.recv_multishot_sequence = 0
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT)
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT, multishot=True)
         self.pending_recv_multishot.append(completion)
         return completion
 
     def complete_recv_multishot_enobufs(self, *, sequence: int | None = None) -> None:
-        completion = self.pending_recv_multishot[-1]
-        completion.res = -errno.ENOBUFS
-        completion.flags = 0
-        completion.result = None
+        pending = self.pending_recv_multishot[-1]
         if sequence is None:
             sequence = self.recv_multishot_sequence
             self.recv_multishot_sequence += 1
-        completion.sequence = sequence
+        completion = self._completion(
+            pending.user_data,
+            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
+            res=-errno.ENOBUFS,
+            flags=0,
+            result=None,
+            sequence=sequence,
+            multishot=True,
+        )
         self._deliver(completion)
 
     def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
-        completion = self.pending_recv_multishot[-1]
-        completion.res = 0 if not data else len(data)
-        completion.flags = uring_api.IORING_CQE_F_MORE if more else 0
-        if not data:
-            completion.result = None
-        elif uring_api.is_available():
-            completion.result = _native_buf_view_for(data)
-        else:
-            completion.result = data
+        pending = self.pending_recv_multishot[-1]
         if sequence is None:
             sequence = self.recv_multishot_sequence
             self.recv_multishot_sequence += 1
-        completion.sequence = sequence
+        if not data:
+            payload = None
+            res = 0
+        elif uring_api.is_available():
+            payload = _native_buf_view_for(data)
+            res = len(data)
+        else:
+            payload = data
+            res = len(data)
+        completion = self._completion(
+            pending.user_data,
+            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
+            res=res,
+            flags=uring_api.IORING_CQE_F_MORE if more else 0,
+            result=payload,
+            sequence=sequence,
+            multishot=True,
+        )
         self._deliver(completion)
 
     def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
@@ -1202,17 +1299,33 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_accept_multishot.append((fd, user_data, flags))
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_ACCEPT)
+        self.accept_multishot_sequence = 0
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_ACCEPT, multishot=True)
         self.pending_accept_multishot.append(completion)
         return completion
 
-    def complete_accept_multishot(self, address: object = "peer", *, more: bool = True) -> None:
+    def complete_accept_multishot(
+        self,
+        address: object = "peer",
+        *,
+        more: bool = True,
+        sequence: int | None = None,
+    ) -> None:
+        pending = self.pending_accept_multishot[-1]
+        if sequence is None:
+            sequence = getattr(self, "accept_multishot_sequence", 0)
+            self.accept_multishot_sequence = sequence + 1
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
-        completion = self.pending_accept_multishot[-1]
-        completion.res = conn.fileno()
-        completion.flags = uring_api.IORING_CQE_F_MORE if more else 0
-        completion.result = (conn.detach(), address)
+        completion = self._completion(
+            pending.user_data,
+            kind=uring_api.COMPLETION_KIND_ACCEPT,
+            res=conn.fileno(),
+            flags=uring_api.IORING_CQE_F_MORE if more else 0,
+            result=(conn.detach(), address),
+            sequence=sequence,
+            multishot=True,
+        )
         self._deliver(completion)
 
     def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
@@ -1726,6 +1839,7 @@ class TestUringProactor:
                     res=5,
                     flags=uring_api.IORING_CQE_F_MORE,
                     result=5,
+                    multishot=False,
                 )
             )
 
@@ -1740,6 +1854,7 @@ class TestUringProactor:
                     res=-errno.ECANCELED,
                     flags=0,
                     result=None,
+                    multishot=False,
                 )
             )
 
@@ -2112,6 +2227,61 @@ class TestUringProactor:
                 (4, b""),
             ]
             assert operation.done() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_defers_finalize_when_terminal_arrives_before_earlier_chunks(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"", more=False, sequence=2)
+            ring.complete_recv_multishot(b"hello", sequence=0)
+            ring.complete_recv_multishot(b"world", sequence=1)
+            assert _recv_many_bytes_sorted(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
+            assert operation.done() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_defers_enobufs_when_it_arrives_before_earlier_chunks(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append)
+            ring = proactor.ring
+            ring.complete_recv_multishot_enobufs(sequence=2)
+            ring.complete_recv_multishot(b"a", more=True, sequence=0)
+            ring.complete_recv_multishot(b"b", more=True, sequence=1)
+            ring.complete_recv_multishot(b"c", more=False, sequence=0)
+            assert _recv_many_bytes_sorted(seen) == [(0, b"a"), (1, b"b"), (2, b"c")]
+            assert (RECV_MANY_BUFFER_PRESSURE, b"") in _recv_many_bytes(seen)
+            assert operation.done() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recvall_defers_finalize_when_terminal_burst_arrives_out_of_order(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recvall(reader, None)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"", more=False, sequence=2)
+            ring.complete_recv_multishot(b"hello", sequence=0)
+            ring.complete_recv_multishot(b"world", sequence=1)
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == b"helloworld"
         finally:
             reader.close()
             writer.close()

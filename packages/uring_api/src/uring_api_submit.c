@@ -120,6 +120,7 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
     }
     pending = (UringApiCompletion *)completion;
     pending->buf_group = Py_NewRef(buf_group_obj);
+    pending->multishot = true;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
@@ -428,6 +429,7 @@ PyObject *UringApiRing_submit_accept_multishot_impl(UringApiRing *self, int fd, 
         return NULL;
     }
     pending = (UringApiCompletion *)completion;
+    pending->multishot = true;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
