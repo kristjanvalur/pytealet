@@ -17,7 +17,7 @@ PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignore
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
-        completion = UringApiCompletion_new_pending(URING_API_PENDING_WAKE, Py_None, NULL);
+        completion = UringApiCompletion_new_pending(URING_API_PENDING_WAKE, Py_None);
         if (completion) {
             sqe = get_sqe(self);
             if (!sqe) {
