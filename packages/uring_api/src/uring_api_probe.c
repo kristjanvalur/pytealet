@@ -1,11 +1,10 @@
 /*
  * Runtime capability probes for the _uring_api extension.
- *
- * These helpers exercise liburing/kernel operations that are optional at
- * runtime and build the capability dictionary exposed to Python and the C API.
- * The file is included by _uring_api.c as part of the single extension
- * translation unit.
  */
+
+#include "uring_api_probe.h"
+#include "uring_api_capi_impl.h"
+#include "uring_api_core.h"
 
 static PyObject *build_probe_result(bool available) {
     PyObject *result;
@@ -52,7 +51,7 @@ static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) 
     return build_probe_result(true);
 }
 
-static PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs) {
+PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs) {
     unsigned int entries;
     unsigned int flags;
 
@@ -467,7 +466,7 @@ static int add_bool_from_feature_probe(PyObject *capabilities, const char *name,
     return PyDict_SetItemString(capabilities, name, truth ? Py_True : Py_False);
 }
 
-static PyObject *build_capability_dict(void) {
+PyObject *build_capability_dict(void) {
     PyObject *capabilities;
     PyObject *probe_result;
 
@@ -580,7 +579,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     {NULL},
 };
 
-static int uring_api_export_capi(PyObject *module) {
+int uring_api_export_capi(PyObject *module) {
     PyObject *capsule;
 
     capsule = PyCapsule_New((void *)&uring_api_capi_table, URING_API_CAPI_CAPSULE_NAME, NULL);

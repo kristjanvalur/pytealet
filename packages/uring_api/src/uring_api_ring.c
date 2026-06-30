@@ -1,12 +1,12 @@
 /*
  * Ring lifecycle methods for the _uring_api extension.
- *
- * This file owns Ring initialisation, teardown, context-manager support, and
- * close handling. It is included by _uring_api.c as part of the single
- * extension translation unit.
  */
 
-static PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
+#include "uring_api_ring.h"
+#include "uring_api_core.h"
+#include "uring_api_dispatch.h"
+
+PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
     UringApiRing *self = (UringApiRing *)type->tp_alloc(type, 0);
 
     (void)args;
@@ -38,7 +38,7 @@ static PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *
     return (PyObject *)self;
 }
 
-static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     struct io_uring_params params;
     unsigned int entries;
     unsigned int flags;
@@ -85,7 +85,7 @@ static int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwarg
     return failed ? -1 : 0;
 }
 
-static void UringApiRing_dealloc(UringApiRing *self) {
+void UringApiRing_dealloc(UringApiRing *self) {
     PyObject_GC_UnTrack(self);
     (void)UringApiRing_stop_delivery(self);
     if (self->initialized) {
@@ -114,17 +114,17 @@ static void UringApiRing_dealloc(UringApiRing *self) {
     PyObject_GC_Del(self);
 }
 
-static int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
+int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
     return 0;
 }
 
-static int UringApiRing_clear(UringApiRing *self) {
+int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     return 0;
 }
 
-static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     if (delivery_check_not_running(self) < 0) {
         return NULL;
     }
@@ -141,9 +141,9 @@ static PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(igno
     Py_RETURN_NONE;
 }
 
-static PyObject *UringApiRing_enter(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+PyObject *UringApiRing_enter(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     Py_INCREF(self);
     return (PyObject *)self;
 }
 
-static PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) { return UringApiRing_close(self, NULL); }
+PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args) { return UringApiRing_close(self, NULL); }
