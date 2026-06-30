@@ -217,18 +217,22 @@ PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer
 PyObject *UringApiRing_submit_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                           unsigned int flags, PyObject *user_data) {
     struct io_uring_sqe *sqe;
-    struct sockaddr_storage addr;
-    socklen_t addrlen;
+    UringApiCompletionViewSockaddrState *sendto_state;
     PyObject *completion = NULL;
     int failed = 0;
 
-    addrlen = sizeof(addr);
-    if (parse_numeric_sockaddr(fd, address, &addr, &addrlen) < 0) {
+    completion = UringApiCompletion_new_pending_view_sockaddr(URING_API_PENDING_SENDTO, user_data, view);
+    if (!completion) {
         return NULL;
     }
-
-    completion = UringApiCompletion_new_pending_view(URING_API_PENDING_SENDTO, user_data, view);
-    if (!completion) {
+    sendto_state = UringApiCompletion_get_view_sockaddr_state((UringApiCompletion *)completion);
+    if (!sendto_state) {
+        Py_DECREF(completion);
+        PyErr_SetString(PyExc_RuntimeError, "sendto completion is missing view/sockaddr state");
+        return NULL;
+    }
+    if (parse_numeric_sockaddr(fd, address, &sendto_state->addr, &sendto_state->addrlen) < 0) {
+        Py_DECREF(completion);
         return NULL;
     }
     Py_BEGIN_CRITICAL_SECTION(self);
@@ -239,7 +243,8 @@ PyObject *UringApiRing_submit_sendto_impl(UringApiRing *self, int fd, Py_buffer 
         if (!sqe) {
             failed = 1;
         } else {
-            io_uring_prep_sendto(sqe, fd, view->buf, (size_t)view->len, (int)flags, (struct sockaddr *)&addr, addrlen);
+            io_uring_prep_sendto(sqe, fd, sendto_state->view.buf, (size_t)sendto_state->view.len, (int)flags,
+                                 (struct sockaddr *)&sendto_state->addr, sendto_state->addrlen);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
@@ -485,18 +490,22 @@ PyObject *UringApiRing_submit_accept_multishot_impl(UringApiRing *self, int fd, 
 
 PyObject *UringApiRing_submit_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data) {
     struct io_uring_sqe *sqe;
-    struct sockaddr_storage addr;
-    socklen_t addrlen;
+    UringApiCompletionSockaddrState *sockaddr_state;
     PyObject *completion = NULL;
     int failed = 0;
 
-    addrlen = sizeof(addr);
-    if (parse_numeric_sockaddr(fd, address, &addr, &addrlen) < 0) {
+    completion = UringApiCompletion_new_pending_sockaddr(URING_API_PENDING_CONNECT, user_data);
+    if (!completion) {
         return NULL;
     }
-
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_CONNECT, user_data);
-    if (!completion) {
+    sockaddr_state = UringApiCompletion_get_sockaddr_state((UringApiCompletion *)completion);
+    if (!sockaddr_state) {
+        Py_DECREF(completion);
+        PyErr_SetString(PyExc_RuntimeError, "connect completion is missing sockaddr state");
+        return NULL;
+    }
+    if (parse_numeric_sockaddr(fd, address, &sockaddr_state->addr, &sockaddr_state->addrlen) < 0) {
+        Py_DECREF(completion);
         return NULL;
     }
 
@@ -508,7 +517,7 @@ PyObject *UringApiRing_submit_connect_impl(UringApiRing *self, int fd, PyObject 
         if (!sqe) {
             failed = 1;
         } else {
-            io_uring_prep_connect(sqe, fd, (struct sockaddr *)&addr, addrlen);
+            io_uring_prep_connect(sqe, fd, (struct sockaddr *)&sockaddr_state->addr, sockaddr_state->addrlen);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;

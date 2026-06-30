@@ -36,6 +36,16 @@ static void UringApiCompletion_release_view_state(UringApiCompletionViewState *v
     }
 }
 
+static void UringApiCompletion_release_view_sockaddr_state(UringApiCompletionViewSockaddrState *view_sockaddr_state) {
+    if (!view_sockaddr_state) {
+        return;
+    }
+    if (view_sockaddr_state->has_view) {
+        PyBuffer_Release(&view_sockaddr_state->view);
+        view_sockaddr_state->has_view = false;
+    }
+}
+
 static void UringApiCompletion_release_msg_view(UringApiCompletionMsgState *msg_state) {
     if (!msg_state) {
         return;
@@ -49,6 +59,7 @@ static void UringApiCompletion_release_msg_view(UringApiCompletionMsgState *msg_
 static void UringApiCompletion_free_state(UringApiCompletion *self) {
     UringApiCompletionBufGroupState *buf_group_state;
     UringApiCompletionViewState *view_state;
+    UringApiCompletionViewSockaddrState *view_sockaddr_state;
     UringApiCompletionMsgState *msg_state;
 
     if (!self->state) {
@@ -69,6 +80,11 @@ static void UringApiCompletion_free_state(UringApiCompletion *self) {
     case URING_API_COMPLETION_STATE_SOCKADDR:
         PyMem_Free((UringApiCompletionSockaddrState *)self->state);
         break;
+    case URING_API_COMPLETION_STATE_VIEW_SOCKADDR:
+        view_sockaddr_state = (UringApiCompletionViewSockaddrState *)self->state;
+        UringApiCompletion_release_view_sockaddr_state(view_sockaddr_state);
+        PyMem_Free(view_sockaddr_state);
+        break;
     case URING_API_COMPLETION_STATE_MSG:
         msg_state = (UringApiCompletionMsgState *)self->state;
         UringApiCompletion_release_msg_view(msg_state);
@@ -86,6 +102,13 @@ UringApiCompletionSockaddrState *UringApiCompletion_get_sockaddr_state(UringApiC
         return NULL;
     }
     return (UringApiCompletionSockaddrState *)self->state;
+}
+
+UringApiCompletionViewSockaddrState *UringApiCompletion_get_view_sockaddr_state(UringApiCompletion *self) {
+    if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_VIEW_SOCKADDR) {
+        return NULL;
+    }
+    return (UringApiCompletionViewSockaddrState *)self->state;
 }
 
 UringApiCompletionMsgState *UringApiCompletion_get_msg_state(UringApiCompletion *self) {
@@ -214,6 +237,50 @@ PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject
     return (PyObject *)completion;
 }
 
+PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view) {
+    UringApiCompletion *completion;
+    UringApiCompletionViewSockaddrState *view_sockaddr_state;
+
+    completion = UringApiCompletion_alloc(kind, user_data);
+    if (!completion) {
+        PyBuffer_Release(view);
+        return NULL;
+    }
+    view_sockaddr_state = PyMem_Malloc(sizeof(UringApiCompletionViewSockaddrState));
+    if (!view_sockaddr_state) {
+        Py_DECREF(completion);
+        PyBuffer_Release(view);
+        return PyErr_NoMemory();
+    }
+    memset(view_sockaddr_state, 0, sizeof(*view_sockaddr_state));
+    view_sockaddr_state->tag = URING_API_COMPLETION_STATE_VIEW_SOCKADDR;
+    view_sockaddr_state->view = *view;
+    view_sockaddr_state->has_view = true;
+    view_sockaddr_state->addrlen = sizeof(view_sockaddr_state->addr);
+    completion->state = view_sockaddr_state;
+    return (PyObject *)completion;
+}
+
+PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyObject *user_data) {
+    UringApiCompletion *completion;
+    UringApiCompletionSockaddrState *sockaddr_state;
+
+    completion = UringApiCompletion_alloc(kind, user_data);
+    if (!completion) {
+        return NULL;
+    }
+    sockaddr_state = PyMem_Malloc(sizeof(UringApiCompletionSockaddrState));
+    if (!sockaddr_state) {
+        Py_DECREF(completion);
+        return PyErr_NoMemory();
+    }
+    memset(sockaddr_state, 0, sizeof(*sockaddr_state));
+    sockaddr_state->tag = URING_API_COMPLETION_STATE_SOCKADDR;
+    sockaddr_state->addrlen = sizeof(sockaddr_state->addr);
+    completion->state = sockaddr_state;
+    return (PyObject *)completion;
+}
+
 PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view) {
     UringApiCompletion *completion;
     UringApiCompletionMsgState *msg_state;
@@ -315,12 +382,18 @@ PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source) {
 void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
     UringApiCompletionBufGroupState *buf_group_state;
     UringApiCompletionViewState *view_state;
+    UringApiCompletionViewSockaddrState *view_sockaddr_state;
     UringApiCompletionMsgState *msg_state;
 
     switch (UringApiCompletion_state_tag(self)) {
     case URING_API_COMPLETION_STATE_VIEW:
         view_state = (UringApiCompletionViewState *)self->state;
         UringApiCompletion_release_view_state(view_state);
+        UringApiCompletion_free_state(self);
+        break;
+    case URING_API_COMPLETION_STATE_VIEW_SOCKADDR:
+        view_sockaddr_state = (UringApiCompletionViewSockaddrState *)self->state;
+        UringApiCompletion_release_view_sockaddr_state(view_sockaddr_state);
         UringApiCompletion_free_state(self);
         break;
     case URING_API_COMPLETION_STATE_BUF_GROUP:
