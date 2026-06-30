@@ -175,16 +175,6 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_recv_multishot(
-            self,
-            fd: int,
-            buffer_size: int = 16384,
-            buffer_count: int = 4,
-            user_data: object = None,
-            flags: int = 0,
-        ) -> Completion:
-            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
-
-        def submit_recv_multishot_buf(
             self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error

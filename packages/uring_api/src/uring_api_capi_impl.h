@@ -17,8 +17,8 @@ unsigned int UringApiCapi_RingCqEntries(PyObject *ring);
 int UringApiCapi_RingClosed(PyObject *ring);
 int UringApiCapi_RingRunning(PyObject *ring);
 int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
-int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned int buffer_size, unsigned int buffer_count,
-                                         unsigned int flags, PyObject *user_data);
+int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
+                                         PyObject *user_data);
 int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
 int UringApiCapi_RingSubmitSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags, unsigned int zc_flags,
                                   PyObject *user_data);
