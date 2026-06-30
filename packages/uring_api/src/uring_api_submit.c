@@ -1,12 +1,12 @@
 /*
  * Submission methods for the _uring_api Ring type.
- *
- * This file contains the Python-visible submit_* wrappers that prepare SQEs,
- * attach Completion objects, and submit work to the ring. It is included by
- * _uring_api.c as part of the single extension translation unit.
  */
 
-static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+#include "uring_api_submit.h"
+#include "uring_api_completion.h"
+#include "uring_api_core.h"
+
+PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf", "user_data", NULL};
     struct io_uring_sqe *sqe;
     Py_buffer view;
@@ -54,7 +54,7 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buffer_size", "buffer_count", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     long fd;
@@ -116,7 +116,7 @@ static PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     Py_buffer view;
@@ -164,7 +164,7 @@ static PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, Py
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "user_data", "flags", "zc_flags", NULL};
     struct io_uring_sqe *sqe;
     Py_buffer view;
@@ -213,7 +213,7 @@ static PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *args,
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     Py_buffer view;
@@ -269,7 +269,7 @@ static PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, 
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf", "user_data", NULL};
     struct io_uring_sqe *sqe;
     Py_buffer view;
@@ -317,7 +317,7 @@ static PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args,
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     Py_buffer view;
@@ -377,7 +377,7 @@ static PyObject *UringApiRing_submit_sendmsg(UringApiRing *self, PyObject *args,
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     Py_buffer view;
@@ -437,7 +437,7 @@ static PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *ar
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     long fd;
@@ -485,7 +485,7 @@ static PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, 
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     long fd;
@@ -533,7 +533,7 @@ static PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObje
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "address", "user_data", NULL};
     struct io_uring_sqe *sqe;
     long fd;
@@ -585,7 +585,7 @@ static PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args,
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"completion", NULL};
     struct io_uring_sqe *sqe;
     PyObject *target_completion;
@@ -625,7 +625,7 @@ static PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, 
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "how", "user_data", NULL};
     struct io_uring_sqe *sqe;
     long fd;
@@ -675,7 +675,7 @@ static PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "user_data", NULL};
     struct io_uring_sqe *sqe;
     long fd;
@@ -720,7 +720,7 @@ static PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, P
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"domain", "type", "protocol", "flags", "user_data", NULL};
     struct io_uring_sqe *sqe;
     long domain;
