@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `recvgen(..., allow_memview=False)` and matching `sock_recvgen(...)` option to
+  yield borrowed `memoryview` chunks and `(RECV_MANY_BUFFER_PRESSURE, None)`
+  pressure tokens for zero-copy consumers that release held views explicitly.
 - `recvgen(sock)` and `ProactorScheduler.sock_recvgen(sock)` as a
   tealet-blocking incremental consumer of `recv_many`, yielding stream-ordered
   `(index, data)` chunks with the same provided-buffer pressure policy as

@@ -11,7 +11,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
-from typing import Any, Generic, NoReturn, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar, cast, overload
 
 import uring_api
 
@@ -129,7 +129,23 @@ class Proactor(Protocol):
 
     def recvall(self, sock: socket.socket, progress: _ProgressCallback | None = None) -> Operation[bytes]: ...
 
-    def recvgen(self, sock: socket.socket) -> Iterator[tuple[int, bytes]]: ...
+    @overload
+    def recvgen(self, sock: socket.socket, *, allow_memview: Literal[False] = False) -> Iterator[tuple[int, bytes]]: ...
+
+    @overload
+    def recvgen(
+        self,
+        sock: socket.socket,
+        *,
+        allow_memview: Literal[True],
+    ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
+
+    def recvgen(
+        self,
+        sock: socket.socket,
+        *,
+        allow_memview: bool = False,
+    ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
@@ -189,13 +205,15 @@ def _recvall_release_pending_views(
 class _RecvGenBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``recvgen``."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, allow_memview: bool = False) -> None:
+        self._allow_memview = allow_memview
         self._lock = threading.Lock()
         self._event = ThreadsafeEvent()
         self._next_index = 0
         self._ready: deque[tuple[int, memoryview | bytes]] = deque()
         self._out_of_order: dict[int, memoryview | bytes] = {}
         self._pending_views: set[int] = set()
+        self._pressure_pending = False
         self._stream_done = False
         self._stream_error: BaseException | None = None
         self._stream: ContinuousOperation[tuple[int, memoryview]] | None = None
@@ -223,6 +241,8 @@ class _RecvGenBuffer:
         with self._lock:
             if index == RECV_MANY_BUFFER_PRESSURE:
                 self._flush_all_views()
+                if self._allow_memview:
+                    self._pressure_pending = True
                 notify = True
             elif len(data) == 0:
                 self._stream_done = True
@@ -261,14 +281,17 @@ class _RecvGenBuffer:
                 self._out_of_order[index] = bytes(chunk)
         self._pending_views.clear()
 
-    def take_next(self) -> tuple[int, bytes] | None:
+    def take_next(self) -> tuple[int, memoryview | bytes | None] | None:
         while True:
             with self._lock:
                 if self._stream_error is not None:
                     raise self._stream_error
+                if self._pressure_pending:
+                    self._pressure_pending = False
+                    return RECV_MANY_BUFFER_PRESSURE, None
                 if self._ready:
                     index, chunk = self._ready.popleft()
-                    if type(chunk) is memoryview:
+                    if not self._allow_memview and type(chunk) is memoryview:
                         chunk = bytes(chunk)
                     return index, chunk
                 if self._stream_done:
@@ -398,18 +421,42 @@ class ProactorBase:
         stream.add_done_callback(on_done)
         return operation
 
-    def recvgen(self, sock: socket.socket) -> Iterator[tuple[int, bytes]]:
+    @overload
+    def recvgen(self, sock: socket.socket, *, allow_memview: Literal[False] = False) -> Iterator[tuple[int, bytes]]: ...
+
+    @overload
+    def recvgen(
+        self,
+        sock: socket.socket,
+        *,
+        allow_memview: Literal[True],
+    ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
+
+    def recvgen(
+        self,
+        sock: socket.socket,
+        *,
+        allow_memview: bool = False,
+    ) -> Iterator[tuple[int, memoryview | bytes | None]]:
         """Incrementally receive byte chunks until EOF as a blocking generator.
 
         Each ``recv_many`` chunk is reordered into stream-index order before it
-        is yielded as ``bytes``. Chunks are copied when dequeued so borrowed
-        kernel views are released promptly; queued views are also copied to
-        ``bytes`` on provided-buffer pressure so leased slots can return to the
-        shared pool. The generator must be consumed from a scheduler tealet so
+        is yielded. By default each chunk is copied to ``bytes`` when dequeued
+        so borrowed kernel views are released promptly; queued views are also
+        copied to ``bytes`` on provided-buffer pressure so leased slots can
+        return to the shared pool.
+
+        With ``allow_memview=True``, chunks may be yielded as borrowed
+        ``memoryview`` objects and ``(RECV_MANY_BUFFER_PRESSURE, None)`` may be
+        yielded when the provided-buffer pool is exhausted. Consumers must then
+        release every ``memoryview`` they still hold, for example by copying to
+        ``bytes`` and dropping references or calling ``memoryview.release()``.
+
+        The generator must be consumed from a scheduler tealet so
         ``ThreadsafeEvent`` waits can block cooperatively.
         """
 
-        buffer = _RecvGenBuffer()
+        buffer = _RecvGenBuffer(allow_memview=allow_memview)
         stream = self.recv_many(sock, buffer.on_result)
         buffer.attach_stream(stream)
         try:
@@ -1854,10 +1901,26 @@ class ProactorScheduler(BaseScheduler):
 
         return self.wait_operation(self._proactor.recvall(sock, progress))
 
-    def sock_recvgen(self, sock: socket.socket) -> Iterator[tuple[int, bytes]]:
+    @overload
+    def sock_recvgen(self, sock: socket.socket, *, allow_memview: Literal[False] = False) -> Iterator[tuple[int, bytes]]: ...
+
+    @overload
+    def sock_recvgen(
+        self,
+        sock: socket.socket,
+        *,
+        allow_memview: Literal[True],
+    ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
+
+    def sock_recvgen(
+        self,
+        sock: socket.socket,
+        *,
+        allow_memview: bool = False,
+    ) -> Iterator[tuple[int, memoryview | bytes | None]]:
         """Incrementally receive byte chunks until EOF as a blocking generator."""
 
-        return self._proactor.recvgen(sock)
+        return self._proactor.recvgen(sock, allow_memview=allow_memview)
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
         """Receive bytes from a non-blocking socket into `buf`."""

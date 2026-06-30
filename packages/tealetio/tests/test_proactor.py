@@ -121,6 +121,32 @@ def test_recvgen_buffer_eof_stops_iteration():
     assert second is None
 
 
+def test_recvgen_buffer_allow_memview_yields_memoryviews():
+    def exercise() -> tuple[int, memoryview | bytes | None]:
+        buffer = proactor_module._RecvGenBuffer(allow_memview=True)
+        buffer.on_result((0, memoryview(b"a")))
+        return buffer.take_next()
+
+    index, chunk = _exercise_recvgen_buffer(exercise)
+    assert index == 0
+    assert type(chunk) is memoryview
+    assert bytes(chunk) == b"a"
+
+
+def test_recvgen_buffer_allow_memview_pressure_token_precedes_flushed_queue():
+    def exercise() -> list[tuple[int, memoryview | bytes | None] | None]:
+        buffer = proactor_module._RecvGenBuffer(allow_memview=True)
+        buffer.on_result((0, memoryview(b"a")))
+        buffer.on_result((1, memoryview(b"b")))
+        buffer.on_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
+        return [buffer.take_next(), buffer.take_next(), buffer.take_next()]
+
+    token, first, second = _exercise_recvgen_buffer(exercise)
+    assert token == (RECV_MANY_BUFFER_PRESSURE, None)
+    assert first == (0, b"a")
+    assert second == (1, b"b")
+
+
 def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
     completed = [operation for operation in operations if operation.done()]
     pending = {operation for operation in operations if not operation.done()}
@@ -2073,6 +2099,46 @@ class TestUringProactor:
             scheduler.spawn(deliver_chunks)
 
             assert scheduler.run_until_complete(task) == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"d")]
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_recvgen_allow_memview_pressure_token_and_continues_receive(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def receive_chunks() -> tuple[bool, list[tuple[int, bytes]]]:
+                got_memview = False
+                got_pressure = False
+                seen: list[tuple[int, bytes]] = []
+                for index, chunk in scheduler.sock_recvgen(reader, allow_memview=True):
+                    if index == RECV_MANY_BUFFER_PRESSURE:
+                        got_pressure = True
+                        continue
+                    if type(chunk) is memoryview:
+                        got_memview = True
+                    seen.append((index, bytes(chunk)))
+                return got_memview and got_pressure, seen
+
+            def deliver_chunks() -> None:
+                ring = scheduler.proactor.ring
+                ring.complete_recv_multishot(b"a", more=True, sequence=0)
+                scheduler.sleep(0.05)
+                ring.complete_recv_multishot(b"b", more=True, sequence=1)
+                ring.complete_recv_multishot(b"c", more=True, sequence=2)
+                ring.complete_recv_multishot_enobufs(sequence=3)
+                ring.complete_recv_multishot(b"d", more=False, sequence=0)
+
+            task = scheduler.spawn(receive_chunks)
+            scheduler.spawn(deliver_chunks)
+
+            saw_memview_and_pressure, seen = scheduler.run_until_complete(task)
+            assert saw_memview_and_pressure
+            assert seen == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"d")]
         finally:
             reader.close()
             writer.close()
