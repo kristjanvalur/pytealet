@@ -90,6 +90,10 @@ static void UringApiCompletion_free_state(UringApiCompletion *self) {
         UringApiCompletion_release_msg_view(msg_state);
         PyMem_Free(msg_state);
         break;
+    case URING_API_COMPLETION_STATE_PATH:
+        PyMem_Free(((UringApiCompletionPathState *)self->state)->path);
+        PyMem_Free(self->state);
+        break;
     case URING_API_COMPLETION_STATE_NONE:
         if (self->state) {
             /* tag was zeroed or corrupt; free orphaned allocation */
@@ -124,6 +128,39 @@ UringApiCompletionMsgState *UringApiCompletion_get_msg_state(UringApiCompletion 
         return NULL;
     }
     return (UringApiCompletionMsgState *)self->state;
+}
+
+UringApiCompletionPathState *UringApiCompletion_get_path_state(UringApiCompletion *self) {
+    if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_PATH) {
+        return NULL;
+    }
+    return (UringApiCompletionPathState *)self->state;
+}
+
+static char *copy_unicode_path(PyObject *path_obj) {
+    Py_ssize_t path_len;
+    const char *path_utf8;
+    char *path_copy;
+
+    if (!PyUnicode_Check(path_obj)) {
+        PyErr_SetString(PyExc_TypeError, "path must be a str");
+        return NULL;
+    }
+    path_utf8 = PyUnicode_AsUTF8AndSize(path_obj, &path_len);
+    if (!path_utf8) {
+        return NULL;
+    }
+    if (path_len < 0) {
+        PyErr_SetString(PyExc_OverflowError, "path is too long");
+        return NULL;
+    }
+    path_copy = PyMem_Malloc((size_t)path_len + 1);
+    if (!path_copy) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    memcpy(path_copy, path_utf8, (size_t)path_len + 1);
+    return path_copy;
 }
 
 int completion_type_check(PyObject *completion) {
@@ -316,6 +353,33 @@ PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyOb
     return (PyObject *)completion;
 }
 
+PyObject *UringApiCompletion_new_pending_path(UringApiPendingKind kind, PyObject *user_data, PyObject *path) {
+    UringApiCompletion *completion;
+    UringApiCompletionPathState *path_state;
+    char *path_copy;
+
+    path_copy = copy_unicode_path(path);
+    if (!path_copy) {
+        return NULL;
+    }
+    completion = UringApiCompletion_alloc(kind, user_data);
+    if (!completion) {
+        PyMem_Free(path_copy);
+        return NULL;
+    }
+    path_state = PyMem_Malloc(sizeof(UringApiCompletionPathState));
+    if (!path_state) {
+        Py_DECREF(completion);
+        PyMem_Free(path_copy);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    path_state->tag = URING_API_COMPLETION_STATE_PATH;
+    path_state->path = path_copy;
+    completion->state = path_state;
+    return (PyObject *)completion;
+}
+
 PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view) {
     UringApiCompletion *completion;
     UringApiCompletionMsgState *msg_state;
@@ -446,6 +510,9 @@ void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
         UringApiCompletion_release_msg_view(msg_state);
         UringApiCompletion_free_state(self);
         break;
+    case URING_API_COMPLETION_STATE_PATH:
+        UringApiCompletion_free_state(self);
+        break;
     case URING_API_COMPLETION_STATE_NONE:
         break;
     }
@@ -531,7 +598,8 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
                             self->kind == URING_API_PENDING_READ || self->kind == URING_API_PENDING_WRITE ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
                             self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET ||
-                            self->kind == URING_API_PENDING_POLL || self->kind == URING_API_PENDING_POLL_MULTISHOT)) {
+                            self->kind == URING_API_PENDING_POLL || self->kind == URING_API_PENDING_POLL_MULTISHOT ||
+                            self->kind == URING_API_PENDING_OPENAT)) {
         payload = PyLong_FromLong(res);
     } else if (res >= 0 && self->kind == URING_API_PENDING_RECVMSG) {
         msg_state = UringApiCompletion_get_msg_state(self);

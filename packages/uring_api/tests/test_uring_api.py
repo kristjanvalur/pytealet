@@ -189,6 +189,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_POLL_REMOVE == 19
     assert uring_api.COMPLETION_KIND_READ == 20
     assert uring_api.COMPLETION_KIND_WRITE == 21
+    assert uring_api.COMPLETION_KIND_OPENAT == 22
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -1778,6 +1779,75 @@ def test_ring_file_read_write_completion_when_available():
             os.close(fd)
     finally:
         os.unlink(path)
+
+
+def test_ring_openat_read_write_round_trip_when_available():
+    require_uring()
+
+    token = {"operation": "openat"}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "openat-test.txt")
+        with uring_api.Ring() as ring:
+            open_handle = ring.submit_openat(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644, token)
+            open_completion = ring.wait(1.0)
+            assert open_completion is open_handle
+            assert open_completion.kind == uring_api.COMPLETION_KIND_OPENAT
+            assert open_completion.user_data is token
+            assert open_completion.res >= 0
+            assert open_completion.result == open_completion.res
+            fd = open_completion.res
+
+            write_handle = ring.submit_write(fd, b"hello", 0, token)
+            write_completion = ring.wait(1.0)
+            assert write_completion is write_handle
+            assert write_completion.res == 5
+
+            buf = bytearray(5)
+            read_handle = ring.submit_read(fd, buf, 0, token)
+            read_completion = ring.wait(1.0)
+            assert read_completion is read_handle
+            assert read_completion.res == 5
+            assert bytes(buf) == b"hello"
+
+            close_handle = ring.submit_close(fd, token)
+            close_completion = ring.wait(1.0)
+            assert close_completion is close_handle
+            assert close_completion.res == 0
+
+
+def test_c_api_openat_read_write_round_trip_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    token = 261
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "openat-capi.txt")
+        with uring_api.Ring() as ring:
+            client.submit_openat(ring, -100, path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644, token)
+            open_completion = ring.wait(1.0)
+            assert open_completion is not None
+            fd = open_completion.res
+            assert fd >= 0
+
+            client.submit_write(ring, fd, 0, b"hello", token)
+            write_completion = ring.wait(1.0)
+            buf = bytearray(5)
+            client.submit_read(ring, fd, 0, buf, token)
+            read_completion = ring.wait(1.0)
+            client.submit_close(ring, fd, token)
+            close_completion = ring.wait(1.0)
+
+        assert client.completion_summary(open_completion) == (
+            token,
+            uring_api.COMPLETION_KIND_OPENAT,
+            fd,
+            0,
+            fd,
+        )
+        assert write_completion is not None
+        assert read_completion is not None
+        assert close_completion is not None
+        assert bytes(buf) == b"hello"
 
 
 def test_c_api_file_read_write_operation_when_available():

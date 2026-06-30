@@ -48,18 +48,20 @@ Basic regular-file I/O is also exposed:
 
 - `submit_read()` / `IORING_OP_READ`, with an explicit file offset
 - `submit_write()` / `IORING_OP_WRITE`, with an explicit file offset
+- `submit_openat()` / `IORING_OP_OPENAT`, returning a caller-owned fd; path
+  strings are copied into completion-owned heap state for the submission lifetime
 
 This is the complete basic Python-oriented socket surface for the low-level
 package. It covers ordinary byte I/O, message I/O, zero-copy send lifetimes,
 listener accept, multishot accept, caller-owned provided-buffer receive with
 leased `BufView` delivery (one-shot and multishot), connection setup,
 shutdown, fd creation/close, handle-based cancellation, readiness polling
-for any pollable file descriptor, and positional file read/write for
-caller-owned fds.
+for any pollable file descriptor, positional file read/write, and async
+`openat` for caller-owned fds.
 
 The local liburing headers also expose helpers that are not part of this
-baseline. `io_uring_prep_openat()` / `io_uring_prep_openat2()` and
-`io_uring_prep_statx()` cover async open and metadata. Fixed-buffer zero-copy
+baseline. `io_uring_prep_openat2()` and `io_uring_prep_statx()` cover
+extended open resolve flags and async metadata. Fixed-buffer zero-copy
 sends still require a different ownership contract than caller-owned `BufGroup`
 rings and leased `BufView` results.
 

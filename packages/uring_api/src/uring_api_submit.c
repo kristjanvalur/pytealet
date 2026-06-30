@@ -246,6 +246,48 @@ PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *
     return Py_NewRef(completion);
 }
 
+PyObject *UringApiRing_submit_openat_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mode,
+                                          PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    UringApiCompletionPathState *path_state;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    completion = UringApiCompletion_new_pending_path(URING_API_PENDING_OPENAT, user_data, path);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        path_state = UringApiCompletion_get_path_state((UringApiCompletion *)completion);
+        if (!path_state || !path_state->path) {
+            PyErr_SetString(PyExc_RuntimeError, "openat completion is missing path state");
+            failed = 1;
+        } else {
+            sqe = get_sqe(self);
+            if (!sqe) {
+                failed = 1;
+            } else {
+                io_uring_prep_openat(sqe, dfd, path_state->path, flags, mode);
+                sqe_set_completion(self, sqe, completion);
+                if (submit_one(self) < 0) {
+                    failed = 1;
+                }
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
 PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                            unsigned int zc_flags, PyObject *user_data) {
     struct io_uring_sqe *sqe;
@@ -882,6 +924,20 @@ PyObject *UringApiRing_submit_write(UringApiRing *self, PyObject *args, PyObject
         return NULL;
     }
     return UringApiRing_submit_write_impl(self, fd, &view, offset, user_data);
+}
+
+PyObject *UringApiRing_submit_openat(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"path", "flags", "mode", "user_data", "dfd", NULL};
+    PyObject *path;
+    int flags;
+    unsigned int mode = 0;
+    int dfd = -100; /* AT_FDCWD */
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oi|IOi", keywords, &path, &flags, &mode, &user_data, &dfd)) {
+        return NULL;
+    }
+    return UringApiRing_submit_openat_impl(self, dfd, path, flags, mode, user_data);
 }
 
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {

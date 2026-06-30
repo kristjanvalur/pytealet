@@ -25,6 +25,7 @@ try:
     from _uring_api import COMPLETION_KIND_POLL_REMOVE as COMPLETION_KIND_POLL_REMOVE
     from _uring_api import COMPLETION_KIND_READ as COMPLETION_KIND_READ
     from _uring_api import COMPLETION_KIND_WRITE as COMPLETION_KIND_WRITE
+    from _uring_api import COMPLETION_KIND_OPENAT as COMPLETION_KIND_OPENAT
     from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
     from _uring_api import COMPLETION_KIND_SEND_ZC as COMPLETION_KIND_SEND_ZC
@@ -79,6 +80,7 @@ except ImportError as exc:
     COMPLETION_KIND_POLL_REMOVE = 19
     COMPLETION_KIND_READ = 20
     COMPLETION_KIND_WRITE = 21
+    COMPLETION_KIND_OPENAT = 22
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -247,6 +249,11 @@ except ImportError as exc:
         def submit_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def submit_openat(
+            self, path: str, flags: int, mode: int = 0, user_data: object = None, dfd: int = -100
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_socket(
             self, domain: int, type: int, protocol: int = 0, flags: int = 0, user_data: object = None
         ) -> Completion:
@@ -299,6 +306,7 @@ class CompletionKind(enum.IntEnum):
     POLL_REMOVE = COMPLETION_KIND_POLL_REMOVE
     READ = COMPLETION_KIND_READ
     WRITE = COMPLETION_KIND_WRITE
+    OPENAT = COMPLETION_KIND_OPENAT
 
 
 DEFAULT_ENTRIES = 8
@@ -341,6 +349,7 @@ __all__ = [
     "COMPLETION_KIND_POLL_REMOVE",
     "COMPLETION_KIND_READ",
     "COMPLETION_KIND_WRITE",
+    "COMPLETION_KIND_OPENAT",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
     "COMPLETION_KIND_SEND_ZC",

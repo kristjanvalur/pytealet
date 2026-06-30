@@ -89,7 +89,8 @@ int module_add_completion_kind_constants(PyObject *module) {
         PyModule_AddIntConstant(module, "COMPLETION_KIND_POLL_MULTISHOT", URING_API_PENDING_POLL_MULTISHOT) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_POLL_REMOVE", URING_API_PENDING_POLL_REMOVE) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_READ", URING_API_PENDING_READ) < 0 ||
-        PyModule_AddIntConstant(module, "COMPLETION_KIND_WRITE", URING_API_PENDING_WRITE) < 0) {
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_WRITE", URING_API_PENDING_WRITE) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_OPENAT", URING_API_PENDING_OPENAT) < 0) {
         return -1;
     }
     return 0;

@@ -331,6 +331,15 @@ int UringApiCapi_RingSubmitWrite(PyObject *ring, int fd, PyObject *data, unsigne
                                           UringApiRing_submit_write_impl);
 }
 
+int UringApiCapi_RingSubmitOpenat(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mode,
+                                  PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return discard_completion_result(
+        UringApiRing_submit_openat_impl((UringApiRing *)ring, dfd, path, flags, mode, user_data));
+}
+
 int UringApiCapi_RingBreakWait(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
