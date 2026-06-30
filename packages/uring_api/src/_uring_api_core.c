@@ -309,82 +309,6 @@ static int ring_check_open(UringApiRing *self) {
     return 0;
 }
 
-static bool is_power_of_two(unsigned long value) { return value != 0 && (value & (value - 1)) == 0; }
-
-static void UringApiRecvBufferPool_free(UringApiRecvBufferPool *pool) {
-    if (!pool) {
-        return;
-    }
-    if (pool->ring_buffer && pool->ring && pool->ring->initialized) {
-        (void)io_uring_free_buf_ring(&pool->ring->ring, pool->ring_buffer, pool->buffer_count, pool->group_id);
-    }
-    PyMem_Free(pool->storage);
-    Py_XDECREF((PyObject *)pool->ring);
-    PyMem_Free(pool);
-}
-
-static UringApiRecvBufferPool *UringApiRecvBufferPool_new(UringApiRing *ring, unsigned int buffer_size,
-                                                          unsigned int buffer_count) {
-    UringApiRecvBufferPool *pool;
-    size_t total_size;
-    int ret = 0;
-    unsigned int index;
-
-    if (buffer_size == 0) {
-        PyErr_SetString(PyExc_ValueError, "buffer_size must be positive");
-        return NULL;
-    }
-    if (!is_power_of_two(buffer_count) || buffer_count > USHRT_MAX + 1U) {
-        PyErr_SetString(PyExc_ValueError, "buffer_count must be a power of two no larger than 65536");
-        return NULL;
-    }
-    if ((size_t)buffer_count > SIZE_MAX / (size_t)buffer_size) {
-        PyErr_SetString(PyExc_ValueError, "buffer pool is too large");
-        return NULL;
-    }
-
-    pool = PyMem_Calloc(1, sizeof(*pool));
-    if (!pool) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    total_size = (size_t)buffer_count * (size_t)buffer_size;
-    pool->storage = PyMem_Malloc(total_size);
-    if (!pool->storage) {
-        UringApiRecvBufferPool_free(pool);
-        PyErr_NoMemory();
-        return NULL;
-    }
-
-    pool->ring = ring;
-    Py_INCREF((PyObject *)ring);
-    pool->buffer_size = buffer_size;
-    pool->buffer_count = buffer_count;
-    pool->group_id = ring->next_buf_group++;
-    pool->mask = io_uring_buf_ring_mask(buffer_count);
-    pool->ring_buffer = io_uring_setup_buf_ring(&ring->ring, buffer_count, pool->group_id, 0, &ret);
-    if (!pool->ring_buffer) {
-        int errnum = normalize_ret_errno(ret);
-        UringApiRecvBufferPool_free(pool);
-        errno = errnum;
-        PyErr_SetFromErrno(PyExc_OSError);
-        return NULL;
-    }
-
-    for (index = 0; index < buffer_count; index++) {
-        io_uring_buf_ring_add(pool->ring_buffer, pool->storage + ((size_t)index * buffer_size), buffer_size,
-                              (unsigned short)index, pool->mask, (int)index);
-    }
-    io_uring_buf_ring_advance(pool->ring_buffer, (int)buffer_count);
-    return pool;
-}
-
-static void UringApiRecvBufferPool_recycle(UringApiRecvBufferPool *pool, unsigned int buffer_id) {
-    io_uring_buf_ring_add(pool->ring_buffer, pool->storage + ((size_t)buffer_id * pool->buffer_size), pool->buffer_size,
-                          (unsigned short)buffer_id, pool->mask, 0);
-    io_uring_buf_ring_advance(pool->ring_buffer, 1);
-}
-
 static void UringApiCompletion_dealloc(UringApiCompletion *self) {
     PyObject_GC_UnTrack(self);
     (void)UringApiCompletion_clear(self);
@@ -393,9 +317,7 @@ static void UringApiCompletion_dealloc(UringApiCompletion *self) {
 
 static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit, void *arg) {
     Py_VISIT(self->buffer);
-    if (self->recv_pool) {
-        Py_VISIT(self->recv_pool->ring);
-    }
+    Py_VISIT(self->buf_group);
     Py_VISIT(self->user_data);
     Py_VISIT(self->result);
     return 0;
@@ -407,8 +329,7 @@ static int UringApiCompletion_clear(UringApiCompletion *self) {
         self->has_view = false;
     }
     Py_CLEAR(self->buffer);
-    UringApiRecvBufferPool_free(self->recv_pool);
-    self->recv_pool = NULL;
+    Py_CLEAR(self->buf_group);
     Py_CLEAR(self->user_data);
     Py_CLEAR(self->result);
     return 0;
@@ -425,7 +346,7 @@ static PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObje
     completion->flags = 0;
     completion->result = NULL;
     completion->buffer = Py_XNewRef(buffer);
-    completion->recv_pool = NULL;
+    completion->buf_group = NULL;
     completion->sequence = 0;
     completion->has_view = false;
     completion->has_msghdr = false;
@@ -508,7 +429,7 @@ static PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *sourc
     completion->result = source->result;
     source->result = NULL;
     completion->buffer = NULL;
-    completion->recv_pool = NULL;
+    completion->buf_group = NULL;
     completion->sequence = source->sequence;
     source->sequence++;
     memset(&completion->view, 0, sizeof(completion->view));
@@ -528,8 +449,7 @@ static void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
         self->has_view = false;
     }
     Py_CLEAR(self->buffer);
-    UringApiRecvBufferPool_free(self->recv_pool);
-    self->recv_pool = NULL;
+    Py_CLEAR(self->buf_group);
 }
 
 static bool UringApiCompletion_should_clear_pending_state(UringApiCompletion *self, int res, unsigned int flags) {
@@ -541,6 +461,7 @@ static bool UringApiCompletion_should_clear_pending_state(UringApiCompletion *se
 }
 
 static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *self, int res, unsigned int flags) {
+    UringApiBufGroup *buf_group;
     unsigned int buffer_id;
     PyObject *payload;
 
@@ -554,23 +475,28 @@ static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *s
         PyErr_SetString(PyExc_RuntimeError, "recv multishot completion did not select a buffer");
         return NULL;
     }
+    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion has no buffer group");
+        return NULL;
+    }
+    buf_group = (UringApiBufGroup *)self->buf_group;
     buffer_id = flags >> IORING_CQE_BUFFER_SHIFT;
-    if (!self->recv_pool || buffer_id >= self->recv_pool->buffer_count) {
+    if (buffer_id >= buf_group->buffer_count) {
         PyErr_SetString(PyExc_RuntimeError, "recv multishot completion selected an invalid buffer");
         return NULL;
     }
-    if ((unsigned int)res > self->recv_pool->buffer_size) {
+    if ((unsigned int)res > buf_group->buffer_size) {
         PyErr_SetString(PyExc_RuntimeError, "recv multishot completion exceeds selected buffer size");
         return NULL;
     }
 
     payload = PyBytes_FromStringAndSize(
-        (const char *)self->recv_pool->storage + ((size_t)buffer_id * self->recv_pool->buffer_size), (Py_ssize_t)res);
+        (const char *)buf_group->storage + ((size_t)buffer_id * buf_group->buffer_size), (Py_ssize_t)res);
     if (!payload) {
         return NULL;
     }
     if (flags & IORING_CQE_F_MORE) {
-        UringApiRecvBufferPool_recycle(self->recv_pool, buffer_id);
+        UringApiBufGroup_recycle(buf_group, buffer_id);
     }
     return payload;
 }

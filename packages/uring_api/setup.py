@@ -83,6 +83,7 @@ setup(
                 "src/_uring_api_probe.c",
                 "src/_uring_api_properties.c",
                 "src/_uring_api_ring.c",
+                "src/_uring_api_bufgroup.c",
                 "src/_uring_api_submit.c",
             ],
             include_dirs=["src/uring_api/include"],

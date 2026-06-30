@@ -84,14 +84,14 @@ struct UringApiRing {
 };
 
 typedef struct {
-    UringApiRing *ring;
+    PyObject_HEAD UringApiRing *ring;
     struct io_uring_buf_ring *ring_buffer;
     unsigned char *storage;
     unsigned int buffer_size;
     unsigned int buffer_count;
     unsigned short group_id;
     int mask;
-} UringApiRecvBufferPool;
+} UringApiBufGroup;
 
 typedef enum {
     URING_API_RECEIVE_IDLE = 0,
@@ -124,7 +124,7 @@ typedef struct {
     unsigned int flags;
     PyObject *result;
     PyObject *buffer;
-    UringApiRecvBufferPool *recv_pool;
+    PyObject *buf_group;
     unsigned long long sequence;
     Py_buffer view;
     struct iovec iov;
@@ -136,6 +136,7 @@ typedef struct {
 } UringApiCompletion;
 
 static PyTypeObject UringApiRing_Type;
+static PyTypeObject UringApiBufGroup_Type;
 static PyTypeObject UringApiCompletion_Type;
 static PyObject *UringApiSubmissionQueueFullError;
 
@@ -194,11 +195,15 @@ static PyObject *UringApiCapi_CompletionResult(PyObject *completion);
 
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
 
+static void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id);
+
 #include "_uring_api_core.c"
 
 #include "_uring_api_probe.c"
 
 #include "_uring_api_ring.c"
+
+#include "_uring_api_bufgroup.c"
 
 #include "_uring_api_submit.c"
 
@@ -214,6 +219,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
     {"reset_serving", (PyCFunction)UringApiRing_reset_serving, METH_NOARGS, "Clear the completion service stop flag."},
+    {"create_buf_group", _PyCFunction_CAST(UringApiRing_create_buf_group), METH_VARARGS | METH_KEYWORDS,
+     "Create a provided-buffer group for multishot receive operations."},
     {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
      "Submit a recv operation."},
     {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_VARARGS | METH_KEYWORDS,
@@ -286,6 +293,24 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {NULL, NULL, NULL, NULL, NULL},
 };
 
+static PyGetSetDef UringApiBufGroup_getset[] = {
+    {"buffer_size", (getter)UringApiBufGroup_get_buffer_size, NULL, NULL, NULL},
+    {"buffer_count", (getter)UringApiBufGroup_get_buffer_count, NULL, NULL, NULL},
+    {"group_id", (getter)UringApiBufGroup_get_group_id, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+static PyTypeObject UringApiBufGroup_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.BufGroup",
+    .tp_basicsize = sizeof(UringApiBufGroup),
+    .tp_dealloc = (destructor)UringApiBufGroup_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)UringApiBufGroup_traverse,
+    .tp_clear = (inquiry)UringApiBufGroup_clear,
+    .tp_doc = "io_uring provided-buffer group",
+    .tp_getset = UringApiBufGroup_getset,
+};
+
 static PyTypeObject UringApiCompletion_Type = {
     PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.Completion",
     .tp_basicsize = sizeof(UringApiCompletion),
@@ -310,6 +335,9 @@ static int uring_api_exec(PyObject *module) {
     if (PyType_Ready(&UringApiCompletion_Type) < 0) {
         return -1;
     }
+    if (PyType_Ready(&UringApiBufGroup_Type) < 0) {
+        return -1;
+    }
     if (PyType_Ready(&UringApiRing_Type) < 0) {
         return -1;
     }
@@ -323,6 +351,11 @@ static int uring_api_exec(PyObject *module) {
     Py_INCREF(&UringApiCompletion_Type);
     if (PyModule_AddObject(module, "Completion", (PyObject *)&UringApiCompletion_Type) < 0) {
         Py_DECREF(&UringApiCompletion_Type);
+        return -1;
+    }
+    Py_INCREF(&UringApiBufGroup_Type);
+    if (PyModule_AddObject(module, "BufGroup", (PyObject *)&UringApiBufGroup_Type) < 0) {
+        Py_DECREF(&UringApiBufGroup_Type);
         return -1;
     }
     Py_INCREF(&UringApiRing_Type);

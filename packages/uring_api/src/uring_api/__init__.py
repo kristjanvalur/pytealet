@@ -27,6 +27,7 @@ try:
     from _uring_api import COMPLETION_KIND_SHUTDOWN as COMPLETION_KIND_SHUTDOWN
     from _uring_api import COMPLETION_KIND_SOCKET as COMPLETION_KIND_SOCKET
     from _uring_api import COMPLETION_KIND_WAKE as COMPLETION_KIND_WAKE
+    from _uring_api import BufGroup as BufGroup
     from _uring_api import Completion as Completion
     from _uring_api import IORING_CQE_F_MORE as IORING_CQE_F_MORE
     from _uring_api import IORING_CQE_F_NOTIF as IORING_CQE_F_NOTIF
@@ -87,6 +88,12 @@ except ImportError as exc:
         result: object
         sequence: int = 0
 
+    @dataclass(frozen=True)
+    class BufGroup:
+        buffer_size: int
+        buffer_count: int
+        group_id: int
+
     class Ring:  # type: ignore[no-redef]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
@@ -138,11 +145,14 @@ except ImportError as exc:
         def break_wait(self) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def create_buf_group(self, buffer_size: int, buffer_count: int) -> BufGroup:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_recv_multishot(
-            self, fd: int, buffer_size: int, buffer_count: int, user_data: object = None, flags: int = 0
+            self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -262,6 +272,7 @@ __all__ = [
     "COMPLETION_KIND_SHUTDOWN",
     "COMPLETION_KIND_SOCKET",
     "COMPLETION_KIND_WAKE",
+    "BufGroup",
     "Completion",
     "IORING_CQE_F_MORE",
     "IORING_CQE_F_NOTIF",
@@ -284,5 +295,6 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from _uring_api import BufGroup as BufGroup
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring
