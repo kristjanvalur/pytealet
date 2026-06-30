@@ -462,10 +462,33 @@ static bool UringApiCompletion_should_clear_pending_state(UringApiCompletion *se
     return !(flags & IORING_CQE_F_MORE);
 }
 
+static void UringApiCompletion_recycle_selected_buffer(UringApiCompletion *self, unsigned int flags) {
+    UringApiBufGroup *buf_group;
+    unsigned int buffer_id;
+
+    if (!(flags & IORING_CQE_F_BUFFER)) {
+        return;
+    }
+    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        return;
+    }
+    buf_group = (UringApiBufGroup *)self->buf_group;
+    buffer_id = flags >> IORING_CQE_BUFFER_SHIFT;
+    if (buffer_id >= buf_group->buffer_count) {
+        return;
+    }
+    if (buf_group->ring && buf_group->ring->initialized) {
+        Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
+        UringApiBufGroup_recycle(buf_group, buffer_id);
+        Py_END_CRITICAL_SECTION();
+    }
+}
+
 static PyObject *UringApiCompletion_recv_multishot_zc_payload(UringApiCompletion *self, int res, unsigned int flags) {
     unsigned int buffer_id;
 
     if (res < 0) {
+        UringApiCompletion_recycle_selected_buffer(self, flags);
         Py_RETURN_NONE;
     }
     if (res == 0 && !(flags & IORING_CQE_F_BUFFER)) {
@@ -497,6 +520,7 @@ static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *s
     PyObject *payload;
 
     if (res < 0) {
+        UringApiCompletion_recycle_selected_buffer(self, flags);
         Py_RETURN_NONE;
     }
     if (res == 0 && !(flags & IORING_CQE_F_BUFFER)) {

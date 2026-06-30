@@ -39,7 +39,9 @@ static int UringApiBufGroup_clear(UringApiBufGroup *self) {
 static void UringApiBufGroup_dealloc(UringApiBufGroup *self) {
     PyObject_GC_UnTrack(self);
     if (self->ring_buffer && self->ring && self->ring->initialized) {
+        Py_BEGIN_CRITICAL_SECTION(self->ring);
         (void)io_uring_free_buf_ring(&self->ring->ring, self->ring_buffer, self->buffer_count, self->group_id);
+        Py_END_CRITICAL_SECTION();
     }
     PyMem_Free(self->storage);
     (void)UringApiBufGroup_clear(self);
