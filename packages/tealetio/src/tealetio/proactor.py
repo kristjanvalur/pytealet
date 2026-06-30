@@ -149,12 +149,6 @@ class Proactor(Protocol):
 ProactorFactory = Callable[[], Proactor]
 
 
-def _recvall_chunk_bytes(chunk: memoryview | bytes) -> bytes:
-    if type(chunk) is bytes:
-        return chunk
-    return bytes(chunk)
-
-
 def _recvall_adopt_chunk(
     chunks: dict[int, memoryview | bytes],
     pending_views: deque[int],
@@ -166,6 +160,20 @@ def _recvall_adopt_chunk(
     while len(pending_views) > _RECVALL_MAX_LIVE_CHUNK_VIEWS:
         old_index = pending_views.popleft()
         chunks[old_index] = bytes(chunks[old_index])
+
+
+def _recvall_release_pending_views(
+    chunks: dict[int, memoryview | bytes],
+    pending_views: deque[int],
+) -> None:
+    while pending_views:
+        index = pending_views.popleft()
+        chunk = chunks.pop(index, None)
+        if type(chunk) is not memoryview:
+            continue
+        close = getattr(chunk, "close", None)
+        if close is not None:
+            close()
 
 
 class ProactorBase:
@@ -231,7 +239,8 @@ class ProactorBase:
         Chunks start as borrowed ``recv_many`` views. ``recvall`` keeps at most
         ``_RECVALL_MAX_LIVE_CHUNK_VIEWS`` unconverted views and copies older
         chunks to ``bytes`` so provided-buffer pools are not pinned indefinitely
-        while a long stream is being collected.
+        while a long stream is being collected. Remaining views are closed in a
+        ``finally`` block after the stream completes.
         """
 
         operation: _LinkedOperation[bytes] = _LinkedOperation(kind="recvall", fileobj=sock)
@@ -253,16 +262,19 @@ class ProactorBase:
         operation._linked_operation = stream
 
         def on_done(done_stream: Operation[Any]) -> None:
-            if done_stream.cancelled():
-                operation._set_cancelled()
-                return
-            exception = done_stream.exception()
-            if exception is not None:
-                operation._set_exception(exception)
-                return
-            operation._set_result(
-                b"".join(_recvall_chunk_bytes(chunks[index]) for index in sorted(chunks))
-            )
+            try:
+                if done_stream.cancelled():
+                    operation._set_cancelled()
+                    return
+                exception = done_stream.exception()
+                if exception is not None:
+                    operation._set_exception(exception)
+                    return
+                operation._set_result(
+                    b"".join(bytes(chunks[index]) for index in sorted(chunks))
+                )
+            finally:
+                _recvall_release_pending_views(chunks, pending_views)
 
         stream.add_done_callback(on_done)
         return operation

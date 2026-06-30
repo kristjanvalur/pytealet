@@ -53,6 +53,19 @@ def test_recvall_adopt_chunk_converts_oldest_views_when_window_exceeded(monkeypa
     assert list(pending) == [1, 2]
 
 
+def test_recvall_release_pending_views_clears_pending_chunk_references():
+    from collections import deque
+
+    chunks: dict[int, memoryview | bytes] = {0: b"done", 1: memoryview(b"tail")}
+    pending: deque[int] = deque([1])
+
+    proactor_module._recvall_release_pending_views(chunks, pending)
+
+    assert not pending
+    assert 0 in chunks
+    assert 1 not in chunks
+
+
 def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
     completed = [operation for operation in operations if operation.done()]
     pending = {operation for operation in operations if not operation.done()}
