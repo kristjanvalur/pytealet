@@ -1432,12 +1432,7 @@ class UringProactor(ProactorBase):
             operation._emit_result((completion.sequence, b""))
             operation._set_result(None)
             return operation
-        payload = completion.result
-        if not isinstance(payload, uring_api.BufView):
-            raise TypeError(
-                f"recv_many completion result must be BufView, got {type(payload).__name__}"
-            )
-        view = memoryview(payload)
+        view = memoryview(completion.result)
         try:
             data = bytes(view)
         finally:
