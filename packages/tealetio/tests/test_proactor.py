@@ -29,6 +29,10 @@ from tealetio.proactor import (
 )
 
 
+def _recv_many_bytes(seen: list[tuple[int, memoryview]]) -> list[tuple[int, bytes]]:
+    return [(index, bytes(data)) for index, data in seen]
+
+
 def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
     completed = [operation for operation in operations if operation.done()]
     pending = {operation for operation in operations if not operation.done()}
@@ -248,7 +252,7 @@ class TestSelectorProactor:
     def test_recv_many_emits_chunks_and_completes_on_eof(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
-        seen: list[tuple[int, bytes]] = []
+        seen: list[tuple[int, memoryview]] = []
         try:
             reader.setblocking(False)
             writer.setblocking(False)
@@ -264,7 +268,8 @@ class TestSelectorProactor:
             while not operation.done():
                 proactor.wait(proactor.get_time() + 1.0)
 
-            assert seen == [(0, b"hello"), (1, b"world"), (2, b"")]
+            assert all(isinstance(data, memoryview) for _, data in seen)
+            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
         finally:
             reader.close()
@@ -1869,7 +1874,7 @@ class TestUringProactor:
     def test_recv_many_uses_multishot_recv_and_finishes_on_eof(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
-        seen: list[tuple[int, bytes]] = []
+        seen: list[tuple[int, memoryview]] = []
         try:
             reader.setblocking(False)
             operation = proactor.recv_many(reader, 5, seen.append)
@@ -1885,7 +1890,7 @@ class TestUringProactor:
             proactor.ring.complete_recv_multishot(b"", more=False)
             proactor.wait(proactor.get_time() + 1.0)
 
-            assert seen == [(0, b"hello"), (1, b"")]
+            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
             assert operation.done() is True
             assert operation.result() is None
         finally:
@@ -1921,20 +1926,20 @@ class TestUringProactor:
     def test_native_recv_many_cancel_after_data_before_sender_close(self):
         proactor = UringProactor()
         reader, writer = socket.socketpair()
-        seen: list[tuple[int, bytes]] = []
+        seen: list[tuple[int, memoryview]] = []
         try:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.recv_many(reader, 5, seen.append)
 
             writer.send(b"hello")
-            _wait_for_uring(proactor, lambda: seen == [(0, b"hello")])
+            _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
 
             operation.cancel()
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
 
             assert operation.cancelled() is True
-            assert seen == [(0, b"hello")]
+            assert _recv_many_bytes(seen) == [(0, b"hello")]
             with pytest.raises(CancelledError):
                 operation.result()
         finally:

@@ -140,8 +140,8 @@ class Proactor(Protocol):
         self,
         sock: socket.socket,
         n: int,
-        callback: Callable[[tuple[int, bytes]], object],
-    ) -> ContinuousOperation[tuple[int, bytes]]: ...
+        callback: Callable[[tuple[int, memoryview]], object],
+    ) -> ContinuousOperation[tuple[int, memoryview]]: ...
 
 
 ProactorFactory = Callable[[], Proactor]
@@ -200,21 +200,21 @@ class ProactorBase:
         self,
         sock: socket.socket,
         n: int,
-        callback: Callable[[tuple[int, bytes]], object],
-    ) -> ContinuousOperation[tuple[int, bytes]]:
+        callback: Callable[[tuple[int, memoryview]], object],
+    ) -> ContinuousOperation[tuple[int, memoryview]]:
         raise NotImplementedError
 
     def recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> Operation[bytes]:
         """Receive chunks until EOF and complete with the full byte string."""
 
         operation: _LinkedOperation[bytes] = _LinkedOperation(kind="recvall", fileobj=sock)
-        chunks: dict[int, bytes] = {}
+        chunks: dict[int, memoryview] = {}
         total = 0
 
-        def on_result(result: tuple[int, bytes]) -> None:
+        def on_result(result: tuple[int, memoryview]) -> None:
             nonlocal total
             index, data = result
-            if not data:
+            if len(data) == 0:
                 return
             chunks[index] = data
             total += len(data)
@@ -232,7 +232,7 @@ class ProactorBase:
             if exception is not None:
                 operation._set_exception(exception)
                 return
-            operation._set_result(b"".join(chunks[index] for index in sorted(chunks)))
+            operation._set_result(b"".join(bytes(chunks[index]) for index in sorted(chunks)))
 
         stream.add_done_callback(on_done)
         return operation
@@ -713,18 +713,18 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         n: int,
-        callback: Callable[[tuple[int, bytes]], object],
-    ) -> ContinuousOperation[tuple[int, bytes]]:
+        callback: Callable[[tuple[int, memoryview]], object],
+    ) -> ContinuousOperation[tuple[int, memoryview]]:
         """Start receiving byte chunks until EOF, cancellation, or failure.
 
         `callback` may run on any backend worker thread. Each result is an
-        ordinal `(index, data)` pair; EOF emits a final empty data point before
-        completing the continuous operation.
+        ordinal `(index, data)` pair with read-only `data` as a `memoryview`;
+        EOF emits a final empty view before completing the continuous operation.
         """
 
         if n <= 0:
             raise ValueError("n must be positive")
-        operation = ContinuousOperation[tuple[int, bytes]](
+        operation = ContinuousOperation[tuple[int, memoryview]](
             kind="recv_many",
             fileobj=sock,
             proactor=self,
@@ -741,10 +741,10 @@ class SelectorProactor(ProactorBase):
                 except (BlockingIOError, InterruptedError):
                     return _ContinuousStepResult(progressed=progressed)
                 if not data:
-                    operation._emit_result((sequence, b""))
+                    operation._emit_result((sequence, memoryview(b"")))
                     sequence += 1
                     return _ContinuousStepResult(progressed=True, done=True)
-                operation._emit_result((sequence, data))
+                operation._emit_result((sequence, memoryview(data)))
                 sequence += 1
                 progressed = True
 
@@ -1402,18 +1402,24 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         n: int,
-        callback: Callable[[tuple[int, bytes]], object],
-    ) -> ContinuousOperation[tuple[int, bytes]]:
+        callback: Callable[[tuple[int, memoryview]], object],
+    ) -> ContinuousOperation[tuple[int, memoryview]]:
         """Start a multishot receive operation that completes on EOF.
 
         `callback` may run on any uring completion service thread. Each result
-        is an ordinal `(index, data)` pair; EOF emits a final empty data point
-        before completing the continuous operation.
+        is an ordinal `(index, data)` pair with read-only `data` as a
+        `memoryview` into the leased kernel buffer. EOF emits a final empty
+        view before completing the continuous operation.
+
+        Callbacks should treat each `data` view as borrowed: copy with
+        `bytes(data)` or release the view before returning if they do not need
+        the payload anymore. Holding many live views can pin provided buffers
+        and stall further receives on the shared `BufGroup`.
         """
 
         if n <= 0:
             raise ValueError("n must be positive")
-        operation = ContinuousOperation[tuple[int, bytes]](
+        operation = ContinuousOperation[tuple[int, memoryview]](
             kind="recv_many",
             fileobj=sock,
             proactor=self,
@@ -1427,17 +1433,16 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_recv_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any]:
-        operation = cast(ContinuousOperation[tuple[int, bytes]], entry.operation)
+        operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
         if completion.res == 0:
-            operation._emit_result((completion.sequence, b""))
+            operation._emit_result((completion.sequence, memoryview(b"")))
             operation._set_result(None)
             return operation
         view = memoryview(completion.result)
         try:
-            data = bytes(view)
+            operation._emit_result((completion.sequence, view))
         finally:
             del view
-        operation._emit_result((completion.sequence, data))
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             operation._set_result(None)
         return operation

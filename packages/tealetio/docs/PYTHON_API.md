@@ -60,17 +60,23 @@ Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
 callback)` emits `(conn, address)` for each accepted connection and remains
 active until it is cancelled or the backend reports a terminal error.
 `recv_many(sock, n, callback)` emits `(index, data)` pairs for each received
-byte chunk, where `index` is the ordinal position in the receive stream. EOF
-emits one final `(index, b"")` data point before the operation completes.
+byte chunk, where `index` is the ordinal position in the receive stream and
+`data` is a read-only `memoryview` into the received bytes. EOF emits one final
+empty view before the operation completes. Callbacks receive borrowed views:
+copy with `bytes(data)` when you need to keep payload past the callback, and
+release views you no longer need so backend buffers can be recycled. On
+`UringProactor`, holding too many live views can pin the shared provided-buffer
+pool and stall further receives.
+
 Backends may run these result callbacks from any worker thread; code that needs
 thread affinity should marshal from the callback into the appropriate scheduler,
 event loop, or application thread.
 
 `recvall(sock, n, progress=None)` builds on `recv_many(...)` and returns a
-normal one-shot `Operation[bytes]`. It collects received chunks by their stream
-index, completes at EOF, and returns the concatenation in index order. When
-provided, `progress(total)` is called after each received non-empty chunk with
-the cumulative number of bytes received.
+normal one-shot `Operation[bytes]`. It retains chunk views until EOF, copies
+them into the final concatenation in index order, and then releases the views.
+When provided, `progress(total)` is called after each received non-empty chunk
+with the cumulative number of bytes received.
 
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.
 Backends call `progress(total)` with the cumulative number of bytes sent as
