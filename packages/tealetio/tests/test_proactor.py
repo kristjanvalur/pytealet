@@ -33,6 +33,26 @@ def _recv_many_bytes(seen: list[tuple[int, memoryview]]) -> list[tuple[int, byte
     return [(index, bytes(data)) for index, data in seen]
 
 
+def test_recvall_adopt_chunk_converts_oldest_views_when_window_exceeded(monkeypatch):
+    from collections import deque
+
+    monkeypatch.setattr(proactor_module, "_RECVALL_MAX_LIVE_CHUNK_VIEWS", 2)
+    chunks: dict[int, memoryview | bytes] = {}
+    pending: deque[int] = deque()
+
+    proactor_module._recvall_adopt_chunk(chunks, pending, 0, memoryview(b"a"))
+    proactor_module._recvall_adopt_chunk(chunks, pending, 1, memoryview(b"b"))
+    assert type(chunks[0]) is memoryview
+    assert type(chunks[1]) is memoryview
+
+    proactor_module._recvall_adopt_chunk(chunks, pending, 2, memoryview(b"c"))
+    assert type(chunks[0]) is bytes
+    assert chunks[0] == b"a"
+    assert type(chunks[1]) is memoryview
+    assert type(chunks[2]) is memoryview
+    assert list(pending) == [1, 2]
+
+
 def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
     completed = [operation for operation in operations if operation.done()]
     pending = {operation for operation in operations if not operation.done()}
@@ -1893,6 +1913,27 @@ class TestUringProactor:
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
             assert operation.done() is True
             assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")
+    def test_recvall_collects_many_out_of_order_chunks(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recvall(reader, 1, None)
+            assert isinstance(proactor.ring, _FakeUringRing)
+
+            for sequence, byte in enumerate(b"abcdefghijklmnop"):
+                proactor.ring.complete_recv_multishot(bytes((byte,)), sequence=sequence)
+                proactor.wait(proactor.get_time() + 1.0)
+            proactor.ring.complete_recv_multishot(b"", more=False, sequence=16)
+            proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.result() == b"abcdefghijklmnop"
         finally:
             reader.close()
             writer.close()

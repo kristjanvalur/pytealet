@@ -7,6 +7,7 @@ import selectors
 import socket
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
 _DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
+_RECVALL_MAX_LIVE_CHUNK_VIEWS = 16
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 
 
@@ -147,6 +149,25 @@ class Proactor(Protocol):
 ProactorFactory = Callable[[], Proactor]
 
 
+def _recvall_chunk_bytes(chunk: memoryview | bytes) -> bytes:
+    if type(chunk) is bytes:
+        return chunk
+    return bytes(chunk)
+
+
+def _recvall_adopt_chunk(
+    chunks: dict[int, memoryview | bytes],
+    pending_views: deque[int],
+    index: int,
+    data: memoryview,
+) -> None:
+    chunks[index] = data
+    pending_views.append(index)
+    while len(pending_views) > _RECVALL_MAX_LIVE_CHUNK_VIEWS:
+        old_index = pending_views.popleft()
+        chunks[old_index] = bytes(chunks[old_index])
+
+
 class ProactorBase:
     """Shared helpers for concrete proactor backends."""
 
@@ -205,10 +226,17 @@ class ProactorBase:
         raise NotImplementedError
 
     def recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> Operation[bytes]:
-        """Receive chunks until EOF and complete with the full byte string."""
+        """Receive chunks until EOF and complete with the full byte string.
+
+        Chunks start as borrowed ``recv_many`` views. ``recvall`` keeps at most
+        ``_RECVALL_MAX_LIVE_CHUNK_VIEWS`` unconverted views and copies older
+        chunks to ``bytes`` so provided-buffer pools are not pinned indefinitely
+        while a long stream is being collected.
+        """
 
         operation: _LinkedOperation[bytes] = _LinkedOperation(kind="recvall", fileobj=sock)
-        chunks: dict[int, memoryview] = {}
+        chunks: dict[int, memoryview | bytes] = {}
+        pending_views: deque[int] = deque()
         total = 0
 
         def on_result(result: tuple[int, memoryview]) -> None:
@@ -216,7 +244,7 @@ class ProactorBase:
             index, data = result
             if len(data) == 0:
                 return
-            chunks[index] = data
+            _recvall_adopt_chunk(chunks, pending_views, index, data)
             total += len(data)
             if progress is not None:
                 progress(total)
@@ -232,7 +260,9 @@ class ProactorBase:
             if exception is not None:
                 operation._set_exception(exception)
                 return
-            operation._set_result(b"".join(bytes(chunks[index]) for index in sorted(chunks)))
+            operation._set_result(
+                b"".join(_recvall_chunk_bytes(chunks[index]) for index in sorted(chunks))
+            )
 
         stream.add_done_callback(on_done)
         return operation
