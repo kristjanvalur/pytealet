@@ -88,6 +88,11 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
         return NULL;
     }
 
+    if (ring->next_buf_group == 0) {
+        Py_DECREF(self);
+        PyErr_SetString(PyExc_RuntimeError, "buffer group ID space exhausted (max 65535 groups per ring)");
+        return NULL;
+    }
     self->group_id = ring->next_buf_group++;
     self->mask = io_uring_buf_ring_mask(buffer_count);
     self->ring_buffer = io_uring_setup_buf_ring(&ring->ring, buffer_count, self->group_id, 0, &ret);

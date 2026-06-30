@@ -135,11 +135,16 @@ static PyObject *UringApiBufView_close(UringApiBufView *self, PyObject *Py_UNUSE
         status = -2;
     } else {
         buf_group = (UringApiBufGroup *)self->buf_group;
-        Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
-        if (UringApiBufView_recycle_locked(self) < 0) {
-            status = -3;
+        if (buf_group->ring && buf_group->ring->initialized) {
+            Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
+            if (UringApiBufView_recycle_locked(self) < 0) {
+                status = -3;
+            }
+            Py_END_CRITICAL_SECTION();
+        } else {
+            self->recycled = true;
+            status = 1;
         }
-        Py_END_CRITICAL_SECTION();
     }
     BUFVIEW_END_CRITICAL_SECTION();
 

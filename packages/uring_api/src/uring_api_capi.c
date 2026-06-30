@@ -99,8 +99,8 @@ int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned int bu
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = PyObject_CallMethod(ring, "submit_recv_multishot", "ikkOI", fd, buffer_size, buffer_count,
-                                 user_data ? user_data : Py_None, flags);
+    result = PyObject_CallMethod(ring, "submit_recv_multishot", "ikkOI", fd, (unsigned long)buffer_size,
+                                 (unsigned long)buffer_count, user_data ? user_data : Py_None, flags);
     if (!result) {
         return -1;
     }
