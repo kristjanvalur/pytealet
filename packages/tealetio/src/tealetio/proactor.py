@@ -7,7 +7,6 @@ import selectors
 import socket
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
@@ -153,35 +152,35 @@ ProactorFactory = Callable[[], Proactor]
 
 def _recvall_adopt_chunk(
     chunks: dict[int, memoryview | bytes],
-    pending_views: deque[int],
+    pending_views: set[int],
     index: int,
     data: memoryview,
 ) -> None:
     chunks[index] = data
-    pending_views.append(index)
+    pending_views.add(index)
 
 
 def _recvall_relieve_pressure(
     chunks: dict[int, memoryview | bytes],
-    pending_views: deque[int],
+    pending_views: set[int],
 ) -> None:
-    while pending_views:
-        index = pending_views.popleft()
+    for index in pending_views:
         chunk = chunks.get(index)
         if type(chunk) is memoryview:
             chunks[index] = bytes(chunk)
+    pending_views.clear()
 
 
 def _recvall_release_pending_views(
     chunks: dict[int, memoryview | bytes],
-    pending_views: deque[int],
+    pending_views: set[int],
 ) -> None:
     # Drop the last recvall-owned references to borrowed chunk views. On modern
     # Python (PEP 688), memoryview uses release() rather than close(); refcount
     # teardown is enough to return leased uring buffers.
-    while pending_views:
-        index = pending_views.popleft()
+    for index in pending_views:
         chunks.pop(index, None)
+    pending_views.clear()
 
 
 class ProactorBase:
@@ -252,7 +251,7 @@ class ProactorBase:
 
         operation: _LinkedOperation[bytes] = _LinkedOperation(kind="recvall", fileobj=sock)
         chunks: dict[int, memoryview | bytes] = {}
-        pending_views: deque[int] = deque()
+        pending_views: set[int] = set()
         total = 0
 
         def on_result(result: tuple[int, memoryview]) -> None:

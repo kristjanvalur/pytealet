@@ -35,10 +35,8 @@ def _recv_many_bytes(seen: list[tuple[int, memoryview]]) -> list[tuple[int, byte
 
 
 def test_recvall_adopt_chunk_keeps_all_chunk_views():
-    from collections import deque
-
     chunks: dict[int, memoryview | bytes] = {}
-    pending: deque[int] = deque()
+    pending: set[int] = set()
 
     proactor_module._recvall_adopt_chunk(chunks, pending, 0, memoryview(b"a"))
     proactor_module._recvall_adopt_chunk(chunks, pending, 1, memoryview(b"b"))
@@ -47,18 +45,16 @@ def test_recvall_adopt_chunk_keeps_all_chunk_views():
     assert type(chunks[0]) is memoryview
     assert type(chunks[1]) is memoryview
     assert type(chunks[2]) is memoryview
-    assert list(pending) == [0, 1, 2]
+    assert pending == {0, 1, 2}
 
 
 def test_recvall_relieve_pressure_converts_all_live_views():
-    from collections import deque
-
     chunks: dict[int, memoryview | bytes] = {
         0: memoryview(b"a"),
         1: memoryview(b"b"),
         2: memoryview(b"c"),
     }
-    pending: deque[int] = deque([0, 1, 2])
+    pending: set[int] = {0, 1, 2}
 
     proactor_module._recvall_relieve_pressure(chunks, pending)
 
@@ -67,10 +63,8 @@ def test_recvall_relieve_pressure_converts_all_live_views():
 
 
 def test_recvall_release_pending_views_clears_pending_chunk_references():
-    from collections import deque
-
     chunks: dict[int, memoryview | bytes] = {0: b"done", 1: memoryview(b"tail")}
-    pending: deque[int] = deque([1])
+    pending: set[int] = {1}
 
     proactor_module._recvall_release_pending_views(chunks, pending)
 
