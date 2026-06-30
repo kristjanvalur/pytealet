@@ -66,12 +66,26 @@ static int UringApiBufView_getbuffer(PyObject *obj, Py_buffer *view, int flags) 
     view->len = (Py_ssize_t)self->length;
     view->readonly = 1;
     view->itemsize = 1;
-    view->format = "B";
-    view->ndim = 1;
-    view->shape = NULL;
-    view->strides = NULL;
+    view->format = (flags & PyBUF_FORMAT) ? "B" : NULL;
     view->suboffsets = NULL;
     view->internal = NULL;
+
+    if (flags & PyBUF_ND) {
+        self->export_shape = (Py_ssize_t)self->length;
+        view->ndim = 1;
+        view->shape = &self->export_shape;
+    } else {
+        view->ndim = 0;
+        view->shape = NULL;
+    }
+
+    if (flags & PyBUF_STRIDES) {
+        self->export_stride = 1;
+        view->strides = &self->export_stride;
+    } else {
+        view->strides = NULL;
+    }
+
     return 0;
 }
 

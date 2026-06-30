@@ -10,6 +10,8 @@ typedef struct {
     unsigned int buffer_id;
     unsigned int length;
     unsigned int export_count;
+    Py_ssize_t export_shape;
+    Py_ssize_t export_stride;
     bool recycled;
 } UringApiBufView;
 
