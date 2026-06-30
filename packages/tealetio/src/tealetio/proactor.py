@@ -40,6 +40,7 @@ __all__ = [
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",
     "UringProactor",
+    "RECV_MANY_BUFFER_PRESSURE",
 ]
 
 
@@ -57,6 +58,8 @@ _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
 _DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
 _RECVALL_MAX_LIVE_CHUNK_VIEWS = 16
+# ``recv_many`` result-callback index signalling provided-buffer pool pressure.
+RECV_MANY_BUFFER_PRESSURE = -1
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 
 
@@ -162,6 +165,18 @@ def _recvall_adopt_chunk(
         chunks[old_index] = bytes(chunks[old_index])
 
 
+def _recvall_relieve_pressure(
+    chunks: dict[int, memoryview | bytes],
+    pending_views: deque[int],
+) -> None:
+    if not pending_views:
+        return
+    old_index = pending_views.popleft()
+    chunk = chunks.get(old_index)
+    if type(chunk) is memoryview:
+        chunks[old_index] = bytes(chunk)
+
+
 def _recvall_release_pending_views(
     chunks: dict[int, memoryview | bytes],
     pending_views: deque[int],
@@ -249,6 +264,9 @@ class ProactorBase:
         def on_result(result: tuple[int, memoryview]) -> None:
             nonlocal total
             index, data = result
+            if index == RECV_MANY_BUFFER_PRESSURE:
+                _recvall_relieve_pressure(chunks, pending_views)
+                return
             if len(data) == 0:
                 return
             _recvall_adopt_chunk(chunks, pending_views, index, data)
@@ -478,6 +496,8 @@ class _UringEntry:
     progress: _ProgressCallback | None = None
     completion: _UringCompletion | None = None
     active: bool = True
+    stream_sequence: int = 0
+    resubmit: _UringEntrySubmit | None = None
 
 
 @dataclass
@@ -1456,6 +1476,10 @@ class UringProactor(ProactorBase):
         need the payload anymore (`memoryview.release()` is optional for early
         release). Holding many live views can pin provided buffers
         and stall further receives on the shared `BufGroup`.
+
+        When the provided-buffer pool is exhausted the backend emits
+        ``(RECV_MANY_BUFFER_PRESSURE, empty_view)`` so consumers can release
+        held views, then automatically resubmits the multishot receive.
         """
 
         if n <= 0:
@@ -1467,21 +1491,36 @@ class UringProactor(ProactorBase):
             result_callback=callback,
         )
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv_many)
-        self._submit_uring_entry(
-            entry,
-            lambda: self._ring.submit_recv_multishot(sock.fileno(), self._get_recv_many_buf_group(), entry),
-        )
+
+        def submit_recv_many() -> _UringCompletion:
+            return self._ring.submit_recv_multishot(sock.fileno(), self._get_recv_many_buf_group(), entry)
+
+        entry.resubmit = submit_recv_many
+        self._submit_uring_entry(entry, submit_recv_many)
         return operation
+
+    def _handle_recv_many_enobufs(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+        operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
+        entry.stream_sequence = completion.sequence
+        operation._emit_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
+        resubmit = entry.resubmit
+        if resubmit is None:
+            operation._set_exception(RuntimeError("recv_many entry is missing its resubmit handler"))
+            return operation
+        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=resubmit))
+        self.break_wait()
+        return None
 
     def _complete_uring_recv_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any]:
         operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
+        index = entry.stream_sequence + completion.sequence
         if completion.res == 0:
-            operation._emit_result((completion.sequence, memoryview(b"")))
+            operation._emit_result((index, memoryview(b"")))
             operation._set_result(None)
             return operation
         view = memoryview(completion.result)
         try:
-            operation._emit_result((completion.sequence, view))
+            operation._emit_result((index, view))
         finally:
             del view
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
@@ -1509,6 +1548,7 @@ class UringProactor(ProactorBase):
         self._pending_tokens.append(None)
         try:
             entry.completion = submit()
+            entry.active = True
         except uring_api.SubmissionQueueFull:
             self._pending_tokens.pop()
             self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
@@ -1607,6 +1647,8 @@ class UringProactor(ProactorBase):
         if entry.operation.done():
             return entry.operation
         if res < 0:
+            if res == -errno.ENOBUFS and entry.complete is UringProactor._complete_uring_recv_many:
+                return self._handle_recv_many_enobufs(entry, completion)
             entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return entry.operation
         return entry.complete(self, entry, completion)

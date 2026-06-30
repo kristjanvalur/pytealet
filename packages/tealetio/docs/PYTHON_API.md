@@ -62,7 +62,11 @@ active until it is cancelled or the backend reports a terminal error.
 `recv_many(sock, n, callback)` emits `(index, data)` pairs for each received
 byte chunk, where `index` is the ordinal position in the receive stream and
 `data` is a read-only `memoryview` into the received bytes. EOF emits one final
-empty view before the operation completes. Callbacks receive borrowed views:
+empty view before the operation completes. On `UringProactor`, when the shared
+provided-buffer pool is exhausted, the callback also receives
+`(RECV_MANY_BUFFER_PRESSURE, empty_view)` so consumers can release held views;
+the proactor then resubmits the multishot receive and continues stream indices
+from the failed completion's `sequence`. Callbacks receive borrowed views:
 copy with `bytes(data)` when you need to keep payload past the callback, and
 drop view references you no longer need so backend buffers can be recycled
 (refcount teardown is enough; `memoryview.release()` is optional for early

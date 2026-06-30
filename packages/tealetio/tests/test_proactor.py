@@ -22,6 +22,7 @@ from tealetio.proactor import (
     InvalidStateError,
     Operation,
     ProactorScheduler,
+    RECV_MANY_BUFFER_PRESSURE,
     SelectorProactor,
     SyncProactorScheduler,
     ThreadedSelectorProactor,
@@ -51,6 +52,20 @@ def test_recvall_adopt_chunk_converts_oldest_views_when_window_exceeded(monkeypa
     assert type(chunks[1]) is memoryview
     assert type(chunks[2]) is memoryview
     assert list(pending) == [1, 2]
+
+
+def test_recvall_relieve_pressure_converts_oldest_live_view():
+    from collections import deque
+
+    chunks: dict[int, memoryview | bytes] = {0: memoryview(b"a"), 1: memoryview(b"b")}
+    pending: deque[int] = deque([0, 1])
+
+    proactor_module._recvall_relieve_pressure(chunks, pending)
+
+    assert chunks[0] == b"a"
+    assert type(chunks[0]) is bytes
+    assert type(chunks[1]) is memoryview
+    assert list(pending) == [1]
 
 
 def test_recvall_release_pending_views_clears_pending_chunk_references():
@@ -1003,9 +1018,21 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_recv_multishot.append((fd, buf_group, user_data))
+        self.recv_multishot_sequence = 0
         completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT)
         self.pending_recv_multishot.append(completion)
         return completion
+
+    def complete_recv_multishot_enobufs(self, *, sequence: int | None = None) -> None:
+        completion = self.pending_recv_multishot[-1]
+        completion.res = -errno.ENOBUFS
+        completion.flags = 0
+        completion.result = None
+        if sequence is None:
+            sequence = self.recv_multishot_sequence
+            self.recv_multishot_sequence += 1
+        completion.sequence = sequence
+        self._deliver(completion)
 
     def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
         completion = self.pending_recv_multishot[-1]
@@ -1926,6 +1953,53 @@ class TestUringProactor:
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
             assert operation.done() is True
             assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_retries_after_enobufs_and_preserves_stream_sequence(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, 5, seen.append)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"a", more=True, sequence=0)
+            ring.complete_recv_multishot(b"b", more=True, sequence=1)
+            ring.complete_recv_multishot_enobufs(sequence=2)
+            assert seen[-1][0] == RECV_MANY_BUFFER_PRESSURE
+            assert len(ring.submitted_recv_multishot) == 2
+            ring.complete_recv_multishot(b"c", more=True, sequence=0)
+            ring.complete_recv_multishot(b"", more=False, sequence=1)
+            assert _recv_many_bytes(seen) == [
+                (0, b"a"),
+                (1, b"b"),
+                (RECV_MANY_BUFFER_PRESSURE, b""),
+                (2, b"c"),
+                (3, b""),
+            ]
+            assert operation.done() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recvall_survives_buffer_pressure_and_continues_receive(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recvall(reader, 1, None)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"a", more=True, sequence=0)
+            ring.complete_recv_multishot(b"b", more=True, sequence=1)
+            ring.complete_recv_multishot(b"c", more=True, sequence=2)
+            ring.complete_recv_multishot_enobufs(sequence=3)
+            ring.complete_recv_multishot(b"d", more=False, sequence=0)
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == b"abcd"
         finally:
             reader.close()
             writer.close()
