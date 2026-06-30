@@ -770,6 +770,38 @@ def test_buf_group_rejects_use_on_different_ring():
             ring_b.submit_recv_multishot_zc(0, buf_group)
 
 
+def test_buf_view_zc_result_exposes_buf_group():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            try:
+                buf_group = ring.create_buf_group(8, 4)
+                ring.submit_recv_multishot_zc(reader.fileno(), buf_group)
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
+                raise
+
+            writer.send(b"x")
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        if completion.res < 0:
+            errno_value = -completion.res
+            if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
+                pytest.skip(f"recv multishot is not supported: errno {errno_value}")
+        assert isinstance(completion.result, uring_api.BufView)
+        assert completion.result.buf_group is buf_group
+        assert completion.result.buf_group.ring is ring
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_buf_view_rejects_direct_instantiation():
     require_uring()
 
