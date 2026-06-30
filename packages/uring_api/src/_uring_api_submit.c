@@ -54,7 +54,7 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_recv_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+static PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     UringApiBufGroup *buf_group;
@@ -80,7 +80,7 @@ static PyObject *UringApiRing_submit_recv_zc(UringApiRing *self, PyObject *args,
         return NULL;
     }
 
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_ZC, user_data, NULL);
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_BUF, user_data, NULL);
     if (!completion) {
         return NULL;
     }
@@ -182,7 +182,7 @@ static PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject
     return Py_NewRef(completion);
 }
 
-static PyObject *UringApiRing_submit_recv_multishot_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+static PyObject *UringApiRing_submit_recv_multishot_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     UringApiBufGroup *buf_group;
@@ -208,7 +208,7 @@ static PyObject *UringApiRing_submit_recv_multishot_zc(UringApiRing *self, PyObj
         return NULL;
     }
 
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_MULTISHOT_ZC, user_data, NULL);
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_MULTISHOT_BUF, user_data, NULL);
     if (!completion) {
         return NULL;
     }

@@ -127,8 +127,8 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_RECV_MULTISHOT == 13
     assert uring_api.COMPLETION_KIND_SEND_ZC == 14
     assert uring_api.COMPLETION_KIND_SENDMSG_ZC == 15
-    assert uring_api.COMPLETION_KIND_RECV_MULTISHOT_ZC == 16
-    assert uring_api.COMPLETION_KIND_RECV_ZC == 17
+    assert uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF == 16
+    assert uring_api.COMPLETION_KIND_RECV_BUF == 17
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -730,7 +730,7 @@ def test_ring_recv_completion_when_available():
         writer.close()
 
 
-def test_ring_recv_zc_completion_when_available():
+def test_ring_recv_buf_completion_when_available():
     require_uring()
 
     token = object()
@@ -741,7 +741,7 @@ def test_ring_recv_zc_completion_when_available():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                pending = ring.submit_recv_zc(reader.fileno(), buf_group, token)
+                pending = ring.submit_recv_buf(reader.fileno(), buf_group, token)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"provided-buffer recv is not supported: errno {exc.errno}")
@@ -757,7 +757,7 @@ def test_ring_recv_zc_completion_when_available():
                     pytest.skip(f"provided-buffer recv is not supported: errno {errno_value}")
             assert completion is pending
             assert completion.user_data is token
-            assert completion.kind == uring_api.COMPLETION_KIND_RECV_ZC
+            assert completion.kind == uring_api.COMPLETION_KIND_RECV_BUF
             assert completion.res == 5
             assert isinstance(completion.result, uring_api.BufView)
             assert completion.result.length == 5
@@ -770,7 +770,7 @@ def test_ring_recv_zc_completion_when_available():
         writer.close()
 
 
-def test_ring_recv_zc_eof_returns_empty_bytes_when_available():
+def test_ring_recv_buf_eof_returns_empty_bytes_when_available():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -780,7 +780,7 @@ def test_ring_recv_zc_eof_returns_empty_bytes_when_available():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                pending = ring.submit_recv_zc(reader.fileno(), buf_group)
+                pending = ring.submit_recv_buf(reader.fileno(), buf_group)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"provided-buffer recv is not supported: errno {exc.errno}")
@@ -795,7 +795,7 @@ def test_ring_recv_zc_eof_returns_empty_bytes_when_available():
             if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
                 pytest.skip(f"provided-buffer recv is not supported: errno {errno_value}")
         assert completion is pending
-        assert completion.kind == uring_api.COMPLETION_KIND_RECV_ZC
+        assert completion.kind == uring_api.COMPLETION_KIND_RECV_BUF
         assert completion.res == 0
         assert completion.result == b""
     finally:
@@ -841,10 +841,10 @@ def test_buf_group_rejects_use_on_different_ring():
     with uring_api.Ring() as ring_a, uring_api.Ring() as ring_b:
         buf_group = ring_a.create_buf_group(16, 4)
         with pytest.raises(ValueError, match="buf_group was not created by this ring"):
-            ring_b.submit_recv_multishot_zc(0, buf_group)
+            ring_b.submit_recv_multishot_buf(0, buf_group)
 
 
-def test_buf_view_zc_result_exposes_buf_group():
+def test_buf_view_buf_result_exposes_buf_group():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -854,7 +854,7 @@ def test_buf_view_zc_result_exposes_buf_group():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                ring.submit_recv_multishot_zc(reader.fileno(), buf_group)
+                ring.submit_recv_multishot_buf(reader.fileno(), buf_group)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -936,18 +936,18 @@ def test_buf_view_memoryview_is_readonly():
         del mv
 
 
-def test_ring_recv_multishot_zc_completion_when_available():
+def test_ring_recv_multishot_buf_completion_when_available():
     require_uring()
 
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        token = {"operation": "recv-multishot-zc"}
+        token = {"operation": "recv-multishot-buf"}
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                handle = ring.submit_recv_multishot_zc(reader.fileno(), buf_group, token)
+                handle = ring.submit_recv_multishot_buf(reader.fileno(), buf_group, token)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -967,7 +967,7 @@ def test_ring_recv_multishot_zc_completion_when_available():
                     if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
                         pytest.skip(f"recv multishot is not supported: errno {errno_value}")
                 assert completion is not handle
-                assert completion.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT_ZC
+                assert completion.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF
                 assert completion.user_data is token
                 assert completion.sequence == sequence
                 assert isinstance(completion.result, uring_api.BufView)
@@ -991,18 +991,18 @@ def test_ring_recv_multishot_zc_completion_when_available():
         writer.close()
 
 
-def test_ring_recv_multishot_zc_eof_returns_empty_bytes_when_available():
+def test_ring_recv_multishot_buf_eof_returns_empty_bytes_when_available():
     require_uring()
 
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        token = {"operation": "recv-multishot-zc-eof"}
+        token = {"operation": "recv-multishot-buf-eof"}
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                handle = ring.submit_recv_multishot_zc(reader.fileno(), buf_group, token)
+                handle = ring.submit_recv_multishot_buf(reader.fileno(), buf_group, token)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -1030,7 +1030,7 @@ def test_ring_recv_multishot_zc_eof_returns_empty_bytes_when_available():
         assert first.flags & uring_api.IORING_CQE_F_MORE
 
         assert final is handle
-        assert final.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT_ZC
+        assert final.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF
         assert final.user_data is token
         assert final.sequence == 1
         assert final.res == 0

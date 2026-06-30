@@ -123,8 +123,8 @@ typedef enum {
     URING_API_PENDING_RECV_MULTISHOT = 13,
     URING_API_PENDING_SEND_ZC = 14,
     URING_API_PENDING_SENDMSG_ZC = 15,
-    URING_API_PENDING_RECV_MULTISHOT_ZC = 16,
-    URING_API_PENDING_RECV_ZC = 17,
+    URING_API_PENDING_RECV_MULTISHOT_BUF = 16,
+    URING_API_PENDING_RECV_BUF = 17,
 } UringApiPendingKind;
 
 typedef struct {
@@ -240,12 +240,12 @@ static PyMethodDef UringApiRing_methods[] = {
      "Create a read-only leased view into a buffer group slot."},
     {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
      "Submit a recv operation."},
-    {"submit_recv_zc", _PyCFunction_CAST(UringApiRing_submit_recv_zc), METH_VARARGS | METH_KEYWORDS,
-     "Submit a zero-copy recv operation using a provided-buffer group."},
+    {"submit_recv_buf", _PyCFunction_CAST(UringApiRing_submit_recv_buf), METH_VARARGS | METH_KEYWORDS,
+     "Submit a one-shot provided-buffer recv operation."},
     {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_VARARGS | METH_KEYWORDS,
      "Submit a multishot recv operation."},
-    {"submit_recv_multishot_zc", _PyCFunction_CAST(UringApiRing_submit_recv_multishot_zc), METH_VARARGS | METH_KEYWORDS,
-     "Submit a zero-copy multishot recv operation."},
+    {"submit_recv_multishot_buf", _PyCFunction_CAST(UringApiRing_submit_recv_multishot_buf), METH_VARARGS | METH_KEYWORDS,
+     "Submit a multishot provided-buffer recv operation."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_VARARGS | METH_KEYWORDS,
      "Submit a send operation."},
     {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_VARARGS | METH_KEYWORDS,

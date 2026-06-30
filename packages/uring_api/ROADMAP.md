@@ -148,7 +148,7 @@ A later zero-copy receive API would need explicit leased-buffer ownership rather
 than exposing raw provided-buffer management as a general low-level primitive:
 
 ```python
-handle = ring.submit_recv_multishot_zc(fd, buffer_size=16384, buffer_count=256, user_data=token)
+handle = ring.submit_recv_multishot_buf(fd, buf_group, user_data=token)
 with completion.result as view:
   process(memoryview(view))
 ```

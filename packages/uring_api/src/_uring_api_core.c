@@ -97,8 +97,8 @@ static int module_add_completion_kind_constants(PyObject *module) {
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SOCKET", URING_API_PENDING_SOCKET) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SEND_ZC", URING_API_PENDING_SEND_ZC) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SENDMSG_ZC", URING_API_PENDING_SENDMSG_ZC) < 0 ||
-        PyModule_AddIntConstant(module, "COMPLETION_KIND_RECV_MULTISHOT_ZC", URING_API_PENDING_RECV_MULTISHOT_ZC) < 0 ||
-        PyModule_AddIntConstant(module, "COMPLETION_KIND_RECV_ZC", URING_API_PENDING_RECV_ZC) < 0) {
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_RECV_MULTISHOT_BUF", URING_API_PENDING_RECV_MULTISHOT_BUF) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_RECV_BUF", URING_API_PENDING_RECV_BUF) < 0) {
         return -1;
     }
     return 0;
@@ -484,7 +484,7 @@ static void UringApiCompletion_recycle_selected_buffer(UringApiCompletion *self,
     }
 }
 
-static PyObject *UringApiCompletion_recv_multishot_zc_payload(UringApiCompletion *self, int res, unsigned int flags) {
+static PyObject *UringApiCompletion_recv_multishot_buf_payload(UringApiCompletion *self, int res, unsigned int flags) {
     unsigned int buffer_id;
 
     if (res < 0) {
@@ -569,8 +569,8 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
     }
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT) {
         payload = UringApiCompletion_recv_multishot_payload(self, res, flags);
-    } else if (self->kind == URING_API_PENDING_RECV_MULTISHOT_ZC || self->kind == URING_API_PENDING_RECV_ZC) {
-        payload = UringApiCompletion_recv_multishot_zc_payload(self, res, flags);
+    } else if (self->kind == URING_API_PENDING_RECV_MULTISHOT_BUF || self->kind == URING_API_PENDING_RECV_BUF) {
+        payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags);
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
                             self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET)) {
