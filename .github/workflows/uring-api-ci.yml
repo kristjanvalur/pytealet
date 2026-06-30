@@ -1,0 +1,213 @@
+name: uring-api CI
+
+on:
+  push:
+    branches:
+      - main
+      - development
+      - experiment/linux-proactor
+    paths:
+      - ".github/workflows/uring-api-ci.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "packages/uring_api/**"
+  pull_request:
+    paths:
+      - ".github/workflows/uring-api-ci.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "packages/uring_api/**"
+
+jobs:
+  test:
+    name: uring-api Linux tests (py${{ matrix.python-version }})
+    # io_uring is Linux-only. This job is the Python compatibility gate for the
+    # package on the newest hosted Ubuntu image.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.13t", "3.14", "3.14t", "3.15", "3.15t"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install liburing
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Check uv lockfile
+        run: uv lock --check
+
+      - name: Install Python ${{ matrix.python-version }} with uv
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Create virtual environment
+        run: uv venv --python ${{ matrix.python-version }} .venv
+
+      - name: Sync uring-api dependencies
+        run: |
+          source .venv/bin/activate
+          uv sync --active --locked --dev --package uring-api
+
+      - name: Run uring-api tests
+        run: |
+          source .venv/bin/activate
+          uv run --active --package uring-api python -m pytest packages/uring_api/tests/ -v
+
+  linux-source-build:
+    name: uring-api source build and probe (${{ matrix.os }})
+    # Hosted runners give us distro/liburing variation, but not arbitrary old
+    # kernels. Add self-hosted or nested-VM jobs later if we need true old-kernel
+    # runtime coverage.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-latest]
+        python-version: ["3.14t"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install liburing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev
+          uname -a
+          apt-cache policy liburing-dev liburing2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Check uv lockfile
+        run: uv lock --check
+
+      - name: Install Python ${{ matrix.python-version }} with uv
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Build uring-api sdist
+        run: uv build --package uring-api --sdist --python ${{ matrix.python-version }} -o dist/sdist
+
+      - name: Install uring-api from source distribution
+        run: |
+          uv venv --python ${{ matrix.python-version }} .venv
+          source .venv/bin/activate
+          uv pip install dist/sdist/uring_api-*.tar.gz
+
+      - name: Report io_uring probe
+        run: |
+          source .venv/bin/activate
+          python - <<'PY'
+          import platform
+          import uring_api
+
+          probe = uring_api.probe()
+          print("python:", platform.python_version(), platform.python_implementation())
+          print("kernel:", platform.release())
+          print("liburing:", uring_api.__liburing_version__)
+          print("compiled liburing:", uring_api.__compiled_liburing_version__)
+          print("compiled liburing info:", uring_api.__compiled_liburing_version_info__)
+          print("probe:", probe)
+          assert isinstance(probe, dict)
+          if probe:
+              assert probe["available"] is True
+              assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
+          PY
+
+  old-liburing-pure-python-fallback:
+    name: uring-api old-liburing pure Python fallback
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install liburing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev
+          apt-cache policy liburing-dev liburing2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python 3.14t with uv
+        run: uv python install 3.14t
+
+      - name: Build uring-api without native extension
+        run: |
+          uv build --package uring-api --wheel --python 3.14t -o dist/old-liburing --clear > build.log 2>&1
+          cat build.log
+          grep -F "uring-api native extension skipped: liburing >= 2.4 development headers are required" build.log
+
+      - name: Verify installed missing native extension probe fallback
+        run: |
+          fallback_root="$(mktemp -d)"
+          fallback_venv="$fallback_root/venv"
+          uv venv --python 3.14t "$fallback_venv"
+          uv pip install --python "$fallback_venv/bin/python" dist/old-liburing/uring_api-*.whl
+          "$fallback_venv/bin/python" - <<'PY'
+          import uring_api
+
+          probe = uring_api.probe()
+          print(probe)
+          assert probe == {}
+          assert uring_api.__compiled_liburing_version_info__ == (0, 0)
+          assert uring_api.C_API_FEATURES == 0
+          assert uring_api.is_available() is False
+          try:
+              uring_api.Ring()
+          except RuntimeError as exc:
+              assert "native extension is unavailable" in str(exc)
+          else:
+              raise AssertionError("Ring unexpectedly initialized without _uring_api")
+          PY
+
+  non-linux-pure-python-fallback:
+    name: uring-api non-Linux pure Python fallback (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        python-version: ["3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python ${{ matrix.python-version }} with uv
+        shell: bash
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Build and install uring-api without native extension
+        shell: bash
+        run: |
+          uv build --package uring-api --wheel --python ${{ matrix.python-version }} -o dist/non-linux --clear > build.log 2>&1
+          cat build.log
+          grep -F "uring-api native extension skipped: io_uring and liburing are Linux-specific" build.log
+          uv venv --python ${{ matrix.python-version }} .venv-fallback
+          if [ -x .venv-fallback/bin/python ]; then
+            fallback_python=.venv-fallback/bin/python
+          else
+            fallback_python=.venv-fallback/Scripts/python.exe
+          fi
+          uv pip install --python "$fallback_python" dist/non-linux/uring_api-*.whl
+          "$fallback_python" - <<'PY'
+          import uring_api
+
+          probe = uring_api.probe()
+          print(probe)
+          assert probe == {}
+          assert uring_api.__compiled_liburing_version_info__ == (0, 0)
+          assert uring_api.C_API_FEATURES == 0
+          assert uring_api.is_available() is False
+          PY

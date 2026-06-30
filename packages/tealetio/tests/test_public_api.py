@@ -73,6 +73,7 @@ def test_top_level_exports_public_scheduler_api():
         "TealetProactorEventLoop",
         "TealetSelectorEventLoop",
         "ThreadedSelectorProactor",
+        "UringProactor",
         "Task",
         "Timeout",
         "TimeoutError",
@@ -141,6 +142,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert issubclass(tealetio.AsyncProactorScheduler, tealetio.ProactorScheduler)
     assert tealetio.SelectorProactor is tealetio.proactor.SelectorProactor
     assert tealetio.ThreadedSelectorProactor is tealetio.proactor.ThreadedSelectorProactor
+    assert tealetio.UringProactor is tealetio.proactor.UringProactor
     assert tealetio.AsyncRunner is tealetio.asyncio.AsyncRunner
     assert tealetio.AsyncScheduler is tealetio.asyncio.AsyncScheduler
     assert tealetio.ForwardingSelector is tealetio.asyncio.ForwardingSelector

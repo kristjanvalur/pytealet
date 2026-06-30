@@ -10,6 +10,7 @@ import weakref
 import pytest
 
 import _tealet
+import tealetio.locks as locks_module
 import tealetio.scheduler as scheduler_module
 import tealetio.tasks as task_module
 from helpers import new_scheduler as _new_scheduler
@@ -1268,6 +1269,32 @@ class TestSchedulerAccessors:
         s.run_until_complete(task)
 
         assert seen == ["resumed"]
+
+    def test_threadsafe_event_swait_uses_bound_scheduler(self, monkeypatch):
+        class DummyScheduler:
+            def __init__(self) -> None:
+                self.scheduled = 0
+
+            def _schedule(self, callback):
+                self.scheduled += 1
+                callback()
+
+        class DummyTealet:
+            link = None
+
+        owner = DummyScheduler()
+        other = DummyScheduler()
+        current = DummyTealet()
+
+        monkeypatch.setattr(locks_module, "_get_current_scheduler", lambda: owner)
+        event = locks_module.ThreadsafeEvent()
+        monkeypatch.setattr(locks_module, "_get_current_scheduler", lambda: other)
+        monkeypatch.setattr(locks_module.tealet, "current", lambda: current)
+
+        assert event.swait() is True
+        assert owner.scheduled == 1
+        assert other.scheduled == 0
+        assert current.link is event
 
     def test_selector_scheduler_wait_readable(self):
         s = SyncSelectorScheduler()
@@ -2890,6 +2917,51 @@ class TestSchedulerExamples:
 
         assert seen == ["ran"]
         assert s.is_running() is False
+
+    def test_call_soon_threadsafe_immediate_runs_on_owner_thread(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def worker() -> None:
+            seen.append("before")
+            s.call_soon_threadsafe(seen.append, "callback", immediate=True)
+            seen.append("after")
+
+        s.spawn(worker)
+        s.run()
+
+        assert seen == ["before", "callback", "after"]
+
+    def test_call_soon_threadsafe_immediate_queues_from_other_thread(self):
+        s = _new_scheduler()
+        started = threading.Event()
+        seen: list[int] = []
+
+        s.call_later(60.0, lambda: None)
+        s.call_soon(started.set)
+
+        def run_forever_in_thread() -> None:
+            set_scheduler(s)
+            s.run_forever()
+
+        t = threading.Thread(target=run_forever_in_thread)
+        t.start()
+        try:
+            assert started.wait(timeout=1.0)
+            caller_thread = threading.get_ident()
+
+            def callback() -> None:
+                seen.append(threading.get_ident())
+                s.stop()
+
+            s.call_soon_threadsafe(callback, immediate=True)
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+            assert seen and seen[0] != caller_thread
+        finally:
+            s.call_soon_threadsafe(s.stop)
+            t.join(timeout=1.0)
 
     def test_stop_breaks_sleep_in_run_forever_via_call_soon_threadsafe(self):
         s = _new_scheduler()

@@ -8,6 +8,7 @@ import heapq
 import importlib
 import inspect
 import itertools
+import queue
 import socket
 import threading
 import time
@@ -511,6 +512,7 @@ class BaseDrivingMixin:
         with scheduler.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._before_arun()
             scheduler._running = True
+            scheduler._owner_thread = threading.get_ident()
             try:
                 while not self._arun_should_terminate():
                     scheduler._run_ready_batch(yield_every)
@@ -520,6 +522,7 @@ class BaseDrivingMixin:
                     if not self._arun_should_terminate():
                         await self._driver_wait()
             finally:
+                scheduler._owner_thread = None
                 scheduler._running = False
 
     async def arun_forever(self, *, yield_every: int | None = None) -> None:
@@ -532,6 +535,7 @@ class BaseDrivingMixin:
             self._before_arun()
             scheduler._stopping = False
             scheduler._running = True
+            scheduler._owner_thread = threading.get_ident()
             try:
                 while not scheduler._stopping:
                     scheduler._run_ready_batch(yield_every)
@@ -541,6 +545,7 @@ class BaseDrivingMixin:
                     if not scheduler._stopping:
                         await self._driver_wait()
             finally:
+                scheduler._owner_thread = None
                 scheduler._running = False
                 scheduler._stopping = False
 
@@ -568,6 +573,7 @@ class BaseDrivingMixin:
             self._before_arun()
             scheduler._stopping = False
             scheduler._running = True
+            scheduler._owner_thread = threading.get_ident()
             try:
                 while not target.done() and not scheduler._stopping:
                     scheduler._run_ready_batch(yield_every)
@@ -577,6 +583,7 @@ class BaseDrivingMixin:
                     if not target.done() and not scheduler._stopping:
                         await self._driver_wait()
             finally:
+                scheduler._owner_thread = None
                 scheduler._running = False
                 scheduler._stopping = False
 
@@ -1207,11 +1214,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._all_tasks: weakref.WeakSet[_tasks.Task] = weakref.WeakSet()
         self._runner = None
         self._running = False
+        self._owner_thread: int | None = None
         self._debug = False
         self._stopping = False
-        self._threadsafe_callbacks: deque[
+        self._threadsafe_callbacks: queue.SimpleQueue[
             tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
-        ] = deque()
+        ] = queue.SimpleQueue()
         self._threadsafe_lock = threading.Lock()
         self._pending_executor_calls = 0
         self._pending_async_waits: set[tealet.tealet] = set()
@@ -1477,13 +1485,16 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         callback: Callable[..., object],
         *args: object,
         context: contextvars.Context | None = None,
+        immediate: bool = False,
     ) -> None:
         """Schedule `callback(*args)` from another thread or driver context."""
 
         if context is None:
             context = contextvars.copy_context()
-        with self._threadsafe_lock:
-            self._threadsafe_callbacks.append((callback, args, context))
+        if immediate and self._owner_thread == threading.get_ident():
+            context.run(callback, *args)
+            return
+        self._threadsafe_callbacks.put((callback, args, context))
         self._break_wait_threadsafe()
 
     def call_later(
@@ -1520,10 +1531,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def _drain_threadsafe_callbacks(self) -> None:
         while True:
-            with self._threadsafe_lock:
-                if not self._threadsafe_callbacks:
-                    return
-                callback, args, context = self._threadsafe_callbacks.popleft()
+            try:
+                callback, args, context = self._threadsafe_callbacks.get_nowait()
+            except queue.Empty:
+                return
             if context is None:
                 callback(*args)
             else:
@@ -1550,8 +1561,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return self._next_timer_deadline() is not None
 
     def _has_pending_driver_work(self) -> bool:
+        if not self._threadsafe_callbacks.empty():
+            return True
         with self._threadsafe_lock:
-            return bool(self._threadsafe_callbacks or self._pending_executor_calls)
+            return bool(self._pending_executor_calls)
 
     def _has_runnable_work(self) -> bool:
         return bool(self._runnable)
@@ -1816,9 +1829,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._verify_current_scheduler()
         with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._running = True
+            self._owner_thread = threading.get_ident()
             try:
                 return self._run_ready_batch(n)
             finally:
+                self._owner_thread = None
                 self._running = False
 
     @abstractmethod

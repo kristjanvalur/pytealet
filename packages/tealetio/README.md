@@ -101,6 +101,8 @@ The common API is available directly from `tealetio`:
 
 - schedulers and runners: `Scheduler`, `ProactorScheduler`, `SyncProactorScheduler`, `AsyncProactorScheduler`, `SelectorScheduler`, `SyncSelectorScheduler`, `AsyncSelectorScheduler`, `BasicScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `Task`, `spawn`, `create_task`, `get_current`, `CancelledError`, `shield`
+- IO operations: `Operation`, `ContinuousOperation`
+- proactor socket helpers: `sendall(..., progress=...)`, `recvall(..., progress=...)`, `accept_many(...)`, `recv_many(...)`
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - runnable scheduling policies: `FifoRunnableQueue`, `PrescheduledRunnableQueue`, `PriorityRunnableQueue`
