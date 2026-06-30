@@ -1,12 +1,14 @@
 /*
  * Completion dispatch and delivery service for the _uring_api extension.
- *
- * This file contains wait(), CQE conversion, break_wait(), and callback-driven
- * completion serving. It is included by _uring_api.c as part of the single
- * extension translation unit.
  */
 
-static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+#include "uring_api_dispatch.h"
+#include "uring_api_completion.h"
+#include "uring_api_core.h"
+
+static bool delivery_should_stop(UringApiRing *self);
+
+PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
     int failed = 0;
@@ -40,7 +42,7 @@ static PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED
     Py_RETURN_NONE;
 }
 
-static int UringApiRing_stop_delivery(UringApiRing *self) {
+int UringApiRing_stop_delivery(UringApiRing *self) {
     PyObject *wakeup = NULL;
     bool running;
 
@@ -61,14 +63,14 @@ static int UringApiRing_stop_delivery(UringApiRing *self) {
     return 0;
 }
 
-static PyObject *UringApiRing_stop_serving(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+PyObject *UringApiRing_stop_serving(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     if (UringApiRing_stop_delivery(self) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
 }
 
-static PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     int failed = 0;
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
@@ -168,8 +170,8 @@ static void receive_wait_lock(UringApiRing *self) {
 
 static void receive_wait_unlock(UringApiRing *self) { PyThread_release_lock(self->delivery_wait_lock); }
 
-static PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
-                                        bool from_delivery_thread) {
+PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
+                                 bool from_delivery_thread) {
     struct io_uring_cqe *cqe = NULL;
     PyObject *result;
     int ret;
@@ -260,7 +262,7 @@ static PyObject *delivery_get_callback(UringApiRing *self) {
     return callback;
 }
 
-static int delivery_get_c_callback(UringApiRing *self, UringApi_CCompletionCallback *callback, void **user_data) {
+static int delivery_get_c_callback(UringApiRing *self, UringApiCompletionCallback *callback, void **user_data) {
     int found;
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
@@ -289,7 +291,7 @@ static void delivery_request_stop_and_wake(UringApiRing *self) {
     Py_DECREF(wakeup);
 }
 
-static PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     bool failed = false;
     bool wait_failed = false;
 
@@ -322,7 +324,7 @@ static PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py
     }
 
     while (!delivery_should_stop(self)) {
-        UringApi_CCompletionCallback c_callback;
+        UringApiCompletionCallback c_callback;
         void *c_callback_user_data;
         PyObject *result = UringApiRing_wait_impl(self, 0, NULL, true);
 
@@ -372,8 +374,7 @@ static PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py
     Py_RETURN_NONE;
 }
 
-static int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApi_CCompletionCallback callback,
-                                            void *user_data) {
+int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApiCompletionCallback callback, void *user_data) {
     int ret = 0;
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
@@ -388,7 +389,7 @@ static int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApi_CComple
     return ret;
 }
 
-static PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"timeout", NULL};
     struct __kernel_timespec timeout;
     PyObject *timeout_obj = Py_None;

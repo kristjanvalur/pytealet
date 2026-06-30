@@ -1,12 +1,14 @@
 /*
  * Public C API export for the _uring_api extension.
- *
- * This file contains the capsule table and wrapper functions used by native
- * consumers. It is included by _uring_api.c as part of the single extension
- * translation unit.
  */
 
-static PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags) {
+#include "uring_api_capi_impl.h"
+#include "uring_api_completion.h"
+#include "uring_api_core.h"
+#include "uring_api_dispatch.h"
+#include "uring_api_ring.h"
+
+PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags) {
     PyObject *args = Py_BuildValue("(II)", entries, flags);
     PyObject *ring;
 
@@ -18,9 +20,9 @@ static PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags) 
     return ring;
 }
 
-static int UringApiCapi_RingCheck(PyObject *ring) { return ring_type_check(ring); }
+int UringApiCapi_RingCheck(PyObject *ring) { return ring_type_check(ring); }
 
-static int UringApiCapi_RingClose(PyObject *ring) {
+int UringApiCapi_RingClose(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -33,7 +35,7 @@ static int UringApiCapi_RingClose(PyObject *ring) {
     return 0;
 }
 
-static int UringApiCapi_RingFd(PyObject *ring) {
+int UringApiCapi_RingFd(PyObject *ring) {
     if (!ring_type_check(ring)) {
         return -1;
     }
@@ -43,42 +45,42 @@ static int UringApiCapi_RingFd(PyObject *ring) {
     return ((UringApiRing *)ring)->ring.ring_fd;
 }
 
-static unsigned int UringApiCapi_RingFeatures(PyObject *ring) {
+unsigned int UringApiCapi_RingFeatures(PyObject *ring) {
     if (!ring_type_check(ring) || !((UringApiRing *)ring)->initialized) {
         return 0;
     }
     return ((UringApiRing *)ring)->ring.features;
 }
 
-static unsigned int UringApiCapi_RingSqEntries(PyObject *ring) {
+unsigned int UringApiCapi_RingSqEntries(PyObject *ring) {
     if (!ring_type_check(ring) || !((UringApiRing *)ring)->initialized) {
         return 0;
     }
     return ring_sq_entries((UringApiRing *)ring);
 }
 
-static unsigned int UringApiCapi_RingCqEntries(PyObject *ring) {
+unsigned int UringApiCapi_RingCqEntries(PyObject *ring) {
     if (!ring_type_check(ring) || !((UringApiRing *)ring)->initialized) {
         return 0;
     }
     return ring_cq_entries((UringApiRing *)ring);
 }
 
-static int UringApiCapi_RingClosed(PyObject *ring) {
+int UringApiCapi_RingClosed(PyObject *ring) {
     if (!ring_type_check(ring)) {
         return -1;
     }
     return !((UringApiRing *)ring)->initialized;
 }
 
-static int UringApiCapi_RingRunning(PyObject *ring) {
+int UringApiCapi_RingRunning(PyObject *ring) {
     if (!ring_type_check(ring)) {
         return -1;
     }
     return ((UringApiRing *)ring)->receive_state == URING_API_RECEIVE_DELIVERING;
 }
 
-static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
+int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -91,8 +93,8 @@ static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, Py
     return 0;
 }
 
-static int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned int buffer_size,
-                                                unsigned int buffer_count, unsigned int flags, PyObject *user_data) {
+int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned int buffer_size, unsigned int buffer_count,
+                                         unsigned int flags, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -106,8 +108,7 @@ static int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned
     return 0;
 }
 
-static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags,
-                                       PyObject *user_data) {
+int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -120,8 +121,8 @@ static int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, u
     return 0;
 }
 
-static int UringApiCapi_RingSubmitSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags,
-                                         unsigned int zc_flags, PyObject *user_data) {
+int UringApiCapi_RingSubmitSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags, unsigned int zc_flags,
+                                  PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -135,7 +136,7 @@ static int UringApiCapi_RingSubmitSendZc(PyObject *ring, int fd, PyObject *data,
     return 0;
 }
 
-static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
+int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -148,8 +149,8 @@ static int UringApiCapi_RingSubmitRecvmsg(PyObject *ring, int fd, PyObject *buf,
     return 0;
 }
 
-static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
-                                         PyObject *user_data) {
+int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                                  PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -163,8 +164,8 @@ static int UringApiCapi_RingSubmitSendto(PyObject *ring, int fd, PyObject *data,
     return 0;
 }
 
-static int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
-                                          PyObject *user_data) {
+int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                                   PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -178,8 +179,8 @@ static int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data
     return 0;
 }
 
-static int UringApiCapi_RingSubmitSendmsgZc(PyObject *ring, int fd, PyObject *data, PyObject *address,
-                                            unsigned int flags, PyObject *user_data) {
+int UringApiCapi_RingSubmitSendmsgZc(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                                     PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -193,7 +194,7 @@ static int UringApiCapi_RingSubmitSendmsgZc(PyObject *ring, int fd, PyObject *da
     return 0;
 }
 
-static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
+int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -206,7 +207,7 @@ static int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int fl
     return 0;
 }
 
-static int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
+int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -219,7 +220,7 @@ static int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsign
     return 0;
 }
 
-static int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data) {
+int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -232,7 +233,7 @@ static int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *addr
     return 0;
 }
 
-static int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data) {
+int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -245,7 +246,7 @@ static int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyOb
     return 0;
 }
 
-static int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data) {
+int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -258,8 +259,8 @@ static int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_d
     return 0;
 }
 
-static int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
-                                         PyObject *user_data) {
+int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
+                                  PyObject *user_data) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -273,7 +274,7 @@ static int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, i
     return 0;
 }
 
-static int UringApiCapi_RingBreakWait(PyObject *ring) {
+int UringApiCapi_RingBreakWait(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -286,7 +287,7 @@ static int UringApiCapi_RingBreakWait(PyObject *ring) {
     return 0;
 }
 
-static PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
+PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
     struct __kernel_timespec timeout_value;
     int timeout_kind;
     if (!ring_type_check(ring)) {
@@ -307,21 +308,21 @@ static PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
     return UringApiRing_wait_impl((UringApiRing *)ring, timeout_kind, &timeout_value, false);
 }
 
-static int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback) {
+int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback) {
     if (!ring_type_check(ring)) {
         return -1;
     }
     return UringApiRing_set_callback((UringApiRing *)ring, callback ? callback : Py_None, NULL);
 }
 
-static int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data) {
+int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data) {
     if (!ring_type_check(ring)) {
         return -1;
     }
     return UringApiRing_set_c_callback_impl((UringApiRing *)ring, callback, user_data);
 }
 
-static int UringApiCapi_RingServeCompletions(PyObject *ring) {
+int UringApiCapi_RingServeCompletions(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -334,7 +335,7 @@ static int UringApiCapi_RingServeCompletions(PyObject *ring) {
     return 0;
 }
 
-static int UringApiCapi_RingStopServing(PyObject *ring) {
+int UringApiCapi_RingStopServing(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -347,7 +348,7 @@ static int UringApiCapi_RingStopServing(PyObject *ring) {
     return 0;
 }
 
-static int UringApiCapi_RingResetServing(PyObject *ring) {
+int UringApiCapi_RingResetServing(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
@@ -360,16 +361,16 @@ static int UringApiCapi_RingResetServing(PyObject *ring) {
     return 0;
 }
 
-static int UringApiCapi_CompletionCheck(PyObject *completion) { return completion_type_check(completion); }
+int UringApiCapi_CompletionCheck(PyObject *completion) { return completion_type_check(completion); }
 
-static PyObject *UringApiCapi_CompletionUserData(PyObject *completion) {
+PyObject *UringApiCapi_CompletionUserData(PyObject *completion) {
     if (!completion_type_check(completion)) {
         return NULL;
     }
     return Py_NewRef(((UringApiCompletion *)completion)->user_data);
 }
 
-static int UringApiCapi_CompletionRes(PyObject *completion, int *value) {
+int UringApiCapi_CompletionRes(PyObject *completion, int *value) {
     if (!completion_type_check(completion)) {
         return -1;
     }
@@ -381,7 +382,7 @@ static int UringApiCapi_CompletionRes(PyObject *completion, int *value) {
     return 0;
 }
 
-static int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *value) {
+int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *value) {
     if (!completion_type_check(completion)) {
         return -1;
     }
@@ -393,7 +394,7 @@ static int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *valu
     return 0;
 }
 
-static int UringApiCapi_CompletionSequence(PyObject *completion, unsigned long long *value) {
+int UringApiCapi_CompletionSequence(PyObject *completion, unsigned long long *value) {
     UringApiCompletion *uring_completion;
     if (!completion_type_check(completion)) {
         return -1;
@@ -407,7 +408,7 @@ static int UringApiCapi_CompletionSequence(PyObject *completion, unsigned long l
     return 0;
 }
 
-static PyObject *UringApiCapi_CompletionResult(PyObject *completion) {
+PyObject *UringApiCapi_CompletionResult(PyObject *completion) {
     PyObject *result;
     if (!completion_type_check(completion)) {
         return NULL;

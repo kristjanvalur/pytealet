@@ -1,10 +1,9 @@
 /*
- * Read-only leased-buffer views for zero-copy multishot receive.
- *
- * BufView exports a slice of valid received bytes from a BufGroup slot. The
- * underlying kernel buffer is recycled back into the group when the last buffer
- * export is released.
+ * Read-only leased-buffer views for provided-buffer receive.
  */
+
+#include "uring_api_bufview.h"
+#include "uring_api_core.h"
 
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
 #define BUFVIEW_BEGIN_CRITICAL_SECTION(view) {
@@ -186,7 +185,7 @@ static PyObject *UringApiBufView_new(PyTypeObject *Py_UNUSED(type), PyObject *ar
     return NULL;
 }
 
-static PyObject *UringApiBufView_create(PyObject *buf_group_obj, unsigned int buffer_id, unsigned int length) {
+PyObject *UringApiBufView_create(PyObject *buf_group_obj, unsigned int buffer_id, unsigned int length) {
     UringApiBufGroup *buf_group;
     UringApiBufView *self;
 
@@ -217,7 +216,7 @@ static PyObject *UringApiBufView_create(PyObject *buf_group_obj, unsigned int bu
     return (PyObject *)self;
 }
 
-static PyObject *UringApiRing_create_buf_view(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_create_buf_view(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"buf_group", "buffer_id", "length", NULL};
     PyObject *buf_group_obj;
     unsigned long buffer_id;
@@ -242,3 +241,35 @@ static PyObject *UringApiRing_create_buf_view(UringApiRing *self, PyObject *args
     }
     return UringApiBufView_create(buf_group_obj, (unsigned int)buffer_id, (unsigned int)length);
 }
+
+static PyMethodDef UringApiBufView_methods[] = {
+    {"close", (PyCFunction)UringApiBufView_close, METH_NOARGS, "Release the leased buffer back to its group."},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyGetSetDef UringApiBufView_getset[] = {
+    {"length", (getter)UringApiBufView_get_length, NULL, NULL, NULL},
+    {"buffer_id", (getter)UringApiBufView_get_buffer_id, NULL, NULL, NULL},
+    {"buf_group", (getter)UringApiBufView_get_buf_group, NULL, NULL, NULL},
+    {"recycled", (getter)UringApiBufView_get_recycled, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+static PyBufferProcs UringApiBufView_bufferprocs = {
+    .bf_getbuffer = UringApiBufView_getbuffer,
+    .bf_releasebuffer = UringApiBufView_releasebuffer,
+};
+
+PyTypeObject UringApiBufView_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.BufView",
+    .tp_basicsize = sizeof(UringApiBufView),
+    .tp_dealloc = (destructor)UringApiBufView_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)UringApiBufView_traverse,
+    .tp_clear = (inquiry)UringApiBufView_clear,
+    .tp_doc = "Read-only leased view into a provided-buffer group slot",
+    .tp_methods = UringApiBufView_methods,
+    .tp_getset = UringApiBufView_getset,
+    .tp_new = UringApiBufView_new,
+    .tp_as_buffer = &UringApiBufView_bufferprocs,
+};

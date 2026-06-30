@@ -1,9 +1,9 @@
 /*
  * Provided-buffer group support for the _uring_api extension.
- *
- * BufGroup wraps io_uring buffer rings so multishot receive operations can
- * share reusable kernel-provided buffers across submissions.
  */
+
+#include "uring_api_bufgroup.h"
+#include "uring_api_core.h"
 
 static bool buf_group_is_power_of_two(unsigned long value) { return value != 0 && (value & (value - 1)) == 0; }
 
@@ -48,7 +48,7 @@ static void UringApiBufGroup_dealloc(UringApiBufGroup *self) {
     PyObject_GC_Del(self);
 }
 
-static PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, unsigned int buffer_count) {
+PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, unsigned int buffer_count) {
     UringApiBufGroup *self;
     size_t total_size;
     int ret = 0;
@@ -108,13 +108,13 @@ static PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer
     return (PyObject *)self;
 }
 
-static void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id) {
+void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id) {
     io_uring_buf_ring_add(self->ring_buffer, self->storage + ((size_t)buffer_id * self->buffer_size), self->buffer_size,
                           (unsigned short)buffer_id, self->mask, 0);
     io_uring_buf_ring_advance(self->ring_buffer, 1);
 }
 
-static PyObject *UringApiRing_create_buf_group(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_create_buf_group(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"buffer_size", "buffer_count", NULL};
     unsigned long buffer_size;
     unsigned long buffer_count;
@@ -145,3 +145,22 @@ static PyObject *UringApiRing_create_buf_group(UringApiRing *self, PyObject *arg
     }
     return buf_group;
 }
+
+static PyGetSetDef UringApiBufGroup_getset[] = {
+    {"buffer_size", (getter)UringApiBufGroup_get_buffer_size, NULL, NULL, NULL},
+    {"buffer_count", (getter)UringApiBufGroup_get_buffer_count, NULL, NULL, NULL},
+    {"group_id", (getter)UringApiBufGroup_get_group_id, NULL, NULL, NULL},
+    {"ring", (getter)UringApiBufGroup_get_ring, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+PyTypeObject UringApiBufGroup_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.BufGroup",
+    .tp_basicsize = sizeof(UringApiBufGroup),
+    .tp_dealloc = (destructor)UringApiBufGroup_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)UringApiBufGroup_traverse,
+    .tp_clear = (inquiry)UringApiBufGroup_clear,
+    .tp_doc = "io_uring provided-buffer group",
+    .tp_getset = UringApiBufGroup_getset,
+};
