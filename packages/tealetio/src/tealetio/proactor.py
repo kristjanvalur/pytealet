@@ -1433,16 +1433,15 @@ class UringProactor(ProactorBase):
             operation._set_result(None)
             return operation
         payload = completion.result
-        if isinstance(payload, bytes):
-            data = payload
-        elif isinstance(payload, uring_api.BufView):
-            view = memoryview(payload)
-            try:
-                data = bytes(view)
-            finally:
-                del view
-        else:
-            data = bytes(cast(Any, payload))
+        if not isinstance(payload, uring_api.BufView):
+            raise TypeError(
+                f"recv_many completion result must be BufView, got {type(payload).__name__}"
+            )
+        view = memoryview(payload)
+        try:
+            data = bytes(view)
+        finally:
+            del view
         operation._emit_result((completion.sequence, data))
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             operation._set_result(None)
