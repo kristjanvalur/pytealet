@@ -19,6 +19,7 @@ try:
     from _uring_api import COMPLETION_KIND_RECV as COMPLETION_KIND_RECV
     from _uring_api import COMPLETION_KIND_RECV_MULTISHOT as COMPLETION_KIND_RECV_MULTISHOT
     from _uring_api import COMPLETION_KIND_RECV_MULTISHOT_ZC as COMPLETION_KIND_RECV_MULTISHOT_ZC
+    from _uring_api import COMPLETION_KIND_RECV_ZC as COMPLETION_KIND_RECV_ZC
     from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
     from _uring_api import COMPLETION_KIND_SEND_ZC as COMPLETION_KIND_SEND_ZC
@@ -68,6 +69,7 @@ except ImportError as exc:
     COMPLETION_KIND_SEND_ZC = 14
     COMPLETION_KIND_SENDMSG_ZC = 15
     COMPLETION_KIND_RECV_MULTISHOT_ZC = 16
+    COMPLETION_KIND_RECV_ZC = 17
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -163,6 +165,11 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_recv_zc(
+            self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_recv_multishot(
@@ -283,6 +290,7 @@ __all__ = [
     "COMPLETION_KIND_RECV",
     "COMPLETION_KIND_RECV_MULTISHOT",
     "COMPLETION_KIND_RECV_MULTISHOT_ZC",
+    "COMPLETION_KIND_RECV_ZC",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
     "COMPLETION_KIND_SEND_ZC",

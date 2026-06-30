@@ -128,6 +128,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_SEND_ZC == 14
     assert uring_api.COMPLETION_KIND_SENDMSG_ZC == 15
     assert uring_api.COMPLETION_KIND_RECV_MULTISHOT_ZC == 16
+    assert uring_api.COMPLETION_KIND_RECV_ZC == 17
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -724,6 +725,79 @@ def test_ring_recv_completion_when_available():
         assert completion.result == 5
         assert completion.sequence == 0
         assert bytes(buf) == b"hello"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_recv_zc_completion_when_available():
+    require_uring()
+
+    token = object()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            try:
+                buf_group = ring.create_buf_group(8, 4)
+                pending = ring.submit_recv_zc(reader.fileno(), buf_group, token)
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"provided-buffer recv is not supported: errno {exc.errno}")
+                raise
+
+            writer.send(b"hello")
+            completion = ring.wait(1.0)
+
+            assert completion is not None
+            if completion.res < 0:
+                errno_value = -completion.res
+                if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
+                    pytest.skip(f"provided-buffer recv is not supported: errno {errno_value}")
+            assert completion is pending
+            assert completion.user_data is token
+            assert completion.kind == uring_api.COMPLETION_KIND_RECV_ZC
+            assert completion.res == 5
+            assert isinstance(completion.result, uring_api.BufView)
+            assert completion.result.length == 5
+            assert completion.result.buf_group is buf_group
+            with memoryview(completion.result) as view:
+                assert bytes(view) == b"hello"
+            assert completion.result.recycled
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_recv_zc_eof_returns_empty_bytes_when_available():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            try:
+                buf_group = ring.create_buf_group(8, 4)
+                pending = ring.submit_recv_zc(reader.fileno(), buf_group)
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"provided-buffer recv is not supported: errno {exc.errno}")
+                raise
+
+            writer.close()
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        if completion.res < 0:
+            errno_value = -completion.res
+            if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
+                pytest.skip(f"provided-buffer recv is not supported: errno {errno_value}")
+        assert completion is pending
+        assert completion.kind == uring_api.COMPLETION_KIND_RECV_ZC
+        assert completion.res == 0
+        assert completion.result == b""
     finally:
         reader.close()
         writer.close()

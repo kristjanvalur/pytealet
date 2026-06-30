@@ -54,6 +54,65 @@ static PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, Py
     return Py_NewRef(completion);
 }
 
+static PyObject *UringApiRing_submit_recv_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
+    struct io_uring_sqe *sqe;
+    UringApiBufGroup *buf_group;
+    long fd;
+    unsigned int flags = 0;
+    PyObject *user_data = Py_None;
+    PyObject *buf_group_obj;
+    PyObject *completion = NULL;
+    UringApiCompletion *pending;
+    int failed = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lO!|OI", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
+                                     &user_data, &flags)) {
+        return NULL;
+    }
+    if (fd < 0 || fd > INT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
+        return NULL;
+    }
+    buf_group = (UringApiBufGroup *)buf_group_obj;
+    if (buf_group->ring != self) {
+        PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_RECV_ZC, user_data, NULL);
+    if (!completion) {
+        return NULL;
+    }
+    pending = (UringApiCompletion *)completion;
+    pending->buf_group = Py_NewRef(buf_group_obj);
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_recv(sqe, (int)fd, NULL, (size_t)buf_group->buffer_size, (int)flags);
+            sqe->flags |= IOSQE_BUFFER_SELECT;
+            sqe->buf_group = buf_group->group_id;
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
 static PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
