@@ -1,0 +1,220 @@
+/*
+ * Read-only leased-buffer views for zero-copy multishot receive.
+ *
+ * BufView exports a slice of valid received bytes from a BufGroup slot. The
+ * underlying kernel buffer is recycled back into the group when the last buffer
+ * export is released.
+ */
+
+static int UringApiBufView_recycle_locked(UringApiBufView *self) {
+    UringApiBufGroup *buf_group;
+
+    if (self->recycled) {
+        return 0;
+    }
+    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_RuntimeError, "buf view is missing its buffer group");
+        return -1;
+    }
+    buf_group = (UringApiBufGroup *)self->buf_group;
+    if (!buf_group->ring || !buf_group->ring->initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "buffer group ring is closed");
+        return -1;
+    }
+    UringApiBufGroup_recycle(buf_group, self->buffer_id);
+    self->recycled = true;
+    return 0;
+}
+
+static int UringApiBufView_getbuffer(PyObject *obj, Py_buffer *view, int flags) {
+    UringApiBufView *self = (UringApiBufView *)obj;
+    UringApiBufGroup *buf_group;
+
+    if (self->recycled) {
+        PyErr_SetString(PyExc_BufferError, "buf view has already been released");
+        return -1;
+    }
+    if (flags & PyBUF_WRITABLE) {
+        PyErr_SetString(PyExc_BufferError, "buf view is read-only");
+        return -1;
+    }
+    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_BufferError, "buf view is missing its buffer group");
+        return -1;
+    }
+    buf_group = (UringApiBufGroup *)self->buf_group;
+    view->buf = buf_group->storage + ((size_t)self->buffer_id * buf_group->buffer_size);
+    view->obj = Py_NewRef(obj);
+    view->len = (Py_ssize_t)self->length;
+    view->readonly = 1;
+    view->itemsize = 1;
+    view->format = "B";
+    view->ndim = 1;
+    view->shape = NULL;
+    view->strides = NULL;
+    view->suboffsets = NULL;
+    view->internal = NULL;
+    self->export_count++;
+    return 0;
+}
+
+static void UringApiBufView_releasebuffer(PyObject *obj, Py_buffer *view) {
+    UringApiBufView *self = (UringApiBufView *)obj;
+    UringApiBufGroup *buf_group;
+
+    (void)view;
+    if (self->export_count == 0) {
+        return;
+    }
+    self->export_count--;
+    if (self->export_count != 0 || self->recycled) {
+        return;
+    }
+    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        return;
+    }
+    buf_group = (UringApiBufGroup *)self->buf_group;
+    if (!buf_group->ring || !buf_group->ring->initialized) {
+        return;
+    }
+    Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
+    (void)UringApiBufView_recycle_locked(self);
+    Py_END_CRITICAL_SECTION();
+}
+
+static PyObject *UringApiBufView_get_length(UringApiBufView *self, void *Py_UNUSED(closure)) {
+    return PyLong_FromUnsignedLong(self->length);
+}
+
+static PyObject *UringApiBufView_get_buffer_id(UringApiBufView *self, void *Py_UNUSED(closure)) {
+    return PyLong_FromUnsignedLong(self->buffer_id);
+}
+
+static PyObject *UringApiBufView_get_buf_group(UringApiBufView *self, void *Py_UNUSED(closure)) {
+    if (!self->buf_group) {
+        Py_RETURN_NONE;
+    }
+    return Py_NewRef(self->buf_group);
+}
+
+static PyObject *UringApiBufView_get_recycled(UringApiBufView *self, void *Py_UNUSED(closure)) {
+    return PyBool_FromLong(self->recycled);
+}
+
+static PyObject *UringApiBufView_close(UringApiBufView *self, PyObject *Py_UNUSED(args)) {
+    UringApiBufGroup *buf_group;
+    int failed = 0;
+
+    if (self->recycled) {
+        Py_RETURN_NONE;
+    }
+    if (self->export_count > 0) {
+        PyErr_SetString(PyExc_BufferError, "cannot close buf view while buffer exports are active");
+        return NULL;
+    }
+    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_RuntimeError, "buf view is missing its buffer group");
+        return NULL;
+    }
+    buf_group = (UringApiBufGroup *)self->buf_group;
+    Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
+    if (UringApiBufView_recycle_locked(self) < 0) {
+        failed = 1;
+    }
+    Py_END_CRITICAL_SECTION();
+    if (failed) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static int UringApiBufView_traverse(UringApiBufView *self, visitproc visit, void *arg) {
+    Py_VISIT(self->buf_group);
+    return 0;
+}
+
+static int UringApiBufView_clear(UringApiBufView *self) {
+    Py_CLEAR(self->buf_group);
+    return 0;
+}
+
+static void UringApiBufView_dealloc(UringApiBufView *self) {
+    UringApiBufGroup *buf_group;
+
+    PyObject_GC_UnTrack(self);
+    if (!self->recycled && self->export_count == 0 && self->buf_group &&
+        PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        buf_group = (UringApiBufGroup *)self->buf_group;
+        if (buf_group->ring && buf_group->ring->initialized) {
+            Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
+            (void)UringApiBufView_recycle_locked(self);
+            Py_END_CRITICAL_SECTION();
+        }
+    }
+    (void)UringApiBufView_clear(self);
+    PyObject_GC_Del(self);
+}
+
+static PyObject *UringApiBufView_new(PyTypeObject *Py_UNUSED(type), PyObject *args, PyObject *kwargs) {
+    (void)args;
+    (void)kwargs;
+    PyErr_SetString(PyExc_TypeError, "BufView cannot be instantiated directly");
+    return NULL;
+}
+
+static PyObject *UringApiBufView_create(PyObject *buf_group_obj, unsigned int buffer_id, unsigned int length) {
+    UringApiBufGroup *buf_group;
+    UringApiBufView *self;
+
+    if (!PyObject_TypeCheck(buf_group_obj, &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup instance");
+        return NULL;
+    }
+    buf_group = (UringApiBufGroup *)buf_group_obj;
+    if (buffer_id >= buf_group->buffer_count) {
+        PyErr_SetString(PyExc_ValueError, "buffer_id is out of range for this buffer group");
+        return NULL;
+    }
+    if (length > buf_group->buffer_size) {
+        PyErr_SetString(PyExc_ValueError, "length exceeds buffer group slot size");
+        return NULL;
+    }
+
+    self = PyObject_GC_New(UringApiBufView, &UringApiBufView_Type);
+    if (!self) {
+        return NULL;
+    }
+    self->buf_group = Py_NewRef(buf_group_obj);
+    self->buffer_id = buffer_id;
+    self->length = length;
+    self->export_count = 0;
+    self->recycled = false;
+    PyObject_GC_Track(self);
+    return (PyObject *)self;
+}
+
+static PyObject *UringApiRing_create_buf_view(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"buf_group", "buffer_id", "length", NULL};
+    PyObject *buf_group_obj;
+    unsigned long buffer_id;
+    unsigned long length;
+    UringApiBufGroup *buf_group;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!kk", keywords, &UringApiBufGroup_Type, &buf_group_obj, &buffer_id,
+                                     &length)) {
+        return NULL;
+    }
+    if (buffer_id > UINT_MAX || length > UINT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "buffer_id and length must fit in uint32_t");
+        return NULL;
+    }
+    buf_group = (UringApiBufGroup *)buf_group_obj;
+    if (buf_group->ring != self) {
+        PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
+        return NULL;
+    }
+    if (ring_check_open(self) < 0) {
+        return NULL;
+    }
+    return UringApiBufView_create(buf_group_obj, (unsigned int)buffer_id, (unsigned int)length);
+}

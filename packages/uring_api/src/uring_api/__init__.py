@@ -28,6 +28,7 @@ try:
     from _uring_api import COMPLETION_KIND_SOCKET as COMPLETION_KIND_SOCKET
     from _uring_api import COMPLETION_KIND_WAKE as COMPLETION_KIND_WAKE
     from _uring_api import BufGroup as BufGroup
+    from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import IORING_CQE_F_MORE as IORING_CQE_F_MORE
     from _uring_api import IORING_CQE_F_NOTIF as IORING_CQE_F_NOTIF
@@ -94,6 +95,13 @@ except ImportError as exc:
         buffer_count: int
         group_id: int
 
+    @dataclass(frozen=True)
+    class BufView:
+        length: int
+        buffer_id: int
+        buf_group: BufGroup
+        recycled: bool
+
     class Ring:  # type: ignore[no-redef]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
@@ -146,6 +154,9 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def create_buf_group(self, buffer_size: int, buffer_count: int) -> BufGroup:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def create_buf_view(self, buf_group: BufGroup, buffer_id: int, length: int) -> BufView:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
@@ -273,6 +284,7 @@ __all__ = [
     "COMPLETION_KIND_SOCKET",
     "COMPLETION_KIND_WAKE",
     "BufGroup",
+    "BufView",
     "Completion",
     "IORING_CQE_F_MORE",
     "IORING_CQE_F_NOTIF",
@@ -296,5 +308,6 @@ __all__ = [
 
 if TYPE_CHECKING:
     from _uring_api import BufGroup as BufGroup
+    from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring

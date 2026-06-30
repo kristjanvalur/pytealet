@@ -752,6 +752,66 @@ def test_c_api_completion_result_is_none_for_pending_completion_when_available()
         writer.close()
 
 
+def test_buf_view_rejects_direct_instantiation():
+    require_uring()
+
+    with pytest.raises(TypeError, match="cannot be instantiated directly"):
+        uring_api.BufView()
+
+
+def test_buf_view_memoryview_recycles_on_last_release():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        buf_group = ring.create_buf_group(16, 4)
+        buf_view = ring.create_buf_view(buf_group, 2, 5)
+        assert buf_view.length == 5
+        assert buf_view.buffer_id == 2
+        assert buf_view.buf_group is buf_group
+        assert not buf_view.recycled
+
+        mv1 = memoryview(buf_view)
+        mv2 = memoryview(buf_view)
+        assert len(mv1) == 5
+        assert len(mv2) == 5
+        assert not buf_view.recycled
+
+        del mv1
+        assert not buf_view.recycled
+        del mv2
+        assert buf_view.recycled
+
+        with pytest.raises(BufferError, match="already been released"):
+            memoryview(buf_view)
+
+
+def test_buf_view_close_requires_no_active_exports():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        buf_group = ring.create_buf_group(16, 4)
+        buf_view = ring.create_buf_view(buf_group, 0, 4)
+        mv = memoryview(buf_view)
+        with pytest.raises(BufferError, match="buffer exports are active"):
+            buf_view.close()
+        del mv
+        buf_view.close()
+        assert buf_view.recycled
+
+
+def test_buf_view_memoryview_is_readonly():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        buf_group = ring.create_buf_group(8, 4)
+        buf_view = ring.create_buf_view(buf_group, 0, 4)
+        mv = memoryview(buf_view)
+        assert mv.readonly
+        with pytest.raises(TypeError):
+            mv[0] = 1
+        del mv
+
+
 def test_ring_recv_multishot_completion_when_available():
     require_uring()
 

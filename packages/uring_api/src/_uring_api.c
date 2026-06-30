@@ -93,6 +93,14 @@ typedef struct {
     int mask;
 } UringApiBufGroup;
 
+typedef struct {
+    PyObject_HEAD PyObject *buf_group;
+    unsigned int buffer_id;
+    unsigned int length;
+    unsigned int export_count;
+    bool recycled;
+} UringApiBufView;
+
 typedef enum {
     URING_API_RECEIVE_IDLE = 0,
     URING_API_RECEIVE_WAITING = 1,
@@ -137,6 +145,7 @@ typedef struct {
 
 static PyTypeObject UringApiRing_Type;
 static PyTypeObject UringApiBufGroup_Type;
+static PyTypeObject UringApiBufView_Type;
 static PyTypeObject UringApiCompletion_Type;
 static PyObject *UringApiSubmissionQueueFullError;
 
@@ -205,6 +214,8 @@ static void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer
 
 #include "_uring_api_bufgroup.c"
 
+#include "_uring_api_bufview.c"
+
 #include "_uring_api_submit.c"
 
 #include "_uring_api_dispatch.c"
@@ -221,6 +232,8 @@ static PyMethodDef UringApiRing_methods[] = {
     {"reset_serving", (PyCFunction)UringApiRing_reset_serving, METH_NOARGS, "Clear the completion service stop flag."},
     {"create_buf_group", _PyCFunction_CAST(UringApiRing_create_buf_group), METH_VARARGS | METH_KEYWORDS,
      "Create a provided-buffer group for multishot receive operations."},
+    {"create_buf_view", _PyCFunction_CAST(UringApiRing_create_buf_view), METH_VARARGS | METH_KEYWORDS,
+     "Create a read-only leased view into a buffer group slot."},
     {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
      "Submit a recv operation."},
     {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_VARARGS | METH_KEYWORDS,
@@ -311,6 +324,38 @@ static PyTypeObject UringApiBufGroup_Type = {
     .tp_getset = UringApiBufGroup_getset,
 };
 
+static PyMethodDef UringApiBufView_methods[] = {
+    {"close", (PyCFunction)UringApiBufView_close, METH_NOARGS, "Release the leased buffer back to its group."},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyGetSetDef UringApiBufView_getset[] = {
+    {"length", (getter)UringApiBufView_get_length, NULL, NULL, NULL},
+    {"buffer_id", (getter)UringApiBufView_get_buffer_id, NULL, NULL, NULL},
+    {"buf_group", (getter)UringApiBufView_get_buf_group, NULL, NULL, NULL},
+    {"recycled", (getter)UringApiBufView_get_recycled, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+static PyBufferProcs UringApiBufView_bufferprocs = {
+    .bf_getbuffer = UringApiBufView_getbuffer,
+    .bf_releasebuffer = UringApiBufView_releasebuffer,
+};
+
+static PyTypeObject UringApiBufView_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.BufView",
+    .tp_basicsize = sizeof(UringApiBufView),
+    .tp_dealloc = (destructor)UringApiBufView_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)UringApiBufView_traverse,
+    .tp_clear = (inquiry)UringApiBufView_clear,
+    .tp_doc = "Read-only leased view into a provided-buffer group slot",
+    .tp_methods = UringApiBufView_methods,
+    .tp_getset = UringApiBufView_getset,
+    .tp_as_buffer = &UringApiBufView_bufferprocs,
+    .tp_new = UringApiBufView_new,
+};
+
 static PyTypeObject UringApiCompletion_Type = {
     PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.Completion",
     .tp_basicsize = sizeof(UringApiCompletion),
@@ -338,6 +383,9 @@ static int uring_api_exec(PyObject *module) {
     if (PyType_Ready(&UringApiBufGroup_Type) < 0) {
         return -1;
     }
+    if (PyType_Ready(&UringApiBufView_Type) < 0) {
+        return -1;
+    }
     if (PyType_Ready(&UringApiRing_Type) < 0) {
         return -1;
     }
@@ -356,6 +404,11 @@ static int uring_api_exec(PyObject *module) {
     Py_INCREF(&UringApiBufGroup_Type);
     if (PyModule_AddObject(module, "BufGroup", (PyObject *)&UringApiBufGroup_Type) < 0) {
         Py_DECREF(&UringApiBufGroup_Type);
+        return -1;
+    }
+    Py_INCREF(&UringApiBufView_Type);
+    if (PyModule_AddObject(module, "BufView", (PyObject *)&UringApiBufView_Type) < 0) {
+        Py_DECREF(&UringApiBufView_Type);
         return -1;
     }
     Py_INCREF(&UringApiRing_Type);
