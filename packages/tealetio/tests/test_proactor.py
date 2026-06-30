@@ -1104,7 +1104,12 @@ class _FakeUringRing:
         completion = self.pending_recv_multishot[-1]
         completion.res = 0 if not data else len(data)
         completion.flags = uring_api.IORING_CQE_F_MORE if more else 0
-        completion.result = None if not data else _native_buf_view_for(data)
+        if not data:
+            completion.result = None
+        elif uring_api.is_available():
+            completion.result = _native_buf_view_for(data)
+        else:
+            completion.result = data
         if sequence is None:
             sequence = self.recv_multishot_sequence
             self.recv_multishot_sequence += 1
