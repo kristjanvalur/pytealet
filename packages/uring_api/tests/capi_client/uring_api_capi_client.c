@@ -77,6 +77,7 @@ static PyObject *client_ring_summary(PyObject *module, PyObject *args) {
 static PyObject *client_completion_summary(PyObject *module, PyObject *completion) {
     PyObject *user_data;
     int res;
+    int kind;
     unsigned int flags;
     PyObject *result;
     PyObject *summary;
@@ -93,7 +94,8 @@ static PyObject *client_completion_summary(PyObject *module, PyObject *completio
     if (!user_data) {
         return NULL;
     }
-    if (api->completion_res(completion, &res) < 0 || api->completion_flags(completion, &flags) < 0) {
+    if (api->completion_res(completion, &res) < 0 || api->completion_flags(completion, &flags) < 0 ||
+        api->completion_kind(completion, &kind) < 0) {
         Py_DECREF(user_data);
         return NULL;
     }
@@ -102,7 +104,7 @@ static PyObject *client_completion_summary(PyObject *module, PyObject *completio
         Py_DECREF(user_data);
         return NULL;
     }
-    summary = Py_BuildValue("OiIO", user_data, res, flags, result);
+    summary = Py_BuildValue("OiiIO", user_data, kind, res, flags, result);
     Py_DECREF(user_data);
     Py_DECREF(result);
     return summary;
@@ -495,7 +497,8 @@ static int client_exec(PyObject *module) {
         !api->ring_submit_close || !api->ring_submit_socket || !api->ring_break_wait || !api->ring_wait ||
         !api->ring_set_callback || !api->ring_set_c_callback || !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
-        !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result) {
+        !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
+        !api->completion_kind) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }
@@ -507,13 +510,19 @@ static void client_free(void *module) {
     Py_CLEAR(callback_sink);
 }
 
-static PyModuleDef_Slot client_slots[] = {
-    {Py_mod_exec, client_exec},
-#if defined(Py_mod_gil)
-    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+/* CPython API uses void* in module slots; this conversion is intentional. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 #endif
-    {0, NULL},
-};
+static PyModuleDef_Slot client_slots[] = {{Py_mod_exec, client_exec},
+#if defined(Py_mod_gil)
+                                          {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+                                          {0, NULL}};
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 static struct PyModuleDef client_module = {
     PyModuleDef_HEAD_INIT,

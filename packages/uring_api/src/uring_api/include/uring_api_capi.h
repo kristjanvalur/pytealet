@@ -11,7 +11,9 @@
 
 #include <stdint.h>
 
-#define URING_API_CAPI_ABI_VERSION 1u
+#include "uring_api_completion_kinds.h"
+
+#define URING_API_CAPI_ABI_VERSION 2u
 #define URING_API_CAPI_CAPSULE_NAME "_uring_api._C_API"
 
 /* Feature flags published in UringApi_CAPI.feature_flags. */
@@ -85,6 +87,7 @@ typedef struct UringApi_CAPI {
     int (*completion_flags)(PyObject *completion, unsigned int *value);
     int (*completion_sequence)(PyObject *completion, unsigned long long *value);
     PyObject *(*completion_result)(PyObject *completion);
+    int (*completion_kind)(PyObject *completion, int *value);
 
     void *reserved[8];
 } UringApi_CAPI;
