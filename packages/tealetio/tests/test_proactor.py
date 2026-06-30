@@ -2086,6 +2086,37 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_recv_many_accumulates_stream_sequence_across_repeated_enobufs(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"a", more=True, sequence=0)
+            ring.complete_recv_multishot(b"b", more=True, sequence=1)
+            ring.complete_recv_multishot_enobufs(sequence=2)
+            ring.complete_recv_multishot(b"c", more=True, sequence=0)
+            ring.complete_recv_multishot_enobufs(sequence=1)
+            assert len(ring.submitted_recv_multishot) == 3
+            ring.complete_recv_multishot(b"d", more=True, sequence=0)
+            ring.complete_recv_multishot(b"", more=False, sequence=1)
+            assert _recv_many_bytes(seen) == [
+                (0, b"a"),
+                (1, b"b"),
+                (RECV_MANY_BUFFER_PRESSURE, b""),
+                (2, b"c"),
+                (RECV_MANY_BUFFER_PRESSURE, b""),
+                (3, b"d"),
+                (4, b""),
+            ]
+            assert operation.done() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_recvgen_reorders_out_of_order_multishot_chunks(self):
         scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
         set_scheduler(scheduler)

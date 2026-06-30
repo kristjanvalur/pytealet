@@ -1674,7 +1674,7 @@ class UringProactor(ProactorBase):
 
     def _handle_recv_many_enobufs(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
-        entry.stream_sequence = completion.sequence
+        entry.stream_sequence += completion.sequence
         operation._emit_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
         resubmit = entry.resubmit
         if resubmit is None:
