@@ -102,7 +102,7 @@ The common API is available directly from `tealetio`:
 - schedulers and runners: `Scheduler`, `ProactorScheduler`, `SyncProactorScheduler`, `AsyncProactorScheduler`, `SelectorScheduler`, `SyncSelectorScheduler`, `AsyncSelectorScheduler`, `BasicScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `Task`, `spawn`, `create_task`, `get_current`, `CancelledError`, `shield`
 - IO operations: `Operation`, `ContinuousOperation`
-- proactor socket helpers: `sendall(..., progress=...)`, `recvall(..., progress=...)`, `accept_many(...)`, `recv_many(...)`; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
+- proactor socket helpers: `sendall(..., progress=...)`, `recvall(..., progress=...)`, `recvgen(...)`, `accept_many(...)`, `recv_many(...)`; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - runnable scheduling policies: `FifoRunnableQueue`, `PrescheduledRunnableQueue`, `PriorityRunnableQueue`
@@ -165,6 +165,9 @@ receive and continues stream indices from the failed completion's `sequence`.
 
 `recvall(...)` keeps chunk views until pressure arrives, then copies every held
 chunk to `bytes` so slots return to the shared pool before receive resumes.
+`recvgen(...)` / `sock_recvgen(...)` yield chunks incrementally in stream order
+with the same pressure policy, reordering out-of-order multishot completions
+before each yield.
 `SelectorProactor.recv_many` still wraps ordinary `recv()` data in short-lived
 views and does not use provided buffers.
 

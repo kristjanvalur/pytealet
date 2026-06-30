@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `recvgen(sock, n)` and `ProactorScheduler.sock_recvgen(sock, n)` as a
+  tealet-blocking incremental consumer of `recv_many`, yielding stream-ordered
+  `(index, data)` chunks with the same provided-buffer pressure policy as
+  `recvall`.
 - `UringProactor` with a shared lazy `BufGroup` for provided-buffer multishot
   `recv_many` / `recvall`, plus `buf_group_factory` for custom pool sizing.
 - `RECV_MANY_BUFFER_PRESSURE` result index so `recv_many` consumers can release

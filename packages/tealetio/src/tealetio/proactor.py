@@ -7,7 +7,8 @@ import selectors
 import socket
 import threading
 import time
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterator
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from typing import Any, Generic, NoReturn, Protocol, TypeAlias, TypeVar, cast
@@ -127,6 +128,12 @@ class Proactor(Protocol):
 
     def recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> Operation[bytes]: ...
 
+    def recvgen(
+        self,
+        sock: socket.socket,
+        n: int,
+    ) -> Iterator[tuple[int, memoryview | bytes]]: ...
+
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
     def accept(self, sock: socket.socket) -> Operation[tuple[socket.socket, Any]]: ...
@@ -181,6 +188,114 @@ def _recvall_release_pending_views(
     for index in pending_views:
         chunks.pop(index, None)
     pending_views.clear()
+
+
+_RECVGEN_EOF = object()
+
+
+class _RecvGenBuffer:
+    """Ordered receive buffer bridging ``recv_many`` callbacks and ``recvgen``."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._event = ThreadsafeEvent()
+        self._next_index = 0
+        self._ready: deque[tuple[int, memoryview | bytes]] = deque()
+        self._out_of_order: dict[int, memoryview | bytes] = {}
+        self._pending_views: set[int] = set()
+        self._stream_done = False
+        self._stream_error: BaseException | None = None
+        self._stream: ContinuousOperation[tuple[int, memoryview]] | None = None
+        self._closed = False
+
+    def attach_stream(self, stream: ContinuousOperation[tuple[int, memoryview]]) -> None:
+        self._stream = stream
+        stream.add_done_callback(self._on_stream_done)
+
+    def _on_stream_done(self, stream: Operation[Any]) -> None:
+        with self._lock:
+            if stream.cancelled():
+                self._stream_error = CancelledError()
+            else:
+                exception = stream.exception()
+                if exception is not None:
+                    self._stream_error = exception
+                elif not self._stream_done:
+                    self._stream_done = True
+        self._event.set()
+
+    def on_result(self, result: tuple[int, memoryview]) -> None:
+        index, data = result
+        notify = False
+        with self._lock:
+            if index == RECV_MANY_BUFFER_PRESSURE:
+                self._flush_all_views()
+                notify = True
+            elif len(data) == 0:
+                self._stream_done = True
+                notify = True
+            else:
+                notify = self._ingest(index, data)
+        if notify:
+            self._event.set()
+
+    def _ingest(self, index: int, data: memoryview) -> bool:
+        if index == self._next_index:
+            self._ready.append((index, data))
+            self._pending_views.add(index)
+            self._next_index += 1
+            self._drain_out_of_order()
+            return True
+        self._out_of_order[index] = data
+        self._pending_views.add(index)
+        return False
+
+    def _drain_out_of_order(self) -> None:
+        while self._next_index in self._out_of_order:
+            data = self._out_of_order.pop(self._next_index)
+            self._ready.append((self._next_index, data))
+            self._next_index += 1
+
+    def _flush_all_views(self) -> None:
+        flushed_ready: deque[tuple[int, memoryview | bytes]] = deque()
+        for index, chunk in self._ready:
+            if type(chunk) is memoryview:
+                chunk = bytes(chunk)
+            flushed_ready.append((index, chunk))
+        self._ready = flushed_ready
+        for index, chunk in list(self._out_of_order.items()):
+            if type(chunk) is memoryview:
+                self._out_of_order[index] = bytes(chunk)
+        self._pending_views.clear()
+
+    def take_next(self) -> tuple[int, memoryview | bytes] | object:
+        while True:
+            with self._lock:
+                if self._stream_error is not None:
+                    raise self._stream_error
+                if self._ready:
+                    return self._ready.popleft()
+                if self._stream_done:
+                    return _RECVGEN_EOF
+            self._event.clear()
+            self._event.swait()
+
+    def close(self) -> None:
+        stream: ContinuousOperation[tuple[int, memoryview]] | None
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            stream = self._stream
+            self._ready.clear()
+            self._out_of_order.clear()
+            self._pending_views.clear()
+        if stream is not None and not stream.done():
+            proactor = stream._proactor
+            if proactor is not None:
+                proactor.cancel_operation(stream)
+            else:
+                stream.cancel()
 
 
 class ProactorBase:
@@ -287,6 +402,35 @@ class ProactorBase:
 
         stream.add_done_callback(on_done)
         return operation
+
+    def recvgen(
+        self,
+        sock: socket.socket,
+        n: int,
+    ) -> Iterator[tuple[int, memoryview | bytes]]:
+        """Incrementally receive byte chunks until EOF as a blocking generator.
+
+        Each ``recv_many`` chunk is reordered into stream-index order before it
+        is yielded. Borrowed ``memoryview`` chunks stay unconverted until
+        provided-buffer pressure arrives, when every held view is copied to
+        ``bytes`` so leased slots can return to the shared pool. The generator
+        must be consumed from a scheduler tealet so ``ThreadsafeEvent`` waits
+        can block cooperatively.
+        """
+
+        if n <= 0:
+            raise ValueError("n must be positive")
+        buffer = _RecvGenBuffer()
+        stream = self.recv_many(sock, n, buffer.on_result)
+        buffer.attach_stream(stream)
+        try:
+            while True:
+                item = buffer.take_next()
+                if item is _RECVGEN_EOF:
+                    break
+                yield cast(tuple[int, memoryview | bytes], item)
+        finally:
+            buffer.close()
 
 
 class Operation(Generic[T]):
@@ -1723,6 +1867,15 @@ class ProactorScheduler(BaseScheduler):
         """Receive byte chunks until EOF and return their concatenation."""
 
         return self.wait_operation(self._proactor.recvall(sock, n, progress))
+
+    def sock_recvgen(
+        self,
+        sock: socket.socket,
+        n: int,
+    ) -> Iterator[tuple[int, memoryview | bytes]]:
+        """Incrementally receive byte chunks until EOF as a blocking generator."""
+
+        return self._proactor.recvgen(sock, n)
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
         """Receive bytes from a non-blocking socket into `buf`."""

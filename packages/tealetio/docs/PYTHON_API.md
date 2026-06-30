@@ -88,6 +88,16 @@ are released by dropping recvall's references. When provided,
 `progress(total)` is called after each received non-empty chunk with the
 cumulative number of bytes received.
 
+`recvgen(sock, n)` is a tealet-blocking generator that incrementally yields
+`(index, data)` chunks in stream-index order until EOF. It shares the same
+provided-buffer pressure policy as `recvall`: borrowed `memoryview` chunks stay
+unconverted until `RECV_MANY_BUFFER_PRESSURE` arrives, when every held view in
+the internal ready and out-of-order queues is copied to `bytes`. Out-of-order
+multishot completions are reordered before yield. The generator must be
+consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can block
+cooperatively. `ProactorScheduler.sock_recvgen(sock, n)` exposes the same
+surface on scheduler instances.
+
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.
 Backends call `progress(total)` with the cumulative number of bytes sent as
 progress becomes observable. Some backends may only expose a single completion
