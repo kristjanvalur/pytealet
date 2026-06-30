@@ -272,8 +272,8 @@ static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *s
         return NULL;
     }
 
-    payload = PyBytes_FromStringAndSize(
-        (const char *)buf_group->storage + ((size_t)buffer_id * buf_group->buffer_size), (Py_ssize_t)res);
+    payload = PyBytes_FromStringAndSize((const char *)buf_group->storage + ((size_t)buffer_id * buf_group->buffer_size),
+                                        (Py_ssize_t)res);
     if (!payload) {
         return NULL;
     }
