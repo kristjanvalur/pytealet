@@ -79,12 +79,12 @@ thread affinity should marshal from the callback into the appropriate scheduler,
 event loop, or application thread.
 
 `recvall(sock, n, progress=None)` builds on `recv_many(...)` and returns a
-normal one-shot `Operation[bytes]`. It keeps a bounded number of live chunk
-views (currently 16) and copies older chunks to `bytes` as new data arrives,
-so long streams do not pin the whole provided-buffer pool while collection is
-still in progress. At EOF it concatenates chunks in stream-index order with `bytes(chunk)`; for
-stored `bytes` chunks that is an identity no-op on CPython. Remaining borrowed
-views are released by dropping recvall's references. When provided,
+normal one-shot `Operation[bytes]`. It keeps chunk views borrowed from
+`recv_many` until provided-buffer pressure arrives, then copies every held
+chunk to `bytes` so leased slots return to the shared pool. At EOF it
+concatenates chunks in stream-index order with `bytes(chunk)`; for stored
+`bytes` chunks that is an identity no-op on CPython. Remaining borrowed views
+are released by dropping recvall's references. When provided,
 `progress(total)` is called after each received non-empty chunk with the
 cumulative number of bytes received.
 

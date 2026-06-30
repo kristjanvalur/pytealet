@@ -57,7 +57,6 @@ _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
 _DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
-_RECVALL_MAX_LIVE_CHUNK_VIEWS = 16
 # ``recv_many`` result-callback index signalling provided-buffer pool pressure.
 RECV_MANY_BUFFER_PRESSURE = -1
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
@@ -160,21 +159,17 @@ def _recvall_adopt_chunk(
 ) -> None:
     chunks[index] = data
     pending_views.append(index)
-    while len(pending_views) > _RECVALL_MAX_LIVE_CHUNK_VIEWS:
-        old_index = pending_views.popleft()
-        chunks[old_index] = bytes(chunks[old_index])
 
 
 def _recvall_relieve_pressure(
     chunks: dict[int, memoryview | bytes],
     pending_views: deque[int],
 ) -> None:
-    if not pending_views:
-        return
-    old_index = pending_views.popleft()
-    chunk = chunks.get(old_index)
-    if type(chunk) is memoryview:
-        chunks[old_index] = bytes(chunk)
+    while pending_views:
+        index = pending_views.popleft()
+        chunk = chunks.get(index)
+        if type(chunk) is memoryview:
+            chunks[index] = bytes(chunk)
 
 
 def _recvall_release_pending_views(
@@ -249,11 +244,10 @@ class ProactorBase:
     def recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> Operation[bytes]:
         """Receive chunks until EOF and complete with the full byte string.
 
-        Chunks start as borrowed ``recv_many`` views. ``recvall`` keeps at most
-        ``_RECVALL_MAX_LIVE_CHUNK_VIEWS`` unconverted views and copies older
-        chunks to ``bytes`` so provided-buffer pools are not pinned indefinitely
-        while a long stream is being collected. Remaining chunk views are dropped
-        in a ``finally`` block after the stream completes.
+        Chunks start as borrowed ``recv_many`` views and stay unconverted until
+        ``recv_many`` reports provided-buffer pressure, when every held view is
+        copied to ``bytes`` to return leased slots. Remaining chunk views are
+        dropped in a ``finally`` block after the stream completes.
         """
 
         operation: _LinkedOperation[bytes] = _LinkedOperation(kind="recvall", fileobj=sock)
