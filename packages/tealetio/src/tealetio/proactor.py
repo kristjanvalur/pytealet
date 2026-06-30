@@ -166,14 +166,12 @@ def _recvall_release_pending_views(
     chunks: dict[int, memoryview | bytes],
     pending_views: deque[int],
 ) -> None:
+    # Drop the last recvall-owned references to borrowed chunk views. On modern
+    # Python (PEP 688), memoryview uses release() rather than close(); refcount
+    # teardown is enough to return leased uring buffers.
     while pending_views:
         index = pending_views.popleft()
-        chunk = chunks.pop(index, None)
-        if type(chunk) is not memoryview:
-            continue
-        close = getattr(chunk, "close", None)
-        if close is not None:
-            close()
+        chunks.pop(index, None)
 
 
 class ProactorBase:
@@ -239,8 +237,8 @@ class ProactorBase:
         Chunks start as borrowed ``recv_many`` views. ``recvall`` keeps at most
         ``_RECVALL_MAX_LIVE_CHUNK_VIEWS`` unconverted views and copies older
         chunks to ``bytes`` so provided-buffer pools are not pinned indefinitely
-        while a long stream is being collected. Remaining views are closed in a
-        ``finally`` block after the stream completes.
+        while a long stream is being collected. Remaining chunk views are dropped
+        in a ``finally`` block after the stream completes.
         """
 
         operation: _LinkedOperation[bytes] = _LinkedOperation(kind="recvall", fileobj=sock)
@@ -1454,8 +1452,9 @@ class UringProactor(ProactorBase):
         view before completing the continuous operation.
 
         Callbacks should treat each `data` view as borrowed: copy with
-        `bytes(data)` or release the view before returning if they do not need
-        the payload anymore. Holding many live views can pin provided buffers
+        `bytes(data)` or drop the view reference before returning if they do not
+        need the payload anymore (`memoryview.release()` is optional for early
+        release). Holding many live views can pin provided buffers
         and stall further receives on the shared `BufGroup`.
         """
 

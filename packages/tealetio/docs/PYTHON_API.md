@@ -64,7 +64,9 @@ byte chunk, where `index` is the ordinal position in the receive stream and
 `data` is a read-only `memoryview` into the received bytes. EOF emits one final
 empty view before the operation completes. Callbacks receive borrowed views:
 copy with `bytes(data)` when you need to keep payload past the callback, and
-release views you no longer need so backend buffers can be recycled. On
+drop view references you no longer need so backend buffers can be recycled
+(refcount teardown is enough; `memoryview.release()` is optional for early
+release and `memoryview` has no `close()` on 3.12+). On
 `UringProactor`, holding too many live views can pin the shared provided-buffer
 pool and stall further receives.
 
@@ -76,9 +78,11 @@ event loop, or application thread.
 normal one-shot `Operation[bytes]`. It keeps a bounded number of live chunk
 views (currently 16) and copies older chunks to `bytes` as new data arrives,
 so long streams do not pin the whole provided-buffer pool while collection is
-still in progress. At EOF it concatenates chunks in stream-index order. When
-provided, `progress(total)` is called after each received non-empty chunk with
-the cumulative number of bytes received.
+still in progress. At EOF it concatenates chunks in stream-index order with `bytes(chunk)`; for
+stored `bytes` chunks that is an identity no-op on CPython. Remaining borrowed
+views are released by dropping recvall's references. When provided,
+`progress(total)` is called after each received non-empty chunk with the
+cumulative number of bytes received.
 
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.
 Backends call `progress(total)` with the cumulative number of bytes sent as
