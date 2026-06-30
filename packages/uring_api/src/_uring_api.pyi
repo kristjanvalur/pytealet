@@ -1,3 +1,4 @@
+import enum
 from types import TracebackType
 from collections.abc import Callable
 from typing import Any
@@ -34,13 +35,30 @@ COMPLETION_KIND_SENDMSG: int
 COMPLETION_KIND_SENDMSG_ZC: int
 COMPLETION_KIND_SOCKET: int
 
+class CompletionKind(enum.IntEnum):
+    RECV = 1
+    SEND = 2
+    WAKE = 3
+    SENDTO = 4
+    RECVMSG = 5
+    ACCEPT = 6
+    CONNECT = 7
+    CANCEL = 8
+    SHUTDOWN = 9
+    CLOSE = 10
+    SENDMSG = 11
+    SOCKET = 12
+    RECV_MULTISHOT = 13
+    SEND_ZC = 14
+    SENDMSG_ZC = 15
+
 class SubmissionQueueFull(RuntimeError): ...
 
 class Completion:
     @property
     def user_data(self) -> object: ...
     @property
-    def kind(self) -> int: ...
+    def kind(self) -> CompletionKind: ...
     @property
     def res(self) -> int: ...
     @property

@@ -93,7 +93,9 @@ static PyObject *client_completion_summary(PyObject *module, PyObject *completio
     if (!user_data) {
         return NULL;
     }
-    if (api->completion_res(completion, &res) < 0 || api->completion_flags(completion, &flags) < 0) {
+    int kind;
+    if (api->completion_res(completion, &res) < 0 || api->completion_flags(completion, &flags) < 0 ||
+        api->completion_kind(completion, &kind) < 0) {
         Py_DECREF(user_data);
         return NULL;
     }
@@ -102,7 +104,7 @@ static PyObject *client_completion_summary(PyObject *module, PyObject *completio
         Py_DECREF(user_data);
         return NULL;
     }
-    summary = Py_BuildValue("OiIO", user_data, res, flags, result);
+    summary = Py_BuildValue("OiiIO", user_data, kind, res, flags, result);
     Py_DECREF(user_data);
     Py_DECREF(result);
     return summary;
@@ -495,7 +497,8 @@ static int client_exec(PyObject *module) {
         !api->ring_submit_close || !api->ring_submit_socket || !api->ring_break_wait || !api->ring_wait ||
         !api->ring_set_callback || !api->ring_set_c_callback || !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
-        !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result) {
+        !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
+        !api->completion_kind) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

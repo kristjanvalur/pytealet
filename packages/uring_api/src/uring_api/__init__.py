@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
@@ -44,9 +45,26 @@ try:
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
     from _uring_api import __liburing_version__ as __liburing_version__
     from _uring_api import probe as _probe
+
+    class CompletionKind(enum.IntEnum):
+        RECV = COMPLETION_KIND_RECV
+        SEND = COMPLETION_KIND_SEND
+        WAKE = COMPLETION_KIND_WAKE
+        SENDTO = COMPLETION_KIND_SENDTO
+        RECVMSG = COMPLETION_KIND_RECVMSG
+        ACCEPT = COMPLETION_KIND_ACCEPT
+        CONNECT = COMPLETION_KIND_CONNECT
+        CANCEL = COMPLETION_KIND_CANCEL
+        SHUTDOWN = COMPLETION_KIND_SHUTDOWN
+        CLOSE = COMPLETION_KIND_CLOSE
+        SENDMSG = COMPLETION_KIND_SENDMSG
+        SOCKET = COMPLETION_KIND_SOCKET
+        RECV_MULTISHOT = COMPLETION_KIND_RECV_MULTISHOT
+        SEND_ZC = COMPLETION_KIND_SEND_ZC
+        SENDMSG_ZC = COMPLETION_KIND_SENDMSG_ZC
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
-    C_API_ABI_VERSION = 1
+    C_API_ABI_VERSION = 2
     C_API_FEATURE_CORE = 1 << 0
     C_API_FEATURES = 0
     COMPLETION_KIND_RECV = 1
@@ -64,6 +82,24 @@ except ImportError as exc:
     COMPLETION_KIND_RECV_MULTISHOT = 13
     COMPLETION_KIND_SEND_ZC = 14
     COMPLETION_KIND_SENDMSG_ZC = 15
+
+    class CompletionKind(enum.IntEnum):
+        RECV = COMPLETION_KIND_RECV
+        SEND = COMPLETION_KIND_SEND
+        WAKE = COMPLETION_KIND_WAKE
+        SENDTO = COMPLETION_KIND_SENDTO
+        RECVMSG = COMPLETION_KIND_RECVMSG
+        ACCEPT = COMPLETION_KIND_ACCEPT
+        CONNECT = COMPLETION_KIND_CONNECT
+        CANCEL = COMPLETION_KIND_CANCEL
+        SHUTDOWN = COMPLETION_KIND_SHUTDOWN
+        CLOSE = COMPLETION_KIND_CLOSE
+        SENDMSG = COMPLETION_KIND_SENDMSG
+        SOCKET = COMPLETION_KIND_SOCKET
+        RECV_MULTISHOT = COMPLETION_KIND_RECV_MULTISHOT
+        SEND_ZC = COMPLETION_KIND_SEND_ZC
+        SENDMSG_ZC = COMPLETION_KIND_SENDMSG_ZC
+
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -81,7 +117,7 @@ except ImportError as exc:
     @dataclass(frozen=True)
     class Completion:
         user_data: object
-        kind: int
+        kind: CompletionKind
         res: int
         flags: int
         result: object
@@ -262,6 +298,7 @@ __all__ = [
     "COMPLETION_KIND_SHUTDOWN",
     "COMPLETION_KIND_SOCKET",
     "COMPLETION_KIND_WAKE",
+    "CompletionKind",
     "Completion",
     "IORING_CQE_F_MORE",
     "IORING_CQE_F_NOTIF",

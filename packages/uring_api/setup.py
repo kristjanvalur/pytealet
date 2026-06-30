@@ -71,7 +71,7 @@ class build_py(_build_py):
 setup(
     package_dir={"": "src"},
     packages=find_packages("src"),
-    package_data={"uring_api": ["py.typed", "include/uring_api_capi.h"]},
+    package_data={"uring_api": ["py.typed", "include/uring_api_capi.h", "include/uring_api_completion_kinds.h"]},
     ext_modules=[
         Extension(
             "_uring_api",

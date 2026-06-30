@@ -93,7 +93,12 @@ def test_public_capi_header_compiles_without_liburing_headers():
     python_include = Path(sysconfig.get_paths()["include"])
     if not python_include.joinpath("Python.h").is_file():
         pytest.skip("Python development headers are not available")
-    source = '#include "uring_api_capi.h"\nstatic const unsigned int abi = URING_API_CAPI_ABI_VERSION;\n'
+    source = (
+        '#include "uring_api_capi.h"\n'
+        "#include \"uring_api_completion_kinds.h\"\n"
+        "static const unsigned int abi = URING_API_CAPI_ABI_VERSION;\n"
+        "static const int recv_kind = URING_API_COMPLETION_KIND_RECV;\n"
+    )
 
     with tempfile.TemporaryDirectory() as temp_dir:
         source_path = Path(temp_dir) / "check_uring_api_capi.c"
@@ -106,7 +111,7 @@ def test_public_capi_header_compiles_without_liburing_headers():
 
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 1
+    assert uring_api.C_API_ABI_VERSION == 2
     assert uring_api.C_API_FEATURE_CORE == 1 << 0
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
 
@@ -134,6 +139,12 @@ def test_native_module_exports_zero_copy_send_constants():
     assert uring_api.IORING_NOTIF_USAGE_ZC_COPIED == 1 << 31
 
 
+def test_completion_kind_enum_matches_module_constants():
+    assert uring_api.CompletionKind.RECV == uring_api.COMPLETION_KIND_RECV
+    assert uring_api.CompletionKind.SENDMSG_ZC == uring_api.COMPLETION_KIND_SENDMSG_ZC
+    assert uring_api.CompletionKind(uring_api.COMPLETION_KIND_ACCEPT) is uring_api.CompletionKind.ACCEPT
+
+
 def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_RECV == 1
     assert uring_api.COMPLETION_KIND_SEND == 2
@@ -158,6 +169,7 @@ def test_public_star_exports_include_completion_kind_sendmsg_zc():
     exec("from uring_api import *", namespace)
 
     assert namespace["COMPLETION_KIND_SENDMSG_ZC"] == uring_api.COMPLETION_KIND_SENDMSG_ZC
+    assert namespace["CompletionKind"] is uring_api.CompletionKind
 
 
 def test_probe_returns_structured_result():
@@ -394,8 +406,20 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
                 client.clear_c_callback(ring)
 
         by_user_data = {completion.user_data: completion for completion in c_deliveries}
-        assert client.completion_summary(by_user_data[220]) == (220, 4, 0, 4)
-        assert client.completion_summary(by_user_data[221]) == (221, 4, 0, 4)
+        assert client.completion_summary(by_user_data[220]) == (
+            220,
+            uring_api.COMPLETION_KIND_RECV,
+            4,
+            0,
+            4,
+        )
+        assert client.completion_summary(by_user_data[221]) == (
+            221,
+            uring_api.COMPLETION_KIND_SEND,
+            4,
+            0,
+            4,
+        )
         assert by_user_data[220].res == 4
         assert by_user_data[220].result == 4
         assert bytes(buf) == b"pong"
@@ -431,8 +455,20 @@ def test_c_api_datagram_operations_when_available():
         by_user_data = {first.user_data: first, second.user_data: second}
         recv_completion = by_user_data[230]
         send_completion = by_user_data[231]
-        assert client.completion_summary(recv_completion) == (230, 5, 0, sender.getsockname())
-        assert client.completion_summary(send_completion) == (231, 5, 0, 5)
+        assert client.completion_summary(recv_completion) == (
+            230,
+            uring_api.COMPLETION_KIND_RECVMSG,
+            5,
+            0,
+            sender.getsockname(),
+        )
+        assert client.completion_summary(send_completion) == (
+            231,
+            uring_api.COMPLETION_KIND_SENDTO,
+            5,
+            0,
+            5,
+        )
         assert bytes(buf) == b"hello"
     finally:
         sender.close()
@@ -455,7 +491,13 @@ def test_c_api_sendmsg_operation_when_available():
             completion = ring.wait(1.0)
 
         assert completion is not None
-        assert client.completion_summary(completion) == (244, 5, 0, 5)
+        assert client.completion_summary(completion) == (
+            244,
+            uring_api.COMPLETION_KIND_SENDMSG,
+            5,
+            0,
+            5,
+        )
         assert client.completion_sequence(completion) == 0
         assert completion.kind == uring_api.COMPLETION_KIND_SENDMSG
         data, address = receiver.recvfrom(5)
@@ -483,7 +525,13 @@ def test_c_api_sendmsg_zc_operation_when_available():
             notification = ring.wait(1.0)
 
         assert completion is not None
-        assert client.completion_summary(completion) == (245, 5, completion.flags, 5)
+        assert client.completion_summary(completion) == (
+            245,
+            uring_api.COMPLETION_KIND_SENDMSG_ZC,
+            5,
+            completion.flags,
+            5,
+        )
         assert client.completion_sequence(completion) == 0
         assert completion.kind == uring_api.COMPLETION_KIND_SENDMSG_ZC
         assert not (completion.flags & uring_api.IORING_CQE_F_NOTIF)
@@ -508,7 +556,13 @@ def test_c_api_send_zc_operation_when_available():
             notification = ring.wait(1.0)
 
         assert completion is not None
-        assert client.completion_summary(completion) == (246, 5, completion.flags, 5)
+        assert client.completion_summary(completion) == (
+            246,
+            uring_api.COMPLETION_KIND_SEND_ZC,
+            5,
+            completion.flags,
+            5,
+        )
         assert completion.kind == uring_api.COMPLETION_KIND_SEND_ZC
         assert not (completion.flags & uring_api.IORING_CQE_F_NOTIF)
         assert notification is None
@@ -535,8 +589,9 @@ def test_c_api_socket_operation_when_available():
             pytest.skip(f"IORING_OP_SOCKET is not supported: errno {errno_value}")
     assert completion.res >= 0
     try:
-        user_data, res, flags, result = client_api.completion_summary(completion)
+        user_data, kind, res, flags, result = client_api.completion_summary(completion)
         assert user_data == 245
+        assert kind == uring_api.COMPLETION_KIND_SOCKET
         assert res == completion.res
         assert flags == 0
         assert result == completion.res
@@ -568,11 +623,12 @@ def test_c_api_accept_operation_when_available():
             completion = ring.wait(1.0)
 
         assert completion is not None
-        user_data, res, flags, result = client_api.completion_summary(completion)
+        user_data, kind, res, flags, result = client_api.completion_summary(completion)
         accepted_fd, address = result
         assert_fd_nonblocking_cloexec(accepted_fd)
         accepted = socket.socket(fileno=accepted_fd)
         assert user_data == 240
+        assert kind == uring_api.COMPLETION_KIND_ACCEPT
         assert res == accepted_fd
         assert flags == 0
         assert address == client.getsockname()
@@ -607,8 +663,9 @@ def test_c_api_recv_multishot_operation_when_available():
             errno_value = -completion.res
             if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
                 pytest.skip(f"recv multishot is not supported: errno {errno_value}")
-        user_data, res, _flags, result = client_api.completion_summary(completion)
+        user_data, kind, res, _flags, result = client_api.completion_summary(completion)
         assert user_data == 246
+        assert kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
         assert res == len(result)
         assert result == b"hello"
         assert client_api.completion_sequence(completion) == 0
@@ -635,7 +692,13 @@ def test_c_api_connect_operation_when_available():
             completion = ring.wait(1.0)
 
         assert completion is not None
-        assert client_api.completion_summary(completion) == (241, 0, 0, None)
+        assert client_api.completion_summary(completion) == (
+            241,
+            uring_api.COMPLETION_KIND_CONNECT,
+            0,
+            0,
+            None,
+        )
         accepted, _address = server.accept()
     finally:
         if accepted is not None:
@@ -657,7 +720,13 @@ def test_c_api_shutdown_operation_when_available():
             completion = ring.wait(1.0)
 
         assert completion is not None
-        assert client_api.completion_summary(completion) == (242, 0, 0, None)
+        assert client_api.completion_summary(completion) == (
+            242,
+            uring_api.COMPLETION_KIND_SHUTDOWN,
+            0,
+            0,
+            None,
+        )
         assert completion.kind == uring_api.COMPLETION_KIND_SHUTDOWN
         assert reader.recv(1) == b""
     finally:
@@ -676,7 +745,13 @@ def test_c_api_close_operation_when_available():
         completion = ring.wait(1.0)
 
     assert completion is not None
-    assert client_api.completion_summary(completion) == (243, 0, 0, None)
+    assert client_api.completion_summary(completion) == (
+        243,
+        uring_api.COMPLETION_KIND_CLOSE,
+        0,
+        0,
+        None,
+    )
     assert completion.kind == uring_api.COMPLETION_KIND_CLOSE
     with pytest.raises(OSError) as excinfo:
         os.fstat(fd)
@@ -763,13 +838,25 @@ def test_c_api_completion_result_is_none_for_pending_completion_when_available()
         with uring_api.Ring() as ring:
             pending = ring.submit_recv(reader.fileno(), buf, 247)
 
-            assert client.completion_summary(pending) == (247, 0, 0, None)
+            assert client.completion_summary(pending) == (
+                247,
+                uring_api.COMPLETION_KIND_RECV,
+                0,
+                0,
+                None,
+            )
 
             writer.send(b"hello")
             completion = ring.wait(1.0)
 
         assert completion is pending
-        assert client.completion_summary(completion) == (247, 5, 0, 5)
+        assert client.completion_summary(completion) == (
+            247,
+            uring_api.COMPLETION_KIND_RECV,
+            5,
+            0,
+            5,
+        )
     finally:
         reader.close()
         writer.close()

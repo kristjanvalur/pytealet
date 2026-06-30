@@ -578,6 +578,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_CompletionFlags,
     UringApiCapi_CompletionSequence,
     UringApiCapi_CompletionResult,
+    UringApiCapi_CompletionKind,
     {NULL},
 };
 

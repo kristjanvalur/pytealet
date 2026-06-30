@@ -419,3 +419,15 @@ PyObject *UringApiCapi_CompletionResult(PyObject *completion) {
     }
     return Py_NewRef(result);
 }
+
+int UringApiCapi_CompletionKind(PyObject *completion, int *value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
+        return -1;
+    }
+    *value = (int)((UringApiCompletion *)completion)->kind;
+    return 0;
+}
