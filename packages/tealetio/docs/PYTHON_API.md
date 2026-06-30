@@ -59,11 +59,13 @@ use this fast path for socket operations that succeed right away.
 Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
 callback)` emits `(conn, address)` for each accepted connection and remains
 active until it is cancelled or the backend reports a terminal error.
-`recv_many(sock, n, callback)` emits `(index, data)` pairs for each received
-byte chunk, where `index` is the ordinal position in the receive stream and
-`data` is a read-only `memoryview` into the received bytes. EOF emits one final
-empty view before the operation completes. On `UringProactor`, when the shared
-provided-buffer pool is exhausted, the callback also receives
+`recv_many(sock, callback)` emits `(index, data)` pairs for each received byte
+chunk, where `index` is the ordinal position in the receive stream and `data`
+is a read-only `memoryview` into the received bytes. EOF emits one final empty
+view before the operation completes. Chunk sizes are backend-defined:
+`UringProactor` uses the shared `BufGroup` slot size (16 KiB by default) and
+`SelectorProactor` reads up to 8 KiB per `recv()` call. When the shared
+provided-buffer pool is exhausted on `UringProactor`, the callback also receives
 `(RECV_MANY_BUFFER_PRESSURE, empty_view)` so consumers can release held views;
 the proactor then resubmits the multishot receive and continues stream indices
 from the failed completion's `sequence`. Callbacks receive borrowed views:
@@ -78,7 +80,7 @@ Backends may run these result callbacks from any worker thread; code that needs
 thread affinity should marshal from the callback into the appropriate scheduler,
 event loop, or application thread.
 
-`recvall(sock, n, progress=None)` builds on `recv_many(...)` and returns a
+`recvall(sock, progress=None)` builds on `recv_many(...)` and returns a
 normal one-shot `Operation[bytes]`. It keeps chunk views borrowed from
 `recv_many` until provided-buffer pressure arrives, then copies every held
 chunk to `bytes` so leased slots return to the shared pool. At EOF it
@@ -88,14 +90,14 @@ are released by dropping recvall's references. When provided,
 `progress(total)` is called after each received non-empty chunk with the
 cumulative number of bytes received.
 
-`recvgen(sock, n)` is a tealet-blocking generator that incrementally yields
+`recvgen(sock)` is a tealet-blocking generator that incrementally yields
 `(index, data)` chunks in stream-index order until EOF. It shares the same
 provided-buffer pressure policy as `recvall`: borrowed `memoryview` chunks stay
 unconverted until `RECV_MANY_BUFFER_PRESSURE` arrives, when every held view in
 the internal ready and out-of-order queues is copied to `bytes`. Out-of-order
 multishot completions are reordered before yield. The generator must be
 consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can block
-cooperatively. `ProactorScheduler.sock_recvgen(sock, n)` exposes the same
+cooperatively. `ProactorScheduler.sock_recvgen(sock)` exposes the same
 surface on scheduler instances.
 
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.

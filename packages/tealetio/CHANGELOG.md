@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `recvgen(sock, n)` and `ProactorScheduler.sock_recvgen(sock, n)` as a
+- `recvgen(sock)` and `ProactorScheduler.sock_recvgen(sock)` as a
   tealet-blocking incremental consumer of `recv_many`, yielding stream-ordered
   `(index, data)` chunks with the same provided-buffer pressure policy as
   `recvall`.
@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
+- Removed the `n` chunk-size argument from `recv_many`, `recvall`, `recvgen`,
+  `sock_recvall`, and `sock_recvgen`; chunk sizes are backend-defined
+  (`SelectorProactor` reads up to 8 KiB per `recv()`, `UringProactor` uses the
+  shared `BufGroup` slot size).
 - `UringProactor.recv_many` delivers leased `memoryview` chunks instead of
   copied `bytes`; `recvall` keeps views until buffer pressure, then copies all
   held chunks to `bytes` and lets the proactor resubmit multishot receive.

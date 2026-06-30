@@ -158,7 +158,7 @@ shape remains subject to change before a stable release.
 
 `UringProactor` (`tealetio.proactor`) shares one lazy `BufGroup` pool (16 KiB ×
 256 buffers by default) across `recv_many` / `recvall` operations on that
-proactor. `recv_many(sock, n, callback)` delivers borrowed `memoryview` chunks
+proactor. `recv_many(sock, callback)` delivers borrowed `memoryview` chunks
 from leased kernel buffers. When the pool is exhausted, the callback receives
 `(RECV_MANY_BUFFER_PRESSURE, empty_view)`; the proactor resubmits multishot
 receive and continues stream indices from the failed completion's `sequence`.
@@ -169,7 +169,7 @@ chunk to `bytes` so slots return to the shared pool before receive resumes.
 with the same pressure policy, reordering out-of-order multishot completions
 before each yield.
 `SelectorProactor.recv_many` still wraps ordinary `recv()` data in short-lived
-views and does not use provided buffers.
+views (up to 8 KiB per read) and does not use provided buffers.
 
 See [Python API reference](docs/PYTHON_API.md) for ownership details.
 

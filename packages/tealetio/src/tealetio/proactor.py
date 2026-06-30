@@ -57,6 +57,7 @@ _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
 _DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
+_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 # ``recv_many`` result-callback index signalling provided-buffer pool pressure.
 RECV_MANY_BUFFER_PRESSURE = -1
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
@@ -126,13 +127,9 @@ class Proactor(Protocol):
 
     def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]: ...
 
-    def recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> Operation[bytes]: ...
+    def recvall(self, sock: socket.socket, progress: _ProgressCallback | None = None) -> Operation[bytes]: ...
 
-    def recvgen(
-        self,
-        sock: socket.socket,
-        n: int,
-    ) -> Iterator[tuple[int, memoryview | bytes]]: ...
+    def recvgen(self, sock: socket.socket) -> Iterator[tuple[int, memoryview | bytes]]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
@@ -149,7 +146,6 @@ class Proactor(Protocol):
     def recv_many(
         self,
         sock: socket.socket,
-        n: int,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]: ...
 
@@ -350,12 +346,11 @@ class ProactorBase:
     def recv_many(
         self,
         sock: socket.socket,
-        n: int,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]:
         raise NotImplementedError
 
-    def recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> Operation[bytes]:
+    def recvall(self, sock: socket.socket, progress: _ProgressCallback | None = None) -> Operation[bytes]:
         """Receive chunks until EOF and complete with the full byte string.
 
         Chunks start as borrowed ``recv_many`` views and stay unconverted until
@@ -382,7 +377,7 @@ class ProactorBase:
             if progress is not None:
                 progress(total)
 
-        stream = self.recv_many(sock, n, on_result)
+        stream = self.recv_many(sock, on_result)
         operation._linked_operation = stream
 
         def on_done(done_stream: Operation[Any]) -> None:
@@ -403,11 +398,7 @@ class ProactorBase:
         stream.add_done_callback(on_done)
         return operation
 
-    def recvgen(
-        self,
-        sock: socket.socket,
-        n: int,
-    ) -> Iterator[tuple[int, memoryview | bytes]]:
+    def recvgen(self, sock: socket.socket) -> Iterator[tuple[int, memoryview | bytes]]:
         """Incrementally receive byte chunks until EOF as a blocking generator.
 
         Each ``recv_many`` chunk is reordered into stream-index order before it
@@ -418,10 +409,8 @@ class ProactorBase:
         can block cooperatively.
         """
 
-        if n <= 0:
-            raise ValueError("n must be positive")
         buffer = _RecvGenBuffer()
-        stream = self.recv_many(sock, n, buffer.on_result)
+        stream = self.recv_many(sock, buffer.on_result)
         buffer.attach_stream(stream)
         try:
             while True:
@@ -909,7 +898,6 @@ class SelectorProactor(ProactorBase):
     def recv_many(
         self,
         sock: socket.socket,
-        n: int,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]:
         """Start receiving byte chunks until EOF, cancellation, or failure.
@@ -917,10 +905,10 @@ class SelectorProactor(ProactorBase):
         `callback` may run on any backend worker thread. Each result is an
         ordinal `(index, data)` pair with read-only `data` as a `memoryview`;
         EOF emits a final empty view before completing the continuous operation.
+        Chunk sizes follow the kernel; this implementation reads up to 8 KiB
+        per ``recv()`` call.
         """
 
-        if n <= 0:
-            raise ValueError("n must be positive")
         operation = ContinuousOperation[tuple[int, memoryview]](
             kind="recv_many",
             fileobj=sock,
@@ -934,7 +922,7 @@ class SelectorProactor(ProactorBase):
             progressed = False
             while True:
                 try:
-                    data = sock.recv(n)
+                    data = sock.recv(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
                 except (BlockingIOError, InterruptedError):
                     return _ContinuousStepResult(progressed=progressed)
                 if not data:
@@ -1598,7 +1586,6 @@ class UringProactor(ProactorBase):
     def recv_many(
         self,
         sock: socket.socket,
-        n: int,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]:
         """Start a multishot receive operation that completes on EOF.
@@ -1606,7 +1593,8 @@ class UringProactor(ProactorBase):
         `callback` may run on any uring completion service thread. Each result
         is an ordinal `(index, data)` pair with read-only `data` as a
         `memoryview` into the leased kernel buffer. EOF emits a final empty
-        view before completing the continuous operation.
+        view before completing the continuous operation. Chunk sizes come from
+        the shared ``BufGroup`` pool, not from a caller argument.
 
         Callbacks should treat each `data` view as borrowed: copy with
         `bytes(data)` or drop the view reference before returning if they do not
@@ -1619,8 +1607,6 @@ class UringProactor(ProactorBase):
         held views, then automatically resubmits the multishot receive.
         """
 
-        if n <= 0:
-            raise ValueError("n must be positive")
         operation = ContinuousOperation[tuple[int, memoryview]](
             kind="recv_many",
             fileobj=sock,
@@ -1863,19 +1849,15 @@ class ProactorScheduler(BaseScheduler):
 
         return self.wait_operation(self._proactor.recv(sock, n))
 
-    def sock_recvall(self, sock: socket.socket, n: int, progress: _ProgressCallback | None = None) -> bytes:
+    def sock_recvall(self, sock: socket.socket, progress: _ProgressCallback | None = None) -> bytes:
         """Receive byte chunks until EOF and return their concatenation."""
 
-        return self.wait_operation(self._proactor.recvall(sock, n, progress))
+        return self.wait_operation(self._proactor.recvall(sock, progress))
 
-    def sock_recvgen(
-        self,
-        sock: socket.socket,
-        n: int,
-    ) -> Iterator[tuple[int, memoryview | bytes]]:
+    def sock_recvgen(self, sock: socket.socket) -> Iterator[tuple[int, memoryview | bytes]]:
         """Incrementally receive byte chunks until EOF as a blocking generator."""
 
-        return self._proactor.recvgen(sock, n)
+        return self._proactor.recvgen(sock)
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
         """Receive bytes from a non-blocking socket into `buf`."""

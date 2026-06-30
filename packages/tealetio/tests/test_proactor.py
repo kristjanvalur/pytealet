@@ -344,7 +344,7 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, seen.append)
 
             writer.send(b"hello")
             while not seen:
@@ -371,7 +371,7 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recvall(reader, 5, progress.append)
+            operation = proactor.recvall(reader, progress.append)
 
             writer.send(b"hello")
             while not progress:
@@ -1960,7 +1960,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            proactor.recv_many(reader, 5, lambda _result: None)
+            proactor.recv_many(reader, lambda _result: None)
             assert created == [(8, 4)]
             submitted = proactor.ring.submitted_recv_multishot[0]
             assert submitted[1].buffer_size == 8
@@ -1977,7 +1977,7 @@ class TestUringProactor:
         seen: list[tuple[int, memoryview]] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, seen.append)
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_recv_multishot[0]
             assert submitted[0] == reader.fileno()
@@ -2004,7 +2004,7 @@ class TestUringProactor:
         seen: list[tuple[int, memoryview]] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, seen.append)
             ring = proactor.ring
             ring.complete_recv_multishot(b"a", more=True, sequence=0)
             ring.complete_recv_multishot(b"b", more=True, sequence=1)
@@ -2034,7 +2034,7 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return [(index, bytes(chunk)) for index, chunk in scheduler.sock_recvgen(reader, 5)]
+                return [(index, bytes(chunk)) for index, chunk in scheduler.sock_recvgen(reader)]
 
             def deliver_chunks() -> None:
                 ring = scheduler.proactor.ring
@@ -2059,7 +2059,7 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return [(index, bytes(chunk)) for index, chunk in scheduler.sock_recvgen(reader, 1)]
+                return [(index, bytes(chunk)) for index, chunk in scheduler.sock_recvgen(reader)]
 
             def deliver_chunks() -> None:
                 ring = scheduler.proactor.ring
@@ -2083,7 +2083,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recvall(reader, 1, None)
+            operation = proactor.recvall(reader, None)
             ring = proactor.ring
             ring.complete_recv_multishot(b"a", more=True, sequence=0)
             ring.complete_recv_multishot(b"b", more=True, sequence=1)
@@ -2103,7 +2103,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recvall(reader, 1, None)
+            operation = proactor.recvall(reader, None)
             assert isinstance(proactor.ring, _FakeUringRing)
 
             for sequence, byte in enumerate(b"abcdefghijklmnop"):
@@ -2125,7 +2125,7 @@ class TestUringProactor:
         progress: list[int] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recvall(reader, 5, progress.append)
+            operation = proactor.recvall(reader, progress.append)
             assert isinstance(proactor.ring, _FakeUringRing)
 
             proactor.ring.complete_recv_multishot(b"world", sequence=1)
@@ -2150,7 +2150,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, seen.append)
 
             writer.send(b"hello")
             _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
@@ -2175,7 +2175,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recvall(reader, 5, progress.append)
+            operation = proactor.recvall(reader, progress.append)
 
             writer.send(b"hello")
             _wait_for_uring(proactor, lambda: progress == [5])
@@ -2322,10 +2322,11 @@ class TestProactorScheduler:
             writer.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return [(index, bytes(chunk)) for index, chunk in scheduler.sock_recvgen(reader, 5)]
+                return [(index, bytes(chunk)) for index, chunk in scheduler.sock_recvgen(reader)]
 
             def send_chunks() -> None:
                 scheduler.sock_sendall(writer, b"hello")
+                scheduler.sleep(0.05)
                 scheduler.sock_sendall(writer, b"world")
                 writer.shutdown(socket.SHUT_WR)
 
