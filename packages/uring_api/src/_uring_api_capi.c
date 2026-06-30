@@ -94,17 +94,11 @@ static int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, Py
 static int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned int buffer_size,
                                                 unsigned int buffer_count, unsigned int flags, PyObject *user_data) {
     PyObject *result;
-    PyObject *buf_group;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    buf_group = PyObject_CallMethod(ring, "create_buf_group", "II", buffer_size, buffer_count);
-    if (!buf_group) {
-        return -1;
-    }
-    result = PyObject_CallMethod(ring, "submit_recv_multishot", "iOOI", fd, buf_group,
+    result = PyObject_CallMethod(ring, "submit_recv_multishot", "ikkOI", fd, buffer_size, buffer_count,
                                  user_data ? user_data : Py_None, flags);
-    Py_DECREF(buf_group);
     if (!result) {
         return -1;
     }

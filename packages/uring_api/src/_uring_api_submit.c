@@ -113,11 +113,16 @@ static PyObject *UringApiRing_submit_recv_zc(UringApiRing *self, PyObject *args,
     return Py_NewRef(completion);
 }
 
+#define URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_SIZE 16384U
+#define URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_COUNT 4U
+
 static PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
+    static char *keywords[] = {"fd", "buffer_size", "buffer_count", "user_data", "flags", NULL};
     struct io_uring_sqe *sqe;
     UringApiBufGroup *buf_group;
     long fd;
+    unsigned long buffer_size = URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_SIZE;
+    unsigned long buffer_count = URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_COUNT;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
     PyObject *buf_group_obj;
@@ -125,17 +130,16 @@ static PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject
     UringApiCompletion *pending;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lO!|OI", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
-                                     &user_data, &flags)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|kkOI", keywords, &fd, &buffer_size, &buffer_count, &user_data,
+                                     &flags)) {
         return NULL;
     }
     if (fd < 0 || fd > INT_MAX) {
         PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
         return NULL;
     }
-    buf_group = (UringApiBufGroup *)buf_group_obj;
-    if (buf_group->ring != self) {
-        PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
+    if (buffer_size > UINT_MAX || buffer_count > UINT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "buffer_size and buffer_count must fit in uint32_t");
         return NULL;
     }
 
@@ -144,22 +148,28 @@ static PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject
         return NULL;
     }
     pending = (UringApiCompletion *)completion;
-    pending->buf_group = Py_NewRef(buf_group_obj);
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
+        buf_group_obj = UringApiBufGroup_create(self, (unsigned int)buffer_size, (unsigned int)buffer_count);
+        if (!buf_group_obj) {
             failed = 1;
         } else {
-            io_uring_prep_recv_multishot(sqe, (int)fd, NULL, 0, (int)flags);
-            sqe->flags |= IOSQE_BUFFER_SELECT;
-            sqe->buf_group = buf_group->group_id;
-            sqe_set_completion(self, sqe, completion);
-            if (submit_one(self) < 0) {
+            buf_group = (UringApiBufGroup *)buf_group_obj;
+            pending->buf_group = buf_group_obj;
+            sqe = get_sqe(self);
+            if (!sqe) {
                 failed = 1;
+            } else {
+                io_uring_prep_recv_multishot(sqe, (int)fd, NULL, 0, (int)flags);
+                sqe->flags |= IOSQE_BUFFER_SELECT;
+                sqe->buf_group = buf_group->group_id;
+                sqe_set_completion(self, sqe, completion);
+                if (submit_one(self) < 0) {
+                    failed = 1;
+                }
             }
         }
     }

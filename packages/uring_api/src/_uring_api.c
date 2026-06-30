@@ -206,6 +206,7 @@ static PyObject *UringApiCapi_CompletionResult(PyObject *completion);
 
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
 
+static PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, unsigned int buffer_count);
 static void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id);
 static PyObject *UringApiBufView_create(PyObject *buf_group_obj, unsigned int buffer_id, unsigned int length);
 

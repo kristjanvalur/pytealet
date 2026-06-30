@@ -103,7 +103,12 @@ class Ring:
         self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
     ) -> Completion: ...
     def submit_recv_multishot(
-        self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
+        self,
+        fd: int,
+        buffer_size: int = 16384,
+        buffer_count: int = 4,
+        user_data: object = None,
+        flags: int = 0,
     ) -> Completion: ...
     def submit_recv_multishot_zc(
         self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
