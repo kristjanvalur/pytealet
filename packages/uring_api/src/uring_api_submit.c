@@ -700,12 +700,12 @@ PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject 
 PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buffer_size", "buffer_count", "user_data", "flags", NULL};
     int fd;
-    unsigned int buffer_size;
-    unsigned int buffer_count;
+    unsigned int buffer_size = URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_SIZE;
+    unsigned int buffer_count = URING_API_RECV_MULTISHOT_DEFAULT_BUFFER_COUNT;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iII|OI", keywords, &fd, &buffer_size, &buffer_count, &user_data,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|IIOI", keywords, &fd, &buffer_size, &buffer_count, &user_data,
                                      &flags)) {
         return NULL;
     }

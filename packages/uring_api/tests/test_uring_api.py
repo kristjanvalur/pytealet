@@ -1144,6 +1144,32 @@ def test_ring_recv_multishot_buf_eof_returns_empty_bytes_when_available():
         writer.close()
 
 
+def test_ring_recv_multishot_accepts_default_buffer_args():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring() as ring:
+            try:
+                handle = ring.submit_recv_multishot(reader.fileno(), user_data="defaults")
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
+                raise
+
+            assert handle.user_data == "defaults"
+            ring.submit_cancel(handle)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                completion = ring.wait(0.0)
+                if completion is handle:
+                    break
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_ring_recv_multishot_completion_when_available():
     require_uring()
 
