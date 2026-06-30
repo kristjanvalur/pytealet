@@ -157,12 +157,39 @@ static void UringApiCompletion_dealloc(UringApiCompletion *self) {
 }
 
 static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit, void *arg) {
+    UringApiCompletionMsgState *msg_state;
+    UringApiCompletionViewState *view_state;
+    UringApiCompletionViewSockaddrState *view_sockaddr_state;
     PyObject *buf_group;
 
     buf_group = UringApiCompletion_get_buf_group(self);
     Py_VISIT(buf_group);
     Py_VISIT(self->user_data);
     Py_VISIT(self->result);
+
+    switch (UringApiCompletion_state_tag(self)) {
+    case URING_API_COMPLETION_STATE_VIEW:
+        view_state = (UringApiCompletionViewState *)self->state;
+        if (view_state->has_view) {
+            Py_VISIT(view_state->view.obj);
+        }
+        break;
+    case URING_API_COMPLETION_STATE_VIEW_SOCKADDR:
+        view_sockaddr_state = (UringApiCompletionViewSockaddrState *)self->state;
+        if (view_sockaddr_state->has_view) {
+            Py_VISIT(view_sockaddr_state->view.obj);
+        }
+        break;
+    case URING_API_COMPLETION_STATE_MSG:
+        msg_state = (UringApiCompletionMsgState *)self->state;
+        if (msg_state->has_view) {
+            Py_VISIT(msg_state->view.obj);
+        }
+        break;
+    default:
+        break;
+    }
+
     return 0;
 }
 
