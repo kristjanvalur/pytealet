@@ -813,6 +813,13 @@ class TestThreadedSelectorProactor:
         assert asyncio.run(run()) == b"hello"
 
 
+class _FakeBufGroup:
+    def __init__(self, ring: "_FakeUringRing", buffer_size: int, buffer_count: int) -> None:
+        self.ring = ring
+        self.buffer_size = buffer_size
+        self.buffer_count = buffer_count
+
+
 class _FakeUringRing:
     def __init__(self, entries: int, flags: int) -> None:
         self.entries = entries
@@ -831,7 +838,8 @@ class _FakeUringRing:
         self.completions: list[SimpleNamespace] = []
         self.accepted_peers: list[socket.socket] = []
         self.submitted_recv: list[tuple[int, object, object]] = []
-        self.submitted_recv_multishot: list[tuple[int, int, int, object]] = []
+        self.submitted_recv_multishot: list[tuple[int, _FakeBufGroup, object]] = []
+        self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
@@ -896,17 +904,23 @@ class _FakeUringRing:
         self._deliver(completion)
         return completion
 
+    def create_buf_group(self, buffer_size: int, buffer_count: int) -> _FakeBufGroup:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        buf_group = _FakeBufGroup(self, buffer_size, buffer_count)
+        self.buf_groups.append(buf_group)
+        return buf_group
+
     def submit_recv_multishot(
         self,
         fd: int,
-        buffer_size: int,
-        buffer_count: int,
+        buf_group: _FakeBufGroup,
         user_data: object = None,
         flags: int = 0,
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_recv_multishot.append((fd, buffer_size, buffer_count, user_data))
+        self.submitted_recv_multishot.append((fd, buf_group, user_data))
         completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT)
         self.pending_recv_multishot.append(completion)
         return completion
@@ -1786,6 +1800,27 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
+    def test_recv_many_uses_custom_buf_group_factory(self):
+        created: list[tuple[int, int]] = []
+
+        def factory(ring: _FakeUringRing) -> _FakeBufGroup:
+            created.append((8, 4))
+            return ring.create_buf_group(8, 4)
+
+        proactor = UringProactor(ring_factory=_FakeUringRing, buf_group_factory=factory)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            proactor.recv_many(reader, 5, lambda _result: None)
+            assert created == [(8, 4)]
+            submitted = proactor.ring.submitted_recv_multishot[0]
+            assert submitted[1].buffer_size == 8
+            assert submitted[1].buffer_count == 4
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_recv_many_uses_multishot_recv_and_finishes_on_eof(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -1796,7 +1831,9 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_recv_multishot[0]
             assert submitted[0] == reader.fileno()
-            assert submitted[1] == 5
+            assert submitted[1] is proactor._recv_many_buf_group
+            assert submitted[1].buffer_size == 16 * 1024
+            assert submitted[1].buffer_count == 256
 
             proactor.ring.complete_recv_multishot(b"hello")
             proactor.wait(proactor.get_time() + 1.0)

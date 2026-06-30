@@ -53,20 +53,27 @@ _ProgressCallback = Callable[[int], object]
 _Clock = Callable[[], float]
 _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
-_DEFAULT_URING_RECV_MANY_BUFFERS = 16
+_DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
+_DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 
 
 _UringRing: TypeAlias = uring_api.Ring
 _UringCompletion: TypeAlias = uring_api.Completion
+_UringBufGroup: TypeAlias = uring_api.BufGroup
 
 
 _UringRingFactory = Callable[[int, int], _UringRing]
+_UringBufGroupFactory = Callable[[_UringRing], _UringBufGroup]
 _UringSendSubmit = Callable[[int, Any, object], _UringCompletion]
 
 
 def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
     return uring_api.Ring(entries=entries, flags=flags)
+
+
+def _default_uring_buf_group_factory(ring: _UringRing) -> _UringBufGroup:
+    return ring.create_buf_group(_DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT)
 
 
 def _probe_uring_send_zc(entries: int, flags: int) -> bool:
@@ -1034,6 +1041,7 @@ class UringProactor(ProactorBase):
         *,
         completion_callback: _CompletionCallback | None = None,
         ring_factory: _UringRingFactory | None = None,
+        buf_group_factory: _UringBufGroupFactory | None = None,
         completion_threads: int = _DEFAULT_URING_COMPLETION_THREADS,
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
     ) -> None:
@@ -1041,8 +1049,12 @@ class UringProactor(ProactorBase):
             raise ValueError("completion_threads must be at least 1")
         if ring_factory is None:
             ring_factory = _default_uring_ring_factory
+        if buf_group_factory is None:
+            buf_group_factory = _default_uring_buf_group_factory
         super().__init__(completion_callback=completion_callback)
         self._ring = ring_factory(entries, flags)
+        self._buf_group_factory = buf_group_factory
+        self._recv_many_buf_group: _UringBufGroup | None = None
         self._submit_send: _UringSendSubmit = self._ring.submit_send
         if _probe_uring_send_zc(entries, flags) and hasattr(self._ring, "submit_send_zc"):
             self._submit_send = self._ring.submit_send_zc
@@ -1076,6 +1088,13 @@ class UringProactor(ProactorBase):
         """Return the low-level `uring_api.Ring` object owned by this proactor."""
 
         return self._ring
+
+    def _get_recv_many_buf_group(self) -> _UringBufGroup:
+        buf_group = self._recv_many_buf_group
+        if buf_group is None:
+            buf_group = self._buf_group_factory(self._ring)
+            self._recv_many_buf_group = buf_group
+        return buf_group
 
     def _service_thread_main(self) -> None:
         self._apply_completion_thread_nice()
@@ -1403,7 +1422,7 @@ class UringProactor(ProactorBase):
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv_many)
         self._submit_uring_entry(
             entry,
-            lambda: self._ring.submit_recv_multishot(sock.fileno(), n, _DEFAULT_URING_RECV_MANY_BUFFERS, entry),
+            lambda: self._ring.submit_recv_multishot(sock.fileno(), self._get_recv_many_buf_group(), entry),
         )
         return operation
 
@@ -1416,6 +1435,12 @@ class UringProactor(ProactorBase):
         payload = completion.result
         if isinstance(payload, bytes):
             data = payload
+        elif isinstance(payload, uring_api.BufView):
+            view = memoryview(payload)
+            try:
+                data = bytes(view)
+            finally:
+                del view
         else:
             data = bytes(cast(Any, payload))
         operation._emit_result((completion.sequence, data))
