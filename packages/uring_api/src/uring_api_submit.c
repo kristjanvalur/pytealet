@@ -6,38 +6,6 @@
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 
-static int validate_fd(long fd) {
-    if (fd < 0 || fd > INT_MAX) {
-        PyErr_SetString(PyExc_ValueError, "fd must fit in a non-negative int");
-        return -1;
-    }
-    return 0;
-}
-
-static int validate_how(long how) {
-    if (how < 0 || how > INT_MAX) {
-        PyErr_SetString(PyExc_ValueError, "how must fit in a non-negative int");
-        return -1;
-    }
-    return 0;
-}
-
-static int validate_socket_domain_type_protocol(long domain, long type, long protocol) {
-    if (domain < 0 || domain > INT_MAX) {
-        PyErr_SetString(PyExc_ValueError, "domain must fit in a non-negative int");
-        return -1;
-    }
-    if (type < 0 || type > INT_MAX) {
-        PyErr_SetString(PyExc_ValueError, "type must fit in a non-negative int");
-        return -1;
-    }
-    if (protocol < 0 || protocol > INT_MAX) {
-        PyErr_SetString(PyExc_ValueError, "protocol must fit in a non-negative int");
-        return -1;
-    }
-    return 0;
-}
-
 PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
@@ -608,10 +576,6 @@ PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lw*|O", keywords, &fd, &view, &user_data)) {
         return NULL;
     }
-    if (validate_fd(fd) < 0) {
-        PyBuffer_Release(&view);
-        return NULL;
-    }
     return UringApiRing_submit_recv_impl(self, (int)fd, &view, user_data);
 }
 
@@ -625,13 +589,6 @@ PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args,
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lkk|OI", keywords, &fd, &buffer_size, &buffer_count, &user_data,
                                      &flags)) {
-        return NULL;
-    }
-    if (validate_fd(fd) < 0) {
-        return NULL;
-    }
-    if (buffer_size > UINT_MAX || buffer_count > UINT_MAX) {
-        PyErr_SetString(PyExc_ValueError, "buffer_size and buffer_count must fit in uint32_t");
         return NULL;
     }
     return UringApiRing_submit_recv_multishot_impl(self, (int)fd, (unsigned int)buffer_size, (unsigned int)buffer_count,
@@ -648,10 +605,6 @@ PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, PyObject 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|OI", keywords, &fd, &view, &user_data, &flags)) {
         return NULL;
     }
-    if (validate_fd(fd) < 0) {
-        PyBuffer_Release(&view);
-        return NULL;
-    }
     return UringApiRing_submit_send_impl(self, (int)fd, &view, flags, user_data);
 }
 
@@ -664,10 +617,6 @@ PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *args, PyObje
     PyObject *user_data = Py_None;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|OII", keywords, &fd, &view, &user_data, &flags, &zc_flags)) {
-        return NULL;
-    }
-    if (validate_fd(fd) < 0) {
-        PyBuffer_Release(&view);
         return NULL;
     }
     return UringApiRing_submit_send_zc_impl(self, (int)fd, &view, flags, zc_flags, user_data);
@@ -684,10 +633,6 @@ PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObjec
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*O|OI", keywords, &fd, &view, &address, &user_data, &flags)) {
         return NULL;
     }
-    if (validate_fd(fd) < 0) {
-        PyBuffer_Release(&view);
-        return NULL;
-    }
     return UringApiRing_submit_sendto_impl(self, (int)fd, &view, address, flags, user_data);
 }
 
@@ -698,10 +643,6 @@ PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args, PyObje
     PyObject *user_data = Py_None;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lw*|O", keywords, &fd, &view, &user_data)) {
-        return NULL;
-    }
-    if (validate_fd(fd) < 0) {
-        PyBuffer_Release(&view);
         return NULL;
     }
     return UringApiRing_submit_recvmsg_impl(self, (int)fd, &view, user_data);
@@ -718,10 +659,6 @@ PyObject *UringApiRing_submit_sendmsg(UringApiRing *self, PyObject *args, PyObje
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
         return NULL;
     }
-    if (validate_fd(fd) < 0) {
-        PyBuffer_Release(&view);
-        return NULL;
-    }
     return UringApiRing_submit_sendmsg_impl(self, (int)fd, &view, address, flags, user_data);
 }
 
@@ -736,10 +673,6 @@ PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *args, PyO
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ly*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
         return NULL;
     }
-    if (validate_fd(fd) < 0) {
-        PyBuffer_Release(&view);
-        return NULL;
-    }
     return UringApiRing_submit_sendmsg_zc_impl(self, (int)fd, &view, address, flags, user_data);
 }
 
@@ -750,9 +683,6 @@ PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObjec
     PyObject *user_data = Py_None;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|OI", keywords, &fd, &user_data, &flags)) {
-        return NULL;
-    }
-    if (validate_fd(fd) < 0) {
         return NULL;
     }
     return UringApiRing_submit_accept_impl(self, (int)fd, flags, user_data);
@@ -767,9 +697,6 @@ PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *arg
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|OI", keywords, &fd, &user_data, &flags)) {
         return NULL;
     }
-    if (validate_fd(fd) < 0) {
-        return NULL;
-    }
     return UringApiRing_submit_accept_multishot_impl(self, (int)fd, flags, user_data);
 }
 
@@ -780,9 +707,6 @@ PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObje
     PyObject *user_data = Py_None;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "lO|O", keywords, &fd, &address, &user_data)) {
-        return NULL;
-    }
-    if (validate_fd(fd) < 0) {
         return NULL;
     }
     return UringApiRing_submit_connect_impl(self, (int)fd, address, user_data);
@@ -807,12 +731,6 @@ PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObj
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ll|O", keywords, &fd, &how, &user_data)) {
         return NULL;
     }
-    if (validate_fd(fd) < 0) {
-        return NULL;
-    }
-    if (validate_how(how) < 0) {
-        return NULL;
-    }
     return UringApiRing_submit_shutdown_impl(self, (int)fd, (int)how, user_data);
 }
 
@@ -822,9 +740,6 @@ PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject
     PyObject *user_data = Py_None;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l|O", keywords, &fd, &user_data)) {
-        return NULL;
-    }
-    if (validate_fd(fd) < 0) {
         return NULL;
     }
     return UringApiRing_submit_close_impl(self, (int)fd, user_data);
@@ -839,9 +754,6 @@ PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, PyObjec
     PyObject *user_data = Py_None;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ll|lIO", keywords, &domain, &type, &protocol, &flags, &user_data)) {
-        return NULL;
-    }
-    if (validate_socket_domain_type_protocol(domain, type, protocol) < 0) {
         return NULL;
     }
     return UringApiRing_submit_socket_impl(self, (int)domain, (int)type, (int)protocol, flags, user_data);
