@@ -123,6 +123,7 @@ typedef enum {
     URING_API_PENDING_RECV_MULTISHOT = 13,
     URING_API_PENDING_SEND_ZC = 14,
     URING_API_PENDING_SENDMSG_ZC = 15,
+    URING_API_PENDING_RECV_MULTISHOT_ZC = 16,
 } UringApiPendingKind;
 
 typedef struct {
@@ -205,6 +206,7 @@ static PyObject *UringApiCapi_CompletionResult(PyObject *completion);
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
 
 static void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id);
+static PyObject *UringApiBufView_create(PyObject *buf_group_obj, unsigned int buffer_id, unsigned int length);
 
 #include "_uring_api_core.c"
 
@@ -238,6 +240,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a recv operation."},
     {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_VARARGS | METH_KEYWORDS,
      "Submit a multishot recv operation."},
+    {"submit_recv_multishot_zc", _PyCFunction_CAST(UringApiRing_submit_recv_multishot_zc), METH_VARARGS | METH_KEYWORDS,
+     "Submit a zero-copy multishot recv operation."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_VARARGS | METH_KEYWORDS,
      "Submit a send operation."},
     {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_VARARGS | METH_KEYWORDS,

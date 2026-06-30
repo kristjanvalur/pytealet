@@ -20,6 +20,7 @@ IORING_SEND_ZC_REPORT_USAGE: int
 IORING_NOTIF_USAGE_ZC_COPIED: int
 COMPLETION_KIND_RECV: int
 COMPLETION_KIND_RECV_MULTISHOT: int
+COMPLETION_KIND_RECV_MULTISHOT_ZC: int
 COMPLETION_KIND_SEND: int
 COMPLETION_KIND_SEND_ZC: int
 COMPLETION_KIND_WAKE: int
@@ -96,6 +97,9 @@ class Ring:
     def create_buf_view(self, buf_group: BufGroup, buffer_id: int, length: int) -> BufView: ...
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion: ...
     def submit_recv_multishot(
+        self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
+    ) -> Completion: ...
+    def submit_recv_multishot_zc(
         self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
     ) -> Completion: ...
     def submit_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion: ...

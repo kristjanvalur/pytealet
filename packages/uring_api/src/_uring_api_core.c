@@ -96,7 +96,8 @@ static int module_add_completion_kind_constants(PyObject *module) {
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SENDMSG", URING_API_PENDING_SENDMSG) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SOCKET", URING_API_PENDING_SOCKET) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_SEND_ZC", URING_API_PENDING_SEND_ZC) < 0 ||
-        PyModule_AddIntConstant(module, "COMPLETION_KIND_SENDMSG_ZC", URING_API_PENDING_SENDMSG_ZC) < 0) {
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_SENDMSG_ZC", URING_API_PENDING_SENDMSG_ZC) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_RECV_MULTISHOT_ZC", URING_API_PENDING_RECV_MULTISHOT_ZC) < 0) {
         return -1;
     }
     return 0;
@@ -460,6 +461,35 @@ static bool UringApiCompletion_should_clear_pending_state(UringApiCompletion *se
     return !(flags & IORING_CQE_F_MORE);
 }
 
+static PyObject *UringApiCompletion_recv_multishot_zc_payload(UringApiCompletion *self, int res, unsigned int flags) {
+    unsigned int buffer_id;
+
+    if (res < 0) {
+        Py_RETURN_NONE;
+    }
+    if (res == 0 && !(flags & IORING_CQE_F_BUFFER)) {
+        return PyBytes_FromStringAndSize("", 0);
+    }
+    if (!(flags & IORING_CQE_F_BUFFER)) {
+        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion did not select a buffer");
+        return NULL;
+    }
+    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion has no buffer group");
+        return NULL;
+    }
+    buffer_id = flags >> IORING_CQE_BUFFER_SHIFT;
+    if (buffer_id >= ((UringApiBufGroup *)self->buf_group)->buffer_count) {
+        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion selected an invalid buffer");
+        return NULL;
+    }
+    if ((unsigned int)res > ((UringApiBufGroup *)self->buf_group)->buffer_size) {
+        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion exceeds selected buffer size");
+        return NULL;
+    }
+    return UringApiBufView_create(self->buf_group, buffer_id, (unsigned int)res);
+}
+
 static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *self, int res, unsigned int flags) {
     UringApiBufGroup *buf_group;
     unsigned int buffer_id;
@@ -512,6 +542,8 @@ static int UringApiCompletion_complete(UringApiCompletion *self, int res, unsign
     }
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT) {
         payload = UringApiCompletion_recv_multishot_payload(self, res, flags);
+    } else if (self->kind == URING_API_PENDING_RECV_MULTISHOT_ZC) {
+        payload = UringApiCompletion_recv_multishot_zc_payload(self, res, flags);
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
                             self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET)) {
