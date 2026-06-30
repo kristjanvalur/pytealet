@@ -98,13 +98,13 @@ except ImportError as exc:
         buffer_size: int
         buffer_count: int
         group_id: int
-        ring: Ring
+        ring: Ring | None
 
     @dataclass(frozen=True)
     class BufView:
         length: int
         buffer_id: int
-        buf_group: BufGroup
+        buf_group: BufGroup | None
         recycled: bool
 
     class Ring:  # type: ignore[no-redef]

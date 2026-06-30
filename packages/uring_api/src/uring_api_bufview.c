@@ -237,14 +237,28 @@ PyObject *UringApiRing_create_buf_view(UringApiRing *self, PyObject *args, PyObj
         return NULL;
     }
     buf_group = (UringApiBufGroup *)buf_group_obj;
-    if (buf_group->ring != self) {
-        PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
-        return NULL;
-    }
+
+    PyObject *buf_view = NULL;
+    int failed = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (buf_group->ring != self) {
+        PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
+        failed = 1;
+    } else {
+        buf_view = UringApiBufView_create(buf_group_obj, (unsigned int)buffer_id, (unsigned int)length);
+        if (!buf_view) {
+            failed = 1;
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
         return NULL;
     }
-    return UringApiBufView_create(buf_group_obj, (unsigned int)buffer_id, (unsigned int)length);
+    return buf_view;
 }
 
 static PyMethodDef UringApiBufView_methods[] = {

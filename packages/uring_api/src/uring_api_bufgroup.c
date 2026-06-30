@@ -151,6 +151,13 @@ PyObject *UringApiRing_create_buf_group(UringApiRing *self, PyObject *args, PyOb
     return buf_group;
 }
 
+static PyObject *UringApiBufGroup_new(PyTypeObject *Py_UNUSED(type), PyObject *args, PyObject *kwargs) {
+    (void)args;
+    (void)kwargs;
+    PyErr_SetString(PyExc_TypeError, "BufGroup cannot be instantiated directly");
+    return NULL;
+}
+
 static PyGetSetDef UringApiBufGroup_getset[] = {
     {"buffer_size", (getter)UringApiBufGroup_get_buffer_size, NULL, NULL, NULL},
     {"buffer_count", (getter)UringApiBufGroup_get_buffer_count, NULL, NULL, NULL},
@@ -168,4 +175,5 @@ PyTypeObject UringApiBufGroup_Type = {
     .tp_clear = (inquiry)UringApiBufGroup_clear,
     .tp_doc = "io_uring provided-buffer group",
     .tp_getset = UringApiBufGroup_getset,
+    .tp_new = UringApiBufGroup_new,
 };

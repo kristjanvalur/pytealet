@@ -100,7 +100,17 @@ def test_public_capi_header_compiles_without_liburing_headers():
         object_path = Path(temp_dir) / "check_uring_api_capi.o"
         source_path.write_text(source, encoding="utf-8")
         subprocess.run(
-            [*cc_argv, "-c", str(source_path), "-o", str(object_path), "-I", str(include_dir), "-I", str(python_include)],
+            [
+                *cc_argv,
+                "-c",
+                str(source_path),
+                "-o",
+                str(object_path),
+                "-I",
+                str(include_dir),
+                "-I",
+                str(python_include),
+            ],
             check=True,
         )
 
@@ -897,6 +907,13 @@ def test_buf_view_buf_result_exposes_buf_group():
     finally:
         reader.close()
         writer.close()
+
+
+def test_buf_group_rejects_direct_instantiation():
+    require_uring()
+
+    with pytest.raises(TypeError, match="cannot be instantiated directly"):
+        uring_api.BufGroup()
 
 
 def test_buf_view_rejects_direct_instantiation():
