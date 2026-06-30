@@ -204,6 +204,7 @@ def test_probe_returns_structured_result():
     assert set(probe) == {
         "available",
         "IORING_ACCEPT_MULTISHOT",
+        "IORING_POLL_MULTISHOT",
         "IORING_RECV_MULTISHOT",
         "IORING_OP_SEND_ZC",
         "IORING_OP_SENDMSG_ZC",
@@ -211,6 +212,7 @@ def test_probe_returns_structured_result():
     }
     assert probe["available"] is True
     assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
+    assert isinstance(probe["IORING_POLL_MULTISHOT"], bool)
     assert isinstance(probe["IORING_RECV_MULTISHOT"], bool)
     assert isinstance(probe["IORING_OP_SEND_ZC"], bool)
     assert isinstance(probe["IORING_OP_SENDMSG_ZC"], bool)
@@ -1472,7 +1474,7 @@ def test_ring_poll_completion_when_available():
 
 
 def test_ring_poll_multishot_completion_when_available():
-    require_uring()
+    require_uring_capability("IORING_POLL_MULTISHOT")
 
     reader, writer = socket.socketpair()
     try:
@@ -1489,10 +1491,6 @@ def test_ring_poll_multishot_completion_when_available():
             assert second is not None
             assert handle.result is None
             for sequence, completion in ((0, first), (1, second)):
-                if completion.res < 0:
-                    errno_value = -completion.res
-                    if errno_value in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
-                        pytest.skip(f"poll multishot is not supported: errno {errno_value}")
                 assert completion is not handle
                 assert completion.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
                 assert completion.user_data is token
@@ -1507,7 +1505,7 @@ def test_ring_poll_multishot_completion_when_available():
 
 
 def test_ring_poll_remove_stops_multishot_poll_when_available():
-    require_uring()
+    require_uring_capability("IORING_POLL_MULTISHOT")
 
     reader, writer = socket.socketpair()
     try:
@@ -1518,10 +1516,6 @@ def test_ring_poll_remove_stops_multishot_poll_when_available():
             writer.send(b"a")
             first = ring.wait(1.0)
             assert first is not None
-            if first.res < 0:
-                errno_value = -first.res
-                if errno_value in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
-                    pytest.skip(f"poll multishot is not supported: errno {errno_value}")
             assert first is not handle
             assert first.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
 

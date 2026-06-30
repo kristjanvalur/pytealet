@@ -181,7 +181,7 @@ if not uring_api.is_available():
 `probe()` creates a tiny temporary ring and closes it right away. If that fails,
 it returns an empty dictionary. If it succeeds, the dictionary contains
 `"available": True` plus named optional capabilities such as
-`"IORING_ACCEPT_MULTISHOT"`, `"IORING_RECV_MULTISHOT"`, and
+`"IORING_ACCEPT_MULTISHOT"`, `"IORING_POLL_MULTISHOT"`, `"IORING_RECV_MULTISHOT"`, and
 `"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"`. Production code should
 still handle `OSError` when it creates the real ring because limits or sandbox
 policy may differ for larger settings.
@@ -238,6 +238,13 @@ than a kernel version check. It creates a private temporary ring and loopback
 listener, submits one multishot accept request, connects a local client, and
 checks whether the first accept completion keeps the request armed. If the build
 headers do not expose the helper flag, the capability simply reports `False`.
+
+The `IORING_POLL_MULTISHOT` capability uses a runtime operation probe. It creates
+a private socket pair, submits one multishot poll for `POLLIN`, writes one byte
+to the peer, and reports `True` only if the first completion reports readiness
+and keeps the request armed with `IORING_CQE_F_MORE`. Gate
+`submit_poll_multishot()` on this entry; one-shot `submit_poll()` and
+`submit_poll_remove()` are treated as baseline poll surface.
 
 The `IORING_RECV_MULTISHOT` capability is also checked with a runtime operation
 probe because it requires newer kernel support than multishot accept. It creates
