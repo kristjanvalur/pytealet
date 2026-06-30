@@ -110,7 +110,7 @@ def test_recvgen_buffer_pressure_converts_all_held_views():
 
 
 def test_recvgen_buffer_eof_stops_iteration():
-    def exercise() -> list[tuple[int, memoryview | bytes] | object]:
+    def exercise() -> list[tuple[int, memoryview | bytes] | None]:
         buffer = proactor_module._RecvGenBuffer()
         buffer.on_result((0, memoryview(b"done")))
         buffer.on_result((1, memoryview(b"")))
@@ -118,7 +118,7 @@ def test_recvgen_buffer_eof_stops_iteration():
 
     first, second = _exercise_recvgen_buffer(exercise)
     assert first == (0, memoryview(b"done"))
-    assert second is proactor_module._RECVGEN_EOF
+    assert second is None
 
 
 def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) -> list[Operation[Any]]:

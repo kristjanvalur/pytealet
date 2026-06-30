@@ -186,9 +186,6 @@ def _recvall_release_pending_views(
     pending_views.clear()
 
 
-_RECVGEN_EOF = object()
-
-
 class _RecvGenBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``recvgen``."""
 
@@ -264,7 +261,7 @@ class _RecvGenBuffer:
                 self._out_of_order[index] = bytes(chunk)
         self._pending_views.clear()
 
-    def take_next(self) -> tuple[int, memoryview | bytes] | object:
+    def take_next(self) -> tuple[int, memoryview | bytes] | None:
         while True:
             with self._lock:
                 if self._stream_error is not None:
@@ -272,7 +269,7 @@ class _RecvGenBuffer:
                 if self._ready:
                     return self._ready.popleft()
                 if self._stream_done:
-                    return _RECVGEN_EOF
+                    return None
             self._event.clear()
             self._event.swait()
 
@@ -415,9 +412,9 @@ class ProactorBase:
         try:
             while True:
                 item = buffer.take_next()
-                if item is _RECVGEN_EOF:
+                if item is None:
                     break
-                yield cast(tuple[int, memoryview | bytes], item)
+                yield item
         finally:
             buffer.close()
 
