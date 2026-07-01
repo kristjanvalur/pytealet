@@ -3166,9 +3166,13 @@ class TestUringProactor:
                 while not state["got_first_three"] and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.02)
                 assert state["got_first_three"]
-                assert len(ring.submitted_recv_multishot) == 2
+                # drain-all policy: resume runs on the next pull after internal queues empty
+                assert len(ring.submitted_recv_multishot) == 1
                 state["release"] = True
-                scheduler.sleep(0.05)
+                deadline = scheduler.proactor.get_time() + 1.0
+                while len(ring.submitted_recv_multishot) < 2 and scheduler.proactor.get_time() < deadline:
+                    scheduler.sleep(0.02)
+                assert len(ring.submitted_recv_multishot) == 2
                 ring.complete_recv_multishot(b"d", more=False, sequence=0)
 
             task = scheduler.spawn(receive_chunks)
