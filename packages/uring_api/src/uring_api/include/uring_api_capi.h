@@ -68,6 +68,10 @@ typedef struct UringApi_CAPI {
     int (*ring_submit_poll)(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
     int (*ring_submit_poll_multishot)(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
     int (*ring_submit_poll_remove)(PyObject *ring, PyObject *target_completion);
+    int (*ring_submit_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset, PyObject *user_data);
+    int (*ring_submit_write)(PyObject *ring, int fd, PyObject *data, unsigned long long offset, PyObject *user_data);
+    int (*ring_submit_openat)(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mode,
+                              PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     /*
      * Wait for one completion and return a new reference, or Py_None on timeout/no completion.
@@ -92,7 +96,7 @@ typedef struct UringApi_CAPI {
     PyObject *(*completion_result)(PyObject *completion);
     int (*completion_kind)(PyObject *completion, int *value);
 
-    void *reserved[5];
+    void *reserved[2];
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

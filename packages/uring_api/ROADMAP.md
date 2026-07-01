@@ -44,16 +44,26 @@ The wrapper currently exposes these socket-oriented operations:
 - `submit_poll_multishot()` / `IORING_OP_POLL_ADD` with `IORING_POLL_MULTISHOT`
 - `submit_poll_remove()` / `IORING_OP_POLL_REMOVE`, for multishot poll handles
 
+Basic regular-file I/O is also exposed:
+
+- `submit_read()` / `IORING_OP_READ`, with an explicit file offset
+- `submit_write()` / `IORING_OP_WRITE`, with an explicit file offset
+- `submit_openat()` / `IORING_OP_OPENAT`, returning a caller-owned fd; path
+  strings are copied into completion-owned heap state for the submission lifetime
+
 This is the complete basic Python-oriented socket surface for the low-level
 package. It covers ordinary byte I/O, message I/O, zero-copy send lifetimes,
 listener accept, multishot accept, caller-owned provided-buffer receive with
 leased `BufView` delivery (one-shot and multishot), connection setup,
-shutdown, fd creation/close, handle-based cancellation, and readiness polling
-for any pollable file descriptor.
+shutdown, fd creation/close, handle-based cancellation, readiness polling
+for any pollable file descriptor, positional file read/write, and async
+`openat` for caller-owned fds.
 
 The local liburing headers also expose helpers that are not part of this
-baseline. Fixed-buffer zero-copy sends still require a different ownership
-contract than caller-owned `BufGroup` rings and leased `BufView` results.
+baseline. `io_uring_prep_openat2()` and `io_uring_prep_statx()` cover
+extended open resolve flags and async metadata. Fixed-buffer zero-copy
+sends still require a different ownership contract than caller-owned `BufGroup`
+rings and leased `BufView` results.
 
 ## Kernel Support Notes
 

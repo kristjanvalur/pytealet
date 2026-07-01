@@ -7,6 +7,14 @@
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 
+static int validate_file_io_buffer_length(Py_buffer *view) {
+    if (view->len < 0 || (unsigned long long)view->len > UINT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "buffer length must fit in uint32_t");
+        return -1;
+    }
+    return 0;
+}
+
 PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
@@ -164,6 +172,128 @@ PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *v
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
+                                          PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    if (validate_file_io_buffer_length(view) < 0) {
+        PyBuffer_Release(view);
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending_view(URING_API_PENDING_READ, user_data, view);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_read(sqe, fd, view->buf, (unsigned)view->len, (__u64)offset);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
+                                           PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    if (validate_file_io_buffer_length(view) < 0) {
+        PyBuffer_Release(view);
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending_view(URING_API_PENDING_WRITE, user_data, view);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_write(sqe, fd, view->buf, (unsigned)view->len, (__u64)offset);
+            sqe_set_completion(self, sqe, completion);
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_openat_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mode,
+                                          PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    UringApiCompletionPathState *path_state;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    completion = UringApiCompletion_new_pending_path(URING_API_PENDING_OPENAT, user_data, path);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        path_state = UringApiCompletion_get_path_state((UringApiCompletion *)completion);
+        if (!path_state || !path_state->path) {
+            PyErr_SetString(PyExc_RuntimeError, "openat completion is missing path state");
+            failed = 1;
+        } else {
+            sqe = get_sqe(self);
+            if (!sqe) {
+                failed = 1;
+            } else {
+                io_uring_prep_openat(sqe, dfd, path_state->path, flags, mode);
+                sqe_set_completion(self, sqe, completion);
+                if (submit_one(self) < 0) {
+                    failed = 1;
+                }
             }
         }
     }
@@ -786,6 +916,56 @@ PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int ty
         return NULL;
     }
     return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_read(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buf", "offset", "user_data", NULL};
+    Py_buffer view;
+    int fd;
+    long long offset;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*L|O", keywords, &fd, &view, &offset, &user_data)) {
+        return NULL;
+    }
+    if (offset < 0) {
+        PyBuffer_Release(&view);
+        PyErr_SetString(PyExc_ValueError, "offset must be non-negative");
+        return NULL;
+    }
+    return UringApiRing_submit_read_impl(self, fd, &view, (unsigned long long)offset, user_data);
+}
+
+PyObject *UringApiRing_submit_write(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "data", "offset", "user_data", NULL};
+    Py_buffer view;
+    int fd;
+    long long offset;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*L|O", keywords, &fd, &view, &offset, &user_data)) {
+        return NULL;
+    }
+    if (offset < 0) {
+        PyBuffer_Release(&view);
+        PyErr_SetString(PyExc_ValueError, "offset must be non-negative");
+        return NULL;
+    }
+    return UringApiRing_submit_write_impl(self, fd, &view, (unsigned long long)offset, user_data);
+}
+
+PyObject *UringApiRing_submit_openat(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"path", "flags", "mode", "user_data", "dfd", NULL};
+    PyObject *path;
+    int flags;
+    unsigned int mode = 0;
+    int dfd = -100; /* AT_FDCWD */
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oi|IOi", keywords, &path, &flags, &mode, &user_data, &dfd)) {
+        return NULL;
+    }
+    return UringApiRing_submit_openat_impl(self, dfd, path, flags, mode, user_data);
 }
 
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {
