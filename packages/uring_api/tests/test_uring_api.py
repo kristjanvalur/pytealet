@@ -252,6 +252,99 @@ def test_ring_accepts_setup_flags_when_probe_accepts_them():
         assert ring.cq_entries > 0
 
 
+def _require_setup_flags(flags: int) -> None:
+    require_uring()
+    if not uring_api.probe(flags=flags):
+        pytest.skip("setup flags are not accepted")
+
+
+def test_single_issuer_allows_submit_and_wait_from_one_thread():
+    _require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
+            recv_buf = bytearray(8)
+            ring.submit_recv(reader.fileno(), recv_buf)
+            writer.send(b"x")
+            completion = ring.wait(1.0)
+            assert completion is not None
+            assert completion.res == 1
+            assert bytes(recv_buf[:1]) == b"x"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_single_issuer_rejects_cross_thread_submit():
+    _require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
+            ring.submit_recv(reader.fileno(), bytearray(8))
+            errors: list[RuntimeError] = []
+
+            def submit_from_other_thread():
+                try:
+                    ring.submit_recv(reader.fileno(), bytearray(8))
+                except RuntimeError as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=submit_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert len(errors) == 1
+            assert "IORING_SETUP_SINGLE_ISSUER" in str(errors[0])
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_defer_taskrun_allows_wait_from_one_thread():
+    flags = uring_api.IORING_SETUP_SINGLE_ISSUER | uring_api.IORING_SETUP_DEFER_TASKRUN
+    _require_setup_flags(flags)
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4, flags=flags) as ring:
+            recv_buf = bytearray(8)
+            ring.submit_recv(reader.fileno(), recv_buf)
+            writer.send(b"x")
+            completion = ring.wait(1.0)
+            assert completion is not None
+            assert completion.res == 1
+            assert bytes(recv_buf[:1]) == b"x"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_defer_taskrun_rejects_cross_thread_wait():
+    flags = uring_api.IORING_SETUP_SINGLE_ISSUER | uring_api.IORING_SETUP_DEFER_TASKRUN
+    _require_setup_flags(flags)
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4, flags=flags) as ring:
+            ring.submit_recv(reader.fileno(), bytearray(8))
+            assert ring.wait(0) is None
+            errors: list[RuntimeError] = []
+
+            def wait_from_other_thread():
+                try:
+                    ring.wait(0)
+                except RuntimeError as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=wait_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert len(errors) == 1
+            assert "IORING_SETUP_DEFER_TASKRUN" in str(errors[0])
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_completion_user_data_cycles_are_collectable():
     require_uring()
 

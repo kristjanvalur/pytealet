@@ -23,6 +23,8 @@ int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int default_e
                         unsigned int *flags);
 int parse_numeric_sockaddr(int fd, PyObject *address, struct sockaddr_storage *storage, socklen_t *addrlen);
 int ring_check_open(UringApiRing *self);
+int ring_check_submit_thread(UringApiRing *self);
+int ring_check_client_thread(UringApiRing *self);
 int submit_one(UringApiRing *self);
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread);
 void receive_wait_end(UringApiRing *self, bool from_delivery_thread);

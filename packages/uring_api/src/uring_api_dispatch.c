@@ -179,6 +179,9 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
     if (ring_check_open(self) < 0) {
         return NULL;
     }
+    if (ring_check_client_thread(self) < 0) {
+        return NULL;
+    }
     if (receive_wait_begin(self, from_delivery_thread) < 0) {
         return NULL;
     }
