@@ -599,10 +599,28 @@ PyObject *UringApiRing_submit_poll_multishot_impl(UringApiRing *self, int fd, un
     return Py_NewRef(completion);
 }
 
+static int poll_remove_target_is_valid(UringApiCompletion *target) {
+    if (target->kind != URING_API_PENDING_POLL && target->kind != URING_API_PENDING_POLL_MULTISHOT) {
+        PyErr_SetString(PyExc_ValueError,
+                        "poll_remove target must be a pending poll or poll_multishot completion handle");
+        return 0;
+    }
+    if (target->result != NULL) {
+        PyErr_SetString(PyExc_ValueError,
+                        "poll_remove target must be the original submit handle, not a delivered completion");
+        return 0;
+    }
+    return 1;
+}
+
 PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *target_completion) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
     int failed = 0;
+
+    if (!poll_remove_target_is_valid((UringApiCompletion *)target_completion)) {
+        return NULL;
+    }
 
     completion = UringApiCompletion_new_pending(URING_API_PENDING_POLL_REMOVE, target_completion);
     if (!completion) {

@@ -1603,6 +1603,41 @@ def test_ring_poll_multishot_completion_when_available():
         writer.close()
 
 
+def test_ring_poll_remove_rejects_wrong_completion_kind():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring() as ring:
+            recv_handle = ring.submit_recv(reader.fileno(), bytearray(1))
+            with pytest.raises(ValueError, match="poll or poll_multishot"):
+                ring.submit_poll_remove(recv_handle)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_poll_remove_rejects_delivered_poll_copy_when_available():
+    require_uring_capability("IORING_POLL_MULTISHOT")
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring() as ring:
+            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, {"operation": "poll-remove-invalid"})
+            writer.send(b"a")
+            delivered = ring.wait(1.0)
+            assert delivered is not None
+            assert delivered is not handle
+            assert delivered.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
+            with pytest.raises(ValueError, match="original submit handle"):
+                ring.submit_poll_remove(delivered)
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_ring_poll_remove_stops_multishot_poll_when_available():
     require_uring_capability("IORING_POLL_MULTISHOT")
 
