@@ -2011,6 +2011,8 @@ class UringProactor(ProactorBase):
     def poll(self, fd: int, mask: int) -> Operation[int]:
         """Submit a one-shot io_uring poll operation."""
 
+        # mask goes straight to io_uring; bad values show up as CQE errors. selector
+        # validates earlier because it has to map masks onto select() fd lists.
         operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_poll)
         self._submit_uring_entry(entry, lambda: self._ring.submit_poll(fd, mask, entry))
@@ -2034,6 +2036,7 @@ class UringProactor(ProactorBase):
         event. `callback` may run on any uring completion service thread.
         """
 
+        # mask handling matches poll(); no pre-validation on the uring path.
         operation = ContinuousOperation[int](
             kind="poll_many",
             fileobj=fd,
