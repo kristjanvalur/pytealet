@@ -1882,8 +1882,7 @@ class UringProactor(ProactorBase):
         operation._emit_result((conn, address))
         if operation.done():
             return operation
-        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=entry.resubmit))
-        self.break_wait()
+        self._queue_entry_resubmit(entry)
         return None
 
     def _deliver_uring_accept_many(
@@ -2000,13 +1999,13 @@ class UringProactor(ProactorBase):
             self._deactivate_uring_entry(entry)
             return operation
         view = entry.data
+        assert view is not None
         chunk = bytes(view[:res])
         operation._emit_result((index, memoryview(chunk)))
         entry.stream_sequence += 1
         if operation.done():
             return operation
-        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=entry.resubmit))
-        self.break_wait()
+        self._queue_entry_resubmit(entry)
         return None
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -2074,8 +2073,7 @@ class UringProactor(ProactorBase):
         operation._emit_result(res)
         if operation.done():
             return operation
-        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=entry.resubmit))
-        self.break_wait()
+        self._queue_entry_resubmit(entry)
         return None
 
     def _deliver_uring_poll_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
@@ -2104,8 +2102,7 @@ class UringProactor(ProactorBase):
                     entry.multishot_leg.nonterminal_seen = 0
                     entry.multishot_leg.pending_final = None
                 operation._emit_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
-                self._deferred_submissions.append(_UringSubmission(entry=entry, submit=entry.resubmit))
-                self.break_wait()
+                self._queue_entry_resubmit(entry)
                 return None
             operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
@@ -2157,6 +2154,12 @@ class UringProactor(ProactorBase):
         self._retry_deferred_submissions()
         if completed_operation is not None:
             self._notify_completed()
+
+    def _queue_entry_resubmit(self, entry: _UringEntry) -> None:
+        submit = entry.resubmit
+        assert submit is not None
+        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
+        self.break_wait()
 
     def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
         self._pending_tokens.append(None)
