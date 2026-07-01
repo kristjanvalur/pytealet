@@ -64,8 +64,15 @@ chunk, where `index` is the ordinal position in the receive stream and `data`
 is a read-only `memoryview` into the received bytes. EOF emits one final empty
 view before the operation completes. Chunk sizes are backend-defined:
 `UringProactor` uses the shared `BufGroup` slot size (16 KiB by default) and
-`SelectorProactor` reads up to 8 KiB per `recv()` call. When the shared
-provided-buffer pool is exhausted on `UringProactor`, the callback also receives
+`SelectorProactor` reads up to 8 KiB per `recv()` call. Each `UringProactor`
+instance lazily creates one `BufGroup` (16 KiB × 256 buffers by default) shared
+by every `recv_many`, `recvall`, and `recvgen` on that proactor. Concurrent
+long-lived receives on different sockets therefore draw from the same
+provided-buffer pool: a slow consumer on one stream can trigger
+`RECV_MANY_BUFFER_PRESSURE` or stall another stream even when the second would
+otherwise fit. Use separate `UringProactor` instances when independent streams
+need isolated buffer pools. When the shared provided-buffer pool is exhausted on
+`UringProactor`, the callback also receives
 `(RECV_MANY_BUFFER_PRESSURE, empty_view)` so consumers can release held views;
 the proactor then resubmits the multishot receive and continues stream indices
 from the failed completion's `sequence`. Callbacks receive borrowed views:
@@ -92,6 +99,10 @@ cumulative number of bytes received.
 
 `recvgen(sock, *, allow_memview=False)` is a tealet-blocking generator that
 incrementally yields `(index, data)` chunks in stream-index order until EOF.
+Unlike `recv_many`, it does not yield a final `(index, empty_view)` EOF tuple;
+iteration ends when the stream completes (the generator raises `StopIteration` /
+returns from `sock_recvgen`). Use `recv_many` directly when you need the
+documented EOF sentinel and exact `recv_many` callback semantics.
 By default each `data` is owned `bytes`, copied when dequeued so borrowed
 kernel views are released promptly; queued views are also copied to `bytes` on
 `RECV_MANY_BUFFER_PRESSURE` so leased slots can return to the shared pool.

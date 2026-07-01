@@ -736,6 +736,7 @@ class _UringEntry:
         assert leg is not None
         with leg.lock:
             if self.operation.done():
+                leg.pending_final = None
                 return (None, None)
             is_termination = not bool(completion.flags & uring_api.IORING_CQE_F_MORE)
             if is_termination:
@@ -1775,6 +1776,7 @@ class UringProactor(ProactorBase):
                 entry.stream_sequence += completion.sequence
                 if entry.multishot_leg is not None:
                     entry.multishot_leg.nonterminal_seen = 0
+                    entry.multishot_leg.pending_final = None
                 operation._emit_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
                 resubmit = entry.resubmit
                 if resubmit is None:
