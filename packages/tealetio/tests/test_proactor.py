@@ -306,6 +306,36 @@ def test_recvgen_buffer_resumes_on_pressure_while_waiting(monkeypatch):
     assert called == [True]
 
 
+def test_recvgen_buffer_resumes_when_half_pool_is_free():
+    resumed: list[bool] = []
+
+    def resume() -> None:
+        resumed.append(True)
+
+    class _Pool:
+        buffer_count = 4
+        leased_count = 4
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> list[bool]:
+        pool = _Pool()
+        buffer = proactor_module._RecvGenBuffer(buf_group=pool, resume_min_free=0.5)
+        buffer.on_result((0, memoryview(b"a")))
+        buffer.on_result((1, memoryview(b"b")))
+        buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
+        assert buffer.take_next() == (0, b"a")
+        assert resumed == []
+        assert buffer.take_next() == (1, b"b")
+        buffer.on_result((2, memoryview(b"")))
+        assert buffer.take_next() is None
+        return resumed
+
+    assert _exercise_recvgen_buffer(exercise) == [True]
+
+
 def test_recvgen_buffer_defers_resume_until_all_queued_chunks_yielded():
     resumed: list[bool] = []
 
@@ -1339,6 +1369,11 @@ class _FakeBufGroup:
         self.ring = ring
         self.buffer_size = buffer_size
         self.buffer_count = buffer_count
+        self.leased_count = 0
+
+    def note_chunk_released(self) -> None:
+        if self.leased_count:
+            self.leased_count -= 1
 
 
 def _fake_multishot_recv_payload(data: bytes) -> memoryview:
@@ -1495,6 +1530,8 @@ class _FakeUringRing:
 
     def complete_recv_multishot_enobufs(self, *, sequence: int | None = None) -> None:
         pending = self.pending_recv_multishot[-1]
+        _, buf_group, _ = self.submitted_recv_multishot[-1]
+        buf_group.leased_count = buf_group.buffer_count
         if sequence is None:
             sequence = self.recv_multishot_sequence
             self.recv_multishot_sequence += 1
@@ -1511,9 +1548,12 @@ class _FakeUringRing:
 
     def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
         pending = self.pending_recv_multishot[-1]
+        _, buf_group, _ = self.submitted_recv_multishot[-1]
         if sequence is None:
             sequence = self.recv_multishot_sequence
             self.recv_multishot_sequence += 1
+        if data:
+            buf_group.leased_count += 1
         if not data:
             payload = None
             res = 0
@@ -3139,16 +3179,16 @@ class TestUringProactor:
         scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
-        state = {"got_first_three": False, "release": False}
+        state = {"got_first_two": False, "release": False}
         try:
             reader.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
                 seen: list[tuple[int, bytes]] = []
-                for index, chunk in scheduler.sock_recvgen(reader):
+                for index, chunk in scheduler.sock_recvgen(reader, buffer_count=4):
                     seen.append((index, chunk))
-                    if len(seen) == 3:
-                        state["got_first_three"] = True
+                    if len(seen) == 2:
+                        state["got_first_two"] = True
                         deadline = scheduler.proactor.get_time() + 1.0
                         while not state["release"] and scheduler.proactor.get_time() < deadline:
                             scheduler.sleep(0.02)
@@ -3163,10 +3203,9 @@ class TestUringProactor:
                 ring.complete_recv_multishot_enobufs(sequence=3)
                 assert len(ring.submitted_recv_multishot) == 1
                 deadline = scheduler.proactor.get_time() + 1.0
-                while not state["got_first_three"] and scheduler.proactor.get_time() < deadline:
+                while not state["got_first_two"] and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.02)
-                assert state["got_first_three"]
-                # drain-all policy: resume runs on the next pull after internal queues empty
+                assert state["got_first_two"]
                 assert len(ring.submitted_recv_multishot) == 1
                 state["release"] = True
                 deadline = scheduler.proactor.get_time() + 1.0
