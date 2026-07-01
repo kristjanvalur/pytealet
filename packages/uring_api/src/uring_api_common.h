@@ -105,23 +105,24 @@ typedef enum {
     URING_API_PENDING_RECV_BUF = URING_API_COMPLETION_KIND_RECV_BUF,
 } UringApiPendingKind;
 
+typedef enum {
+    URING_API_COMPLETION_STATE_NONE = 0,
+    URING_API_COMPLETION_STATE_VIEW,
+    URING_API_COMPLETION_STATE_BUF_GROUP,
+    URING_API_COMPLETION_STATE_SOCKADDR,
+    URING_API_COMPLETION_STATE_VIEW_SOCKADDR,
+    URING_API_COMPLETION_STATE_MSG,
+} UringApiCompletionStateKind;
+
 typedef struct {
     PyObject_HEAD UringApiPendingKind kind;
     PyObject *user_data;
     int res;
     unsigned int flags;
     PyObject *result;
-    PyObject *buffer;
-    PyObject *buf_group;
     unsigned long long sequence;
     bool multishot;
-    Py_buffer view;
-    struct iovec iov;
-    struct msghdr msg;
-    struct sockaddr_storage addr;
-    socklen_t addrlen;
-    bool has_view;
-    bool has_msghdr;
+    void *state;
 } UringApiCompletion;
 
 extern PyTypeObject UringApiRing_Type;
