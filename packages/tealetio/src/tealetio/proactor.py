@@ -118,32 +118,12 @@ def _default_uring_buf_group_factory(ring: _UringRing) -> _UringBufGroup:
     return ring.create_buf_group(_DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT)
 
 
-def _probe_uring_send_zc(entries: int, flags: int) -> bool:
+def _uring_probe_capabilities(entries: int, flags: int) -> dict[str, bool]:
     try:
-        return uring_api.probe(entries=entries, flags=flags).get("IORING_OP_SEND_ZC", False)
+        probe = uring_api.probe(entries=entries, flags=flags)
     except (OSError, RuntimeError, NotImplementedError):
-        return False
-
-
-def _probe_uring_poll_multishot(entries: int, flags: int) -> bool:
-    try:
-        return uring_api.probe(entries=entries, flags=flags).get("IORING_POLL_MULTISHOT", False)
-    except (OSError, RuntimeError, NotImplementedError):
-        return False
-
-
-def _probe_uring_accept_multishot(entries: int, flags: int) -> bool:
-    try:
-        return uring_api.probe(entries=entries, flags=flags).get("IORING_ACCEPT_MULTISHOT", False)
-    except (OSError, RuntimeError, NotImplementedError):
-        return False
-
-
-def _probe_uring_recv_multishot(entries: int, flags: int) -> bool:
-    try:
-        return uring_api.probe(entries=entries, flags=flags).get("IORING_RECV_MULTISHOT", False)
-    except (OSError, RuntimeError, NotImplementedError):
-        return False
+        return {}
+    return {key: bool(value) for key, value in probe.items()}
 
 
 def _poll_mask_to_selector_events(mask: int) -> int:
@@ -1542,15 +1522,13 @@ class UringProactor(ProactorBase):
         self._ring = ring_factory(entries, flags)
         self._buf_group_factory = buf_group_factory
         self._recv_many_buf_group: _UringBufGroup | None = None
+        self._capabilities = _uring_probe_capabilities(entries, flags)
         self._submit_send: _UringSendSubmit = self._ring.submit_send
-        if _probe_uring_send_zc(entries, flags) and hasattr(self._ring, "submit_send_zc"):
+        if self._capabilities.get("IORING_OP_SEND_ZC", False) and hasattr(self._ring, "submit_send_zc"):
             self._submit_send = self._ring.submit_send_zc
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by resubmitting the matching one-shot opcode after
         # each completion (see the *_oneshot delivery handlers below).
-        self._poll_multishot_supported = _probe_uring_poll_multishot(entries, flags)
-        self._accept_multishot_supported = _probe_uring_accept_multishot(entries, flags)
-        self._recv_multishot_supported = _probe_uring_recv_multishot(entries, flags)
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
@@ -1581,6 +1559,15 @@ class UringProactor(ProactorBase):
         """Return the low-level `uring_api.Ring` object owned by this proactor."""
 
         return self._ring
+
+    @property
+    def capabilities(self) -> dict[str, bool]:
+        """Return the io_uring capability probe for this proactor's ring parameters.
+
+        Populated once at construction from ``uring_api.probe(entries=..., flags=...)``.
+        """
+
+        return dict(self._capabilities)
 
     def _get_recv_many_buf_group(self) -> _UringBufGroup:
         buf_group = self._recv_many_buf_group
@@ -1859,7 +1846,7 @@ class UringProactor(ProactorBase):
             proactor=self,
             result_callback=callback,
         )
-        if self._accept_multishot_supported:
+        if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
             # one multishot accept stays armed until F_MORE clears or we cancel.
             entry = _UringEntry(
                 operation=operation,
@@ -1971,7 +1958,7 @@ class UringProactor(ProactorBase):
             proactor=self,
             result_callback=callback,
         )
-        if self._recv_multishot_supported:
+        if self._capabilities.get("IORING_RECV_MULTISHOT", False):
             # provided-buffer multishot: leased BufViews, ENOBUFS resubmit path.
             entry = _UringEntry(
                 operation=operation,
@@ -2059,7 +2046,7 @@ class UringProactor(ProactorBase):
             proactor=self,
             result_callback=callback,
         )
-        if self._poll_multishot_supported:
+        if self._capabilities.get("IORING_POLL_MULTISHOT", False):
             # kernel keeps the poll armed; cancel via submit_poll_remove().
             entry = _UringEntry(
                 operation=operation,
@@ -2151,7 +2138,7 @@ class UringProactor(ProactorBase):
         if cancel_target is not None:
             # multishot poll registrations tear down via poll_remove; one-shot
             # fallbacks (poll/accept/recv *many) cancel the pending sqe instead.
-            if operation.kind == "poll_many" and self._poll_multishot_supported:
+            if operation.kind == "poll_many" and self._capabilities.get("IORING_POLL_MULTISHOT", False):
                 self._submit_poll_remove(cast(_UringCompletion, cancel_target))
             else:
                 self._submit_cancel(cast(_UringCompletion, cancel_target))

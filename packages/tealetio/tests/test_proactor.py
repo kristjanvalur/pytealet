@@ -270,9 +270,28 @@ def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) ->
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
+def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
+    capabilities = {
+        "available": True,
+        "IORING_ACCEPT_MULTISHOT": True,
+        "IORING_RECV_MULTISHOT": True,
+        "IORING_POLL_MULTISHOT": True,
+        "IORING_OP_SEND_ZC": True,
+    }
+    capabilities.update(overrides)
+    return capabilities
+
+
+def _patch_uring_capabilities(monkeypatch: pytest.MonkeyPatch, **overrides: bool) -> None:
+    monkeypatch.setattr(
+        proactor_module,
+        "_uring_probe_capabilities",
+        lambda entries, flags: _default_uring_capabilities(**overrides),
+    )
+
+
 def _force_uring_multishot_probes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(proactor_module, "_probe_uring_accept_multishot", lambda entries, flags: True)
-    monkeypatch.setattr(proactor_module, "_probe_uring_recv_multishot", lambda entries, flags: True)
+    _patch_uring_capabilities(monkeypatch)
 
 
 class TestOperation:
@@ -1553,6 +1572,28 @@ class TestUringProactor:
             return
         _force_uring_multishot_probes(monkeypatch)
 
+    def test_capabilities_cached_from_single_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[int, int]] = []
+
+        def tracking_capabilities(entries: int, flags: int) -> dict[str, bool]:
+            calls.append((entries, flags))
+            return {
+                "available": True,
+                "IORING_RECV_MULTISHOT": True,
+                "IORING_OP_SEND_ZC": False,
+            }
+
+        monkeypatch.setattr(proactor_module, "_uring_probe_capabilities", tracking_capabilities)
+        proactor = UringProactor(ring_factory=_FakeUringRing, entries=16, flags=1 << 12)
+        try:
+            assert calls == [(16, 1 << 12)]
+            assert proactor.capabilities["available"] is True
+            assert proactor.capabilities["IORING_RECV_MULTISHOT"] is True
+            assert proactor.capabilities["IORING_OP_SEND_ZC"] is False
+            assert proactor.capabilities is not proactor._capabilities
+        finally:
+            proactor.close()
+
     def test_wait_without_pending_operations_waits_for_timeout(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
@@ -2101,7 +2142,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_sendall_uses_send_zc_when_probe_supports_it(self, monkeypatch):
-        monkeypatch.setattr(proactor_module, "_probe_uring_send_zc", lambda entries, flags: True)
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
         proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -2123,7 +2164,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_sendall_uses_send_when_probe_lacks_send_zc(self, monkeypatch):
-        monkeypatch.setattr(proactor_module, "_probe_uring_send_zc", lambda entries, flags: False)
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -2254,7 +2295,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_poll_many_uses_multishot_poll(self, monkeypatch):
-        monkeypatch.setattr(proactor_module, "_probe_uring_poll_multishot", lambda entries, flags: True)
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         seen: list[int] = []
@@ -2273,7 +2314,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_poll_many_cancel_uses_poll_remove(self, monkeypatch):
-        monkeypatch.setattr(proactor_module, "_probe_uring_poll_multishot", lambda entries, flags: True)
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -2290,7 +2331,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_poll_many_falls_back_to_oneshot_poll_and_resubmits(self, monkeypatch):
-        monkeypatch.setattr(proactor_module, "_probe_uring_poll_multishot", lambda entries, flags: False)
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         seen: list[int] = []
@@ -2312,7 +2353,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_poll_many_cancel_uses_cancel_in_oneshot_fallback(self, monkeypatch):
-        monkeypatch.setattr(proactor_module, "_probe_uring_poll_multishot", lambda entries, flags: False)
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -2346,7 +2387,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_accept_many_falls_back_to_oneshot_accept_and_resubmits(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(proactor_module, "_probe_uring_accept_multishot", lambda entries, flags: False)
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
         accepted: list[tuple[socket.socket, Any]] = []
@@ -2415,7 +2456,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_recv_many_falls_back_to_oneshot_recv_and_finishes_on_eof(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(proactor_module, "_probe_uring_recv_multishot", lambda entries, flags: False)
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         seen: list[tuple[int, memoryview]] = []

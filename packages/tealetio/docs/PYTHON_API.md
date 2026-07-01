@@ -95,6 +95,10 @@ When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
 falls back to repeated one-shot `submit_accept()` after each accepted
 connection.
 
+`UringProactor.capabilities` exposes the `uring_api.probe(entries=...,
+flags=...)` result captured once at construction, so callers and the proactor
+itself can gate behaviour without re-running runtime probes.
+
 Backends may run these result callbacks from any worker thread; code that needs
 thread affinity should marshal from the callback into the appropriate scheduler,
 event loop, or application thread.
