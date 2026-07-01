@@ -6,6 +6,7 @@ import os
 import select
 import selectors
 import socket
+import tempfile
 import threading
 import time
 from concurrent.futures import CancelledError
@@ -347,6 +348,20 @@ class TestSelectorProactor:
             proactor.set_clock(lambda: 42.0)
 
             assert proactor.get_time() == 42.0
+        finally:
+            proactor.close()
+
+    def test_file_operations_are_not_implemented(self):
+        proactor = SelectorProactor()
+        try:
+            with pytest.raises(NotImplementedError):
+                proactor.openat("/tmp/x", os.O_RDONLY)
+            with pytest.raises(NotImplementedError):
+                proactor.read(0, 1, 0)
+            with pytest.raises(NotImplementedError):
+                proactor.read_into(0, bytearray(1), 0)
+            with pytest.raises(NotImplementedError):
+                proactor.write(0, b"x", 0)
         finally:
             proactor.close()
 
@@ -1292,6 +1307,11 @@ class _FakeUringRing:
         self.submitted_poll: list[tuple[int, int, object]] = []
         self.submitted_poll_multishot: list[tuple[int, int, object]] = []
         self.submitted_poll_remove: list[object] = []
+        self.submitted_openat: list[tuple[str, int, int, object, int]] = []
+        self.submitted_read: list[tuple[int, object, int, object]] = []
+        self.submitted_write: list[tuple[int, bytes, int, object]] = []
+        self.open_fds: dict[int, bytes] = {}
+        self.next_open_fd = 200
         self.pending_recv: list[SimpleNamespace] = []
         self.pending_recv_multishot: list[SimpleNamespace] = []
         self.pending_accept_multishot: list[SimpleNamespace] = []
@@ -1607,6 +1627,72 @@ class _FakeUringRing:
         remove_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_POLL_REMOVE, res=0)
         self._deliver(remove_completion)
         return remove_completion
+
+    def submit_openat(
+        self,
+        path: str,
+        flags: int,
+        mode: int = 0,
+        user_data: object = None,
+        dfd: int = -100,
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_openat.append((path, flags, mode, user_data, dfd))
+        fd = self.next_open_fd
+        self.next_open_fd += 1
+        self.open_fds[fd] = b""
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_OPENAT,
+            res=fd,
+            result=fd,
+        )
+        self._deliver(completion)
+        return completion
+
+    def submit_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(memoryview(data))
+        self.submitted_write.append((fd, payload, offset, user_data))
+        existing = self.open_fds.get(fd, b"")
+        if offset == len(existing):
+            updated = existing + payload
+        else:
+            buf = bytearray(existing)
+            end = offset + len(payload)
+            if end > len(buf):
+                buf.extend(b"\x00" * (end - len(buf)))
+            buf[offset:end] = payload
+            updated = bytes(buf)
+        self.open_fds[fd] = updated
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_WRITE,
+            res=len(payload),
+            result=len(payload),
+        )
+        self._deliver(completion)
+        return completion
+
+    def submit_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_read.append((fd, buf, offset, user_data))
+        view = memoryview(buf)
+        payload = self.open_fds.get(fd, b"hello")[offset:]
+        nbytes = min(len(view), len(payload))
+        if nbytes:
+            view[:nbytes] = payload[:nbytes]
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_READ,
+            res=nbytes,
+            result=nbytes,
+        )
+        self._deliver(completion)
+        return completion
 
     def wait(self, timeout: float | None = None) -> SimpleNamespace | None:
         if not self.completions:
@@ -2046,6 +2132,61 @@ class TestUringProactor:
             reader.close()
             writer.close()
             proactor.close()
+
+    def test_openat_read_write_round_trip_from_ring_completion(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            open_operation = proactor.openat("/tmp/example.txt", os.O_RDWR | os.O_CREAT, 0o644)
+            _wait_for_uring(proactor, lambda: open_operation.done())
+            fd = open_operation.result()
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_openat[0][:3] == ("/tmp/example.txt", os.O_RDWR | os.O_CREAT, 0o644)
+
+            write_operation = proactor.write(fd, b"hello", 0)
+            _wait_for_uring(proactor, lambda: write_operation.done())
+            assert write_operation.result() == 5
+
+            read_operation = proactor.read(fd, 5, 0)
+            _wait_for_uring(proactor, lambda: read_operation.done())
+            assert read_operation.result() == b"hello"
+
+            buf = bytearray(5)
+            read_into_operation = proactor.read_into(fd, buf, 0)
+            _wait_for_uring(proactor, lambda: read_into_operation.done())
+            assert read_into_operation.result() == 5
+            assert bytes(buf) == b"hello"
+        finally:
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_openat_read_write_round_trip(self):
+        proactor = UringProactor()
+        fd: int | None = None
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "proactor-file.txt")
+            try:
+                open_operation = proactor.openat(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+                _wait_for_uring(proactor, lambda: open_operation.done())
+                fd = open_operation.result()
+                assert fd >= 0
+
+                write_operation = proactor.write(fd, b"hello", 0)
+                _wait_for_uring(proactor, lambda: write_operation.done())
+                assert write_operation.result() == 5
+
+                read_operation = proactor.read(fd, 5, 0)
+                _wait_for_uring(proactor, lambda: read_operation.done())
+                assert read_operation.result() == b"hello"
+
+                buf = bytearray(5)
+                read_into_operation = proactor.read_into(fd, buf, 0)
+                _wait_for_uring(proactor, lambda: read_into_operation.done())
+                assert read_into_operation.result() == 5
+                assert bytes(buf) == b"hello"
+            finally:
+                if fd is not None:
+                    os.close(fd)
+                proactor.close()
 
     def test_uring_entry_keeps_pending_completion_handle(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing)

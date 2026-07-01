@@ -62,6 +62,7 @@ _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 # ``recv_many`` result-callback index signalling provided-buffer pool pressure.
 RECV_MANY_BUFFER_PRESSURE = -1
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
+_DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
 
 T_Cargo = TypeVar("T_Cargo")
 
@@ -230,6 +231,14 @@ class Proactor(Protocol):
     ) -> ContinuousOperation[tuple[socket.socket, Any]]: ...
 
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]: ...
+
+    def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]: ...
+
+    def read(self, fd: int, n: int, offset: int) -> Operation[bytes]: ...
+
+    def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]: ...
+
+    def write(self, fd: int, data: Any, offset: int) -> Operation[int]: ...
 
     def recv_many(
         self,
@@ -453,6 +462,18 @@ class ProactorBase:
         sock: socket.socket,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]:
+        raise NotImplementedError
+
+    def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
+        raise NotImplementedError
+
+    def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
+        raise NotImplementedError
+
+    def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
+        raise NotImplementedError
+
+    def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
         raise NotImplementedError
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -1949,6 +1970,61 @@ class UringProactor(ProactorBase):
     def _complete_uring_connect(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
         operation = cast(Operation[None], entry.operation)
         operation._set_result(None)
+        return operation
+
+    def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
+        """Submit an io_uring openat operation and return the opened fd on success."""
+
+        operation = Operation[int](kind="openat", fileobj=path, proactor=self)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_openat)
+        self._submit_uring_entry(entry, lambda: self._ring.submit_openat(path, flags, mode, entry, dfd=dfd))
+        return operation
+
+    def _complete_uring_openat(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], entry.operation)
+        operation._set_result(completion.res)
+        return operation
+
+    def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
+        """Submit a positioned file read that completes with the bytes read."""
+
+        operation = Operation[bytes](kind="read", fileobj=fd, proactor=self)
+        data = memoryview(bytearray(n))
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_read, data=data)
+        self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, data, offset, entry))
+        return operation
+
+    def _complete_uring_read(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[bytes]:
+        assert entry.data is not None
+        operation = cast(Operation[bytes], entry.operation)
+        operation._set_result(entry.data[: completion.res].tobytes())
+        return operation
+
+    def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
+        """Submit a positioned file read into a caller-provided buffer."""
+
+        operation = Operation[int](kind="read_into", fileobj=fd, proactor=self)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_read_into, data=memoryview(buf))
+        self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, buf, offset, entry))
+        return operation
+
+    def _complete_uring_read_into(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], entry.operation)
+        operation._set_result(completion.res)
+        return operation
+
+    def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
+        """Submit a positioned file write and return the byte count written."""
+
+        operation = Operation[int](kind="write", fileobj=fd, proactor=self)
+        payload = memoryview(data)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_write, data=payload)
+        self._submit_uring_entry(entry, lambda: self._ring.submit_write(fd, payload, offset, entry))
+        return operation
+
+    def _complete_uring_write(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], entry.operation)
+        operation._set_result(completion.res)
         return operation
 
     def recv_many(
