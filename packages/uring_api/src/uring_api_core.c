@@ -283,19 +283,15 @@ static unsigned long long ring_current_thread_id(void) {
     return (unsigned long long)PyThread_get_thread_ident();
 }
 
-static int ring_check_owned_thread(UringApiRing *self, unsigned int setup_flag, unsigned long long *stored_thread_id,
-                                   const char *error_message) {
+static int ring_check_owner_thread(UringApiRing *self, const char *error_message) {
     unsigned long long current_thread_id;
     unsigned long long stored;
 
-    if (!(self->setup_flags & setup_flag)) {
-        return 0;
-    }
     current_thread_id = ring_current_thread_id();
-    stored = *stored_thread_id;
+    stored = self->owner_thread_id;
     if (stored == 0) {
         /* races on the first assignment are acceptable; later calls still catch misuse. */
-        *stored_thread_id = current_thread_id;
+        self->owner_thread_id = current_thread_id;
         return 0;
     }
     if (stored != current_thread_id) {
@@ -306,15 +302,24 @@ static int ring_check_owned_thread(UringApiRing *self, unsigned int setup_flag, 
 }
 
 int ring_check_submit_thread(UringApiRing *self) {
-    return ring_check_owned_thread(
-        self, IORING_SETUP_SINGLE_ISSUER, &self->submit_thread_id,
-        "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from one thread");
+    if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
+        return ring_check_owner_thread(
+            self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one "
+                  "thread");
+    }
+    if (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) {
+        return ring_check_owner_thread(
+            self, "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from one thread");
+    }
+    return 0;
 }
 
 int ring_check_client_thread(UringApiRing *self) {
-    return ring_check_owned_thread(
-        self, IORING_SETUP_DEFER_TASKRUN, &self->client_thread_id,
-        "ring was created with IORING_SETUP_DEFER_TASKRUN; completion processing must run on one thread");
+    if (!(self->setup_flags & IORING_SETUP_DEFER_TASKRUN)) {
+        return 0;
+    }
+    return ring_check_owner_thread(
+        self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one thread");
 }
 
 int submit_one(UringApiRing *self) {

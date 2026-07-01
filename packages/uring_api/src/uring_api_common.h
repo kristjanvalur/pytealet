@@ -77,8 +77,7 @@ struct UringApiRing {
     unsigned int receive_state;
     unsigned short next_buf_group;
     unsigned int setup_flags;
-    unsigned long long submit_thread_id;
-    unsigned long long client_thread_id;
+    unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
 };
