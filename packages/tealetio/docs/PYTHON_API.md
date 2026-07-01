@@ -68,10 +68,11 @@ sockets.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
-rejects empty or unsupported masks with `ValueError` because the mask must map
-onto `select()` read/write/exception fd lists, and it allows at most one
-pending operation per fd per direction (so `poll(POLLIN)` conflicts with an
-in-flight `recv_many` on the same socket).
+maps `POLLIN`, `POLLPRI`, `POLLOUT`, `POLLERR`, `POLLHUP`, and `POLLRDHUP`
+(when the platform defines it) onto `select()` read/write/exception fd lists;
+other `select.POLL*` bits are not supported and raise `ValueError`. It allows
+at most one pending operation per fd per direction (so `poll(POLLIN)` conflicts
+with an in-flight `recv_many` on the same socket).
 
 `UringProactor` forwards `mask` and `fd` unchanged to io_uring; invalid
 arguments surface as operation/CQE errors rather than pre-submit `ValueError`.

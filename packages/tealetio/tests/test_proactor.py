@@ -584,6 +584,44 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_poll_completes_once_with_bidirectional_mask(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            mask = select.POLLIN | select.POLLOUT
+            operation = proactor.poll(reader.fileno(), mask)
+            writer.send(b"a")
+            _wait_until_done(proactor, operation)
+            assert operation.done() is True
+            assert operation.result() & mask
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_emits_immediately_when_fd_already_ready(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.send(b"a")
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert seen == [select.POLLIN]
+            assert operation.done() is False
+            operation.cancel()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not hasattr(select, "POLLRDHUP"), reason="POLLRDHUP is not defined on this platform")
+    def test_poll_mask_accepts_pollrdhup(self):
+        assert proactor_module._poll_mask_to_selector_events(select.POLLRDHUP) == selectors.EVENT_READ
+
     def test_poll_many_does_not_double_emit_when_mask_maps_to_both_directions(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()

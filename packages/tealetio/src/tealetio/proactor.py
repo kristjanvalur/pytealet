@@ -118,9 +118,12 @@ def _default_uring_buf_group_factory(ring: _UringRing) -> _UringBufGroup:
     return ring.create_buf_group(_DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT)
 
 
+_POLL_READ_MASK = select.POLLIN | select.POLLPRI | getattr(select, "POLLRDHUP", 0)
+
+
 def _poll_mask_to_selector_events(mask: int) -> int:
     events = 0
-    if mask & (select.POLLIN | select.POLLPRI):
+    if mask & _POLL_READ_MASK:
         events |= selectors.EVENT_READ
     if mask & select.POLLOUT:
         events |= selectors.EVENT_WRITE
@@ -135,7 +138,7 @@ def _probe_poll_fd_now(fd: int, mask: int) -> int:
     read_fds: list[int] = []
     write_fds: list[int] = []
     exc_fds: list[int] = []
-    if mask & (select.POLLIN | select.POLLPRI):
+    if mask & _POLL_READ_MASK:
         read_fds.append(fd)
     if mask & select.POLLOUT:
         write_fds.append(fd)
@@ -146,7 +149,7 @@ def _probe_poll_fd_now(fd: int, mask: int) -> int:
     ready_r, ready_w, ready_x = select.select(read_fds, write_fds, exc_fds, 0)
     result = 0
     if ready_r:
-        result |= mask & (select.POLLIN | select.POLLPRI)
+        result |= mask & _POLL_READ_MASK
     if ready_w:
         result |= mask & select.POLLOUT
     if ready_x:
@@ -1199,8 +1202,34 @@ class SelectorProactor(ProactorBase):
                 self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
             self._reserve_fd_poll_operation(fd, selector_events, operation)
             operation._continuous_step = step
+            if self._try_step_continuous_operation(fd, operation, step):
+                return
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
+
+    def _try_step_continuous_operation(
+        self,
+        fd: int,
+        operation: ContinuousOperation[T],
+        step: Callable[[], _ContinuousStepResult],
+    ) -> bool:
+        """Run one continuous step synchronously. Return True if the operation finished."""
+
+        try:
+            step_result = step()
+        except (BlockingIOError, InterruptedError):
+            return False
+        except BaseException as exc:
+            self._remove_operation(operation)
+            operation._set_exception(exc)
+            return True
+        if step_result.done:
+            self._remove_operation(operation)
+            operation._set_result(None)
+            return True
+        if step_result.progressed:
+            self._update_selector_registration(fd)
+        return False
 
     def _reserve_fd_poll_operation(self, fd: int, selector_events: int, operation: Operation[Any]) -> None:
         entry = self._fd_operations.setdefault(fd, _FdEntry())
