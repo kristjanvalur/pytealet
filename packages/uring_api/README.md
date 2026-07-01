@@ -206,7 +206,10 @@ else:
 
 Some flags also impose application-level contracts. For example,
 `IORING_SETUP_SINGLE_ISSUER` means callers must submit SQEs from a single owning
-thread even on kernels that accept the flag.
+thread even on kernels that accept the flag. `IORING_SETUP_DEFER_TASKRUN`
+requires that same owning thread to reap completions too: `wait()` and
+`serve_completions()` must run there, not on a worker pool. Kernels expect
+`IORING_SETUP_DEFER_TASKRUN` together with `IORING_SETUP_SINGLE_ISSUER`.
 
 The compiled liburing version fields report the header version used to build the
 binary extension. This is useful in CI because Linux distribution images can
@@ -331,6 +334,10 @@ The intended baseline is simple:
 - alternatively, callers may start their own Python threads and have each one
     call `serve_completions()` to wait for completions and call the callback
     directly.
+
+Rings created with `IORING_SETUP_DEFER_TASKRUN` do not follow that worker-pool
+model. Submit, `wait()`, `serve_completions()`, and `break_wait()` must all run
+on the owning thread established by the first gated call.
 
 `break_wait()` prepares and submits an internal NOP. When the reaper consumes that
 completion, `wait()` returns `None` rather than a user completion.

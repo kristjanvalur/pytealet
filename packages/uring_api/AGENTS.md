@@ -137,10 +137,15 @@ not a permanent ring failure.
 - While `serve_completions()` workers are running, public `wait()` raises
   `RuntimeError`. Join worker threads and call `stop_serving()` before `close()`.
 - Callback exceptions are reported as unraisable and stop the serving group.
+- `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
+  `wait()`, `serve_completions()`, and `break_wait()` must run on that same
+  thread; worker-thread `serve_completions()` is rejected at entry.
 
 ### Setup flags
 
 `IORING_SETUP_SINGLE_ISSUER` and similar flags impose application contracts.
+Use `IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN` when deferring
+taskrun; the extension enforces the combined single-thread contract.
 Check `probe(flags=...)` before constructing a real `Ring(flags=...)`.
 `tealetio.UringProactor` does not default this flag; see
 `ROADMAP.md` (`UringProactor` submission threading and

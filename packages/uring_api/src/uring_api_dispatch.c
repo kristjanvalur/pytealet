@@ -298,6 +298,13 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
     bool failed = false;
     bool wait_failed = false;
 
+    if (ring_check_open(self) < 0) {
+        return NULL;
+    }
+    if (ring_check_client_thread(self) < 0) {
+        return NULL;
+    }
+
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");

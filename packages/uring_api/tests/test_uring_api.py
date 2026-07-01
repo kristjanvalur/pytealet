@@ -396,6 +396,79 @@ def test_single_issuer_allows_cross_thread_wait():
         writer.close()
 
 
+def test_single_issuer_allows_break_wait_from_owner_thread():
+    _require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
+            ring.submit_recv(reader.fileno(), bytearray(8))
+            results: list[object] = []
+            thread = threading.Thread(target=lambda: results.append(ring.wait(10.0)))
+            thread.start()
+            ring.break_wait()
+            thread.join(1.0)
+            if thread.is_alive():
+                ring.break_wait()
+                thread.join(1.0)
+            assert thread.is_alive() is False
+            assert results == [None]
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_single_issuer_rejects_cross_thread_break_wait():
+    _require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
+            ring.submit_recv(reader.fileno(), bytearray(8))
+            errors: list[RuntimeError] = []
+
+            def break_from_other_thread():
+                try:
+                    ring.break_wait()
+                except RuntimeError as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=break_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert len(errors) == 1
+            assert "IORING_SETUP_SINGLE_ISSUER" in str(errors[0])
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_defer_taskrun_rejects_cross_thread_serve_completions():
+    flags = uring_api.IORING_SETUP_SINGLE_ISSUER | uring_api.IORING_SETUP_DEFER_TASKRUN
+    _require_setup_flags(flags)
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4, flags=flags) as ring:
+            ring.callback = lambda completion: None
+            ring.submit_recv(reader.fileno(), bytearray(8))
+            errors: list[RuntimeError] = []
+
+            def serve_from_other_thread():
+                try:
+                    ring.serve_completions()
+                except RuntimeError as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=serve_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert len(errors) == 1
+            assert "IORING_SETUP_DEFER_TASKRUN" in str(errors[0])
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_completion_user_data_cycles_are_collectable():
     require_uring()
 
