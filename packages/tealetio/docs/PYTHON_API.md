@@ -59,15 +59,43 @@ use this fast path for socket operations that succeed right away.
 Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
 callback)` emits `(conn, address)` for each accepted connection and remains
 active until it is cancelled or the backend reports a terminal error.
+`poll(fd, mask)` waits for fd readiness and returns a one-shot `Operation[int]`.
+The result is the event bitmask currently set on the fd (`select.POLL*` bits
+among those requested in `mask`). `poll_many(fd, mask, callback)` emits that
+bitmask on each readiness event and remains active until cancelled or the
+backend reports a terminal error. Poll works on any file descriptor, not only
+sockets.
+
+`SelectorProactor` probes immediate readiness with `select.select()` and
+registers the fd with the internal selector when the fd is not ready yet. It
+maps `POLLIN`, `POLLPRI`, `POLLOUT`, `POLLERR`, `POLLHUP`, and `POLLRDHUP`
+(when the platform defines it) onto `select()` read/write/exception fd lists;
+other `select.POLL*` bits are not supported and raise `ValueError`. `POLLERR`
+and `POLLHUP` register for both read and write selector wakeups, and
+immediate probing also checks the read fd list because Linux often reports
+peer hangup as readability rather than an exception-set wakeup. It allows
+at most one pending operation per fd per direction (so `poll(POLLIN)` conflicts
+with an in-flight `recv_many` on the same socket).
+
+`UringProactor` forwards `mask` and `fd` unchanged to io_uring; invalid
+arguments surface as operation/CQE errors rather than pre-submit `ValueError`.
+Poll results pass through `completion.res` as the kernel reports them and may
+include bits outside the requested `mask`; the selector backend intersects
+results with the request. Poll and socket receive/send operations may coexist
+on the same fd — for example `poll_many(POLLIN)` alongside `recv_many()` on one
+socket. That overlap is uncommon and rarely problematic; the uring path
+deliberately does not enforce selector-style per-fd exclusivity.
+
 `recv_many(sock, callback)` emits `(index, data)` pairs for each received byte
 chunk, where `index` is the ordinal position in the receive stream and `data`
 is a read-only `memoryview` into the received bytes. EOF emits one final empty
 view before the operation completes. Chunk sizes are backend-defined:
-`UringProactor` uses the shared `BufGroup` slot size (16 KiB by default) and
-`SelectorProactor` reads up to 8 KiB per `recv()` call. Each `UringProactor`
-instance lazily creates one `BufGroup` (16 KiB × 256 buffers by default) shared
-by every `recv_many`, `recvall`, and `recvgen` on that proactor. Concurrent
-long-lived receives on different sockets therefore draw from the same
+`UringProactor` uses the shared `BufGroup` slot size (16 KiB by default) when
+multishot provided-buffer receive is available, and `SelectorProactor` reads up
+to 8 KiB per `recv()` call. Each `UringProactor` instance lazily creates one
+`BufGroup` (16 KiB × 256 buffers by default) shared by every `recv_many`,
+`recvall`, and `recvgen` on that proactor when multishot receive is in use.
+Concurrent long-lived receives on different sockets therefore draw from the same
 provided-buffer pool: a slow consumer on one stream can trigger
 `RECV_MANY_BUFFER_PRESSURE` or stall another stream even when the second would
 otherwise fit. Use separate `UringProactor` instances when independent streams
@@ -82,6 +110,26 @@ drop view references you no longer need so backend buffers can be recycled
 release and `memoryview` has no `close()` on 3.12+). On
 `UringProactor`, holding too many live views can pin the shared provided-buffer
 pool and stall further receives.
+
+When `IORING_RECV_MULTISHOT` is unavailable, `UringProactor.recv_many()` falls
+back to repeated one-shot `submit_recv()` calls. Chunks are independent
+`memoryview` objects over copied bytes (not leased `BufView` results), chunk
+size is up to 8 KiB, stream indices stay in-order, and
+`RECV_MANY_BUFFER_PRESSURE` is never emitted. `recvall` and `recvgen` inherit
+this degraded mode automatically.
+
+When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
+falls back to repeated one-shot `submit_accept()` after each accepted
+connection.
+
+When `IORING_POLL_MULTISHOT` is unavailable, `UringProactor.poll_many()` falls
+back to repeated one-shot `submit_poll()` after each readiness event.
+Multishot cancel uses `submit_poll_remove()`; the oneshot fallback cancels the
+pending SQE like other degraded `*many` paths.
+
+`UringProactor.capabilities` exposes the `uring_api.probe(entries=...,
+flags=...)` result captured once at construction, so callers and the proactor
+itself can gate behaviour without re-running runtime probes.
 
 Backends may run these result callbacks from any worker thread; code that needs
 thread affinity should marshal from the callback into the appropriate scheduler,

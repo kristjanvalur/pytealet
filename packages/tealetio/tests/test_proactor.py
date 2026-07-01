@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import select
 import selectors
 import socket
 import threading
@@ -269,6 +270,30 @@ def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) ->
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
+def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
+    capabilities = {
+        "available": True,
+        "IORING_ACCEPT_MULTISHOT": True,
+        "IORING_RECV_MULTISHOT": True,
+        "IORING_POLL_MULTISHOT": True,
+        "IORING_OP_SEND_ZC": True,
+    }
+    capabilities.update(overrides)
+    return capabilities
+
+
+def _patch_uring_capabilities(monkeypatch: pytest.MonkeyPatch, **overrides: bool) -> None:
+    monkeypatch.setattr(
+        uring_api,
+        "probe",
+        lambda *args, **kwargs: _default_uring_capabilities(**overrides),
+    )
+
+
+def _force_uring_multishot_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_uring_capabilities(monkeypatch)
+
+
 class TestOperation:
     def test_operation_result_requires_completion(self):
         operation: Operation[int] = Operation(kind="test")
@@ -487,6 +512,158 @@ class TestSelectorProactor:
             assert all(isinstance(data, memoryview) for _, data in seen)
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_completes_when_fd_becomes_readable(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll(reader.fileno(), select.POLLIN)
+            assert operation.done() is False
+
+            writer.send(b"x")
+            _wait_until_done(proactor, operation)
+
+            assert operation.result() & select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_emits_readiness_until_cancelled(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+
+            writer.send(b"a")
+            while not seen:
+                proactor.wait(proactor.get_time() + 1.0)
+            assert seen[-1] & select.POLLIN
+
+            operation.cancel()
+            assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_rejects_empty_mask(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            with pytest.raises(ValueError, match="poll mask"):
+                proactor.poll(reader.fileno(), 0)
+            with pytest.raises(ValueError, match="poll mask"):
+                proactor.poll_many(reader.fileno(), 0, lambda _mask: None)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_rejects_conflicting_recv_many_on_same_fd(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            recv_many = proactor.recv_many(reader, lambda _chunk: None)
+            with pytest.raises(RuntimeError, match="already pending"):
+                proactor.poll(reader.fileno(), select.POLLIN)
+            recv_many.cancel()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_completes_once_with_bidirectional_mask(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            mask = select.POLLIN | select.POLLOUT
+            operation = proactor.poll(reader.fileno(), mask)
+            writer.send(b"a")
+            _wait_until_done(proactor, operation)
+            assert operation.done() is True
+            assert operation.result() & mask
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_emits_immediately_when_fd_already_ready(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.send(b"a")
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert seen == [select.POLLIN]
+            assert operation.done() is False
+            operation.cancel()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not hasattr(select, "POLLRDHUP"), reason="POLLRDHUP is not defined on this platform")
+    def test_poll_mask_accepts_pollrdhup(self):
+        assert proactor_module._poll_mask_to_selector_events(select.POLLRDHUP) == selectors.EVENT_READ
+
+    def test_poll_detects_pollhup_after_peer_close(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.close()
+            operation = proactor.poll(reader.fileno(), select.POLLHUP)
+            _wait_until_done(proactor, operation)
+            assert operation.result() & select.POLLHUP
+        finally:
+            reader.close()
+            proactor.close()
+
+    def test_poll_detects_pollin_and_pollhup_after_peer_close(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.close()
+            mask = select.POLLIN | select.POLLHUP
+            operation = proactor.poll(reader.fileno(), mask)
+            _wait_until_done(proactor, operation)
+            assert operation.result() & mask
+        finally:
+            reader.close()
+            proactor.close()
+
+    def test_poll_many_does_not_double_emit_when_mask_maps_to_both_directions(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            mask = select.POLLIN | select.POLLOUT
+            operation = proactor.poll_many(reader.fileno(), mask, seen.append)
+            writer.send(b"a")
+            while not seen:
+                proactor.wait(proactor.get_time() + 1.0)
+            assert len(seen) == 1
+            assert seen[0] & mask
+            operation.cancel()
         finally:
             reader.close()
             writer.close()
@@ -1112,9 +1289,16 @@ class _FakeUringRing:
         self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
         self.submitted_cancel: list[object] = []
+        self.submitted_poll: list[tuple[int, int, object]] = []
+        self.submitted_poll_multishot: list[tuple[int, int, object]] = []
+        self.submitted_poll_remove: list[object] = []
         self.pending_recv: list[SimpleNamespace] = []
         self.pending_recv_multishot: list[SimpleNamespace] = []
         self.pending_accept_multishot: list[SimpleNamespace] = []
+        self.pending_poll_multishot: list[SimpleNamespace] = []
+        self.pending_poll_oneshot: list[SimpleNamespace] = []
+        self.pending_accept_oneshot: list[SimpleNamespace] = []
+        self.pending_recv_oneshot: list[SimpleNamespace] = []
         self.recv_multishot_sequence = 0
 
     def _completion(
@@ -1170,14 +1354,32 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         view = memoryview(buf)
         operation = getattr(user_data, "operation", None)
-        payload = b"world" if getattr(operation, "kind", None) == "recv_into" else b"hello"
+        kind = getattr(operation, "kind", None)
+        self.submitted_recv.append((fd, buf, user_data))
+        if kind == "recv_many":
+            completion = self._completion(user_data, res=0, result=0)
+            self.pending_recv_oneshot.append(completion)
+            return completion
+        payload = b"world" if kind == "recv_into" else b"hello"
         if len(view) >= len(payload):
             view[: len(payload)] = payload
-        self.submitted_recv.append((fd, buf, user_data))
-        completion = self._completion(user_data, res=5, result=5)
+        completion = self._completion(user_data, res=len(payload), result=len(payload))
         self.pending_recv.append(completion)
         self._deliver(completion)
         return completion
+
+    def complete_recv_oneshot(self, data: bytes) -> None:
+        completion = self.pending_recv_oneshot.pop(0)
+        entry = completion.user_data
+        view = memoryview(entry.data)
+        if data:
+            view[: len(data)] = data
+            completion.res = len(data)
+            completion.result = len(data)
+        else:
+            completion.res = 0
+            completion.result = 0
+        self._deliver(completion)
 
     def create_buf_group(self, buffer_size: int, buffer_count: int) -> _FakeBufGroup:
         if self.closed:
@@ -1247,7 +1449,9 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         self.submitted_send.append((fd, data, user_data))
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload))
+        completion = self._completion(
+            user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
+        )
         self._deliver(completion)
         return completion
 
@@ -1292,8 +1496,16 @@ class _FakeUringRing:
             res=conn.fileno(),
             result=(conn.detach(), "peer"),
         )
+        operation = getattr(user_data, "operation", None)
+        if getattr(operation, "kind", None) == "accept_many":
+            self.pending_accept_oneshot.append(completion)
+            return completion
         self._deliver(completion)
         return completion
+
+    def complete_accept_oneshot(self) -> None:
+        completion = self.pending_accept_oneshot.pop(0)
+        self._deliver(completion)
 
     def submit_accept_multishot(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:
@@ -1343,6 +1555,58 @@ class _FakeUringRing:
         cancel_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
         self._deliver(cancel_completion)
         return cancel_completion
+
+    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_poll.append((fd, mask, user_data))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL, res=mask, result=mask)
+        operation = getattr(user_data, "operation", None)
+        if getattr(operation, "kind", None) == "poll_many":
+            self.pending_poll_oneshot.append(completion)
+            return completion
+        self._deliver(completion)
+        return completion
+
+    def complete_poll_oneshot(self, res: int = select.POLLIN) -> None:
+        completion = self.pending_poll_oneshot.pop(0)
+        completion.res = res
+        completion.result = res
+        self._deliver(completion)
+
+    def submit_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_poll_multishot.append((fd, mask, user_data))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT, multishot=True)
+        self.pending_poll_multishot.append(completion)
+        return completion
+
+    def complete_poll_multishot(
+        self,
+        res: int = select.POLLIN,
+        *,
+        more: bool = True,
+        sequence: int = 0,
+    ) -> None:
+        pending = self.pending_poll_multishot[-1]
+        completion = self._completion(
+            pending.user_data,
+            kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
+            res=res,
+            flags=uring_api.IORING_CQE_F_MORE if more else 0,
+            sequence=sequence,
+            multishot=True,
+        )
+        self._deliver(completion)
+
+    def submit_poll_remove(self, completion: SimpleNamespace) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_poll_remove.append(completion)
+        remove_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_POLL_REMOVE, res=0)
+        self._deliver(remove_completion)
+        return remove_completion
 
     def wait(self, timeout: float | None = None) -> SimpleNamespace | None:
         if not self.completions:
@@ -1415,6 +1679,34 @@ class _BackpressuredUringRing(_DeferredUringRing):
 
 
 class TestUringProactor:
+    @pytest.fixture(autouse=True)
+    def _default_multishot_probes(self, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+        if "falls_back" in request.node.name:
+            return
+        _force_uring_multishot_probes(monkeypatch)
+
+    def test_capabilities_cached_from_single_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[int, int]] = []
+
+        def tracking_capabilities(*args: object, **kwargs: object) -> dict[str, bool]:
+            calls.append((kwargs.get("entries", args[0] if args else 8), kwargs.get("flags", args[1] if len(args) > 1 else 0)))
+            return {
+                "available": True,
+                "IORING_RECV_MULTISHOT": True,
+                "IORING_OP_SEND_ZC": False,
+            }
+
+        monkeypatch.setattr(uring_api, "probe", tracking_capabilities)
+        proactor = UringProactor(ring_factory=_FakeUringRing, entries=16, flags=1 << 12)
+        try:
+            assert calls == [(16, 1 << 12)]
+            assert proactor.capabilities["available"] is True
+            assert proactor.capabilities["IORING_RECV_MULTISHOT"] is True
+            assert proactor.capabilities["IORING_OP_SEND_ZC"] is False
+            assert proactor.capabilities is not proactor._capabilities
+        finally:
+            proactor.close()
+
     def test_wait_without_pending_operations_waits_for_timeout(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
@@ -1963,7 +2255,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_sendall_uses_send_zc_when_probe_supports_it(self, monkeypatch):
-        monkeypatch.setattr(proactor_module, "_probe_uring_send_zc", lambda entries, flags: True)
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
         proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -1985,7 +2277,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_sendall_uses_send_when_probe_lacks_send_zc(self, monkeypatch):
-        monkeypatch.setattr(proactor_module, "_probe_uring_send_zc", lambda entries, flags: False)
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -2098,6 +2390,160 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
+    def test_poll_uses_submit_poll(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll(reader.fileno(), select.POLLIN)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert len(proactor.ring.submitted_poll) == 1
+            assert proactor.ring.submitted_poll[0][:2] == (reader.fileno(), select.POLLIN)
+            assert operation.done() is True
+            assert operation.result() == select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_uses_multishot_poll(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_poll_multishot
+            proactor.ring.complete_poll_multishot(select.POLLIN, more=False)
+            _wait_for_uring(proactor, lambda: seen == [select.POLLIN] and operation.done())
+            assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_cancel_uses_poll_remove(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
+            handle = proactor.ring.pending_poll_multishot[-1]
+            operation.cancel()
+            _wait_for_uring(proactor, lambda: proactor.ring.submitted_poll_remove == [handle])
+            _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
+            assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_falls_back_to_oneshot_poll_and_resubmits(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert proactor.ring.submitted_poll_multishot == []
+            assert len(proactor.ring.submitted_poll) == 1
+            proactor.ring.complete_poll_oneshot(select.POLLIN)
+            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
+            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
+            assert operation.done() is False
+            operation.cancel()
+            assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_cancel_uses_cancel_in_oneshot_fallback(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
+            pending = proactor.ring.pending_poll_oneshot[-1]
+            operation.cancel()
+            _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
+            assert proactor.ring.submitted_poll_remove == []
+            assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_poll_completes_when_fd_becomes_readable(self):
+        proactor = UringProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll(reader.fileno(), select.POLLIN)
+            writer.send(b"x")
+            _wait_for_uring(proactor, operation.done)
+            assert operation.result() & select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_poll_many_emits_and_cancels_on_multishot_path(self):
+        if not uring_api.probe().get("IORING_POLL_MULTISHOT", False):
+            pytest.skip("multishot poll is unavailable")
+        proactor = UringProactor()
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            writer.send(b"x")
+            _wait_for_uring(proactor, lambda: len(seen) >= 1)
+            assert seen[-1] & select.POLLIN
+            operation.cancel()
+            _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
+            assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_accept_many_falls_back_to_oneshot_accept_and_resubmits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append)
+            assert proactor.ring.submitted_accept_multishot == []
+            assert len(proactor.ring.submitted_accept) == 1
+            proactor.ring.complete_accept_oneshot()
+            _wait_for_uring(proactor, lambda: len(accepted) == 1)
+            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_accept) == 2)
+            assert operation.done() is False
+            operation.cancel()
+            assert operation.cancelled() is True
+        finally:
+            for conn, _address in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
     def test_accept_many_uses_multishot_accept(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
@@ -2140,6 +2586,28 @@ class TestUringProactor:
             submitted = proactor.ring.submitted_recv_multishot[0]
             assert submitted[1].buffer_size == 8
             assert submitted[1].buffer_count == 4
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_falls_back_to_oneshot_recv_and_finishes_on_eof(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append)
+            assert proactor.ring.submitted_recv_multishot == []
+            assert len(proactor.ring.submitted_recv) == 1
+            proactor.ring.complete_recv_oneshot(b"hello")
+            _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
+            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_recv) == 2)
+            proactor.ring.complete_recv_oneshot(b"")
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
+            assert proactor._recv_many_buf_group is None
         finally:
             reader.close()
             writer.close()

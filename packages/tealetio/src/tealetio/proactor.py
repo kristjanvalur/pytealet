@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio as _asyncio
 import errno
 import os
+import select
 import selectors
 import socket
 import threading
@@ -117,11 +118,46 @@ def _default_uring_buf_group_factory(ring: _UringRing) -> _UringBufGroup:
     return ring.create_buf_group(_DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT)
 
 
-def _probe_uring_send_zc(entries: int, flags: int) -> bool:
-    try:
-        return uring_api.probe(entries=entries, flags=flags).get("IORING_OP_SEND_ZC", False)
-    except (OSError, RuntimeError, NotImplementedError):
-        return False
+_POLL_READ_MASK = select.POLLIN | select.POLLPRI | getattr(select, "POLLRDHUP", 0)
+_POLL_EX_MASK = select.POLLERR | select.POLLHUP
+
+
+def _poll_mask_to_selector_events(mask: int) -> int:
+    events = 0
+    if mask & _POLL_READ_MASK:
+        events |= selectors.EVENT_READ
+    if mask & select.POLLOUT:
+        events |= selectors.EVENT_WRITE
+    if mask & _POLL_EX_MASK:
+        events |= selectors.EVENT_READ | selectors.EVENT_WRITE
+    if events == 0:
+        raise ValueError("poll mask must request at least one supported event")
+    return events
+
+
+def _probe_poll_fd_now(fd: int, mask: int) -> int:
+    read_fds: list[int] = []
+    write_fds: list[int] = []
+    exc_fds: list[int] = []
+    if mask & (_POLL_READ_MASK | _POLL_EX_MASK):
+        read_fds.append(fd)
+    if mask & select.POLLOUT:
+        write_fds.append(fd)
+    if mask & _POLL_EX_MASK:
+        exc_fds.append(fd)
+    if not (read_fds or write_fds or exc_fds):
+        raise ValueError("poll mask must request at least one supported event")
+    ready_r, ready_w, ready_x = select.select(read_fds, write_fds, exc_fds, 0)
+    result = 0
+    if ready_r:
+        result |= mask & (_POLL_READ_MASK | _POLL_EX_MASK)
+    if ready_w:
+        result |= mask & select.POLLOUT
+    if ready_x:
+        result |= mask & _POLL_EX_MASK
+    if result:
+        return result
+    raise BlockingIOError(errno.EWOULDBLOCK, "fd is not ready")
 
 
 def _configure_accepted_socket(sock: socket.socket) -> socket.socket:
@@ -200,6 +236,15 @@ class Proactor(Protocol):
         sock: socket.socket,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]: ...
+
+    def poll(self, fd: int, mask: int) -> Operation[int]: ...
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]: ...
 
 
 ProactorFactory = Callable[[], Proactor]
@@ -408,6 +453,17 @@ class ProactorBase:
         sock: socket.socket,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]:
+        raise NotImplementedError
+
+    def poll(self, fd: int, mask: int) -> Operation[int]:
+        raise NotImplementedError
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
         raise NotImplementedError
 
     def recvall(self, sock: socket.socket, progress: _ProgressCallback | None = None) -> Operation[bytes]:
@@ -837,6 +893,11 @@ class SelectorProactor(ProactorBase):
                     self._drain_wakeup()
                     woke = True
                     continue
+                entry = self._fd_operations.get(fd)
+                if entry is not None and entry.reader is not None and entry.reader is entry.writer:
+                    if mask & (selectors.EVENT_READ | selectors.EVENT_WRITE):
+                        self._step_fd_operation(fd, selectors.EVENT_READ, completed)
+                    continue
                 if mask & selectors.EVENT_READ:
                     self._step_fd_operation(fd, selectors.EVENT_READ, completed)
                 if mask & selectors.EVENT_WRITE:
@@ -1063,6 +1124,121 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
         return operation
 
+    def poll(self, fd: int, mask: int) -> Operation[int]:
+        """Wait until an fd reports the requested poll events."""
+
+        operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
+
+        def attempt() -> int:
+            return _probe_poll_fd_now(fd, mask)
+
+        self._submit_fd_operation(fd, mask, operation, attempt)
+        return operation
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
+        """Emit poll event masks whenever the fd becomes ready.
+
+        `callback` may run on any backend worker thread.
+        """
+
+        operation = ContinuousOperation[int](
+            kind="poll_many",
+            fileobj=fd,
+            proactor=self,
+            result_callback=callback,
+        )
+
+        def step() -> _ContinuousStepResult:
+            try:
+                result = _probe_poll_fd_now(fd, mask)
+            except BlockingIOError:
+                return _ContinuousStepResult(progressed=False)
+            operation._emit_result(result)
+            return _ContinuousStepResult(progressed=True)
+
+        self._submit_fd_continuous_operation(fd, mask, operation, step)
+        return operation
+
+    def _submit_fd_operation(
+        self,
+        fd: int,
+        poll_mask: int,
+        operation: Operation[T],
+        attempt: Callable[[], T],
+    ) -> None:
+        with self._lock:
+            self._check_open()
+            self._check_fd(fd)
+            selector_events = _poll_mask_to_selector_events(poll_mask)
+            if selector_events & selectors.EVENT_READ:
+                self._check_fd_operation_available(fd, selectors.EVENT_READ)
+            if selector_events & selectors.EVENT_WRITE:
+                self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
+            if self._try_complete_operation(operation, attempt):
+                return
+            self._reserve_fd_poll_operation(fd, selector_events, operation)
+            operation._attempt = attempt
+            self._update_selector_registration(fd)
+        self._after_selector_registration_changed()
+
+    def _submit_fd_continuous_operation(
+        self,
+        fd: int,
+        poll_mask: int,
+        operation: ContinuousOperation[T],
+        step: Callable[[], _ContinuousStepResult],
+    ) -> None:
+        with self._lock:
+            self._check_open()
+            self._check_fd(fd)
+            selector_events = _poll_mask_to_selector_events(poll_mask)
+            if selector_events & selectors.EVENT_READ:
+                self._check_fd_operation_available(fd, selectors.EVENT_READ)
+            if selector_events & selectors.EVENT_WRITE:
+                self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
+            self._reserve_fd_poll_operation(fd, selector_events, operation)
+            operation._continuous_step = step
+            if self._try_step_continuous_operation(fd, operation, step):
+                return
+            self._update_selector_registration(fd)
+        self._after_selector_registration_changed()
+
+    def _try_step_continuous_operation(
+        self,
+        fd: int,
+        operation: ContinuousOperation[T],
+        step: Callable[[], _ContinuousStepResult],
+    ) -> bool:
+        """Run one continuous step synchronously. Return True if the operation finished."""
+
+        try:
+            step_result = step()
+        except (BlockingIOError, InterruptedError):
+            return False
+        except BaseException as exc:
+            self._remove_operation(operation)
+            operation._set_exception(exc)
+            return True
+        if step_result.done:
+            self._remove_operation(operation)
+            operation._set_result(None)
+            return True
+        if step_result.progressed:
+            self._update_selector_registration(fd)
+        return False
+
+    def _reserve_fd_poll_operation(self, fd: int, selector_events: int, operation: Operation[Any]) -> None:
+        entry = self._fd_operations.setdefault(fd, _FdEntry())
+        if selector_events & selectors.EVENT_READ:
+            entry.reader = operation
+        if selector_events & selectors.EVENT_WRITE:
+            entry.writer = operation
+
     def _submit_socket_operation(
         self,
         sock: socket.socket,
@@ -1247,6 +1423,10 @@ class SelectorProactor(ProactorBase):
         if sock.fileno() < 0:
             raise ValueError("socket is closed")
 
+    def _check_fd(self, fd: int) -> None:
+        if fd < 0:
+            raise ValueError("fd is closed")
+
 
 class ThreadedSelectorProactor(SelectorProactor):
     """Selector proactor that polls readiness from a worker thread."""
@@ -1367,9 +1547,16 @@ class UringProactor(ProactorBase):
         self._ring = ring_factory(entries, flags)
         self._buf_group_factory = buf_group_factory
         self._recv_many_buf_group: _UringBufGroup | None = None
+        try:
+            self._capabilities = uring_api.probe(entries=entries, flags=flags)
+        except (OSError, RuntimeError, NotImplementedError):
+            self._capabilities = {}
         self._submit_send: _UringSendSubmit = self._ring.submit_send
-        if _probe_uring_send_zc(entries, flags) and hasattr(self._ring, "submit_send_zc"):
+        if self._capabilities.get("IORING_OP_SEND_ZC", False) and hasattr(self._ring, "submit_send_zc"):
             self._submit_send = self._ring.submit_send_zc
+        # continuous *many ops prefer kernel multishot when probed; otherwise they
+        # emulate the stream by resubmitting the matching one-shot opcode after
+        # each completion (see the *_oneshot delivery handlers below).
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
@@ -1400,6 +1587,15 @@ class UringProactor(ProactorBase):
         """Return the low-level `uring_api.Ring` object owned by this proactor."""
 
         return self._ring
+
+    @property
+    def capabilities(self) -> dict[str, bool]:
+        """Return the io_uring capability probe for this proactor's ring parameters.
+
+        Populated once at construction from ``uring_api.probe(entries=..., flags=...)``.
+        """
+
+        return dict(self._capabilities)
 
     def _get_recv_many_buf_group(self) -> _UringBufGroup:
         buf_group = self._recv_many_buf_group
@@ -1665,9 +1861,11 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         callback: Callable[[tuple[socket.socket, Any]], object],
     ) -> ContinuousOperation[tuple[socket.socket, Any]]:
-        """Start a multishot accept operation.
+        """Start a continuous accept operation.
 
-        `callback` may run on any uring completion service thread.
+        Uses multishot accept when the runtime probe accepts it; otherwise
+        resubmits one-shot ``submit_accept()`` after each connection. `callback`
+        may run on any uring completion service thread.
         """
 
         operation = ContinuousOperation[tuple[socket.socket, Any]](
@@ -1676,16 +1874,49 @@ class UringProactor(ProactorBase):
             proactor=self,
             result_callback=callback,
         )
-        entry = _UringEntry(
-            operation=operation,
-            complete=UringProactor._deliver_uring_accept_many,
-            multishot_leg=_MultishotLegState(),
-        )
-        self._submit_uring_entry(
-            entry,
-            lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
-        )
+        if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
+            # one multishot accept stays armed until F_MORE clears or we cancel.
+            entry = _UringEntry(
+                operation=operation,
+                complete=UringProactor._deliver_uring_accept_many,
+                multishot_leg=_MultishotLegState(),
+            )
+            self._submit_uring_entry(
+                entry,
+                lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
+            )
+            return operation
+
+        # fallback: accept one connection, emit it, queue another submit_accept().
+        entry = _UringEntry(operation=operation, complete=UringProactor._deliver_uring_accept_many_oneshot)
+
+        def submit_accept() -> _UringCompletion:
+            return self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS)
+
+        entry.resubmit = submit_accept
+        self._submit_uring_entry(entry, submit_accept)
         return operation
+
+    def _deliver_uring_accept_many_oneshot(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+    ) -> Operation[Any] | None:
+        # one-shot accept completes per connection; re-arm via the deferred queue.
+        operation = cast(ContinuousOperation[tuple[socket.socket, Any]], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        fd, address = cast(tuple[int, Any], completion.result)
+        conn = socket.socket(fileno=fd)
+        _configure_accepted_socket(conn)
+        operation._emit_result((conn, address))
+        if operation.done():
+            return operation
+        self._queue_entry_resubmit(entry)
+        return None
 
     def _deliver_uring_accept_many(
         self,
@@ -1725,25 +1956,27 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]:
-        """Start a multishot receive operation that completes on EOF.
+        """Start a continuous receive operation that completes on EOF.
 
-        `callback` may run on any uring completion service thread. Each result
-        is an ordinal `(index, data)` pair with read-only `data` as a
-        `memoryview` into the leased kernel buffer. Callback delivery may
-        arrive out of order across completion threads; consumers that need
-        stream order must reorder by index themselves. EOF emits a final empty
-        view before completing the continuous operation. Chunk sizes come from
-        the shared ``BufGroup`` pool, not from a caller argument.
+        `callback` may run on any uring completion service thread.
 
-        Callbacks should treat each `data` view as borrowed: copy with
-        `bytes(data)` or drop the view reference before returning if they do not
-        need the payload anymore (`memoryview.release()` is optional for early
-        release). Holding many live views can pin provided buffers
-        and stall further receives on the shared `BufGroup`.
+        When multishot provided-buffer receive is available, each result is an
+        ordinal `(index, data)` pair with read-only `data` as a `memoryview`
+        into a leased kernel buffer. Callback delivery may arrive out of order
+        across completion threads; consumers that need stream order must
+        reorder by index themselves. Chunk sizes come from the shared
+        ``BufGroup`` pool. Holding live views can pin provided buffers and
+        stall further receives. When the pool is exhausted the backend emits
+        ``(RECV_MANY_BUFFER_PRESSURE, empty_view)`` and resubmits the multishot
+        receive.
 
-        When the provided-buffer pool is exhausted the backend emits
-        ``(RECV_MANY_BUFFER_PRESSURE, empty_view)`` so consumers can release
-        held views, then automatically resubmits the multishot receive.
+        When multishot receive is unavailable, the proactor falls back to
+        repeated one-shot ``submit_recv()`` into a reused buffer. Chunks are
+        independent ``memoryview`` objects over copied bytes (not leased
+        ``BufView`` results), chunk size is up to 8 KiB, indices stay in-order,
+        and ``RECV_MANY_BUFFER_PRESSURE`` is never emitted.
+
+        EOF always emits a final empty view before completing the operation.
         """
 
         operation = ContinuousOperation[tuple[int, memoryview]](
@@ -1752,17 +1985,144 @@ class UringProactor(ProactorBase):
             proactor=self,
             result_callback=callback,
         )
+        if self._capabilities.get("IORING_RECV_MULTISHOT", False):
+            # provided-buffer multishot: leased BufViews, ENOBUFS resubmit path.
+            entry = _UringEntry(
+                operation=operation,
+                complete=UringProactor._deliver_uring_recv_many,
+                multishot_leg=_MultishotLegState(),
+            )
+
+            def submit_recv_many() -> _UringCompletion:
+                return self._ring.submit_recv_multishot(sock.fileno(), self._get_recv_many_buf_group(), entry)
+
+            entry.resubmit = submit_recv_many
+            self._submit_uring_entry(entry, submit_recv_many)
+            return operation
+
+        # degraded fallback: copy each recv into an owned view and resubmit recv.
+        buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
         entry = _UringEntry(
             operation=operation,
-            complete=UringProactor._deliver_uring_recv_many,
-            multishot_leg=_MultishotLegState(),
+            complete=UringProactor._deliver_uring_recv_many_oneshot,
+            data=memoryview(buffer),
         )
 
-        def submit_recv_many() -> _UringCompletion:
-            return self._ring.submit_recv_multishot(sock.fileno(), self._get_recv_many_buf_group(), entry)
+        def submit_recv() -> _UringCompletion:
+            return self._ring.submit_recv(sock.fileno(), buffer, entry)
 
-        entry.resubmit = submit_recv_many
-        self._submit_uring_entry(entry, submit_recv_many)
+        entry.resubmit = submit_recv
+        self._submit_uring_entry(entry, submit_recv)
+        return operation
+
+    def _deliver_uring_recv_many_oneshot(
+        self, entry: _UringEntry, completion: _UringCompletion
+    ) -> Operation[Any] | None:
+        # not BufView-based: copy out of the reused recv buffer so resubmit is safe.
+        operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        index = entry.stream_sequence
+        if res == 0:
+            operation._emit_result((index, memoryview(b"")))
+            operation._set_result(None)
+            self._deactivate_uring_entry(entry)
+            return operation
+        view = entry.data
+        assert view is not None
+        chunk = bytes(view[:res])
+        operation._emit_result((index, memoryview(chunk)))
+        entry.stream_sequence += 1
+        if operation.done():
+            return operation
+        self._queue_entry_resubmit(entry)
+        return None
+
+    def poll(self, fd: int, mask: int) -> Operation[int]:
+        """Submit a one-shot io_uring poll operation."""
+
+        # mask and fd go straight to io_uring; bad values show up as CQE errors.
+        # selector validates masks (select() fd lists) and fd>=0; no per-fd exclusivity.
+        operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_poll)
+        self._submit_uring_entry(entry, lambda: self._ring.submit_poll(fd, mask, entry))
+        return operation
+
+    def _complete_uring_poll(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], entry.operation)
+        operation._set_result(completion.res)
+        return operation
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
+        """Start a continuous io_uring poll operation.
+
+        Uses multishot poll when the runtime probe accepts it; otherwise falls
+        back to resubmitting one-shot ``submit_poll()`` after each readiness
+        event. `callback` may run on any uring completion service thread.
+        """
+
+        # mask handling matches poll(); no pre-validation on the uring path.
+        operation = ContinuousOperation[int](
+            kind="poll_many",
+            fileobj=fd,
+            proactor=self,
+            result_callback=callback,
+        )
+        if self._capabilities.get("IORING_POLL_MULTISHOT", False):
+            # kernel keeps the poll armed; cancel via submit_poll_remove().
+            entry = _UringEntry(
+                operation=operation,
+                complete=UringProactor._deliver_uring_poll_many,
+                multishot_leg=_MultishotLegState(),
+            )
+            self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
+            return operation
+
+        # fallback: one-shot submit_poll per readiness event.
+        entry = _UringEntry(operation=operation, complete=UringProactor._deliver_uring_poll_many_oneshot)
+
+        def submit_poll() -> _UringCompletion:
+            return self._ring.submit_poll(fd, mask, entry)
+
+        entry.resubmit = submit_poll
+        self._submit_uring_entry(entry, submit_poll)
+        return operation
+
+    def _deliver_uring_poll_many_oneshot(
+        self, entry: _UringEntry, completion: _UringCompletion
+    ) -> Operation[Any] | None:
+        # emit the mask, then queue another submit_poll() unless cancelled.
+        operation = cast(ContinuousOperation[int], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        operation._emit_result(res)
+        if operation.done():
+            return operation
+        self._queue_entry_resubmit(entry)
+        return None
+
+    def _deliver_uring_poll_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+        operation = cast(ContinuousOperation[int], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        operation._emit_result(res)
+        if not completion.flags & uring_api.IORING_CQE_F_MORE:
+            operation._set_result(None)
+            self._deactivate_uring_entry(entry)
         return operation
 
     def _deliver_uring_recv_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
@@ -1778,12 +2138,7 @@ class UringProactor(ProactorBase):
                     entry.multishot_leg.nonterminal_seen = 0
                     entry.multishot_leg.pending_final = None
                 operation._emit_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
-                resubmit = entry.resubmit
-                if resubmit is None:
-                    operation._set_exception(RuntimeError("recv_many entry is missing its resubmit handler"))
-                    return operation
-                self._deferred_submissions.append(_UringSubmission(entry=entry, submit=resubmit))
-                self.break_wait()
+                self._queue_entry_resubmit(entry)
                 return None
             operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
@@ -1809,12 +2164,22 @@ class UringProactor(ProactorBase):
             return
         cancel_target = operation._cancel_target
         if cancel_target is not None:
-            self._submit_cancel(cast(_UringCompletion, cancel_target))
+            # multishot poll registrations tear down via poll_remove; one-shot
+            # fallbacks (poll/accept/recv *many) cancel the pending sqe instead.
+            if operation.kind == "poll_many" and self._capabilities.get("IORING_POLL_MULTISHOT", False):
+                self._submit_poll_remove(cast(_UringCompletion, cancel_target))
+            else:
+                self._submit_cancel(cast(_UringCompletion, cancel_target))
         cancelled = operation._set_cancelled()
         if cancelled:
             self.break_wait()
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
+        if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
+            target = cast(_UringCompletion, completion.user_data)
+            self._deactivate_uring_entry(cast(_UringEntry, target.user_data))
+            self._retry_deferred_submissions()
+            return
         if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
             self._retry_deferred_submissions()
             return
@@ -1830,6 +2195,12 @@ class UringProactor(ProactorBase):
         self._retry_deferred_submissions()
         if completed_operation is not None:
             self._notify_completed()
+
+    def _queue_entry_resubmit(self, entry: _UringEntry) -> None:
+        submit = entry.resubmit
+        assert submit is not None
+        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
+        self.break_wait()
 
     def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
         self._pending_tokens.append(None)
@@ -1854,6 +2225,16 @@ class UringProactor(ProactorBase):
         except uring_api.SubmissionQueueFull:
             self._deferred_submissions.append(
                 _UringSubmission(entry=None, submit=lambda: self._ring.submit_cancel(completion))
+            )
+            return False
+        return True
+
+    def _submit_poll_remove(self, completion: _UringCompletion) -> bool:
+        try:
+            self._ring.submit_poll_remove(completion)
+        except uring_api.SubmissionQueueFull:
+            self._deferred_submissions.append(
+                _UringSubmission(entry=None, submit=lambda: self._ring.submit_poll_remove(completion))
             )
             return False
         return True

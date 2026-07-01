@@ -216,17 +216,34 @@ Sibling packages should declare `tealet` compatibility ranges (for the current
 
 ## Coding Guidelines
 
-### `isinstance` in production code
+### Internal contracts in production code
 
-Use `isinstance` when polymorphism is expected — for example, branching across
-several concrete types that callers may pass in. Tests may use `isinstance` (or
-`assert isinstance`) to verify behaviour and API contracts.
+Trust invariants your own code establishes. Do not litter production paths with
+defensive checks whose only job is to confirm that internal state still matches
+an invariant you control.
 
-In production code, do not add `isinstance` checks solely to verify an internal
-contract you control. Trust the contract and let violations surface naturally
-through `AttributeError`, `TypeError`, or similar failures. Debug-only `assert`
-statements are fine when they document invariants rather than user-facing
-validation.
+**User-facing validation is different.** Check arguments, feature combinations,
+and resource state that callers can actually get wrong, and raise clear errors
+for those cases.
+
+**Do not add internal sanity checks** such as:
+
+- `isinstance` solely to verify an object you constructed or stored yourself
+- `if field is None: raise RuntimeError("... missing its ...")` for fields your
+  setup code is responsible for populating
+- Broad `try`/`except` wrappers whose main purpose is to re-raise a tidier
+  message for logic bugs
+
+Let internal contract violations surface as ordinary logic failures —
+`AttributeError`, `TypeError`, `KeyError`, and similar — so bugs stay loud and
+locate the broken assumption quickly. Tests may still use `isinstance`,
+`assert`, or explicit guard checks to document API contracts.
+
+Use `isinstance` when polymorphism is genuinely expected — for example,
+branching across several concrete types that callers may pass in.
+
+Debug-only `assert` statements are fine when they document invariants rather
+than acting as user-facing validation.
 
 ### Runtime safety first
 
