@@ -2012,7 +2012,8 @@ class UringProactor(ProactorBase):
         """Submit a one-shot io_uring poll operation."""
 
         # mask goes straight to io_uring; bad values show up as CQE errors. selector
-        # validates earlier because it has to map masks onto select() fd lists.
+        # validates earlier because it has to map masks onto select() fd lists. no
+        # per-fd exclusivity — poll may share an fd with recv/send SQEs.
         operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_poll)
         self._submit_uring_entry(entry, lambda: self._ring.submit_poll(fd, mask, entry))

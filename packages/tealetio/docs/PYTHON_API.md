@@ -71,10 +71,13 @@ registers the fd with the internal selector when the fd is not ready yet. It
 rejects empty or unsupported masks with `ValueError` because the mask must map
 onto `select()` read/write/exception fd lists, and it allows at most one
 pending operation per fd per direction (so `poll(POLLIN)` conflicts with an
-in-flight `recv_many` on the same socket). `UringProactor` forwards `mask`
-unchanged to io_uring; invalid masks surface as operation/CQE errors. It does
-not enforce the same per-fd exclusivity and may run poll and socket I/O SQEs on
-the same fd concurrently.
+in-flight `recv_many` on the same socket).
+
+`UringProactor` forwards `mask` unchanged to io_uring; invalid masks surface
+as operation/CQE errors. Poll and socket receive/send operations may coexist on
+the same fd — for example `poll_many(POLLIN)` alongside `recv_many()` on one
+socket. That overlap is uncommon and rarely problematic; the uring path
+deliberately does not enforce selector-style per-fd exclusivity.
 
 `recv_many(sock, callback)` emits `(index, data)` pairs for each received byte
 chunk, where `index` is the ordinal position in the receive stream and `data`
