@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import gc
+import select
 import selectors
 import socket
 import threading
@@ -1559,6 +1560,73 @@ class TestSchedulerAccessors:
             s.spawn(send)
             assert s.run_until_complete(task) == b"hello"
         finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_basic_scheduler_poll_requires_io_capable_scheduler(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        reader, _writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            with pytest.raises(NotImplementedError, match="poll requires"):
+                s.poll(reader.fileno(), select.POLLIN)
+        finally:
+            reader.close()
+            _writer.close()
+
+    def test_selector_scheduler_poll_completes_when_fd_becomes_readable(self):
+        s = SyncSelectorScheduler()
+        set_scheduler(s)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def wait_for_read() -> int:
+                return s.poll(reader.fileno(), select.POLLIN)
+
+            def send() -> None:
+                s.sleep(0.001)
+                writer.send(b"x")
+
+            task = s.spawn(wait_for_read)
+            s.spawn(send)
+
+            assert s.run_until_complete(task) & select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_selector_scheduler_poll_many_emits_until_cancelled(self):
+        s = SyncSelectorScheduler()
+        set_scheduler(s)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        operation = None
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = s.poll_many(reader.fileno(), select.POLLIN, seen.append)
+
+            def send() -> None:
+                s.sleep(0.001)
+                writer.send(b"x")
+
+            def wait_for_event() -> None:
+                while not seen:
+                    s.sleep(0.001)
+                operation.cancel()
+
+            s.spawn(send)
+            task = s.spawn(wait_for_event)
+            s.run_until_complete(task)
+            assert seen[0] & select.POLLIN
+        finally:
+            if operation is not None:
+                operation.cancel()
             reader.close()
             writer.close()
             s.close()
