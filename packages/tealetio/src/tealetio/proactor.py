@@ -387,6 +387,7 @@ class _RecvGenBuffer:
         total = self._buf_group.buffer_count
         if self._resume_min_free >= 1.0:
             return total
+        # always require at least one free slot (e.g. buffer_count=1, min_free=0.5 → 1 not 0)
         return max(1, math.ceil(total * self._resume_min_free))
 
     def _pool_has_room_for_resume_locked(self) -> bool:
@@ -645,9 +646,9 @@ class ProactorBase:
         sized by ``buffer_size`` and ``buffer_count`` (defaults: 16 KiB x 8).
         When the pool is full, multishot receive stays paused until
         ``BufGroup.leased_count`` drops enough to satisfy ``resume_min_free``
-        (default ``0.5``: at least half the pool must be free). ``resume()``
-        from the pressure message runs on the following ``take_next()`` once
-        that threshold is met.
+        (default ``0.5``: at least half the pool must be free, never less than
+        one slot). ``resume()`` from the pressure message runs on the following
+        ``take_next()`` once that threshold is met.
 
         With ``allow_memview=True``, chunks may be yielded as borrowed
         ``memoryview`` objects and ``(RECV_MANY_BUFFER_PRESSURE, None)`` may be

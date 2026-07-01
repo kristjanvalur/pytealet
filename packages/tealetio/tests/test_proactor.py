@@ -306,6 +306,33 @@ def test_recvgen_buffer_resumes_on_pressure_while_waiting(monkeypatch):
     assert called == [True]
 
 
+def test_recvgen_buffer_single_slot_pool_requires_one_free_before_resume():
+    resumed: list[bool] = []
+
+    def resume() -> None:
+        resumed.append(True)
+
+    class _Pool:
+        buffer_count = 1
+        leased_count = 1
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> list[bool]:
+        pool = _Pool()
+        buffer = proactor_module._RecvGenBuffer(buf_group=pool, resume_min_free=0.5)
+        buffer.on_result((0, memoryview(b"a")))
+        buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
+        assert buffer.take_next() == (0, b"a")
+        buffer.on_result((1, memoryview(b"")))
+        assert buffer.take_next() is None
+        return resumed
+
+    assert _exercise_recvgen_buffer(exercise) == [True]
+
+
 def test_recvgen_buffer_resumes_when_half_pool_is_free():
     resumed: list[bool] = []
 
