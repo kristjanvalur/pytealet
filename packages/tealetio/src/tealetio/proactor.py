@@ -1946,26 +1946,56 @@ class UringProactor(ProactorBase):
         mask: int,
         callback: Callable[[int], object],
     ) -> ContinuousOperation[int]:
-        """Start a multishot io_uring poll operation.
+        """Start a continuous io_uring poll operation.
 
-        `callback` may run on any uring completion service thread.
+        Uses multishot poll when the runtime probe accepts it; otherwise falls
+        back to resubmitting one-shot ``submit_poll()`` after each readiness
+        event. `callback` may run on any uring completion service thread.
         """
 
-        if not self._poll_multishot_supported:
-            raise NotImplementedError("io_uring multishot poll is not supported on this system")
         operation = ContinuousOperation[int](
             kind="poll_many",
             fileobj=fd,
             proactor=self,
             result_callback=callback,
         )
-        entry = _UringEntry(
-            operation=operation,
-            complete=UringProactor._deliver_uring_poll_many,
-            multishot_leg=_MultishotLegState(),
-        )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
+        if self._poll_multishot_supported:
+            entry = _UringEntry(
+                operation=operation,
+                complete=UringProactor._deliver_uring_poll_many,
+                multishot_leg=_MultishotLegState(),
+            )
+            self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
+            return operation
+
+        entry = _UringEntry(operation=operation, complete=UringProactor._deliver_uring_poll_many_oneshot)
+
+        def submit_poll() -> _UringCompletion:
+            return self._ring.submit_poll(fd, mask, entry)
+
+        entry.resubmit = submit_poll
+        self._submit_uring_entry(entry, submit_poll)
         return operation
+
+    def _deliver_uring_poll_many_oneshot(
+        self, entry: _UringEntry, completion: _UringCompletion
+    ) -> Operation[Any] | None:
+        operation = cast(ContinuousOperation[int], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        operation._emit_result(res)
+        if operation.done():
+            return operation
+        resubmit = entry.resubmit
+        if resubmit is None:
+            operation._set_exception(RuntimeError("poll_many entry is missing its resubmit handler"))
+            return operation
+        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=resubmit))
+        self.break_wait()
+        return None
 
     def _deliver_uring_poll_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[int], entry.operation)
@@ -2024,7 +2054,7 @@ class UringProactor(ProactorBase):
             return
         cancel_target = operation._cancel_target
         if cancel_target is not None:
-            if operation.kind == "poll_many":
+            if operation.kind == "poll_many" and self._poll_multishot_supported:
                 self._submit_poll_remove(cast(_UringCompletion, cancel_target))
             else:
                 self._submit_cancel(cast(_UringCompletion, cancel_target))

@@ -1159,6 +1159,7 @@ class _FakeUringRing:
         self.pending_recv_multishot: list[SimpleNamespace] = []
         self.pending_accept_multishot: list[SimpleNamespace] = []
         self.pending_poll_multishot: list[SimpleNamespace] = []
+        self.pending_poll_oneshot: list[SimpleNamespace] = []
         self.recv_multishot_sequence = 0
 
     def _completion(
@@ -1395,8 +1396,18 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         self.submitted_poll.append((fd, mask, user_data))
         completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL, res=mask, result=mask)
+        operation = getattr(user_data, "operation", None)
+        if getattr(operation, "kind", None) == "poll_many":
+            self.pending_poll_oneshot.append(completion)
+            return completion
         self._deliver(completion)
         return completion
+
+    def complete_poll_oneshot(self, res: int = select.POLLIN) -> None:
+        completion = self.pending_poll_oneshot.pop(0)
+        completion.res = res
+        completion.result = res
+        self._deliver(completion)
 
     def submit_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
@@ -2239,15 +2250,41 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_poll_many_raises_when_multishot_poll_unsupported(self, monkeypatch):
+    def test_poll_many_falls_back_to_oneshot_poll_and_resubmits(self, monkeypatch):
+        monkeypatch.setattr(proactor_module, "_probe_uring_poll_multishot", lambda entries, flags: False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert proactor.ring.submitted_poll_multishot == []
+            assert len(proactor.ring.submitted_poll) == 1
+            proactor.ring.complete_poll_oneshot(select.POLLIN)
+            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
+            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
+            assert operation.done() is False
+            operation.cancel()
+            assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_cancel_uses_cancel_in_oneshot_fallback(self, monkeypatch):
         monkeypatch.setattr(proactor_module, "_probe_uring_poll_multishot", lambda entries, flags: False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            with pytest.raises(NotImplementedError, match="multishot poll"):
-                proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
+            pending = proactor.ring.pending_poll_oneshot[-1]
+            operation.cancel()
+            _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
+            assert proactor.ring.submitted_poll_remove == []
+            assert operation.cancelled() is True
         finally:
             reader.close()
             writer.close()
