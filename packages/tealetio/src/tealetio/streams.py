@@ -1,4 +1,4 @@
-"""Tealet-native stream helpers with an asyncio-compatible async API."""
+"""Tealet-native stream helpers with optional asyncio-compatible facades."""
 
 from __future__ import annotations
 
@@ -19,21 +19,22 @@ __all__ = [
     "SocketTransport",
     "StreamReader",
     "StreamWriter",
-    "SyncStreamReader",
-    "SyncStreamWriter",
+    "AsyncStreamReader",
+    "AsyncStreamWriter",
     "open_connection",
     "open_streams",
-    "open_sync_streams",
+    "open_async_connection",
+    "open_async_streams",
     "run_coro",
 ]
 
 
 def run_coro(coro: Coroutine[Any, Any, T]) -> T:
-    """Drive a stream coroutine without an asyncio event loop.
+    """Drive an async-stream coroutine without an asyncio event loop.
 
-    Stream methods are ``async def`` for handler compatibility, but they block
-    through ``scheduler.wait_operation`` rather than yielding asyncio futures.
-    Unexpected yields surface as ``RuntimeError``.
+    ``AsyncStream*`` methods are ``async def`` for handler compatibility, but
+    they block through ``scheduler.wait_operation`` rather than yielding asyncio
+    futures. Unexpected yields surface as ``RuntimeError``.
     """
 
     def on_yield(value: object) -> object:
@@ -193,27 +194,7 @@ class _WriterCore:
 
 
 class StreamReader:
-    """Async-shaped stream reader backed by tealet-blocking socket I/O."""
-
-    def __init__(self, transport: SocketTransport, *, limit: int = _DEFAULT_LIMIT) -> None:
-        self._core = _ReaderCore(transport, limit=limit)
-
-    @property
-    def at_eof(self) -> bool:
-        return self._core.at_eof
-
-    async def read(self, n: int = -1) -> bytes:
-        return self._core.read(n)
-
-    async def readexactly(self, n: int) -> bytes:
-        return self._core.readexactly(n)
-
-    async def readline(self) -> bytes:
-        return self._core.readline()
-
-
-class SyncStreamReader:
-    """Synchronous stream reader for native tealet handlers."""
+    """Native tealet stream reader with synchronous methods."""
 
     def __init__(self, transport: SocketTransport, *, limit: int = _DEFAULT_LIMIT) -> None:
         self._core = _ReaderCore(transport, limit=limit)
@@ -232,40 +213,30 @@ class SyncStreamReader:
         return self._core.readline()
 
 
-class StreamWriter:
-    """Async-shaped stream writer backed by tealet-blocking socket I/O."""
+class AsyncStreamReader:
+    """Asyncio-shaped stream reader backed by tealet-blocking socket I/O."""
 
-    def __init__(self, transport: SocketTransport, reader: StreamReader | None = None) -> None:
-        self._core = _WriterCore(transport)
-        self._reader = reader
+    def __init__(self, transport: SocketTransport, *, limit: int = _DEFAULT_LIMIT) -> None:
+        self._core = _ReaderCore(transport, limit=limit)
 
     @property
-    def transport(self) -> SocketTransport:
-        return self._core._transport
+    def at_eof(self) -> bool:
+        return self._core.at_eof
 
-    def get_extra_info(self, name: str, default: Any = None) -> Any:
-        return self._core._transport.get_extra_info(name, default)
+    async def read(self, n: int = -1) -> bytes:
+        return self._core.read(n)
 
-    def write(self, data: bytes | bytearray | memoryview) -> None:
-        self._core.write(data)
+    async def readexactly(self, n: int) -> bytes:
+        return self._core.readexactly(n)
 
-    def close(self) -> None:
-        self._core.close()
-
-    def is_closing(self) -> bool:
-        return self._core.is_closing()
-
-    async def drain(self) -> None:
-        return None
-
-    async def wait_closed(self) -> None:
-        return None
+    async def readline(self) -> bytes:
+        return self._core.readline()
 
 
-class SyncStreamWriter:
-    """Synchronous stream writer for native tealet handlers."""
+class StreamWriter:
+    """Native tealet stream writer with synchronous methods."""
 
-    def __init__(self, transport: SocketTransport, reader: SyncStreamReader | None = None) -> None:
+    def __init__(self, transport: SocketTransport, reader: StreamReader | None = None) -> None:
         self._core = _WriterCore(transport)
         self._reader = reader
 
@@ -292,13 +263,43 @@ class SyncStreamWriter:
         return None
 
 
+class AsyncStreamWriter:
+    """Asyncio-shaped stream writer backed by tealet-blocking socket I/O."""
+
+    def __init__(self, transport: SocketTransport, reader: AsyncStreamReader | None = None) -> None:
+        self._core = _WriterCore(transport)
+        self._reader = reader
+
+    @property
+    def transport(self) -> SocketTransport:
+        return self._core._transport
+
+    def get_extra_info(self, name: str, default: Any = None) -> Any:
+        return self._core._transport.get_extra_info(name, default)
+
+    def write(self, data: bytes | bytearray | memoryview) -> None:
+        self._core.write(data)
+
+    def close(self) -> None:
+        self._core.close()
+
+    def is_closing(self) -> bool:
+        return self._core.is_closing()
+
+    async def drain(self) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
+
+
 def open_streams(
     scheduler: ProactorScheduler,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
 ) -> tuple[StreamReader, StreamWriter]:
-    """Wrap a connected non-blocking socket as async-default stream endpoints."""
+    """Wrap a connected non-blocking socket as native stream endpoints."""
 
     transport = SocketTransport(scheduler, sock)
     reader = StreamReader(transport, limit=limit)
@@ -306,17 +307,17 @@ def open_streams(
     return reader, writer
 
 
-def open_sync_streams(
+def open_async_streams(
     scheduler: ProactorScheduler,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
-) -> tuple[SyncStreamReader, SyncStreamWriter]:
-    """Wrap a connected non-blocking socket as synchronous stream endpoints."""
+) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
+    """Wrap a connected non-blocking socket as asyncio-shaped stream endpoints."""
 
     transport = SocketTransport(scheduler, sock)
-    reader = SyncStreamReader(transport, limit=limit)
-    writer = SyncStreamWriter(transport, reader)
+    reader = AsyncStreamReader(transport, limit=limit)
+    writer = AsyncStreamWriter(transport, reader)
     return reader, writer
 
 
@@ -329,7 +330,7 @@ def open_connection(
     proto: int = 0,
     limit: int = _DEFAULT_LIMIT,
 ) -> tuple[StreamReader, StreamWriter]:
-    """Connect to ``host:port`` and return async-default stream endpoints."""
+    """Connect to ``host:port`` and return native stream endpoints."""
 
     infos = socket.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM, proto=proto)
     last_error: OSError | None = None
@@ -340,6 +341,35 @@ def open_connection(
             sock.setblocking(False)
             scheduler.sock_connect(sock, sockaddr)
             return open_streams(scheduler, sock, limit=limit)
+        except OSError as exc:
+            last_error = exc
+            if sock is not None:
+                sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError("open_connection failed without address resolution results")
+
+
+def open_async_connection(
+    scheduler: ProactorScheduler,
+    host: str,
+    port: int,
+    *,
+    family: int = socket.AF_UNSPEC,
+    proto: int = 0,
+    limit: int = _DEFAULT_LIMIT,
+) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
+    """Connect to ``host:port`` and return asyncio-shaped stream endpoints."""
+
+    infos = socket.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM, proto=proto)
+    last_error: OSError | None = None
+    for family, socktype, proto, _canonname, sockaddr in infos:
+        sock: socket.socket | None = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            sock.setblocking(False)
+            scheduler.sock_connect(sock, sockaddr)
+            return open_async_streams(scheduler, sock, limit=limit)
         except OSError as exc:
             last_error = exc
             if sock is not None:

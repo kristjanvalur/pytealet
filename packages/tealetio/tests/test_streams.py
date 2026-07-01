@@ -8,10 +8,10 @@ import pytest
 from tealetio import set_scheduler
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.streams import (
-    SyncStreamReader,
-    SyncStreamWriter,
+    StreamReader,
+    StreamWriter,
+    open_async_streams,
     open_streams,
-    open_sync_streams,
     run_coro,
 )
 from test_proactor import _FakeUringRing
@@ -31,7 +31,7 @@ class TestStreamsPoC:
             writer.setblocking(True)
 
             async def handler() -> bytes:
-                stream_reader, _stream_writer = open_streams(scheduler, reader)
+                stream_reader, _stream_writer = open_async_streams(scheduler, reader)
                 return await stream_reader.readexactly(5)
 
             def deliver() -> None:
@@ -56,7 +56,7 @@ class TestStreamsPoC:
             server.setblocking(False)
 
             async def echo_handler() -> bytes:
-                stream_reader, stream_writer = open_streams(scheduler, server)
+                stream_reader, stream_writer = open_async_streams(scheduler, server)
                 line = await stream_reader.readline()
                 stream_writer.write(line.upper())
                 await stream_writer.drain()
@@ -76,7 +76,7 @@ class TestStreamsPoC:
             server.close()
             scheduler.close()
 
-    def test_sync_stream_read_and_write(self):
+    def test_native_stream_read_and_write(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
@@ -85,9 +85,9 @@ class TestStreamsPoC:
             writer.setblocking(True)
 
             def handler() -> bytes:
-                stream_reader, stream_writer = open_sync_streams(scheduler, reader)
-                assert isinstance(stream_reader, SyncStreamReader)
-                assert isinstance(stream_writer, SyncStreamWriter)
+                stream_reader, stream_writer = open_streams(scheduler, reader)
+                assert isinstance(stream_reader, StreamReader)
+                assert isinstance(stream_writer, StreamWriter)
                 payload = stream_reader.readexactly(5)
                 stream_writer.write(b"ack")
                 stream_writer.drain()
@@ -115,7 +115,7 @@ class TestStreamsPoC:
             reader.setblocking(False)
 
             async def handler() -> bytes:
-                stream_reader, _stream_writer = open_streams(scheduler, reader)
+                stream_reader, _stream_writer = open_async_streams(scheduler, reader)
                 return await stream_reader.readexactly(5)
 
             def deliver() -> None:
