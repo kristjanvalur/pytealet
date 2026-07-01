@@ -238,6 +238,12 @@ def _recvall_release_pending_views(
     pending_views.clear()
 
 
+def _flush_recvgen_pending_chunk(chunk: memoryview | bytes) -> memoryview | bytes:
+    if type(chunk) is memoryview:
+        return bytes(chunk)
+    return chunk
+
+
 class _RecvGenBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``recvgen``."""
 
@@ -245,7 +251,7 @@ class _RecvGenBuffer:
         self._allow_memview = allow_memview
         self._lock = threading.Lock()
         self._event = ThreadsafeEvent()
-        self._reorder = _OrderedIngestBuffer[memoryview]()
+        self._reorder = _OrderedIngestBuffer[memoryview | bytes]()
         self._ready: deque[tuple[int, memoryview | bytes]] = deque()
         self._pressure_pending = False
         self._stream_done = False
@@ -296,7 +302,7 @@ class _RecvGenBuffer:
                 chunk = bytes(chunk)
             flushed_ready.append((index, chunk))
         self._ready = flushed_ready
-        self._reorder.map_pending(lambda chunk: bytes(chunk) if type(chunk) is memoryview else chunk)
+        self._reorder.map_pending(_flush_recvgen_pending_chunk)
 
     def _has_waitable_work_locked(self) -> bool:
         return self._stream_error is not None or self._pressure_pending or bool(self._ready) or self._stream_done
