@@ -70,7 +70,10 @@ sockets.
 registers the fd with the internal selector when the fd is not ready yet. It
 maps `POLLIN`, `POLLPRI`, `POLLOUT`, `POLLERR`, `POLLHUP`, and `POLLRDHUP`
 (when the platform defines it) onto `select()` read/write/exception fd lists;
-other `select.POLL*` bits are not supported and raise `ValueError`. It allows
+other `select.POLL*` bits are not supported and raise `ValueError`. `POLLERR`
+and `POLLHUP` register for both read and write selector wakeups, and
+immediate probing also checks the read fd list because Linux often reports
+peer hangup as readability rather than an exception-set wakeup. It allows
 at most one pending operation per fd per direction (so `poll(POLLIN)` conflicts
 with an in-flight `recv_many` on the same socket).
 

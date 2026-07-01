@@ -622,6 +622,33 @@ class TestSelectorProactor:
     def test_poll_mask_accepts_pollrdhup(self):
         assert proactor_module._poll_mask_to_selector_events(select.POLLRDHUP) == selectors.EVENT_READ
 
+    def test_poll_detects_pollhup_after_peer_close(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.close()
+            operation = proactor.poll(reader.fileno(), select.POLLHUP)
+            _wait_until_done(proactor, operation)
+            assert operation.result() & select.POLLHUP
+        finally:
+            reader.close()
+            proactor.close()
+
+    def test_poll_detects_pollin_and_pollhup_after_peer_close(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.close()
+            mask = select.POLLIN | select.POLLHUP
+            operation = proactor.poll(reader.fileno(), mask)
+            _wait_until_done(proactor, operation)
+            assert operation.result() & mask
+        finally:
+            reader.close()
+            proactor.close()
+
     def test_poll_many_does_not_double_emit_when_mask_maps_to_both_directions(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -2468,6 +2495,28 @@ class TestUringProactor:
             writer.send(b"x")
             _wait_for_uring(proactor, operation.done)
             assert operation.result() & select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_poll_many_emits_and_cancels_on_multishot_path(self):
+        if not uring_api.probe().get("IORING_POLL_MULTISHOT", False):
+            pytest.skip("multishot poll is unavailable")
+        proactor = UringProactor()
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            writer.send(b"x")
+            _wait_for_uring(proactor, lambda: len(seen) >= 1)
+            assert seen[-1] & select.POLLIN
+            operation.cancel()
+            _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
+            assert operation.cancelled() is True
         finally:
             reader.close()
             writer.close()
