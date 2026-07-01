@@ -2139,7 +2139,12 @@ class UringProactor(ProactorBase):
             self.break_wait()
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
-        if completion.kind in (uring_api.COMPLETION_KIND_CANCEL, uring_api.COMPLETION_KIND_POLL_REMOVE):
+        if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
+            target = cast(_UringCompletion, completion.user_data)
+            self._deactivate_uring_entry(cast(_UringEntry, target.user_data))
+            self._retry_deferred_submissions()
+            return
+        if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
             self._retry_deferred_submissions()
             return
         entry = cast(_UringEntry, completion.user_data)

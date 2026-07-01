@@ -2324,6 +2324,7 @@ class TestUringProactor:
             handle = proactor.ring.pending_poll_multishot[-1]
             operation.cancel()
             _wait_for_uring(proactor, lambda: proactor.ring.submitted_poll_remove == [handle])
+            _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
             assert operation.cancelled() is True
         finally:
             reader.close()
