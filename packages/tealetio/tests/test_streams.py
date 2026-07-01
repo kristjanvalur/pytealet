@@ -13,7 +13,9 @@ from tealetio.streams import (
     SocketTransport,
     StreamReader,
     StreamWriter,
+    open_async_connection,
     open_async_streams,
+    open_connection,
     open_streams,
     run_coro,
 )
@@ -190,6 +192,70 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
+            scheduler.close()
+
+    def test_open_connection_resolves_literal_ip_inside_scheduler(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_greeting = b"hello"
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+
+            def accept_and_echo() -> None:
+                conn, _address = scheduler.sock_accept(server)
+                try:
+                    payload = scheduler.sock_recv(conn, len(client_greeting))
+                    scheduler.sock_sendall(conn, payload.upper())
+                finally:
+                    conn.close()
+
+            def connect_via_streams() -> bytes:
+                stream_reader, stream_writer = open_connection(scheduler, "127.0.0.1", port)
+                stream_writer.write(client_greeting)
+                stream_writer.drain()
+                return stream_reader.readexactly(len(client_greeting))
+
+            connect_task = scheduler.spawn(connect_via_streams)
+            scheduler.spawn(accept_and_echo)
+            assert scheduler.run_until_complete(connect_task) == b"HELLO"
+        finally:
+            server.close()
+            scheduler.close()
+
+    def test_open_async_connection_resolves_literal_ip_inside_scheduler(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+
+            async def connect_and_ping() -> bytes:
+                stream_reader, stream_writer = open_async_connection(scheduler, "127.0.0.1", port)
+                stream_writer.write(b"ping")
+                await stream_writer.drain()
+                return await stream_reader.readexactly(4)
+
+            def accept_side() -> None:
+                conn, _address = scheduler.sock_accept(server)
+                try:
+                    scheduler.sock_sendall(conn, b"pong")
+                finally:
+                    conn.close()
+
+            def exercise() -> bytes:
+                scheduler.spawn(accept_side)
+                return run_coro(connect_and_ping())
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"pong"
+        finally:
+            server.close()
             scheduler.close()
 
     def test_run_coro_rejects_real_yields(self):
