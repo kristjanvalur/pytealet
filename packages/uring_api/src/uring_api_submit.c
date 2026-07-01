@@ -573,6 +573,7 @@ PyObject *UringApiRing_submit_poll_multishot_impl(UringApiRing *self, int fd, un
     if (!completion) {
         return NULL;
     }
+    ((UringApiCompletion *)completion)->multishot = true;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
