@@ -123,16 +123,11 @@ class TestStreamsPoC:
                 stream_reader, _stream_writer = open_async_streams(scheduler, reader)
                 return await stream_reader.readexactly(5)
 
-            def deliver() -> None:
-                ring = scheduler.proactor.ring
-                assert isinstance(ring, _FakeUringRing)
-                ring.complete_recv_multishot(b"hello", more=False, sequence=0)
-
             def exercise() -> bytes:
-                scheduler.spawn(deliver)
                 return run_coro(handler())
 
-            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello"
+            # _FakeUringRing completes recv_into synchronously with b"world".
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"world"
         finally:
             reader.close()
             writer.close()
@@ -256,6 +251,78 @@ class TestStreamsPoC:
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"pong"
         finally:
             server.close()
+            scheduler.close()
+
+    def test_stream_readinto_fills_caller_buffer(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(True)
+
+            def handler() -> tuple[int, bytes]:
+                stream_reader, _stream_writer = open_streams(scheduler, reader)
+                buf = bytearray(8)
+                nbytes = stream_reader.readinto(buf)
+                return nbytes, bytes(buf)
+
+            def deliver() -> None:
+                writer.sendall(b"hello")
+
+            def exercise() -> tuple[int, bytes]:
+                scheduler.spawn(deliver)
+                return handler()
+
+            nbytes, payload = scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert nbytes == 5
+            assert payload[:5] == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_stream_reads_use_recv_into_not_sock_recv(self, monkeypatch):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        recv_calls: list[tuple[object, ...]] = []
+        recv_into_calls: list[tuple[object, ...]] = []
+        real_recv = scheduler.sock_recv
+        real_recv_into = scheduler.sock_recv_into
+
+        def tracking_recv(sock, n):
+            recv_calls.append((sock, n))
+            return real_recv(sock, n)
+
+        def tracking_recv_into(sock, buf):
+            recv_into_calls.append((sock, memoryview(buf).nbytes))
+            return real_recv_into(sock, buf)
+
+        monkeypatch.setattr(scheduler, "sock_recv", tracking_recv)
+        monkeypatch.setattr(scheduler, "sock_recv_into", tracking_recv_into)
+        try:
+            reader.setblocking(False)
+            writer.setblocking(True)
+
+            def handler() -> bytes:
+                stream_reader, _stream_writer = open_streams(scheduler, reader)
+                return stream_reader.readexactly(5)
+
+            def deliver() -> None:
+                writer.sendall(b"hello")
+
+            def exercise() -> bytes:
+                scheduler.spawn(deliver)
+                return handler()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello"
+            assert recv_calls == []
+            assert recv_into_calls
+            assert recv_into_calls[0][1] >= 5
+        finally:
+            reader.close()
+            writer.close()
             scheduler.close()
 
     def test_run_coro_rejects_real_yields(self):

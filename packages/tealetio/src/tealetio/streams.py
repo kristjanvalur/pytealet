@@ -87,6 +87,9 @@ class SocketTransport:
     def recv(self, n: int) -> bytes:
         return self._scheduler.sock_recv(self._sock, n)
 
+    def recv_into(self, buf: Any) -> int:
+        return self._scheduler.sock_recv_into(self._sock, buf)
+
     def sendall(self, data: bytes | bytearray | memoryview) -> None:
         self._scheduler.sock_sendall(self._sock, data)
 
@@ -123,29 +126,41 @@ class _ReaderCore:
     def at_eof(self) -> bool:
         return self._eof and not self._buffer
 
-    def _readinto_buffer(self, n: int) -> bytes:
-        if self._buffer:
-            if len(self._buffer) >= n:
-                chunk = bytes(self._buffer[:n])
-                del self._buffer[:n]
-                return chunk
-            chunk = bytes(self._buffer)
-            self._buffer.clear()
-            if self._eof:
-                return chunk
-            extra = self._transport.recv(n - len(chunk))
-            if not extra:
-                self._eof = True
-                return chunk
-            return chunk + extra
-
-        if self._eof:
-            return b""
-
-        chunk = self._transport.recv(n)
-        if not chunk:
+    def _recv_into_socket(self, view: memoryview) -> int:
+        if not view:
+            return 0
+        nbytes = self._transport.recv_into(view)
+        if nbytes == 0:
             self._eof = True
+        return nbytes
+
+    def _recv_chunk(self, chunk_size: int) -> bytes:
+        chunk = bytearray(chunk_size)
+        nbytes = self._recv_into_socket(memoryview(chunk))
+        return bytes(chunk[:nbytes])
+
+    def _fill_buffer(self, min_bytes: int) -> None:
+        while len(self._buffer) < min_bytes and not self._eof:
+            chunk_size = min(self._limit, max(min_bytes - len(self._buffer), 1))
+            chunk = self._recv_chunk(chunk_size)
+            if not chunk:
+                return
+            self._buffer.extend(chunk)
+
+    def _take_bytes(self, n: int) -> bytes:
+        count = min(n, len(self._buffer))
+        if count == 0:
+            return b""
+        chunk = bytes(self._buffer[:count])
+        del self._buffer[:count]
         return chunk
+
+    def _read_some(self, n: int) -> bytes:
+        if self._eof and not self._buffer:
+            return b""
+        if len(self._buffer) < n and not self._eof:
+            self._fill_buffer(n)
+        return self._take_bytes(min(n, len(self._buffer)))
 
     def read(self, n: int = -1) -> bytes:
         if n == 0:
@@ -153,16 +168,34 @@ class _ReaderCore:
         if n < 0:
             parts: list[bytes] = []
             if self._buffer:
-                parts.append(bytes(self._buffer))
-                self._buffer.clear()
+                parts.append(self._take_bytes(len(self._buffer)))
             while not self._eof:
-                chunk = self._transport.recv(self._limit)
+                chunk = self._recv_chunk(self._limit)
                 if not chunk:
-                    self._eof = True
                     break
                 parts.append(chunk)
             return b"".join(parts)
-        return self._readinto_buffer(n)
+        return self._read_some(n)
+
+    def readinto(self, b: Any) -> int | None:
+        view = memoryview(b).cast("B")
+        if not view.nbytes:
+            return 0
+
+        total = 0
+        if self._buffer:
+            prefix = min(view.nbytes, len(self._buffer))
+            view[:prefix] = self._buffer[:prefix]
+            del self._buffer[:prefix]
+            total += prefix
+            if total == view.nbytes:
+                return total
+
+        if self._eof:
+            return total or 0
+
+        total += self._recv_into_socket(view[total:])
+        return total
 
     def readexactly(self, n: int) -> bytes:
         if n < 0:
@@ -170,34 +203,22 @@ class _ReaderCore:
         if n == 0:
             return b""
 
-        collected = bytearray()
-        while len(collected) < n:
-            if self._eof:
-                raise asyncio.IncompleteReadError(bytes(collected), n)
-            chunk = self._readinto_buffer(n - len(collected))
-            if not chunk:
-                raise asyncio.IncompleteReadError(bytes(collected), n)
-            collected.extend(chunk)
-        return bytes(collected)
+        if len(self._buffer) < n and not self._eof:
+            self._fill_buffer(n)
+        if len(self._buffer) < n:
+            partial = bytes(self._buffer)
+            self._buffer.clear()
+            raise asyncio.IncompleteReadError(partial, n)
+        return self._take_bytes(n)
 
     def readline(self) -> bytes:
         while True:
             newline = self._buffer.find(b"\n")
             if newline >= 0:
-                line = bytes(self._buffer[: newline + 1])
-                del self._buffer[: newline + 1]
-                return line
+                return self._take_bytes(newline + 1)
             if self._eof:
-                if self._buffer:
-                    line = bytes(self._buffer)
-                    self._buffer.clear()
-                    return line
-                return b""
-            chunk = self._transport.recv(self._limit)
-            if not chunk:
-                self._eof = True
-                continue
-            self._buffer.extend(chunk)
+                return self._take_bytes(len(self._buffer))
+            self._fill_buffer(len(self._buffer) + 1)
 
 
 class _WriterCore:
@@ -235,6 +256,9 @@ class StreamReader:
     def read(self, n: int = -1) -> bytes:
         return self._core.read(n)
 
+    def readinto(self, b: Any) -> int | None:
+        return self._core.readinto(b)
+
     def readexactly(self, n: int) -> bytes:
         return self._core.readexactly(n)
 
@@ -254,6 +278,9 @@ class AsyncStreamReader:
 
     async def read(self, n: int = -1) -> bytes:
         return self._core.read(n)
+
+    async def readinto(self, b: Any) -> int | None:
+        return self._core.readinto(b)
 
     async def readexactly(self, n: int) -> bytes:
         return self._core.readexactly(n)

@@ -517,6 +517,11 @@ Module helpers `tealetio.getaddrinfo(...)`, `tealetio.getnameinfo(...)`, and
 `open_connection(...)` and `open_async_connection(...)` resolve hostnames through
 `scheduler.ensure_resolved(...)` before calling `sock_connect`.
 
+Stream reads use `scheduler.sock_recv_into()` through `SocketTransport.recv_into()`
+so `UringProactor.recv_into()` can fill caller-owned buffers without an extra
+`recv()` copy. `StreamReader.readinto()` fills a caller buffer directly; other
+read methods assemble data in an internal `bytearray` before returning `bytes`.
+
 This module is an early proof of concept. It does not integrate with stdlib
 `asyncio.StreamReader` instances or the `ForwardingProactor` guest loop.
 
