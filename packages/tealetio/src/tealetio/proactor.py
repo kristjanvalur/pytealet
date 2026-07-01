@@ -1545,6 +1545,9 @@ class UringProactor(ProactorBase):
         self._submit_send: _UringSendSubmit = self._ring.submit_send
         if _probe_uring_send_zc(entries, flags) and hasattr(self._ring, "submit_send_zc"):
             self._submit_send = self._ring.submit_send_zc
+        # continuous *many ops prefer kernel multishot when probed; otherwise they
+        # emulate the stream by resubmitting the matching one-shot opcode after
+        # each completion (see the *_oneshot delivery handlers below).
         self._poll_multishot_supported = _probe_uring_poll_multishot(entries, flags)
         self._accept_multishot_supported = _probe_uring_accept_multishot(entries, flags)
         self._recv_multishot_supported = _probe_uring_recv_multishot(entries, flags)
@@ -1857,6 +1860,7 @@ class UringProactor(ProactorBase):
             result_callback=callback,
         )
         if self._accept_multishot_supported:
+            # one multishot accept stays armed until F_MORE clears or we cancel.
             entry = _UringEntry(
                 operation=operation,
                 complete=UringProactor._deliver_uring_accept_many,
@@ -1868,6 +1872,7 @@ class UringProactor(ProactorBase):
             )
             return operation
 
+        # fallback: accept one connection, emit it, queue another submit_accept().
         entry = _UringEntry(operation=operation, complete=UringProactor._deliver_uring_accept_many_oneshot)
 
         def submit_accept() -> _UringCompletion:
@@ -1882,6 +1887,7 @@ class UringProactor(ProactorBase):
         entry: _UringEntry,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        # one-shot accept completes per connection; re-arm via the deferred queue.
         operation = cast(ContinuousOperation[tuple[socket.socket, Any]], entry.operation)
         res = completion.res
         if res < 0:
@@ -1966,6 +1972,7 @@ class UringProactor(ProactorBase):
             result_callback=callback,
         )
         if self._recv_multishot_supported:
+            # provided-buffer multishot: leased BufViews, ENOBUFS resubmit path.
             entry = _UringEntry(
                 operation=operation,
                 complete=UringProactor._deliver_uring_recv_many,
@@ -1979,6 +1986,7 @@ class UringProactor(ProactorBase):
             self._submit_uring_entry(entry, submit_recv_many)
             return operation
 
+        # degraded fallback: copy each recv into an owned view and resubmit recv.
         buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
         entry = _UringEntry(
             operation=operation,
@@ -1996,6 +2004,7 @@ class UringProactor(ProactorBase):
     def _deliver_uring_recv_many_oneshot(
         self, entry: _UringEntry, completion: _UringCompletion
     ) -> Operation[Any] | None:
+        # not BufView-based: copy out of the reused recv buffer so resubmit is safe.
         operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
         res = completion.res
         if res < 0:
@@ -2051,6 +2060,7 @@ class UringProactor(ProactorBase):
             result_callback=callback,
         )
         if self._poll_multishot_supported:
+            # kernel keeps the poll armed; cancel via submit_poll_remove().
             entry = _UringEntry(
                 operation=operation,
                 complete=UringProactor._deliver_uring_poll_many,
@@ -2059,6 +2069,7 @@ class UringProactor(ProactorBase):
             self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
             return operation
 
+        # fallback: one-shot submit_poll per readiness event.
         entry = _UringEntry(operation=operation, complete=UringProactor._deliver_uring_poll_many_oneshot)
 
         def submit_poll() -> _UringCompletion:
@@ -2071,6 +2082,7 @@ class UringProactor(ProactorBase):
     def _deliver_uring_poll_many_oneshot(
         self, entry: _UringEntry, completion: _UringCompletion
     ) -> Operation[Any] | None:
+        # emit the mask, then queue another submit_poll() unless cancelled.
         operation = cast(ContinuousOperation[int], entry.operation)
         res = completion.res
         if res < 0:
@@ -2137,6 +2149,8 @@ class UringProactor(ProactorBase):
             return
         cancel_target = operation._cancel_target
         if cancel_target is not None:
+            # multishot poll registrations tear down via poll_remove; one-shot
+            # fallbacks (poll/accept/recv *many) cancel the pending sqe instead.
             if operation.kind == "poll_many" and self._poll_multishot_supported:
                 self._submit_poll_remove(cast(_UringCompletion, cancel_target))
             else:
