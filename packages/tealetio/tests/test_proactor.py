@@ -3081,16 +3081,16 @@ class TestUringProactor:
         scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
-        state = {"got_first_three": False, "release": False}
+        state = {"got_first_two": False, "release": False}
         try:
             reader.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
                 seen: list[tuple[int, bytes]] = []
-                for index, chunk in scheduler.sock_recvgen(reader):
+                for index, chunk in scheduler.sock_recvgen(reader, buffer_count=4):
                     seen.append((index, chunk))
-                    if len(seen) == 3:
-                        state["got_first_three"] = True
+                    if len(seen) == 2:
+                        state["got_first_two"] = True
                         deadline = scheduler.proactor.get_time() + 1.0
                         while not state["release"] and scheduler.proactor.get_time() < deadline:
                             scheduler.sleep(0.02)
@@ -3104,11 +3104,14 @@ class TestUringProactor:
                 ring.complete_recv_multishot(b"c", more=True, sequence=2)
                 ring.complete_recv_multishot_enobufs(sequence=3)
                 deadline = scheduler.proactor.get_time() + 1.0
-                while not state["got_first_three"] and scheduler.proactor.get_time() < deadline:
+                while not state["got_first_two"] and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.02)
-                assert state["got_first_three"]
+                assert state["got_first_two"]
+                assert len(ring.submitted_recv_multishot) == 1
                 state["release"] = True
-                scheduler.sleep(0.05)
+                deadline = scheduler.proactor.get_time() + 1.0
+                while len(ring.submitted_recv_multishot) < 2 and scheduler.proactor.get_time() < deadline:
+                    scheduler.sleep(0.02)
                 ring.complete_recv_multishot(b"d", more=False, sequence=0)
 
             task = scheduler.spawn(receive_chunks)
@@ -3132,7 +3135,8 @@ class TestUringProactor:
                 got_memview = False
                 saw_pressure = False
                 seen: list[tuple[int, bytes]] = []
-                for index, chunk in scheduler.sock_recvgen(reader, allow_memview=True):
+                buf_group = None
+                for index, chunk in scheduler.sock_recvgen(reader, allow_memview=True, buffer_count=4):
                     if index == RECV_MANY_BUFFER_PRESSURE:
                         saw_pressure = True
                         state["got_pressure"] = True
@@ -3144,6 +3148,9 @@ class TestUringProactor:
                     if type(chunk) is memoryview:
                         got_memview = True
                     seen.append((index, bytes(chunk)))
+                    if buf_group is None:
+                        buf_group = scheduler.proactor.ring.submitted_recv_multishot[-1][1]
+                    buf_group.note_chunk_released()
                 return got_memview and saw_pressure, seen
 
             def deliver_chunks() -> None:
@@ -3157,8 +3164,11 @@ class TestUringProactor:
                 while not state["got_pressure"] and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.02)
                 assert state["got_pressure"]
+                assert len(ring.submitted_recv_multishot) == 1
                 state["release"] = True
-                scheduler.sleep(0.05)
+                deadline = scheduler.proactor.get_time() + 1.0
+                while len(ring.submitted_recv_multishot) < 2 and scheduler.proactor.get_time() < deadline:
+                    scheduler.sleep(0.02)
                 ring.complete_recv_multishot(b"d", more=False, sequence=0)
 
             task = scheduler.spawn(receive_chunks)
