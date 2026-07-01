@@ -1989,11 +1989,7 @@ class UringProactor(ProactorBase):
         operation._emit_result(res)
         if operation.done():
             return operation
-        resubmit = entry.resubmit
-        if resubmit is None:
-            operation._set_exception(RuntimeError("poll_many entry is missing its resubmit handler"))
-            return operation
-        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=resubmit))
+        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=entry.resubmit))
         self.break_wait()
         return None
 
@@ -2023,11 +2019,7 @@ class UringProactor(ProactorBase):
                     entry.multishot_leg.nonterminal_seen = 0
                     entry.multishot_leg.pending_final = None
                 operation._emit_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
-                resubmit = entry.resubmit
-                if resubmit is None:
-                    operation._set_exception(RuntimeError("recv_many entry is missing its resubmit handler"))
-                    return operation
-                self._deferred_submissions.append(_UringSubmission(entry=entry, submit=resubmit))
+                self._deferred_submissions.append(_UringSubmission(entry=entry, submit=entry.resubmit))
                 self.break_wait()
                 return None
             operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
