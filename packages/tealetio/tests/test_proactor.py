@@ -284,9 +284,9 @@ def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
 
 def _patch_uring_capabilities(monkeypatch: pytest.MonkeyPatch, **overrides: bool) -> None:
     monkeypatch.setattr(
-        proactor_module,
-        "_uring_probe_capabilities",
-        lambda entries, flags: _default_uring_capabilities(**overrides),
+        uring_api,
+        "probe",
+        lambda *args, **kwargs: _default_uring_capabilities(**overrides),
     )
 
 
@@ -1575,15 +1575,15 @@ class TestUringProactor:
     def test_capabilities_cached_from_single_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[tuple[int, int]] = []
 
-        def tracking_capabilities(entries: int, flags: int) -> dict[str, bool]:
-            calls.append((entries, flags))
+        def tracking_capabilities(*args: object, **kwargs: object) -> dict[str, bool]:
+            calls.append((kwargs.get("entries", args[0] if args else 8), kwargs.get("flags", args[1] if len(args) > 1 else 0)))
             return {
                 "available": True,
                 "IORING_RECV_MULTISHOT": True,
                 "IORING_OP_SEND_ZC": False,
             }
 
-        monkeypatch.setattr(proactor_module, "_uring_probe_capabilities", tracking_capabilities)
+        monkeypatch.setattr(uring_api, "probe", tracking_capabilities)
         proactor = UringProactor(ring_factory=_FakeUringRing, entries=16, flags=1 << 12)
         try:
             assert calls == [(16, 1 << 12)]

@@ -118,14 +118,6 @@ def _default_uring_buf_group_factory(ring: _UringRing) -> _UringBufGroup:
     return ring.create_buf_group(_DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT)
 
 
-def _uring_probe_capabilities(entries: int, flags: int) -> dict[str, bool]:
-    try:
-        probe = uring_api.probe(entries=entries, flags=flags)
-    except (OSError, RuntimeError, NotImplementedError):
-        return {}
-    return {key: bool(value) for key, value in probe.items()}
-
-
 def _poll_mask_to_selector_events(mask: int) -> int:
     events = 0
     if mask & (select.POLLIN | select.POLLPRI):
@@ -1522,7 +1514,10 @@ class UringProactor(ProactorBase):
         self._ring = ring_factory(entries, flags)
         self._buf_group_factory = buf_group_factory
         self._recv_many_buf_group: _UringBufGroup | None = None
-        self._capabilities = _uring_probe_capabilities(entries, flags)
+        try:
+            self._capabilities = uring_api.probe(entries=entries, flags=flags)
+        except (OSError, RuntimeError, NotImplementedError):
+            self._capabilities = {}
         self._submit_send: _UringSendSubmit = self._ring.submit_send
         if self._capabilities.get("IORING_OP_SEND_ZC", False) and hasattr(self._ring, "submit_send_zc"):
             self._submit_send = self._ring.submit_send_zc
