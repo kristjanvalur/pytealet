@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio as _asyncio
 import errno
 import os
+import select
 import selectors
 import socket
 import threading
@@ -124,6 +125,51 @@ def _probe_uring_send_zc(entries: int, flags: int) -> bool:
         return False
 
 
+def _probe_uring_poll_multishot(entries: int, flags: int) -> bool:
+    try:
+        return uring_api.probe(entries=entries, flags=flags).get("IORING_POLL_MULTISHOT", False)
+    except (OSError, RuntimeError, NotImplementedError):
+        return False
+
+
+def _poll_mask_to_selector_events(mask: int) -> int:
+    events = 0
+    if mask & (select.POLLIN | select.POLLPRI):
+        events |= selectors.EVENT_READ
+    if mask & select.POLLOUT:
+        events |= selectors.EVENT_WRITE
+    if mask & (select.POLLERR | select.POLLHUP):
+        events |= selectors.EVENT_READ | selectors.EVENT_WRITE
+    if events == 0:
+        raise ValueError("poll mask must request at least one supported event")
+    return events
+
+
+def _probe_poll_fd_now(fd: int, mask: int) -> int:
+    read_fds: list[int] = []
+    write_fds: list[int] = []
+    exc_fds: list[int] = []
+    if mask & (select.POLLIN | select.POLLPRI):
+        read_fds.append(fd)
+    if mask & select.POLLOUT:
+        write_fds.append(fd)
+    if mask & (select.POLLERR | select.POLLHUP):
+        exc_fds.append(fd)
+    if not (read_fds or write_fds or exc_fds):
+        raise ValueError("poll mask must request at least one supported event")
+    ready_r, ready_w, ready_x = select.select(read_fds, write_fds, exc_fds, 0)
+    result = 0
+    if ready_r:
+        result |= mask & (select.POLLIN | select.POLLPRI)
+    if ready_w:
+        result |= mask & select.POLLOUT
+    if ready_x:
+        result |= mask & (select.POLLERR | select.POLLHUP)
+    if result:
+        return result
+    raise BlockingIOError(errno.EWOULDBLOCK, "fd is not ready")
+
+
 def _configure_accepted_socket(sock: socket.socket) -> socket.socket:
     sock.setblocking(False)
     os.set_inheritable(sock.fileno(), False)
@@ -200,6 +246,15 @@ class Proactor(Protocol):
         sock: socket.socket,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]: ...
+
+    def poll(self, fd: int, mask: int) -> Operation[int]: ...
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]: ...
 
 
 ProactorFactory = Callable[[], Proactor]
@@ -408,6 +463,17 @@ class ProactorBase:
         sock: socket.socket,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]:
+        raise NotImplementedError
+
+    def poll(self, fd: int, mask: int) -> Operation[int]:
+        raise NotImplementedError
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
         raise NotImplementedError
 
     def recvall(self, sock: socket.socket, progress: _ProgressCallback | None = None) -> Operation[bytes]:
@@ -1063,6 +1129,97 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
         return operation
 
+    def poll(self, fd: int, mask: int) -> Operation[int]:
+        """Wait until an fd reports the requested poll events."""
+
+        operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
+
+        def attempt() -> int:
+            return _probe_poll_fd_now(fd, mask)
+
+        self._submit_fd_operation(fd, mask, operation, attempt)
+        return operation
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
+        """Emit poll event masks whenever the fd becomes ready.
+
+        `callback` may run on any backend worker thread.
+        """
+
+        operation = ContinuousOperation[int](
+            kind="poll_many",
+            fileobj=fd,
+            proactor=self,
+            result_callback=callback,
+        )
+
+        def step() -> _ContinuousStepResult:
+            try:
+                result = _probe_poll_fd_now(fd, mask)
+            except BlockingIOError:
+                return _ContinuousStepResult(progressed=False)
+            operation._emit_result(result)
+            return _ContinuousStepResult(progressed=True)
+
+        self._submit_fd_continuous_operation(fd, mask, operation, step)
+        return operation
+
+    def _submit_fd_operation(
+        self,
+        fd: int,
+        poll_mask: int,
+        operation: Operation[T],
+        attempt: Callable[[], T],
+    ) -> None:
+        with self._lock:
+            self._check_open()
+            self._check_fd(fd)
+            selector_events = _poll_mask_to_selector_events(poll_mask)
+            if selector_events & selectors.EVENT_READ:
+                self._check_fd_operation_available(fd, selectors.EVENT_READ)
+            if selector_events & selectors.EVENT_WRITE:
+                self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
+            if self._try_complete_operation(operation, attempt):
+                return
+            self._reserve_fd_poll_operation(fd, selector_events, operation)
+            operation._attempt = attempt
+            self._update_selector_registration(fd)
+        self._after_selector_registration_changed()
+
+    def _submit_fd_continuous_operation(
+        self,
+        fd: int,
+        poll_mask: int,
+        operation: ContinuousOperation[T],
+        step: Callable[[], _ContinuousStepResult],
+    ) -> None:
+        with self._lock:
+            self._check_open()
+            self._check_fd(fd)
+            selector_events = _poll_mask_to_selector_events(poll_mask)
+            if selector_events & selectors.EVENT_READ:
+                self._check_fd_operation_available(fd, selectors.EVENT_READ)
+            if selector_events & selectors.EVENT_WRITE:
+                self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
+            self._reserve_fd_poll_operation(fd, selector_events, operation)
+            operation._continuous_step = step
+            self._update_selector_registration(fd)
+        self._after_selector_registration_changed()
+
+    def _reserve_fd_poll_operation(self, fd: int, selector_events: int, operation: Operation[Any]) -> None:
+        entry = self._fd_operations.setdefault(fd, _FdEntry())
+        if selector_events & selectors.EVENT_READ:
+            self._check_fd_operation_available(fd, selectors.EVENT_READ)
+            entry.reader = operation
+        if selector_events & selectors.EVENT_WRITE:
+            self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
+            entry.writer = operation
+
     def _submit_socket_operation(
         self,
         sock: socket.socket,
@@ -1247,6 +1404,10 @@ class SelectorProactor(ProactorBase):
         if sock.fileno() < 0:
             raise ValueError("socket is closed")
 
+    def _check_fd(self, fd: int) -> None:
+        if fd < 0:
+            raise ValueError("fd is closed")
+
 
 class ThreadedSelectorProactor(SelectorProactor):
     """Selector proactor that polls readiness from a worker thread."""
@@ -1370,6 +1531,7 @@ class UringProactor(ProactorBase):
         self._submit_send: _UringSendSubmit = self._ring.submit_send
         if _probe_uring_send_zc(entries, flags) and hasattr(self._ring, "submit_send_zc"):
             self._submit_send = self._ring.submit_send_zc
+        self._poll_multishot_supported = _probe_uring_poll_multishot(entries, flags)
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
@@ -1765,6 +1927,59 @@ class UringProactor(ProactorBase):
         self._submit_uring_entry(entry, submit_recv_many)
         return operation
 
+    def poll(self, fd: int, mask: int) -> Operation[int]:
+        """Submit a one-shot io_uring poll operation."""
+
+        operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_poll)
+        self._submit_uring_entry(entry, lambda: self._ring.submit_poll(fd, mask, entry))
+        return operation
+
+    def _complete_uring_poll(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], entry.operation)
+        operation._set_result(completion.res)
+        return operation
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
+        """Start a multishot io_uring poll operation.
+
+        `callback` may run on any uring completion service thread.
+        """
+
+        if not self._poll_multishot_supported:
+            raise NotImplementedError("io_uring multishot poll is not supported on this system")
+        operation = ContinuousOperation[int](
+            kind="poll_many",
+            fileobj=fd,
+            proactor=self,
+            result_callback=callback,
+        )
+        entry = _UringEntry(
+            operation=operation,
+            complete=UringProactor._deliver_uring_poll_many,
+            multishot_leg=_MultishotLegState(),
+        )
+        self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
+        return operation
+
+    def _deliver_uring_poll_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+        operation = cast(ContinuousOperation[int], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        operation._emit_result(res)
+        if not completion.flags & uring_api.IORING_CQE_F_MORE:
+            operation._set_result(None)
+            self._deactivate_uring_entry(entry)
+        return operation
+
     def _deliver_uring_recv_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
         res = completion.res
@@ -1809,13 +2024,16 @@ class UringProactor(ProactorBase):
             return
         cancel_target = operation._cancel_target
         if cancel_target is not None:
-            self._submit_cancel(cast(_UringCompletion, cancel_target))
+            if operation.kind == "poll_many":
+                self._submit_poll_remove(cast(_UringCompletion, cancel_target))
+            else:
+                self._submit_cancel(cast(_UringCompletion, cancel_target))
         cancelled = operation._set_cancelled()
         if cancelled:
             self.break_wait()
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
-        if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
+        if completion.kind in (uring_api.COMPLETION_KIND_CANCEL, uring_api.COMPLETION_KIND_POLL_REMOVE):
             self._retry_deferred_submissions()
             return
         entry = cast(_UringEntry, completion.user_data)
@@ -1854,6 +2072,16 @@ class UringProactor(ProactorBase):
         except uring_api.SubmissionQueueFull:
             self._deferred_submissions.append(
                 _UringSubmission(entry=None, submit=lambda: self._ring.submit_cancel(completion))
+            )
+            return False
+        return True
+
+    def _submit_poll_remove(self, completion: _UringCompletion) -> bool:
+        try:
+            self._ring.submit_poll_remove(completion)
+        except uring_api.SubmissionQueueFull:
+            self._deferred_submissions.append(
+                _UringSubmission(entry=None, submit=lambda: self._ring.submit_poll_remove(completion))
             )
             return False
         return True

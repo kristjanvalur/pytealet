@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import select
 import selectors
 import socket
 import threading
@@ -487,6 +488,45 @@ class TestSelectorProactor:
             assert all(isinstance(data, memoryview) for _, data in seen)
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_completes_when_fd_becomes_readable(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll(reader.fileno(), select.POLLIN)
+            assert operation.done() is False
+
+            writer.send(b"x")
+            _wait_until_done(proactor, operation)
+
+            assert operation.result() & select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_emits_readiness_until_cancelled(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+
+            writer.send(b"a")
+            while not seen:
+                proactor.wait(proactor.get_time() + 1.0)
+            assert seen[-1] & select.POLLIN
+
+            operation.cancel()
+            assert operation.cancelled() is True
         finally:
             reader.close()
             writer.close()
@@ -1112,9 +1152,13 @@ class _FakeUringRing:
         self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
         self.submitted_cancel: list[object] = []
+        self.submitted_poll: list[tuple[int, int, object]] = []
+        self.submitted_poll_multishot: list[tuple[int, int, object]] = []
+        self.submitted_poll_remove: list[object] = []
         self.pending_recv: list[SimpleNamespace] = []
         self.pending_recv_multishot: list[SimpleNamespace] = []
         self.pending_accept_multishot: list[SimpleNamespace] = []
+        self.pending_poll_multishot: list[SimpleNamespace] = []
         self.recv_multishot_sequence = 0
 
     def _completion(
@@ -1247,7 +1291,9 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         self.submitted_send.append((fd, data, user_data))
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload))
+        completion = self._completion(
+            user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
+        )
         self._deliver(completion)
         return completion
 
@@ -1343,6 +1389,48 @@ class _FakeUringRing:
         cancel_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
         self._deliver(cancel_completion)
         return cancel_completion
+
+    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_poll.append((fd, mask, user_data))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL, res=mask, result=mask)
+        self._deliver(completion)
+        return completion
+
+    def submit_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_poll_multishot.append((fd, mask, user_data))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT, multishot=True)
+        self.pending_poll_multishot.append(completion)
+        return completion
+
+    def complete_poll_multishot(
+        self,
+        res: int = select.POLLIN,
+        *,
+        more: bool = True,
+        sequence: int = 0,
+    ) -> None:
+        pending = self.pending_poll_multishot[-1]
+        completion = self._completion(
+            pending.user_data,
+            kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
+            res=res,
+            flags=uring_api.IORING_CQE_F_MORE if more else 0,
+            sequence=sequence,
+            multishot=True,
+        )
+        self._deliver(completion)
+
+    def submit_poll_remove(self, completion: SimpleNamespace) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_poll_remove.append(completion)
+        remove_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_POLL_REMOVE, res=0)
+        self._deliver(remove_completion)
+        return remove_completion
 
     def wait(self, timeout: float | None = None) -> SimpleNamespace | None:
         if not self.completions:
@@ -2096,6 +2184,89 @@ class TestUringProactor:
             if conn is not None:
                 conn.close()
             server.close()
+            proactor.close()
+
+    def test_poll_uses_submit_poll(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll(reader.fileno(), select.POLLIN)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert len(proactor.ring.submitted_poll) == 1
+            assert proactor.ring.submitted_poll[0][:2] == (reader.fileno(), select.POLLIN)
+            assert operation.done() is True
+            assert operation.result() == select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_uses_multishot_poll(self, monkeypatch):
+        monkeypatch.setattr(proactor_module, "_probe_uring_poll_multishot", lambda entries, flags: True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_poll_multishot
+            proactor.ring.complete_poll_multishot(select.POLLIN, more=False)
+            _wait_for_uring(proactor, lambda: seen == [select.POLLIN] and operation.done())
+            assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_cancel_uses_poll_remove(self, monkeypatch):
+        monkeypatch.setattr(proactor_module, "_probe_uring_poll_multishot", lambda entries, flags: True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
+            handle = proactor.ring.pending_poll_multishot[-1]
+            operation.cancel()
+            _wait_for_uring(proactor, lambda: proactor.ring.submitted_poll_remove == [handle])
+            assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_raises_when_multishot_poll_unsupported(self, monkeypatch):
+        monkeypatch.setattr(proactor_module, "_probe_uring_poll_multishot", lambda entries, flags: False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            with pytest.raises(NotImplementedError, match="multishot poll"):
+                proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_poll_completes_when_fd_becomes_readable(self):
+        proactor = UringProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll(reader.fileno(), select.POLLIN)
+            writer.send(b"x")
+            _wait_for_uring(proactor, operation.done)
+            assert operation.result() & select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
             proactor.close()
 
     def test_accept_many_uses_multishot_accept(self):
