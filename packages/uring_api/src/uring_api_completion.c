@@ -150,10 +150,6 @@ static char *copy_unicode_path(PyObject *path_obj) {
     if (!path_utf8) {
         return NULL;
     }
-    if (path_len < 0) {
-        PyErr_SetString(PyExc_OverflowError, "path is too long");
-        return NULL;
-    }
     path_copy = PyMem_Malloc((size_t)path_len + 1);
     if (!path_copy) {
         PyErr_NoMemory();

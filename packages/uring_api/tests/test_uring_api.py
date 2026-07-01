@@ -1,5 +1,6 @@
 import errno
 import fcntl
+import mmap
 import select
 import gc
 import importlib.util
@@ -1746,6 +1747,63 @@ def test_ring_close_completion_when_available():
     with pytest.raises(OSError) as excinfo:
         os.fstat(fd)
     assert excinfo.value.errno == errno.EBADF
+
+
+UINT_MAX = (1 << 32) - 1
+
+
+def test_ring_submit_read_rejects_negative_offset():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        with pytest.raises(ValueError, match="offset must be non-negative"):
+            ring.submit_read(0, bytearray(1), -1)
+
+
+def test_ring_submit_write_rejects_negative_offset():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        with pytest.raises(ValueError, match="offset must be non-negative"):
+            ring.submit_write(0, b"x", -1)
+
+
+def _oversized_file_buffer():
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    try:
+        os.ftruncate(tmp.fileno(), UINT_MAX + 1)
+        buf = mmap.mmap(tmp.fileno(), UINT_MAX + 1, access=mmap.ACCESS_WRITE)
+    except OSError:
+        tmp.close()
+        os.unlink(tmp.name)
+        pytest.skip("cannot create oversized buffer for bounds test")
+    tmp.close()
+    os.unlink(tmp.name)
+    return buf
+
+
+def test_ring_submit_read_rejects_buffer_length_above_uint_max():
+    require_uring()
+
+    buf = _oversized_file_buffer()
+    try:
+        with uring_api.Ring() as ring:
+            with pytest.raises(ValueError, match="buffer length must fit in uint32_t"):
+                ring.submit_read(0, buf, 0)
+    finally:
+        buf.close()
+
+
+def test_ring_submit_write_rejects_buffer_length_above_uint_max():
+    require_uring()
+
+    buf = _oversized_file_buffer()
+    try:
+        with uring_api.Ring() as ring:
+            with pytest.raises(ValueError, match="buffer length must fit in uint32_t"):
+                ring.submit_write(0, buf, 0)
+    finally:
+        buf.close()
 
 
 def test_ring_file_read_write_completion_when_available():

@@ -7,6 +7,14 @@
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 
+static int validate_file_io_buffer_length(Py_buffer *view) {
+    if (view->len < 0 || (unsigned long long)view->len > UINT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "buffer length must fit in uint32_t");
+        return -1;
+    }
+    return 0;
+}
+
 PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
@@ -182,6 +190,11 @@ PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *v
     PyObject *completion = NULL;
     int failed = 0;
 
+    if (validate_file_io_buffer_length(view) < 0) {
+        PyBuffer_Release(view);
+        return NULL;
+    }
+
     completion = UringApiCompletion_new_pending_view(URING_API_PENDING_READ, user_data, view);
     if (!completion) {
         return NULL;
@@ -216,6 +229,11 @@ PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
     int failed = 0;
+
+    if (validate_file_io_buffer_length(view) < 0) {
+        PyBuffer_Release(view);
+        return NULL;
+    }
 
     completion = UringApiCompletion_new_pending_view(URING_API_PENDING_WRITE, user_data, view);
     if (!completion) {
@@ -904,26 +922,36 @@ PyObject *UringApiRing_submit_read(UringApiRing *self, PyObject *args, PyObject 
     static char *keywords[] = {"fd", "buf", "offset", "user_data", NULL};
     Py_buffer view;
     int fd;
-    unsigned long long offset;
+    long long offset;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*K|O", keywords, &fd, &view, &offset, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*L|O", keywords, &fd, &view, &offset, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_read_impl(self, fd, &view, offset, user_data);
+    if (offset < 0) {
+        PyBuffer_Release(&view);
+        PyErr_SetString(PyExc_ValueError, "offset must be non-negative");
+        return NULL;
+    }
+    return UringApiRing_submit_read_impl(self, fd, &view, (unsigned long long)offset, user_data);
 }
 
 PyObject *UringApiRing_submit_write(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "offset", "user_data", NULL};
     Py_buffer view;
     int fd;
-    unsigned long long offset;
+    long long offset;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*K|O", keywords, &fd, &view, &offset, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*L|O", keywords, &fd, &view, &offset, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_write_impl(self, fd, &view, offset, user_data);
+    if (offset < 0) {
+        PyBuffer_Release(&view);
+        PyErr_SetString(PyExc_ValueError, "offset must be non-negative");
+        return NULL;
+    }
+    return UringApiRing_submit_write_impl(self, fd, &view, (unsigned long long)offset, user_data);
 }
 
 PyObject *UringApiRing_submit_openat(UringApiRing *self, PyObject *args, PyObject *kwargs) {
