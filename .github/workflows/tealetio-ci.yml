@@ -54,7 +54,48 @@ jobs:
           source .venv/bin/activate
           uv sync --active --locked --dev --package tealetio
 
+      - name: Report tealetio runtime environment
+        run: |
+          source .venv/bin/activate
+          python - <<'PY'
+          import importlib.util
+          import platform
+          import sys
+          import sysconfig
+
+          import tealet
+          import uring_api
+
+          print("python:", sys.version.replace("\n", " "))
+          print("implementation:", platform.python_implementation())
+          print("gil_enabled:", getattr(sys, "_is_gil_enabled", lambda: "unknown")())
+          print("platform:", platform.platform())
+          print("kernel:", platform.release())
+          print("tealet:", getattr(tealet, "__version__", "unknown"))
+
+          native_error = getattr(uring_api, "_native_import_error", None)
+          print("uring_api native extension:", "loaded" if native_error is None else f"unavailable ({native_error})")
+          print("uring_api.__liburing_version__:", uring_api.__liburing_version__)
+          print("uring_api.__compiled_liburing_version__:", uring_api.__compiled_liburing_version__)
+          print("uring_api.__compiled_liburing_version_info__:", uring_api.__compiled_liburing_version_info__)
+
+          ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+          if ext_suffix:
+              spec = importlib.util.find_spec("_uring_api")
+              if spec is None or spec.origin is None:
+                  print("_uring_api module:", "not installed")
+              else:
+                  print("_uring_api module:", spec.origin)
+
+          probe = uring_api.probe()
+          print("uring_api.probe():", probe)
+          print("uring_api.is_available():", uring_api.is_available())
+          PY
+          echo "--- liburing packages (tealetio CI does not install liburing-dev) ---"
+          apt-cache policy liburing-dev liburing2 2>/dev/null || true
+          dpkg -l 'liburing*' 2>/dev/null || true
+
       - name: Run tealetio tests
         run: |
           source .venv/bin/activate
-          uv run --active --package tealetio python -m pytest packages/tealetio/tests/ -v
+          uv run --active --package tealetio python -m pytest packages/tealetio/tests/ -v -ra

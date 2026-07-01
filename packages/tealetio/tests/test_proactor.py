@@ -271,9 +271,13 @@ def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) ->
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
+def _native_uring_extension_imported() -> bool:
+    return getattr(uring_api, "_native_import_error", None) is None
+
+
 def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
     capabilities = {
-        "available": True,
+        "available": _native_uring_extension_imported(),
         "IORING_ACCEPT_MULTISHOT": True,
         "IORING_RECV_MULTISHOT": True,
         "IORING_POLL_MULTISHOT": True,
@@ -1233,48 +1237,10 @@ class _FakeBufGroup:
         self.buffer_count = buffer_count
 
 
-class _NativeBufViewPool:
-    """Retain real rings and sockets so leased BufView completions stay valid."""
-
-    def __init__(self) -> None:
-        self._rings: list[uring_api.Ring] = []
-        self._sockets: list[socket.socket] = []
-
-    def view_for(self, data: bytes) -> uring_api.BufView:
-        reader, writer = socket.socketpair()
-        reader.setblocking(False)
-        writer.setblocking(False)
-        ring = uring_api.Ring(entries=2)
-        group = ring.create_buf_group(max(1024, len(data)), 4)
-        writer.send(data)
-        ring.submit_recv_buf(reader.fileno(), group)
-        completion = ring.wait(1.0)
-        if completion is None or completion.res != len(data):
-            reader.close()
-            writer.close()
-            ring.close()
-            raise RuntimeError("failed to synthesize BufView completion for fake recv_many")
-        payload = completion.result
-        if not isinstance(payload, uring_api.BufView):
-            reader.close()
-            writer.close()
-            ring.close()
-            raise RuntimeError("recv_buf completion did not return BufView")
-        self._rings.append(ring)
-        self._sockets.extend((reader, writer))
-        return payload
-
-
-_NATIVE_BUF_VIEW_POOL: _NativeBufViewPool | None = None
-
-
-def _native_buf_view_for(data: bytes) -> uring_api.BufView:
-    global _NATIVE_BUF_VIEW_POOL
-    if not uring_api.is_available():
-        raise RuntimeError("io_uring is required to synthesize BufView recv_many completions")
-    if _NATIVE_BUF_VIEW_POOL is None:
-        _NATIVE_BUF_VIEW_POOL = _NativeBufViewPool()
-    return _NATIVE_BUF_VIEW_POOL.view_for(data)
+def _fake_multishot_recv_payload(data: bytes) -> memoryview:
+    # fake-ring completions use owned views; do not consult uring_api.is_available()
+    # because TestUringProactor patches probe() to enable multishot opcodes.
+    return memoryview(bytearray(data))
 
 
 class _FakeUringRing:
@@ -1447,11 +1413,8 @@ class _FakeUringRing:
         if not data:
             payload = None
             res = 0
-        elif uring_api.is_available():
-            payload = _native_buf_view_for(data)
-            res = len(data)
         else:
-            payload = data
+            payload = _fake_multishot_recv_payload(data)
             res = len(data)
         completion = self._completion(
             pending.user_data,
