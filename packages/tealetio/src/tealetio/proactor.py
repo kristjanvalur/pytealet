@@ -2017,8 +2017,9 @@ class UringProactor(ProactorBase):
         """Submit a positioned file write and return the byte count written."""
 
         operation = Operation[int](kind="write", fileobj=fd, proactor=self)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_write)
-        self._submit_uring_entry(entry, lambda: self._ring.submit_write(fd, data, offset, entry))
+        payload = memoryview(data)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_write, data=payload)
+        self._submit_uring_entry(entry, lambda: self._ring.submit_write(fd, payload, offset, entry))
         return operation
 
     def _complete_uring_write(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:

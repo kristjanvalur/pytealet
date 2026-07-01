@@ -2177,6 +2177,12 @@ class TestUringProactor:
                 read_operation = proactor.read(fd, 5, 0)
                 _wait_for_uring(proactor, lambda: read_operation.done())
                 assert read_operation.result() == b"hello"
+
+                buf = bytearray(5)
+                read_into_operation = proactor.read_into(fd, buf, 0)
+                _wait_for_uring(proactor, lambda: read_into_operation.done())
+                assert read_into_operation.result() == 5
+                assert bytes(buf) == b"hello"
             finally:
                 if fd is not None:
                     os.close(fd)

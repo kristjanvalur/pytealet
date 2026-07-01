@@ -57,12 +57,14 @@ read its result directly without switching or waiting. Selector-backed proactors
 use this fast path for socket operations that succeed right away.
 
 `UringProactor` also exposes positioned file I/O through io_uring:
-`openat(path, flags, mode=0)` returns a caller-owned fd,
+`openat(path, flags, mode=0, *, dfd=AT_FDCWD)` returns a caller-owned fd,
 `read(fd, n, offset)` and `read_into(fd, buf, offset)` read at an explicit
-offset, and `write(fd, data, offset)` writes at an explicit offset. Selector-
-backed proactors do not implement these operations yet. Path, flags, mode,
-offsets, and fds are forwarded unchanged to `uring_api`; errors surface as
-operation failures rather than pre-submit `ValueError`.
+offset, and `write(fd, data, offset)` writes at an explicit offset. The `dfd`
+argument is forwarded to `uring_api.submit_openat()` for directory-relative
+opens. Selector-backed proactors do not implement these operations yet. Path,
+flags, mode, offsets, and fds are forwarded unchanged to `uring_api`; kernel
+and CQE errors surface as operation failures. `uring_api` may still raise
+`ValueError` synchronously at submit time for some invalid offsets or buffers.
 
 Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
 callback)` emits `(conn, address)` for each accepted connection and remains
