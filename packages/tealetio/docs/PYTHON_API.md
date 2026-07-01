@@ -378,6 +378,71 @@ iterator that yields scheduler futures in child completion order. If the timeout
 expires before all children finish, iteration raises `TimeoutError`; unfinished
 children are not cancelled by `as_completed(...)`.
 
+## Streams (proof of concept)
+
+`tealetio.streams` provides tealet-native stream endpoints backed by blocking
+socket I/O through the scheduler. `StreamReader` and `StreamWriter` are the
+default native types with synchronous methods. `AsyncStreamReader` and
+`AsyncStreamWriter` mirror the asyncio stream API shape (`async def read`,
+`drain`, and so on) so handlers written for asyncio-style web code can run under
+`run_coro()` or `scheduler.await_()` without creating asyncio futures for socket
+reads and writes.
+
+```python
+from tealetio.proactor import SyncProactorScheduler
+from tealetio.streams import open_async_streams, run_coro
+
+scheduler = SyncProactorScheduler()
+
+async def handler(reader, writer):
+    line = await reader.readline()
+    writer.write(line.upper())
+    await writer.drain()
+
+def exercise(sock):
+    reader, writer = open_async_streams(scheduler, sock)
+    return run_coro(handler(reader, writer))
+```
+
+`open_connection(scheduler, host, port)` connects a TCP socket and returns native
+`(reader, writer)`. `open_async_connection(...)` returns asyncio-shaped
+endpoints. `open_streams()` and `open_async_streams()` wrap an existing
+non-blocking connected socket. Under the hood, `SocketTransport` calls
+`scheduler.sock_recv()` and `scheduler.sock_sendall()`.
+
+Pass `stream_factory=` to `open_streams()`, `open_async_streams()`,
+`open_connection(...)`, or `open_async_connection(...)` to customise the stream
+types created for each connection. Use `StreamFactory` for native
+`(StreamReader, StreamWriter)` pairs and `AsyncStreamFactory` for asyncio-shaped
+pairs. `default_stream_factory` and `default_async_stream_factory` are the
+built-in implementations.
+
+Proactor socket operations accept `socket.socket` objects. `UringProactor`
+submits the socket's file descriptor to io_uring internally; the public API
+still expects a non-blocking `socket.socket` so accepted connections, peer
+metadata, and selector-backed backends share one handle type.
+
+## Name resolution
+
+`scheduler.getaddrinfo(host, port, ...)` and `scheduler.getnameinfo(sockaddr,
+flags=0)` run the stdlib resolver on a worker thread through
+`run_in_executor`, matching asyncio's `loop.getaddrinfo()` /
+`loop.getnameinfo()`. `scheduler.ensure_resolved(address, ...)` skips the
+executor when `host` is already a literal IP, like asyncio's `_ensure_resolved`.
+Module helpers `tealetio.getaddrinfo(...)`, `tealetio.getnameinfo(...)`, and
+`tealetio.ensure_resolved(...)` delegate to the running scheduler.
+
+`open_connection(...)` and `open_async_connection(...)` resolve hostnames through
+`scheduler.ensure_resolved(...)` before calling `sock_connect`.
+
+Stream reads use `scheduler.sock_recv_into()` through `SocketTransport.recv_into()`
+so `UringProactor.recv_into()` can fill caller-owned buffers without an extra
+`recv()` copy. `StreamReader.readinto()` fills a caller buffer directly; other
+read methods assemble data in an internal `bytearray` before returning `bytes`.
+
+This module is an early proof of concept. It does not integrate with stdlib
+`asyncio.StreamReader` instances or the `ForwardingProactor` guest loop.
+
 ## Synchronisation Primitives
 
 `tealetio` provides scheduler-aware synchronisation primitives modelled after

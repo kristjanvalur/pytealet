@@ -79,6 +79,9 @@ __all__ = [
     "create_task",
     "ensure_future",
     "gather",
+    "getaddrinfo",
+    "getnameinfo",
+    "ensure_resolved",
     "get_scheduler",
     "get_running_scheduler",
     "set_scheduler",
@@ -667,6 +670,55 @@ def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
     context = contextvars.copy_context()
     call = functools.partial(context.run, func, *args, **kwargs)
     return get_running_scheduler().run_in_executor(None, call).wait()
+
+
+def getaddrinfo(
+    host: str | bytes | None,
+    port: str | int | bytes | None,
+    *,
+    family: int = 0,
+    type: int = 0,
+    proto: int = 0,
+    flags: int = 0,
+) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+    """Resolve ``host``/``port`` on a worker thread and wait from the current tealet."""
+
+    return get_running_scheduler().getaddrinfo(
+        host,
+        port,
+        family=family,
+        type=type,
+        proto=proto,
+        flags=flags,
+    )
+
+
+def getnameinfo(sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
+    """Reverse-resolve ``sockaddr`` on a worker thread and wait from the current tealet."""
+
+    return get_running_scheduler().getnameinfo(sockaddr, flags=flags)
+
+
+def ensure_resolved(
+    address: tuple[Any, ...],
+    *,
+    family: int = 0,
+    type: int = socket.SOCK_STREAM,
+    proto: int = 0,
+    flags: int = 0,
+) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+    """Resolve ``address`` like asyncio ``loop._ensure_resolved``."""
+
+    from . import dns
+
+    return dns.ensure_resolved(
+        get_running_scheduler(),
+        address,
+        family=family,
+        type=type,
+        proto=proto,
+        flags=flags,
+    )
 
 
 def sleep(delay: float) -> None:
@@ -1341,6 +1393,59 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return self.spawn(wait_for_shutdown)
 
     # -- External integration APIs ------------------------------------
+
+    def getaddrinfo(
+        self,
+        host: str | bytes | None,
+        port: str | int | bytes | None,
+        *,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        """Resolve ``host``/``port`` on a worker thread without blocking the scheduler thread."""
+
+        return cast(
+            list[tuple[int, int, int, str, tuple[Any, ...]]],
+            self.run_in_executor(
+                None,
+                socket.getaddrinfo,
+                host,
+                port,
+                family,
+                type,
+                proto,
+                flags,
+            ).wait(),
+        )
+
+    def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
+        """Reverse-resolve ``sockaddr`` on a worker thread without blocking the scheduler thread."""
+
+        return self.run_in_executor(None, socket.getnameinfo, sockaddr, flags).wait()
+
+    def ensure_resolved(
+        self,
+        address: tuple[Any, ...],
+        *,
+        family: int = 0,
+        type: int = socket.SOCK_STREAM,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        """Resolve ``address``, skipping executor lookup for literal IP hosts."""
+
+        from . import dns
+
+        return dns.ensure_resolved(
+            self,
+            address,
+            family=family,
+            type=type,
+            proto=proto,
+            flags=flags,
+        )
 
     def run_in_executor(
         self,
