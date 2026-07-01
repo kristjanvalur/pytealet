@@ -13,6 +13,17 @@
 #define BUFVIEW_END_CRITICAL_SECTION() Py_END_CRITICAL_SECTION()
 #endif
 
+static void UringApiBufView_release_lease(UringApiBufGroup *buf_group, UringApiBufView *self, int return_to_ring) {
+    if (self->recycled || !self->leased) {
+        return;
+    }
+    if (return_to_ring) {
+        UringApiBufGroup_recycle(buf_group, self->buffer_id);
+    }
+    UringApiBufGroup_note_unleased(buf_group);
+    self->recycled = true;
+}
+
 static void UringApiBufView_recycle_quiet(UringApiBufView *self) {
     UringApiBufGroup *buf_group;
 
@@ -25,13 +36,13 @@ static void UringApiBufView_recycle_quiet(UringApiBufView *self) {
     }
     buf_group = (UringApiBufGroup *)self->buf_group;
     if (!buf_group->ring || !buf_group->ring->initialized || !buf_group->ring_buffer) {
+        UringApiBufGroup_note_unleased(buf_group);
         self->recycled = true;
         return;
     }
     Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
     if (!self->recycled) {
-        UringApiBufGroup_recycle(buf_group, self->buffer_id);
-        self->recycled = true;
+        UringApiBufView_release_lease(buf_group, self, 1);
     }
     Py_END_CRITICAL_SECTION();
 }
@@ -51,8 +62,7 @@ static int UringApiBufView_recycle_locked(UringApiBufView *self) {
         PyErr_SetString(PyExc_RuntimeError, "buffer group ring is closed");
         return -1;
     }
-    UringApiBufGroup_recycle(buf_group, self->buffer_id);
-    self->recycled = true;
+    UringApiBufView_release_lease(buf_group, self, 1);
     return 0;
 }
 
@@ -189,6 +199,7 @@ static PyObject *UringApiBufView_close(UringApiBufView *self, PyObject *Py_UNUSE
             }
             Py_END_CRITICAL_SECTION();
         } else {
+            UringApiBufGroup_note_unleased(buf_group);
             self->recycled = true;
             status = 1;
         }
@@ -258,6 +269,7 @@ PyObject *UringApiBufView_create(PyObject *buf_group_obj, unsigned int buffer_id
     self->export_count = 0;
     self->leased = true;
     self->recycled = false;
+    UringApiBufGroup_note_leased(buf_group);
     PyObject_GC_Track(self);
     return (PyObject *)self;
 }

@@ -1402,6 +1402,23 @@ def test_buf_group_exposes_creating_ring():
         assert buf_group.ring is ring
 
 
+def test_buf_group_tracks_leased_wrapper_count():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        buf_group = ring.create_buf_group(16, 4)
+        assert buf_group.buffer_count == 4
+        assert buf_group.leased_count == 0
+
+        buf_view = ring.create_buf_view(buf_group, 1, 5)
+        assert buf_group.leased_count == 1
+
+        mv = memoryview(buf_view)
+        del mv
+        assert buf_view.recycled
+        assert buf_group.leased_count == 0
+
+
 def test_buf_group_rejects_use_on_different_ring():
     require_uring()
 
@@ -1438,6 +1455,9 @@ def test_buf_view_buf_result_exposes_buf_group():
         assert isinstance(completion.result, uring_api.BufView)
         assert completion.result.buf_group is buf_group
         assert completion.result.buf_group.ring is ring
+        assert buf_group.leased_count == 1
+        del completion
+        assert buf_group.leased_count == 0
     finally:
         reader.close()
         writer.close()
@@ -1482,17 +1502,20 @@ def test_buf_view_memoryview_recycles_on_last_release():
         assert buf_view.buffer_id == 2
         assert buf_view.buf_group is buf_group
         assert not buf_view.recycled
+        assert buf_group.leased_count == 1
 
         mv1 = memoryview(buf_view)
         mv2 = memoryview(buf_view)
         assert len(mv1) == 5
         assert len(mv2) == 5
         assert not buf_view.recycled
+        assert buf_group.leased_count == 1
 
         del mv1
         assert not buf_view.recycled
         del mv2
         assert buf_view.recycled
+        assert buf_group.leased_count == 0
 
         with pytest.raises(BufferError, match="already been released"):
             memoryview(buf_view)
@@ -1630,6 +1653,9 @@ def test_ring_recv_multishot_eof_returns_empty_bufview_when_available():
         assert final.result.length == 0
         assert not final.result
         assert not (final.flags & uring_api.IORING_CQE_F_MORE)
+        assert buf_group.leased_count == 1
+        del first
+        assert buf_group.leased_count == 0
     finally:
         reader.close()
         writer.close()

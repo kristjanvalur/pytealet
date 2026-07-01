@@ -23,6 +23,7 @@ jobs:
   test:
     name: tealet-greenlet tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     env:
       PYTEALET_EXT_DEBUG: "1"
       PYTEALET_SKIP_LONG_GREENLET_TESTS: "1"
