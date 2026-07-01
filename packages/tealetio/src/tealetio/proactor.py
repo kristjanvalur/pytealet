@@ -17,6 +17,7 @@ from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar
 import uring_api
 
 from . import compat
+from .files import ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, ContinuousStepResult, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
@@ -44,6 +45,7 @@ __all__ = [
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",
     "UringProactor",
+    "ProactorFile",
     "RECV_MANY_BUFFER_PRESSURE",
 ]
 
@@ -2571,6 +2573,23 @@ class ProactorScheduler(BaseScheduler):
         """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
 
         return self._proactor.poll_many(fd, mask, callback)
+
+    def open(self, path: str, mode: str = "rb") -> ProactorFile:
+        """Open a positioned binary file through the proactor backend."""
+
+        flags, file_mode = parse_open_mode(mode)
+        try:
+            fd = self.wait_operation(self._proactor.openat(path, flags, file_mode))
+        except NotImplementedError as exc:
+            raise NotImplementedError("scheduler file I/O requires a proactor with openat support") from exc
+        return ProactorFile(
+            self,
+            self._proactor,
+            fd,
+            path=path,
+            flags=flags,
+            append="a" in mode,
+        )
 
     def _has_pending_driver_work(self) -> bool:
         return self._proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)

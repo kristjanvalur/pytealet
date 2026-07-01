@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import io
 import os
 import select
 import selectors
@@ -3943,3 +3944,98 @@ class TestProactorScheduler:
                 scheduler.close()
 
         assert asyncio.run(run()) is True
+
+    def test_open_returns_raw_io_file_from_fake_ring(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        try:
+
+            def exercise() -> tuple[bytes, bytes]:
+                with scheduler.open("/tmp/example.txt", "w+b") as handle:
+                    assert isinstance(handle, io.RawIOBase)
+                    assert handle.name == "/tmp/example.txt"
+                    assert handle.write(b"hello") == 5
+                    handle.seek(0)
+                    payload = handle.read()
+                    assert handle.tell() == 5
+                    handle.seek(0)
+                    prefix = handle.read(3)
+                return payload, prefix
+
+            payload, prefix = scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert payload == b"hello"
+            assert prefix == b"hel"
+        finally:
+            scheduler.close()
+
+    def test_readinto_uses_proactor_read_into(self, monkeypatch):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        read_into_calls: list[tuple[int, int]] = []
+        original_read_into = UringProactor.read_into
+
+        def tracking_read_into(self, fd: int, buf: Any, offset: int):
+            read_into_calls.append((fd, offset))
+            return original_read_into(self, fd, buf, offset)
+
+        monkeypatch.setattr(UringProactor, "read_into", tracking_read_into)
+        try:
+
+            def exercise() -> tuple[int, bytes]:
+                with scheduler.open("/tmp/buffered.txt", "w+b") as handle:
+                    handle.write(b"hello")
+                    handle.seek(0)
+                    buf = bytearray(5)
+                    nbytes = handle.readinto(buf)
+                    return nbytes, bytes(buf)
+
+            nbytes, payload = scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert nbytes == 5
+            assert payload == b"hello"
+            assert read_into_calls == [(read_into_calls[0][0], 0)]
+        finally:
+            scheduler.close()
+
+    def test_buffered_reader_stacks_on_proactor_file(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        try:
+
+            def exercise() -> bytes:
+                with scheduler.open("/tmp/stacked.txt", "w+b") as handle:
+                    handle.write(b"hello")
+                    handle.seek(0)
+                    return io.BufferedReader(handle, buffer_size=2).read()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello"
+        finally:
+            scheduler.close()
+
+    def test_open_requires_proactor_with_openat_support(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        try:
+            with pytest.raises(NotImplementedError, match="openat support"):
+                scheduler.open("/tmp/x", "rb")
+        finally:
+            scheduler.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_open_read_write_and_buffered_stack(self):
+        scheduler = SyncProactorScheduler(UringProactor)
+        set_scheduler(scheduler)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "scheduler-file.txt")
+            try:
+
+                def exercise() -> bytes:
+                    with scheduler.open(path, "wb") as handle:
+                        assert handle.write(b"hello") == 5
+
+                    with scheduler.open(path, "rb") as handle:
+                        buffered = io.BufferedReader(handle)
+                        return buffered.read()
+
+                assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello"
+            finally:
+                scheduler.close()

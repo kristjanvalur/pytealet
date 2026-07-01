@@ -191,6 +191,14 @@ direction bits are set.
 same callback and args, one combined selector wakeup schedules a single call.
 Register distinct callbacks when you need separate per-direction invocations.
 
+`ProactorScheduler.open(path, mode="rb")` returns an unbuffered `ProactorFile`
+(`io.RawIOBase`) for positioned binary I/O through the proactor backend. The
+handle tracks a logical file position and uses `read_into()` for in-buffer reads,
+so `io.BufferedReader` and `io.TextIOWrapper` can stack on top without an extra
+copy through `read()`. File helpers require a proactor with `openat` support
+(`UringProactor` today). Low-level `openat` / positioned `read` / `write` remain
+on `scheduler.proactor` for callers that need explicit flags, offsets, or `dfd`.
+
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.
 Backends call `progress(total)` with the cumulative number of bytes sent as
 progress becomes observable. Some backends may only expose a single completion
