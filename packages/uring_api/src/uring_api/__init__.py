@@ -20,6 +20,9 @@ try:
     from _uring_api import COMPLETION_KIND_RECV as COMPLETION_KIND_RECV
     from _uring_api import COMPLETION_KIND_RECV_MULTISHOT as COMPLETION_KIND_RECV_MULTISHOT
     from _uring_api import COMPLETION_KIND_RECV_BUF as COMPLETION_KIND_RECV_BUF
+    from _uring_api import COMPLETION_KIND_POLL as COMPLETION_KIND_POLL
+    from _uring_api import COMPLETION_KIND_POLL_MULTISHOT as COMPLETION_KIND_POLL_MULTISHOT
+    from _uring_api import COMPLETION_KIND_POLL_REMOVE as COMPLETION_KIND_POLL_REMOVE
     from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
     from _uring_api import COMPLETION_KIND_SEND_ZC as COMPLETION_KIND_SEND_ZC
@@ -69,6 +72,9 @@ except ImportError as exc:
     COMPLETION_KIND_SEND_ZC = 14
     COMPLETION_KIND_SENDMSG_ZC = 15
     COMPLETION_KIND_RECV_BUF = 16
+    COMPLETION_KIND_POLL = 17
+    COMPLETION_KIND_POLL_MULTISHOT = 18
+    COMPLETION_KIND_POLL_REMOVE = 19
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -213,6 +219,15 @@ except ImportError as exc:
         def submit_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def submit_poll(self, fd: int, mask: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_poll_remove(self, completion: Completion) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_cancel(self, completion: Completion) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -269,6 +284,9 @@ class CompletionKind(enum.IntEnum):
     SEND_ZC = COMPLETION_KIND_SEND_ZC
     SENDMSG_ZC = COMPLETION_KIND_SENDMSG_ZC
     RECV_BUF = COMPLETION_KIND_RECV_BUF
+    POLL = COMPLETION_KIND_POLL
+    POLL_MULTISHOT = COMPLETION_KIND_POLL_MULTISHOT
+    POLL_REMOVE = COMPLETION_KIND_POLL_REMOVE
 
 
 DEFAULT_ENTRIES = 8
@@ -306,6 +324,9 @@ __all__ = [
     "COMPLETION_KIND_RECV",
     "COMPLETION_KIND_RECV_MULTISHOT",
     "COMPLETION_KIND_RECV_BUF",
+    "COMPLETION_KIND_POLL",
+    "COMPLETION_KIND_POLL_MULTISHOT",
+    "COMPLETION_KIND_POLL_REMOVE",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
     "COMPLETION_KIND_SEND_ZC",

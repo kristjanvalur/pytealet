@@ -1,5 +1,6 @@
 import errno
 import fcntl
+import select
 import gc
 import importlib.util
 import os
@@ -183,6 +184,9 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_SEND_ZC == 14
     assert uring_api.COMPLETION_KIND_SENDMSG_ZC == 15
     assert uring_api.COMPLETION_KIND_RECV_BUF == 16
+    assert uring_api.COMPLETION_KIND_POLL == 17
+    assert uring_api.COMPLETION_KIND_POLL_MULTISHOT == 18
+    assert uring_api.COMPLETION_KIND_POLL_REMOVE == 19
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -200,6 +204,7 @@ def test_probe_returns_structured_result():
     assert set(probe) == {
         "available",
         "IORING_ACCEPT_MULTISHOT",
+        "IORING_POLL_MULTISHOT",
         "IORING_RECV_MULTISHOT",
         "IORING_OP_SEND_ZC",
         "IORING_OP_SENDMSG_ZC",
@@ -207,10 +212,20 @@ def test_probe_returns_structured_result():
     }
     assert probe["available"] is True
     assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
+    assert isinstance(probe["IORING_POLL_MULTISHOT"], bool)
     assert isinstance(probe["IORING_RECV_MULTISHOT"], bool)
     assert isinstance(probe["IORING_OP_SEND_ZC"], bool)
     assert isinstance(probe["IORING_OP_SENDMSG_ZC"], bool)
     assert isinstance(probe["IORING_OP_SOCKET"], bool)
+
+
+def test_probe_capabilities_are_stable_across_calls():
+    require_uring()
+
+    first = uring_api.probe()
+    second = uring_api.probe()
+
+    assert first == second
 
 
 def test_probe_reports_requested_setup_flags():
@@ -616,6 +631,96 @@ def test_c_api_send_zc_operation_when_available():
         assert not (completion.flags & uring_api.IORING_CQE_F_NOTIF)
         assert notification is None
         assert reader.recv(5) == b"hello"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_c_api_poll_operation_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring() as ring:
+            client.submit_poll(ring, reader.fileno(), select.POLLIN, 250)
+            writer.send(b"x")
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        assert client.completion_summary(completion) == (
+            250,
+            uring_api.COMPLETION_KIND_POLL,
+            completion.res,
+            0,
+            completion.res,
+        )
+        assert completion.res & select.POLLIN
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_c_api_poll_multishot_operation_when_available():
+    require_uring_capability("IORING_POLL_MULTISHOT")
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring() as ring:
+            client.submit_poll_multishot(ring, reader.fileno(), select.POLLIN, 251)
+            writer.send(b"a")
+            first = ring.wait(1.0)
+            writer.send(b"b")
+            second = ring.wait(1.0)
+
+        assert first is not None
+        assert second is not None
+        for sequence, completion in ((0, first), (1, second)):
+            assert client.completion_summary(completion) == (
+                251,
+                uring_api.COMPLETION_KIND_POLL_MULTISHOT,
+                completion.res,
+                completion.flags,
+                completion.res,
+            )
+            assert client.completion_sequence(completion) == sequence
+            assert completion.res & select.POLLIN
+            if sequence == 0:
+                assert completion.flags & uring_api.IORING_CQE_F_MORE
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_c_api_poll_remove_operation_when_available():
+    require_uring_capability("IORING_POLL_MULTISHOT")
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring() as ring:
+            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, 252)
+            writer.send(b"a")
+            first = ring.wait(1.0)
+            assert first is not None
+            assert first.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
+
+            client.submit_poll_remove(ring, handle)
+            removed = False
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                completion = ring.wait(0.0)
+                if completion is None:
+                    continue
+                if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
+                    removed = True
+                    assert completion.user_data is handle
+                    break
+            assert removed
     finally:
         reader.close()
         writer.close()
@@ -1443,6 +1548,126 @@ def test_ring_accept_multishot_completion_when_available():
         for client in clients:
             client.close()
         server.close()
+
+
+def test_ring_poll_completion_when_available():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        token = {"operation": "poll"}
+        with uring_api.Ring() as ring:
+            handle = ring.submit_poll(reader.fileno(), select.POLLIN, token)
+            writer.send(b"x")
+            completion = ring.wait(1.0)
+            assert completion is not None
+            assert completion is handle
+            assert completion.kind == uring_api.COMPLETION_KIND_POLL
+            assert completion.user_data is token
+            assert completion.res & select.POLLIN
+            assert completion.result == completion.res
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_poll_multishot_completion_when_available():
+    require_uring_capability("IORING_POLL_MULTISHOT")
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        token = {"operation": "poll-multishot"}
+        with uring_api.Ring() as ring:
+            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, token)
+            writer.send(b"a")
+            first = ring.wait(1.0)
+            writer.send(b"b")
+            second = ring.wait(1.0)
+
+            assert first is not None
+            assert second is not None
+            assert handle.result is None
+            for sequence, completion in ((0, first), (1, second)):
+                assert completion is not handle
+                assert completion.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
+                assert completion.user_data is token
+                assert completion.sequence == sequence
+                assert completion.res & select.POLLIN
+                assert completion.result == completion.res
+                if sequence == 0:
+                    assert completion.flags & uring_api.IORING_CQE_F_MORE
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_poll_remove_rejects_wrong_completion_kind():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring() as ring:
+            recv_handle = ring.submit_recv(reader.fileno(), bytearray(1))
+            with pytest.raises(ValueError, match="poll or poll_multishot"):
+                ring.submit_poll_remove(recv_handle)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_poll_remove_rejects_delivered_poll_copy_when_available():
+    require_uring_capability("IORING_POLL_MULTISHOT")
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring() as ring:
+            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, {"operation": "poll-remove-invalid"})
+            writer.send(b"a")
+            delivered = ring.wait(1.0)
+            assert delivered is not None
+            assert delivered is not handle
+            assert delivered.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
+            with pytest.raises(ValueError, match="original submit handle"):
+                ring.submit_poll_remove(delivered)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_poll_remove_stops_multishot_poll_when_available():
+    require_uring_capability("IORING_POLL_MULTISHOT")
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        token = {"operation": "poll-remove"}
+        with uring_api.Ring() as ring:
+            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, token)
+            writer.send(b"a")
+            first = ring.wait(1.0)
+            assert first is not None
+            assert first is not handle
+            assert first.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
+
+            remove_handle = ring.submit_poll_remove(handle)
+            assert remove_handle.kind == uring_api.COMPLETION_KIND_POLL_REMOVE
+            removed = False
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                completion = ring.wait(0.0)
+                if completion is None:
+                    continue
+                if completion is remove_handle:
+                    removed = True
+                    break
+            assert removed
+    finally:
+        reader.close()
+        writer.close()
 
 
 def test_ring_connect_completion_when_available():

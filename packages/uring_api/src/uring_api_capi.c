@@ -269,6 +269,29 @@ int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int prot
         UringApiRing_submit_socket_impl((UringApiRing *)ring, domain, type, protocol, flags, user_data));
 }
 
+int UringApiCapi_RingSubmitPoll(PyObject *ring, int fd, unsigned int mask, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return discard_completion_result(UringApiRing_submit_poll_impl((UringApiRing *)ring, fd, mask, user_data));
+}
+
+int UringApiCapi_RingSubmitPollMultishot(PyObject *ring, int fd, unsigned int mask, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return discard_completion_result(
+        UringApiRing_submit_poll_multishot_impl((UringApiRing *)ring, fd, mask, user_data));
+}
+
+int UringApiCapi_RingSubmitPollRemove(PyObject *ring, PyObject *target_completion) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return discard_completion_result(
+        UringApiRing_submit_poll_remove_impl((UringApiRing *)ring, target_completion));
+}
+
 int UringApiCapi_RingBreakWait(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
