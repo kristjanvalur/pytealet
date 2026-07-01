@@ -59,6 +59,23 @@ use this fast path for socket operations that succeed right away.
 Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
 callback)` emits `(conn, address)` for each accepted connection and remains
 active until it is cancelled or the backend reports a terminal error.
+`poll(fd, mask)` waits for fd readiness and returns a one-shot `Operation[int]`.
+The result is the event bitmask currently set on the fd (`select.POLL*` bits
+among those requested in `mask`). `poll_many(fd, mask, callback)` emits that
+bitmask on each readiness event and remains active until cancelled or the
+backend reports a terminal error. Poll works on any file descriptor, not only
+sockets.
+
+`SelectorProactor` probes immediate readiness with `select.select()` and
+registers the fd with the internal selector when the fd is not ready yet. It
+rejects empty or unsupported masks with `ValueError` because the mask must map
+onto `select()` read/write/exception fd lists, and it allows at most one
+pending operation per fd per direction (so `poll(POLLIN)` conflicts with an
+in-flight `recv_many` on the same socket). `UringProactor` forwards `mask`
+unchanged to io_uring; invalid masks surface as operation/CQE errors. It does
+not enforce the same per-fd exclusivity and may run poll and socket I/O SQEs on
+the same fd concurrently.
+
 `recv_many(sock, callback)` emits `(index, data)` pairs for each received byte
 chunk, where `index` is the ordinal position in the receive stream and `data`
 is a read-only `memoryview` into the received bytes. EOF emits one final empty
@@ -94,6 +111,11 @@ this degraded mode automatically.
 When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
 falls back to repeated one-shot `submit_accept()` after each accepted
 connection.
+
+When `IORING_POLL_MULTISHOT` is unavailable, `UringProactor.poll_many()` falls
+back to repeated one-shot `submit_poll()` after each readiness event.
+Multishot cancel uses `submit_poll_remove()`; the oneshot fallback cancels the
+pending SQE like other degraded `*many` paths.
 
 `UringProactor.capabilities` exposes the `uring_api.probe(entries=...,
 flags=...)` result captured once at construction, so callers and the proactor
