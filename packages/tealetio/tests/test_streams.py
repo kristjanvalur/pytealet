@@ -8,6 +8,9 @@ import pytest
 from tealetio import set_scheduler
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.streams import (
+    AsyncStreamReader,
+    AsyncStreamWriter,
+    SocketTransport,
     StreamReader,
     StreamWriter,
     open_async_streams,
@@ -128,6 +131,62 @@ class TestStreamsPoC:
                 return run_coro(handler())
 
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_open_streams_uses_custom_stream_factory(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            class TaggedStreamReader(StreamReader):
+                tag = "native-custom"
+
+            def custom_factory(scheduler, sock, *, limit):
+                transport = SocketTransport(scheduler, sock)
+                stream_reader = TaggedStreamReader(transport, limit=limit)
+                stream_writer = StreamWriter(transport, stream_reader)
+                return stream_reader, stream_writer
+
+            stream_reader, _stream_writer = open_streams(
+                scheduler,
+                reader,
+                stream_factory=custom_factory,
+            )
+            assert isinstance(stream_reader, TaggedStreamReader)
+            assert stream_reader.tag == "native-custom"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_open_async_streams_uses_custom_stream_factory(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            class TaggedAsyncStreamReader(AsyncStreamReader):
+                tag = "async-custom"
+
+            def custom_factory(scheduler, sock, *, limit):
+                transport = SocketTransport(scheduler, sock)
+                stream_reader = TaggedAsyncStreamReader(transport, limit=limit)
+                stream_writer = AsyncStreamWriter(transport, stream_reader)
+                return stream_reader, stream_writer
+
+            stream_reader, _stream_writer = open_async_streams(
+                scheduler,
+                reader,
+                stream_factory=custom_factory,
+            )
+            assert isinstance(stream_reader, TaggedAsyncStreamReader)
+            assert stream_reader.tag == "async-custom"
         finally:
             reader.close()
             writer.close()
