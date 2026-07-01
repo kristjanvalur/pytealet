@@ -2532,6 +2532,21 @@ class ProactorScheduler(BaseScheduler):
 
         return self.wait_operation(self._proactor.connect(sock, address))
 
+    def poll(self, fd: int, mask: int) -> int:
+        """Wait until an fd reports events in `mask` and return the readiness bitmask."""
+
+        return self.wait_operation(self._proactor.poll(fd, mask))
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
+        """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
+
+        return self._proactor.poll_many(fd, mask, callback)
+
     def _has_pending_driver_work(self) -> bool:
         return self._proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)
 

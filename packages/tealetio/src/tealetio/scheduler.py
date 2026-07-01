@@ -1454,6 +1454,21 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
+    def poll(self, fd: int, mask: int) -> int:
+        """Wait until an fd reports events in `mask` and return the readiness bitmask."""
+
+        raise NotImplementedError("poll requires an IO-capable scheduler")
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> Any:
+        """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
+
+        raise NotImplementedError("poll requires an IO-capable scheduler")
+
     # -- Driver state --------------------------------------------------
 
     def _verify_current_scheduler(self) -> None:
