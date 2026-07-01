@@ -460,6 +460,39 @@ iterator that yields scheduler futures in child completion order. If the timeout
 expires before all children finish, iteration raises `TimeoutError`; unfinished
 children are not cancelled by `as_completed(...)`.
 
+## Streams (proof of concept)
+
+`tealetio.streams` provides asyncio-shaped stream endpoints backed by tealet
+blocking socket I/O. The default API is `async def` (`StreamReader`,
+`StreamWriter`) so handlers written for asyncio-style web code can run under
+`run_coro()` or `scheduler.await_()` without creating asyncio futures for socket
+reads and writes. `SyncStreamReader` and `SyncStreamWriter` expose the same
+behaviour through plain synchronous methods for native tealet applications.
+
+```python
+from tealetio.proactor import SyncProactorScheduler
+from tealetio.streams import open_streams, run_coro
+
+scheduler = SyncProactorScheduler()
+
+async def handler(reader, writer):
+    line = await reader.readline()
+    writer.write(line.upper())
+    await writer.drain()
+
+def exercise(sock):
+    reader, writer = open_streams(scheduler, sock)
+    return run_coro(handler(reader, writer))
+```
+
+`open_connection(scheduler, host, port)` connects a TCP socket and returns
+`(reader, writer)`. `open_streams()` and `open_sync_streams()` wrap an existing
+non-blocking connected socket. Under the hood, `SocketTransport` calls
+`scheduler.sock_recv()` and `scheduler.sock_sendall()`.
+
+This module is an early proof of concept. It does not integrate with stdlib
+`asyncio.StreamReader` instances or the `ForwardingProactor` guest loop.
+
 ## Synchronisation Primitives
 
 `tealetio` provides scheduler-aware synchronisation primitives modelled after
