@@ -839,6 +839,73 @@ def test_c_api_recv_multishot_operation_when_available():
         writer.close()
 
 
+def test_c_api_recv_buf_operation_when_available():
+    require_uring()
+
+    client_api = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            try:
+                buf_group = ring.create_buf_group(8, 4)
+                client_api.submit_recv_buf(ring, reader.fileno(), buf_group, 247, 0)
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"provided-buffer recv is not supported: errno {exc.errno}")
+                raise
+            writer.send(b"hello")
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        if completion.res < 0:
+            errno_value = -completion.res
+            if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
+                pytest.skip(f"recv buf is not supported: errno {errno_value}")
+        user_data, kind, res, _flags, result = client_api.completion_summary(completion)
+        assert user_data == 247
+        assert kind == uring_api.COMPLETION_KIND_RECV_BUF
+        assert isinstance(result, uring_api.BufView)
+        assert res == result.length
+        view = memoryview(result)
+        try:
+            assert bytes(view) == b"hello"
+        finally:
+            del view
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_c_api_cancel_operation_when_available():
+    require_uring()
+
+    client_api = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        buf = bytearray(5)
+        with uring_api.Ring() as ring:
+            target = ring.submit_recv(reader.fileno(), buf, "target")
+            writer.send(b"hello")
+            assert ring.wait(1.0) is target
+
+            client_api.submit_cancel(ring, target)
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        user_data, kind, res, _flags, result = client_api.completion_summary(completion)
+        assert user_data is target
+        assert kind == uring_api.COMPLETION_KIND_CANCEL
+        assert res < 0
+        assert result is None
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_c_api_connect_operation_when_available():
     require_uring()
 

@@ -6,6 +6,8 @@
 #include "uring_api_common.h"
 
 PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data);
+PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,
+                                            unsigned int flags, PyObject *user_data);
 PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group,
                                                   unsigned int flags, PyObject *user_data);
 PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,

@@ -44,8 +44,10 @@ typedef struct UringApi_CAPI {
     int (*ring_closed)(PyObject *ring);
     int (*ring_running)(PyObject *ring);
 
-    /* Submission and receive operations. */
+    /* Submission operations (ordered like Ring.submit_*). */
     int (*ring_submit_recv)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+    int (*ring_submit_recv_buf)(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
+                                PyObject *user_data);
     int (*ring_submit_recv_multishot)(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
                                       PyObject *user_data);
     int (*ring_submit_send)(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
@@ -61,16 +63,17 @@ typedef struct UringApi_CAPI {
     int (*ring_submit_accept)(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
     int (*ring_submit_accept_multishot)(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
     int (*ring_submit_connect)(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
-    int (*ring_submit_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
-    int (*ring_submit_close)(PyObject *ring, int fd, PyObject *user_data);
-    int (*ring_submit_socket)(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
-                              PyObject *user_data);
     int (*ring_submit_poll)(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
     int (*ring_submit_poll_multishot)(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
     int (*ring_submit_poll_remove)(PyObject *ring, PyObject *target_completion);
+    int (*ring_submit_cancel)(PyObject *ring, PyObject *target_completion);
+    int (*ring_submit_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
+    int (*ring_submit_close)(PyObject *ring, int fd, PyObject *user_data);
     int (*ring_submit_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset, PyObject *user_data);
     int (*ring_submit_write)(PyObject *ring, int fd, PyObject *data, unsigned long long offset, PyObject *user_data);
     int (*ring_submit_openat)(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mode,
+                              PyObject *user_data);
+    int (*ring_submit_socket)(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
                               PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     /*

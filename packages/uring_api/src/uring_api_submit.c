@@ -49,19 +49,15 @@ PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *v
     return Py_NewRef(completion);
 }
 
-PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
+PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,
+                                            unsigned int flags, PyObject *user_data) {
     struct io_uring_sqe *sqe;
     UringApiBufGroup *buf_group;
-    int fd;
-    unsigned int flags = 0;
-    PyObject *user_data = Py_None;
-    PyObject *buf_group_obj;
     PyObject *completion = NULL;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO!|OI", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
-                                     &user_data, &flags)) {
+    if (!buf_group_obj || !PyObject_TypeCheck(buf_group_obj, &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup");
         return NULL;
     }
     buf_group = (UringApiBufGroup *)buf_group_obj;
@@ -99,6 +95,20 @@ PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObj
         return NULL;
     }
     return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
+    int fd;
+    unsigned int flags = 0;
+    PyObject *user_data = Py_None;
+    PyObject *buf_group_obj;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO!|OI", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
+                                     &user_data, &flags)) {
+        return NULL;
+    }
+    return UringApiRing_submit_recv_buf_impl(self, fd, buf_group_obj, flags, user_data);
 }
 
 PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,

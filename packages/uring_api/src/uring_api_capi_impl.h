@@ -17,6 +17,8 @@ unsigned int UringApiCapi_RingCqEntries(PyObject *ring);
 int UringApiCapi_RingClosed(PyObject *ring);
 int UringApiCapi_RingRunning(PyObject *ring);
 int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+int UringApiCapi_RingSubmitRecvBuf(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
+                                   PyObject *user_data);
 int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
                                          PyObject *user_data);
 int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
@@ -32,17 +34,18 @@ int UringApiCapi_RingSubmitSendmsgZc(PyObject *ring, int fd, PyObject *data, PyO
 int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
 int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
 int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
-int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data);
-int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data);
-int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
-                                  PyObject *user_data);
 int UringApiCapi_RingSubmitPoll(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
 int UringApiCapi_RingSubmitPollMultishot(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
 int UringApiCapi_RingSubmitPollRemove(PyObject *ring, PyObject *target_completion);
+int UringApiCapi_RingSubmitCancel(PyObject *ring, PyObject *target_completion);
+int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data);
+int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data);
 int UringApiCapi_RingSubmitRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset, PyObject *user_data);
 int UringApiCapi_RingSubmitWrite(PyObject *ring, int fd, PyObject *data, unsigned long long offset,
                                  PyObject *user_data);
 int UringApiCapi_RingSubmitOpenat(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mode,
+                                  PyObject *user_data);
+int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
                                   PyObject *user_data);
 int UringApiCapi_RingBreakWait(PyObject *ring);
 PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
