@@ -91,6 +91,14 @@ static void UringApiCompletion_free_state(UringApiCompletion *self) {
         PyMem_Free(msg_state);
         break;
     case URING_API_COMPLETION_STATE_NONE:
+        if (self->state) {
+            /* tag was zeroed or corrupt; free orphaned allocation */
+            PyMem_Free(self->state);
+        }
+        break;
+    default:
+        /* unknown state tag; free to avoid leaking */
+        PyMem_Free(self->state);
         break;
     }
 
@@ -531,17 +539,21 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
         }
         msg_state->addrlen = msg_state->msg.msg_namelen;
         payload = sockaddr_to_object(&msg_state->addr, msg_state->addrlen);
-    } else if (res >= 0 && self->kind == URING_API_PENDING_ACCEPT) {
+    } else if (self->kind == URING_API_PENDING_ACCEPT) {
         sockaddr_state = UringApiCompletion_get_sockaddr_state(self);
-        if (!sockaddr_state) {
-            PyErr_SetString(PyExc_RuntimeError, "accept completion is missing sockaddr state");
-            return -1;
+        if (res >= 0) {
+            if (!sockaddr_state) {
+                PyErr_SetString(PyExc_RuntimeError, "accept completion is missing sockaddr state");
+                return -1;
+            }
+            payload = sockaddr_to_object(&sockaddr_state->addr, sockaddr_state->addrlen);
+            if (payload) {
+                payload = Py_BuildValue("iN", res, payload);
+            }
+        } else {
+            payload = Py_NewRef(Py_None);
         }
-        payload = sockaddr_to_object(&sockaddr_state->addr, sockaddr_state->addrlen);
-        if (payload) {
-            payload = Py_BuildValue("iN", res, payload);
-        }
-        if (flags & IORING_CQE_F_MORE) {
+        if ((flags & IORING_CQE_F_MORE) && sockaddr_state) {
             sockaddr_state->addrlen = sizeof(sockaddr_state->addr);
         }
     } else if (res >= 0 && self->kind == URING_API_PENDING_CONNECT) {
