@@ -73,9 +73,12 @@ onto `select()` read/write/exception fd lists, and it allows at most one
 pending operation per fd per direction (so `poll(POLLIN)` conflicts with an
 in-flight `recv_many` on the same socket).
 
-`UringProactor` forwards `mask` unchanged to io_uring; invalid masks surface
-as operation/CQE errors. Poll and socket receive/send operations may coexist on
-the same fd — for example `poll_many(POLLIN)` alongside `recv_many()` on one
+`UringProactor` forwards `mask` and `fd` unchanged to io_uring; invalid
+arguments surface as operation/CQE errors rather than pre-submit `ValueError`.
+Poll results pass through `completion.res` as the kernel reports them and may
+include bits outside the requested `mask`; the selector backend intersects
+results with the request. Poll and socket receive/send operations may coexist
+on the same fd — for example `poll_many(POLLIN)` alongside `recv_many()` on one
 socket. That overlap is uncommon and rarely problematic; the uring path
 deliberately does not enforce selector-style per-fd exclusivity.
 

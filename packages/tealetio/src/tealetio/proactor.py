@@ -889,6 +889,11 @@ class SelectorProactor(ProactorBase):
                     self._drain_wakeup()
                     woke = True
                     continue
+                entry = self._fd_operations.get(fd)
+                if entry is not None and entry.reader is not None and entry.reader is entry.writer:
+                    if mask & (selectors.EVENT_READ | selectors.EVENT_WRITE):
+                        self._step_fd_operation(fd, selectors.EVENT_READ, completed)
+                    continue
                 if mask & selectors.EVENT_READ:
                     self._step_fd_operation(fd, selectors.EVENT_READ, completed)
                 if mask & selectors.EVENT_WRITE:
@@ -1200,10 +1205,8 @@ class SelectorProactor(ProactorBase):
     def _reserve_fd_poll_operation(self, fd: int, selector_events: int, operation: Operation[Any]) -> None:
         entry = self._fd_operations.setdefault(fd, _FdEntry())
         if selector_events & selectors.EVENT_READ:
-            self._check_fd_operation_available(fd, selectors.EVENT_READ)
             entry.reader = operation
         if selector_events & selectors.EVENT_WRITE:
-            self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
             entry.writer = operation
 
     def _submit_socket_operation(
@@ -2011,9 +2014,8 @@ class UringProactor(ProactorBase):
     def poll(self, fd: int, mask: int) -> Operation[int]:
         """Submit a one-shot io_uring poll operation."""
 
-        # mask goes straight to io_uring; bad values show up as CQE errors. selector
-        # validates earlier because it has to map masks onto select() fd lists. no
-        # per-fd exclusivity — poll may share an fd with recv/send SQEs.
+        # mask and fd go straight to io_uring; bad values show up as CQE errors.
+        # selector validates masks (select() fd lists) and fd>=0; no per-fd exclusivity.
         operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_poll)
         self._submit_uring_entry(entry, lambda: self._ring.submit_poll(fd, mask, entry))

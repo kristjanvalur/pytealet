@@ -556,6 +556,54 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_poll_rejects_empty_mask(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            with pytest.raises(ValueError, match="poll mask"):
+                proactor.poll(reader.fileno(), 0)
+            with pytest.raises(ValueError, match="poll mask"):
+                proactor.poll_many(reader.fileno(), 0, lambda _mask: None)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_rejects_conflicting_recv_many_on_same_fd(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            recv_many = proactor.recv_many(reader, lambda _chunk: None)
+            with pytest.raises(RuntimeError, match="already pending"):
+                proactor.poll(reader.fileno(), select.POLLIN)
+            recv_many.cancel()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_does_not_double_emit_when_mask_maps_to_both_directions(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            mask = select.POLLIN | select.POLLOUT
+            operation = proactor.poll_many(reader.fileno(), mask, seen.append)
+            writer.send(b"a")
+            while not seen:
+                proactor.wait(proactor.get_time() + 1.0)
+            assert len(seen) == 1
+            assert seen[0] & mask
+            operation.cancel()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_recvall_collects_chunks_and_reports_progress(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
