@@ -410,6 +410,18 @@ endpoints. `open_streams()` and `open_async_streams()` wrap an existing
 non-blocking connected socket. Under the hood, `SocketTransport` calls
 `scheduler.sock_recv()` and `scheduler.sock_sendall()`.
 
+Pass `stream_factory=` to `open_streams()`, `open_async_streams()`,
+`open_connection(...)`, or `open_async_connection(...)` to customise the stream
+types created for each connection. Use `StreamFactory` for native
+`(StreamReader, StreamWriter)` pairs and `AsyncStreamFactory` for asyncio-shaped
+pairs. `default_stream_factory` and `default_async_stream_factory` are the
+built-in implementations.
+
+Proactor socket operations accept `socket.socket` objects. `UringProactor`
+submits the socket's file descriptor to io_uring internally; the public API
+still expects a non-blocking `socket.socket` so accepted connections, peer
+metadata, and selector-backed backends share one handle type.
+
 This module is an early proof of concept. It does not integrate with stdlib
 `asyncio.StreamReader` instances or the `ForwardingProactor` guest loop.
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import socket
 from collections.abc import Coroutine
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from asynkit import coro_drive
 
@@ -21,12 +21,40 @@ __all__ = [
     "StreamWriter",
     "AsyncStreamReader",
     "AsyncStreamWriter",
+    "StreamFactory",
+    "AsyncStreamFactory",
+    "default_stream_factory",
+    "default_async_stream_factory",
     "open_connection",
     "open_streams",
     "open_async_connection",
     "open_async_streams",
     "run_coro",
 ]
+
+
+class StreamFactory(Protocol):
+    """Build a native ``(StreamReader, StreamWriter)`` pair for a connected socket."""
+
+    def __call__(
+        self,
+        scheduler: ProactorScheduler,
+        sock: socket.socket,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+    ) -> tuple[StreamReader, StreamWriter]: ...
+
+
+class AsyncStreamFactory(Protocol):
+    """Build an asyncio-shaped ``(AsyncStreamReader, AsyncStreamWriter)`` pair."""
+
+    def __call__(
+        self,
+        scheduler: ProactorScheduler,
+        sock: socket.socket,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+    ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
 
 def run_coro(coro: Coroutine[Any, Any, T]) -> T:
@@ -293,13 +321,13 @@ class AsyncStreamWriter:
         return None
 
 
-def open_streams(
+def default_stream_factory(
     scheduler: ProactorScheduler,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
 ) -> tuple[StreamReader, StreamWriter]:
-    """Wrap a connected non-blocking socket as native stream endpoints."""
+    """Construct the default native stream pair for a connected socket."""
 
     transport = SocketTransport(scheduler, sock)
     reader = StreamReader(transport, limit=limit)
@@ -307,18 +335,44 @@ def open_streams(
     return reader, writer
 
 
-def open_async_streams(
+def default_async_stream_factory(
     scheduler: ProactorScheduler,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
-    """Wrap a connected non-blocking socket as asyncio-shaped stream endpoints."""
+    """Construct the default asyncio-shaped stream pair for a connected socket."""
 
     transport = SocketTransport(scheduler, sock)
     reader = AsyncStreamReader(transport, limit=limit)
     writer = AsyncStreamWriter(transport, reader)
     return reader, writer
+
+
+def open_streams(
+    scheduler: ProactorScheduler,
+    sock: socket.socket,
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: StreamFactory | None = None,
+) -> tuple[StreamReader, StreamWriter]:
+    """Wrap a connected non-blocking socket as native stream endpoints."""
+
+    factory = default_stream_factory if stream_factory is None else stream_factory
+    return factory(scheduler, sock, limit=limit)
+
+
+def open_async_streams(
+    scheduler: ProactorScheduler,
+    sock: socket.socket,
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: AsyncStreamFactory | None = None,
+) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
+    """Wrap a connected non-blocking socket as asyncio-shaped stream endpoints."""
+
+    factory = default_async_stream_factory if stream_factory is None else stream_factory
+    return factory(scheduler, sock, limit=limit)
 
 
 def open_connection(
@@ -329,6 +383,7 @@ def open_connection(
     family: int = socket.AF_UNSPEC,
     proto: int = 0,
     limit: int = _DEFAULT_LIMIT,
+    stream_factory: StreamFactory | None = None,
 ) -> tuple[StreamReader, StreamWriter]:
     """Connect to ``host:port`` and return native stream endpoints."""
 
@@ -340,7 +395,7 @@ def open_connection(
             sock = socket.socket(family, socktype, proto)
             sock.setblocking(False)
             scheduler.sock_connect(sock, sockaddr)
-            return open_streams(scheduler, sock, limit=limit)
+            return open_streams(scheduler, sock, limit=limit, stream_factory=stream_factory)
         except OSError as exc:
             last_error = exc
             if sock is not None:
@@ -358,6 +413,7 @@ def open_async_connection(
     family: int = socket.AF_UNSPEC,
     proto: int = 0,
     limit: int = _DEFAULT_LIMIT,
+    stream_factory: AsyncStreamFactory | None = None,
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
     """Connect to ``host:port`` and return asyncio-shaped stream endpoints."""
 
@@ -369,7 +425,7 @@ def open_async_connection(
             sock = socket.socket(family, socktype, proto)
             sock.setblocking(False)
             scheduler.sock_connect(sock, sockaddr)
-            return open_async_streams(scheduler, sock, limit=limit)
+            return open_async_streams(scheduler, sock, limit=limit, stream_factory=stream_factory)
         except OSError as exc:
             last_error = exc
             if sock is not None:
