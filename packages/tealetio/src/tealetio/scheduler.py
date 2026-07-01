@@ -1454,6 +1454,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
+    def open(self, path: str, mode: str = "rb") -> Any:
+        """Open a positioned binary file through the scheduler."""
+
+        raise NotImplementedError("file I/O requires a proactor scheduler with openat support")
+
     # -- Driver state --------------------------------------------------
 
     def _verify_current_scheduler(self) -> None:

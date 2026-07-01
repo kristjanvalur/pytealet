@@ -39,6 +39,7 @@ def test_top_level_exports_public_scheduler_api():
         "Operation",
         "Proactor",
         "ProactorFactory",
+        "ProactorFile",
         "ProactorScheduler",
         "get_current",
         "InvalidStateError",
