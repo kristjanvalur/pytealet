@@ -80,6 +80,7 @@ PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *use
     completion->buffer = Py_XNewRef(buffer);
     completion->buf_group = NULL;
     completion->sequence = 0;
+    completion->multishot = false;
     completion->has_view = false;
     completion->has_msghdr = false;
     PyObject_GC_Track(completion);
@@ -163,6 +164,7 @@ PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source) {
     completion->buf_group = NULL;
     completion->sequence = source->sequence;
     source->sequence++;
+    completion->multishot = source->multishot;
     memset(&completion->view, 0, sizeof(completion->view));
     memset(&completion->iov, 0, sizeof(completion->iov));
     memset(&completion->msg, 0, sizeof(completion->msg));
@@ -242,50 +244,6 @@ static PyObject *UringApiCompletion_recv_multishot_buf_payload(UringApiCompletio
     return UringApiBufView_create(self->buf_group, buffer_id, (unsigned int)res);
 }
 
-static PyObject *UringApiCompletion_recv_multishot_payload(UringApiCompletion *self, int res, unsigned int flags) {
-    UringApiBufGroup *buf_group;
-    unsigned int buffer_id;
-    PyObject *payload;
-
-    if (res < 0) {
-        UringApiCompletion_recycle_selected_buffer(self, flags);
-        Py_RETURN_NONE;
-    }
-    if (res == 0 && !(flags & IORING_CQE_F_BUFFER)) {
-        return PyBytes_FromStringAndSize("", 0);
-    }
-    if (!(flags & IORING_CQE_F_BUFFER)) {
-        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion did not select a buffer");
-        return NULL;
-    }
-    if (!self->buf_group || !PyObject_TypeCheck(self->buf_group, &UringApiBufGroup_Type)) {
-        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion has no buffer group");
-        return NULL;
-    }
-    buf_group = (UringApiBufGroup *)self->buf_group;
-    buffer_id = flags >> IORING_CQE_BUFFER_SHIFT;
-    if (buffer_id >= buf_group->buffer_count) {
-        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion selected an invalid buffer");
-        return NULL;
-    }
-    if ((unsigned int)res > buf_group->buffer_size) {
-        PyErr_SetString(PyExc_RuntimeError, "recv multishot completion exceeds selected buffer size");
-        return NULL;
-    }
-
-    payload = PyBytes_FromStringAndSize((const char *)buf_group->storage + ((size_t)buffer_id * buf_group->buffer_size),
-                                        (Py_ssize_t)res);
-    if (!payload) {
-        return NULL;
-    }
-    if (flags & IORING_CQE_F_MORE && buf_group->ring && buf_group->ring->initialized) {
-        Py_BEGIN_CRITICAL_SECTION(buf_group->ring);
-        UringApiBufGroup_recycle(buf_group, buffer_id);
-        Py_END_CRITICAL_SECTION();
-    }
-    return payload;
-}
-
 int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags) {
     PyObject *payload;
 
@@ -295,9 +253,7 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
         UringApiCompletion_clear_pending_state(self);
         return 1;
     }
-    if (self->kind == URING_API_PENDING_RECV_MULTISHOT) {
-        payload = UringApiCompletion_recv_multishot_payload(self, res, flags);
-    } else if (self->kind == URING_API_PENDING_RECV_MULTISHOT_BUF || self->kind == URING_API_PENDING_RECV_BUF) {
+    if (self->kind == URING_API_PENDING_RECV_MULTISHOT || self->kind == URING_API_PENDING_RECV_BUF) {
         payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags);
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
@@ -353,6 +309,10 @@ static PyObject *UringApiCompletion_get_sequence(UringApiCompletion *self, void 
     return PyLong_FromUnsignedLongLong(self->sequence);
 }
 
+static PyObject *UringApiCompletion_get_multishot(UringApiCompletion *self, void *closure) {
+    return PyBool_FromLong(self->multishot);
+}
+
 static PyGetSetDef UringApiCompletion_getset[] = {
     {"user_data", (getter)UringApiCompletion_get_user_data, NULL, NULL, NULL},
     {"kind", (getter)UringApiCompletion_get_kind, NULL, NULL, NULL},
@@ -360,6 +320,7 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {"flags", (getter)UringApiCompletion_get_flags, NULL, NULL, NULL},
     {"result", (getter)UringApiCompletion_get_result, NULL, NULL, NULL},
     {"sequence", (getter)UringApiCompletion_get_sequence, NULL, NULL, NULL},
+    {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

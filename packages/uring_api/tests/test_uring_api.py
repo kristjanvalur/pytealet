@@ -130,7 +130,7 @@ def test_public_capi_header_compiles_without_liburing_headers():
 
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 2
+    assert uring_api.C_API_ABI_VERSION == 1
     assert uring_api.C_API_FEATURE_CORE == 1 << 0
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
 
@@ -163,7 +163,7 @@ def test_completion_kind_enum_matches_module_constants():
     assert uring_api.CompletionKind.SENDMSG_ZC == uring_api.COMPLETION_KIND_SENDMSG_ZC
     assert uring_api.CompletionKind(uring_api.COMPLETION_KIND_ACCEPT) is uring_api.CompletionKind.ACCEPT
     assert uring_api.CompletionKind.RECV_BUF == uring_api.COMPLETION_KIND_RECV_BUF
-    assert uring_api.CompletionKind.RECV_MULTISHOT_BUF == uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF
+    assert uring_api.CompletionKind.RECV_MULTISHOT == uring_api.COMPLETION_KIND_RECV_MULTISHOT
 
 
 def test_native_module_exports_completion_kind_constants():
@@ -182,8 +182,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_RECV_MULTISHOT == 13
     assert uring_api.COMPLETION_KIND_SEND_ZC == 14
     assert uring_api.COMPLETION_KIND_SENDMSG_ZC == 15
-    assert uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF == 16
-    assert uring_api.COMPLETION_KIND_RECV_BUF == 17
+    assert uring_api.COMPLETION_KIND_RECV_BUF == 16
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -700,7 +699,8 @@ def test_c_api_recv_multishot_operation_when_available():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             try:
-                client_api.submit_recv_multishot(ring, reader.fileno(), 8, 4, 0, 246)
+                buf_group = ring.create_buf_group(8, 4)
+                client_api.submit_recv_multishot(ring, reader.fileno(), buf_group, 246, 0)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -715,9 +715,15 @@ def test_c_api_recv_multishot_operation_when_available():
                 pytest.skip(f"recv multishot is not supported: errno {errno_value}")
         user_data, kind, res, _flags, result = client_api.completion_summary(completion)
         assert user_data == 246
+        assert completion.multishot is True
         assert kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
-        assert res == len(result)
-        assert result == b"hello"
+        assert isinstance(result, uring_api.BufView)
+        assert res == result.length
+        view = memoryview(result)
+        try:
+            assert bytes(view) == b"hello"
+        finally:
+            del view
         assert client_api.completion_sequence(completion) == 0
     finally:
         reader.close()
@@ -1009,7 +1015,7 @@ def test_buf_group_rejects_use_on_different_ring():
     with uring_api.Ring() as ring_a, uring_api.Ring() as ring_b:
         buf_group = ring_a.create_buf_group(16, 4)
         with pytest.raises(ValueError, match="buf_group was not created by this ring"):
-            ring_b.submit_recv_multishot_buf(0, buf_group)
+            ring_b.submit_recv_multishot(0, buf_group)
 
 
 def test_buf_view_buf_result_exposes_buf_group():
@@ -1022,7 +1028,7 @@ def test_buf_view_buf_result_exposes_buf_group():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                ring.submit_recv_multishot_buf(reader.fileno(), buf_group)
+                ring.submit_recv_multishot(reader.fileno(), buf_group)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -1126,18 +1132,18 @@ def test_buf_view_memoryview_is_readonly():
         del mv
 
 
-def test_ring_recv_multishot_buf_completion_when_available():
+def test_ring_recv_multishot_completion_when_available():
     require_uring()
 
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        token = {"operation": "recv-multishot-buf"}
+        token = {"operation": "recv-multishot"}
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                handle = ring.submit_recv_multishot_buf(reader.fileno(), buf_group, token)
+                handle = ring.submit_recv_multishot(reader.fileno(), buf_group, token)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -1157,7 +1163,8 @@ def test_ring_recv_multishot_buf_completion_when_available():
                     if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
                         pytest.skip(f"recv multishot is not supported: errno {errno_value}")
                 assert completion is not handle
-                assert completion.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF
+                assert completion.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
+                assert completion.multishot is True
                 assert completion.user_data is token
                 assert completion.sequence == sequence
                 assert isinstance(completion.result, uring_api.BufView)
@@ -1181,18 +1188,18 @@ def test_ring_recv_multishot_buf_completion_when_available():
         writer.close()
 
 
-def test_ring_recv_multishot_buf_eof_returns_empty_bytes_when_available():
+def test_ring_recv_multishot_eof_returns_empty_bufview_when_available():
     require_uring()
 
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        token = {"operation": "recv-multishot-buf-eof"}
+        token = {"operation": "recv-multishot-eof"}
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                handle = ring.submit_recv_multishot_buf(reader.fileno(), buf_group, token)
+                handle = ring.submit_recv_multishot(reader.fileno(), buf_group, token)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -1209,6 +1216,7 @@ def test_ring_recv_multishot_buf_eof_returns_empty_bytes_when_available():
             if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
                 pytest.skip(f"recv multishot is not supported: errno {errno_value}")
         assert first is not handle
+        assert first.multishot is True
         assert first.sequence == 0
         assert isinstance(first.result, uring_api.BufView)
         view = memoryview(first.result)
@@ -1220,7 +1228,8 @@ def test_ring_recv_multishot_buf_eof_returns_empty_bytes_when_available():
         assert first.flags & uring_api.IORING_CQE_F_MORE
 
         assert final is handle
-        assert final.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT_BUF
+        assert final.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
+        assert final.multishot is True
         assert final.user_data is token
         assert final.sequence == 1
         assert final.res == 0
@@ -1233,122 +1242,7 @@ def test_ring_recv_multishot_buf_eof_returns_empty_bytes_when_available():
         writer.close()
 
 
-def test_ring_recv_multishot_accepts_default_buffer_args():
-    require_uring()
 
-    reader, writer = socket.socketpair()
-    try:
-        reader.setblocking(False)
-        with uring_api.Ring() as ring:
-            try:
-                handle = ring.submit_recv_multishot(reader.fileno(), user_data="defaults")
-            except OSError as exc:
-                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
-                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
-                raise
-
-            assert handle.user_data == "defaults"
-            ring.submit_cancel(handle)
-            deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline:
-                completion = ring.wait(0.0)
-                if completion is handle:
-                    break
-    finally:
-        reader.close()
-        writer.close()
-
-
-def test_ring_recv_multishot_completion_when_available():
-    require_uring()
-
-    reader, writer = socket.socketpair()
-    try:
-        reader.setblocking(False)
-        writer.setblocking(False)
-        token = {"operation": "recv-multishot"}
-        with uring_api.Ring() as ring:
-            try:
-                handle = ring.submit_recv_multishot(reader.fileno(), 8, 4, token)
-            except OSError as exc:
-                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
-                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
-                raise
-
-            writer.send(b"hello")
-            first = ring.wait(1.0)
-            writer.send(b"world")
-            second = ring.wait(1.0)
-
-            assert first is not None
-            assert second is not None
-            assert handle.result is None
-            for sequence, completion, expected in ((0, first, b"hello"), (1, second, b"world")):
-                if completion.res < 0:
-                    errno_value = -completion.res
-                    if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
-                        pytest.skip(f"recv multishot is not supported: errno {errno_value}")
-                assert completion is not handle
-                assert completion.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
-                assert completion.user_data is token
-                assert completion.sequence == sequence
-                assert completion.result == expected
-                assert completion.res == len(expected)
-                assert completion.flags & uring_api.IORING_CQE_F_MORE
-
-            ring.submit_cancel(handle)
-            deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline:
-                completion = ring.wait(0.0)
-                if completion is handle:
-                    break
-    finally:
-        reader.close()
-        writer.close()
-
-
-def test_ring_recv_multishot_eof_returns_empty_bytes_when_available():
-    require_uring()
-
-    reader, writer = socket.socketpair()
-    try:
-        reader.setblocking(False)
-        writer.setblocking(False)
-        token = {"operation": "recv-multishot-eof"}
-        with uring_api.Ring() as ring:
-            try:
-                handle = ring.submit_recv_multishot(reader.fileno(), 8, 4, token)
-            except OSError as exc:
-                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
-                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
-                raise
-
-            writer.send(b"hello")
-            first = ring.wait(1.0)
-            writer.close()
-            final = ring.wait(1.0)
-
-        assert first is not None
-        if first.res < 0:
-            errno_value = -first.res
-            if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
-                pytest.skip(f"recv multishot is not supported: errno {errno_value}")
-        assert first is not handle
-        assert first.sequence == 0
-        assert first.result == b"hello"
-        assert first.res == 5
-        assert first.flags & uring_api.IORING_CQE_F_MORE
-
-        assert final is handle
-        assert final.kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT
-        assert final.user_data is token
-        assert final.sequence == 1
-        assert final.res == 0
-        assert final.result == b""
-        assert not (final.flags & uring_api.IORING_CQE_F_MORE)
-    finally:
-        reader.close()
-        writer.close()
 
 
 def test_ring_cancel_unknown_completion_reports_cancel_completion_when_available():
@@ -1522,6 +1416,7 @@ def test_ring_accept_multishot_completion_when_available():
                         pytest.skip(f"IORING_ACCEPT_MULTISHOT is not supported: errno {errno_value}")
                 assert completion is not handle
                 assert completion.kind == uring_api.COMPLETION_KIND_ACCEPT
+                assert completion.multishot is True
                 assert completion.user_data is token
                 assert completion.sequence == sequence
                 assert completion.flags & uring_api.IORING_CQE_F_MORE

@@ -24,18 +24,23 @@ with uring_api.Ring() as ring:
 
 ## Socket I/O
 
-`Ring` currently exposes `submit_recv()`, `submit_recv_multishot()`,
-`create_buf_group()`, `submit_recv_buf()`, `submit_recv_multishot_buf()`,
-`submit_send()`, `submit_send_zc()`, `submit_recvmsg()`, `submit_sendto()`,
-`submit_sendmsg()`, `submit_sendmsg_zc()`, `submit_accept()`,
-`submit_accept_multishot()`, `submit_connect()`, `submit_shutdown()`,
-`submit_close()`, `submit_socket()`, and `wait()`. This is the complete baseline
-for Python-oriented socket I/O in `uring-api`: normal sends and receives,
-copied and leased-buffer multishot receive, message-oriented operations,
-listener accept paths, connection setup, orderly shutdown, fd creation/close,
-cancellation, and the practical multishot server cases all have direct wrappers.
+Need to drive socket work through a ring without building a full event loop?
+`Ring` exposes direct submit wrappers for the common Python-oriented cases:
+
+- stream I/O: `submit_recv()`, and provided-buffer `submit_recv_buf()` /
+  `submit_recv_multishot()` via `create_buf_group()`;
+- message I/O: `submit_recvmsg()`, `submit_sendto()`, `submit_sendmsg()`, and
+  zero-copy `submit_sendmsg_zc()`;
+- listeners and setup: `submit_accept()`, `submit_accept_multishot()`,
+  `submit_connect()`, and `submit_socket()`;
+- lifecycle: `submit_shutdown()`, `submit_close()`, send helpers `submit_send()`
+  / `submit_send_zc()`, and `wait()` for completion reaping.
+
 Each submitted operation carries a Python `user_data` object which comes back
-with its completion.
+with its completion. Inspect the semantic operation with `completion.kind`
+(`CompletionKind` enum, or the matching `COMPLETION_KIND_*` constants) when
+callbacks need to branch on completion type rather than inferring from
+`result` alone.
 
 ```python
 import socket
@@ -80,18 +85,12 @@ been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
 same descriptor.
 
-`submit_recv_multishot()` owns an internal provided-buffer ring for the pending
-operation. Each receive CQE is copied into a new Python `bytes` object, the
-selected kernel buffer is recycled right away, and the delivered completion gets
-a `sequence` number so callback users can reconstruct receive order even when
-worker threads dispatch completions out of order. Multishot completions are
-numbered from `0`; normal one-shot completions also report `sequence == 0`.
-
-For leased-buffer receive, create a caller-owned provided-buffer ring with
-`create_buf_group()` and submit with `submit_recv_buf()` or
-`submit_recv_multishot_buf()`. Completions return read-only `BufView` objects
-instead of copying into `bytes`. Export the payload with `memoryview(view)` and
-release the export before the kernel buffer is recycled:
+Provided-buffer receive uses a caller-owned ring created with
+`create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or
+stream receives with `submit_recv_multishot(fd, buf_group, ...)`. Both paths
+return read-only `BufView` objects rather than copying into `bytes`. Export the
+payload with `memoryview(view)` and drop the export (or call
+`memoryview.release()`) before the kernel buffer is recycled:
 
 ```python
 buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)
@@ -105,12 +104,37 @@ finally:
     del view
 ```
 
+Multishot receive reuses the same `BufGroup` contract. Each CQE delivers a
+leased `BufView`, sets `completion.sequence` for out-of-order callback
+reconstruction, and uses `IORING_CQE_F_MORE` until EOF, cancellation, or
+`-ENOBUFS` when the buffer ring is empty. After `-ENOBUFS`, return buffers to
+the ring and submit a fresh `submit_recv_multishot()`; stream consumers should
+continue ordinal indexing from the terminal completion's `sequence`.
+
+```python
+handle = ring.submit_recv_multishot(reader.fileno(), buf_group, token)
+completion = ring.wait(1.0)
+view = memoryview(completion.result)
+try:
+    process(view)
+finally:
+    del view
+```
+
 `BufView` tracks active exported memoryviews and recycles the selected buffer
 back to the ring when the last export is released. Provided-buffer completions
 always return `BufView`, including EOF (`completion.res == 0`), where the view
 has `length == 0` and is falsy. Detect stream end from `completion.res`, not
 from the result type. `BufGroup` and `BufView` cannot be constructed directly;
 use `Ring.create_buf_group()` and let receive completions create the views.
+
+`completion.kind` uses `RECV_MULTISHOT` (13) for multishot provided-buffer
+receive and `RECV_BUF` (16) for one-shot `submit_recv_buf()`.
+
+`CompletionKind` values are stable across releases and mirror the C API
+constants in `uring_api_completion_kinds.h`. Prefer the enum in Python code;
+native clients include the same header and call `completion_kind()` on the
+completion object.
 
 The local liburing headers expose more socket-adjacent operations than this
 wrapper publishes, but those are intentionally outside the core Python-oriented
@@ -287,8 +311,8 @@ The intended baseline is simple:
 
 - one thread may reap completions with `wait()`;
 - other threads may call submit-side methods such as `submit_recv()`,
-    `submit_recv_multishot()`, `create_buf_group()`, `submit_recv_buf()`,
-    `submit_recv_multishot_buf()`, `submit_send()`, `submit_send_zc()`,
+    `create_buf_group()`, `submit_recv_buf()`, `submit_recv_multishot()`,
+    `submit_send()`, `submit_send_zc()`,
     `submit_recvmsg()`, `submit_sendto()`, `submit_sendmsg_zc()`,
     `submit_accept()`, `submit_accept_multishot()`, `submit_connect()`, and
     `break_wait()`;
@@ -368,8 +392,10 @@ The capsule currently exposes:
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;
 - `completion_check()`, `completion_user_data()`, `completion_res()`,
-    `completion_flags()`, `completion_sequence()`, and `completion_result()`
-    for native completion inspection.
+    `completion_flags()`, `completion_sequence()`, `completion_result()`, and
+    `completion_kind()` for native completion inspection. Kind values match
+    `URING_API_COMPLETION_KIND_*` in `uring_api_completion_kinds.h` and
+    `CompletionKind` in Python.
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

@@ -19,7 +19,6 @@ try:
     from _uring_api import COMPLETION_KIND_CLOSE as COMPLETION_KIND_CLOSE
     from _uring_api import COMPLETION_KIND_RECV as COMPLETION_KIND_RECV
     from _uring_api import COMPLETION_KIND_RECV_MULTISHOT as COMPLETION_KIND_RECV_MULTISHOT
-    from _uring_api import COMPLETION_KIND_RECV_MULTISHOT_BUF as COMPLETION_KIND_RECV_MULTISHOT_BUF
     from _uring_api import COMPLETION_KIND_RECV_BUF as COMPLETION_KIND_RECV_BUF
     from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
@@ -51,7 +50,7 @@ try:
     from _uring_api import probe as _probe
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
-    C_API_ABI_VERSION = 2
+    C_API_ABI_VERSION = 1
     C_API_FEATURE_CORE = 1 << 0
     C_API_FEATURES = 0
     COMPLETION_KIND_RECV = 1
@@ -69,8 +68,7 @@ except ImportError as exc:
     COMPLETION_KIND_RECV_MULTISHOT = 13
     COMPLETION_KIND_SEND_ZC = 14
     COMPLETION_KIND_SENDMSG_ZC = 15
-    COMPLETION_KIND_RECV_MULTISHOT_BUF = 16
-    COMPLETION_KIND_RECV_BUF = 17
+    COMPLETION_KIND_RECV_BUF = 16
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -93,6 +91,7 @@ except ImportError as exc:
         flags: int
         result: object
         sequence: int = 0
+        multishot: bool = False
 
     @dataclass(frozen=True)
     class BufGroup:
@@ -175,16 +174,6 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_recv_multishot(
-            self,
-            fd: int,
-            buffer_size: int = 16384,
-            buffer_count: int = 4,
-            user_data: object = None,
-            flags: int = 0,
-        ) -> Completion:
-            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
-
-        def submit_recv_multishot_buf(
             self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
@@ -279,7 +268,6 @@ class CompletionKind(enum.IntEnum):
     RECV_MULTISHOT = COMPLETION_KIND_RECV_MULTISHOT
     SEND_ZC = COMPLETION_KIND_SEND_ZC
     SENDMSG_ZC = COMPLETION_KIND_SENDMSG_ZC
-    RECV_MULTISHOT_BUF = COMPLETION_KIND_RECV_MULTISHOT_BUF
     RECV_BUF = COMPLETION_KIND_RECV_BUF
 
 
@@ -317,7 +305,6 @@ __all__ = [
     "COMPLETION_KIND_CLOSE",
     "COMPLETION_KIND_RECV",
     "COMPLETION_KIND_RECV_MULTISHOT",
-    "COMPLETION_KIND_RECV_MULTISHOT_BUF",
     "COMPLETION_KIND_RECV_BUF",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",

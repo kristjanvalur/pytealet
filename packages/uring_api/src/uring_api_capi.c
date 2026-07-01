@@ -2,6 +2,7 @@
  * Public C API export for the _uring_api extension.
  */
 
+#include "uring_api_bufgroup.h"
 #include "uring_api_capi_impl.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
@@ -159,13 +160,17 @@ int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject 
     return ring_submit_buffer_view_status((UringApiRing *)ring, fd, buf, user_data, 1, UringApiRing_submit_recv_impl);
 }
 
-int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, unsigned int buffer_size, unsigned int buffer_count,
-                                         unsigned int flags, PyObject *user_data) {
+int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
+                                         PyObject *user_data) {
     if (!ring_type_check(ring)) {
         return -1;
     }
+    if (!buf_group || !PyObject_TypeCheck(buf_group, &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup");
+        return -1;
+    }
     return discard_completion_result(
-        UringApiRing_submit_recv_multishot_impl((UringApiRing *)ring, fd, buffer_size, buffer_count, flags, user_data));
+        UringApiRing_submit_recv_multishot_impl((UringApiRing *)ring, fd, buf_group, flags, user_data));
 }
 
 int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data) {

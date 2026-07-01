@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `recvgen(..., allow_memview=True)` and matching `sock_recvgen(...)` option to
+  yield borrowed `memoryview` chunks and `(RECV_MANY_BUFFER_PRESSURE, None)`
+  pressure tokens for zero-copy consumers that release held views explicitly.
+- `recvgen(sock)` and `ProactorScheduler.sock_recvgen(sock)` as a
+  tealet-blocking incremental consumer of `recv_many`, yielding stream-ordered
+  `(index, data)` chunks with the same provided-buffer pressure policy as
+  `recvall`.
+- `UringProactor` with a shared lazy `BufGroup` for provided-buffer multishot
+  `recv_many` / `recvall`, plus `buf_group_factory` for custom pool sizing.
+- `RECV_MANY_BUFFER_PRESSURE` result index so `recv_many` consumers can release
+  held views when the shared provided-buffer pool is exhausted.
 - Published runnable queue policies (`FifoRunnableQueue`,
   `PrescheduledRunnableQueue`, and `PriorityRunnableQueue`) for explicit
   scheduler construction, including priority-scheduling applications.
@@ -24,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
+- `recvgen` / `sock_recvgen` now yield `(index, bytes)` by default, copying
+  chunks on dequeue (and flushing queued views on provided-buffer pressure) so
+  consumers do not hold borrowed kernel views; opt in to
+  `allow_memview=True` for borrowed views and pressure tokens.
+- Removed the `n` chunk-size argument from `recv_many`, `recvall`, `recvgen`,
+  `sock_recvall`, and `sock_recvgen`; chunk sizes are backend-defined
+  (`SelectorProactor` reads up to 8 KiB per `recv()`, `UringProactor` uses the
+  shared `BufGroup` slot size).
+- `UringProactor.recv_many` delivers leased `memoryview` chunks instead of
+  copied `bytes`; `recvall` keeps views until buffer pressure, then copies all
+  held chunks to `bytes` and lets the proactor resubmit multishot receive.
 - Made `Scheduler` use the proactor-backed synchronous scheduler by default,
   while keeping explicit selector-backed schedulers available.
 - Changed `run_asyncio_in_tealet(...)` to choose the hosted asyncio loop from

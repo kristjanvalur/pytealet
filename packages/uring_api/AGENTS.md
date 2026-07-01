@@ -100,21 +100,21 @@ in those tests.
 - `submit_send_zc()` and `submit_sendmsg_zc()` deliver the user `Completion`
   on the operation CQE; the later `IORING_CQE_F_NOTIF` lifetime CQE is consumed
   internally before the retained buffer is released.
-- `submit_recv_multishot()` owns an internal provided-buffer ring, copies each
-  receive into a new `bytes` object, recycles the kernel buffer immediately, and
-  assigns `completion.sequence` so out-of-order callback delivery can be
-  reconstructed.
+- `submit_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
+  `BufView` completions, and assigns `completion.sequence` so out-of-order
+  callback delivery can be reconstructed. When the buffer ring is empty the
+  multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)
 
 - Create pools with `Ring.create_buf_group()`; submit with `submit_recv_buf()`
-  or `submit_recv_multishot_buf()`. Neither `BufGroup` nor `BufView` is directly
+  or `submit_recv_multishot()`. Neither `BufGroup` nor `BufView` is directly
   instantiable.
 - A `BufGroup` must belong to the `Ring` that created it. Reject cross-ring use
   with `ValueError`.
-- `_buf` completion paths always return `BufView`, never `b""`. EOF (`res == 0`)
+- Provided-buffer completion paths always return `BufView`, never `b""`. EOF (`res == 0`)
   yields an empty `BufView` (`length == 0`, falsy). Kernel-selected zero-length
   buffers are still leased and recycle on `close()` / last `memoryview` release.
 - `BufView` buffer exports are read-only. Set `format` only when
@@ -142,6 +142,9 @@ not a permanent ring failure.
 
 `IORING_SETUP_SINGLE_ISSUER` and similar flags impose application contracts.
 Check `probe(flags=...)` before constructing a real `Ring(flags=...)`.
+`tealetio.UringProactor` does not default this flag; see
+`ROADMAP.md` (`UringProactor` submission threading and
+`IORING_SETUP_SINGLE_ISSUER`) for why worker-thread submission stays enabled.
 
 ## C Extension Layout
 
@@ -173,7 +176,8 @@ constants and types live in `src/uring_api/__init__.py`.
 
 - Stable public kind values live in `URING_API_COMPLETION_KIND_*` macros
   (`uring_api_completion_kinds.h`). Internal pending kinds must stay aligned.
-  Provided-buffer kinds are `RECV_MULTISHOT_BUF` (16) and `RECV_BUF` (17).
+  Provided-buffer receive uses `RECV_MULTISHOT` (13) for multishot and
+  `RECV_BUF` (16) for one-shot `submit_recv_buf()`.
 - `Completion.kind` on the native `Completion` object is an `int`. Export
   `CompletionKind` (`enum.IntEnum`) from `uring_api/__init__.py` only — not from
   `_uring_api.pyi` or the extension module namespace.

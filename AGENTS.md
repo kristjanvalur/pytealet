@@ -216,6 +216,18 @@ Sibling packages should declare `tealet` compatibility ranges (for the current
 
 ## Coding Guidelines
 
+### `isinstance` in production code
+
+Use `isinstance` when polymorphism is expected — for example, branching across
+several concrete types that callers may pass in. Tests may use `isinstance` (or
+`assert isinstance`) to verify behaviour and API contracts.
+
+In production code, do not add `isinstance` checks solely to verify an internal
+contract you control. Trust the contract and let violations surface naturally
+through `AttributeError`, `TypeError`, or similar failures. Debug-only `assert`
+statements are fine when they document invariants rather than user-facing
+validation.
+
 ### Runtime safety first
 
 - Treat segfaults, aborts, and debug-assert crashes as highest priority.

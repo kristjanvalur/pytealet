@@ -22,11 +22,231 @@ from tealetio.proactor import (
     InvalidStateError,
     Operation,
     ProactorScheduler,
+    RECV_MANY_BUFFER_PRESSURE,
     SelectorProactor,
     SyncProactorScheduler,
     ThreadedSelectorProactor,
     UringProactor,
 )
+
+
+def _recv_many_bytes(seen: list[tuple[int, memoryview]]) -> list[tuple[int, bytes]]:
+    return [(index, bytes(data)) for index, data in seen]
+
+
+def _recv_many_bytes_sorted(seen: list[tuple[int, memoryview]]) -> list[tuple[int, bytes]]:
+    return sorted((index, bytes(data)) for index, data in seen if index != RECV_MANY_BUFFER_PRESSURE)
+
+
+def test_recvall_adopt_chunk_keeps_all_chunk_views():
+    chunks: dict[int, memoryview | bytes] = {}
+    pending: set[int] = set()
+
+    proactor_module._recvall_adopt_chunk(chunks, pending, 0, memoryview(b"a"))
+    proactor_module._recvall_adopt_chunk(chunks, pending, 1, memoryview(b"b"))
+    proactor_module._recvall_adopt_chunk(chunks, pending, 2, memoryview(b"c"))
+
+    assert type(chunks[0]) is memoryview
+    assert type(chunks[1]) is memoryview
+    assert type(chunks[2]) is memoryview
+    assert pending == {0, 1, 2}
+
+
+def test_recvall_relieve_pressure_converts_all_live_views():
+    chunks: dict[int, memoryview | bytes] = {
+        0: memoryview(b"a"),
+        1: memoryview(b"b"),
+        2: memoryview(b"c"),
+    }
+    pending: set[int] = {0, 1, 2}
+
+    proactor_module._recvall_relieve_pressure(chunks, pending)
+
+    assert chunks == {0: b"a", 1: b"b", 2: b"c"}
+    assert not pending
+
+
+def test_recvall_release_pending_views_clears_pending_chunk_references():
+    chunks: dict[int, memoryview | bytes] = {0: b"done", 1: memoryview(b"tail")}
+    pending: set[int] = {1}
+
+    proactor_module._recvall_release_pending_views(chunks, pending)
+
+    assert not pending
+    assert 0 in chunks
+    assert 1 not in chunks
+
+
+def _exercise_recvgen_buffer(exercise: Any) -> Any:
+    scheduler = SyncProactorScheduler()
+    set_scheduler(scheduler)
+    try:
+        return scheduler.run_until_complete(scheduler.spawn(exercise))
+    finally:
+        scheduler.close()
+
+
+def _multishot_test_completion(*, sequence: int = 0, more: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        multishot=True,
+        flags=uring_api.IORING_CQE_F_MORE if more else 0,
+        sequence=sequence,
+    )
+
+
+def _multishot_test_entry() -> proactor_module._UringEntry:
+    operation = ContinuousOperation(
+        kind="recv_many",
+        fileobj=socket.socketpair()[0],
+        proactor=None,
+        result_callback=lambda _result: None,
+    )
+    return proactor_module._UringEntry(
+        operation=operation,
+        complete=lambda *_args: None,
+        multishot_leg=proactor_module._MultishotLegState(),
+    )
+
+
+def test_uring_entry_omits_multishot_leg_for_one_shot_operations():
+    operation = Operation(kind="recv", fileobj=socket.socketpair()[0], proactor=None)
+    entry = proactor_module._UringEntry(operation=operation, complete=lambda *_args: None)
+    assert entry.multishot_leg is None
+
+
+def test_completions_to_process_passes_through_non_multishot():
+    entry = _multishot_test_entry()
+    completion = SimpleNamespace(multishot=False)
+    assert entry.completions_to_process(completion) == (completion, None)
+
+
+def test_completions_to_process_defers_out_of_order_termination():
+    entry = _multishot_test_entry()
+    terminal = _multishot_test_completion(sequence=2, more=False)
+    assert entry.completions_to_process(terminal) == (None, None)
+    assert entry.multishot_leg is not None
+    assert entry.multishot_leg.pending_final is terminal
+
+
+def test_completions_to_process_flushes_stored_termination():
+    entry = _multishot_test_entry()
+    terminal = _multishot_test_completion(sequence=2, more=False)
+    entry.completions_to_process(terminal)
+    first = _multishot_test_completion(sequence=0)
+    assert entry.completions_to_process(first) == (first, None)
+    second = _multishot_test_completion(sequence=1)
+    assert entry.completions_to_process(second) == (second, terminal)
+
+
+def test_ordered_ingest_buffer_returns_empty_when_out_of_order():
+    buffer = proactor_module._OrderedIngestBuffer[str]()
+    assert buffer.ingest(1, "b") == []
+
+
+def test_ordered_ingest_buffer_returns_single_ready_item():
+    buffer = proactor_module._OrderedIngestBuffer[str]()
+    assert buffer.ingest(0, "a") == [(0, "a")]
+
+
+def test_ordered_ingest_buffer_unclogs_pending_items():
+    buffer = proactor_module._OrderedIngestBuffer[str]()
+    assert buffer.ingest(1, "b") == []
+    assert buffer.ingest(2, "c") == []
+    assert buffer.ingest(0, "a") == [(0, "a"), (1, "b"), (2, "c")]
+
+
+def test_recvgen_buffer_reorders_out_of_order_chunks():
+    def exercise() -> list[tuple[int, bytes]]:
+        buffer = proactor_module._RecvGenBuffer()
+        buffer.on_result((1, memoryview(b"b")))
+        buffer.on_result((0, memoryview(b"a")))
+        return [buffer.take_next(), buffer.take_next()]
+
+    first, second = _exercise_recvgen_buffer(exercise)
+    assert first == (0, b"a")
+    assert second == (1, b"b")
+
+
+def test_recvgen_buffer_pressure_converts_all_held_views():
+    def exercise() -> list[tuple[int, bytes]]:
+        buffer = proactor_module._RecvGenBuffer()
+        buffer.on_result((0, memoryview(b"a")))
+        buffer.on_result((1, memoryview(b"b")))
+        buffer.on_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
+        return [buffer.take_next(), buffer.take_next()]
+
+    (index0, chunk0), (index1, chunk1) = _exercise_recvgen_buffer(exercise)
+    assert index0 == 0
+    assert chunk0 == b"a"
+    assert index1 == 1
+    assert chunk1 == b"b"
+
+
+def test_recvgen_buffer_eof_stops_iteration():
+    def exercise() -> list[tuple[int, bytes] | None]:
+        buffer = proactor_module._RecvGenBuffer()
+        buffer.on_result((0, memoryview(b"done")))
+        buffer.on_result((1, memoryview(b"")))
+        return [buffer.take_next(), buffer.take_next()]
+
+    first, second = _exercise_recvgen_buffer(exercise)
+    assert first == (0, b"done")
+    assert second is None
+
+
+def test_recvgen_buffer_allow_memview_yields_memoryviews():
+    def exercise() -> tuple[int, memoryview | bytes | None]:
+        buffer = proactor_module._RecvGenBuffer(allow_memview=True)
+        buffer.on_result((0, memoryview(b"a")))
+        return buffer.take_next()
+
+    index, chunk = _exercise_recvgen_buffer(exercise)
+    assert index == 0
+    assert type(chunk) is memoryview
+    assert bytes(chunk) == b"a"
+
+
+def test_recvgen_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
+    """Regression: recv completion threads must wake a blocked take_next()."""
+
+    ready_to_wait = threading.Event()
+
+    def exercise() -> tuple[int, bytes]:
+        buffer = proactor_module._RecvGenBuffer()
+        real_swait = buffer._event.swait
+
+        def swait_and_signal() -> bool:
+            ready_to_wait.set()
+            return real_swait()
+
+        monkeypatch.setattr(buffer._event, "swait", swait_and_signal)
+
+        def producer() -> None:
+            assert ready_to_wait.wait(timeout=1.0)
+            buffer.on_result((0, memoryview(b"late")))
+
+        threading.Thread(target=producer, daemon=True).start()
+        item = buffer.take_next()
+        assert item is not None
+        index, chunk = item
+        assert type(chunk) is bytes
+        return index, chunk
+
+    assert _exercise_recvgen_buffer(exercise) == (0, b"late")
+
+
+def test_recvgen_buffer_allow_memview_pressure_token_precedes_flushed_queue():
+    def exercise() -> list[tuple[int, memoryview | bytes | None] | None]:
+        buffer = proactor_module._RecvGenBuffer(allow_memview=True)
+        buffer.on_result((0, memoryview(b"a")))
+        buffer.on_result((1, memoryview(b"b")))
+        buffer.on_result((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")))
+        return [buffer.take_next(), buffer.take_next(), buffer.take_next()]
+
+    token, first, second = _exercise_recvgen_buffer(exercise)
+    assert token == (RECV_MANY_BUFFER_PRESSURE, None)
+    assert first == (0, b"a")
+    assert second == (1, b"b")
 
 
 def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
@@ -248,11 +468,11 @@ class TestSelectorProactor:
     def test_recv_many_emits_chunks_and_completes_on_eof(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
-        seen: list[tuple[int, bytes]] = []
+        seen: list[tuple[int, memoryview]] = []
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, seen.append)
 
             writer.send(b"hello")
             while not seen:
@@ -264,7 +484,8 @@ class TestSelectorProactor:
             while not operation.done():
                 proactor.wait(proactor.get_time() + 1.0)
 
-            assert seen == [(0, b"hello"), (1, b"world"), (2, b"")]
+            assert all(isinstance(data, memoryview) for _, data in seen)
+            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
         finally:
             reader.close()
@@ -278,7 +499,7 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recvall(reader, 5, progress.append)
+            operation = proactor.recvall(reader, progress.append)
 
             writer.send(b"hello")
             while not progress:
@@ -813,6 +1034,57 @@ class TestThreadedSelectorProactor:
         assert asyncio.run(run()) == b"hello"
 
 
+class _FakeBufGroup:
+    def __init__(self, ring: "_FakeUringRing", buffer_size: int, buffer_count: int) -> None:
+        self.ring = ring
+        self.buffer_size = buffer_size
+        self.buffer_count = buffer_count
+
+
+class _NativeBufViewPool:
+    """Retain real rings and sockets so leased BufView completions stay valid."""
+
+    def __init__(self) -> None:
+        self._rings: list[uring_api.Ring] = []
+        self._sockets: list[socket.socket] = []
+
+    def view_for(self, data: bytes) -> uring_api.BufView:
+        reader, writer = socket.socketpair()
+        reader.setblocking(False)
+        writer.setblocking(False)
+        ring = uring_api.Ring(entries=2)
+        group = ring.create_buf_group(max(1024, len(data)), 4)
+        writer.send(data)
+        ring.submit_recv_buf(reader.fileno(), group)
+        completion = ring.wait(1.0)
+        if completion is None or completion.res != len(data):
+            reader.close()
+            writer.close()
+            ring.close()
+            raise RuntimeError("failed to synthesize BufView completion for fake recv_many")
+        payload = completion.result
+        if not isinstance(payload, uring_api.BufView):
+            reader.close()
+            writer.close()
+            ring.close()
+            raise RuntimeError("recv_buf completion did not return BufView")
+        self._rings.append(ring)
+        self._sockets.extend((reader, writer))
+        return payload
+
+
+_NATIVE_BUF_VIEW_POOL: _NativeBufViewPool | None = None
+
+
+def _native_buf_view_for(data: bytes) -> uring_api.BufView:
+    global _NATIVE_BUF_VIEW_POOL
+    if not uring_api.is_available():
+        raise RuntimeError("io_uring is required to synthesize BufView recv_many completions")
+    if _NATIVE_BUF_VIEW_POOL is None:
+        _NATIVE_BUF_VIEW_POOL = _NativeBufViewPool()
+    return _NATIVE_BUF_VIEW_POOL.view_for(data)
+
+
 class _FakeUringRing:
     def __init__(self, entries: int, flags: int) -> None:
         self.entries = entries
@@ -831,7 +1103,8 @@ class _FakeUringRing:
         self.completions: list[SimpleNamespace] = []
         self.accepted_peers: list[socket.socket] = []
         self.submitted_recv: list[tuple[int, object, object]] = []
-        self.submitted_recv_multishot: list[tuple[int, int, int, object]] = []
+        self.submitted_recv_multishot: list[tuple[int, _FakeBufGroup, object]] = []
+        self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
@@ -852,8 +1125,18 @@ class _FakeUringRing:
         flags: int = 0,
         result: object = None,
         sequence: int = 0,
+        *,
+        multishot: bool = False,
     ) -> SimpleNamespace:
-        return SimpleNamespace(user_data=user_data, kind=kind, res=res, flags=flags, result=result, sequence=sequence)
+        return SimpleNamespace(
+            user_data=user_data,
+            kind=kind,
+            res=res,
+            flags=flags,
+            result=result,
+            sequence=sequence,
+            multishot=multishot,
+        )
 
     def close(self) -> None:
         self.stop_serving()
@@ -896,30 +1179,67 @@ class _FakeUringRing:
         self._deliver(completion)
         return completion
 
+    def create_buf_group(self, buffer_size: int, buffer_count: int) -> _FakeBufGroup:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        buf_group = _FakeBufGroup(self, buffer_size, buffer_count)
+        self.buf_groups.append(buf_group)
+        return buf_group
+
     def submit_recv_multishot(
         self,
         fd: int,
-        buffer_size: int,
-        buffer_count: int,
+        buf_group: _FakeBufGroup,
         user_data: object = None,
         flags: int = 0,
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_recv_multishot.append((fd, buffer_size, buffer_count, user_data))
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT)
+        self.submitted_recv_multishot.append((fd, buf_group, user_data))
+        self.recv_multishot_sequence = 0
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT, multishot=True)
         self.pending_recv_multishot.append(completion)
         return completion
 
-    def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
-        completion = self.pending_recv_multishot[-1]
-        completion.res = len(data)
-        completion.flags = uring_api.IORING_CQE_F_MORE if more else 0
-        completion.result = data
+    def complete_recv_multishot_enobufs(self, *, sequence: int | None = None) -> None:
+        pending = self.pending_recv_multishot[-1]
         if sequence is None:
             sequence = self.recv_multishot_sequence
             self.recv_multishot_sequence += 1
-        completion.sequence = sequence
+        completion = self._completion(
+            pending.user_data,
+            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
+            res=-errno.ENOBUFS,
+            flags=0,
+            result=None,
+            sequence=sequence,
+            multishot=True,
+        )
+        self._deliver(completion)
+
+    def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
+        pending = self.pending_recv_multishot[-1]
+        if sequence is None:
+            sequence = self.recv_multishot_sequence
+            self.recv_multishot_sequence += 1
+        if not data:
+            payload = None
+            res = 0
+        elif uring_api.is_available():
+            payload = _native_buf_view_for(data)
+            res = len(data)
+        else:
+            payload = data
+            res = len(data)
+        completion = self._completion(
+            pending.user_data,
+            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
+            res=res,
+            flags=uring_api.IORING_CQE_F_MORE if more else 0,
+            result=payload,
+            sequence=sequence,
+            multishot=True,
+        )
         self._deliver(completion)
 
     def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
@@ -979,17 +1299,33 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_accept_multishot.append((fd, user_data, flags))
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_ACCEPT)
+        self.accept_multishot_sequence = 0
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_ACCEPT, multishot=True)
         self.pending_accept_multishot.append(completion)
         return completion
 
-    def complete_accept_multishot(self, address: object = "peer", *, more: bool = True) -> None:
+    def complete_accept_multishot(
+        self,
+        address: object = "peer",
+        *,
+        more: bool = True,
+        sequence: int | None = None,
+    ) -> None:
+        pending = self.pending_accept_multishot[-1]
+        if sequence is None:
+            sequence = getattr(self, "accept_multishot_sequence", 0)
+            self.accept_multishot_sequence = sequence + 1
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
-        completion = self.pending_accept_multishot[-1]
-        completion.res = conn.fileno()
-        completion.flags = uring_api.IORING_CQE_F_MORE if more else 0
-        completion.result = (conn.detach(), address)
+        completion = self._completion(
+            pending.user_data,
+            kind=uring_api.COMPLETION_KIND_ACCEPT,
+            res=conn.fileno(),
+            flags=uring_api.IORING_CQE_F_MORE if more else 0,
+            result=(conn.detach(), address),
+            sequence=sequence,
+            multishot=True,
+        )
         self._deliver(completion)
 
     def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
@@ -1503,6 +1839,7 @@ class TestUringProactor:
                     res=5,
                     flags=uring_api.IORING_CQE_F_MORE,
                     result=5,
+                    multishot=False,
                 )
             )
 
@@ -1517,6 +1854,7 @@ class TestUringProactor:
                     res=-errno.ECANCELED,
                     flags=0,
                     result=None,
+                    multishot=False,
                 )
             )
 
@@ -1786,24 +2124,48 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
+    def test_recv_many_uses_custom_buf_group_factory(self):
+        created: list[tuple[int, int]] = []
+
+        def factory(ring: _FakeUringRing) -> _FakeBufGroup:
+            created.append((8, 4))
+            return ring.create_buf_group(8, 4)
+
+        proactor = UringProactor(ring_factory=_FakeUringRing, buf_group_factory=factory)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            proactor.recv_many(reader, lambda _result: None)
+            assert created == [(8, 4)]
+            submitted = proactor.ring.submitted_recv_multishot[0]
+            assert submitted[1].buffer_size == 8
+            assert submitted[1].buffer_count == 4
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")
     def test_recv_many_uses_multishot_recv_and_finishes_on_eof(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
-        seen: list[tuple[int, bytes]] = []
+        seen: list[tuple[int, memoryview]] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, seen.append)
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_recv_multishot[0]
             assert submitted[0] == reader.fileno()
-            assert submitted[1] == 5
+            assert submitted[1] is proactor._recv_many_buf_group
+            assert submitted[1].buffer_size == 16 * 1024
+            assert submitted[1].buffer_count == 256
 
             proactor.ring.complete_recv_multishot(b"hello")
             proactor.wait(proactor.get_time() + 1.0)
             proactor.ring.complete_recv_multishot(b"", more=False)
             proactor.wait(proactor.get_time() + 1.0)
 
-            assert seen == [(0, b"hello"), (1, b"")]
+            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
             assert operation.done() is True
             assert operation.result() is None
         finally:
@@ -1811,13 +2173,260 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_recv_many_retries_after_enobufs_and_preserves_stream_sequence(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"a", more=True, sequence=0)
+            ring.complete_recv_multishot(b"b", more=True, sequence=1)
+            ring.complete_recv_multishot_enobufs(sequence=2)
+            assert seen[-1][0] == RECV_MANY_BUFFER_PRESSURE
+            assert len(ring.submitted_recv_multishot) == 2
+            ring.complete_recv_multishot(b"c", more=True, sequence=0)
+            ring.complete_recv_multishot(b"", more=False, sequence=1)
+            assert _recv_many_bytes(seen) == [
+                (0, b"a"),
+                (1, b"b"),
+                (RECV_MANY_BUFFER_PRESSURE, b""),
+                (2, b"c"),
+                (3, b""),
+            ]
+            assert operation.done() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_accumulates_stream_sequence_across_repeated_enobufs(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"a", more=True, sequence=0)
+            ring.complete_recv_multishot(b"b", more=True, sequence=1)
+            ring.complete_recv_multishot_enobufs(sequence=2)
+            ring.complete_recv_multishot(b"c", more=True, sequence=0)
+            ring.complete_recv_multishot_enobufs(sequence=1)
+            assert len(ring.submitted_recv_multishot) == 3
+            ring.complete_recv_multishot(b"d", more=True, sequence=0)
+            ring.complete_recv_multishot(b"", more=False, sequence=1)
+            assert _recv_many_bytes(seen) == [
+                (0, b"a"),
+                (1, b"b"),
+                (RECV_MANY_BUFFER_PRESSURE, b""),
+                (2, b"c"),
+                (RECV_MANY_BUFFER_PRESSURE, b""),
+                (3, b"d"),
+                (4, b""),
+            ]
+            assert operation.done() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_defers_finalize_when_terminal_arrives_before_earlier_chunks(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"", more=False, sequence=2)
+            ring.complete_recv_multishot(b"hello", sequence=0)
+            ring.complete_recv_multishot(b"world", sequence=1)
+            assert _recv_many_bytes_sorted(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
+            assert operation.done() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_defers_enobufs_when_it_arrives_before_earlier_chunks(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append)
+            ring = proactor.ring
+            ring.complete_recv_multishot_enobufs(sequence=2)
+            ring.complete_recv_multishot(b"a", more=True, sequence=0)
+            ring.complete_recv_multishot(b"b", more=True, sequence=1)
+            ring.complete_recv_multishot(b"c", more=False, sequence=0)
+            assert _recv_many_bytes_sorted(seen) == [(0, b"a"), (1, b"b"), (2, b"c")]
+            assert (RECV_MANY_BUFFER_PRESSURE, b"") in _recv_many_bytes(seen)
+            assert operation.done() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recvall_defers_finalize_when_terminal_burst_arrives_out_of_order(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recvall(reader, None)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"", more=False, sequence=2)
+            ring.complete_recv_multishot(b"hello", sequence=0)
+            ring.complete_recv_multishot(b"world", sequence=1)
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == b"helloworld"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recvgen_reorders_out_of_order_multishot_chunks(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def receive_chunks() -> list[tuple[int, bytes]]:
+                return list(scheduler.sock_recvgen(reader))
+
+            def deliver_chunks() -> None:
+                ring = scheduler.proactor.ring
+                ring.complete_recv_multishot(b"b", more=True, sequence=1)
+                ring.complete_recv_multishot(b"a", more=True, sequence=0)
+                ring.complete_recv_multishot(b"", more=False, sequence=2)
+
+            task = scheduler.spawn(receive_chunks)
+            scheduler.spawn(deliver_chunks)
+
+            assert scheduler.run_until_complete(task) == [(0, b"a"), (1, b"b")]
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_recvgen_survives_buffer_pressure_and_continues_receive(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def receive_chunks() -> list[tuple[int, bytes]]:
+                return list(scheduler.sock_recvgen(reader))
+
+            def deliver_chunks() -> None:
+                ring = scheduler.proactor.ring
+                ring.complete_recv_multishot(b"a", more=True, sequence=0)
+                ring.complete_recv_multishot(b"b", more=True, sequence=1)
+                ring.complete_recv_multishot(b"c", more=True, sequence=2)
+                ring.complete_recv_multishot_enobufs(sequence=3)
+                ring.complete_recv_multishot(b"d", more=False, sequence=0)
+
+            task = scheduler.spawn(receive_chunks)
+            scheduler.spawn(deliver_chunks)
+
+            assert scheduler.run_until_complete(task) == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"d")]
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_recvgen_allow_memview_pressure_token_and_continues_receive(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def receive_chunks() -> tuple[bool, list[tuple[int, bytes]]]:
+                got_memview = False
+                got_pressure = False
+                seen: list[tuple[int, bytes]] = []
+                for index, chunk in scheduler.sock_recvgen(reader, allow_memview=True):
+                    if index == RECV_MANY_BUFFER_PRESSURE:
+                        got_pressure = True
+                        continue
+                    if type(chunk) is memoryview:
+                        got_memview = True
+                    seen.append((index, bytes(chunk)))
+                return got_memview and got_pressure, seen
+
+            def deliver_chunks() -> None:
+                ring = scheduler.proactor.ring
+                ring.complete_recv_multishot(b"a", more=True, sequence=0)
+                scheduler.sleep(0.05)
+                ring.complete_recv_multishot(b"b", more=True, sequence=1)
+                ring.complete_recv_multishot(b"c", more=True, sequence=2)
+                ring.complete_recv_multishot_enobufs(sequence=3)
+                ring.complete_recv_multishot(b"d", more=False, sequence=0)
+
+            task = scheduler.spawn(receive_chunks)
+            scheduler.spawn(deliver_chunks)
+
+            saw_memview_and_pressure, seen = scheduler.run_until_complete(task)
+            assert saw_memview_and_pressure
+            assert seen == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"d")]
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_recvall_survives_buffer_pressure_and_continues_receive(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recvall(reader, None)
+            ring = proactor.ring
+            ring.complete_recv_multishot(b"a", more=True, sequence=0)
+            ring.complete_recv_multishot(b"b", more=True, sequence=1)
+            ring.complete_recv_multishot(b"c", more=True, sequence=2)
+            ring.complete_recv_multishot_enobufs(sequence=3)
+            ring.complete_recv_multishot(b"d", more=False, sequence=0)
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == b"abcd"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")
+    def test_recvall_collects_many_out_of_order_chunks(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recvall(reader, None)
+            assert isinstance(proactor.ring, _FakeUringRing)
+
+            for sequence, byte in enumerate(b"abcdefghijklmnop"):
+                proactor.ring.complete_recv_multishot(bytes((byte,)), sequence=sequence)
+                proactor.wait(proactor.get_time() + 1.0)
+            proactor.ring.complete_recv_multishot(b"", more=False, sequence=16)
+            proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.result() == b"abcdefghijklmnop"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")
     def test_recvall_collects_uring_multishot_receive_and_reports_progress(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         progress: list[int] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recvall(reader, 5, progress.append)
+            operation = proactor.recvall(reader, progress.append)
             assert isinstance(proactor.ring, _FakeUringRing)
 
             proactor.ring.complete_recv_multishot(b"world", sequence=1)
@@ -1838,20 +2447,20 @@ class TestUringProactor:
     def test_native_recv_many_cancel_after_data_before_sender_close(self):
         proactor = UringProactor()
         reader, writer = socket.socketpair()
-        seen: list[tuple[int, bytes]] = []
+        seen: list[tuple[int, memoryview]] = []
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv_many(reader, 5, seen.append)
+            operation = proactor.recv_many(reader, seen.append)
 
             writer.send(b"hello")
-            _wait_for_uring(proactor, lambda: seen == [(0, b"hello")])
+            _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
 
             operation.cancel()
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
 
             assert operation.cancelled() is True
-            assert seen == [(0, b"hello")]
+            assert _recv_many_bytes(seen) == [(0, b"hello")]
             with pytest.raises(CancelledError):
                 operation.result()
         finally:
@@ -1867,7 +2476,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recvall(reader, 5, progress.append)
+            operation = proactor.recvall(reader, progress.append)
 
             writer.send(b"hello")
             _wait_for_uring(proactor, lambda: progress == [5])
@@ -2000,6 +2609,32 @@ class TestProactorScheduler:
             task = scheduler.spawn(exchange)
 
             assert scheduler.run_until_complete(task) == (5, b"world")
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_sock_recvgen_yields_chunks_in_stream_order(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def receive_chunks() -> list[tuple[int, bytes]]:
+                return list(scheduler.sock_recvgen(reader))
+
+            def send_chunks() -> None:
+                scheduler.sock_sendall(writer, b"hello")
+                scheduler.sleep(0.05)
+                scheduler.sock_sendall(writer, b"world")
+                writer.shutdown(socket.SHUT_WR)
+
+            task = scheduler.spawn(receive_chunks)
+            scheduler.spawn(send_chunks)
+
+            assert scheduler.run_until_complete(task) == [(0, b"hello"), (1, b"world")]
         finally:
             reader.close()
             writer.close()

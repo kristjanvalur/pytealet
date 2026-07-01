@@ -218,10 +218,9 @@ static PyObject *client_submit_recvmsg(PyObject *module, PyObject *args) {
 
 static PyObject *client_submit_recv_multishot(PyObject *module, PyObject *args) {
     PyObject *ring;
+    PyObject *buf_group;
     PyObject *user_data;
     int fd;
-    unsigned int buffer_size;
-    unsigned int buffer_count;
     unsigned int flags;
 
     (void)module;
@@ -229,11 +228,10 @@ static PyObject *client_submit_recv_multishot(PyObject *module, PyObject *args) 
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiIIIO:submit_recv_multishot", &ring, &fd, &buffer_size, &buffer_count, &flags,
-                          &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOOI:submit_recv_multishot", &ring, &fd, &buf_group, &user_data, &flags)) {
         return NULL;
     }
-    if (api->ring_submit_recv_multishot(ring, fd, buffer_size, buffer_count, flags, user_data) < 0) {
+    if (api->ring_submit_recv_multishot(ring, fd, buf_group, flags, user_data) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
