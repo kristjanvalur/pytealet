@@ -65,6 +65,8 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->delivery_stop_requested = false;
     self->delivery_active_workers = 0;
     self->next_buf_group = 1;
+    self->setup_flags = flags;
+    self->owner_thread_id = 0;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -140,6 +142,8 @@ PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     self->delivery_stop_requested = false;
     self->delivery_active_workers = 0;
     self->next_buf_group = 1;
+    self->setup_flags = 0;
+    self->owner_thread_id = 0;
     Py_END_CRITICAL_SECTION();
     Py_RETURN_NONE;
 }

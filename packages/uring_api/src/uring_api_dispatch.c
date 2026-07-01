@@ -179,6 +179,9 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
     if (ring_check_open(self) < 0) {
         return NULL;
     }
+    if (ring_check_client_thread(self) < 0) {
+        return NULL;
+    }
     if (receive_wait_begin(self, from_delivery_thread) < 0) {
         return NULL;
     }
@@ -294,6 +297,13 @@ static void delivery_request_stop_and_wake(UringApiRing *self) {
 PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     bool failed = false;
     bool wait_failed = false;
+
+    if (ring_check_open(self) < 0) {
+        return NULL;
+    }
+    if (ring_check_client_thread(self) < 0) {
+        return NULL;
+    }
 
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     if (!self->initialized) {

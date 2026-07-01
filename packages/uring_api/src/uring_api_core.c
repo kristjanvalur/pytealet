@@ -279,6 +279,49 @@ int ring_check_open(UringApiRing *self) {
     return 0;
 }
 
+static unsigned long long ring_current_thread_id(void) {
+    return (unsigned long long)PyThread_get_thread_ident();
+}
+
+static int ring_check_owner_thread(UringApiRing *self, const char *error_message) {
+    unsigned long long current_thread_id;
+    unsigned long long stored;
+
+    current_thread_id = ring_current_thread_id();
+    stored = self->owner_thread_id;
+    if (stored == 0) {
+        /* races on the first assignment are acceptable; later calls still catch misuse. */
+        self->owner_thread_id = current_thread_id;
+        return 0;
+    }
+    if (stored != current_thread_id) {
+        PyErr_SetString(PyExc_RuntimeError, error_message);
+        return -1;
+    }
+    return 0;
+}
+
+int ring_check_submit_thread(UringApiRing *self) {
+    if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
+        return ring_check_owner_thread(
+            self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one "
+                  "thread");
+    }
+    if (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) {
+        return ring_check_owner_thread(
+            self, "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from one thread");
+    }
+    return 0;
+}
+
+int ring_check_client_thread(UringApiRing *self) {
+    if (!(self->setup_flags & IORING_SETUP_DEFER_TASKRUN)) {
+        return 0;
+    }
+    return ring_check_owner_thread(
+        self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one thread");
+}
+
 int submit_one(UringApiRing *self) {
     int ret;
 
@@ -356,9 +399,13 @@ void delivery_mark_exited(UringApiRing *self) {
 }
 
 struct io_uring_sqe *get_sqe(UringApiRing *self) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&self->ring);
+    struct io_uring_sqe *sqe;
     int ret;
 
+    if (ring_check_submit_thread(self) < 0) {
+        return NULL;
+    }
+    sqe = io_uring_get_sqe(&self->ring);
     if (sqe) {
         return sqe;
     }
