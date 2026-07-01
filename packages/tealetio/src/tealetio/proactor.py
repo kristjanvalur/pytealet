@@ -132,6 +132,20 @@ def _probe_uring_poll_multishot(entries: int, flags: int) -> bool:
         return False
 
 
+def _probe_uring_accept_multishot(entries: int, flags: int) -> bool:
+    try:
+        return uring_api.probe(entries=entries, flags=flags).get("IORING_ACCEPT_MULTISHOT", False)
+    except (OSError, RuntimeError, NotImplementedError):
+        return False
+
+
+def _probe_uring_recv_multishot(entries: int, flags: int) -> bool:
+    try:
+        return uring_api.probe(entries=entries, flags=flags).get("IORING_RECV_MULTISHOT", False)
+    except (OSError, RuntimeError, NotImplementedError):
+        return False
+
+
 def _poll_mask_to_selector_events(mask: int) -> int:
     events = 0
     if mask & (select.POLLIN | select.POLLPRI):
@@ -1532,6 +1546,8 @@ class UringProactor(ProactorBase):
         if _probe_uring_send_zc(entries, flags) and hasattr(self._ring, "submit_send_zc"):
             self._submit_send = self._ring.submit_send_zc
         self._poll_multishot_supported = _probe_uring_poll_multishot(entries, flags)
+        self._accept_multishot_supported = _probe_uring_accept_multishot(entries, flags)
+        self._recv_multishot_supported = _probe_uring_recv_multishot(entries, flags)
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
@@ -1827,9 +1843,11 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         callback: Callable[[tuple[socket.socket, Any]], object],
     ) -> ContinuousOperation[tuple[socket.socket, Any]]:
-        """Start a multishot accept operation.
+        """Start a continuous accept operation.
 
-        `callback` may run on any uring completion service thread.
+        Uses multishot accept when the runtime probe accepts it; otherwise
+        resubmits one-shot ``submit_accept()`` after each connection. `callback`
+        may run on any uring completion service thread.
         """
 
         operation = ContinuousOperation[tuple[socket.socket, Any]](
@@ -1838,16 +1856,47 @@ class UringProactor(ProactorBase):
             proactor=self,
             result_callback=callback,
         )
-        entry = _UringEntry(
-            operation=operation,
-            complete=UringProactor._deliver_uring_accept_many,
-            multishot_leg=_MultishotLegState(),
-        )
-        self._submit_uring_entry(
-            entry,
-            lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
-        )
+        if self._accept_multishot_supported:
+            entry = _UringEntry(
+                operation=operation,
+                complete=UringProactor._deliver_uring_accept_many,
+                multishot_leg=_MultishotLegState(),
+            )
+            self._submit_uring_entry(
+                entry,
+                lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
+            )
+            return operation
+
+        entry = _UringEntry(operation=operation, complete=UringProactor._deliver_uring_accept_many_oneshot)
+
+        def submit_accept() -> _UringCompletion:
+            return self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS)
+
+        entry.resubmit = submit_accept
+        self._submit_uring_entry(entry, submit_accept)
         return operation
+
+    def _deliver_uring_accept_many_oneshot(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+    ) -> Operation[Any] | None:
+        operation = cast(ContinuousOperation[tuple[socket.socket, Any]], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        fd, address = cast(tuple[int, Any], completion.result)
+        conn = socket.socket(fileno=fd)
+        _configure_accepted_socket(conn)
+        operation._emit_result((conn, address))
+        if operation.done():
+            return operation
+        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=entry.resubmit))
+        self.break_wait()
+        return None
 
     def _deliver_uring_accept_many(
         self,
@@ -1887,25 +1936,27 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         callback: Callable[[tuple[int, memoryview]], object],
     ) -> ContinuousOperation[tuple[int, memoryview]]:
-        """Start a multishot receive operation that completes on EOF.
+        """Start a continuous receive operation that completes on EOF.
 
-        `callback` may run on any uring completion service thread. Each result
-        is an ordinal `(index, data)` pair with read-only `data` as a
-        `memoryview` into the leased kernel buffer. Callback delivery may
-        arrive out of order across completion threads; consumers that need
-        stream order must reorder by index themselves. EOF emits a final empty
-        view before completing the continuous operation. Chunk sizes come from
-        the shared ``BufGroup`` pool, not from a caller argument.
+        `callback` may run on any uring completion service thread.
 
-        Callbacks should treat each `data` view as borrowed: copy with
-        `bytes(data)` or drop the view reference before returning if they do not
-        need the payload anymore (`memoryview.release()` is optional for early
-        release). Holding many live views can pin provided buffers
-        and stall further receives on the shared `BufGroup`.
+        When multishot provided-buffer receive is available, each result is an
+        ordinal `(index, data)` pair with read-only `data` as a `memoryview`
+        into a leased kernel buffer. Callback delivery may arrive out of order
+        across completion threads; consumers that need stream order must
+        reorder by index themselves. Chunk sizes come from the shared
+        ``BufGroup`` pool. Holding live views can pin provided buffers and
+        stall further receives. When the pool is exhausted the backend emits
+        ``(RECV_MANY_BUFFER_PRESSURE, empty_view)`` and resubmits the multishot
+        receive.
 
-        When the provided-buffer pool is exhausted the backend emits
-        ``(RECV_MANY_BUFFER_PRESSURE, empty_view)`` so consumers can release
-        held views, then automatically resubmits the multishot receive.
+        When multishot receive is unavailable, the proactor falls back to
+        repeated one-shot ``submit_recv()`` into a reused buffer. Chunks are
+        independent ``memoryview`` objects over copied bytes (not leased
+        ``BufView`` results), chunk size is up to 8 KiB, indices stay in-order,
+        and ``RECV_MANY_BUFFER_PRESSURE`` is never emitted.
+
+        EOF always emits a final empty view before completing the operation.
         """
 
         operation = ContinuousOperation[tuple[int, memoryview]](
@@ -1914,18 +1965,58 @@ class UringProactor(ProactorBase):
             proactor=self,
             result_callback=callback,
         )
+        if self._recv_multishot_supported:
+            entry = _UringEntry(
+                operation=operation,
+                complete=UringProactor._deliver_uring_recv_many,
+                multishot_leg=_MultishotLegState(),
+            )
+
+            def submit_recv_many() -> _UringCompletion:
+                return self._ring.submit_recv_multishot(sock.fileno(), self._get_recv_many_buf_group(), entry)
+
+            entry.resubmit = submit_recv_many
+            self._submit_uring_entry(entry, submit_recv_many)
+            return operation
+
+        buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
         entry = _UringEntry(
             operation=operation,
-            complete=UringProactor._deliver_uring_recv_many,
-            multishot_leg=_MultishotLegState(),
+            complete=UringProactor._deliver_uring_recv_many_oneshot,
+            data=memoryview(buffer),
         )
 
-        def submit_recv_many() -> _UringCompletion:
-            return self._ring.submit_recv_multishot(sock.fileno(), self._get_recv_many_buf_group(), entry)
+        def submit_recv() -> _UringCompletion:
+            return self._ring.submit_recv(sock.fileno(), buffer, entry)
 
-        entry.resubmit = submit_recv_many
-        self._submit_uring_entry(entry, submit_recv_many)
+        entry.resubmit = submit_recv
+        self._submit_uring_entry(entry, submit_recv)
         return operation
+
+    def _deliver_uring_recv_many_oneshot(
+        self, entry: _UringEntry, completion: _UringCompletion
+    ) -> Operation[Any] | None:
+        operation = cast(ContinuousOperation[tuple[int, memoryview]], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        index = entry.stream_sequence
+        if res == 0:
+            operation._emit_result((index, memoryview(b"")))
+            operation._set_result(None)
+            self._deactivate_uring_entry(entry)
+            return operation
+        view = entry.data
+        chunk = bytes(view[:res])
+        operation._emit_result((index, memoryview(chunk)))
+        entry.stream_sequence += 1
+        if operation.done():
+            return operation
+        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=entry.resubmit))
+        self.break_wait()
+        return None
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
         """Submit a one-shot io_uring poll operation."""

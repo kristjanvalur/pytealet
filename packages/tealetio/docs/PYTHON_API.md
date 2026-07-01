@@ -63,11 +63,12 @@ active until it is cancelled or the backend reports a terminal error.
 chunk, where `index` is the ordinal position in the receive stream and `data`
 is a read-only `memoryview` into the received bytes. EOF emits one final empty
 view before the operation completes. Chunk sizes are backend-defined:
-`UringProactor` uses the shared `BufGroup` slot size (16 KiB by default) and
-`SelectorProactor` reads up to 8 KiB per `recv()` call. Each `UringProactor`
-instance lazily creates one `BufGroup` (16 KiB × 256 buffers by default) shared
-by every `recv_many`, `recvall`, and `recvgen` on that proactor. Concurrent
-long-lived receives on different sockets therefore draw from the same
+`UringProactor` uses the shared `BufGroup` slot size (16 KiB by default) when
+multishot provided-buffer receive is available, and `SelectorProactor` reads up
+to 8 KiB per `recv()` call. Each `UringProactor` instance lazily creates one
+`BufGroup` (16 KiB × 256 buffers by default) shared by every `recv_many`,
+`recvall`, and `recvgen` on that proactor when multishot receive is in use.
+Concurrent long-lived receives on different sockets therefore draw from the same
 provided-buffer pool: a slow consumer on one stream can trigger
 `RECV_MANY_BUFFER_PRESSURE` or stall another stream even when the second would
 otherwise fit. Use separate `UringProactor` instances when independent streams
@@ -82,6 +83,17 @@ drop view references you no longer need so backend buffers can be recycled
 release and `memoryview` has no `close()` on 3.12+). On
 `UringProactor`, holding too many live views can pin the shared provided-buffer
 pool and stall further receives.
+
+When `IORING_RECV_MULTISHOT` is unavailable, `UringProactor.recv_many()` falls
+back to repeated one-shot `submit_recv()` calls. Chunks are independent
+`memoryview` objects over copied bytes (not leased `BufView` results), chunk
+size is up to 8 KiB, stream indices stay in-order, and
+`RECV_MANY_BUFFER_PRESSURE` is never emitted. `recvall` and `recvgen` inherit
+this degraded mode automatically.
+
+When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
+falls back to repeated one-shot `submit_accept()` after each accepted
+connection.
 
 Backends may run these result callbacks from any worker thread; code that needs
 thread affinity should marshal from the callback into the appropriate scheduler,

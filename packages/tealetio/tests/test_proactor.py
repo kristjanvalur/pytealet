@@ -270,6 +270,11 @@ def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) ->
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
+def _force_uring_multishot_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(proactor_module, "_probe_uring_accept_multishot", lambda entries, flags: True)
+    monkeypatch.setattr(proactor_module, "_probe_uring_recv_multishot", lambda entries, flags: True)
+
+
 class TestOperation:
     def test_operation_result_requires_completion(self):
         operation: Operation[int] = Operation(kind="test")
@@ -1160,6 +1165,8 @@ class _FakeUringRing:
         self.pending_accept_multishot: list[SimpleNamespace] = []
         self.pending_poll_multishot: list[SimpleNamespace] = []
         self.pending_poll_oneshot: list[SimpleNamespace] = []
+        self.pending_accept_oneshot: list[SimpleNamespace] = []
+        self.pending_recv_oneshot: list[SimpleNamespace] = []
         self.recv_multishot_sequence = 0
 
     def _completion(
@@ -1215,14 +1222,32 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         view = memoryview(buf)
         operation = getattr(user_data, "operation", None)
-        payload = b"world" if getattr(operation, "kind", None) == "recv_into" else b"hello"
+        kind = getattr(operation, "kind", None)
+        self.submitted_recv.append((fd, buf, user_data))
+        if kind == "recv_many":
+            completion = self._completion(user_data, res=0, result=0)
+            self.pending_recv_oneshot.append(completion)
+            return completion
+        payload = b"world" if kind == "recv_into" else b"hello"
         if len(view) >= len(payload):
             view[: len(payload)] = payload
-        self.submitted_recv.append((fd, buf, user_data))
-        completion = self._completion(user_data, res=5, result=5)
+        completion = self._completion(user_data, res=len(payload), result=len(payload))
         self.pending_recv.append(completion)
         self._deliver(completion)
         return completion
+
+    def complete_recv_oneshot(self, data: bytes) -> None:
+        completion = self.pending_recv_oneshot.pop(0)
+        entry = completion.user_data
+        view = memoryview(entry.data)
+        if data:
+            view[: len(data)] = data
+            completion.res = len(data)
+            completion.result = len(data)
+        else:
+            completion.res = 0
+            completion.result = 0
+        self._deliver(completion)
 
     def create_buf_group(self, buffer_size: int, buffer_count: int) -> _FakeBufGroup:
         if self.closed:
@@ -1339,8 +1364,16 @@ class _FakeUringRing:
             res=conn.fileno(),
             result=(conn.detach(), "peer"),
         )
+        operation = getattr(user_data, "operation", None)
+        if getattr(operation, "kind", None) == "accept_many":
+            self.pending_accept_oneshot.append(completion)
+            return completion
         self._deliver(completion)
         return completion
+
+    def complete_accept_oneshot(self) -> None:
+        completion = self.pending_accept_oneshot.pop(0)
+        self._deliver(completion)
 
     def submit_accept_multishot(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:
@@ -1514,6 +1547,12 @@ class _BackpressuredUringRing(_DeferredUringRing):
 
 
 class TestUringProactor:
+    @pytest.fixture(autouse=True)
+    def _default_multishot_probes(self, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+        if "falls_back" in request.node.name:
+            return
+        _force_uring_multishot_probes(monkeypatch)
+
     def test_wait_without_pending_operations_waits_for_timeout(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
@@ -2306,6 +2345,28 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_accept_many_falls_back_to_oneshot_accept_and_resubmits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(proactor_module, "_probe_uring_accept_multishot", lambda entries, flags: False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append)
+            assert proactor.ring.submitted_accept_multishot == []
+            assert len(proactor.ring.submitted_accept) == 1
+            proactor.ring.complete_accept_oneshot()
+            _wait_for_uring(proactor, lambda: len(accepted) == 1)
+            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_accept) == 2)
+            assert operation.done() is False
+            operation.cancel()
+            assert operation.cancelled() is True
+        finally:
+            for conn, _address in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
     def test_accept_many_uses_multishot_accept(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
@@ -2348,6 +2409,28 @@ class TestUringProactor:
             submitted = proactor.ring.submitted_recv_multishot[0]
             assert submitted[1].buffer_size == 8
             assert submitted[1].buffer_count == 4
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_falls_back_to_oneshot_recv_and_finishes_on_eof(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(proactor_module, "_probe_uring_recv_multishot", lambda entries, flags: False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append)
+            assert proactor.ring.submitted_recv_multishot == []
+            assert len(proactor.ring.submitted_recv) == 1
+            proactor.ring.complete_recv_oneshot(b"hello")
+            _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
+            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_recv) == 2)
+            proactor.ring.complete_recv_oneshot(b"")
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
+            assert proactor._recv_many_buf_group is None
         finally:
             reader.close()
             writer.close()
