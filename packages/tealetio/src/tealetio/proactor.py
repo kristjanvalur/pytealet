@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import errno
-import math
 import os
 import select
 import selectors
@@ -61,7 +60,6 @@ _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
 _DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
 _DEFAULT_RECVGEN_BUFFER_SIZE = 16 * 1024
 _DEFAULT_RECVGEN_BUFFER_COUNT = 8
-_DEFAULT_RECVGEN_RESUME_MIN_FREE = 0.5
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 # ``recv_many`` result-callback index signalling provided-buffer pool pressure.
 RECV_MANY_BUFFER_PRESSURE = -1
@@ -220,7 +218,6 @@ class Proactor(Protocol):
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
         allow_memview: Literal[False] = False,
     ) -> Iterator[tuple[int, bytes]]: ...
 
@@ -232,7 +229,6 @@ class Proactor(Protocol):
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
         allow_memview: Literal[True],
     ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
 
@@ -243,7 +239,6 @@ class Proactor(Protocol):
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
         allow_memview: bool = False,
     ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
 
@@ -329,11 +324,9 @@ class _RecvGenBuffer:
         *,
         allow_memview: bool = False,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
     ) -> None:
         self._allow_memview = allow_memview
         self._buf_group = buf_group
-        self._resume_min_free = resume_min_free
         self._resume: _RecvManyResume | None = None
         self._resume_next = False
         self._lock = threading.Lock()
@@ -384,11 +377,8 @@ class _RecvGenBuffer:
     def _required_free_slots(self) -> int:
         if self._buf_group is None:
             return 0
-        total = self._buf_group.buffer_count
-        if self._resume_min_free >= 1.0:
-            return total
-        # always require at least one free slot (e.g. buffer_count=1, min_free=0.5 → 1 not 0)
-        return max(1, math.ceil(total * self._resume_min_free))
+        # half the pool must be free; single-slot pools still need one free slot
+        return max(1, self._buf_group.buffer_count // 2)
 
     def _pool_has_room_for_resume_locked(self) -> bool:
         if self._resume is None:
@@ -610,7 +600,6 @@ class ProactorBase:
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
         allow_memview: Literal[False] = False,
     ) -> Iterator[tuple[int, bytes]]: ...
 
@@ -622,7 +611,6 @@ class ProactorBase:
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
         allow_memview: Literal[True],
     ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
 
@@ -633,7 +621,6 @@ class ProactorBase:
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
         allow_memview: bool = False,
     ) -> Iterator[tuple[int, memoryview | bytes | None]]:
         """Incrementally receive byte chunks until EOF as a blocking generator.
@@ -644,11 +631,10 @@ class ProactorBase:
 
         On ``UringProactor``, ``recvgen`` owns a dedicated provided-buffer pool
         sized by ``buffer_size`` and ``buffer_count`` (defaults: 16 KiB x 8).
-        When the pool is full, multishot receive stays paused until
-        ``BufGroup.leased_count`` drops enough to satisfy ``resume_min_free``
-        (default ``0.5``: at least half the pool must be free, never less than
-        one slot). ``resume()`` from the pressure message runs on the following
-        ``take_next()`` once that threshold is met.
+        When the pool is full, multishot receive stays paused until at least
+        half the ``BufGroup`` slots are free (never less than one). ``resume()``
+        from the pressure message runs on the following ``take_next()`` once that
+        threshold is met.
 
         With ``allow_memview=True``, chunks may be yielded as borrowed
         ``memoryview`` objects and ``(RECV_MANY_BUFFER_PRESSURE, None)`` may be
@@ -662,11 +648,7 @@ class ProactorBase:
         recv_many_group = buf_group
         if recv_many_group is None:
             recv_many_group = self._create_recv_many_buf_group(buffer_size, buffer_count)
-        buffer = _RecvGenBuffer(
-            allow_memview=allow_memview,
-            buf_group=recv_many_group,
-            resume_min_free=resume_min_free,
-        )
+        buffer = _RecvGenBuffer(allow_memview=allow_memview, buf_group=recv_many_group)
         stream = self.recv_many(sock, buffer.on_result, buf_group=recv_many_group)
         buffer.attach_stream(stream)
         try:
@@ -2603,7 +2585,6 @@ class ProactorScheduler(BaseScheduler):
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
         allow_memview: Literal[False] = False,
     ) -> Iterator[tuple[int, bytes]]: ...
 
@@ -2615,7 +2596,6 @@ class ProactorScheduler(BaseScheduler):
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
         allow_memview: Literal[True],
     ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
 
@@ -2626,7 +2606,6 @@ class ProactorScheduler(BaseScheduler):
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: _UringBufGroup | None = None,
-        resume_min_free: float = _DEFAULT_RECVGEN_RESUME_MIN_FREE,
         allow_memview: bool = False,
     ) -> Iterator[tuple[int, memoryview | bytes | None]]:
         """Incrementally receive byte chunks until EOF as a blocking generator."""
@@ -2636,7 +2615,6 @@ class ProactorScheduler(BaseScheduler):
             buffer_size=buffer_size,
             buffer_count=buffer_count,
             buf_group=buf_group,
-            resume_min_free=resume_min_free,
             allow_memview=allow_memview,
         )
 

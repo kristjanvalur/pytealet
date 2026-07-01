@@ -322,7 +322,7 @@ def test_recvgen_buffer_single_slot_pool_requires_one_free_before_resume():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvGenBuffer(buf_group=pool, resume_min_free=0.5)
+        buffer = proactor_module._RecvGenBuffer(buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
         assert buffer.take_next() == (0, b"a")
@@ -349,7 +349,7 @@ def test_recvgen_buffer_resumes_when_half_pool_is_free():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvGenBuffer(buf_group=pool, resume_min_free=0.5)
+        buffer = proactor_module._RecvGenBuffer(buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
