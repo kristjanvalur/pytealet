@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any, Protocol, TypeVar
 
 from asynkit import coro_drive
@@ -12,6 +12,7 @@ from asynkit import coro_drive
 from .proactor import ProactorScheduler
 
 T = TypeVar("T")
+TStreamPair = TypeVar("TStreamPair")
 
 _DEFAULT_LIMIT = 2**16
 
@@ -375,6 +376,48 @@ def open_async_streams(
     return factory(scheduler, sock, limit=limit)
 
 
+def _connect_tcp_streams(
+    scheduler: ProactorScheduler,
+    host: str,
+    port: int,
+    *,
+    family: int = socket.AF_UNSPEC,
+    proto: int = 0,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: StreamFactory | AsyncStreamFactory | None,
+    open_streams_fn: Callable[..., TStreamPair],
+) -> TStreamPair:
+    infos = scheduler.ensure_resolved(
+        (host, port),
+        family=family,
+        type=socket.SOCK_STREAM,
+        proto=proto,
+    )
+    if not infos:
+        raise OSError("getaddrinfo() returned empty list")
+
+    last_error: OSError | None = None
+    for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
+        sock: socket.socket | None = None
+        try:
+            sock = socket.socket(addr_family, socktype, addr_proto)
+            sock.setblocking(False)
+            scheduler.sock_connect(sock, sockaddr)
+            return open_streams_fn(
+                scheduler,
+                sock,
+                limit=limit,
+                stream_factory=stream_factory,
+            )
+        except OSError as exc:
+            last_error = exc
+            if sock is not None:
+                sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError("open_connection failed without address resolution results")
+
+
 def open_connection(
     scheduler: ProactorScheduler,
     host: str,
@@ -387,22 +430,16 @@ def open_connection(
 ) -> tuple[StreamReader, StreamWriter]:
     """Connect to ``host:port`` and return native stream endpoints."""
 
-    infos = socket.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM, proto=proto)
-    last_error: OSError | None = None
-    for family, socktype, proto, _canonname, sockaddr in infos:
-        sock: socket.socket | None = None
-        try:
-            sock = socket.socket(family, socktype, proto)
-            sock.setblocking(False)
-            scheduler.sock_connect(sock, sockaddr)
-            return open_streams(scheduler, sock, limit=limit, stream_factory=stream_factory)
-        except OSError as exc:
-            last_error = exc
-            if sock is not None:
-                sock.close()
-    if last_error is not None:
-        raise last_error
-    raise OSError("open_connection failed without address resolution results")
+    return _connect_tcp_streams(
+        scheduler,
+        host,
+        port,
+        family=family,
+        proto=proto,
+        limit=limit,
+        stream_factory=stream_factory,
+        open_streams_fn=open_streams,
+    )
 
 
 def open_async_connection(
@@ -417,19 +454,13 @@ def open_async_connection(
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
     """Connect to ``host:port`` and return asyncio-shaped stream endpoints."""
 
-    infos = socket.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM, proto=proto)
-    last_error: OSError | None = None
-    for family, socktype, proto, _canonname, sockaddr in infos:
-        sock: socket.socket | None = None
-        try:
-            sock = socket.socket(family, socktype, proto)
-            sock.setblocking(False)
-            scheduler.sock_connect(sock, sockaddr)
-            return open_async_streams(scheduler, sock, limit=limit, stream_factory=stream_factory)
-        except OSError as exc:
-            last_error = exc
-            if sock is not None:
-                sock.close()
-    if last_error is not None:
-        raise last_error
-    raise OSError("open_connection failed without address resolution results")
+    return _connect_tcp_streams(
+        scheduler,
+        host,
+        port,
+        family=family,
+        proto=proto,
+        limit=limit,
+        stream_factory=stream_factory,
+        open_streams_fn=open_async_streams,
+    )

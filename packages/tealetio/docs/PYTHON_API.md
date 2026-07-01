@@ -504,6 +504,19 @@ submits the socket's file descriptor to io_uring internally; the public API
 still expects a non-blocking `socket.socket` so accepted connections, peer
 metadata, and selector-backed backends share one handle type.
 
+## Name resolution
+
+`scheduler.getaddrinfo(host, port, ...)` and `scheduler.getnameinfo(sockaddr,
+flags=0)` run the stdlib resolver on a worker thread through
+`run_in_executor`, matching asyncio's `loop.getaddrinfo()` /
+`loop.getnameinfo()`. `scheduler.ensure_resolved(address, ...)` skips the
+executor when `host` is already a literal IP, like asyncio's `_ensure_resolved`.
+Module helpers `tealetio.getaddrinfo(...)`, `tealetio.getnameinfo(...)`, and
+`tealetio.ensure_resolved(...)` delegate to the running scheduler.
+
+`open_connection(...)` and `open_async_connection(...)` resolve hostnames through
+`scheduler.ensure_resolved(...)` before calling `sock_connect`.
+
 This module is an early proof of concept. It does not integrate with stdlib
 `asyncio.StreamReader` instances or the `ForwardingProactor` guest loop.
 
