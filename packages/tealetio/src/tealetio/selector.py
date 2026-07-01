@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, cast
 
 from .locks import Event
+from .proactor import (
+    ContinuousOperation,
+    _poll_mask_to_selector_events,
+    _probe_poll_fd_now,
+)
 from .scheduler import (
     AsyncDrivingMixin,
     AsyncSchedulerDrivingAPI,
@@ -37,6 +42,18 @@ class _FdCallbacks:
 
     def empty(self) -> bool:
         return self.reader is None and self.writer is None
+
+
+class _SelectorPollMany(ContinuousOperation[int]):
+    _cleanup: Callable[[], None] | None = None
+
+    def cancel(self) -> None:
+        if self.done():
+            return
+        cleanup = self._cleanup
+        if cleanup is not None:
+            cleanup()
+        self._set_cancelled()
 
 
 class SelectorMixin:
@@ -282,6 +299,115 @@ class SelectorMixin:
             if err in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
                 continue
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
+
+    def poll(self, fd: int, mask: int) -> int:
+        """Wait until an fd reports events in `mask` and return the readiness bitmask."""
+
+        fd = self._fileobj_to_fd(fd)
+        while True:
+            try:
+                return _probe_poll_fd_now(fd, mask)
+            except BlockingIOError:
+                self._wait_poll_fd(fd, mask)
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
+        """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
+
+        fd = self._fileobj_to_fd(fd)
+        operation = _SelectorPollMany(kind="poll_many", fileobj=fd, result_callback=callback)
+        events = _poll_mask_to_selector_events(mask)
+        armed = {"read": False, "write": False}
+
+        def disarm() -> None:
+            if armed["read"]:
+                self.remove_reader(fd)
+                armed["read"] = False
+            if armed["write"]:
+                self.remove_writer(fd)
+                armed["write"] = False
+
+        def arm() -> None:
+            if operation.done():
+                return
+            if events == (selectors.EVENT_READ | selectors.EVENT_WRITE):
+                if not armed["read"]:
+                    armed["read"] = True
+                    self.add_reader(fd, on_ready)
+                return
+            if events & selectors.EVENT_READ and not armed["read"]:
+                armed["read"] = True
+                self.add_reader(fd, on_ready)
+            if events & selectors.EVENT_WRITE and not armed["write"]:
+                armed["write"] = True
+                self.add_writer(fd, on_ready)
+
+        def on_ready() -> None:
+            if operation.done():
+                disarm()
+                return
+            try:
+                result = _probe_poll_fd_now(fd, mask)
+            except BlockingIOError:
+                return
+            operation._emit_result(result)
+
+        operation._cleanup = disarm
+        try:
+            result = _probe_poll_fd_now(fd, mask)
+        except BlockingIOError:
+            arm()
+        else:
+            operation._emit_result(result)
+            arm()
+        return operation
+
+    def _wait_poll_fd(self, fd: int, mask: int) -> None:
+        events = _poll_mask_to_selector_events(mask)
+        ready = Event()
+        armed = {"read": False, "write": False}
+        active = True
+
+        def disarm() -> None:
+            if armed["read"]:
+                self.remove_reader(fd)
+                armed["read"] = False
+            if armed["write"]:
+                self.remove_writer(fd)
+                armed["write"] = False
+
+        def wake() -> None:
+            nonlocal active
+            if not active:
+                return
+            try:
+                _probe_poll_fd_now(fd, mask)
+            except BlockingIOError:
+                return
+            active = False
+            disarm()
+            ready.set()
+
+        try:
+            if events == (selectors.EVENT_READ | selectors.EVENT_WRITE):
+                armed["read"] = True
+                self.add_reader(fd, wake)
+            else:
+                if events & selectors.EVENT_READ:
+                    armed["read"] = True
+                    self.add_reader(fd, wake)
+                if events & selectors.EVENT_WRITE:
+                    armed["write"] = True
+                    self.add_writer(fd, wake)
+            ready.swait()
+        finally:
+            if active:
+                active = False
+                disarm()
 
     def _check_socket(self, sock: socket.socket) -> None:
         if sock.getblocking():
