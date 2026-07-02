@@ -60,8 +60,9 @@ for any pollable file descriptor, positional file read/write, and async
 `openat` for caller-owned fds.
 
 The local liburing headers also expose helpers that are not part of this
-baseline. `io_uring_prep_openat2()` and `io_uring_prep_statx()` cover
-extended open resolve flags and async metadata. Fixed-buffer zero-copy
+baseline. `io_uring_prep_openat2()` covers extended open resolve flags.
+`submit_statx()` now covers async metadata via `io_uring_prep_statx()`.
+Fixed-buffer zero-copy
 sends still require a different ownership contract than caller-owned `BufGroup`
 rings and leased `BufView` results.
 

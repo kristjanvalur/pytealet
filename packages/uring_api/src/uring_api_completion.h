@@ -49,6 +49,13 @@ typedef struct {
     char *path;
 } UringApiCompletionPathState;
 
+typedef struct {
+    UringApiCompletionStateKind tag;
+    char *path;
+    Py_buffer view;
+    bool has_view;
+} UringApiCompletionStatxState;
+
 int completion_type_check(PyObject *completion);
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyObject *user_data, PyObject *buf_group);
@@ -56,6 +63,8 @@ PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject
 PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_path(UringApiPendingKind kind, PyObject *user_data, PyObject *path);
+PyObject *UringApiCompletion_new_pending_statx(UringApiPendingKind kind, PyObject *user_data, PyObject *path,
+                                               Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 bool is_zero_copy_send_kind(UringApiPendingKind kind);
@@ -67,5 +76,6 @@ UringApiCompletionSockaddrState *UringApiCompletion_get_sockaddr_state(UringApiC
 UringApiCompletionViewSockaddrState *UringApiCompletion_get_view_sockaddr_state(UringApiCompletion *self);
 UringApiCompletionMsgState *UringApiCompletion_get_msg_state(UringApiCompletion *self);
 UringApiCompletionPathState *UringApiCompletion_get_path_state(UringApiCompletion *self);
+UringApiCompletionStatxState *UringApiCompletion_get_statx_state(UringApiCompletion *self);
 
 #endif

@@ -90,7 +90,19 @@ int module_add_completion_kind_constants(PyObject *module) {
         PyModule_AddIntConstant(module, "COMPLETION_KIND_POLL_REMOVE", URING_API_PENDING_POLL_REMOVE) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_READ", URING_API_PENDING_READ) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_WRITE", URING_API_PENDING_WRITE) < 0 ||
-        PyModule_AddIntConstant(module, "COMPLETION_KIND_OPENAT", URING_API_PENDING_OPENAT) < 0) {
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_OPENAT", URING_API_PENDING_OPENAT) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_STATX", URING_API_PENDING_STATX) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int module_add_statx_constants(PyObject *module) {
+    if (PyModule_AddIntConstant(module, "AT_EMPTY_PATH", 0x1000) < 0 ||
+        PyModule_AddIntConstant(module, "STATX_BASIC_STATS", 0x000007ff) < 0 ||
+        PyModule_AddIntConstant(module, "STATX_SIZE", 0x00000200) < 0 ||
+        PyModule_AddIntConstant(module, "STATX_BUFFER_SIZE", 256) < 0 ||
+        PyModule_AddIntConstant(module, "STATX_STX_SIZE_OFFSET", 40) < 0) {
         return -1;
     }
     return 0;
@@ -279,9 +291,7 @@ int ring_check_open(UringApiRing *self) {
     return 0;
 }
 
-static unsigned long long ring_current_thread_id(void) {
-    return (unsigned long long)PyThread_get_thread_ident();
-}
+static unsigned long long ring_current_thread_id(void) { return (unsigned long long)PyThread_get_thread_ident(); }
 
 static int ring_check_owner_thread(UringApiRing *self, const char *error_message) {
     unsigned long long current_thread_id;

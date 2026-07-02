@@ -36,8 +36,8 @@ static int ring_submit_buffer_view_status(UringApiRing *ring, int fd, PyObject *
 
 static PyObject *ring_submit_file_buffer(UringApiRing *ring, int fd, PyObject *buf, unsigned long long offset,
                                          PyObject *user_data, int writable,
-                                         PyObject *(*submit_impl)(UringApiRing *, int, Py_buffer *,
-                                                                  unsigned long long, PyObject *)) {
+                                         PyObject *(*submit_impl)(UringApiRing *, int, Py_buffer *, unsigned long long,
+                                                                  PyObject *)) {
     Py_buffer view;
     int flags = writable ? PyBUF_WRITABLE : PyBUF_SIMPLE;
 
@@ -49,10 +49,9 @@ static PyObject *ring_submit_file_buffer(UringApiRing *ring, int fd, PyObject *b
 
 static int ring_submit_file_buffer_status(UringApiRing *ring, int fd, PyObject *buf, unsigned long long offset,
                                           PyObject *user_data, int writable,
-                                          PyObject *(*submit_impl)(UringApiRing *, int, Py_buffer *,
-                                                                   unsigned long long, PyObject *)) {
-    return discard_completion_result(
-        ring_submit_file_buffer(ring, fd, buf, offset, user_data, writable, submit_impl));
+                                          PyObject *(*submit_impl)(UringApiRing *, int, Py_buffer *, unsigned long long,
+                                                                   PyObject *)) {
+    return discard_completion_result(ring_submit_file_buffer(ring, fd, buf, offset, user_data, writable, submit_impl));
 }
 
 static int ring_submit_send_buffer(UringApiRing *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data,
@@ -295,8 +294,7 @@ int UringApiCapi_RingSubmitPollRemove(PyObject *ring, PyObject *target_completio
     if (!ring_type_check(ring)) {
         return -1;
     }
-    return discard_completion_result(
-        UringApiRing_submit_poll_remove_impl((UringApiRing *)ring, target_completion));
+    return discard_completion_result(UringApiRing_submit_poll_remove_impl((UringApiRing *)ring, target_completion));
 }
 
 int UringApiCapi_RingSubmitCancel(PyObject *ring, PyObject *target_completion) {
@@ -306,8 +304,7 @@ int UringApiCapi_RingSubmitCancel(PyObject *ring, PyObject *target_completion) {
     if (!completion_type_check(target_completion)) {
         return -1;
     }
-    return discard_completion_result(
-        UringApiRing_submit_cancel_impl((UringApiRing *)ring, target_completion));
+    return discard_completion_result(UringApiRing_submit_cancel_impl((UringApiRing *)ring, target_completion));
 }
 
 int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data) {
@@ -324,8 +321,7 @@ int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data) {
     return discard_completion_result(UringApiRing_submit_close_impl((UringApiRing *)ring, fd, user_data));
 }
 
-int UringApiCapi_RingSubmitRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
-                                PyObject *user_data) {
+int UringApiCapi_RingSubmitRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset, PyObject *user_data) {
     if (!ring_type_check(ring)) {
         return -1;
     }
@@ -349,6 +345,24 @@ int UringApiCapi_RingSubmitOpenat(PyObject *ring, int dfd, PyObject *path, int f
     }
     return discard_completion_result(
         UringApiRing_submit_openat_impl((UringApiRing *)ring, dfd, path, flags, mode, user_data));
+}
+
+static int ring_submit_statx_buffer_status(UringApiRing *ring, int dfd, PyObject *path, int flags, unsigned int mask,
+                                           PyObject *buf, PyObject *user_data) {
+    Py_buffer view;
+
+    if (PyObject_GetBuffer(buf, &view, PyBUF_WRITABLE) < 0) {
+        return -1;
+    }
+    return discard_completion_result(UringApiRing_submit_statx_impl(ring, dfd, path, flags, mask, &view, user_data));
+}
+
+int UringApiCapi_RingSubmitStatx(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mask, PyObject *buf,
+                                 PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return ring_submit_statx_buffer_status((UringApiRing *)ring, dfd, path, flags, mask, buf, user_data);
 }
 
 int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,

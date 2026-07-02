@@ -685,6 +685,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSubmitRead,
     UringApiCapi_RingSubmitWrite,
     UringApiCapi_RingSubmitOpenat,
+    UringApiCapi_RingSubmitStatx,
     UringApiCapi_RingSubmitSocket,
     UringApiCapi_RingBreakWait,
     UringApiCapi_RingWait,

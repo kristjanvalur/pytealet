@@ -162,9 +162,7 @@ static PyObject *UringApiBufView_get_buf_group(UringApiBufView *self, void *Py_U
     return Py_NewRef(self->buf_group);
 }
 
-static int UringApiBufView_bool(PyObject *obj) {
-    return ((UringApiBufView *)obj)->length > 0;
-}
+static int UringApiBufView_bool(PyObject *obj) { return ((UringApiBufView *)obj)->length > 0; }
 
 static PyObject *UringApiBufView_get_recycled(UringApiBufView *self, void *Py_UNUSED(closure)) {
     bool recycled;

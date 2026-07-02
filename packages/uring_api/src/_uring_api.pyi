@@ -27,6 +27,12 @@ COMPLETION_KIND_RECV_BUF: int
 COMPLETION_KIND_READ: int
 COMPLETION_KIND_WRITE: int
 COMPLETION_KIND_OPENAT: int
+COMPLETION_KIND_STATX: int
+AT_EMPTY_PATH: int
+STATX_BASIC_STATS: int
+STATX_SIZE: int
+STATX_BUFFER_SIZE: int
+STATX_STX_SIZE_OFFSET: int
 COMPLETION_KIND_SEND: int
 COMPLETION_KIND_SEND_ZC: int
 COMPLETION_KIND_WAKE: int
@@ -143,6 +149,9 @@ class Ring:
     def submit_write(self, fd: int, data: Any, offset: FileOffset, user_data: object = None) -> Completion: ...
     def submit_openat(
         self, path: str, flags: int, mode: int = 0, user_data: object = None, dfd: int = ...
+    ) -> Completion: ...
+    def submit_statx(
+        self, dfd: int, path: str, flags: int, mask: int, buf: Any, user_data: object = None
     ) -> Completion: ...
     def submit_socket(
         self, domain: int, type: int, protocol: int = 0, flags: int = 0, user_data: object = None

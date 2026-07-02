@@ -85,6 +85,22 @@ been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
 same descriptor.
 
+## File metadata and positioned I/O
+
+`Ring` also exposes positioned file helpers for caller-owned fds:
+
+- `submit_openat(path, flags, mode=0, *, dfd=AT_FDCWD)` opens a path and
+  returns the new fd in the completion result;
+- `submit_read(fd, buf, offset)` and `submit_write(fd, data, offset)` perform
+  explicit-offset I/O into caller buffers;
+- `submit_statx(dfd, path, flags, mask, buf)` fills a caller-provided 256-byte
+  statx buffer asynchronously.
+
+For fd-only metadata, pass an empty path with `AT_EMPTY_PATH` in `flags`. Read
+`stx_size` from the completed buffer with `statx_st_size(buf)` or
+`STATX_STX_SIZE_OFFSET`. Path-based lookups use `dfd=AT_FDCWD` (`-100`) and a
+normal filesystem path.
+
 Provided-buffer receive uses a caller-owned ring created with
 `create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or
 stream receives with `submit_recv_multishot(fd, buf_group, ...)`. Both paths

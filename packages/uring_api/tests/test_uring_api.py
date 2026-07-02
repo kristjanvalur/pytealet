@@ -146,7 +146,7 @@ def test_public_capi_header_compiles_without_liburing_headers():
 
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 1
+    assert uring_api.C_API_ABI_VERSION == 2
     assert uring_api.C_API_FEATURE_CORE == 1 << 0
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
 
@@ -205,6 +205,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_READ == 20
     assert uring_api.COMPLETION_KIND_WRITE == 21
     assert uring_api.COMPLETION_KIND_OPENAT == 22
+    assert uring_api.COMPLETION_KIND_STATX == 23
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -2254,6 +2255,95 @@ def test_ring_file_read_write_completion_when_available():
                 assert bytes(buf) == b"hello"
         finally:
             os.close(fd)
+    finally:
+        os.unlink(path)
+
+
+def test_ring_submit_statx_rejects_small_buffer():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        with pytest.raises(ValueError, match="256 bytes"):
+            ring.submit_statx(0, "", 0, uring_api.STATX_SIZE, bytearray(32))
+
+
+def test_ring_statx_fd_returns_size_when_available():
+    require_uring()
+
+    token = {"operation": "statx-fd"}
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        try:
+            assert os.write(fd, b"hello") == 5
+            buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+            with uring_api.Ring() as ring:
+                statx_handle = ring.submit_statx(
+                    fd,
+                    "",
+                    uring_api.AT_EMPTY_PATH,
+                    uring_api.STATX_SIZE,
+                    buf,
+                    token,
+                )
+                completion = ring.wait(1.0)
+                assert completion is statx_handle
+                assert completion.kind == uring_api.COMPLETION_KIND_STATX
+                assert completion.user_data is token
+                assert completion.res == 0
+                assert uring_api.statx_st_size(buf) == 5
+        finally:
+            os.close(fd)
+    finally:
+        os.unlink(path)
+
+
+def test_ring_statx_path_returns_size_when_available():
+    require_uring()
+
+    token = {"operation": "statx-path"}
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        with open(path, "wb") as handle:
+            handle.write(b"hello")
+        buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+        with uring_api.Ring() as ring:
+            statx_handle = ring.submit_statx(-100, path, 0, uring_api.STATX_SIZE, buf, token)
+            completion = ring.wait(1.0)
+            assert completion is statx_handle
+            assert completion.kind == uring_api.COMPLETION_KIND_STATX
+            assert completion.res == 0
+            assert uring_api.statx_st_size(buf) == 5
+    finally:
+        os.unlink(path)
+
+
+def test_c_api_statx_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    token = 262
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        with open(path, "wb") as handle:
+            handle.write(b"hello")
+        buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+        with uring_api.Ring() as ring:
+            client.submit_statx(ring, -100, path, 0, uring_api.STATX_SIZE, buf, token)
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        assert client.completion_summary(completion) == (
+            token,
+            uring_api.COMPLETION_KIND_STATX,
+            0,
+            0,
+            0,
+        )
+        assert uring_api.statx_st_size(buf) == 5
     finally:
         os.unlink(path)
 

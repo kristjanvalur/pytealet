@@ -487,6 +487,29 @@ static PyObject *client_submit_write(PyObject *module, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *client_submit_statx(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *path;
+    PyObject *buf;
+    PyObject *user_data;
+    int dfd;
+    int flags;
+    unsigned int mask;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOiIOO:submit_statx", &ring, &dfd, &path, &flags, &mask, &buf, &user_data)) {
+        return NULL;
+    }
+    if (api->ring_submit_statx(ring, dfd, path, flags, mask, buf, user_data) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *client_submit_openat(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *path;
@@ -637,6 +660,7 @@ static PyMethodDef client_methods[] = {
     {"submit_read", _PyCFunction_CAST(client_submit_read), METH_VARARGS, NULL},
     {"submit_write", _PyCFunction_CAST(client_submit_write), METH_VARARGS, NULL},
     {"submit_openat", _PyCFunction_CAST(client_submit_openat), METH_VARARGS, NULL},
+    {"submit_statx", _PyCFunction_CAST(client_submit_statx), METH_VARARGS, NULL},
     {"submit_socket", _PyCFunction_CAST(client_submit_socket), METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL},
 };
@@ -664,6 +688,7 @@ static int client_exec(PyObject *module) {
         !api->ring_submit_poll || !api->ring_submit_poll_multishot || !api->ring_submit_poll_remove ||
         !api->ring_submit_cancel || !api->ring_submit_shutdown || !api->ring_submit_close ||
         !api->ring_submit_read || !api->ring_submit_write || !api->ring_submit_openat ||
+        !api->ring_submit_statx ||
         !api->ring_submit_socket || !api->ring_break_wait || !api->ring_wait ||
         !api->ring_set_callback || !api->ring_set_c_callback || !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||

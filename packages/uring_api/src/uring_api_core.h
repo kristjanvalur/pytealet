@@ -14,6 +14,7 @@ int module_add_setup_flag_constants(PyObject *module);
 int module_add_cqe_flag_constants(PyObject *module);
 int module_add_recvsend_flag_constants(PyObject *module);
 int module_add_completion_kind_constants(PyObject *module);
+int module_add_statx_constants(PyObject *module);
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
 unsigned int ring_sq_entries(UringApiRing *self);
