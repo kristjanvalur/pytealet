@@ -11,11 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, cast
 
 from .locks import Event
-from .proactor import (
-    ContinuousOperation,
-    _poll_mask_to_selector_events,
-    _probe_poll_fd_now,
-)
+from .operations import ContinuousOperation
+from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
     AsyncSchedulerDrivingAPI,
@@ -306,8 +303,8 @@ class SelectorMixin:
         fd = self._fileobj_to_fd(fd)
         while True:
             try:
-                return _probe_poll_fd_now(fd, mask)
-            except BlockingIOError:
+                return probe_poll_fd_now(fd, mask)
+            except (BlockingIOError, InterruptedError):
                 self._wait_poll_fd(fd, mask)
 
     def poll_many(
@@ -320,7 +317,7 @@ class SelectorMixin:
 
         fd = self._fileobj_to_fd(fd)
         operation = _SelectorPollMany(kind="poll_many", fileobj=fd, result_callback=callback)
-        events = _poll_mask_to_selector_events(mask)
+        events = poll_mask_to_selector_events(mask)
         armed = {"read": False, "write": False}
 
         def disarm() -> None:
@@ -334,11 +331,6 @@ class SelectorMixin:
         def arm() -> None:
             if operation.done():
                 return
-            if events == (selectors.EVENT_READ | selectors.EVENT_WRITE):
-                if not armed["read"]:
-                    armed["read"] = True
-                    self.add_reader(fd, on_ready)
-                return
             if events & selectors.EVENT_READ and not armed["read"]:
                 armed["read"] = True
                 self.add_reader(fd, on_ready)
@@ -351,15 +343,15 @@ class SelectorMixin:
                 disarm()
                 return
             try:
-                result = _probe_poll_fd_now(fd, mask)
-            except BlockingIOError:
+                result = probe_poll_fd_now(fd, mask)
+            except (BlockingIOError, InterruptedError):
                 return
             operation._emit_result(result)
 
         operation._cleanup = disarm
         try:
-            result = _probe_poll_fd_now(fd, mask)
-        except BlockingIOError:
+            result = probe_poll_fd_now(fd, mask)
+        except (BlockingIOError, InterruptedError):
             arm()
         else:
             operation._emit_result(result)
@@ -367,7 +359,7 @@ class SelectorMixin:
         return operation
 
     def _wait_poll_fd(self, fd: int, mask: int) -> None:
-        events = _poll_mask_to_selector_events(mask)
+        events = poll_mask_to_selector_events(mask)
         ready = Event()
         armed = {"read": False, "write": False}
         active = True
@@ -385,24 +377,20 @@ class SelectorMixin:
             if not active:
                 return
             try:
-                _probe_poll_fd_now(fd, mask)
-            except BlockingIOError:
+                probe_poll_fd_now(fd, mask)
+            except (BlockingIOError, InterruptedError):
                 return
             active = False
             disarm()
             ready.set()
 
         try:
-            if events == (selectors.EVENT_READ | selectors.EVENT_WRITE):
+            if events & selectors.EVENT_READ:
                 armed["read"] = True
                 self.add_reader(fd, wake)
-            else:
-                if events & selectors.EVENT_READ:
-                    armed["read"] = True
-                    self.add_reader(fd, wake)
-                if events & selectors.EVENT_WRITE:
-                    armed["write"] = True
-                    self.add_writer(fd, wake)
+            if events & selectors.EVENT_WRITE:
+                armed["write"] = True
+                self.add_writer(fd, wake)
             ready.swait()
         finally:
             if active:
@@ -499,6 +487,13 @@ class SelectorMixin:
         events = self._selector.select(timeout=timeout)
         self._process_selector_events(events)
 
+    def _fd_callbacks_match(self, left: _FdCallback | None, right: _FdCallback | None) -> bool:
+        if left is None or right is None:
+            return False
+        left_callback, left_args, _ = left
+        right_callback, right_args, _ = right
+        return left_callback is right_callback and left_args == right_args
+
     def _process_selector_events(self, events: list[tuple[selectors.SelectorKey, int]]) -> None:
         wakeup_fd = self._selector_wakeup_reader.fileno()
         for key, mask in events:
@@ -506,10 +501,18 @@ class SelectorMixin:
             if fd == wakeup_fd:
                 self._drain_selector_wakeup()
                 continue
-            if mask & selectors.EVENT_READ:
+            entry = self._fd_callbacks.get(fd)
+            if (
+                entry is not None
+                and mask & (selectors.EVENT_READ | selectors.EVENT_WRITE)
+                and self._fd_callbacks_match(entry.reader, entry.writer)
+            ):
                 self._schedule_fd_callback(fd, selectors.EVENT_READ)
-            if mask & selectors.EVENT_WRITE:
-                self._schedule_fd_callback(fd, selectors.EVENT_WRITE)
+            else:
+                if mask & selectors.EVENT_READ:
+                    self._schedule_fd_callback(fd, selectors.EVENT_READ)
+                if mask & selectors.EVENT_WRITE:
+                    self._schedule_fd_callback(fd, selectors.EVENT_WRITE)
             self._update_selector_registration(fd)
 
     def _has_pending_driver_work(self) -> bool:

@@ -1631,6 +1631,111 @@ class TestSchedulerAccessors:
             writer.close()
             s.close()
 
+    def test_selector_scheduler_poll_rejects_empty_mask(self):
+        s = SyncSelectorScheduler()
+        set_scheduler(s)
+        reader, writer = socket.socketpair()
+        try:
+            with pytest.raises(ValueError, match="poll mask"):
+                s.poll(reader.fileno(), 0)
+            with pytest.raises(ValueError, match="poll mask"):
+                s.poll_many(reader.fileno(), 0, lambda _mask: None)
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_selector_scheduler_poll_completes_once_with_bidirectional_mask(self):
+        s = SyncSelectorScheduler()
+        set_scheduler(s)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            mask = select.POLLIN | select.POLLOUT
+
+            def wait_for_both() -> int:
+                return s.poll(reader.fileno(), mask)
+
+            def send() -> None:
+                s.sleep(0.001)
+                writer.send(b"a")
+
+            task = s.spawn(wait_for_both)
+            s.spawn(send)
+            assert s.run_until_complete(task) & mask
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_selector_scheduler_poll_many_emits_immediately_when_fd_already_ready(self):
+        s = SyncSelectorScheduler()
+        set_scheduler(s)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.send(b"a")
+            operation = s.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert seen == [select.POLLIN]
+            assert operation.done() is False
+            operation.cancel()
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_selector_scheduler_poll_many_does_not_double_emit_for_bidirectional_mask(self):
+        s = SyncSelectorScheduler()
+        set_scheduler(s)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        operation = None
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            mask = select.POLLIN | select.POLLOUT
+            operation = s.poll_many(reader.fileno(), mask, seen.append)
+
+            def send() -> None:
+                s.sleep(0.001)
+                writer.send(b"a")
+
+            def wait_for_event() -> None:
+                while not seen:
+                    s.sleep(0.001)
+                operation.cancel()
+
+            s.spawn(send)
+            task = s.spawn(wait_for_event)
+            s.run_until_complete(task)
+            assert len(seen) == 1
+            assert seen[0] & mask
+        finally:
+            if operation is not None:
+                operation.cancel()
+            reader.close()
+            writer.close()
+            s.close()
+
+    def test_selector_scheduler_poll_detects_pollhup_after_peer_close(self):
+        s = SyncSelectorScheduler()
+        set_scheduler(s)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.close()
+
+            def wait_for_hup() -> int:
+                return s.poll(reader.fileno(), select.POLLHUP)
+
+            assert s.run_until_complete(s.spawn(wait_for_hup)) & select.POLLHUP
+        finally:
+            reader.close()
+            s.close()
+
     def test_basic_scheduler_io_callbacks_require_io_capable_scheduler(self):
         s = BasicScheduler()
         set_scheduler(s)

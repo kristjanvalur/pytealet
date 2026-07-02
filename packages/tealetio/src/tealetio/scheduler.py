@@ -43,6 +43,7 @@ from .locks import (
     set_scheduler_resolver,
     timeout as scheduler_timeout,
 )
+from .operations import ContinuousOperation
 from . import tasks as _tasks
 
 
@@ -1464,7 +1465,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         fd: int,
         mask: int,
         callback: Callable[[int], object],
-    ) -> Any:
+    ) -> ContinuousOperation[int]:
         """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
 
         raise NotImplementedError("poll requires an IO-capable scheduler")

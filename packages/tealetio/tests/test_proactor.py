@@ -17,6 +17,7 @@ from typing import Any, cast
 import pytest
 import uring_api
 
+import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.proactor import (
@@ -1013,7 +1014,7 @@ class TestSelectorProactor:
 
     @pytest.mark.skipif(not hasattr(select, "POLLRDHUP"), reason="POLLRDHUP is not defined on this platform")
     def test_poll_mask_accepts_pollrdhup(self):
-        assert proactor_module._poll_mask_to_selector_events(select.POLLRDHUP) == selectors.EVENT_READ
+        assert poll_helpers_module.poll_mask_to_selector_events(select.POLLRDHUP) == selectors.EVENT_READ
 
     def test_poll_detects_pollhup_after_peer_close(self):
         proactor = SelectorProactor()
