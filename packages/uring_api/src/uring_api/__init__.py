@@ -28,6 +28,7 @@ try:
     from _uring_api import COMPLETION_KIND_OPENAT as COMPLETION_KIND_OPENAT
     from _uring_api import COMPLETION_KIND_STATX as COMPLETION_KIND_STATX
     from _uring_api import AT_EMPTY_PATH as AT_EMPTY_PATH
+    from _uring_api import AT_FDCWD as AT_FDCWD
     from _uring_api import STATX_BASIC_STATS as STATX_BASIC_STATS
     from _uring_api import STATX_SIZE as STATX_SIZE
     from _uring_api import STATX_BUFFER_SIZE as STATX_BUFFER_SIZE
@@ -88,6 +89,7 @@ except ImportError as exc:
     COMPLETION_KIND_WRITE = 21
     COMPLETION_KIND_OPENAT = 22
     COMPLETION_KIND_STATX = 23
+    AT_FDCWD = -100
     AT_EMPTY_PATH = 0x1000
     STATX_BASIC_STATS = 0x000007FF
     STATX_SIZE = 0x00000200
@@ -328,10 +330,20 @@ class CompletionKind(enum.IntEnum):
 
 
 def statx_st_size(buf: Any) -> int:
-    """Read ``stx_size`` from a completed statx buffer."""
+    """Read ``stx_size`` from a completed statx buffer.
+
+    Call only after the statx completion reports ``res == 0``. The buffer must
+    be at least ``STATX_BUFFER_SIZE`` bytes and should have been filled by a
+    submit that requested ``STATX_SIZE`` in the mask.
+    """
 
     view = memoryview(buf)
+    if len(view) < STATX_BUFFER_SIZE:
+        raise ValueError("statx buffer must be at least STATX_BUFFER_SIZE bytes")
     offset = STATX_STX_SIZE_OFFSET
+    mask = int.from_bytes(view[0:4], "little", signed=False)
+    if not (mask & STATX_SIZE):
+        raise ValueError("statx buffer does not contain STATX_SIZE fields")
     return int.from_bytes(view[offset : offset + 8], "little", signed=False)
 
 
@@ -377,6 +389,7 @@ __all__ = [
     "COMPLETION_KIND_WRITE",
     "COMPLETION_KIND_OPENAT",
     "COMPLETION_KIND_STATX",
+    "AT_FDCWD",
     "AT_EMPTY_PATH",
     "STATX_BASIC_STATS",
     "STATX_SIZE",

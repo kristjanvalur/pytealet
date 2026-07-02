@@ -2310,7 +2310,7 @@ def test_ring_statx_path_returns_size_when_available():
             handle.write(b"hello")
         buf = bytearray(uring_api.STATX_BUFFER_SIZE)
         with uring_api.Ring() as ring:
-            statx_handle = ring.submit_statx(-100, path, 0, uring_api.STATX_SIZE, buf, token)
+            statx_handle = ring.submit_statx(uring_api.AT_FDCWD, path, 0, uring_api.STATX_SIZE, buf, token)
             completion = ring.wait(1.0)
             assert completion is statx_handle
             assert completion.kind == uring_api.COMPLETION_KIND_STATX
@@ -2346,6 +2346,35 @@ def test_c_api_statx_when_available():
         assert uring_api.statx_st_size(buf) == 5
     finally:
         os.unlink(path)
+
+
+def test_ring_statx_fails_for_nonexistent_path():
+    require_uring()
+
+    buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+    with uring_api.Ring() as ring:
+        handle = ring.submit_statx(
+            uring_api.AT_FDCWD,
+            "/nonexistent/uring-api-statx-missing",
+            0,
+            uring_api.STATX_SIZE,
+            buf,
+        )
+        completion = ring.wait(1.0)
+        assert completion is handle
+        assert completion.kind == uring_api.COMPLETION_KIND_STATX
+        assert completion.res < 0
+
+
+def test_statx_st_size_rejects_short_buffer():
+    with pytest.raises(ValueError, match="STATX_BUFFER_SIZE"):
+        uring_api.statx_st_size(bytearray(32))
+
+
+def test_statx_st_size_rejects_buffer_without_size_mask():
+    buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+    with pytest.raises(ValueError, match="STATX_SIZE"):
+        uring_api.statx_st_size(buf)
 
 
 def test_ring_openat_read_write_round_trip_when_available():

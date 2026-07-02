@@ -4,6 +4,8 @@
 
 #include "uring_api_core.h"
 
+#include "uring_api_statx_layout.h"
+
 int ring_type_check(PyObject *ring) {
     if (!PyObject_TypeCheck(ring, &UringApiRing_Type)) {
         PyErr_SetString(PyExc_TypeError, "ring must be an _uring_api.Ring instance");
@@ -98,11 +100,12 @@ int module_add_completion_kind_constants(PyObject *module) {
 }
 
 int module_add_statx_constants(PyObject *module) {
-    if (PyModule_AddIntConstant(module, "AT_EMPTY_PATH", 0x1000) < 0 ||
+    if (PyModule_AddIntConstant(module, "AT_FDCWD", -100) < 0 ||
+        PyModule_AddIntConstant(module, "AT_EMPTY_PATH", 0x1000) < 0 ||
         PyModule_AddIntConstant(module, "STATX_BASIC_STATS", 0x000007ff) < 0 ||
         PyModule_AddIntConstant(module, "STATX_SIZE", 0x00000200) < 0 ||
         PyModule_AddIntConstant(module, "STATX_BUFFER_SIZE", 256) < 0 ||
-        PyModule_AddIntConstant(module, "STATX_STX_SIZE_OFFSET", 40) < 0) {
+        PyModule_AddIntConstant(module, "STATX_STX_SIZE_OFFSET", URING_API_STATX_STX_SIZE_OFFSET) < 0) {
         return -1;
     }
     return 0;

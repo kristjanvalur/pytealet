@@ -194,10 +194,12 @@ constants and types live in `src/uring_api/__init__.py`.
 - `Completion.kind` on the native `Completion` object is an `int`. Export
   `CompletionKind` (`enum.IntEnum`) from `uring_api/__init__.py` only — not from
   `_uring_api.pyi` or the extension module namespace.
-- C API clients must check `abi_version` / `URING_API_CAPI_ABI_VERSION` before
-  use. Adding vtable entries requires bumping the ABI version, updating
-  `uring_api_capi.h`, `uring_api_probe.c`, `tests/capi_client/`, and tests that
-  assert the ABI constant.
+- C API clients must check `abi_version` / `URING_API_CAPI_ABI_VERSION` and
+  `struct_size` before use. While the package remains pre-release, keep
+  `URING_API_CAPI_ABI_VERSION` at **1**: append new vtable entries at the end,
+  update `uring_api_capi.h`, `uring_api_probe.c`, `tests/capi_client/`, and
+  client null-checks. Reserve ABI bumps for the first stable release or a
+  deliberate breaking layout change.
 
 Preserve refcount and buffer-lifetime invariants when touching completion
 delivery or pending-operation state.
