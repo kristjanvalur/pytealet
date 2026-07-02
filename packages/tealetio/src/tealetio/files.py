@@ -19,18 +19,22 @@ def parse_open_mode(mode: str) -> tuple[int, int]:
         raise ValueError("ProactorFile requires a binary mode such as 'rb' or 'wb'")
     if "t" in mode:
         raise ValueError("text mode is not supported; use io.TextIOWrapper on a binary ProactorFile")
+    if "x" in mode:
+        raise ValueError("exclusive create modes such as 'xb' are not supported")
 
+    append = "a" in mode
     if "+" in mode:
         flags = os.O_RDWR
     elif "w" in mode:
         flags = os.O_WRONLY
     elif "r" in mode:
         flags = os.O_RDONLY
+    elif append:
+        flags = os.O_WRONLY
     else:
         raise ValueError(f"invalid mode: {mode!r}")
 
-    append = "a" in mode
-    if "w" in mode or append or "+" in mode:
+    if "w" in mode or append:
         flags |= os.O_CREAT
     if "w" in mode and not append:
         flags |= os.O_TRUNC
@@ -140,6 +144,7 @@ class ProactorFile(io.RawIOBase):
         if not self._writable:
             raise OSError(errno.EBADF, "File is not writable")
         if self._append:
+            # synchronous metadata lookup; uring statx could replace this later
             self._pos = os.fstat(self._fd).st_size
         nbytes = self._scheduler.wait_operation(self._proactor.write(self._fd, b, self._pos))
         self._pos += nbytes

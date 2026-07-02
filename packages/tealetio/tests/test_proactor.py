@@ -4039,3 +4039,121 @@ class TestProactorScheduler:
                 assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello"
             finally:
                 scheduler.close()
+
+    def test_seek_cur_updates_logical_position(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        try:
+
+            def exercise() -> int:
+                with scheduler.open("/tmp/seek-cur.txt", "w+b") as handle:
+                    handle.write(b"hello")
+                    handle.seek(2, os.SEEK_CUR)
+                    return handle.tell()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == 7
+        finally:
+            scheduler.close()
+
+    def test_seek_end_and_positioned_read_use_file_size(self, monkeypatch: pytest.MonkeyPatch):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        ring = cast(_FakeUringRing, scheduler._proactor.ring)
+
+        def fake_fstat(fd: int) -> os.stat_result:
+            size = len(ring.open_fds.get(fd, b""))
+            return os.stat_result((0, 0, 0, 0, 0, 0, size, 0, 0, 0))
+
+        monkeypatch.setattr(os, "fstat", fake_fstat)
+        try:
+
+            def exercise() -> tuple[int, bytes]:
+                with scheduler.open("/tmp/seek-end.txt", "w+b") as handle:
+                    handle.write(b"hello")
+                    handle.seek(0, os.SEEK_END)
+                    end_pos = handle.tell()
+                    handle.seek(-2, os.SEEK_END)
+                    return end_pos, handle.read(2)
+
+            end_pos, suffix = scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert end_pos == 5
+            assert suffix == b"lo"
+            assert ring.submitted_read[-1][2] == 3
+        finally:
+            scheduler.close()
+
+    def test_append_write_ignores_prior_seek(self, monkeypatch: pytest.MonkeyPatch):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        ring = cast(_FakeUringRing, scheduler._proactor.ring)
+
+        def fake_fstat(fd: int) -> os.stat_result:
+            size = len(ring.open_fds.get(fd, b""))
+            return os.stat_result((0, 0, 0, 0, 0, 0, size, 0, 0, 0))
+
+        monkeypatch.setattr(os, "fstat", fake_fstat)
+        try:
+
+            def exercise() -> bytes:
+                with scheduler.open("/tmp/append.txt", "a+b") as handle:
+                    handle.write(b"hello")
+                    handle.seek(0)
+                    handle.write(b"!")
+                    handle.seek(0)
+                    return handle.read()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello!"
+            assert ring.submitted_write[-1][2] == 5
+        finally:
+            scheduler.close()
+
+    def test_writeonly_handle_rejects_read(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        try:
+
+            def exercise() -> None:
+                with scheduler.open("/tmp/write-only.txt", "wb") as handle:
+                    with pytest.raises(OSError) as excinfo:
+                        handle.read(1)
+                    assert excinfo.value.errno == errno.EBADF
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.close()
+
+    def test_readonly_handle_rejects_write(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        try:
+
+            def exercise() -> None:
+                with scheduler.open("/tmp/read-only.txt", "rb") as handle:
+                    with pytest.raises(OSError) as excinfo:
+                        handle.write(b"y")
+                    assert excinfo.value.errno == errno.EBADF
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_append_mode_appends_after_seek(self):
+        scheduler = SyncProactorScheduler(UringProactor)
+        set_scheduler(scheduler)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "append-native.txt")
+            try:
+
+                def exercise() -> bytes:
+                    with scheduler.open(path, "wb") as handle:
+                        handle.write(b"hello")
+                    with scheduler.open(path, "ab") as handle:
+                        handle.seek(0)
+                        handle.write(b"!")
+                    with scheduler.open(path, "rb") as handle:
+                        return handle.read()
+
+                assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello!"
+            finally:
+                scheduler.close()
