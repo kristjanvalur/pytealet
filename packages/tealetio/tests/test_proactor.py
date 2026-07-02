@@ -17,12 +17,13 @@ from typing import Any, cast
 import pytest
 import uring_api
 
+import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
 from tealetio import TimeoutError, set_scheduler, timeout
+from tealetio.operations import InvalidStateError
 from tealetio.proactor import (
     AsyncProactorScheduler,
     ContinuousOperation,
-    InvalidStateError,
     Operation,
     ProactorScheduler,
     RECV_MANY_BUFFER_PRESSURE,
@@ -1013,7 +1014,7 @@ class TestSelectorProactor:
 
     @pytest.mark.skipif(not hasattr(select, "POLLRDHUP"), reason="POLLRDHUP is not defined on this platform")
     def test_poll_mask_accepts_pollrdhup(self):
-        assert proactor_module._poll_mask_to_selector_events(select.POLLRDHUP) == selectors.EVENT_READ
+        assert poll_helpers_module.poll_mask_to_selector_events(select.POLLRDHUP) == selectors.EVENT_READ
 
     def test_poll_detects_pollhup_after_peer_close(self):
         proactor = SelectorProactor()
@@ -3690,6 +3691,61 @@ class TestProactorScheduler:
 
             assert scheduler.run_until_complete(task) == [(0, b"hello"), (1, b"world")]
         finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_poll_completes_when_fd_becomes_readable(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def wait_for_read() -> int:
+                return scheduler.poll(reader.fileno(), select.POLLIN)
+
+            def send() -> None:
+                scheduler.sleep(0.001)
+                writer.send(b"x")
+
+            task = scheduler.spawn(wait_for_read)
+            scheduler.spawn(send)
+
+            assert scheduler.run_until_complete(task) & select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_poll_many_emits_until_cancelled(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        operation = None
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = scheduler.poll_many(reader.fileno(), select.POLLIN, seen.append)
+
+            def send() -> None:
+                scheduler.sleep(0.001)
+                writer.send(b"x")
+
+            def wait_for_event() -> None:
+                while not seen:
+                    scheduler.sleep(0.001)
+                operation.cancel()
+
+            scheduler.spawn(send)
+            task = scheduler.spawn(wait_for_event)
+            scheduler.run_until_complete(task)
+            assert seen[0] & select.POLLIN
+        finally:
+            if operation is not None:
+                operation.cancel()
             reader.close()
             writer.close()
             scheduler.close()

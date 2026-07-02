@@ -43,6 +43,7 @@ from .locks import (
     set_scheduler_resolver,
     timeout as scheduler_timeout,
 )
+from .operations import ContinuousOperation
 from . import tasks as _tasks
 
 
@@ -1453,6 +1454,21 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Connect a non-blocking socket to `address`."""
 
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
+
+    def poll(self, fd: int, mask: int) -> int:
+        """Wait until an fd reports events in `mask` and return the readiness bitmask."""
+
+        raise NotImplementedError("poll requires an IO-capable scheduler")
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
+        """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
+
+        raise NotImplementedError("poll requires an IO-capable scheduler")
 
     # -- Driver state --------------------------------------------------
 

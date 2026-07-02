@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, cast
 
 from .locks import Event
+from .operations import ContinuousOperation
+from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
     AsyncSchedulerDrivingAPI,
@@ -39,8 +41,26 @@ class _FdCallbacks:
         return self.reader is None and self.writer is None
 
 
+class _SelectorPollMany(ContinuousOperation[int]):
+    _cleanup: Callable[[], None] | None = None
+
+    def cancel(self) -> None:
+        if self.done():
+            return
+        cleanup = self._cleanup
+        if cleanup is not None:
+            cleanup()
+        self._set_cancelled()
+
+
 class SelectorMixin:
-    """Selector-backed readiness waits for schedulers."""
+    """Selector-backed readiness waits for schedulers.
+
+    When reader and writer slots on an fd share the same callback and args,
+    a single selector delivery that includes both directions schedules that
+    callback once. This matches proactor poll dedup and avoids double emits
+    from bidirectional poll masks.
+    """
 
     def __init__(self, selector: selectors.BaseSelector | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -283,6 +303,115 @@ class SelectorMixin:
                 continue
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
+    def poll(self, fd: int, mask: int) -> int:
+        """Wait until an fd reports events in `mask` and return the readiness bitmask."""
+
+        fd = self._fileobj_to_fd(fd)
+        while True:
+            try:
+                return probe_poll_fd_now(fd, mask)
+            except (BlockingIOError, InterruptedError):
+                self._wait_poll_fd(fd, mask)
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]:
+        """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
+
+        fd = self._fileobj_to_fd(fd)
+        operation = _SelectorPollMany(kind="poll_many", fileobj=fd, result_callback=callback)
+        events = poll_mask_to_selector_events(mask)
+        armed = {"read": False, "write": False}
+
+        def disarm() -> None:
+            if armed["read"]:
+                self.remove_reader(fd)
+                armed["read"] = False
+            if armed["write"]:
+                self.remove_writer(fd)
+                armed["write"] = False
+
+        def arm() -> None:
+            if operation.done():
+                return
+            if events & selectors.EVENT_READ and not armed["read"]:
+                armed["read"] = True
+                self.add_reader(fd, on_ready)
+            if events & selectors.EVENT_WRITE and not armed["write"]:
+                armed["write"] = True
+                self.add_writer(fd, on_ready)
+
+        def fail(exc: BaseException) -> None:
+            disarm()
+            operation._set_exception(exc)
+
+        def on_ready() -> None:
+            if operation.done():
+                disarm()
+                return
+            try:
+                result = probe_poll_fd_now(fd, mask)
+            except (BlockingIOError, InterruptedError):
+                return
+            except BaseException as exc:
+                fail(exc)
+                return
+            operation._emit_result(result)
+
+        operation._cleanup = disarm
+        try:
+            result = probe_poll_fd_now(fd, mask)
+        except (BlockingIOError, InterruptedError):
+            arm()
+        except BaseException as exc:
+            fail(exc)
+        else:
+            operation._emit_result(result)
+            arm()
+        return operation
+
+    def _wait_poll_fd(self, fd: int, mask: int) -> None:
+        events = poll_mask_to_selector_events(mask)
+        ready = Event()
+        armed = {"read": False, "write": False}
+        active = True
+
+        def disarm() -> None:
+            if armed["read"]:
+                self.remove_reader(fd)
+                armed["read"] = False
+            if armed["write"]:
+                self.remove_writer(fd)
+                armed["write"] = False
+
+        def wake() -> None:
+            nonlocal active
+            if not active:
+                return
+            try:
+                probe_poll_fd_now(fd, mask)
+            except (BlockingIOError, InterruptedError):
+                return
+            active = False
+            disarm()
+            ready.set()
+
+        try:
+            if events & selectors.EVENT_READ:
+                armed["read"] = True
+                self.add_reader(fd, wake)
+            if events & selectors.EVENT_WRITE:
+                armed["write"] = True
+                self.add_writer(fd, wake)
+            ready.swait()
+        finally:
+            if active:
+                active = False
+                disarm()
+
     def _check_socket(self, sock: socket.socket) -> None:
         if sock.getblocking():
             raise ValueError("socket must be non-blocking")
@@ -373,6 +502,13 @@ class SelectorMixin:
         events = self._selector.select(timeout=timeout)
         self._process_selector_events(events)
 
+    def _fd_callbacks_match(self, left: _FdCallback | None, right: _FdCallback | None) -> bool:
+        if left is None or right is None:
+            return False
+        left_callback, left_args, _ = left
+        right_callback, right_args, _ = right
+        return left_callback is right_callback and left_args == right_args
+
     def _process_selector_events(self, events: list[tuple[selectors.SelectorKey, int]]) -> None:
         wakeup_fd = self._selector_wakeup_reader.fileno()
         for key, mask in events:
@@ -380,10 +516,18 @@ class SelectorMixin:
             if fd == wakeup_fd:
                 self._drain_selector_wakeup()
                 continue
-            if mask & selectors.EVENT_READ:
+            entry = self._fd_callbacks.get(fd)
+            if (
+                entry is not None
+                and mask & (selectors.EVENT_READ | selectors.EVENT_WRITE)
+                and self._fd_callbacks_match(entry.reader, entry.writer)
+            ):
                 self._schedule_fd_callback(fd, selectors.EVENT_READ)
-            if mask & selectors.EVENT_WRITE:
-                self._schedule_fd_callback(fd, selectors.EVENT_WRITE)
+            else:
+                if mask & selectors.EVENT_READ:
+                    self._schedule_fd_callback(fd, selectors.EVENT_READ)
+                if mask & selectors.EVENT_WRITE:
+                    self._schedule_fd_callback(fd, selectors.EVENT_WRITE)
             self._update_selector_registration(fd)
 
     def _has_pending_driver_work(self) -> bool:

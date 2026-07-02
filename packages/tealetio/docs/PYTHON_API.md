@@ -176,6 +176,21 @@ must be consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can
 block cooperatively. `ProactorScheduler.sock_recvgen(sock, ...)` exposes the
 same surface on scheduler instances.
 
+IO-capable schedulers also expose blocking poll helpers on top of the proactor
+or selector backends. `poll(fd, mask)` waits cooperatively and returns the
+readiness bitmask. `poll_many(fd, mask, callback)` starts a continuous poll
+and forwards each readiness event to `callback`. `ProactorScheduler` implements
+these through `wait_operation()` and proactor `poll`/`poll_many`.
+`SelectorScheduler` implements them with selector-backed readiness waits and
+the same `select.POLL*` mask semantics as `SelectorProactor`. When a bidirectional
+poll mask arms the same callback on both read and write, the selector scheduler
+delivers at most one callback invocation per readiness event even if both
+direction bits are set.
+
+`add_reader` / `add_writer` follow the same rule: if both slots on an fd hold the
+same callback and args, one combined selector wakeup schedules a single call.
+Register distinct callbacks when you need separate per-direction invocations.
+
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.
 Backends call `progress(total)` with the cumulative number of bytes sent as
 progress becomes observable. Some backends may only expose a single completion
