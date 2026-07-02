@@ -29,6 +29,7 @@ static int parse_kernel_version(void) {
         return 0;
     }
 
+    /* sscanf stops at the first non-digit in each field, so 5.6.0-rc1 parses as 5.6.0. */
     matched = sscanf(uts.release, "%d.%d.%d", &kernel_version_major, &kernel_version_minor, &kernel_version_patch);
     if (matched < 2) {
         kernel_version_major = 0;

@@ -250,16 +250,36 @@ def test_probe_returns_structured_result():
     assert isinstance(probe["IORING_OP_STATX"], bool)
 
 
+def _kernel_version_component(value: str) -> int:
+    digits = []
+    for char in value:
+        if char.isdigit():
+            digits.append(char)
+        else:
+            break
+    return int("".join(digits)) if digits else 0
+
+
 def _kernel_version_at_least(release: str, major: int, minor: int, patch: int = 0) -> bool:
     parts = release.split("-", 1)[0].split(".")
     if len(parts) < 2:
         return False
-    parsed = [int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0]
+    parsed = [
+        _kernel_version_component(parts[0]),
+        _kernel_version_component(parts[1]),
+        _kernel_version_component(parts[2]) if len(parts) > 2 else 0,
+    ]
     if parsed[0] != major:
         return parsed[0] > major
     if parsed[1] != minor:
         return parsed[1] > minor
     return parsed[2] >= patch
+
+
+def test_kernel_version_at_least_handles_release_candidate_suffixes():
+    assert _kernel_version_at_least("5.6.0-rc1", 5, 6)
+    assert not _kernel_version_at_least("5.5.99-rc7", 5, 6)
+    assert _kernel_version_at_least("6.6.12-1-WSL2", 5, 6)
 
 
 def test_probe_statx_matches_kernel_version_gate():
