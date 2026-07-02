@@ -26,7 +26,6 @@ from .scheduler import (
     RunnableQueueFactory,
     SyncDrivingMixin,
     SyncSchedulerDrivingAPI,
-    get_running_scheduler,
 )
 
 T = TypeVar("T")
@@ -964,6 +963,7 @@ class SelectorProactor(ProactorBase):
         self._wakeup_writer.setblocking(False)
         self._selector.register(self._wakeup_reader.fileno(), selectors.EVENT_READ, None)
         self._recv_many_buf_group: _SelectorBufGroup | None = None
+        self._recv_many_repressure_pending: set[ContinuousOperation[Any]] = set()
 
     def create_buf_group(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
         """Create a synthetic provided-buffer pool for ``recv_many`` / ``recvgen``."""
@@ -992,14 +992,29 @@ class SelectorProactor(ProactorBase):
             state.paused = False
             if buf_group.leased_count >= buf_group.buffer_count:
                 state.pressure_emitted = False
-                try:
-                    get_running_scheduler().call_soon(self.break_wait)
-                except RuntimeError:
-                    self.break_wait()
+                self._recv_many_repressure_pending.add(operation)
             else:
                 self.break_wait()
 
         return resume
+
+    def _service_recv_many_repressure_pending(self) -> list[Operation[Any]]:
+        """Re-emit recv_many pressure deferred from a premature resume."""
+
+        completed: list[Operation[Any]] = []
+        for operation in list(self._recv_many_repressure_pending):
+            self._recv_many_repressure_pending.discard(operation)
+            if operation.done():
+                continue
+            fileobj = operation.fileobj
+            if fileobj is None:
+                continue
+            fd = fileobj if isinstance(fileobj, int) else cast(socket.socket, fileobj).fileno()
+            step = operation._continuous_step
+            if step is None:
+                continue
+            self._step_continuous_fd_operation(fd, selectors.EVENT_READ, operation, completed)
+        return completed
 
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
@@ -1045,6 +1060,9 @@ class SelectorProactor(ProactorBase):
             self._notify_completion()
 
     def _poll(self, deadline: float | None = None) -> list[Operation[Any]]:
+        completed = self._service_recv_many_repressure_pending()
+        if completed:
+            return completed
         select_released = getattr(self._selector, "select_released", None)
         wakeup_fd = self._wakeup_reader.fileno()
         while True:
