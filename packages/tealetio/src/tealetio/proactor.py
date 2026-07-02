@@ -18,7 +18,7 @@ import uring_api
 
 from . import compat
 from .locks import ThreadsafeEvent
-from .operations import ContinuousOperation, InvalidStateError, Operation
+from .operations import ContinuousOperation, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -34,7 +34,6 @@ T = TypeVar("T")
 
 __all__ = [
     "ContinuousOperation",
-    "InvalidStateError",
     "Operation",
     "AsyncProactorScheduler",
     "Proactor",

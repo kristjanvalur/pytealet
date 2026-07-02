@@ -20,10 +20,10 @@ import uring_api
 import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
 from tealetio import TimeoutError, set_scheduler, timeout
+from tealetio.operations import InvalidStateError
 from tealetio.proactor import (
     AsyncProactorScheduler,
     ContinuousOperation,
-    InvalidStateError,
     Operation,
     ProactorScheduler,
     RECV_MANY_BUFFER_PRESSURE,
