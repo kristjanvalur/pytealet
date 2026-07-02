@@ -63,5 +63,6 @@ int UringApiCapi_CompletionFlags(PyObject *completion, unsigned int *value);
 int UringApiCapi_CompletionSequence(PyObject *completion, unsigned long long *value);
 PyObject *UringApiCapi_CompletionResult(PyObject *completion);
 int UringApiCapi_CompletionKind(PyObject *completion, int *value);
+int UringApiCapi_StatxStSize(PyObject *buf, unsigned long long *value);
 
 #endif

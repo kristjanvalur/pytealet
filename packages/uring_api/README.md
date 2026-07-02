@@ -94,28 +94,27 @@ same descriptor.
 - `submit_read(fd, buf, offset)` and `submit_write(fd, data, offset)` perform
   explicit-offset I/O into caller buffers;
 - `submit_statx(dfd, path, flags, mask, buf)` fills a caller-provided 256-byte
-  statx buffer asynchronously.
+  statx buffer asynchronously;
+- `submit_fstatx_size(fd, buf)` and `submit_statx_size(path, buf)` are the
+  common fast-path submits (they request `STATX_SIZE` only).
 
-For fd-only metadata, pass an empty path with `AT_EMPTY_PATH` in `flags`. Path
-lookups use `dfd=AT_FDCWD` and a normal filesystem path.
+For fd-only metadata, pass an empty path with `AT_EMPTY_PATH` in `flags`, or use
+`submit_fstatx_size()`. Path lookups use `submit_statx_size()` or
+`dfd=AT_FDCWD` with a normal filesystem path.
 
-The common case is file size only (append EOF, `SEEK_END`, sendfile bounds).
-Allocate a buffer once, submit with `mask=STATX_SIZE`, then convert in one step:
+The common case is file size only (append EOF, `SEEK_END`, sendfile bounds):
 
 ```python
-buf = uring_api.statx_buffer()
-handle = ring.submit_statx(fd, "", uring_api.AT_EMPTY_PATH, uring_api.STATX_SIZE, buf)
+buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+handle = ring.submit_fstatx_size(fd, buf)
 completion = ring.wait()
-size = uring_api.statx_st_size_from_completion(completion, buf)
+if completion.res == 0:
+    size = uring_api.statx_st_size(buf)
 ```
 
-Payload stays in the caller-owned buffer; `Completion` stays generic. Lower-level
-helpers are available when you already know `completion.res == 0`:
-
-- **`statx_st_size(buf)`** — read `stx_size` from the submit buffer.
-- **`statx_to_stat_result(buf)`** — full `os.stat_result` when you submitted
-  `STATX_BASIC_STATS` (or a superset); use
-  `statx_to_stat_result_from_completion()` for the same one-step pattern.
+`statx_st_size(buf)` is implemented in the `_uring_api` C extension: it reads
+`stx_size` from the caller-owned submit buffer after a successful completion.
+Use `submit_statx()` directly when you need a different mask or flags.
 
 Provided-buffer receive uses a caller-owned ring created with
 `create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or
@@ -452,7 +451,8 @@ The capsule currently exposes:
     `completion_flags()`, `completion_sequence()`, `completion_result()`, and
     `completion_kind()` for native completion inspection. Kind values match
     `URING_API_COMPLETION_KIND_*` in `uring_api_completion_kinds.h` and
-    `CompletionKind` in Python.
+    `CompletionKind` in Python;
+- `statx_st_size()` for reading `stx_size` from a completed statx buffer.
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

@@ -94,6 +94,7 @@ setup(
                 "src/uring_api_kernel_version.c",
                 "src/uring_api_probe.c",
                 "src/uring_api_ring.c",
+                "src/uring_api_statx.c",
                 "src/uring_api_submit.c",
             ],
             depends=[
@@ -107,6 +108,7 @@ setup(
                 "src/uring_api_kernel_version.h",
                 "src/uring_api_probe.h",
                 "src/uring_api_ring.h",
+                "src/uring_api_statx.h",
                 "src/uring_api_submit.h",
             ],
             include_dirs=["src/uring_api/include"],

@@ -62,6 +62,7 @@ try:
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
     from _uring_api import __liburing_version__ as __liburing_version__
     from _uring_api import probe as _probe
+    from _uring_api import statx_st_size as statx_st_size
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
     C_API_ABI_VERSION = 1
@@ -275,6 +276,14 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def submit_fstatx_size(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_statx_size(
+            self, path: str, buf: Any, user_data: object = None, *, dfd: int = -100
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_socket(
             self, domain: int, type: int, protocol: int = 0, flags: int = 0, user_data: object = None
         ) -> Completion:
@@ -301,6 +310,9 @@ except ImportError as exc:
         if entries <= 0:
             raise ValueError("entries must be between 1 and UINT_MAX")
         return {}
+
+    def statx_st_size(buf: Any) -> int:
+        raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 else:
     _native_import_error = None
 
@@ -330,14 +342,6 @@ class CompletionKind(enum.IntEnum):
     OPENAT = COMPLETION_KIND_OPENAT
     STATX = COMPLETION_KIND_STATX
 
-
-from .statx import (  # noqa: E402
-    statx_buffer,
-    statx_st_size,
-    statx_st_size_from_completion,
-    statx_to_stat_result,
-    statx_to_stat_result_from_completion,
-)
 
 DEFAULT_ENTRIES = 8
 DEFAULT_FLAGS = 0
@@ -388,11 +392,7 @@ __all__ = [
     "STATX_SIZE",
     "STATX_BUFFER_SIZE",
     "STATX_STX_SIZE_OFFSET",
-    "statx_buffer",
     "statx_st_size",
-    "statx_st_size_from_completion",
-    "statx_to_stat_result",
-    "statx_to_stat_result_from_completion",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
     "COMPLETION_KIND_SEND_ZC",

@@ -100,7 +100,10 @@ typedef struct UringApi_CAPI {
     PyObject *(*completion_result)(PyObject *completion);
     int (*completion_kind)(PyObject *completion, int *value);
 
-    void *reserved[2];
+    /* statx buffer helpers. */
+    int (*statx_st_size)(PyObject *buf, unsigned long long *value);
+
+    void *reserved[1];
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

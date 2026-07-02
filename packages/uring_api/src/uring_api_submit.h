@@ -47,6 +47,8 @@ PyObject *UringApiRing_submit_read(UringApiRing *self, PyObject *args, PyObject 
 PyObject *UringApiRing_submit_write(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_openat(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_statx(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_fstatx_size(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_statx_size(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs);
