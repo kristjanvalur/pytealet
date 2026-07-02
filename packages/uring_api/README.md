@@ -428,9 +428,9 @@ directory when compiling an extension module.
 The capsule currently exposes:
 
 - `abi_version`, `struct_size`, and `feature_flags` for compatibility checks.
-  While the package remains pre-release, `abi_version` stays at **1**; new
-  function-table entries are appended and clients should compare `struct_size`
-  and null-check pointers they rely on;
+  While the package remains pre-release, `abi_version` stays at **1** but the
+  function table may be reordered or extended; clients should compare
+  `struct_size` and null-check pointers they rely on;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
 - `probe(entries, flags)`, which returns a new reference to the same flat
@@ -442,7 +442,8 @@ The capsule currently exposes:
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
     `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_read()`,
     `ring_submit_write()`, `ring_submit_openat()`, `ring_submit_statx()`,
-    `ring_submit_fdsize()`, `ring_submit_socket()`, `ring_submit_poll()`,
+    `ring_submit_fdsize()`, `statx_st_size()`, `ring_submit_socket()`,
+    `ring_submit_poll()`,
     `ring_submit_poll_multishot()`,
     `ring_submit_poll_remove()`,
     `ring_break_wait()`, and `ring_wait()`;
@@ -453,9 +454,7 @@ The capsule currently exposes:
     `completion_flags()`, `completion_sequence()`, `completion_result()`, and
     `completion_kind()` for native completion inspection. Kind values match
     `URING_API_COMPLETION_KIND_*` in `uring_api_completion_kinds.h` and
-    `CompletionKind` in Python;
-- `ring_submit_fdsize()` and `statx_st_size()` appended after `completion_kind`
-    (compare `struct_size` before calling).
+    `CompletionKind` in Python.
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual
