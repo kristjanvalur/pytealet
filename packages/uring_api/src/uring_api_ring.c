@@ -98,6 +98,7 @@ void UringApiRing_dealloc(UringApiRing *self) {
         self->initialized = false;
     }
     (void)UringApiRing_clear(self);
+    UringApiRing_clear_free_buf_group_ids(self);
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
     if (self->delivery_wait_lock) {
@@ -142,6 +143,7 @@ PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     self->delivery_stop_requested = false;
     self->delivery_active_workers = 0;
     self->next_buf_group = 1;
+    UringApiRing_clear_free_buf_group_ids(self);
     self->setup_flags = 0;
     self->owner_thread_id = 0;
     Py_END_CRITICAL_SECTION();

@@ -45,6 +45,20 @@ def require_uring_capability(name: str) -> None:
         pytest.skip(f"{name} is not supported")
 
 
+def collect_until_stable() -> None:
+    """Run GC until a pass collects nothing.
+
+    Used by BufGroup ID recycling tests that require extension teardown
+    before the next allocation. Stricter than one ``gc.collect()`` but still
+    assumes a tracing GC like CPython's. Scenarios that must not depend on
+    GC (for example ``ring.close()`` resetting the allocator) live in
+    separate tests.
+    """
+
+    while gc.collect():
+        pass
+
+
 def wait_until_running(ring: uring_api.Ring) -> None:
     deadline = time.monotonic() + 1.0
     while not ring.running and time.monotonic() < deadline:
@@ -1417,6 +1431,101 @@ def test_buf_group_tracks_leased_wrapper_count():
         del mv
         assert buf_view.recycled
         assert buf_group.leased_count == 0
+
+
+def test_buf_group_id_recycles_after_release():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        first = ring.create_buf_group(16, 4)
+        first_id = first.group_id
+        del first
+        collect_until_stable()
+
+        second = ring.create_buf_group(16, 4)
+        assert second.group_id == first_id
+
+
+def test_buf_group_ids_stay_unique_while_live():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        first = ring.create_buf_group(16, 4)
+        second = ring.create_buf_group(16, 4)
+        third = ring.create_buf_group(16, 4)
+        assert len({first.group_id, second.group_id, third.group_id}) == 3
+
+
+def test_buf_group_id_reuses_freed_slot_before_allocating_new():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        first = ring.create_buf_group(16, 4)
+        second = ring.create_buf_group(16, 4)
+        second_id = second.group_id
+        del second
+        collect_until_stable()
+
+        third = ring.create_buf_group(16, 4)
+        assert third.group_id == second_id
+        assert first.group_id != third.group_id
+
+
+def test_buf_group_id_survives_many_create_release_cycles():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        seen_ids: set[int] = set()
+        for _ in range(512):
+            buf_group = ring.create_buf_group(16, 4)
+            seen_ids.add(buf_group.group_id)
+            del buf_group
+        collect_until_stable()
+
+        reused = ring.create_buf_group(16, 4)
+        assert reused.group_id in seen_ids
+
+
+def test_buf_group_id_tail_shrink_reuses_highest_slot_without_new_id():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        groups = [ring.create_buf_group(16, 4) for _ in range(4)]
+        ids = [group.group_id for group in groups]
+        assert ids == [1, 2, 3, 4]
+
+        del groups[3]
+        collect_until_stable()
+        tail_reused = ring.create_buf_group(16, 4)
+        assert tail_reused.group_id == 4
+
+        del groups[2]
+        collect_until_stable()
+        middle_reused = ring.create_buf_group(16, 4)
+        assert middle_reused.group_id == 3
+
+
+def test_buf_group_id_resets_in_new_ring_session_after_close_without_gc():
+    require_uring()
+
+    ring = uring_api.Ring()
+    held: list[uring_api.BufGroup] = []
+    try:
+        held.append(ring.create_buf_group(16, 4))
+        held.append(ring.create_buf_group(16, 4))
+        assert [group.group_id for group in held] == [1, 2]
+        ring.close()
+        with pytest.raises(RuntimeError, match="ring is closed"):
+            ring.create_buf_group(16, 4)
+    finally:
+        if not ring.closed:
+            ring.close()
+
+    fresh = uring_api.Ring()
+    try:
+        assert fresh.create_buf_group(16, 4).group_id == 1
+    finally:
+        fresh.close()
 
 
 def test_buf_group_rejects_use_on_different_ring():

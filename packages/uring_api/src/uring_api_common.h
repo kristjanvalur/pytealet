@@ -76,6 +76,9 @@ struct UringApiRing {
     unsigned int delivery_active_workers;
     unsigned int receive_state;
     unsigned short next_buf_group;
+    unsigned short *free_buf_group_ids;
+    unsigned int free_buf_group_id_count;
+    unsigned int free_buf_group_id_capacity;
     unsigned int setup_flags;
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
