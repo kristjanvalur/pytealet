@@ -1576,6 +1576,23 @@ class TestSchedulerAccessors:
             reader.close()
             _writer.close()
 
+    def test_selector_scheduler_poll_completes_on_pollout_only(self):
+        s = SyncSelectorScheduler()
+        set_scheduler(s)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def wait_for_write() -> int:
+                return s.poll(writer.fileno(), select.POLLOUT)
+
+            assert s.run_until_complete(s.spawn(wait_for_write)) & select.POLLOUT
+        finally:
+            reader.close()
+            writer.close()
+            s.close()
+
     def test_selector_scheduler_poll_completes_when_fd_becomes_readable(self):
         s = SyncSelectorScheduler()
         set_scheduler(s)

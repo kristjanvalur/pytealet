@@ -54,7 +54,13 @@ class _SelectorPollMany(ContinuousOperation[int]):
 
 
 class SelectorMixin:
-    """Selector-backed readiness waits for schedulers."""
+    """Selector-backed readiness waits for schedulers.
+
+    When reader and writer slots on an fd share the same callback and args,
+    a single selector delivery that includes both directions schedules that
+    callback once. This matches proactor poll dedup and avoids double emits
+    from bidirectional poll masks.
+    """
 
     def __init__(self, selector: selectors.BaseSelector | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -338,6 +344,10 @@ class SelectorMixin:
                 armed["write"] = True
                 self.add_writer(fd, on_ready)
 
+        def fail(exc: BaseException) -> None:
+            disarm()
+            operation._set_exception(exc)
+
         def on_ready() -> None:
             if operation.done():
                 disarm()
@@ -346,6 +356,9 @@ class SelectorMixin:
                 result = probe_poll_fd_now(fd, mask)
             except (BlockingIOError, InterruptedError):
                 return
+            except BaseException as exc:
+                fail(exc)
+                return
             operation._emit_result(result)
 
         operation._cleanup = disarm
@@ -353,6 +366,8 @@ class SelectorMixin:
             result = probe_poll_fd_now(fd, mask)
         except (BlockingIOError, InterruptedError):
             arm()
+        except BaseException as exc:
+            fail(exc)
         else:
             operation._emit_result(result)
             arm()

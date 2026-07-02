@@ -18,7 +18,7 @@ import uring_api
 
 from . import compat
 from .locks import ThreadsafeEvent
-from .operations import ContinuousOperation, Operation
+from .operations import ContinuousOperation, ContinuousStepResult, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -658,12 +658,6 @@ class _LinkedOperation(Operation[T]):
 
 
 @dataclass
-class _ContinuousStepResult:
-    progressed: bool = False
-    done: bool = False
-
-
-@dataclass
 class _SelectorRecvManyState:
     paused: bool = False
     pressure_emitted: bool = False
@@ -1028,13 +1022,13 @@ class SelectorProactor(ProactorBase):
             result_callback=callback,
         )
 
-        def step() -> _ContinuousStepResult:
+        def step() -> ContinuousStepResult:
             progressed = False
             while True:
                 try:
                     conn, address = sock.accept()
                 except (BlockingIOError, InterruptedError):
-                    return _ContinuousStepResult(progressed=progressed)
+                    return ContinuousStepResult(progressed=progressed)
                 _configure_accepted_socket(conn)
                 operation._emit_result((conn, address))
                 progressed = True
@@ -1102,18 +1096,18 @@ class SelectorProactor(ProactorBase):
         # automatically; keep the legacy drain loop and ignore buf_group pressure.
         if not _supports_release_buffer():
 
-            def step_unpaced() -> _ContinuousStepResult:
+            def step_unpaced() -> ContinuousStepResult:
                 nonlocal sequence
                 progressed = False
                 while True:
                     try:
                         data = sock.recv(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
                     except (BlockingIOError, InterruptedError):
-                        return _ContinuousStepResult(progressed=progressed)
+                        return ContinuousStepResult(progressed=progressed)
                     if not data:
                         operation._emit_result((sequence, memoryview(b"")))
                         sequence += 1
-                        return _ContinuousStepResult(progressed=True, done=True)
+                        return ContinuousStepResult(progressed=True, done=True)
                     operation._emit_result((sequence, memoryview(data)))
                     sequence += 1
                     progressed = True
@@ -1127,10 +1121,10 @@ class SelectorProactor(ProactorBase):
         )
         state = _SelectorRecvManyState()
 
-        def step() -> _ContinuousStepResult:
+        def step() -> ContinuousStepResult:
             nonlocal sequence
             if state.paused:
-                return _ContinuousStepResult(progressed=False)
+                return ContinuousStepResult(progressed=False)
             if resolved_group.leased_count >= resolved_group.buffer_count:
                 if not state.pressure_emitted:
                     state.pressure_emitted = True
@@ -1141,20 +1135,20 @@ class SelectorProactor(ProactorBase):
                             self._selector_recv_many_resume(operation, state, resolved_group),
                         )
                     )
-                    return _ContinuousStepResult(progressed=True)
-                return _ContinuousStepResult(progressed=False)
+                    return ContinuousStepResult(progressed=True)
+                return ContinuousStepResult(progressed=False)
             try:
                 data = sock.recv(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
             except (BlockingIOError, InterruptedError):
-                return _ContinuousStepResult(progressed=False)
+                return ContinuousStepResult(progressed=False)
             if not data:
                 operation._emit_result((sequence, memoryview(b"")))
                 sequence += 1
-                return _ContinuousStepResult(progressed=True, done=True)
+                return ContinuousStepResult(progressed=True, done=True)
             operation._emit_result((sequence, _leased_selector_memoryview(data, resolved_group)))
             sequence += 1
             state.pressure_emitted = False
-            return _ContinuousStepResult(progressed=True)
+            return ContinuousStepResult(progressed=True)
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
         return operation
@@ -1188,13 +1182,13 @@ class SelectorProactor(ProactorBase):
             result_callback=callback,
         )
 
-        def step() -> _ContinuousStepResult:
+        def step() -> ContinuousStepResult:
             try:
                 result = _probe_poll_fd_now(fd, mask)
             except BlockingIOError:
-                return _ContinuousStepResult(progressed=False)
+                return ContinuousStepResult(progressed=False)
             operation._emit_result(result)
-            return _ContinuousStepResult(progressed=True)
+            return ContinuousStepResult(progressed=True)
 
         self._submit_fd_continuous_operation(fd, mask, operation, step)
         return operation
@@ -1226,7 +1220,7 @@ class SelectorProactor(ProactorBase):
         fd: int,
         poll_mask: int,
         operation: ContinuousOperation[T],
-        step: Callable[[], _ContinuousStepResult],
+        step: Callable[[], ContinuousStepResult],
     ) -> None:
         with self._lock:
             self._check_open()
@@ -1247,7 +1241,7 @@ class SelectorProactor(ProactorBase):
         self,
         fd: int,
         operation: ContinuousOperation[T],
-        step: Callable[[], _ContinuousStepResult],
+        step: Callable[[], ContinuousStepResult],
     ) -> bool:
         """Run one continuous step synchronously. Return True if the operation finished."""
 
@@ -1298,7 +1292,7 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         event: int,
         operation: ContinuousOperation[T],
-        step: Callable[[], _ContinuousStepResult],
+        step: Callable[[], ContinuousStepResult],
     ) -> None:
         with self._lock:
             self._check_open()

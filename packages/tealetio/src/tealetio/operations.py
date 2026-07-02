@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from concurrent.futures import CancelledError
+from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 T = TypeVar("T")
@@ -19,6 +20,12 @@ class OperationCancelHost(Protocol):
 
 _DoneCallback = Callable[["Operation[Any]"], object]
 _ResultCallback = Callable[[T_co], object]
+
+
+@dataclass
+class ContinuousStepResult:
+    progressed: bool = False
+    done: bool = False
 
 
 class Operation(Generic[T]):
@@ -162,7 +169,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj, proactor=proactor)
         self._result_callbacks: list[_ResultCallback[T_co]] = []
-        self._continuous_step: Callable[[], Any] | None = None
+        self._continuous_step: Callable[[], ContinuousStepResult] | None = None
         if result_callback is not None:
             self._result_callbacks.append(result_callback)
 
