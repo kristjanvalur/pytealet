@@ -414,7 +414,7 @@ PyObject *UringApiCompletion_new_pending_path(UringApiPendingKind kind, PyObject
 }
 
 PyObject *UringApiCompletion_new_pending_statx(UringApiPendingKind kind, PyObject *user_data, PyObject *path,
-                                               Py_buffer *view, unsigned int mask) {
+                                               Py_buffer *view) {
     UringApiCompletion *completion;
     UringApiCompletionStatxState *statx_state;
     char *path_copy;
@@ -442,7 +442,6 @@ PyObject *UringApiCompletion_new_pending_statx(UringApiPendingKind kind, PyObjec
     statx_state->path = path_copy;
     statx_state->view = *view;
     statx_state->has_view = true;
-    statx_state->mask = mask;
     completion->state = statx_state;
     return (PyObject *)completion;
 }
@@ -680,12 +679,9 @@ static PyObject *UringApiCompletion_recv_multishot_buf_payload(UringApiCompletio
     return UringApiBufView_create(buf_group_obj, buffer_id, (unsigned int)res);
 }
 
-static PyObject *statx_completion_size_payload(const void *buf, Py_ssize_t buflen, unsigned int requested_mask) {
+static PyObject *fdsize_completion_size_payload(const void *buf, Py_ssize_t buflen) {
     unsigned long long file_size;
 
-    if (!(requested_mask & URING_API_STATX_SIZE_MASK)) {
-        return Py_NewRef(Py_None);
-    }
     if (uring_api_statx_try_read_st_size(buf, buflen, &file_size)) {
         return PyLong_FromUnsignedLongLong(file_size);
     }
@@ -712,8 +708,7 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
             PyErr_SetString(PyExc_RuntimeError, "fdsize completion is missing buffer state");
             return -1;
         }
-        payload = statx_completion_size_payload(fdsize_state->buf, (Py_ssize_t)sizeof(fdsize_state->buf),
-                                                URING_API_STATX_SIZE_MASK);
+        payload = fdsize_completion_size_payload(fdsize_state->buf, (Py_ssize_t)sizeof(fdsize_state->buf));
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
                             self->kind == URING_API_PENDING_READ || self->kind == URING_API_PENDING_WRITE ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
@@ -722,13 +717,7 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
                             self->kind == URING_API_PENDING_OPENAT)) {
         payload = PyLong_FromLong(res);
     } else if (res >= 0 && self->kind == URING_API_PENDING_STATX) {
-        UringApiCompletionStatxState *statx_state = UringApiCompletion_get_statx_state(self);
-
-        if (statx_state && statx_state->has_view) {
-            payload = statx_completion_size_payload(statx_state->view.buf, statx_state->view.len, statx_state->mask);
-        } else {
-            payload = Py_NewRef(Py_None);
-        }
+        payload = Py_NewRef(Py_None);
     } else if (res >= 0 && self->kind == URING_API_PENDING_RECVMSG) {
         msg_state = UringApiCompletion_get_msg_state(self);
         if (!msg_state) {

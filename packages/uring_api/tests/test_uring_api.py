@@ -2329,7 +2329,7 @@ def test_ring_submit_statx_rejects_small_buffer():
             ring.submit_statx(0, "", 0, uring_api.STATX_SIZE, bytearray(32))
 
 
-def test_ring_statx_path_returns_size_in_result_and_buffer_when_available():
+def test_ring_statx_path_returns_size_in_buffer_when_available():
     require_uring()
 
     token = {"operation": "statx-path"}
@@ -2346,13 +2346,13 @@ def test_ring_statx_path_returns_size_in_result_and_buffer_when_available():
             assert completion.kind == uring_api.COMPLETION_KIND_STATX
             assert completion.user_data is token
             assert completion.res == 0
-            assert completion.result == 5
+            assert completion.result is None
             assert uring_api.statx_st_size(buf) == 5
     finally:
         os.unlink(path)
 
 
-def test_ring_statx_fd_submit_returns_size_in_result_and_buffer_when_available():
+def test_ring_statx_fd_submit_returns_size_in_buffer_when_available():
     require_uring()
 
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -2374,7 +2374,7 @@ def test_ring_statx_fd_submit_returns_size_in_result_and_buffer_when_available()
                 assert completion is handle
                 assert completion.kind == uring_api.COMPLETION_KIND_STATX
                 assert completion.res == 0
-                assert completion.result == 5
+                assert completion.result is None
                 assert uring_api.statx_st_size(buf) == 5
         finally:
             os.close(fd)
@@ -2448,7 +2448,7 @@ def test_c_api_statx_when_available():
             uring_api.COMPLETION_KIND_STATX,
             0,
             0,
-            5,
+            None,
         )
         assert uring_api.statx_st_size(buf) == 5
     finally:
