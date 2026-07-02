@@ -5,6 +5,7 @@ import errno
 import io
 import os
 import select
+import struct
 import selectors
 import socket
 import tempfile
@@ -472,6 +473,15 @@ def _native_uring_extension_imported() -> bool:
     return getattr(uring_api, "_native_import_error", None) is None
 
 
+def _pack_fake_statx_buffer(buf: bytearray | memoryview, *, size: int, mode: int = 0o100644) -> None:
+    view = memoryview(buf)
+    mask = uring_api.STATX_BASIC_STATS
+    struct.pack_into("<IIQ", view, 0, mask, 4096, 0)
+    struct.pack_into("<IIIH", view, 16, 1, os.getuid(), os.getgid(), mode)
+    struct.pack_into("<QQQ", view, 32, 1, size, (size + 511) // 512)
+    struct.pack_into("<IIII", view, 128, 0, 0, 1, 0)
+
+
 def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
     capabilities = {
         "available": _native_uring_extension_imported(),
@@ -479,6 +489,7 @@ def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
         "IORING_RECV_MULTISHOT": True,
         "IORING_POLL_MULTISHOT": True,
         "IORING_OP_SEND_ZC": True,
+        "IORING_OP_STATX": True,
     }
     capabilities.update(overrides)
     return capabilities
@@ -549,6 +560,25 @@ class TestSelectorProactor:
             proactor.set_clock(lambda: 42.0)
 
             assert proactor.get_time() == 42.0
+        finally:
+            proactor.close()
+
+    def test_stat_completes_immediately_with_blocking_fstat(self):
+        proactor = SelectorProactor()
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                path = tmp.name
+                tmp.write(b"hello")
+            try:
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    operation = proactor.stat(fd=fd)
+                    assert operation.done()
+                    assert operation.result().st_size == 5
+                finally:
+                    os.close(fd)
+            finally:
+                os.unlink(path)
         finally:
             proactor.close()
 
@@ -1655,6 +1685,7 @@ class _FakeUringRing:
         self.submitted_poll_multishot: list[tuple[int, int, object]] = []
         self.submitted_poll_remove: list[object] = []
         self.submitted_openat: list[tuple[str, int, int, object, int]] = []
+        self.submitted_statx: list[tuple[int, str, int, int, object, object]] = []
         self.submitted_read: list[tuple[int, object, int, object]] = []
         self.submitted_write: list[tuple[int, bytes, int, object]] = []
         self.open_fds: dict[int, bytes] = {}
@@ -1976,6 +2007,29 @@ class _FakeUringRing:
         remove_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_POLL_REMOVE, res=0)
         self._deliver(remove_completion)
         return remove_completion
+
+    def submit_statx(
+        self,
+        dfd: int,
+        path: str,
+        flags: int,
+        mask: int,
+        buf: Any,
+        user_data: object = None,
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_statx.append((dfd, path, flags, mask, buf, user_data))
+        size = len(self.open_fds.get(dfd, b""))
+        _pack_fake_statx_buffer(buf, size=size)
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_STATX,
+            res=0,
+            result=0,
+        )
+        self._deliver(completion)
+        return completion
 
     def submit_openat(
         self,
@@ -2504,6 +2558,49 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: read_into_operation.done())
             assert read_into_operation.result() == 5
             assert bytes(buf) == b"hello"
+        finally:
+            proactor.close()
+
+    def test_stat_fd_uses_statx_when_capable(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            open_operation = proactor.openat("/tmp/stat.txt", os.O_RDWR | os.O_CREAT, 0o644)
+            _wait_for_uring(proactor, lambda: open_operation.done())
+            fd = open_operation.result()
+            write_operation = proactor.write(fd, b"hello", 0)
+            _wait_for_uring(proactor, lambda: write_operation.done())
+
+            stat_operation = proactor.stat(fd=fd)
+            _wait_for_uring(proactor, lambda: stat_operation.done())
+            assert stat_operation.result().st_size == 5
+            ring = cast(_FakeUringRing, proactor.ring)
+            assert ring.submitted_statx[-1][:4] == (
+                fd,
+                "",
+                uring_api.AT_EMPTY_PATH,
+                uring_api.STATX_BASIC_STATS,
+            )
+        finally:
+            proactor.close()
+
+    def test_stat_falls_back_to_blocking_when_statx_unavailable(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_STATX=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                path = tmp.name
+                tmp.write(b"hello")
+            try:
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    stat_operation = proactor.stat(fd=fd)
+                    assert stat_operation.done()
+                    assert stat_operation.result().st_size == 5
+                    assert cast(_FakeUringRing, proactor.ring).submitted_statx == []
+                finally:
+                    os.close(fd)
+            finally:
+                os.unlink(path)
         finally:
             proactor.close()
 
@@ -4055,16 +4152,10 @@ class TestProactorScheduler:
         finally:
             scheduler.close()
 
-    def test_seek_end_and_positioned_read_use_file_size(self, monkeypatch: pytest.MonkeyPatch):
+    def test_seek_end_and_positioned_read_use_file_size(self):
         scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
         set_scheduler(scheduler)
         ring = cast(_FakeUringRing, scheduler._proactor.ring)
-
-        def fake_fstat(fd: int) -> os.stat_result:
-            size = len(ring.open_fds.get(fd, b""))
-            return os.stat_result((0, 0, 0, 0, 0, 0, size, 0, 0, 0))
-
-        monkeypatch.setattr(os, "fstat", fake_fstat)
         try:
 
             def exercise() -> tuple[int, bytes]:
@@ -4079,19 +4170,14 @@ class TestProactorScheduler:
             assert end_pos == 5
             assert suffix == b"lo"
             assert ring.submitted_read[-1][2] == 3
+            assert ring.submitted_statx
         finally:
             scheduler.close()
 
-    def test_append_write_ignores_prior_seek(self, monkeypatch: pytest.MonkeyPatch):
+    def test_append_write_ignores_prior_seek(self):
         scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
         set_scheduler(scheduler)
         ring = cast(_FakeUringRing, scheduler._proactor.ring)
-
-        def fake_fstat(fd: int) -> os.stat_result:
-            size = len(ring.open_fds.get(fd, b""))
-            return os.stat_result((0, 0, 0, 0, 0, 0, size, 0, 0, 0))
-
-        monkeypatch.setattr(os, "fstat", fake_fstat)
         try:
 
             def exercise() -> bytes:
@@ -4104,6 +4190,7 @@ class TestProactorScheduler:
 
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello!"
             assert ring.submitted_write[-1][2] == 5
+            assert len(ring.submitted_statx) >= 2
         finally:
             scheduler.close()
 

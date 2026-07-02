@@ -197,13 +197,15 @@ handle tracks a logical file position and uses `read_into()` for in-buffer reads
 so `io.BufferedReader` and `io.TextIOWrapper` can stack on top without an extra
 copy through `read()`. File helpers require a proactor with `openat` support
 (`UringProactor` today). Low-level `openat` / positioned `read` / `write` remain
-on `scheduler.proactor` for callers that need explicit flags, offsets, or `dfd`.
+on `scheduler.proactor` for callers that need explicit flags, offsets, `dfd`, or
+metadata via `stat(path=...)` / `stat(fd=...)`.
 
 Supported binary modes mirror the usual stdlib subset: `rb`, `wb`, `ab`, `r+b`,
 `w+b`, and `a+b` (plus `rb+` / `wb+` / `ab+` spellings). Text modes (`t`) and
-exclusive create (`x`) raise `ValueError`. Append and `seek(SEEK_END)` currently
-use synchronous `os.fstat()` on the scheduler thread to track EOF; a future
-`statx` operation on `UringProactor` could make that cooperative.
+exclusive create (`x`) raise `ValueError`. Append and `seek(SEEK_END)` use
+`proactor.stat(fd=...)` to track EOF. `UringProactor` submits io_uring `statx`
+when `IORING_OP_STATX` is probed; other proactors complete `stat()` immediately
+via blocking `os.fstat()` / `os.stat()`.
 
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.
 Backends call `progress(total)` with the cumulative number of bytes sent as

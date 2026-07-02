@@ -5,6 +5,7 @@ import errno
 import os
 import selectors
 import socket
+import struct
 import sys
 import threading
 import time
@@ -72,6 +73,44 @@ _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "S
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
 
 T_Cargo = TypeVar("T_Cargo")
+
+
+def _stat_result_from_statx(buf: bytes | bytearray) -> os.stat_result:
+    """Build ``os.stat_result`` from a completed io_uring statx buffer."""
+
+    if len(buf) < uring_api.STATX_BUFFER_SIZE:
+        raise ValueError("statx buffer must be at least STATX_BUFFER_SIZE bytes")
+    mask = struct.unpack_from("<I", buf, 0)[0]
+    if not (mask & uring_api.STATX_SIZE):
+        raise ValueError("statx buffer does not contain STATX_SIZE fields")
+    blksize = struct.unpack_from("<I", buf, 4)[0]
+    nlink, uid, gid, mode = struct.unpack_from("<IIIH", buf, 16)
+    ino, size, blocks = struct.unpack_from("<QQQ", buf, 32)
+    atime_sec, _atime_nsec = struct.unpack_from("<qi", buf, 64)[:2]
+    ctime_sec, _ctime_nsec = struct.unpack_from("<qi", buf, 96)[:2]
+    mtime_sec, _mtime_nsec = struct.unpack_from("<qi", buf, 112)[:2]
+    rdev_major, rdev_minor, dev_major, dev_minor = struct.unpack_from("<IIII", buf, 128)
+    dev = os.makedev(dev_major, dev_minor)
+    return os.stat_result(
+        (
+            mode,
+            ino,
+            dev,
+            nlink,
+            uid,
+            gid,
+            size,
+            atime_sec,
+            mtime_sec,
+            ctime_sec,
+            _atime_nsec,
+            _mtime_nsec,
+            _ctime_nsec,
+            blocks,
+            blksize,
+            os.makedev(rdev_major, rdev_minor),
+        )
+    )
 
 
 class _OrderedIngestBuffer(Generic[T_Cargo]):
@@ -283,6 +322,8 @@ class Proactor(Protocol):
     def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]: ...
 
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]: ...
+
+    def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]: ...
 
     def recv_many(
         self,
@@ -537,6 +578,26 @@ class ProactorBase:
 
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
         raise NotImplementedError
+
+    def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
+        """Return file metadata, completing synchronously via ``os.stat`` / ``os.fstat``."""
+
+        self._check_open()
+        if fd < 0 and not path:
+            raise ValueError("stat() requires fd >= 0 or a non-empty path")
+        operation = Operation[os.stat_result](
+            kind="stat",
+            fileobj=fd if fd >= 0 else path,
+            proactor=self,
+        )
+        try:
+            if fd >= 0:
+                operation._set_result(os.fstat(fd))
+            else:
+                operation._set_result(os.stat(path))
+        except OSError as exc:
+            operation._set_exception(exc)
+        return operation
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
         raise NotImplementedError
@@ -2052,6 +2113,49 @@ class UringProactor(ProactorBase):
     def _complete_uring_write(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
         operation = cast(Operation[int], entry.operation)
         operation._set_result(completion.res)
+        return operation
+
+    def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
+        """Return file metadata via io_uring statx when probed, else blocking ``os.stat``."""
+
+        self._check_open()
+        if fd < 0 and not path:
+            raise ValueError("stat() requires fd >= 0 or a non-empty path")
+        if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "submit_statx"):
+            return super().stat(path, fd=fd)
+
+        operation = Operation[os.stat_result](
+            kind="stat",
+            fileobj=fd if fd >= 0 else path,
+            proactor=self,
+        )
+        buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+        if fd >= 0:
+            dfd = fd
+            stat_path = ""
+            stat_flags = uring_api.AT_EMPTY_PATH
+        else:
+            dfd = uring_api.AT_FDCWD
+            stat_path = path
+            stat_flags = 0
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_stat, data=buf)
+        self._submit_uring_entry(
+            entry,
+            lambda: self._ring.submit_statx(
+                dfd,
+                stat_path,
+                stat_flags,
+                uring_api.STATX_BASIC_STATS,
+                buf,
+                entry,
+            ),
+        )
+        return operation
+
+    def _complete_uring_stat(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[os.stat_result]:
+        assert entry.data is not None
+        operation = cast(Operation[os.stat_result], entry.operation)
+        operation._set_result(_stat_result_from_statx(entry.data))
         return operation
 
     def recv_many(
