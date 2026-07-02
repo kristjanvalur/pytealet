@@ -93,13 +93,34 @@ same descriptor.
   returns the new fd in the completion result;
 - `submit_read(fd, buf, offset)` and `submit_write(fd, data, offset)` perform
   explicit-offset I/O into caller buffers;
+- `submit_statx_fdsize(fd)` is the common fast path for open-file metadata: it
+  runs fd-only statx internally and puts the byte length in `completion.result`
+  on success (`completion.kind == CompletionKind.STATX_FDSIZE`);
 - `submit_statx(dfd, path, flags, mask, buf)` fills a caller-provided 256-byte
-  statx buffer asynchronously.
+  statx buffer asynchronously when you need a custom mask or path lookup.
 
-For fd-only metadata, pass an empty path with `AT_EMPTY_PATH` in `flags`. Read
-`stx_size` from the completed buffer with `statx_st_size(buf)` only after
-`completion.res == 0`, or read `STATX_STX_SIZE_OFFSET` manually. Path-based
-lookups use `dfd=AT_FDCWD` and a normal filesystem path.
+The usual positioned-file case (append EOF, `SEEK_END`, sendfile bounds) is an
+open fd whose size you already own:
+
+```python
+handle = ring.submit_statx_fdsize(fd)
+completion = ring.wait()
+if completion.res == 0:
+    size = completion.result
+```
+
+No caller buffer is required for `submit_statx_fdsize()`. Use `submit_statx()`
+when you need path-based metadata or fields beyond `stx_size`.
+
+Successful `submit_statx()` completions always leave `completion.result` as
+`None`; read fields from the caller-owned submit buffer (for example via
+`statx_st_size(buf)` when you requested `STATX_SIZE`). Only
+`submit_statx_fdsize()` puts the byte length in `completion.result`. If the
+internal buffer lacks size fields, `completion.result` is `None` and the
+completion is still delivered.
+
+**Behaviour change (since PR #34):** successful `submit_statx()` no longer sets
+`completion.result` to `0`; it stays `None`.
 
 Provided-buffer receive uses a caller-owned ring created with
 `create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or
@@ -412,9 +433,9 @@ directory when compiling an extension module.
 The capsule currently exposes:
 
 - `abi_version`, `struct_size`, and `feature_flags` for compatibility checks.
-  While the package remains pre-release, `abi_version` stays at **1**; new
-  function-table entries are appended and clients should compare `struct_size`
-  and null-check pointers they rely on;
+  While the package remains pre-release, `abi_version` stays at **1** but the
+  function table may be reordered or extended; clients should compare
+  `struct_size` and null-check pointers they rely on;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
 - `probe(entries, flags)`, which returns a new reference to the same flat
@@ -426,7 +447,9 @@ The capsule currently exposes:
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
     `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_read()`,
     `ring_submit_write()`, `ring_submit_openat()`, `ring_submit_statx()`,
-    `ring_submit_socket()`, `ring_submit_poll()`, `ring_submit_poll_multishot()`,
+    `ring_submit_statx_fdsize()`, `statx_st_size()`, `ring_submit_socket()`,
+    `ring_submit_poll()`,
+    `ring_submit_poll_multishot()`,
     `ring_submit_poll_remove()`,
     `ring_break_wait()`, and `ring_wait()`;
 - `ring_set_callback()`, `ring_set_c_callback()`, `ring_serve_completions()`,

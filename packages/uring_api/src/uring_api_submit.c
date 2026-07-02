@@ -6,8 +6,7 @@
 #include "uring_api_bufgroup.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
-
-#define URING_API_STATX_BUFFER_SIZE 256
+#include "uring_api_statx.h"
 
 static int validate_file_io_buffer_length(Py_buffer *view) {
     if (view->len < 0 || (unsigned long long)view->len > UINT_MAX) {
@@ -1049,6 +1048,59 @@ PyObject *UringApiRing_submit_statx(UringApiRing *self, PyObject *args, PyObject
         return NULL;
     }
     return UringApiRing_submit_statx_impl(self, dfd, path, flags, mask, &view, user_data);
+}
+
+PyObject *UringApiRing_submit_statx_fdsize_impl(UringApiRing *self, int fd, PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    UringApiCompletionStatxFdsizeState *statx_fdsize_state;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    completion = UringApiCompletion_new_pending_statx_fdsize(user_data);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        statx_fdsize_state = UringApiCompletion_get_statx_fdsize_state((UringApiCompletion *)completion);
+        if (!statx_fdsize_state) {
+            PyErr_SetString(PyExc_RuntimeError, "statx_fdsize completion is missing buffer state");
+            failed = 1;
+        } else {
+            sqe = get_sqe(self);
+            if (!sqe) {
+                failed = 1;
+            } else {
+                io_uring_prep_statx(sqe, fd, "", URING_API_AT_EMPTY_PATH, URING_API_STATX_SIZE_MASK,
+                                    (struct statx *)statx_fdsize_state->buf);
+                sqe_set_completion(self, sqe, completion);
+                if (submit_one(self) < 0) {
+                    failed = 1;
+                }
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_statx_fdsize(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "user_data", NULL};
+    int fd;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|O", keywords, &fd, &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_submit_statx_fdsize_impl(self, fd, user_data);
 }
 
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {

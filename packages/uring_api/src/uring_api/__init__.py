@@ -28,6 +28,7 @@ try:
     from _uring_api import COMPLETION_KIND_WRITE as COMPLETION_KIND_WRITE
     from _uring_api import COMPLETION_KIND_OPENAT as COMPLETION_KIND_OPENAT
     from _uring_api import COMPLETION_KIND_STATX as COMPLETION_KIND_STATX
+    from _uring_api import COMPLETION_KIND_STATX_FDSIZE as COMPLETION_KIND_STATX_FDSIZE
     from _uring_api import AT_EMPTY_PATH as AT_EMPTY_PATH
     from _uring_api import AT_FDCWD as AT_FDCWD
     from _uring_api import STATX_BASIC_STATS as STATX_BASIC_STATS
@@ -62,6 +63,7 @@ try:
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
     from _uring_api import __liburing_version__ as __liburing_version__
     from _uring_api import probe as _probe
+    from _uring_api import statx_st_size as statx_st_size
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
     C_API_ABI_VERSION = 1
@@ -91,6 +93,7 @@ except ImportError as exc:
     COMPLETION_KIND_WRITE = 21
     COMPLETION_KIND_OPENAT = 22
     COMPLETION_KIND_STATX = 23
+    COMPLETION_KIND_STATX_FDSIZE = 24
     AT_FDCWD = -100
     AT_EMPTY_PATH = 0x1000
     STATX_BASIC_STATS = 0x000007FF
@@ -275,6 +278,9 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def submit_statx_fdsize(self, fd: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_socket(
             self, domain: int, type: int, protocol: int = 0, flags: int = 0, user_data: object = None
         ) -> Completion:
@@ -301,6 +307,10 @@ except ImportError as exc:
         if entries <= 0:
             raise ValueError("entries must be between 1 and UINT_MAX")
         return {}
+
+    def statx_st_size(buf: Any) -> int:
+        raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
 else:
     _native_import_error = None
 
@@ -329,24 +339,7 @@ class CompletionKind(enum.IntEnum):
     WRITE = COMPLETION_KIND_WRITE
     OPENAT = COMPLETION_KIND_OPENAT
     STATX = COMPLETION_KIND_STATX
-
-
-def statx_st_size(buf: Any) -> int:
-    """Read ``stx_size`` from a completed statx buffer.
-
-    Call only after the statx completion reports ``res == 0``. The buffer must
-    be at least ``STATX_BUFFER_SIZE`` bytes and should have been filled by a
-    submit that requested ``STATX_SIZE`` in the mask.
-    """
-
-    view = memoryview(buf)
-    if len(view) < STATX_BUFFER_SIZE:
-        raise ValueError("statx buffer must be at least STATX_BUFFER_SIZE bytes")
-    offset = STATX_STX_SIZE_OFFSET
-    mask = int.from_bytes(view[0:4], "little", signed=False)
-    if not (mask & STATX_SIZE):
-        raise ValueError("statx buffer does not contain STATX_SIZE fields")
-    return int.from_bytes(view[offset : offset + 8], "little", signed=False)
+    STATX_FDSIZE = COMPLETION_KIND_STATX_FDSIZE
 
 
 DEFAULT_ENTRIES = 8
@@ -392,6 +385,7 @@ __all__ = [
     "COMPLETION_KIND_WRITE",
     "COMPLETION_KIND_OPENAT",
     "COMPLETION_KIND_STATX",
+    "COMPLETION_KIND_STATX_FDSIZE",
     "AT_FDCWD",
     "AT_EMPTY_PATH",
     "STATX_BASIC_STATS",

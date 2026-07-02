@@ -6,6 +6,9 @@
 #include "uring_api_bufgroup.h"
 #include "uring_api_bufview.h"
 #include "uring_api_core.h"
+#include "uring_api_statx.h"
+
+#include <string.h>
 
 static int UringApiCompletion_clear(UringApiCompletion *self);
 
@@ -104,6 +107,9 @@ static void UringApiCompletion_free_state(UringApiCompletion *self) {
         PyMem_Free(statx_state);
         break;
     }
+    case URING_API_COMPLETION_STATE_STATX_FDSIZE:
+        PyMem_Free((UringApiCompletionStatxFdsizeState *)self->state);
+        break;
     case URING_API_COMPLETION_STATE_NONE:
         if (self->state) {
             /* tag was zeroed or corrupt; free orphaned allocation */
@@ -152,6 +158,13 @@ UringApiCompletionStatxState *UringApiCompletion_get_statx_state(UringApiComplet
         return NULL;
     }
     return (UringApiCompletionStatxState *)self->state;
+}
+
+UringApiCompletionStatxFdsizeState *UringApiCompletion_get_statx_fdsize_state(UringApiCompletion *self) {
+    if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_STATX_FDSIZE) {
+        return NULL;
+    }
+    return (UringApiCompletionStatxFdsizeState *)self->state;
 }
 
 static char *copy_unicode_path(PyObject *path_obj) {
@@ -433,6 +446,26 @@ PyObject *UringApiCompletion_new_pending_statx(UringApiPendingKind kind, PyObjec
     return (PyObject *)completion;
 }
 
+PyObject *UringApiCompletion_new_pending_statx_fdsize(PyObject *user_data) {
+    UringApiCompletion *completion;
+    UringApiCompletionStatxFdsizeState *statx_fdsize_state;
+
+    completion = UringApiCompletion_alloc(URING_API_PENDING_STATX_FDSIZE, user_data);
+    if (!completion) {
+        return NULL;
+    }
+    statx_fdsize_state = PyMem_Malloc(sizeof(UringApiCompletionStatxFdsizeState));
+    if (!statx_fdsize_state) {
+        Py_DECREF(completion);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    statx_fdsize_state->tag = URING_API_COMPLETION_STATE_STATX_FDSIZE;
+    memset(statx_fdsize_state->buf, 0, sizeof(statx_fdsize_state->buf));
+    completion->state = statx_fdsize_state;
+    return (PyObject *)completion;
+}
+
 PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view) {
     UringApiCompletion *completion;
     UringApiCompletionMsgState *msg_state;
@@ -575,6 +608,9 @@ void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
         UringApiCompletion_free_state(self);
         break;
     }
+    case URING_API_COMPLETION_STATE_STATX_FDSIZE:
+        UringApiCompletion_free_state(self);
+        break;
     case URING_API_COMPLETION_STATE_NONE:
         break;
     }
@@ -643,8 +679,18 @@ static PyObject *UringApiCompletion_recv_multishot_buf_payload(UringApiCompletio
     return UringApiBufView_create(buf_group_obj, buffer_id, (unsigned int)res);
 }
 
+static PyObject *statx_fdsize_completion_size_payload(const void *buf, Py_ssize_t buflen) {
+    unsigned long long file_size;
+
+    if (uring_api_statx_try_read_st_size(buf, buflen, &file_size)) {
+        return PyLong_FromUnsignedLongLong(file_size);
+    }
+    return Py_NewRef(Py_None);
+}
+
 int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags) {
     PyObject *payload;
+    UringApiCompletionStatxFdsizeState *statx_fdsize_state;
     UringApiCompletionMsgState *msg_state;
     UringApiCompletionSockaddrState *sockaddr_state;
 
@@ -656,13 +702,23 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
     }
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT || self->kind == URING_API_PENDING_RECV_BUF) {
         payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags);
+    } else if (res >= 0 && self->kind == URING_API_PENDING_STATX_FDSIZE) {
+        statx_fdsize_state = UringApiCompletion_get_statx_fdsize_state(self);
+        if (!statx_fdsize_state) {
+            PyErr_SetString(PyExc_RuntimeError, "statx_fdsize completion is missing buffer state");
+            return -1;
+        }
+        payload = statx_fdsize_completion_size_payload(statx_fdsize_state->buf,
+                                                         (Py_ssize_t)sizeof(statx_fdsize_state->buf));
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
                             self->kind == URING_API_PENDING_READ || self->kind == URING_API_PENDING_WRITE ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
                             self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET ||
                             self->kind == URING_API_PENDING_POLL || self->kind == URING_API_PENDING_POLL_MULTISHOT ||
-                            self->kind == URING_API_PENDING_OPENAT || self->kind == URING_API_PENDING_STATX)) {
+                            self->kind == URING_API_PENDING_OPENAT)) {
         payload = PyLong_FromLong(res);
+    } else if (res >= 0 && self->kind == URING_API_PENDING_STATX) {
+        payload = Py_NewRef(Py_None);
     } else if (res >= 0 && self->kind == URING_API_PENDING_RECVMSG) {
         msg_state = UringApiCompletion_get_msg_state(self);
         if (!msg_state) {
