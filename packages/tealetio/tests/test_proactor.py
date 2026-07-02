@@ -786,6 +786,72 @@ class TestSelectorProactor:
             proactor.close()
 
     @pytest.mark.skipif(not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+")
+    def test_recv_many_reemits_pressure_after_premature_resume(self):
+        proactor = SelectorProactor()
+        buf_group = proactor.create_buf_group(1024, 2)
+        reader, writer = socket.socketpair()
+        seen: list[_RecvManySeen] = []
+        held: list[memoryview] = []
+        pressure_count = 0
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def on_result(result: _RecvManySeen) -> None:
+                nonlocal pressure_count
+                index, payload = result
+                if index >= 0:
+                    if payload:
+                        view = cast(memoryview, payload)
+                        held.append(view)
+                        seen.append((index, bytes(view)))
+                    else:
+                        seen.append((index, b""))
+                    return
+                seen.append(result)
+                if index == RECV_MANY_BUFFER_PRESSURE and callable(payload):
+                    pressure_count += 1
+                    if pressure_count == 1:
+                        cast(Callable[[], None], payload)()
+                        return
+                    for view in held:
+                        view.release()
+                    held.clear()
+                    cast(Callable[[], None], payload)()
+
+            operation = proactor.recv_many(reader, on_result, buf_group=buf_group)
+            writer.send(b"a")
+            while len([item for item in seen if item[0] >= 0]) < 1:
+                proactor.wait(proactor.get_time() + 1.0)
+            writer.send(b"b")
+            while len([item for item in seen if item[0] >= 0]) < 2:
+                proactor.wait(proactor.get_time() + 1.0)
+            writer.send(b"c")
+            deadline = proactor.get_time() + 1.0
+            while pressure_count < 1:
+                if proactor.get_time() >= deadline:
+                    break
+                proactor.wait(proactor.get_time() + 0.05)
+            assert pressure_count == 1
+            deadline = proactor.get_time() + 1.0
+            while pressure_count < 2:
+                if proactor.get_time() >= deadline:
+                    break
+                proactor.wait(proactor.get_time() + 0.05)
+            assert pressure_count == 2
+            while len([item for item in seen if item[0] >= 0]) < 3:
+                proactor.wait(proactor.get_time() + 1.0)
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done():
+                proactor.wait(proactor.get_time() + 1.0)
+            data_seen = [(index, payload) for index, payload in seen if index >= 0]
+            assert data_seen == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"")]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+")
     def test_recvgen_survives_selector_buffer_pressure(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)

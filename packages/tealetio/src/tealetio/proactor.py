@@ -26,6 +26,7 @@ from .scheduler import (
     RunnableQueueFactory,
     SyncDrivingMixin,
     SyncSchedulerDrivingAPI,
+    get_running_scheduler,
 )
 
 T = TypeVar("T")
@@ -983,12 +984,20 @@ class SelectorProactor(ProactorBase):
         self,
         operation: ContinuousOperation[_RecvManyResult],
         state: _SelectorRecvManyState,
+        buf_group: _SelectorBufGroup,
     ) -> _RecvManyResume:
         def resume() -> None:
             if operation.done():
                 return
             state.paused = False
-            self.break_wait()
+            if buf_group.leased_count >= buf_group.buffer_count:
+                state.pressure_emitted = False
+                try:
+                    get_running_scheduler().call_soon(self.break_wait)
+                except RuntimeError:
+                    self.break_wait()
+            else:
+                self.break_wait()
 
         return resume
 
@@ -1272,6 +1281,7 @@ class SelectorProactor(ProactorBase):
         # pre-3.12: no __release_buffer__, so leased views cannot return slots
         # automatically; keep the legacy drain loop and ignore buf_group pressure.
         if not _supports_release_buffer():
+
             def step_unpaced() -> _ContinuousStepResult:
                 nonlocal sequence
                 progressed = False
@@ -1292,7 +1302,9 @@ class SelectorProactor(ProactorBase):
             return operation
 
         # paced path: one chunk per step; pool exhaustion yields RECV_MANY_BUFFER_PRESSURE.
-        resolved_group = cast(_SelectorBufGroup, buf_group if buf_group is not None else self._get_recv_many_buf_group())
+        resolved_group = cast(
+            _SelectorBufGroup, buf_group if buf_group is not None else self._get_recv_many_buf_group()
+        )
         state = _SelectorRecvManyState()
 
         def step() -> _ContinuousStepResult:
@@ -1304,7 +1316,10 @@ class SelectorProactor(ProactorBase):
                     state.pressure_emitted = True
                     state.paused = True
                     operation._emit_result(
-                        (RECV_MANY_BUFFER_PRESSURE, self._selector_recv_many_resume(operation, state))
+                        (
+                            RECV_MANY_BUFFER_PRESSURE,
+                            self._selector_recv_many_resume(operation, state, resolved_group),
+                        )
                     )
                     return _ContinuousStepResult(progressed=True)
                 return _ContinuousStepResult(progressed=False)
