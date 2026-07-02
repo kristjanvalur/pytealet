@@ -7,9 +7,19 @@
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 
+#define URING_API_STATX_BUFFER_SIZE 256
+
 static int validate_file_io_buffer_length(Py_buffer *view) {
     if (view->len < 0 || (unsigned long long)view->len > UINT_MAX) {
         PyErr_SetString(PyExc_ValueError, "buffer length must fit in uint32_t");
+        return -1;
+    }
+    return 0;
+}
+
+static int validate_statx_buffer(Py_buffer *view) {
+    if (view->len < URING_API_STATX_BUFFER_SIZE) {
+        PyErr_SetString(PyExc_ValueError, "statx buffer must be at least 256 bytes");
         return -1;
     }
     return 0;
@@ -49,8 +59,8 @@ PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *v
     return Py_NewRef(completion);
 }
 
-PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,
-                                            unsigned int flags, PyObject *user_data) {
+PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
+                                            PyObject *user_data) {
     struct io_uring_sqe *sqe;
     UringApiBufGroup *buf_group;
     PyObject *completion = NULL;
@@ -195,7 +205,7 @@ PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *v
 }
 
 PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
-                                          PyObject *user_data) {
+                                        PyObject *user_data) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
     int failed = 0;
@@ -235,7 +245,7 @@ PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *v
 }
 
 PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
-                                           PyObject *user_data) {
+                                         PyObject *user_data) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
     int failed = 0;
@@ -300,6 +310,53 @@ PyObject *UringApiRing_submit_openat_impl(UringApiRing *self, int dfd, PyObject 
                 failed = 1;
             } else {
                 io_uring_prep_openat(sqe, dfd, path_state->path, flags, mode);
+                sqe_set_completion(self, sqe, completion);
+                if (submit_one(self) < 0) {
+                    failed = 1;
+                }
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_statx_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mask,
+                                         Py_buffer *view, PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    UringApiCompletionStatxState *statx_state;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    if (validate_statx_buffer(view) < 0) {
+        PyBuffer_Release(view);
+        return NULL;
+    }
+
+    completion = UringApiCompletion_new_pending_statx(URING_API_PENDING_STATX, user_data, path, view);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        statx_state = UringApiCompletion_get_statx_state((UringApiCompletion *)completion);
+        if (!statx_state || !statx_state->path) {
+            PyErr_SetString(PyExc_RuntimeError, "statx completion is missing path state");
+            failed = 1;
+        } else {
+            sqe = get_sqe(self);
+            if (!sqe) {
+                failed = 1;
+            } else {
+                io_uring_prep_statx(sqe, dfd, statx_state->path, flags, mask, (struct statx *)statx_state->view.buf);
                 sqe_set_completion(self, sqe, completion);
                 if (submit_one(self) < 0) {
                     failed = 1;
@@ -976,6 +1033,22 @@ PyObject *UringApiRing_submit_openat(UringApiRing *self, PyObject *args, PyObjec
         return NULL;
     }
     return UringApiRing_submit_openat_impl(self, dfd, path, flags, mode, user_data);
+}
+
+PyObject *UringApiRing_submit_statx(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"dfd", "path", "flags", "mask", "buf", "user_data", NULL};
+    Py_buffer view;
+    PyObject *path;
+    int dfd;
+    int flags;
+    unsigned int mask;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iOIIw*|O", keywords, &dfd, &path, &flags, &mask, &view,
+                                     &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_submit_statx_impl(self, dfd, path, flags, mask, &view, user_data);
 }
 
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {

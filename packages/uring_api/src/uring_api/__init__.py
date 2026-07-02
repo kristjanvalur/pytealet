@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 try:
     from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
+    from _uring_api import C_API_STRUCT_SIZE as C_API_STRUCT_SIZE
     from _uring_api import C_API_FEATURE_CORE as C_API_FEATURE_CORE
     from _uring_api import C_API_FEATURES as C_API_FEATURES
     from _uring_api import COMPLETION_KIND_ACCEPT as COMPLETION_KIND_ACCEPT
@@ -26,6 +27,13 @@ try:
     from _uring_api import COMPLETION_KIND_READ as COMPLETION_KIND_READ
     from _uring_api import COMPLETION_KIND_WRITE as COMPLETION_KIND_WRITE
     from _uring_api import COMPLETION_KIND_OPENAT as COMPLETION_KIND_OPENAT
+    from _uring_api import COMPLETION_KIND_STATX as COMPLETION_KIND_STATX
+    from _uring_api import AT_EMPTY_PATH as AT_EMPTY_PATH
+    from _uring_api import AT_FDCWD as AT_FDCWD
+    from _uring_api import STATX_BASIC_STATS as STATX_BASIC_STATS
+    from _uring_api import STATX_SIZE as STATX_SIZE
+    from _uring_api import STATX_BUFFER_SIZE as STATX_BUFFER_SIZE
+    from _uring_api import STATX_STX_SIZE_OFFSET as STATX_STX_SIZE_OFFSET
     from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
     from _uring_api import COMPLETION_KIND_SEND_ZC as COMPLETION_KIND_SEND_ZC
@@ -57,6 +65,7 @@ try:
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
     C_API_ABI_VERSION = 1
+    C_API_STRUCT_SIZE = 0
     C_API_FEATURE_CORE = 1 << 0
     C_API_FEATURES = 0
     COMPLETION_KIND_RECV = 1
@@ -81,6 +90,13 @@ except ImportError as exc:
     COMPLETION_KIND_READ = 20
     COMPLETION_KIND_WRITE = 21
     COMPLETION_KIND_OPENAT = 22
+    COMPLETION_KIND_STATX = 23
+    AT_FDCWD = -100
+    AT_EMPTY_PATH = 0x1000
+    STATX_BASIC_STATS = 0x000007FF
+    STATX_SIZE = 0x00000200
+    STATX_BUFFER_SIZE = 256
+    STATX_STX_SIZE_OFFSET = 40
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -254,6 +270,11 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def submit_statx(
+            self, dfd: int, path: str, flags: int, mask: int, buf: Any, user_data: object = None
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_socket(
             self, domain: int, type: int, protocol: int = 0, flags: int = 0, user_data: object = None
         ) -> Completion:
@@ -307,6 +328,25 @@ class CompletionKind(enum.IntEnum):
     READ = COMPLETION_KIND_READ
     WRITE = COMPLETION_KIND_WRITE
     OPENAT = COMPLETION_KIND_OPENAT
+    STATX = COMPLETION_KIND_STATX
+
+
+def statx_st_size(buf: Any) -> int:
+    """Read ``stx_size`` from a completed statx buffer.
+
+    Call only after the statx completion reports ``res == 0``. The buffer must
+    be at least ``STATX_BUFFER_SIZE`` bytes and should have been filled by a
+    submit that requested ``STATX_SIZE`` in the mask.
+    """
+
+    view = memoryview(buf)
+    if len(view) < STATX_BUFFER_SIZE:
+        raise ValueError("statx buffer must be at least STATX_BUFFER_SIZE bytes")
+    offset = STATX_STX_SIZE_OFFSET
+    mask = int.from_bytes(view[0:4], "little", signed=False)
+    if not (mask & STATX_SIZE):
+        raise ValueError("statx buffer does not contain STATX_SIZE fields")
+    return int.from_bytes(view[offset : offset + 8], "little", signed=False)
 
 
 DEFAULT_ENTRIES = 8
@@ -335,6 +375,7 @@ __all__ = [
     "DEFAULT_ENTRIES",
     "DEFAULT_FLAGS",
     "C_API_ABI_VERSION",
+    "C_API_STRUCT_SIZE",
     "C_API_FEATURE_CORE",
     "C_API_FEATURES",
     "COMPLETION_KIND_ACCEPT",
@@ -350,6 +391,14 @@ __all__ = [
     "COMPLETION_KIND_READ",
     "COMPLETION_KIND_WRITE",
     "COMPLETION_KIND_OPENAT",
+    "COMPLETION_KIND_STATX",
+    "AT_FDCWD",
+    "AT_EMPTY_PATH",
+    "STATX_BASIC_STATS",
+    "STATX_SIZE",
+    "STATX_BUFFER_SIZE",
+    "STATX_STX_SIZE_OFFSET",
+    "statx_st_size",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
     "COMPLETION_KIND_SEND_ZC",

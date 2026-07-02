@@ -180,6 +180,16 @@ def test_completion_kind_enum_matches_module_constants():
     assert uring_api.CompletionKind(uring_api.COMPLETION_KIND_ACCEPT) is uring_api.CompletionKind.ACCEPT
     assert uring_api.CompletionKind.RECV_BUF == uring_api.COMPLETION_KIND_RECV_BUF
     assert uring_api.CompletionKind.RECV_MULTISHOT == uring_api.COMPLETION_KIND_RECV_MULTISHOT
+    assert uring_api.CompletionKind.STATX == uring_api.COMPLETION_KIND_STATX
+
+
+def test_native_module_exports_statx_constants():
+    assert uring_api.AT_FDCWD == -100
+    assert uring_api.AT_EMPTY_PATH == 0x1000
+    assert uring_api.STATX_BASIC_STATS == 0x000007FF
+    assert uring_api.STATX_SIZE == 0x00000200
+    assert uring_api.STATX_BUFFER_SIZE == 256
+    assert uring_api.STATX_STX_SIZE_OFFSET == 40
 
 
 def test_native_module_exports_completion_kind_constants():
@@ -205,6 +215,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_READ == 20
     assert uring_api.COMPLETION_KIND_WRITE == 21
     assert uring_api.COMPLETION_KIND_OPENAT == 22
+    assert uring_api.COMPLETION_KIND_STATX == 23
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -227,6 +238,7 @@ def test_probe_returns_structured_result():
         "IORING_OP_SEND_ZC",
         "IORING_OP_SENDMSG_ZC",
         "IORING_OP_SOCKET",
+        "IORING_OP_STATX",
     }
     assert probe["available"] is True
     assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
@@ -235,6 +247,47 @@ def test_probe_returns_structured_result():
     assert isinstance(probe["IORING_OP_SEND_ZC"], bool)
     assert isinstance(probe["IORING_OP_SENDMSG_ZC"], bool)
     assert isinstance(probe["IORING_OP_SOCKET"], bool)
+    assert isinstance(probe["IORING_OP_STATX"], bool)
+
+
+def _kernel_version_component(value: str) -> int:
+    digits = []
+    for char in value:
+        if char.isdigit():
+            digits.append(char)
+        else:
+            break
+    return int("".join(digits)) if digits else 0
+
+
+def _kernel_version_at_least(release: str, major: int, minor: int, patch: int = 0) -> bool:
+    parts = release.split("-", 1)[0].split(".")
+    if len(parts) < 2:
+        return False
+    parsed = [
+        _kernel_version_component(parts[0]),
+        _kernel_version_component(parts[1]),
+        _kernel_version_component(parts[2]) if len(parts) > 2 else 0,
+    ]
+    if parsed[0] != major:
+        return parsed[0] > major
+    if parsed[1] != minor:
+        return parsed[1] > minor
+    return parsed[2] >= patch
+
+
+def test_kernel_version_at_least_handles_release_candidate_suffixes():
+    assert _kernel_version_at_least("5.6.0-rc1", 5, 6)
+    assert not _kernel_version_at_least("5.5.99-rc7", 5, 6)
+    assert _kernel_version_at_least("6.6.12-1-WSL2", 5, 6)
+
+
+def test_probe_statx_matches_kernel_version_gate():
+    require_uring()
+
+    probe = uring_api.probe()
+    expected = _kernel_version_at_least(os.uname().release, 5, 6)
+    assert probe["IORING_OP_STATX"] is expected
 
 
 def test_probe_capabilities_are_stable_across_calls():
@@ -603,6 +656,7 @@ def test_c_api_client_can_import_capsule_and_probe():
     probe = client.probe()
 
     assert abi_version == uring_api.C_API_ABI_VERSION
+    assert struct_size == uring_api.C_API_STRUCT_SIZE
     assert struct_size > 0
     assert feature_flags & uring_api.C_API_FEATURE_CORE
     assert (major, minor) == uring_api.__compiled_liburing_version_info__
@@ -2256,6 +2310,124 @@ def test_ring_file_read_write_completion_when_available():
             os.close(fd)
     finally:
         os.unlink(path)
+
+
+def test_ring_submit_statx_rejects_small_buffer():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        with pytest.raises(ValueError, match="256 bytes"):
+            ring.submit_statx(0, "", 0, uring_api.STATX_SIZE, bytearray(32))
+
+
+def test_ring_statx_fd_returns_size_when_available():
+    require_uring()
+
+    token = {"operation": "statx-fd"}
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        try:
+            assert os.write(fd, b"hello") == 5
+            buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+            with uring_api.Ring() as ring:
+                statx_handle = ring.submit_statx(
+                    fd,
+                    "",
+                    uring_api.AT_EMPTY_PATH,
+                    uring_api.STATX_SIZE,
+                    buf,
+                    token,
+                )
+                completion = ring.wait(1.0)
+                assert completion is statx_handle
+                assert completion.kind == uring_api.COMPLETION_KIND_STATX
+                assert completion.user_data is token
+                assert completion.res == 0
+                assert uring_api.statx_st_size(buf) == 5
+        finally:
+            os.close(fd)
+    finally:
+        os.unlink(path)
+
+
+def test_ring_statx_path_returns_size_when_available():
+    require_uring()
+
+    token = {"operation": "statx-path"}
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        with open(path, "wb") as handle:
+            handle.write(b"hello")
+        buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+        with uring_api.Ring() as ring:
+            statx_handle = ring.submit_statx(uring_api.AT_FDCWD, path, 0, uring_api.STATX_SIZE, buf, token)
+            completion = ring.wait(1.0)
+            assert completion is statx_handle
+            assert completion.kind == uring_api.COMPLETION_KIND_STATX
+            assert completion.res == 0
+            assert uring_api.statx_st_size(buf) == 5
+    finally:
+        os.unlink(path)
+
+
+def test_c_api_statx_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    token = 262
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        with open(path, "wb") as handle:
+            handle.write(b"hello")
+        buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+        with uring_api.Ring() as ring:
+            client.submit_statx(ring, -100, path, 0, uring_api.STATX_SIZE, buf, token)
+            completion = ring.wait(1.0)
+
+        assert completion is not None
+        assert client.completion_summary(completion) == (
+            token,
+            uring_api.COMPLETION_KIND_STATX,
+            0,
+            0,
+            0,
+        )
+        assert uring_api.statx_st_size(buf) == 5
+    finally:
+        os.unlink(path)
+
+
+def test_ring_statx_fails_for_nonexistent_path():
+    require_uring()
+
+    buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+    with uring_api.Ring() as ring:
+        handle = ring.submit_statx(
+            uring_api.AT_FDCWD,
+            "/nonexistent/uring-api-statx-missing",
+            0,
+            uring_api.STATX_SIZE,
+            buf,
+        )
+        completion = ring.wait(1.0)
+        assert completion is handle
+        assert completion.kind == uring_api.COMPLETION_KIND_STATX
+        assert completion.res < 0
+
+
+def test_statx_st_size_rejects_short_buffer():
+    with pytest.raises(ValueError, match="STATX_BUFFER_SIZE"):
+        uring_api.statx_st_size(bytearray(32))
+
+
+def test_statx_st_size_rejects_buffer_without_size_mask():
+    buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+    with pytest.raises(ValueError, match="STATX_SIZE"):
+        uring_api.statx_st_size(buf)
 
 
 def test_ring_openat_read_write_round_trip_when_available():

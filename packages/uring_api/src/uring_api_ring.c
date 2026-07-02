@@ -293,6 +293,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a file write operation at an explicit offset."},
     {"submit_openat", _PyCFunction_CAST(UringApiRing_submit_openat), METH_VARARGS | METH_KEYWORDS,
      "Submit an openat operation and return a caller-owned fd on success."},
+    {"submit_statx", _PyCFunction_CAST(UringApiRing_submit_statx), METH_VARARGS | METH_KEYWORDS,
+     "Submit a statx operation and fill the caller-provided statx buffer on success."},
     {"submit_socket", _PyCFunction_CAST(UringApiRing_submit_socket), METH_VARARGS | METH_KEYWORDS,
      "Submit a socket creation operation."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,

@@ -5,6 +5,7 @@
 #include "uring_api_probe.h"
 #include "uring_api_capi_impl.h"
 #include "uring_api_core.h"
+#include "uring_api_kernel_version.h"
 
 #include <poll.h>
 
@@ -22,6 +23,12 @@ static int capability_poll_multishot = 0;
 static int capability_recv_multishot = 0;
 static int capability_socket = 0;
 static int capability_sendmsg_zc = 0;
+static int capability_statx = 0;
+
+/* io_uring_enter(2): IORING_OP_STATX is available since 5.6. */
+#define URING_API_KERNEL_VERSION_STATX_MAJOR 5
+#define URING_API_KERNEL_VERSION_STATX_MINOR 6
+#define URING_API_KERNEL_VERSION_STATX_PATCH 0
 
 static int default_availability_cached = 0;
 static int default_availability = 0;
@@ -612,6 +619,9 @@ static int ensure_capability_cache(void) {
     if (cache_feature_bool(uring_api_probe_sendmsg_zc_impl, &capability_sendmsg_zc) < 0) {
         return -1;
     }
+    capability_statx = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_STATX_MAJOR,
+                                                       URING_API_KERNEL_VERSION_STATX_MINOR,
+                                                       URING_API_KERNEL_VERSION_STATX_PATCH);
     capability_cache_ready = 1;
     return 0;
 }
@@ -637,7 +647,8 @@ static PyObject *build_capability_dict(void) {
         add_cached_bool(capabilities, "IORING_RECV_MULTISHOT", capability_recv_multishot) < 0 ||
         add_cached_bool(capabilities, "IORING_OP_SOCKET", capability_socket) < 0 ||
         add_cached_bool(capabilities, "IORING_OP_SEND_ZC", capability_sendmsg_zc) < 0 ||
-        add_cached_bool(capabilities, "IORING_OP_SENDMSG_ZC", capability_sendmsg_zc) < 0) {
+        add_cached_bool(capabilities, "IORING_OP_SENDMSG_ZC", capability_sendmsg_zc) < 0 ||
+        add_cached_bool(capabilities, "IORING_OP_STATX", capability_statx) < 0) {
         Py_DECREF(capabilities);
         return NULL;
     }
@@ -685,6 +696,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSubmitRead,
     UringApiCapi_RingSubmitWrite,
     UringApiCapi_RingSubmitOpenat,
+    UringApiCapi_RingSubmitStatx,
     UringApiCapi_RingSubmitSocket,
     UringApiCapi_RingBreakWait,
     UringApiCapi_RingWait,
@@ -714,7 +726,8 @@ int uring_api_export_capi(PyObject *module) {
         Py_DECREF(capsule);
         return -1;
     }
-    if (PyModule_AddIntConstant(module, "C_API_ABI_VERSION", (long)URING_API_CAPI_ABI_VERSION) < 0) {
+    if (PyModule_AddIntConstant(module, "C_API_ABI_VERSION", (long)URING_API_CAPI_ABI_VERSION) < 0 ||
+        PyModule_AddIntConstant(module, "C_API_STRUCT_SIZE", (long)sizeof(UringApi_CAPI)) < 0) {
         return -1;
     }
     if (module_add_uint64_constant(module, "C_API_FEATURE_CORE", URING_API_CAPI_FEATURE_CORE) < 0) {

@@ -85,6 +85,22 @@ been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
 same descriptor.
 
+## File metadata and positioned I/O
+
+`Ring` also exposes positioned file helpers for caller-owned fds:
+
+- `submit_openat(path, flags, mode=0, *, dfd=AT_FDCWD)` opens a path and
+  returns the new fd in the completion result;
+- `submit_read(fd, buf, offset)` and `submit_write(fd, data, offset)` perform
+  explicit-offset I/O into caller buffers;
+- `submit_statx(dfd, path, flags, mask, buf)` fills a caller-provided 256-byte
+  statx buffer asynchronously.
+
+For fd-only metadata, pass an empty path with `AT_EMPTY_PATH` in `flags`. Read
+`stx_size` from the completed buffer with `statx_st_size(buf)` only after
+`completion.res == 0`, or read `STATX_STX_SIZE_OFFSET` manually. Path-based
+lookups use `dfd=AT_FDCWD` and a normal filesystem path.
+
 Provided-buffer receive uses a caller-owned ring created with
 `create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or
 stream receives with `submit_recv_multishot(fd, buf_group, ...)`. Both paths
@@ -185,7 +201,9 @@ those results. If ring creation fails,
 it returns an empty dictionary. If it succeeds, the dictionary contains
 `"available": True` plus named optional capabilities such as
 `"IORING_ACCEPT_MULTISHOT"`, `"IORING_POLL_MULTISHOT"`, `"IORING_RECV_MULTISHOT"`, and
-`"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"`. Production code should
+`"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"`, and `"IORING_OP_STATX"`
+(version-gated via `uname(2)` against the `io_uring_enter(2)` 5.6 floor).
+Production code should
 still handle `OSError` when it creates the real ring because limits or sandbox
 policy may differ for larger settings.
 
@@ -393,7 +411,10 @@ directory when compiling an extension module.
 
 The capsule currently exposes:
 
-- `abi_version`, `struct_size`, and `feature_flags` for compatibility checks;
+- `abi_version`, `struct_size`, and `feature_flags` for compatibility checks.
+  While the package remains pre-release, `abi_version` stays at **1**; new
+  function-table entries are appended and clients should compare `struct_size`
+  and null-check pointers they rely on;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
 - `probe(entries, flags)`, which returns a new reference to the same flat
@@ -403,8 +424,10 @@ The capsule currently exposes:
     `ring_submit_send_zc()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
     `ring_submit_sendmsg()`, `ring_submit_sendmsg_zc()`, `ring_submit_accept()`,
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
-    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_socket()`,
-    `ring_submit_poll()`, `ring_submit_poll_multishot()`, `ring_submit_poll_remove()`,
+    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_read()`,
+    `ring_submit_write()`, `ring_submit_openat()`, `ring_submit_statx()`,
+    `ring_submit_socket()`, `ring_submit_poll()`, `ring_submit_poll_multishot()`,
+    `ring_submit_poll_remove()`,
     `ring_break_wait()`, and `ring_wait()`;
 - `ring_set_callback()`, `ring_set_c_callback()`, `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
