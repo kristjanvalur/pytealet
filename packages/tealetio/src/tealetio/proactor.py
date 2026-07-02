@@ -75,7 +75,7 @@ _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
 T_Cargo = TypeVar("T_Cargo")
 
 
-def _stat_result_from_statx(buf: bytes | bytearray) -> os.stat_result:
+def _stat_result_from_statx(buf: bytes | bytearray | memoryview) -> os.stat_result:
     """Build ``os.stat_result`` from a completed io_uring statx buffer."""
 
     if len(buf) < uring_api.STATX_BUFFER_SIZE:
@@ -584,7 +584,6 @@ class ProactorBase:
         operation = Operation[os.stat_result](
             kind="stat",
             fileobj=fd if fd >= 0 else path,
-            proactor=self,
         )
         try:
             if fd >= 0:
@@ -601,7 +600,7 @@ class ProactorBase:
         self._check_open()
         if fd < 0:
             raise ValueError("stat_fdsize() requires fd >= 0")
-        operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
+        operation = Operation[int](kind="stat_fdsize", fileobj=fd)
         try:
             operation._set_result(os.fstat(fd).st_size)
         except OSError as exc:
@@ -2147,7 +2146,7 @@ class UringProactor(ProactorBase):
             dfd = uring_api.AT_FDCWD
             stat_path = path
             stat_flags = 0
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_stat, data=buf)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_stat, data=memoryview(buf))
         self._submit_uring_entry(
             entry,
             lambda: self._ring.submit_statx(

@@ -3846,6 +3846,10 @@ class TestUringProactor:
 
 
 class TestProactorScheduler:
+    @pytest.fixture(autouse=True)
+    def _patch_uring_probe_capabilities(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch)
+
     def test_proactor_scheduler_is_abstract(self):
         with pytest.raises(TypeError, match="abstract"):
             ProactorScheduler()
