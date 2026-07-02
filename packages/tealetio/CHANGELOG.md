@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+- `recv_many` provided-buffer exhaustion now delivers
+  `(RECV_MANY_BUFFER_PRESSURE, resume)`; consumers must drop held views and
+  call `resume()` to continue (no automatic resubmission).
+- `recvgen` / `sock_recvgen` always yield `(index, memoryview)` and
+  `(RECV_MANY_BUFFER_PRESSURE, None)`; the `allow_memview` option is removed.
+
 ### Added
-- `recvgen(..., allow_memview=True)` and matching `sock_recvgen(...)` option to
-  yield borrowed `memoryview` chunks and `(RECV_MANY_BUFFER_PRESSURE, None)`
-  pressure tokens for zero-copy consumers that release held views explicitly.
 - `recvgen(sock)` and `ProactorScheduler.sock_recvgen(sock)` as a
   tealet-blocking incremental consumer of `recv_many`, yielding stream-ordered
   `(index, data)` chunks with the same provided-buffer pressure policy as
@@ -35,17 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
-- `recvgen` / `sock_recvgen` now yield `(index, bytes)` by default, copying
-  chunks on dequeue (and flushing queued views on provided-buffer pressure) so
-  consumers do not hold borrowed kernel views; opt in to
-  `allow_memview=True` for borrowed views and pressure tokens.
+- `recvgen` / `sock_recvgen` always yield `(index, memoryview)` chunks and
+  `(RECV_MANY_BUFFER_PRESSURE, None)` pressure tokens; consumers release held
+  views between reads so leased kernel buffers can return to the pool.
 - Removed the `n` chunk-size argument from `recv_many`, `recvall`, `recvgen`,
   `sock_recvall`, and `sock_recvgen`; chunk sizes are backend-defined
   (`SelectorProactor` reads up to 8 KiB per `recv()`, `UringProactor` uses the
   shared `BufGroup` slot size).
 - `UringProactor.recv_many` delivers leased `memoryview` chunks instead of
   copied `bytes`; `recvall` keeps views until buffer pressure, then copies all
-  held chunks to `bytes` and lets the proactor resubmit multishot receive.
+  held chunks to `bytes` before calling the pressure `resume()` callback.
+- `SelectorProactor.recv_many` (Python 3.12+) uses a synthetic `BufGroup` and
+  the same `(RECV_MANY_BUFFER_PRESSURE, resume)` backpressure contract as uring.
 - Made `Scheduler` use the proactor-backed synchronous scheduler by default,
   while keeping explicit selector-backed schedulers available.
 - Changed `run_asyncio_in_tealet(...)` to choose the hosted asyncio loop from

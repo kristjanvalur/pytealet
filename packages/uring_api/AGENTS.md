@@ -29,8 +29,12 @@ From the workspace root:
 
 ```bash
 uv sync --active --locked --dev --package uring-api
-uv run --active --package uring-api python -m pytest packages/uring_api/tests/ -v
+timeout 30 uv run --active --package uring-api python -m pytest packages/uring_api/tests/ -v
 ```
+
+Run unit tests with a **30-second timeout** (`timeout 30` on Linux). The full
+suite should finish well inside that budget on a desktop; a hang usually means a
+deadlock or a stuck `wait()` rather than slow hardware.
 
 Install liburing on Ubuntu:
 
@@ -76,7 +80,11 @@ missing kernel support.
 
 ## Test Policy
 
-Tests live in `packages/uring_api/tests/`. Follow existing patterns:
+Tests live in `packages/uring_api/tests/`. When verifying changes locally or in
+automation, wrap pytest in a 30-second process timeout so stuck tests fail fast
+instead of blocking the session.
+
+Follow existing patterns:
 
 - Gate on availability with `require_uring()`.
 - Gate optional features with `require_uring_capability("NAME")`.

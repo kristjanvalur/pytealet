@@ -15,6 +15,10 @@ static PyObject *UringApiBufGroup_get_buffer_count(UringApiBufGroup *self, void 
     return PyLong_FromUnsignedLong(self->buffer_count);
 }
 
+static PyObject *UringApiBufGroup_get_leased_count(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
+    return PyLong_FromUnsignedLong(self->leased_count);
+}
+
 static PyObject *UringApiBufGroup_get_group_id(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
     return PyLong_FromUnsignedLong(self->group_id);
 }
@@ -85,6 +89,7 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
     self->storage = NULL;
     self->buffer_size = buffer_size;
     self->buffer_count = buffer_count;
+    self->leased_count = 0;
     self->group_id = 0;
     self->mask = 0;
 
@@ -125,6 +130,14 @@ void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id) {
     io_uring_buf_ring_add(self->ring_buffer, self->storage + ((size_t)buffer_id * self->buffer_size), self->buffer_size,
                           (unsigned short)buffer_id, self->mask, 0);
     io_uring_buf_ring_advance(self->ring_buffer, 1);
+}
+
+void UringApiBufGroup_note_leased(UringApiBufGroup *self) { self->leased_count++; }
+
+void UringApiBufGroup_note_unleased(UringApiBufGroup *self) {
+    if (self->leased_count > 0) {
+        self->leased_count--;
+    }
 }
 
 PyObject *UringApiRing_create_buf_group(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -169,6 +182,7 @@ static PyObject *UringApiBufGroup_new(PyTypeObject *Py_UNUSED(type), PyObject *a
 static PyGetSetDef UringApiBufGroup_getset[] = {
     {"buffer_size", (getter)UringApiBufGroup_get_buffer_size, NULL, NULL, NULL},
     {"buffer_count", (getter)UringApiBufGroup_get_buffer_count, NULL, NULL, NULL},
+    {"leased_count", (getter)UringApiBufGroup_get_leased_count, NULL, NULL, NULL},
     {"group_id", (getter)UringApiBufGroup_get_group_id, NULL, NULL, NULL},
     {"ring", (getter)UringApiBufGroup_get_ring, NULL, NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL},
