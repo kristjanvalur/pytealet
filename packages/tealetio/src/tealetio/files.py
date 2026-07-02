@@ -75,7 +75,7 @@ class ProactorFile(io.RawIOBase):
         self._writable = access in (os.O_WRONLY, os.O_RDWR)
         self._pos = 0
         if append:
-            self._pos = self._file_stat().st_size
+            self._pos = self._file_size()
 
     @property
     def name(self) -> str:
@@ -105,7 +105,7 @@ class ProactorFile(io.RawIOBase):
         elif whence == os.SEEK_CUR:
             self._pos += pos
         elif whence == os.SEEK_END:
-            self._pos = self._file_stat().st_size + pos
+            self._pos = self._file_size() + pos
         else:
             raise ValueError("invalid whence")
         if self._pos < 0:
@@ -144,7 +144,7 @@ class ProactorFile(io.RawIOBase):
         if not self._writable:
             raise OSError(errno.EBADF, "File is not writable")
         if self._append:
-            self._pos = self._file_stat().st_size
+            self._pos = self._file_size()
         nbytes = self._scheduler.wait_operation(self._proactor.write(self._fd, b, self._pos))
         self._pos += nbytes
         return nbytes
@@ -163,8 +163,8 @@ class ProactorFile(io.RawIOBase):
             if exc.errno != errno.EBADF:
                 raise
 
-    def _file_stat(self) -> os.stat_result:
-        return self._scheduler.wait_operation(self._proactor.stat(fd=self._fd))
+    def _file_size(self) -> int:
+        return self._scheduler.wait_operation(self._proactor.stat_fdsize(self._fd))
 
     def _read_chunk(self, size: int) -> bytes:
         data = self._scheduler.wait_operation(self._proactor.read(self._fd, size, self._pos))

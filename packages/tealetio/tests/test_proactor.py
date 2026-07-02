@@ -582,6 +582,25 @@ class TestSelectorProactor:
         finally:
             proactor.close()
 
+    def test_stat_fdsize_completes_immediately_with_blocking_fstat(self):
+        proactor = SelectorProactor()
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                path = tmp.name
+                tmp.write(b"hello")
+            try:
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    operation = proactor.stat_fdsize(fd)
+                    assert operation.done()
+                    assert operation.result() == 5
+                finally:
+                    os.close(fd)
+            finally:
+                os.unlink(path)
+        finally:
+            proactor.close()
+
     def test_file_operations_are_not_implemented(self):
         proactor = SelectorProactor()
         try:
@@ -1686,6 +1705,7 @@ class _FakeUringRing:
         self.submitted_poll_remove: list[object] = []
         self.submitted_openat: list[tuple[str, int, int, object, int]] = []
         self.submitted_statx: list[tuple[int, str, int, int, object, object]] = []
+        self.submitted_statx_fdsize: list[tuple[int, object]] = []
         self.submitted_read: list[tuple[int, object, int, object]] = []
         self.submitted_write: list[tuple[int, bytes, int, object]] = []
         self.open_fds: dict[int, bytes] = {}
@@ -2027,6 +2047,20 @@ class _FakeUringRing:
             kind=uring_api.COMPLETION_KIND_STATX,
             res=0,
             result=0,
+        )
+        self._deliver(completion)
+        return completion
+
+    def submit_statx_fdsize(self, fd: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_statx_fdsize.append((fd, user_data))
+        size = len(self.open_fds.get(fd, b""))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_STATX_FDSIZE,
+            res=0,
+            result=size,
         )
         self._deliver(completion)
         return completion
@@ -2597,6 +2631,45 @@ class TestUringProactor:
                     assert stat_operation.done()
                     assert stat_operation.result().st_size == 5
                     assert cast(_FakeUringRing, proactor.ring).submitted_statx == []
+                finally:
+                    os.close(fd)
+            finally:
+                os.unlink(path)
+        finally:
+            proactor.close()
+
+    def test_stat_fdsize_uses_statx_fdsize_when_capable(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            open_operation = proactor.openat("/tmp/stat-fdsize.txt", os.O_RDWR | os.O_CREAT, 0o644)
+            _wait_for_uring(proactor, lambda: open_operation.done())
+            fd = open_operation.result()
+            write_operation = proactor.write(fd, b"hello", 0)
+            _wait_for_uring(proactor, lambda: write_operation.done())
+
+            stat_fdsize_operation = proactor.stat_fdsize(fd)
+            _wait_for_uring(proactor, lambda: stat_fdsize_operation.done())
+            assert stat_fdsize_operation.result() == 5
+            ring = cast(_FakeUringRing, proactor.ring)
+            assert ring.submitted_statx_fdsize[-1][0] == fd
+            assert ring.submitted_statx == []
+        finally:
+            proactor.close()
+
+    def test_stat_fdsize_falls_back_to_blocking_when_statx_unavailable(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_STATX=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                path = tmp.name
+                tmp.write(b"hello")
+            try:
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    stat_fdsize_operation = proactor.stat_fdsize(fd)
+                    assert stat_fdsize_operation.done()
+                    assert stat_fdsize_operation.result() == 5
+                    assert cast(_FakeUringRing, proactor.ring).submitted_statx_fdsize == []
                 finally:
                     os.close(fd)
             finally:
@@ -4170,7 +4243,8 @@ class TestProactorScheduler:
             assert end_pos == 5
             assert suffix == b"lo"
             assert ring.submitted_read[-1][2] == 3
-            assert ring.submitted_statx
+            assert ring.submitted_statx_fdsize
+            assert ring.submitted_statx == []
         finally:
             scheduler.close()
 
@@ -4190,7 +4264,8 @@ class TestProactorScheduler:
 
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello!"
             assert ring.submitted_write[-1][2] == 5
-            assert len(ring.submitted_statx) >= 2
+            assert len(ring.submitted_statx_fdsize) >= 2
+            assert ring.submitted_statx == []
         finally:
             scheduler.close()
 

@@ -325,6 +325,8 @@ class Proactor(Protocol):
 
     def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]: ...
 
+    def stat_fdsize(self, fd: int) -> Operation[int]: ...
+
     def recv_many(
         self,
         sock: socket.socket,
@@ -595,6 +597,19 @@ class ProactorBase:
                 operation._set_result(os.fstat(fd))
             else:
                 operation._set_result(os.stat(path))
+        except OSError as exc:
+            operation._set_exception(exc)
+        return operation
+
+    def stat_fdsize(self, fd: int) -> Operation[int]:
+        """Return the byte length of an open file descriptor."""
+
+        self._check_open()
+        if fd < 0:
+            raise ValueError("stat_fdsize() requires fd >= 0")
+        operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
+        try:
+            operation._set_result(os.fstat(fd).st_size)
         except OSError as exc:
             operation._set_exception(exc)
         return operation
@@ -2156,6 +2171,32 @@ class UringProactor(ProactorBase):
         assert entry.data is not None
         operation = cast(Operation[os.stat_result], entry.operation)
         operation._set_result(_stat_result_from_statx(entry.data))
+        return operation
+
+    def stat_fdsize(self, fd: int) -> Operation[int]:
+        """Return file byte length via io_uring statx_fdsize when probed, else blocking ``os.fstat``."""
+
+        self._check_open()
+        if fd < 0:
+            raise ValueError("stat_fdsize() requires fd >= 0")
+        if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "submit_statx_fdsize"):
+            return super().stat_fdsize(fd)
+
+        operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_stat_fdsize)
+        self._submit_uring_entry(entry, lambda: self._ring.submit_statx_fdsize(fd, entry))
+        return operation
+
+    def _complete_uring_stat_fdsize(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], entry.operation)
+        size = completion.result
+        if size is None:
+            try:
+                operation._set_result(os.fstat(cast(int, operation.fileobj)).st_size)
+            except OSError as exc:
+                operation._set_exception(exc)
+            return operation
+        operation._set_result(cast(int, size))
         return operation
 
     def recv_many(
