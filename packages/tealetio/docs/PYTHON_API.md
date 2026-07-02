@@ -155,22 +155,18 @@ are released by dropping recvall's references. When provided,
 `progress(total)` is called after each received non-empty chunk with the
 cumulative number of bytes received.
 
-`recvgen(sock, *, allow_memview=False)` is a tealet-blocking generator that
-incrementally yields `(index, data)` chunks in stream-index order until EOF.
-Unlike `recv_many`, it does not yield a final `(index, empty_view)` EOF tuple;
-iteration ends when the stream completes (the generator raises `StopIteration` /
-returns from `sock_recvgen`). Use `recv_many` directly when you need the
-documented EOF sentinel and exact `recv_many` callback semantics.
-By default each `data` is owned `bytes`, copied when dequeued so borrowed
-kernel views are released promptly; queued views are also copied to `bytes` on
-`RECV_MANY_BUFFER_PRESSURE` so leased slots can return to the shared pool.
+`recvgen(sock)` is a tealet-blocking generator that incrementally yields
+`(index, data)` chunks in stream-index order until EOF. Each `data` is a
+read-only `memoryview`; copy with `bytes(data)` when owned storage is required
+past the current iteration step. Unlike `recv_many`, it does not yield a final
+`(index, empty_view)` EOF tuple; iteration ends when the stream completes (the
+generator raises `StopIteration` / returns from `sock_recvgen`). Use
+`recv_many` directly when you need the documented EOF sentinel and exact
+`recv_many` callback semantics.
 
-With `allow_memview=True`, `data` may be a borrowed `memoryview` and
-`(RECV_MANY_BUFFER_PRESSURE, None)` may be yielded when the provided-buffer
-pool is exhausted. Consumers must then release every `memoryview` they still
-hold, for example by copying to `bytes` and dropping references or calling
-`memoryview.release()`. Queued views are still copied to `bytes` internally on
-pressure so kernel slots can return before the consumer resumes.
+`(RECV_MANY_BUFFER_PRESSURE, None)` is yielded when the provided-buffer pool is
+exhausted. Consumers should drop every receive `memoryview` they still hold when
+that token appears and avoid keeping more views than needed between reads.
 
 Out-of-order multishot completions are reordered before yield. The generator
 must be consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can

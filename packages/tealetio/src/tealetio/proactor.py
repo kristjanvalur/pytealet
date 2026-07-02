@@ -6,13 +6,14 @@ import os
 import select
 import selectors
 import socket
+import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar, cast, overload
+from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar, cast
 
 import uring_api
 
@@ -114,6 +115,89 @@ _UringCompletion: TypeAlias = uring_api.Completion
 _UringBufGroup: TypeAlias = uring_api.BufGroup
 
 
+class RecvBufferPool(Protocol):
+    """Provided-buffer pool surface shared by uring and selector backends.
+
+    ``leased_count`` tracks how many receive chunks consumers still hold.
+    When the pool is full, ``recv_many`` / ``recvgen`` pause and surface
+    ``(RECV_MANY_BUFFER_PRESSURE, resume)`` so callers can drop views and
+    call ``resume()`` to regulate inbound flow.
+    """
+
+    @property
+    def buffer_size(self) -> int: ...
+
+    @property
+    def buffer_count(self) -> int: ...
+
+    @property
+    def leased_count(self) -> int: ...
+
+
+def _supports_release_buffer() -> bool:
+    """Return True when PEP 688 ``__release_buffer__`` exporters are usable.
+
+    Selector leased chunks rely on ``__release_buffer__`` to decrement
+    ``leased_count`` when consumers drop chunk views. On older CPython we
+    fall back to unpaced ``recv_many`` without pool pressure (see below).
+    """
+
+    return sys.version_info >= (3, 12)
+
+
+class _SelectorBufGroup:
+    """Synthetic provided-buffer pool for selector ``recv_many`` flow control.
+
+    There is no kernel buffer ring on the selector path; this pool only
+    counts in-flight chunk views so ``recv_many`` can mirror uring backpressure.
+    Consumers should drop ``memoryview`` references (or call ``resume()`` after
+    pressure) to return slots and let the proactor read again.
+    """
+
+    def __init__(self, buffer_size: int, buffer_count: int) -> None:
+        self.buffer_size = buffer_size
+        self.buffer_count = buffer_count
+        self.leased_count = 0
+
+    def _note_leased(self) -> None:
+        self.leased_count += 1
+
+    def _note_unleased(self) -> None:
+        if self.leased_count:
+            self.leased_count -= 1
+
+    def note_chunk_released(self) -> None:
+        """Explicitly return one leased slot (tests and manual consumers)."""
+
+        self._note_unleased()
+
+
+class _LeasedChunk:
+    """PEP 688 buffer exporter whose release returns a selector pool slot."""
+
+    def __init__(self, data: bytearray, pool: _SelectorBufGroup) -> None:
+        self._data = data
+        self._pool = pool
+        self._held: memoryview | None = None
+
+    def __buffer__(self, flags: int) -> memoryview:
+        assert self._held is None
+        self._held = memoryview(self._data)
+        return self._held
+
+    def __release_buffer__(self, view: memoryview) -> None:
+        assert self._held is view
+        self._held.release()
+        self._held = None
+        self._pool._note_unleased()
+
+
+def _leased_selector_memoryview(data: bytes | bytearray, pool: _SelectorBufGroup) -> memoryview:
+    pool._note_leased()
+    payload = data if type(data) is bytearray else bytearray(data)
+    return memoryview(_LeasedChunk(payload, pool))
+
+
 _UringRingFactory = Callable[[int, int], _UringRing]
 _UringBufGroupFactory = Callable[[_UringRing], _UringBufGroup]
 _UringSendSubmit = Callable[[int, Any, object], _UringCompletion]
@@ -210,37 +294,14 @@ class Proactor(Protocol):
 
     def recvall(self, sock: socket.socket, progress: _ProgressCallback | None = None) -> Operation[bytes]: ...
 
-    @overload
     def recvgen(
         self,
         sock: socket.socket,
         *,
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
-        buf_group: _UringBufGroup | None = None,
-        allow_memview: Literal[False] = False,
-    ) -> Iterator[tuple[int, bytes]]: ...
-
-    @overload
-    def recvgen(
-        self,
-        sock: socket.socket,
-        *,
-        buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
-        buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
-        buf_group: _UringBufGroup | None = None,
-        allow_memview: Literal[True],
-    ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
-
-    def recvgen(
-        self,
-        sock: socket.socket,
-        *,
-        buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
-        buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
-        buf_group: _UringBufGroup | None = None,
-        allow_memview: bool = False,
-    ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
+        buf_group: RecvBufferPool | None = None,
+    ) -> Iterator[tuple[int, memoryview] | tuple[Literal[-1], None]]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
@@ -267,7 +328,7 @@ class Proactor(Protocol):
         sock: socket.socket,
         callback: _RecvManyCallback,
         *,
-        buf_group: _UringBufGroup | None = None,
+        buf_group: RecvBufferPool | None = None,
     ) -> ContinuousOperation[_RecvManyResult]: ...
 
     def poll(self, fd: int, mask: int) -> Operation[int]: ...
@@ -322,17 +383,15 @@ class _RecvGenBuffer:
     def __init__(
         self,
         *,
-        allow_memview: bool = False,
-        buf_group: _UringBufGroup | None = None,
+        buf_group: RecvBufferPool | None = None,
     ) -> None:
-        self._allow_memview = allow_memview
         self._buf_group = buf_group
         self._resume: _RecvManyResume | None = None
         self._resume_next = False
         self._lock = threading.Lock()
         self._event = ThreadsafeEvent()
-        self._reorder = _OrderedIngestBuffer[memoryview | bytes]()
-        self._ready: deque[tuple[int, memoryview | bytes | None]] = deque()
+        self._reorder = _OrderedIngestBuffer[memoryview]()
+        self._ready: deque[tuple[int, memoryview | None]] = deque()
         self._stream_done = False
         self._stream_error: BaseException | None = None
         self._stream: ContinuousOperation[_RecvManyResult] | None = None
@@ -360,8 +419,7 @@ class _RecvGenBuffer:
         with self._lock:
             if index == RECV_MANY_BUFFER_PRESSURE:
                 self._resume = cast(_RecvManyResume, data)
-                if self._allow_memview:
-                    self._ready.appendleft((RECV_MANY_BUFFER_PRESSURE, None))
+                self._ready.appendleft((RECV_MANY_BUFFER_PRESSURE, None))
                 notify = True
             else:
                 notify = self._ingest(index, cast(memoryview, data))
@@ -374,33 +432,19 @@ class _RecvGenBuffer:
             self._ready.extend(ready)
         return bool(ready)
 
-    def _required_free_slots(self) -> int:
-        if self._buf_group is None:
-            return 0
-        # half the pool must be free; single-slot pools still need one free slot
-        return max(1, self._buf_group.buffer_count // 2)
-
     def _pool_has_room_for_resume_locked(self) -> bool:
         if self._resume is None:
             return False
         buf_group = self._buf_group
-        if buf_group is None or not hasattr(buf_group, "leased_count"):
+        if buf_group is None:
             return not self._ready and not self._reorder.has_pending()
-        free_slots = buf_group.buffer_count - buf_group.leased_count
-        return free_slots >= self._required_free_slots()
+        # half the pool must be free; single-slot pools still need one free slot
+        required_free = max(1, buf_group.buffer_count // 2)
+        return buf_group.buffer_count - buf_group.leased_count >= required_free
 
     def _maybe_arm_resume_locked(self) -> None:
         if self._pool_has_room_for_resume_locked():
             self._resume_next = True
-
-    def _release_dequeued_chunk(self, chunk: memoryview | bytes | None) -> memoryview | bytes | None:
-        if chunk is None or self._allow_memview or type(chunk) is not memoryview:
-            return chunk
-        released = bytes(chunk)
-        release = getattr(self._buf_group, "note_chunk_released", None)
-        if release is not None:
-            release()
-        return released
 
     def _take_pending_resume_locked(self) -> _RecvManyResume | None:
         if not self._resume_next or self._resume is None:
@@ -410,7 +454,7 @@ class _RecvGenBuffer:
         self._resume_next = False
         return resume_fn
 
-    def take_next(self) -> tuple[int, memoryview | bytes | None] | None:
+    def take_next(self) -> tuple[int, memoryview | None] | None:
         while True:
             resume_fn: _RecvManyResume | None = None
             wait = False
@@ -422,12 +466,11 @@ class _RecvGenBuffer:
                 if self._ready:
                     index, chunk = self._ready.popleft()
                     if index == RECV_MANY_BUFFER_PRESSURE:
-                        result: tuple[int, memoryview | bytes | None] | None = (RECV_MANY_BUFFER_PRESSURE, None)
+                        result: tuple[int, memoryview | None] | None = (RECV_MANY_BUFFER_PRESSURE, None)
                     elif not chunk:
                         self._stream_done = True
                         result = None
                     else:
-                        chunk = self._release_dequeued_chunk(chunk)
                         if self._pool_has_room_for_resume_locked():
                             self._resume_next = True
                         result = (index, chunk)
@@ -514,11 +557,11 @@ class ProactorBase:
         sock: socket.socket,
         callback: _RecvManyCallback,
         *,
-        buf_group: _UringBufGroup | None = None,
+        buf_group: RecvBufferPool | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         raise NotImplementedError
 
-    def _create_recv_many_buf_group(self, buffer_size: int, buffer_count: int) -> _UringBufGroup | None:
+    def _create_recv_many_buf_group(self, buffer_size: int, buffer_count: int) -> RecvBufferPool | None:
         return None
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
@@ -592,54 +635,31 @@ class ProactorBase:
         stream.add_done_callback(on_done)
         return operation
 
-    @overload
     def recvgen(
         self,
         sock: socket.socket,
         *,
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
-        buf_group: _UringBufGroup | None = None,
-        allow_memview: Literal[False] = False,
-    ) -> Iterator[tuple[int, bytes]]: ...
-
-    @overload
-    def recvgen(
-        self,
-        sock: socket.socket,
-        *,
-        buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
-        buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
-        buf_group: _UringBufGroup | None = None,
-        allow_memview: Literal[True],
-    ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
-
-    def recvgen(
-        self,
-        sock: socket.socket,
-        *,
-        buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
-        buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
-        buf_group: _UringBufGroup | None = None,
-        allow_memview: bool = False,
-    ) -> Iterator[tuple[int, memoryview | bytes | None]]:
+        buf_group: RecvBufferPool | None = None,
+    ) -> Iterator[tuple[int, memoryview] | tuple[Literal[-1], None]]:
         """Incrementally receive byte chunks until EOF as a blocking generator.
 
         Each ``recv_many`` chunk is reordered into stream-index order before it
-        is yielded. By default each chunk is copied to ``bytes`` when dequeued
-        so borrowed kernel views are released promptly.
+        is yielded as a read-only ``memoryview``. Copy with ``bytes(data)`` when
+        owned storage is required past the current iteration step.
 
-        On ``UringProactor``, ``recvgen`` owns a dedicated provided-buffer pool
-        sized by ``buffer_size`` and ``buffer_count`` (defaults: 16 KiB x 8).
+        ``recvgen`` owns a dedicated provided-buffer pool sized by
+        ``buffer_size`` and ``buffer_count`` (defaults: 16 KiB x 8).
         When the pool is full, multishot receive stays paused until at least
         half the ``BufGroup`` slots are free (never less than one). ``resume()``
         from the pressure message runs on the following ``take_next()`` once that
         threshold is met.
 
-        With ``allow_memview=True``, chunks may be yielded as borrowed
-        ``memoryview`` objects and ``(RECV_MANY_BUFFER_PRESSURE, None)`` may be
-        yielded when the provided-buffer pool is exhausted. Consumers must
-        release every ``memoryview`` they still hold before more data arrives.
+        ``(RECV_MANY_BUFFER_PRESSURE, None)`` is yielded when the
+        provided-buffer pool is exhausted. Consumers should drop every receive
+        ``memoryview`` they still hold when that token appears and avoid keeping
+        more views than needed between reads.
 
         The generator must be consumed from a scheduler tealet so
         ``ThreadsafeEvent`` waits can block cooperatively.
@@ -648,7 +668,7 @@ class ProactorBase:
         recv_many_group = buf_group
         if recv_many_group is None:
             recv_many_group = self._create_recv_many_buf_group(buffer_size, buffer_count)
-        buffer = _RecvGenBuffer(allow_memview=allow_memview, buf_group=recv_many_group)
+        buffer = _RecvGenBuffer(buf_group=recv_many_group)
         stream = self.recv_many(sock, buffer.on_result, buf_group=recv_many_group)
         buffer.attach_stream(stream)
         try:
@@ -840,6 +860,12 @@ class _ContinuousStepResult:
 
 
 @dataclass
+class _SelectorRecvManyState:
+    paused: bool = False
+    pressure_emitted: bool = False
+
+
+@dataclass
 class _FdEntry:
     reader: Operation[Any] | ContinuousOperation[Any] | None = None
     writer: Operation[Any] | ContinuousOperation[Any] | None = None
@@ -934,6 +960,35 @@ class SelectorProactor(ProactorBase):
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
         self._selector.register(self._wakeup_reader.fileno(), selectors.EVENT_READ, None)
+        self._recv_many_buf_group: _SelectorBufGroup | None = None
+
+    def create_buf_group(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
+        """Create a synthetic provided-buffer pool for ``recv_many`` / ``recvgen``."""
+
+        return _SelectorBufGroup(buffer_size, buffer_count)
+
+    def _get_recv_many_buf_group(self) -> _SelectorBufGroup:
+        buf_group = self._recv_many_buf_group
+        if buf_group is None:
+            buf_group = self.create_buf_group(_DEFAULT_RECVGEN_BUFFER_SIZE, _DEFAULT_RECVGEN_BUFFER_COUNT)
+            self._recv_many_buf_group = buf_group
+        return buf_group
+
+    def _create_recv_many_buf_group(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
+        return self.create_buf_group(buffer_size, buffer_count)
+
+    def _selector_recv_many_resume(
+        self,
+        operation: ContinuousOperation[_RecvManyResult],
+        state: _SelectorRecvManyState,
+    ) -> _RecvManyResume:
+        def resume() -> None:
+            if operation.done():
+                return
+            state.paused = False
+            self.break_wait()
+
+        return resume
 
     def has_pending_operations(self) -> bool:
         """Return True if operations are waiting for backend completion."""
@@ -1190,15 +1245,18 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         callback: _RecvManyCallback,
         *,
-        buf_group: _UringBufGroup | None = None,
+        buf_group: RecvBufferPool | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start receiving byte chunks until EOF, cancellation, or failure.
 
         `callback` may run on any backend worker thread. Each result is an
-        ordinal `(index, data)` pair with read-only `data` as a `memoryview`;
-        EOF emits a final empty view before completing the continuous operation.
-        Chunk sizes follow the kernel; this implementation reads up to 8 KiB
-        per ``recv()`` call. ``buf_group`` is ignored on the selector backend.
+        ordinal `(index, data)` pair with read-only `data` as a leased
+        ``memoryview``; EOF emits a final empty view before completing the
+        continuous operation. Chunk sizes follow the kernel; this implementation
+        reads up to 8 KiB per ``recv()`` call. When the synthetic
+        ``buf_group`` pool is exhausted, the callback also receives
+        ``(RECV_MANY_BUFFER_PRESSURE, resume)``; call ``resume()`` after
+        dropping held views to re-arm the next read.
         """
 
         operation = ContinuousOperation[_RecvManyResult](
@@ -1209,21 +1267,57 @@ class SelectorProactor(ProactorBase):
         )
         sequence = 0
 
+        # pre-3.12: no __release_buffer__, so leased views cannot return slots
+        # automatically; keep the legacy drain loop and ignore buf_group pressure.
+        if not _supports_release_buffer():
+            def step_unpaced() -> _ContinuousStepResult:
+                nonlocal sequence
+                progressed = False
+                while True:
+                    try:
+                        data = sock.recv(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
+                    except (BlockingIOError, InterruptedError):
+                        return _ContinuousStepResult(progressed=progressed)
+                    if not data:
+                        operation._emit_result((sequence, memoryview(b"")))
+                        sequence += 1
+                        return _ContinuousStepResult(progressed=True, done=True)
+                    operation._emit_result((sequence, memoryview(data)))
+                    sequence += 1
+                    progressed = True
+
+            self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step_unpaced)
+            return operation
+
+        # paced path: one chunk per step; pool exhaustion yields RECV_MANY_BUFFER_PRESSURE.
+        resolved_group = cast(_SelectorBufGroup, buf_group if buf_group is not None else self._get_recv_many_buf_group())
+        state = _SelectorRecvManyState()
+
         def step() -> _ContinuousStepResult:
             nonlocal sequence
-            progressed = False
-            while True:
-                try:
-                    data = sock.recv(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
-                except (BlockingIOError, InterruptedError):
-                    return _ContinuousStepResult(progressed=progressed)
-                if not data:
-                    operation._emit_result((sequence, memoryview(b"")))
-                    sequence += 1
-                    return _ContinuousStepResult(progressed=True, done=True)
-                operation._emit_result((sequence, memoryview(data)))
+            if state.paused:
+                return _ContinuousStepResult(progressed=False)
+            if resolved_group.leased_count >= resolved_group.buffer_count:
+                if not state.pressure_emitted:
+                    state.pressure_emitted = True
+                    state.paused = True
+                    operation._emit_result(
+                        (RECV_MANY_BUFFER_PRESSURE, self._selector_recv_many_resume(operation, state))
+                    )
+                    return _ContinuousStepResult(progressed=True)
+                return _ContinuousStepResult(progressed=False)
+            try:
+                data = sock.recv(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
+            except (BlockingIOError, InterruptedError):
+                return _ContinuousStepResult(progressed=False)
+            if not data:
+                operation._emit_result((sequence, memoryview(b"")))
                 sequence += 1
-                progressed = True
+                return _ContinuousStepResult(progressed=True, done=True)
+            operation._emit_result((sequence, _leased_selector_memoryview(data, resolved_group)))
+            sequence += 1
+            state.pressure_emitted = False
+            return _ContinuousStepResult(progressed=True)
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
         return operation
@@ -2132,7 +2226,7 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         callback: _RecvManyCallback,
         *,
-        buf_group: _UringBufGroup | None = None,
+        buf_group: RecvBufferPool | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start a continuous receive operation that completes on EOF.
 
@@ -2577,37 +2671,14 @@ class ProactorScheduler(BaseScheduler):
 
         return self.wait_operation(self._proactor.recvall(sock, progress))
 
-    @overload
     def sock_recvgen(
         self,
         sock: socket.socket,
         *,
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
-        buf_group: _UringBufGroup | None = None,
-        allow_memview: Literal[False] = False,
-    ) -> Iterator[tuple[int, bytes]]: ...
-
-    @overload
-    def sock_recvgen(
-        self,
-        sock: socket.socket,
-        *,
-        buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
-        buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
-        buf_group: _UringBufGroup | None = None,
-        allow_memview: Literal[True],
-    ) -> Iterator[tuple[int, memoryview | bytes | None]]: ...
-
-    def sock_recvgen(
-        self,
-        sock: socket.socket,
-        *,
-        buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
-        buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
-        buf_group: _UringBufGroup | None = None,
-        allow_memview: bool = False,
-    ) -> Iterator[tuple[int, memoryview | bytes | None]]:
+        buf_group: RecvBufferPool | None = None,
+    ) -> Iterator[tuple[int, memoryview] | tuple[Literal[-1], None]]:
         """Incrementally receive byte chunks until EOF as a blocking generator."""
 
         return self._proactor.recvgen(
@@ -2615,7 +2686,6 @@ class ProactorScheduler(BaseScheduler):
             buffer_size=buffer_size,
             buffer_count=buffer_count,
             buf_group=buf_group,
-            allow_memview=allow_memview,
         )
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:

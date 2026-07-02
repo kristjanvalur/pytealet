@@ -165,10 +165,9 @@ receive and continues stream indices from the failed completion's `sequence`.
 
 `recvall(...)` keeps chunk views until pressure arrives, then copies every held
 chunk to `bytes` so slots return to the shared pool before receive resumes.
-`recvgen(...)` / `sock_recvgen(...)` yield owned `bytes` chunks by default,
-copying on dequeue so leased views are released promptly. Pass
-`allow_memview=True` to yield borrowed `memoryview` chunks and
-`(RECV_MANY_BUFFER_PRESSURE, None)` pressure tokens instead.
+`recvgen(...)` / `sock_recvgen(...)` yield read-only `memoryview` chunks and
+`(RECV_MANY_BUFFER_PRESSURE, None)` pressure tokens; copy with `bytes(data)`
+when owned storage is required past the current iteration step.
 `SelectorProactor.recv_many` still wraps ordinary `recv()` data in short-lived
 views (up to 8 KiB per read) and does not use provided buffers.
 

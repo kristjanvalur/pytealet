@@ -8,9 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `recvgen(..., allow_memview=True)` and matching `sock_recvgen(...)` option to
-  yield borrowed `memoryview` chunks and `(RECV_MANY_BUFFER_PRESSURE, None)`
-  pressure tokens for zero-copy consumers that release held views explicitly.
 - `recvgen(sock)` and `ProactorScheduler.sock_recvgen(sock)` as a
   tealet-blocking incremental consumer of `recv_many`, yielding stream-ordered
   `(index, data)` chunks with the same provided-buffer pressure policy as
@@ -35,10 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
-- `recvgen` / `sock_recvgen` now yield `(index, bytes)` by default, copying
-  chunks on dequeue (and flushing queued views on provided-buffer pressure) so
-  consumers do not hold borrowed kernel views; opt in to
-  `allow_memview=True` for borrowed views and pressure tokens.
+- `recvgen` / `sock_recvgen` always yield `(index, memoryview)` chunks and
+  `(RECV_MANY_BUFFER_PRESSURE, None)` pressure tokens; consumers release held
+  views between reads so leased kernel buffers can return to the pool.
 - Removed the `n` chunk-size argument from `recv_many`, `recvall`, `recvgen`,
   `sock_recvall`, and `sock_recvgen`; chunk sizes are backend-defined
   (`SelectorProactor` reads up to 8 KiB per `recv()`, `UringProactor` uses the
