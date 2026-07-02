@@ -52,6 +52,7 @@ int UringApiRing_release_buf_group_id(UringApiRing *ring, unsigned short group_i
         new_capacity = ring->free_buf_group_id_capacity == 0 ? 16 : ring->free_buf_group_id_capacity * 2;
         new_ids = (unsigned short *)PyMem_Realloc(ring->free_buf_group_ids, new_capacity * sizeof(unsigned short));
         if (!new_ids) {
+            /* Caller must treat this as OOM; the group_id cannot be queued. */
             return -1;
         }
         ring->free_buf_group_ids = new_ids;
@@ -91,16 +92,25 @@ static int UringApiBufGroup_traverse(UringApiBufGroup *self, visitproc visit, vo
 
 static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
     unsigned short group_id;
+    UringApiRing *ring;
 
-    if (!self->ring_buffer || !self->ring || !self->ring->initialized) {
+    ring = self->ring;
+    group_id = self->group_id;
+    if (!ring || !ring->initialized || group_id == 0) {
+        self->ring_buffer = NULL;
         return;
     }
-    group_id = self->group_id;
-    Py_BEGIN_CRITICAL_SECTION(self->ring);
-    (void)io_uring_free_buf_ring(&self->ring->ring, self->ring_buffer, self->buffer_count, group_id);
-    (void)UringApiRing_release_buf_group_id(self->ring, group_id);
+
+    Py_BEGIN_CRITICAL_SECTION(ring);
+    if (self->ring_buffer) {
+        (void)io_uring_free_buf_ring(&ring->ring, self->ring_buffer, self->buffer_count, group_id);
+        self->ring_buffer = NULL;
+    }
+    if (UringApiRing_release_buf_group_id(ring, group_id) < 0) {
+        Py_FatalError("failed to recycle buffer group ID after freelist allocation failed");
+    }
+    self->group_id = 0;
     Py_END_CRITICAL_SECTION();
-    self->ring_buffer = NULL;
 }
 
 static int UringApiBufGroup_clear(UringApiBufGroup *self) {
@@ -169,10 +179,17 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
     self->ring_buffer = io_uring_setup_buf_ring(&ring->ring, buffer_count, self->group_id, 0, &ret);
     if (!self->ring_buffer) {
         int errnum = normalize_ret_errno(ret);
+
+        /* Caller holds the ring critical section; release the ID before DECREF. */
+        if (UringApiRing_release_buf_group_id(ring, self->group_id) < 0) {
+            self->group_id = 0;
+            Py_DECREF(self);
+            return PyErr_NoMemory();
+        }
+        self->group_id = 0;
         Py_DECREF(self);
         errno = errnum;
-        PyErr_SetFromErrno(PyExc_OSError);
-        return NULL;
+        return PyErr_SetFromErrno(PyExc_OSError);
     }
 
     for (index = 0; index < buffer_count; index++) {
