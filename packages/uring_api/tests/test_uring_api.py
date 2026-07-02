@@ -1472,6 +1472,25 @@ def test_buf_group_id_survives_many_create_release_cycles():
         assert reused.group_id in seen_ids
 
 
+def test_buf_group_id_tail_shrink_reuses_highest_slot_without_new_id():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        groups = [ring.create_buf_group(16, 4) for _ in range(4)]
+        ids = [group.group_id for group in groups]
+        assert ids == [1, 2, 3, 4]
+
+        del groups[3]
+        gc.collect()
+        tail_reused = ring.create_buf_group(16, 4)
+        assert tail_reused.group_id == 4
+
+        del groups[2]
+        gc.collect()
+        middle_reused = ring.create_buf_group(16, 4)
+        assert middle_reused.group_id == 3
+
+
 def test_buf_group_rejects_use_on_different_ring():
     require_uring()
 

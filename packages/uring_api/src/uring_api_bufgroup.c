@@ -24,11 +24,28 @@ unsigned short UringApiRing_alloc_buf_group_id(UringApiRing *ring) {
     return ring->next_buf_group++;
 }
 
+static void UringApiRing_shrink_free_buf_group_tail(UringApiRing *ring) {
+    while (ring->free_buf_group_id_count > 0) {
+        unsigned short tail_id = ring->free_buf_group_ids[ring->free_buf_group_id_count - 1];
+
+        if (tail_id != (unsigned short)(ring->next_buf_group - 1)) {
+            break;
+        }
+        ring->free_buf_group_id_count--;
+        ring->next_buf_group--;
+    }
+}
+
 int UringApiRing_release_buf_group_id(UringApiRing *ring, unsigned short group_id) {
     unsigned int new_capacity;
     unsigned short *new_ids;
 
     if (group_id == 0) {
+        return 0;
+    }
+    if (group_id == (unsigned short)(ring->next_buf_group - 1)) {
+        ring->next_buf_group--;
+        UringApiRing_shrink_free_buf_group_tail(ring);
         return 0;
     }
     if (ring->free_buf_group_id_count >= ring->free_buf_group_id_capacity) {
