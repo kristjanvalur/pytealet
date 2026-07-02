@@ -96,10 +96,21 @@ same descriptor.
 - `submit_statx(dfd, path, flags, mask, buf)` fills a caller-provided 256-byte
   statx buffer asynchronously.
 
-For fd-only metadata, pass an empty path with `AT_EMPTY_PATH` in `flags`. Read
-`stx_size` from the completed buffer with `statx_st_size(buf)` only after
-`completion.res == 0`, or read `STATX_STX_SIZE_OFFSET` manually. Path-based
+For fd-only metadata, pass an empty path with `AT_EMPTY_PATH` in `flags`. Path
 lookups use `dfd=AT_FDCWD` and a normal filesystem path.
+
+After `completion.res == 0`, parse the submit buffer with the pure-Python
+helpers (payload stays in the caller buffer; `Completion` stays generic):
+
+- **`statx_st_size(buf)`** — the common file-I/O case (append EOF, `SEEK_END`,
+  sendfile bounds). Submit with `mask=STATX_SIZE` when only the byte length is
+  needed.
+- **`statx_to_stat_result(buf)`** — full `os.stat_result` when you submitted
+  `STATX_BASIC_STATS` (or a superset).
+- **`statx_mask(buf)`** — inspect which fields the kernel wrote.
+
+Lower-level clients can still read `STATX_STX_SIZE_OFFSET` and the other
+`STATX_STX_*_OFFSET` constants manually.
 
 Provided-buffer receive uses a caller-owned ring created with
 `create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or

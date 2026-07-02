@@ -2430,6 +2430,60 @@ def test_statx_st_size_rejects_buffer_without_size_mask():
         uring_api.statx_st_size(buf)
 
 
+def test_statx_mask_reads_first_field():
+    buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+    buf[0:4] = (uring_api.STATX_SIZE | uring_api.STATX_BASIC_STATS).to_bytes(4, "little")
+    assert uring_api.statx_mask(buf) == (uring_api.STATX_SIZE | uring_api.STATX_BASIC_STATS)
+
+
+def test_statx_to_stat_result_rejects_buffer_without_basic_stats_mask():
+    buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+    buf[0:4] = uring_api.STATX_SIZE.to_bytes(4, "little")
+    buf[uring_api.STATX_STX_SIZE_OFFSET : uring_api.STATX_STX_SIZE_OFFSET + 8] = (9).to_bytes(8, "little")
+    assert uring_api.statx_st_size(buf) == 9
+    with pytest.raises(ValueError, match="STATX_BASIC_STATS"):
+        uring_api.statx_to_stat_result(buf)
+
+
+def test_statx_to_stat_result_matches_os_fstat():
+    require_uring()
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        with open(path, "wb") as handle:
+            handle.write(b"hello")
+        expected = os.stat(path)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+            with uring_api.Ring() as ring:
+                handle = ring.submit_statx(
+                    fd,
+                    "",
+                    uring_api.AT_EMPTY_PATH,
+                    uring_api.STATX_BASIC_STATS,
+                    buf,
+                )
+                completion = ring.wait(1.0)
+            assert completion is handle
+            assert completion.res == 0
+            parsed = uring_api.statx_to_stat_result(buf)
+            assert parsed.st_size == expected.st_size
+            assert parsed.st_mode == expected.st_mode
+            assert parsed.st_ino == expected.st_ino
+            assert parsed.st_uid == expected.st_uid
+            assert parsed.st_gid == expected.st_gid
+            assert parsed.st_mtime == int(expected.st_mtime)
+            assert parsed.st_atime == int(expected.st_atime)
+            assert parsed.st_ctime == int(expected.st_ctime)
+            assert uring_api.statx_st_size(buf) == expected.st_size
+        finally:
+            os.close(fd)
+    finally:
+        os.unlink(path)
+
+
 def test_ring_openat_read_write_round_trip_when_available():
     require_uring()
 

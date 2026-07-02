@@ -331,23 +331,25 @@ class CompletionKind(enum.IntEnum):
     STATX = COMPLETION_KIND_STATX
 
 
-def statx_st_size(buf: Any) -> int:
-    """Read ``stx_size`` from a completed statx buffer.
-
-    Call only after the statx completion reports ``res == 0``. The buffer must
-    be at least ``STATX_BUFFER_SIZE`` bytes and should have been filled by a
-    submit that requested ``STATX_SIZE`` in the mask.
-    """
-
-    view = memoryview(buf)
-    if len(view) < STATX_BUFFER_SIZE:
-        raise ValueError("statx buffer must be at least STATX_BUFFER_SIZE bytes")
-    offset = STATX_STX_SIZE_OFFSET
-    mask = int.from_bytes(view[0:4], "little", signed=False)
-    if not (mask & STATX_SIZE):
-        raise ValueError("statx buffer does not contain STATX_SIZE fields")
-    return int.from_bytes(view[offset : offset + 8], "little", signed=False)
-
+from .statx import (  # noqa: E402
+    STATX_STX_ATIME_OFFSET,
+    STATX_STX_BLKSIZE_OFFSET,
+    STATX_STX_BLOCKS_OFFSET,
+    STATX_STX_BTIME_OFFSET,
+    STATX_STX_CTIME_OFFSET,
+    STATX_STX_RDEV_OFFSET,
+    STATX_STX_DEV_OFFSET,
+    STATX_STX_GID_OFFSET,
+    STATX_STX_INO_OFFSET,
+    STATX_STX_MASK_OFFSET,
+    STATX_STX_MODE_OFFSET,
+    STATX_STX_MTIME_OFFSET,
+    STATX_STX_NLINK_OFFSET,
+    STATX_STX_UID_OFFSET,
+    statx_mask,
+    statx_st_size,
+    statx_to_stat_result,
+)
 
 DEFAULT_ENTRIES = 8
 DEFAULT_FLAGS = 0
@@ -398,7 +400,23 @@ __all__ = [
     "STATX_SIZE",
     "STATX_BUFFER_SIZE",
     "STATX_STX_SIZE_OFFSET",
+    "STATX_STX_MASK_OFFSET",
+    "STATX_STX_BLKSIZE_OFFSET",
+    "STATX_STX_NLINK_OFFSET",
+    "STATX_STX_UID_OFFSET",
+    "STATX_STX_GID_OFFSET",
+    "STATX_STX_MODE_OFFSET",
+    "STATX_STX_INO_OFFSET",
+    "STATX_STX_BLOCKS_OFFSET",
+    "STATX_STX_ATIME_OFFSET",
+    "STATX_STX_BTIME_OFFSET",
+    "STATX_STX_CTIME_OFFSET",
+    "STATX_STX_MTIME_OFFSET",
+    "STATX_STX_RDEV_OFFSET",
+    "STATX_STX_DEV_OFFSET",
+    "statx_mask",
     "statx_st_size",
+    "statx_to_stat_result",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
     "COMPLETION_KIND_SEND_ZC",
