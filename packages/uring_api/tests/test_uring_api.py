@@ -1419,6 +1419,59 @@ def test_buf_group_tracks_leased_wrapper_count():
         assert buf_group.leased_count == 0
 
 
+def test_buf_group_id_recycles_after_release():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        first = ring.create_buf_group(16, 4)
+        first_id = first.group_id
+        del first
+        gc.collect()
+
+        second = ring.create_buf_group(16, 4)
+        assert second.group_id == first_id
+
+
+def test_buf_group_ids_stay_unique_while_live():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        first = ring.create_buf_group(16, 4)
+        second = ring.create_buf_group(16, 4)
+        third = ring.create_buf_group(16, 4)
+        assert len({first.group_id, second.group_id, third.group_id}) == 3
+
+
+def test_buf_group_id_reuses_freed_slot_before_allocating_new():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        first = ring.create_buf_group(16, 4)
+        second = ring.create_buf_group(16, 4)
+        second_id = second.group_id
+        del second
+        gc.collect()
+
+        third = ring.create_buf_group(16, 4)
+        assert third.group_id == second_id
+        assert first.group_id != third.group_id
+
+
+def test_buf_group_id_survives_many_create_release_cycles():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        seen_ids: set[int] = set()
+        for _ in range(512):
+            buf_group = ring.create_buf_group(16, 4)
+            seen_ids.add(buf_group.group_id)
+            del buf_group
+        gc.collect()
+
+        reused = ring.create_buf_group(16, 4)
+        assert reused.group_id in seen_ids
+
+
 def test_buf_group_rejects_use_on_different_ring():
     require_uring()
 

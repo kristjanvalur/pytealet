@@ -7,6 +7,43 @@
 
 static bool buf_group_is_power_of_two(unsigned long value) { return value != 0 && (value & (value - 1)) == 0; }
 
+void UringApiRing_clear_free_buf_group_ids(UringApiRing *ring) {
+    PyMem_Free(ring->free_buf_group_ids);
+    ring->free_buf_group_ids = NULL;
+    ring->free_buf_group_id_count = 0;
+    ring->free_buf_group_id_capacity = 0;
+}
+
+unsigned short UringApiRing_alloc_buf_group_id(UringApiRing *ring) {
+    if (ring->free_buf_group_id_count > 0) {
+        return ring->free_buf_group_ids[--ring->free_buf_group_id_count];
+    }
+    if (ring->next_buf_group == 0) {
+        return 0;
+    }
+    return ring->next_buf_group++;
+}
+
+int UringApiRing_release_buf_group_id(UringApiRing *ring, unsigned short group_id) {
+    unsigned int new_capacity;
+    unsigned short *new_ids;
+
+    if (group_id == 0) {
+        return 0;
+    }
+    if (ring->free_buf_group_id_count >= ring->free_buf_group_id_capacity) {
+        new_capacity = ring->free_buf_group_id_capacity == 0 ? 16 : ring->free_buf_group_id_capacity * 2;
+        new_ids = (unsigned short *)PyMem_Realloc(ring->free_buf_group_ids, new_capacity * sizeof(unsigned short));
+        if (!new_ids) {
+            return -1;
+        }
+        ring->free_buf_group_ids = new_ids;
+        ring->free_buf_group_id_capacity = new_capacity;
+    }
+    ring->free_buf_group_ids[ring->free_buf_group_id_count++] = group_id;
+    return 0;
+}
+
 static PyObject *UringApiBufGroup_get_buffer_size(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
     return PyLong_FromUnsignedLong(self->buffer_size);
 }
@@ -36,11 +73,15 @@ static int UringApiBufGroup_traverse(UringApiBufGroup *self, visitproc visit, vo
 }
 
 static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
+    unsigned short group_id;
+
     if (!self->ring_buffer || !self->ring || !self->ring->initialized) {
         return;
     }
+    group_id = self->group_id;
     Py_BEGIN_CRITICAL_SECTION(self->ring);
-    (void)io_uring_free_buf_ring(&self->ring->ring, self->ring_buffer, self->buffer_count, self->group_id);
+    (void)io_uring_free_buf_ring(&self->ring->ring, self->ring_buffer, self->buffer_count, group_id);
+    (void)UringApiRing_release_buf_group_id(self->ring, group_id);
     Py_END_CRITICAL_SECTION();
     self->ring_buffer = NULL;
 }
@@ -101,12 +142,12 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
         return NULL;
     }
 
-    if (ring->next_buf_group == 0) {
+    self->group_id = UringApiRing_alloc_buf_group_id(ring);
+    if (self->group_id == 0) {
         Py_DECREF(self);
-        PyErr_SetString(PyExc_RuntimeError, "buffer group ID space exhausted (max 65535 groups per ring)");
+        PyErr_SetString(PyExc_RuntimeError, "buffer group ID space exhausted (max 65535 live groups per ring)");
         return NULL;
     }
-    self->group_id = ring->next_buf_group++;
     self->mask = io_uring_buf_ring_mask(buffer_count);
     self->ring_buffer = io_uring_setup_buf_ring(&ring->ring, buffer_count, self->group_id, 0, &ret);
     if (!self->ring_buffer) {
