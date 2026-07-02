@@ -200,12 +200,27 @@ copy through `read()`. File helpers require a proactor with `openat` support
 on `scheduler.proactor` for callers that need explicit flags, offsets, `dfd`, or
 metadata via `stat(path=...)` / `stat(fd=...)`.
 
+`ProactorFile.fileno()` exposes the raw OS descriptor. I/O through the handle
+uses the tracked logical offset; calling `os.read()` / `os.write()` on that fd
+directly bypasses position tracking and can desynchronise `tell()` and subsequent
+proactor reads or writes.
+
 Supported binary modes mirror the usual stdlib subset: `rb`, `wb`, `ab`, `r+b`,
 `w+b`, and `a+b` (plus `rb+` / `wb+` / `ab+` spellings). Text modes (`t`) and
-exclusive create (`x`) raise `ValueError`. Append and `seek(SEEK_END)` use
-`proactor.stat(fd=...)` to track EOF. `UringProactor` submits io_uring `statx`
-when `IORING_OP_STATX` is probed; other proactors complete `stat()` immediately
-via blocking `os.fstat()` / `os.stat()`.
+exclusive create (`x`) raise `ValueError`.
+
+Append-mode `ProactorFile` writes are positioned at the tracked logical offset,
+not via kernel append semantics, so the handle keeps an internal end-of-file flag
+(`_pos_at_eof`). While that flag is set, sequential append writes extend from the
+current `_pos` without calling `proactor.stat_fdsize()`. The flag clears after
+`seek()` (other than `seek(SEEK_END, 0)` when already at EOF) or after reads in
+update/append modes; the next append write then looks up file size again before
+writing. `seek(SEEK_END, …)` uses `stat_fdsize()` when a fresh EOF position is
+needed. Concurrent writers can still race; that was already true for stat-then-write.
+
+`UringProactor` submits io_uring `statx` / `statx_fdsize` when `IORING_OP_STATX`
+is probed; other proactors complete `stat()` / `stat_fdsize()` immediately via
+blocking `os.fstat()` / `os.stat()`.
 
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.
 Backends call `progress(total)` with the cumulative number of bytes sent as

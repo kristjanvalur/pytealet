@@ -83,14 +83,14 @@ def _stat_result_from_statx(buf: bytes | bytearray) -> os.stat_result:
     mask = struct.unpack_from("<I", buf, 0)[0]
     if not (mask & uring_api.STATX_SIZE):
         raise ValueError("statx buffer does not contain STATX_SIZE fields")
-    blksize = struct.unpack_from("<I", buf, 4)[0]
     nlink, uid, gid, mode = struct.unpack_from("<IIIH", buf, 16)
-    ino, size, blocks = struct.unpack_from("<QQQ", buf, 32)
-    atime_sec, _atime_nsec = struct.unpack_from("<qi", buf, 64)[:2]
-    ctime_sec, _ctime_nsec = struct.unpack_from("<qi", buf, 96)[:2]
-    mtime_sec, _mtime_nsec = struct.unpack_from("<qi", buf, 112)[:2]
-    rdev_major, rdev_minor, dev_major, dev_minor = struct.unpack_from("<IIII", buf, 128)
+    ino, size, _blocks = struct.unpack_from("<QQQ", buf, 32)
+    atime_sec, atime_nsec = struct.unpack_from("<qi", buf, 64)
+    ctime_sec, ctime_nsec = struct.unpack_from("<qi", buf, 96)
+    mtime_sec, mtime_nsec = struct.unpack_from("<qi", buf, 112)
+    _rdev_major, _rdev_minor, dev_major, dev_minor = struct.unpack_from("<IIII", buf, 128)
     dev = os.makedev(dev_major, dev_minor)
+    # os.stat_result accepts a 10-field sequence; extra tuple entries mis-map attributes.
     return os.stat_result(
         (
             mode,
@@ -100,15 +100,9 @@ def _stat_result_from_statx(buf: bytes | bytearray) -> os.stat_result:
             uid,
             gid,
             size,
-            atime_sec,
-            mtime_sec,
-            ctime_sec,
-            _atime_nsec,
-            _mtime_nsec,
-            _ctime_nsec,
-            blocks,
-            blksize,
-            os.makedev(rdev_major, rdev_minor),
+            atime_sec + atime_nsec / 1_000_000_000,
+            mtime_sec + mtime_nsec / 1_000_000_000,
+            ctime_sec + ctime_nsec / 1_000_000_000,
         )
     )
 
@@ -2170,7 +2164,10 @@ class UringProactor(ProactorBase):
     def _complete_uring_stat(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[os.stat_result]:
         assert entry.data is not None
         operation = cast(Operation[os.stat_result], entry.operation)
-        operation._set_result(_stat_result_from_statx(entry.data))
+        try:
+            operation._set_result(_stat_result_from_statx(entry.data))
+        except ValueError as exc:
+            operation._set_exception(exc)
         return operation
 
     def stat_fdsize(self, fd: int) -> Operation[int]:
@@ -2727,14 +2724,21 @@ class ProactorScheduler(BaseScheduler):
             fd = self.wait_operation(self._proactor.openat(path, flags, file_mode))
         except NotImplementedError as exc:
             raise NotImplementedError("scheduler file I/O requires a proactor with openat support") from exc
-        return ProactorFile(
-            self,
-            self._proactor,
-            fd,
-            path=path,
-            flags=flags,
-            append="a" in mode,
-        )
+        try:
+            return ProactorFile(
+                self,
+                self._proactor,
+                fd,
+                path=path,
+                flags=flags,
+                append="a" in mode,
+            )
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
 
     def _has_pending_driver_work(self) -> bool:
         return self._proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)

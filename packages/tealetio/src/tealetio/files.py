@@ -52,10 +52,15 @@ class ProactorFile(io.RawIOBase):
     ``io.BufferedReader`` can fill caller buffers without an extra copy through
     ``read()``.
 
-    Append mode tracks whether ``_pos`` is at end-of-file so writes can skip a
-    size lookup when the handle has only extended the file from the tail.
-    Concurrent writers can still race; that was already true when every append
-    write stat-then-wrote.
+    Append mode tracks ``_pos_at_eof`` so writes can skip ``stat_fdsize()`` while
+    the handle has only extended the file from the tail. ``seek()`` (except
+    ``seek(SEEK_END, 0)`` when already at EOF) and reads clear the flag; the next
+    append write looks up file size again. Concurrent writers can still race.
+
+    ``fileno()`` returns the raw OS descriptor. Reads and writes through this
+    handle use the tracked logical offset; direct ``os.read`` / ``os.write`` on
+    that fd bypass position tracking and can desynchronise ``tell()`` and later
+    proactor I/O.
     """
 
     def __init__(
@@ -97,6 +102,8 @@ class ProactorFile(io.RawIOBase):
         return not self.closed
 
     def fileno(self) -> int:
+        """Return the OS fd; direct syscalls on it bypass logical position tracking."""
+
         self._checkClosed()
         return self._fd
 
