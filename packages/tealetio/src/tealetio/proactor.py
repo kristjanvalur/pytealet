@@ -67,6 +67,7 @@ RECV_MANY_BUFFER_PRESSURE = -1
 _RecvManyResume = Callable[[], None]
 _RecvManyResult = tuple[int, memoryview | _RecvManyResume]
 _RecvManyCallback = Callable[[_RecvManyResult], object]
+_RecvGenYield: TypeAlias = tuple[int, memoryview] | tuple[Literal[-1], None]
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
 
@@ -303,7 +304,7 @@ class Proactor(Protocol):
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: RecvBufferPool | None = None,
-    ) -> Iterator[tuple[int, memoryview] | tuple[Literal[-1], None]]: ...
+    ) -> Iterator[_RecvGenYield]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
@@ -456,10 +457,11 @@ class _RecvGenBuffer:
         self._resume_next = False
         return resume_fn
 
-    def take_next(self) -> tuple[int, memoryview | None] | None:
+    def take_next(self) -> _RecvGenYield | None:
         while True:
             resume_fn: _RecvManyResume | None = None
             wait = False
+            result: _RecvGenYield | None
             with self._lock:
                 if self._stream_error is not None:
                     raise self._stream_error
@@ -468,14 +470,14 @@ class _RecvGenBuffer:
                 if self._ready:
                     index, chunk = self._ready.popleft()
                     if index == RECV_MANY_BUFFER_PRESSURE:
-                        result: tuple[int, memoryview | None] | None = (RECV_MANY_BUFFER_PRESSURE, None)
+                        result = (RECV_MANY_BUFFER_PRESSURE, None)
                     elif not chunk:
                         self._stream_done = True
                         result = None
                     else:
                         if self._pool_has_room_for_resume_locked():
                             self._resume_next = True
-                        result = (index, chunk)
+                        result = (index, cast(memoryview, chunk))
                 elif self._stream_done:
                     result = None
                 else:
@@ -644,7 +646,7 @@ class ProactorBase:
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: RecvBufferPool | None = None,
-    ) -> Iterator[tuple[int, memoryview] | tuple[Literal[-1], None]]:
+    ) -> Iterator[_RecvGenYield]:
         """Incrementally receive byte chunks until EOF as a blocking generator.
 
         Each ``recv_many`` chunk is reordered into stream-index order before it
@@ -2293,17 +2295,20 @@ class UringProactor(ProactorBase):
             result_callback=callback,
         )
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
-            resolved_group = buf_group if buf_group is not None else self._get_recv_many_buf_group()
+            if buf_group is not None:
+                uring_group = cast(_UringBufGroup, buf_group)
+            else:
+                uring_group = self._get_recv_many_buf_group()
             # provided-buffer multishot: leased BufViews, ENOBUFS resume callback path.
             entry = _UringEntry(
                 operation=operation,
                 complete=UringProactor._deliver_uring_recv_many,
                 multishot_leg=_MultishotLegState(),
-                buf_group=resolved_group,
+                buf_group=uring_group,
             )
 
             def submit_recv_many() -> _UringCompletion:
-                return self._ring.submit_recv_multishot(sock.fileno(), resolved_group, entry)
+                return self._ring.submit_recv_multishot(sock.fileno(), uring_group, entry)
 
             entry.resubmit = submit_recv_many
             self._submit_uring_entry(entry, submit_recv_many)
@@ -2713,7 +2718,7 @@ class ProactorScheduler(BaseScheduler):
         buffer_size: int = _DEFAULT_RECVGEN_BUFFER_SIZE,
         buffer_count: int = _DEFAULT_RECVGEN_BUFFER_COUNT,
         buf_group: RecvBufferPool | None = None,
-    ) -> Iterator[tuple[int, memoryview] | tuple[Literal[-1], None]]:
+    ) -> Iterator[_RecvGenYield]:
         """Incrementally receive byte chunks until EOF as a blocking generator."""
 
         return self._proactor.recvgen(
