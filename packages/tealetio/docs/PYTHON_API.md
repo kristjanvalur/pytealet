@@ -191,6 +191,42 @@ direction bits are set.
 same callback and args, one combined selector wakeup schedules a single call.
 Register distinct callbacks when you need separate per-direction invocations.
 
+`ProactorScheduler.open(path, mode="rb")` returns an unbuffered `ProactorFile`
+(`io.RawIOBase`) for positioned binary I/O through the proactor backend. The
+handle tracks a logical file position and uses `read_into()` for in-buffer reads,
+so `io.BufferedReader` and `io.TextIOWrapper` can stack on top without an extra
+copy through `read()`. File helpers require a proactor with `openat` support
+(`UringProactor` today). Low-level `openat` / positioned `read` / `write` remain
+on `scheduler.proactor` for callers that need explicit flags, offsets, `dfd`, or
+metadata via `stat(path=...)` / `stat(fd=...)`.
+
+`ProactorFile.fileno()` exposes the raw OS descriptor. I/O through the handle
+uses the tracked logical offset; calling `os.read()` / `os.write()` on that fd
+directly bypasses position tracking and can desynchronise `tell()` and subsequent
+proactor reads or writes.
+
+Supported binary modes mirror the usual stdlib subset: `rb`, `wb`, `ab`, `r+b`,
+`w+b`, and `a+b` (plus `rb+` / `wb+` / `ab+` spellings). Text modes (`t`) and
+exclusive create (`x`) raise `ValueError`.
+
+Append-mode opens still set `O_APPEND` on the fd (stdlib parity). `ProactorFile`
+also tracks a logical offset in userspace and passes it to positioned proactor
+writes. On Linux, kernel append handling may still redirect some writes to the
+true end-of-file even when an explicit offset is supplied, which can diverge from
+`_pos` when concurrent writers extend the file while `_pos_at_eof` is set and
+sequential append writes skip `stat_fdsize()`. The handle keeps `_pos_at_eof` to
+avoid redundant size lookups: while set, sequential append writes extend from
+`_pos`; the flag clears after `seek()` (other than `seek(SEEK_END, 0)` when
+already at EOF) or after reads in update/append modes, and the next append write
+looks up file size again. `seek(SEEK_END, …)` uses `stat_fdsize()` when a fresh
+EOF position is needed.
+
+`UringProactor` submits io_uring `statx` / `statx_fdsize` when `IORING_OP_STATX`
+is probed; other proactors complete `stat()` / `stat_fdsize()` immediately via
+blocking `os.fstat()` / `os.stat()`. When `statx_fdsize` completes without a
+parsed size, the uring completion path falls back to a rare blocking `os.fstat()`
+on the completion thread before delivering the operation result.
+
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.
 Backends call `progress(total)` with the cumulative number of bytes sent as
 progress becomes observable. Some backends may only expose a single completion

@@ -5,6 +5,7 @@ import errno
 import os
 import selectors
 import socket
+import struct
 import sys
 import threading
 import time
@@ -17,6 +18,7 @@ from typing import Any, Generic, Literal, NoReturn, Protocol, TypeAlias, TypeVar
 import uring_api
 
 from . import compat
+from .files import ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, ContinuousStepResult, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
@@ -44,6 +46,7 @@ __all__ = [
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",
     "UringProactor",
+    "ProactorFile",
     "RECV_MANY_BUFFER_PRESSURE",
 ]
 
@@ -70,6 +73,38 @@ _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "S
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
 
 T_Cargo = TypeVar("T_Cargo")
+
+
+def _stat_result_from_statx(buf: bytes | bytearray | memoryview) -> os.stat_result:
+    """Build ``os.stat_result`` from a completed io_uring statx buffer."""
+
+    if len(buf) < uring_api.STATX_BUFFER_SIZE:
+        raise ValueError("statx buffer must be at least STATX_BUFFER_SIZE bytes")
+    mask = struct.unpack_from("<I", buf, 0)[0]
+    if not (mask & uring_api.STATX_SIZE):
+        raise ValueError("statx buffer does not contain STATX_SIZE fields")
+    nlink, uid, gid, mode = struct.unpack_from("<IIIH", buf, 16)
+    ino, size, _blocks = struct.unpack_from("<QQQ", buf, 32)
+    atime_sec, atime_nsec = struct.unpack_from("<qi", buf, 64)
+    ctime_sec, ctime_nsec = struct.unpack_from("<qi", buf, 96)
+    mtime_sec, mtime_nsec = struct.unpack_from("<qi", buf, 112)
+    _rdev_major, _rdev_minor, dev_major, dev_minor = struct.unpack_from("<IIII", buf, 128)
+    dev = os.makedev(dev_major, dev_minor)
+    # os.stat_result accepts a 10-field sequence; extra tuple entries mis-map attributes.
+    return os.stat_result(
+        (
+            mode,
+            ino,
+            dev,
+            nlink,
+            uid,
+            gid,
+            size,
+            atime_sec + atime_nsec / 1_000_000_000,
+            mtime_sec + mtime_nsec / 1_000_000_000,
+            ctime_sec + ctime_nsec / 1_000_000_000,
+        )
+    )
 
 
 class _OrderedIngestBuffer(Generic[T_Cargo]):
@@ -281,6 +316,10 @@ class Proactor(Protocol):
     def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]: ...
 
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]: ...
+
+    def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]: ...
+
+    def stat_fdsize(self, fd: int) -> Operation[int]: ...
 
     def recv_many(
         self,
@@ -535,6 +574,38 @@ class ProactorBase:
 
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
         raise NotImplementedError
+
+    def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
+        """Return file metadata, completing synchronously via ``os.stat`` / ``os.fstat``."""
+
+        self._check_open()
+        if fd < 0 and not path:
+            raise ValueError("stat() requires fd >= 0 or a non-empty path")
+        operation = Operation[os.stat_result](
+            kind="stat",
+            fileobj=fd if fd >= 0 else path,
+        )
+        try:
+            if fd >= 0:
+                operation._set_result(os.fstat(fd))
+            else:
+                operation._set_result(os.stat(path))
+        except OSError as exc:
+            operation._set_exception(exc)
+        return operation
+
+    def stat_fdsize(self, fd: int) -> Operation[int]:
+        """Return the byte length of an open file descriptor."""
+
+        self._check_open()
+        if fd < 0:
+            raise ValueError("stat_fdsize() requires fd >= 0")
+        operation = Operation[int](kind="stat_fdsize", fileobj=fd)
+        try:
+            operation._set_result(os.fstat(fd).st_size)
+        except OSError as exc:
+            operation._set_exception(exc)
+        return operation
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
         raise NotImplementedError
@@ -2052,6 +2123,85 @@ class UringProactor(ProactorBase):
         operation._set_result(completion.res)
         return operation
 
+    def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
+        """Return file metadata via io_uring statx when probed, else blocking ``os.stat``."""
+
+        self._check_open()
+        if fd < 0 and not path:
+            raise ValueError("stat() requires fd >= 0 or a non-empty path")
+        if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "submit_statx"):
+            return super().stat(path, fd=fd)
+
+        operation = Operation[os.stat_result](
+            kind="stat",
+            fileobj=fd if fd >= 0 else path,
+            proactor=self,
+        )
+        buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+        if fd >= 0:
+            dfd = fd
+            stat_path = ""
+            stat_flags = uring_api.AT_EMPTY_PATH
+        else:
+            dfd = uring_api.AT_FDCWD
+            stat_path = path
+            stat_flags = 0
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_stat, data=memoryview(buf))
+        self._submit_uring_entry(
+            entry,
+            lambda: self._ring.submit_statx(
+                dfd,
+                stat_path,
+                stat_flags,
+                uring_api.STATX_BASIC_STATS,
+                buf,
+                entry,
+            ),
+        )
+        return operation
+
+    def _complete_uring_stat(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[os.stat_result]:
+        assert entry.data is not None
+        operation = cast(Operation[os.stat_result], entry.operation)
+        try:
+            operation._set_result(_stat_result_from_statx(entry.data))
+        except ValueError as exc:
+            operation._set_exception(exc)
+        return operation
+
+    def stat_fdsize(self, fd: int) -> Operation[int]:
+        """Return file byte length via io_uring statx_fdsize when probed, else blocking ``os.fstat``.
+
+        When statx_fdsize completes without a parsed size, the completion handler
+        falls back to blocking ``os.fstat`` on the uring completion thread. That
+        path should be rare; the blocking submit-time fallback via ``super()`` is
+        used when statx is unavailable.
+        """
+
+        self._check_open()
+        if fd < 0:
+            raise ValueError("stat_fdsize() requires fd >= 0")
+        if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "submit_statx_fdsize"):
+            return super().stat_fdsize(fd)
+
+        operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
+        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_stat_fdsize)
+        self._submit_uring_entry(entry, lambda: self._ring.submit_statx_fdsize(fd, entry))
+        return operation
+
+    def _complete_uring_stat_fdsize(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+        # Rare statx_fdsize parse miss: recover with blocking fstat on this thread.
+        operation = cast(Operation[int], entry.operation)
+        size = completion.result
+        if size is None:
+            try:
+                operation._set_result(os.fstat(cast(int, operation.fileobj)).st_size)
+            except OSError as exc:
+                operation._set_exception(exc)
+            return operation
+        operation._set_result(cast(int, size))
+        return operation
+
     def recv_many(
         self,
         sock: socket.socket,
@@ -2571,6 +2721,30 @@ class ProactorScheduler(BaseScheduler):
         """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
 
         return self._proactor.poll_many(fd, mask, callback)
+
+    def open(self, path: str, mode: str = "rb") -> ProactorFile:
+        """Open a positioned binary file through the proactor backend."""
+
+        flags, file_mode = parse_open_mode(mode)
+        try:
+            fd = self.wait_operation(self._proactor.openat(path, flags, file_mode))
+        except NotImplementedError as exc:
+            raise NotImplementedError("scheduler file I/O requires a proactor with openat support") from exc
+        try:
+            return ProactorFile(
+                self,
+                self._proactor,
+                fd,
+                path=path,
+                flags=flags,
+                append="a" in mode,
+            )
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
 
     def _has_pending_driver_work(self) -> bool:
         return self._proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)
