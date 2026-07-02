@@ -59,7 +59,7 @@ typedef struct {
 typedef struct {
     UringApiCompletionStateKind tag;
     unsigned char buf[256];
-} UringApiCompletionFdsizeState;
+} UringApiCompletionStatxFdsizeState;
 
 int completion_type_check(PyObject *completion);
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data);
@@ -70,8 +70,8 @@ PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyOb
 PyObject *UringApiCompletion_new_pending_path(UringApiPendingKind kind, PyObject *user_data, PyObject *path);
 PyObject *UringApiCompletion_new_pending_statx(UringApiPendingKind kind, PyObject *user_data, PyObject *path,
                                                Py_buffer *view);
-PyObject *UringApiCompletion_new_pending_fdsize(PyObject *user_data);
-UringApiCompletionFdsizeState *UringApiCompletion_get_fdsize_state(UringApiCompletion *self);
+PyObject *UringApiCompletion_new_pending_statx_fdsize(PyObject *user_data);
+UringApiCompletionStatxFdsizeState *UringApiCompletion_get_statx_fdsize_state(UringApiCompletion *self);
 PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 bool is_zero_copy_send_kind(UringApiPendingKind kind);

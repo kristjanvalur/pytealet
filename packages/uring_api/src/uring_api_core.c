@@ -94,7 +94,7 @@ int module_add_completion_kind_constants(PyObject *module) {
         PyModule_AddIntConstant(module, "COMPLETION_KIND_WRITE", URING_API_PENDING_WRITE) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_OPENAT", URING_API_PENDING_OPENAT) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_STATX", URING_API_PENDING_STATX) < 0 ||
-        PyModule_AddIntConstant(module, "COMPLETION_KIND_FDSIZE", URING_API_PENDING_FDSIZE) < 0) {
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_STATX_FDSIZE", URING_API_PENDING_STATX_FDSIZE) < 0) {
         return -1;
     }
     return 0;

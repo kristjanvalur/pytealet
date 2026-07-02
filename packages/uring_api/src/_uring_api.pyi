@@ -29,7 +29,7 @@ COMPLETION_KIND_READ: int
 COMPLETION_KIND_WRITE: int
 COMPLETION_KIND_OPENAT: int
 COMPLETION_KIND_STATX: int
-COMPLETION_KIND_FDSIZE: int
+COMPLETION_KIND_STATX_FDSIZE: int
 AT_FDCWD: int
 AT_EMPTY_PATH: int
 STATX_BASIC_STATS: int
@@ -156,7 +156,7 @@ class Ring:
     def submit_statx(
         self, dfd: int, path: str, flags: int, mask: int, buf: Any, user_data: object = None
     ) -> Completion: ...
-    def submit_fdsize(self, fd: int, user_data: object = None) -> Completion: ...
+    def submit_statx_fdsize(self, fd: int, user_data: object = None) -> Completion: ...
     def submit_socket(
         self, domain: int, type: int, protocol: int = 0, flags: int = 0, user_data: object = None
     ) -> Completion: ...

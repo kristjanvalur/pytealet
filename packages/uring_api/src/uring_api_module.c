@@ -16,7 +16,8 @@ static PyMethodDef uring_api_methods[] = {
     {"probe", _PyCFunction_CAST(uring_api_probe), METH_VARARGS | METH_KEYWORDS,
      "Probe whether a minimal io_uring instance can be created."},
     {"statx_st_size", _PyCFunction_CAST(UringApiStatx_st_size), METH_O,
-     "Read stx_size from a completed statx buffer filled with STATX_SIZE."},
+     "Read stx_size from a completed statx buffer after a successful statx completion "
+     "(res == 0). The submit mask must have included STATX_SIZE."},
     {NULL, NULL, 0, NULL},
 };
 

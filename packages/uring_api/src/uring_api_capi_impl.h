@@ -47,7 +47,7 @@ int UringApiCapi_RingSubmitOpenat(PyObject *ring, int dfd, PyObject *path, int f
                                   PyObject *user_data);
 int UringApiCapi_RingSubmitStatx(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mask, PyObject *buf,
                                  PyObject *user_data);
-int UringApiCapi_RingSubmitFdsize(PyObject *ring, int fd, PyObject *user_data);
+int UringApiCapi_RingSubmitStatxFdsize(PyObject *ring, int fd, PyObject *user_data);
 int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
                                   PyObject *user_data);
 int UringApiCapi_RingBreakWait(PyObject *ring);

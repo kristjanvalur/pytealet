@@ -28,7 +28,7 @@ try:
     from _uring_api import COMPLETION_KIND_WRITE as COMPLETION_KIND_WRITE
     from _uring_api import COMPLETION_KIND_OPENAT as COMPLETION_KIND_OPENAT
     from _uring_api import COMPLETION_KIND_STATX as COMPLETION_KIND_STATX
-    from _uring_api import COMPLETION_KIND_FDSIZE as COMPLETION_KIND_FDSIZE
+    from _uring_api import COMPLETION_KIND_STATX_FDSIZE as COMPLETION_KIND_STATX_FDSIZE
     from _uring_api import AT_EMPTY_PATH as AT_EMPTY_PATH
     from _uring_api import AT_FDCWD as AT_FDCWD
     from _uring_api import STATX_BASIC_STATS as STATX_BASIC_STATS
@@ -93,7 +93,7 @@ except ImportError as exc:
     COMPLETION_KIND_WRITE = 21
     COMPLETION_KIND_OPENAT = 22
     COMPLETION_KIND_STATX = 23
-    COMPLETION_KIND_FDSIZE = 24
+    COMPLETION_KIND_STATX_FDSIZE = 24
     AT_FDCWD = -100
     AT_EMPTY_PATH = 0x1000
     STATX_BASIC_STATS = 0x000007FF
@@ -278,7 +278,7 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_fdsize(self, fd: int, user_data: object = None) -> Completion:
+        def submit_statx_fdsize(self, fd: int, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_socket(
@@ -339,7 +339,7 @@ class CompletionKind(enum.IntEnum):
     WRITE = COMPLETION_KIND_WRITE
     OPENAT = COMPLETION_KIND_OPENAT
     STATX = COMPLETION_KIND_STATX
-    FDSIZE = COMPLETION_KIND_FDSIZE
+    STATX_FDSIZE = COMPLETION_KIND_STATX_FDSIZE
 
 
 DEFAULT_ENTRIES = 8
@@ -385,7 +385,7 @@ __all__ = [
     "COMPLETION_KIND_WRITE",
     "COMPLETION_KIND_OPENAT",
     "COMPLETION_KIND_STATX",
-    "COMPLETION_KIND_FDSIZE",
+    "COMPLETION_KIND_STATX_FDSIZE",
     "AT_FDCWD",
     "AT_EMPTY_PATH",
     "STATX_BASIC_STATS",

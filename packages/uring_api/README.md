@@ -93,9 +93,9 @@ same descriptor.
   returns the new fd in the completion result;
 - `submit_read(fd, buf, offset)` and `submit_write(fd, data, offset)` perform
   explicit-offset I/O into caller buffers;
-- `submit_fdsize(fd)` is the common fast path for open-file metadata: it runs
-  fd-only statx internally and puts the byte length in `completion.result` on
-  success (`completion.kind == CompletionKind.FDSIZE`);
+- `submit_statx_fdsize(fd)` is the common fast path for open-file metadata: it
+  runs fd-only statx internally and puts the byte length in `completion.result`
+  on success (`completion.kind == CompletionKind.STATX_FDSIZE`);
 - `submit_statx(dfd, path, flags, mask, buf)` fills a caller-provided 256-byte
   statx buffer asynchronously when you need a custom mask or path lookup.
 
@@ -103,21 +103,21 @@ The usual positioned-file case (append EOF, `SEEK_END`, sendfile bounds) is an
 open fd whose size you already own:
 
 ```python
-handle = ring.submit_fdsize(fd)
+handle = ring.submit_statx_fdsize(fd)
 completion = ring.wait()
 if completion.res == 0:
     size = completion.result
 ```
 
-No caller buffer is required for `submit_fdsize()`. Use `submit_statx()` when
-you need path-based metadata or fields beyond `stx_size`.
+No caller buffer is required for `submit_statx_fdsize()`. Use `submit_statx()`
+when you need path-based metadata or fields beyond `stx_size`.
 
 Successful `submit_statx()` completions always leave `completion.result` as
 `None`; read fields from the caller-owned submit buffer (for example via
-`statx_st_size(buf)` when you requested `STATX_SIZE`). Only `submit_fdsize()`
-puts the byte length in `completion.result`. If fdsize cannot parse size from
-its internal buffer, `completion.result` is `None` and the completion is still
-delivered.
+`statx_st_size(buf)` when you requested `STATX_SIZE`). Only
+`submit_statx_fdsize()` puts the byte length in `completion.result`. If the
+internal buffer lacks size fields, `completion.result` is `None` and the
+completion is still delivered.
 
 **Behaviour change (since PR #34):** successful `submit_statx()` no longer sets
 `completion.result` to `0`; it stays `None`.
@@ -447,7 +447,7 @@ The capsule currently exposes:
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
     `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_read()`,
     `ring_submit_write()`, `ring_submit_openat()`, `ring_submit_statx()`,
-    `ring_submit_fdsize()`, `statx_st_size()`, `ring_submit_socket()`,
+    `ring_submit_statx_fdsize()`, `statx_st_size()`, `ring_submit_socket()`,
     `ring_submit_poll()`,
     `ring_submit_poll_multishot()`,
     `ring_submit_poll_remove()`,

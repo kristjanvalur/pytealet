@@ -365,11 +365,11 @@ int UringApiCapi_RingSubmitStatx(PyObject *ring, int dfd, PyObject *path, int fl
     return ring_submit_statx_buffer_status((UringApiRing *)ring, dfd, path, flags, mask, buf, user_data);
 }
 
-int UringApiCapi_RingSubmitFdsize(PyObject *ring, int fd, PyObject *user_data) {
+int UringApiCapi_RingSubmitStatxFdsize(PyObject *ring, int fd, PyObject *user_data) {
     if (!ring_type_check(ring)) {
         return -1;
     }
-    return discard_completion_result(UringApiRing_submit_fdsize_impl((UringApiRing *)ring, fd, user_data));
+    return discard_completion_result(UringApiRing_submit_statx_fdsize_impl((UringApiRing *)ring, fd, user_data));
 }
 
 int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,

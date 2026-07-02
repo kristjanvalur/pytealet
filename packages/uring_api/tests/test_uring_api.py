@@ -21,6 +21,7 @@ import weakref
 
 import pytest
 
+import _uring_api
 import uring_api
 
 # Mirror packages/uring_api/setup.py EXTENSION_C_COMPILE_ARGS.
@@ -182,7 +183,7 @@ def test_completion_kind_enum_matches_module_constants():
     assert uring_api.CompletionKind.RECV_BUF == uring_api.COMPLETION_KIND_RECV_BUF
     assert uring_api.CompletionKind.RECV_MULTISHOT == uring_api.COMPLETION_KIND_RECV_MULTISHOT
     assert uring_api.CompletionKind.STATX == uring_api.COMPLETION_KIND_STATX
-    assert uring_api.CompletionKind.FDSIZE == uring_api.COMPLETION_KIND_FDSIZE
+    assert uring_api.CompletionKind.STATX_FDSIZE == uring_api.COMPLETION_KIND_STATX_FDSIZE
 
 
 def test_statx_st_size_is_native_helper():
@@ -224,7 +225,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_WRITE == 21
     assert uring_api.COMPLETION_KIND_OPENAT == 22
     assert uring_api.COMPLETION_KIND_STATX == 23
-    assert uring_api.COMPLETION_KIND_FDSIZE == 24
+    assert uring_api.COMPLETION_KIND_STATX_FDSIZE == 24
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
@@ -711,6 +712,7 @@ def build_c_api_client():
                 "-I",
                 str(include_dir),
                 str(source_path),
+                _uring_api.__file__,
                 "-o",
                 str(extension_path),
             ],
@@ -2403,10 +2405,10 @@ def test_ring_statx_without_size_mask_returns_none_result_when_available():
         os.unlink(path)
 
 
-def test_ring_fdsize_returns_size_in_completion_result_when_available():
+def test_ring_statx_fdsize_returns_size_in_completion_result_when_available():
     require_uring()
 
-    token = {"operation": "fdsize"}
+    token = {"operation": "statx-fdsize"}
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         path = tmp.name
     try:
@@ -2414,10 +2416,10 @@ def test_ring_fdsize_returns_size_in_completion_result_when_available():
         try:
             assert os.write(fd, b"hello") == 5
             with uring_api.Ring() as ring:
-                handle = ring.submit_fdsize(fd, token)
+                handle = ring.submit_statx_fdsize(fd, token)
                 completion = ring.wait(1.0)
                 assert completion is handle
-                assert completion.kind == uring_api.COMPLETION_KIND_FDSIZE
+                assert completion.kind == uring_api.COMPLETION_KIND_STATX_FDSIZE
                 assert completion.user_data is token
                 assert completion.res == 0
                 assert completion.result == 5
@@ -2463,7 +2465,21 @@ def test_c_api_statx_st_size_reads_buffer():
     assert client.statx_st_size(buf) == 9
 
 
-def test_c_api_fdsize_when_available():
+def test_statx_try_read_st_size_graceful_degradation():
+    """Mirror submit_statx_fdsize completion.result when res == 0 but size is absent."""
+    client = build_c_api_client()
+    buf_with_size = bytearray(uring_api.STATX_BUFFER_SIZE)
+    buf_with_size[0:4] = uring_api.STATX_SIZE.to_bytes(4, "little")
+    buf_with_size[uring_api.STATX_STX_SIZE_OFFSET : uring_api.STATX_STX_SIZE_OFFSET + 8] = (5).to_bytes(
+        8, "little"
+    )
+    assert client.statx_try_read_st_size(buf_with_size) == 5
+
+    buf_without_size = bytearray(uring_api.STATX_BUFFER_SIZE)
+    assert client.statx_try_read_st_size(buf_without_size) is None
+
+
+def test_c_api_statx_fdsize_when_available():
     require_uring()
 
     client = build_c_api_client()
@@ -2475,12 +2491,12 @@ def test_c_api_fdsize_when_available():
         try:
             assert os.write(fd, b"hello") == 5
             with uring_api.Ring() as ring:
-                client.submit_fdsize(ring, fd, token)
+                client.submit_statx_fdsize(ring, fd, token)
                 completion = ring.wait(1.0)
             assert completion is not None
             assert client.completion_summary(completion) == (
                 token,
-                uring_api.COMPLETION_KIND_FDSIZE,
+                uring_api.COMPLETION_KIND_STATX_FDSIZE,
                 0,
                 0,
                 5,
@@ -2491,14 +2507,14 @@ def test_c_api_fdsize_when_available():
         os.unlink(path)
 
 
-def test_ring_fdsize_fails_for_invalid_fd():
+def test_ring_statx_fdsize_fails_for_invalid_fd():
     require_uring()
 
     with uring_api.Ring() as ring:
-        handle = ring.submit_fdsize(-1)
+        handle = ring.submit_statx_fdsize(-1)
         completion = ring.wait(1.0)
         assert completion is handle
-        assert completion.kind == uring_api.COMPLETION_KIND_FDSIZE
+        assert completion.kind == uring_api.COMPLETION_KIND_STATX_FDSIZE
         assert completion.res < 0
         assert completion.result is None
 
