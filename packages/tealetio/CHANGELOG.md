@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+- `recv_many` provided-buffer exhaustion now delivers
+  `(RECV_MANY_BUFFER_PRESSURE, resume)`; consumers must drop held views and
+  call `resume()` to continue (no automatic resubmission).
+- `recvgen` / `sock_recvgen` always yield `(index, memoryview)` and
+  `(RECV_MANY_BUFFER_PRESSURE, None)`; the `allow_memview` option is removed.
+
 ### Added
 - `recvgen(sock)` and `ProactorScheduler.sock_recvgen(sock)` as a
   tealet-blocking incremental consumer of `recv_many`, yielding stream-ordered
@@ -41,7 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared `BufGroup` slot size).
 - `UringProactor.recv_many` delivers leased `memoryview` chunks instead of
   copied `bytes`; `recvall` keeps views until buffer pressure, then copies all
-  held chunks to `bytes` and lets the proactor resubmit multishot receive.
+  held chunks to `bytes` before calling the pressure `resume()` callback.
+- `SelectorProactor.recv_many` (Python 3.12+) uses a synthetic `BufGroup` and
+  the same `(RECV_MANY_BUFFER_PRESSURE, resume)` backpressure contract as uring.
 - Made `Scheduler` use the proactor-backed synchronous scheduler by default,
   while keeping explicit selector-backed schedulers available.
 - Changed `run_asyncio_in_tealet(...)` to choose the hosted asyncio loop from

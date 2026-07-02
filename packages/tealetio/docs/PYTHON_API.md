@@ -103,17 +103,20 @@ view before the operation completes. Chunk sizes are backend-defined:
 `UringProactor` uses the shared `BufGroup` slot size (16 KiB by default) when
 multishot provided-buffer receive is available, and `SelectorProactor` reads up
 to 8 KiB per `recv()` call. Each `UringProactor` instance lazily creates one
-`BufGroup` (16 KiB × 256 buffers by default) shared by every `recv_many`,
-`recvall`, and `recvgen` on that proactor when multishot receive is in use.
-Concurrent long-lived receives on different sockets therefore draw from the same
-provided-buffer pool: a slow consumer on one stream can trigger
-`RECV_MANY_BUFFER_PRESSURE` or stall another stream even when the second would
-otherwise fit. Use separate `UringProactor` instances when independent streams
-need isolated buffer pools. When the shared provided-buffer pool is exhausted on
-`UringProactor`, the callback also receives
-`(RECV_MANY_BUFFER_PRESSURE, empty_view)` so consumers can release held views;
-the proactor then resubmits the multishot receive and continues stream indices
-from the failed completion's `sequence`. Callbacks receive borrowed views:
+`BufGroup` (16 KiB × 256 buffers by default) shared by `recv_many` and
+`recvall` when multishot receive is in use. `recvgen` creates a dedicated pool
+per generator (defaults: 16 KiB × 8). Concurrent long-lived `recv_many`
+streams on one `UringProactor` therefore draw from the same provided-buffer
+pool: a slow consumer on one stream can trigger `RECV_MANY_BUFFER_PRESSURE` or
+stall another stream even when the second would otherwise fit. Use separate
+`UringProactor` instances when independent streams need isolated buffer pools.
+When the provided-buffer pool is exhausted on `UringProactor`, the callback
+receives `(RECV_MANY_BUFFER_PRESSURE, resume)`; drop held views and call
+`resume()` to re-arm multishot receive (stream indices continue from the failed
+completion's `sequence`). On Python 3.12+, `SelectorProactor.recv_many` uses a
+synthetic pool with the same `(RECV_MANY_BUFFER_PRESSURE, resume)` contract;
+older CPython falls back to unpaced reads without pool pressure. Callbacks
+receive borrowed views:
 copy with `bytes(data)` when you need to keep payload past the callback, and
 drop view references you no longer need so backend buffers can be recycled
 (refcount teardown is enough; `memoryview.release()` is optional for early

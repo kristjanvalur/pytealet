@@ -181,12 +181,14 @@ class _LeasedChunk:
         self._held: memoryview | None = None
 
     def __buffer__(self, flags: int) -> memoryview:
-        assert self._held is None
+        if self._held is not None:
+            raise AssertionError("leased chunk buffer is already held")
         self._held = memoryview(self._data)
         return self._held
 
     def __release_buffer__(self, view: memoryview) -> None:
-        assert self._held is view
+        if self._held is not view:
+            raise AssertionError("released view does not match active leased chunk")
         self._held.release()
         self._held = None
         self._pool._note_unleased()

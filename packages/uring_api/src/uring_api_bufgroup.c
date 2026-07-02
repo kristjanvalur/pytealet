@@ -134,7 +134,11 @@ void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id) {
 
 void UringApiBufGroup_note_leased(UringApiBufGroup *self) { self->leased_count++; }
 
-void UringApiBufGroup_note_unleased(UringApiBufGroup *self) { self->leased_count--; }
+void UringApiBufGroup_note_unleased(UringApiBufGroup *self) {
+    if (self->leased_count > 0) {
+        self->leased_count--;
+    }
+}
 
 PyObject *UringApiRing_create_buf_group(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"buffer_size", "buffer_count", NULL};
