@@ -45,6 +45,18 @@ def require_uring_capability(name: str) -> None:
         pytest.skip(f"{name} is not supported")
 
 
+def collect_until_stable() -> None:
+    """Run GC until a pass collects nothing.
+
+    BufGroup ID recycling tests rely on extension teardown running promptly.
+    This is stricter than a single ``gc.collect()`` and tolerates short
+    cycles, but still assumes a tracing GC like CPython's.
+    """
+
+    while gc.collect():
+        pass
+
+
 def wait_until_running(ring: uring_api.Ring) -> None:
     deadline = time.monotonic() + 1.0
     while not ring.running and time.monotonic() < deadline:
@@ -1426,7 +1438,7 @@ def test_buf_group_id_recycles_after_release():
         first = ring.create_buf_group(16, 4)
         first_id = first.group_id
         del first
-        gc.collect()
+        collect_until_stable()
 
         second = ring.create_buf_group(16, 4)
         assert second.group_id == first_id
@@ -1450,7 +1462,7 @@ def test_buf_group_id_reuses_freed_slot_before_allocating_new():
         second = ring.create_buf_group(16, 4)
         second_id = second.group_id
         del second
-        gc.collect()
+        collect_until_stable()
 
         third = ring.create_buf_group(16, 4)
         assert third.group_id == second_id
@@ -1466,7 +1478,7 @@ def test_buf_group_id_survives_many_create_release_cycles():
             buf_group = ring.create_buf_group(16, 4)
             seen_ids.add(buf_group.group_id)
             del buf_group
-        gc.collect()
+        collect_until_stable()
 
         reused = ring.create_buf_group(16, 4)
         assert reused.group_id in seen_ids
@@ -1481,12 +1493,12 @@ def test_buf_group_id_tail_shrink_reuses_highest_slot_without_new_id():
         assert ids == [1, 2, 3, 4]
 
         del groups[3]
-        gc.collect()
+        collect_until_stable()
         tail_reused = ring.create_buf_group(16, 4)
         assert tail_reused.group_id == 4
 
         del groups[2]
-        gc.collect()
+        collect_until_stable()
         middle_reused = ring.create_buf_group(16, 4)
         assert middle_reused.group_id == 3
 

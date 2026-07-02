@@ -106,9 +106,8 @@ static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
         (void)io_uring_free_buf_ring(&ring->ring, self->ring_buffer, self->buffer_count, group_id);
         self->ring_buffer = NULL;
     }
-    if (UringApiRing_release_buf_group_id(ring, group_id) < 0) {
-        Py_FatalError("failed to recycle buffer group ID after freelist allocation failed");
-    }
+    /* Teardown OOM while queueing the ID is non-fatal: the kernel ring is gone. */
+    (void)UringApiRing_release_buf_group_id(ring, group_id);
     self->group_id = 0;
     Py_END_CRITICAL_SECTION();
 }
