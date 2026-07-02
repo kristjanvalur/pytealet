@@ -63,6 +63,7 @@ try:
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
     from _uring_api import __liburing_version__ as __liburing_version__
     from _uring_api import probe as _probe
+    from _uring_api import statx_st_size as statx_st_size
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
     C_API_ABI_VERSION = 1
@@ -307,6 +308,9 @@ except ImportError as exc:
             raise ValueError("entries must be between 1 and UINT_MAX")
         return {}
 
+    def statx_st_size(buf: Any) -> int:
+        raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
 else:
     _native_import_error = None
 
@@ -388,6 +392,7 @@ __all__ = [
     "STATX_SIZE",
     "STATX_BUFFER_SIZE",
     "STATX_STX_SIZE_OFFSET",
+    "statx_st_size",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
     "COMPLETION_KIND_SEND_ZC",

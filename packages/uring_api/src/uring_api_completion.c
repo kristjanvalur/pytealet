@@ -712,7 +712,14 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
                             self->kind == URING_API_PENDING_OPENAT)) {
         payload = PyLong_FromLong(res);
     } else if (res >= 0 && self->kind == URING_API_PENDING_STATX) {
-        payload = Py_NewRef(Py_None);
+        UringApiCompletionStatxState *statx_state = UringApiCompletion_get_statx_state(self);
+
+        if (statx_state && statx_state->has_view &&
+            uring_api_statx_try_read_st_size(statx_state->view.buf, statx_state->view.len, &file_size)) {
+            payload = PyLong_FromUnsignedLongLong(file_size);
+        } else {
+            payload = Py_NewRef(Py_None);
+        }
     } else if (res >= 0 && self->kind == URING_API_PENDING_RECVMSG) {
         msg_state = UringApiCompletion_get_msg_state(self);
         if (!msg_state) {

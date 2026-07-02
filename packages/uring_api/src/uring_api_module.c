@@ -8,11 +8,15 @@
 #include "uring_api_core.h"
 #include "uring_api_probe.h"
 #include "uring_api_ring.h"
+#include "uring_api_statx.h"
+
 PyObject *UringApiSubmissionQueueFullError;
 
 static PyMethodDef uring_api_methods[] = {
     {"probe", _PyCFunction_CAST(uring_api_probe), METH_VARARGS | METH_KEYWORDS,
      "Probe whether a minimal io_uring instance can be created."},
+    {"statx_st_size", _PyCFunction_CAST(UringApiStatx_st_size), METH_O,
+     "Read stx_size from a completed statx buffer filled with STATX_SIZE."},
     {NULL, NULL, 0, NULL},
 };
 

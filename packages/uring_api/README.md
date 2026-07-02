@@ -112,6 +112,11 @@ if completion.res == 0:
 No caller buffer is required for `submit_fdsize()`. Use `submit_statx()` when
 you need path-based metadata or fields beyond `stx_size`.
 
+After a successful `submit_statx()` that requested `STATX_SIZE`, the byte
+length is available both as `completion.result` and via `statx_st_size(buf)` on
+the caller-owned submit buffer. When the completion buffer lacks
+`STATX_SIZE` fields, `completion.result` is `None`.
+
 Provided-buffer receive uses a caller-owned ring created with
 `create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or
 stream receives with `submit_recv_multishot(fd, buf_group, ...)`. Both paths
@@ -448,7 +453,9 @@ The capsule currently exposes:
     `completion_flags()`, `completion_sequence()`, `completion_result()`, and
     `completion_kind()` for native completion inspection. Kind values match
     `URING_API_COMPLETION_KIND_*` in `uring_api_completion_kinds.h` and
-    `CompletionKind` in Python.
+    `CompletionKind` in Python;
+- `ring_submit_fdsize()` and `statx_st_size()` appended after `completion_kind`
+    (compare `struct_size` before calling).
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

@@ -3,6 +3,7 @@
  */
 
 #include "uring_api_probe.h"
+#include "uring_api_statx.h"
 #include "uring_api_capi_impl.h"
 #include "uring_api_core.h"
 #include "uring_api_kernel_version.h"
@@ -697,7 +698,6 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSubmitWrite,
     UringApiCapi_RingSubmitOpenat,
     UringApiCapi_RingSubmitStatx,
-    UringApiCapi_RingSubmitFdsize,
     UringApiCapi_RingSubmitSocket,
     UringApiCapi_RingBreakWait,
     UringApiCapi_RingWait,
@@ -713,7 +713,8 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_CompletionSequence,
     UringApiCapi_CompletionResult,
     UringApiCapi_CompletionKind,
-    {NULL},
+    UringApiCapi_RingSubmitFdsize,
+    UringApiCapi_StatxStSize,
 };
 
 int uring_api_export_capi(PyObject *module) {

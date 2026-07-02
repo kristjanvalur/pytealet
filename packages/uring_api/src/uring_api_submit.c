@@ -8,8 +8,6 @@
 #include "uring_api_core.h"
 #include "uring_api_statx.h"
 
-#define URING_API_STATX_BUFFER_SIZE 256
-
 static int validate_file_io_buffer_length(Py_buffer *view) {
     if (view->len < 0 || (unsigned long long)view->len > UINT_MAX) {
         PyErr_SetString(PyExc_ValueError, "buffer length must fit in uint32_t");
