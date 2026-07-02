@@ -48,9 +48,11 @@ def require_uring_capability(name: str) -> None:
 def collect_until_stable() -> None:
     """Run GC until a pass collects nothing.
 
-    BufGroup ID recycling tests rely on extension teardown running promptly.
-    This is stricter than a single ``gc.collect()`` and tolerates short
-    cycles, but still assumes a tracing GC like CPython's.
+    Used by BufGroup ID recycling tests that require extension teardown
+    before the next allocation. Stricter than one ``gc.collect()`` but still
+    assumes a tracing GC like CPython's. Scenarios that must not depend on
+    GC (for example ``ring.close()`` resetting the allocator) live in
+    separate tests.
     """
 
     while gc.collect():
@@ -1501,6 +1503,29 @@ def test_buf_group_id_tail_shrink_reuses_highest_slot_without_new_id():
         collect_until_stable()
         middle_reused = ring.create_buf_group(16, 4)
         assert middle_reused.group_id == 3
+
+
+def test_buf_group_id_resets_in_new_ring_session_after_close_without_gc():
+    require_uring()
+
+    ring = uring_api.Ring()
+    held: list[uring_api.BufGroup] = []
+    try:
+        held.append(ring.create_buf_group(16, 4))
+        held.append(ring.create_buf_group(16, 4))
+        assert [group.group_id for group in held] == [1, 2]
+        ring.close()
+        with pytest.raises(RuntimeError, match="ring is closed"):
+            ring.create_buf_group(16, 4)
+    finally:
+        if not ring.closed:
+            ring.close()
+
+    fresh = uring_api.Ring()
+    try:
+        assert fresh.create_buf_group(16, 4).group_id == 1
+    finally:
+        fresh.close()
 
 
 def test_buf_group_rejects_use_on_different_ring():

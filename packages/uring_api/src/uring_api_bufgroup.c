@@ -36,6 +36,14 @@ static void UringApiRing_shrink_free_buf_group_tail(UringApiRing *ring) {
     }
 }
 
+/*
+ * Return a buffer-group ID to the per-ring pool after io_uring_free_buf_ring().
+ * Returns 0 on success. Returns -1 when freelist growth hits PyMem_Realloc OOM;
+ * the ID is then lost for the rest of this ring session (effective pool shrinks).
+ * BufGroup create paths must treat -1 as PyErr_NoMemory(). Teardown may ignore
+ * -1: the kernel buf ring is already gone and losing reuse of one numeric ID is
+ * acceptable best-effort behaviour under memory pressure.
+ */
 int UringApiRing_release_buf_group_id(UringApiRing *ring, unsigned short group_id) {
     unsigned int new_capacity;
     unsigned short *new_ids;
@@ -52,7 +60,6 @@ int UringApiRing_release_buf_group_id(UringApiRing *ring, unsigned short group_i
         new_capacity = ring->free_buf_group_id_capacity == 0 ? 16 : ring->free_buf_group_id_capacity * 2;
         new_ids = (unsigned short *)PyMem_Realloc(ring->free_buf_group_ids, new_capacity * sizeof(unsigned short));
         if (!new_ids) {
-            /* Caller must treat this as OOM; the group_id cannot be queued. */
             return -1;
         }
         ring->free_buf_group_ids = new_ids;
