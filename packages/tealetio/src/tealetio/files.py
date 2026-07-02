@@ -51,6 +51,11 @@ class ProactorFile(io.RawIOBase):
     positioned proactor operations. ``readinto()`` uses ``read_into`` so
     ``io.BufferedReader`` can fill caller buffers without an extra copy through
     ``read()``.
+
+    Append mode tracks whether ``_pos`` is at end-of-file so writes can skip a
+    size lookup when the handle has only extended the file from the tail.
+    Concurrent writers can still race; that was already true when every append
+    write stat-then-wrote.
     """
 
     def __init__(
@@ -76,6 +81,7 @@ class ProactorFile(io.RawIOBase):
         self._pos = 0
         if append:
             self._pos = self._file_size()
+            self._pos_at_eof = True
 
     @property
     def name(self) -> str:
@@ -105,11 +111,14 @@ class ProactorFile(io.RawIOBase):
         elif whence == os.SEEK_CUR:
             self._pos += pos
         elif whence == os.SEEK_END:
-            self._pos = self._file_size() + pos
+            if not (self._append and self._pos_at_eof and pos == 0):
+                self._pos = self._file_size() + pos
         else:
             raise ValueError("invalid whence")
         if self._pos < 0:
             raise OSError(errno.EINVAL, "Invalid argument")
+        if self._append:
+            self._pos_at_eof = whence == os.SEEK_END and pos == 0
         return self._pos
 
     def read(self, size: int = -1) -> bytes:
@@ -137,16 +146,20 @@ class ProactorFile(io.RawIOBase):
             return 0
         nbytes = self._scheduler.wait_operation(self._proactor.read_into(self._fd, view, self._pos))
         self._pos += nbytes
+        if self._append:
+            self._pos_at_eof = False
         return nbytes
 
     def write(self, b: Any) -> int | None:
         self._checkClosed()
         if not self._writable:
             raise OSError(errno.EBADF, "File is not writable")
-        if self._append:
+        if self._append and not self._pos_at_eof:
             self._pos = self._file_size()
         nbytes = self._scheduler.wait_operation(self._proactor.write(self._fd, b, self._pos))
         self._pos += nbytes
+        if self._append:
+            self._pos_at_eof = True
         return nbytes
 
     def close(self) -> None:
@@ -169,4 +182,6 @@ class ProactorFile(io.RawIOBase):
     def _read_chunk(self, size: int) -> bytes:
         data = self._scheduler.wait_operation(self._proactor.read(self._fd, size, self._pos))
         self._pos += len(data)
+        if self._append:
+            self._pos_at_eof = False
         return data

@@ -4264,8 +4264,43 @@ class TestProactorScheduler:
 
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello!"
             assert ring.submitted_write[-1][2] == 5
-            assert len(ring.submitted_statx_fdsize) >= 2
+            assert len(ring.submitted_statx_fdsize) == 2
             assert ring.submitted_statx == []
+        finally:
+            scheduler.close()
+
+    def test_append_sequential_writes_stat_once_at_open(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        ring = cast(_FakeUringRing, scheduler._proactor.ring)
+        try:
+
+            def exercise() -> None:
+                with scheduler.open("/tmp/append-seq.txt", "ab") as handle:
+                    handle.write(b"hello")
+                    handle.write(b"world")
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert len(ring.submitted_statx_fdsize) == 1
+            assert ring.submitted_write[0][2] == 0
+            assert ring.submitted_write[1][2] == 5
+        finally:
+            scheduler.close()
+
+    def test_append_seek_end_zero_is_noop_when_already_at_eof(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        ring = cast(_FakeUringRing, scheduler._proactor.ring)
+        try:
+
+            def exercise() -> int:
+                with scheduler.open("/tmp/append-seek-end.txt", "ab") as handle:
+                    handle.write(b"hello")
+                    handle.seek(0, os.SEEK_END)
+                    return handle.tell()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == 5
+            assert len(ring.submitted_statx_fdsize) == 1
         finally:
             scheduler.close()
 
