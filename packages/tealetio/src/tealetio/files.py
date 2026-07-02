@@ -10,17 +10,32 @@ if TYPE_CHECKING:
 
 _DEFAULT_CREAT_MODE = 0o666
 _READ_CHUNK = 64 * 1024
+_SUPPORTED_BINARY_OPEN_MODES = frozenset(
+    {
+        "rb",
+        "wb",
+        "ab",
+        "r+b",
+        "rb+",
+        "w+b",
+        "wb+",
+        "a+b",
+        "ab+",
+    }
+)
 
 
 def parse_open_mode(mode: str) -> tuple[int, int]:
     """Map a binary open mode string to ``(flags, mode)`` for ``openat``."""
 
-    if not mode or "b" not in mode:
+    if not mode:
         raise ValueError("ProactorFile requires a binary mode such as 'rb' or 'wb'")
     if "t" in mode:
         raise ValueError("text mode is not supported; use io.TextIOWrapper on a binary ProactorFile")
     if "x" in mode:
         raise ValueError("exclusive create modes such as 'xb' are not supported")
+    if mode not in _SUPPORTED_BINARY_OPEN_MODES:
+        raise ValueError(f"unsupported mode: {mode!r}")
 
     append = "a" in mode
     if "+" in mode:
@@ -40,6 +55,8 @@ def parse_open_mode(mode: str) -> tuple[int, int]:
         flags |= os.O_TRUNC
     if append:
         flags |= os.O_APPEND
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
 
     return flags, _DEFAULT_CREAT_MODE
 
@@ -150,6 +167,7 @@ class ProactorFile(io.RawIOBase):
             raise OSError(errno.EBADF, "File is not readable")
         view = memoryview(buffer).cast("B")
         if not view:
+            # empty buffer is a no-op; keep append EOF tracking unchanged
             return 0
         nbytes = self._scheduler.wait_operation(self._proactor.read_into(self._fd, view, self._pos))
         self._pos += nbytes

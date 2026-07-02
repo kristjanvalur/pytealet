@@ -209,18 +209,23 @@ Supported binary modes mirror the usual stdlib subset: `rb`, `wb`, `ab`, `r+b`,
 `w+b`, and `a+b` (plus `rb+` / `wb+` / `ab+` spellings). Text modes (`t`) and
 exclusive create (`x`) raise `ValueError`.
 
-Append-mode `ProactorFile` writes are positioned at the tracked logical offset,
-not via kernel append semantics, so the handle keeps an internal end-of-file flag
-(`_pos_at_eof`). While that flag is set, sequential append writes extend from the
-current `_pos` without calling `proactor.stat_fdsize()`. The flag clears after
-`seek()` (other than `seek(SEEK_END, 0)` when already at EOF) or after reads in
-update/append modes; the next append write then looks up file size again before
-writing. `seek(SEEK_END, …)` uses `stat_fdsize()` when a fresh EOF position is
-needed. Concurrent writers can still race; that was already true for stat-then-write.
+Append-mode opens still set `O_APPEND` on the fd (stdlib parity). `ProactorFile`
+also tracks a logical offset in userspace and passes it to positioned proactor
+writes. On Linux, kernel append handling may still redirect some writes to the
+true end-of-file even when an explicit offset is supplied, which can diverge from
+`_pos` when concurrent writers extend the file while `_pos_at_eof` is set and
+sequential append writes skip `stat_fdsize()`. The handle keeps `_pos_at_eof` to
+avoid redundant size lookups: while set, sequential append writes extend from
+`_pos`; the flag clears after `seek()` (other than `seek(SEEK_END, 0)` when
+already at EOF) or after reads in update/append modes, and the next append write
+looks up file size again. `seek(SEEK_END, …)` uses `stat_fdsize()` when a fresh
+EOF position is needed.
 
 `UringProactor` submits io_uring `statx` / `statx_fdsize` when `IORING_OP_STATX`
 is probed; other proactors complete `stat()` / `stat_fdsize()` immediately via
-blocking `os.fstat()` / `os.stat()`.
+blocking `os.fstat()` / `os.stat()`. When `statx_fdsize` completes without a
+parsed size, the uring completion path falls back to a rare blocking `os.fstat()`
+on the completion thread before delivering the operation result.
 
 `sendall(sock, data, progress=None)` also accepts an optional progress callback.
 Backends call `progress(total)` with the cumulative number of bytes sent as

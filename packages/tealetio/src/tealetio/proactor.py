@@ -2171,7 +2171,13 @@ class UringProactor(ProactorBase):
         return operation
 
     def stat_fdsize(self, fd: int) -> Operation[int]:
-        """Return file byte length via io_uring statx_fdsize when probed, else blocking ``os.fstat``."""
+        """Return file byte length via io_uring statx_fdsize when probed, else blocking ``os.fstat``.
+
+        When statx_fdsize completes without a parsed size, the completion handler
+        falls back to blocking ``os.fstat`` on the uring completion thread. That
+        path should be rare; the blocking submit-time fallback via ``super()`` is
+        used when statx is unavailable.
+        """
 
         self._check_open()
         if fd < 0:
@@ -2185,6 +2191,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_stat_fdsize(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+        # Rare statx_fdsize parse miss: recover with blocking fstat on this thread.
         operation = cast(Operation[int], entry.operation)
         size = completion.result
         if size is None:
