@@ -180,6 +180,16 @@ def test_completion_kind_enum_matches_module_constants():
     assert uring_api.CompletionKind(uring_api.COMPLETION_KIND_ACCEPT) is uring_api.CompletionKind.ACCEPT
     assert uring_api.CompletionKind.RECV_BUF == uring_api.COMPLETION_KIND_RECV_BUF
     assert uring_api.CompletionKind.RECV_MULTISHOT == uring_api.COMPLETION_KIND_RECV_MULTISHOT
+    assert uring_api.CompletionKind.STATX == uring_api.COMPLETION_KIND_STATX
+
+
+def test_native_module_exports_statx_constants():
+    assert uring_api.AT_FDCWD == -100
+    assert uring_api.AT_EMPTY_PATH == 0x1000
+    assert uring_api.STATX_BASIC_STATS == 0x000007FF
+    assert uring_api.STATX_SIZE == 0x00000200
+    assert uring_api.STATX_BUFFER_SIZE == 256
+    assert uring_api.STATX_STX_SIZE_OFFSET == 40
 
 
 def test_native_module_exports_completion_kind_constants():
@@ -228,6 +238,7 @@ def test_probe_returns_structured_result():
         "IORING_OP_SEND_ZC",
         "IORING_OP_SENDMSG_ZC",
         "IORING_OP_SOCKET",
+        "IORING_OP_STATX",
     }
     assert probe["available"] is True
     assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
@@ -236,6 +247,27 @@ def test_probe_returns_structured_result():
     assert isinstance(probe["IORING_OP_SEND_ZC"], bool)
     assert isinstance(probe["IORING_OP_SENDMSG_ZC"], bool)
     assert isinstance(probe["IORING_OP_SOCKET"], bool)
+    assert isinstance(probe["IORING_OP_STATX"], bool)
+
+
+def _kernel_version_at_least(release: str, major: int, minor: int, patch: int = 0) -> bool:
+    parts = release.split("-", 1)[0].split(".")
+    if len(parts) < 2:
+        return False
+    parsed = [int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0]
+    if parsed[0] != major:
+        return parsed[0] > major
+    if parsed[1] != minor:
+        return parsed[1] > minor
+    return parsed[2] >= patch
+
+
+def test_probe_statx_matches_kernel_version_gate():
+    require_uring()
+
+    probe = uring_api.probe()
+    expected = _kernel_version_at_least(os.uname().release, 5, 6)
+    assert probe["IORING_OP_STATX"] is expected
 
 
 def test_probe_capabilities_are_stable_across_calls():
@@ -604,6 +636,7 @@ def test_c_api_client_can_import_capsule_and_probe():
     probe = client.probe()
 
     assert abi_version == uring_api.C_API_ABI_VERSION
+    assert struct_size == uring_api.C_API_STRUCT_SIZE
     assert struct_size > 0
     assert feature_flags & uring_api.C_API_FEATURE_CORE
     assert (major, minor) == uring_api.__compiled_liburing_version_info__

@@ -7,6 +7,7 @@
 #define PY_SSIZE_T_CLEAN
 #include "uring_api_capi.h"
 #include <Python.h>
+#include <stddef.h>
 
 #ifndef _PyCFunction_CAST
 #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
@@ -673,6 +674,10 @@ static int client_exec(PyObject *module) {
     }
     if (api->abi_version != URING_API_CAPI_ABI_VERSION) {
         PyErr_SetString(PyExc_RuntimeError, "unexpected uring-api C API ABI version");
+        return -1;
+    }
+    if (api->struct_size < offsetof(UringApi_CAPI, ring_submit_statx) + sizeof(api->ring_submit_statx)) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for ring_submit_statx");
         return -1;
     }
     if ((api->feature_flags & URING_API_CAPI_FEATURE_CORE) == 0) {

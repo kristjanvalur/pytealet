@@ -201,7 +201,9 @@ those results. If ring creation fails,
 it returns an empty dictionary. If it succeeds, the dictionary contains
 `"available": True` plus named optional capabilities such as
 `"IORING_ACCEPT_MULTISHOT"`, `"IORING_POLL_MULTISHOT"`, `"IORING_RECV_MULTISHOT"`, and
-`"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"`. Production code should
+`"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"`, and `"IORING_OP_STATX"`
+(version-gated via `uname(2)` against the `io_uring_enter(2)` 5.6 floor).
+Production code should
 still handle `OSError` when it creates the real ring because limits or sandbox
 policy may differ for larger settings.
 

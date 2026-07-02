@@ -9,6 +9,7 @@ __liburing_version__: str
 __compiled_liburing_version__: str
 __compiled_liburing_version_info__: tuple[int, int]
 C_API_ABI_VERSION: int
+C_API_STRUCT_SIZE: int
 C_API_FEATURE_CORE: int
 C_API_FEATURES: int
 IORING_SETUP_CQSIZE: int

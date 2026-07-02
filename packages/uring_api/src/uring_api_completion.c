@@ -216,6 +216,7 @@ static void UringApiCompletion_dealloc(UringApiCompletion *self) {
 
 static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit, void *arg) {
     UringApiCompletionMsgState *msg_state;
+    UringApiCompletionStatxState *statx_state;
     UringApiCompletionViewState *view_state;
     UringApiCompletionViewSockaddrState *view_sockaddr_state;
     PyObject *buf_group;
@@ -242,6 +243,12 @@ static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit
         msg_state = (UringApiCompletionMsgState *)self->state;
         if (msg_state->has_view) {
             Py_VISIT(msg_state->view.obj);
+        }
+        break;
+    case URING_API_COMPLETION_STATE_STATX:
+        statx_state = (UringApiCompletionStatxState *)self->state;
+        if (statx_state->has_view) {
+            Py_VISIT(statx_state->view.obj);
         }
         break;
     default:

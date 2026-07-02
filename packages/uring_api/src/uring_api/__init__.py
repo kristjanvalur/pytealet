@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 try:
     from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
+    from _uring_api import C_API_STRUCT_SIZE as C_API_STRUCT_SIZE
     from _uring_api import C_API_FEATURE_CORE as C_API_FEATURE_CORE
     from _uring_api import C_API_FEATURES as C_API_FEATURES
     from _uring_api import COMPLETION_KIND_ACCEPT as COMPLETION_KIND_ACCEPT
@@ -64,6 +65,7 @@ try:
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
     C_API_ABI_VERSION = 1
+    C_API_STRUCT_SIZE = 0
     C_API_FEATURE_CORE = 1 << 0
     C_API_FEATURES = 0
     COMPLETION_KIND_RECV = 1
@@ -373,6 +375,7 @@ __all__ = [
     "DEFAULT_ENTRIES",
     "DEFAULT_FLAGS",
     "C_API_ABI_VERSION",
+    "C_API_STRUCT_SIZE",
     "C_API_FEATURE_CORE",
     "C_API_FEATURES",
     "COMPLETION_KIND_ACCEPT",
