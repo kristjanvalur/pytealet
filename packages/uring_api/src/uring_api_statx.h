@@ -5,6 +5,7 @@
 
 #include <Python.h>
 
+/* Mirror public AT_EMPTY_PATH / STATX_SIZE module constants for C submit paths. */
 #define URING_API_AT_EMPTY_PATH 0x1000
 #define URING_API_STATX_SIZE_MASK 0x00000200u
 #define URING_API_STATX_BUFFER_SIZE 256

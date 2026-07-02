@@ -2352,6 +2352,57 @@ def test_ring_statx_path_returns_size_in_result_and_buffer_when_available():
         os.unlink(path)
 
 
+def test_ring_statx_fd_submit_returns_size_in_result_and_buffer_when_available():
+    require_uring()
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        try:
+            assert os.write(fd, b"hello") == 5
+            buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+            with uring_api.Ring() as ring:
+                handle = ring.submit_statx(
+                    fd,
+                    "",
+                    uring_api.AT_EMPTY_PATH,
+                    uring_api.STATX_SIZE,
+                    buf,
+                )
+                completion = ring.wait(1.0)
+                assert completion is handle
+                assert completion.kind == uring_api.COMPLETION_KIND_STATX
+                assert completion.res == 0
+                assert completion.result == 5
+                assert uring_api.statx_st_size(buf) == 5
+        finally:
+            os.close(fd)
+    finally:
+        os.unlink(path)
+
+
+def test_ring_statx_without_size_mask_returns_none_result_when_available():
+    require_uring()
+
+    statx_nlink = 0x4
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        with open(path, "wb") as handle:
+            handle.write(b"hello")
+        buf = bytearray(uring_api.STATX_BUFFER_SIZE)
+        with uring_api.Ring() as ring:
+            handle = ring.submit_statx(uring_api.AT_FDCWD, path, 0, statx_nlink, buf)
+            completion = ring.wait(1.0)
+            assert completion is handle
+            assert completion.kind == uring_api.COMPLETION_KIND_STATX
+            assert completion.res == 0
+            assert completion.result is None
+    finally:
+        os.unlink(path)
+
+
 def test_ring_fdsize_returns_size_in_completion_result_when_available():
     require_uring()
 

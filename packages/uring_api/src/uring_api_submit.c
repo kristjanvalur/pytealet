@@ -337,7 +337,7 @@ PyObject *UringApiRing_submit_statx_impl(UringApiRing *self, int dfd, PyObject *
         return NULL;
     }
 
-    completion = UringApiCompletion_new_pending_statx(URING_API_PENDING_STATX, user_data, path, view);
+    completion = UringApiCompletion_new_pending_statx(URING_API_PENDING_STATX, user_data, path, view, mask);
     if (!completion) {
         return NULL;
     }

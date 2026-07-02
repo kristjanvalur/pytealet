@@ -112,10 +112,18 @@ if completion.res == 0:
 No caller buffer is required for `submit_fdsize()`. Use `submit_statx()` when
 you need path-based metadata or fields beyond `stx_size`.
 
-After a successful `submit_statx()` that requested `STATX_SIZE`, the byte
-length is available both as `completion.result` and via `statx_st_size(buf)` on
-the caller-owned submit buffer. When the completion buffer lacks
-`STATX_SIZE` fields, `completion.result` is `None`.
+After a successful `submit_statx()` whose submit `mask` included `STATX_SIZE`,
+the byte length is available both as `completion.result` and via
+`statx_st_size(buf)` on the caller-owned submit buffer. When `STATX_SIZE` was
+not requested, or the kernel buffer lacks size fields, `completion.result` is
+`None` and the completion is still delivered; call `statx_st_size(buf)` when
+you need a strict parse error. `submit_fdsize()` uses the same lenient rule:
+`completion.result` is the size when present, otherwise `None`, without dropping
+the completion.
+
+**Behaviour change (since PR #34):** successful `submit_statx()` no longer sets
+`completion.result` to `0`. It is the parsed byte length when `STATX_SIZE` was
+written, otherwise `None`.
 
 Provided-buffer receive uses a caller-owned ring created with
 `create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or
