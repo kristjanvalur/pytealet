@@ -25,35 +25,3 @@ int uring_api_statx_read_st_size(const void *buf, Py_ssize_t buflen, unsigned lo
     *size_out = statx->stx_size;
     return 0;
 }
-
-PyObject *UringApiStatx_st_size(PyObject *self, PyObject *arg) {
-    Py_buffer view;
-    unsigned long long size;
-
-    (void)self;
-    if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) {
-        return NULL;
-    }
-    if (uring_api_statx_read_st_size(view.buf, view.len, &size) < 0) {
-        PyBuffer_Release(&view);
-        return NULL;
-    }
-    PyBuffer_Release(&view);
-    return PyLong_FromUnsignedLongLong(size);
-}
-
-int UringApiCapi_StatxStSize(PyObject *buf, unsigned long long *value) {
-    Py_buffer view;
-    int status;
-
-    if (!value) {
-        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
-        return -1;
-    }
-    if (PyObject_GetBuffer(buf, &view, PyBUF_SIMPLE) < 0) {
-        return -1;
-    }
-    status = uring_api_statx_read_st_size(view.buf, view.len, value);
-    PyBuffer_Release(&view);
-    return status;
-}

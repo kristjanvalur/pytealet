@@ -488,22 +488,23 @@ static PyObject *client_submit_write(PyObject *module, PyObject *args) {
     Py_RETURN_NONE;
 }
 
-static PyObject *client_statx_st_size(PyObject *module, PyObject *buf) {
-    unsigned long long size;
+static PyObject *client_submit_fdsize(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *user_data;
+    int fd;
 
     (void)module;
     if (!api) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->statx_st_size) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API statx_st_size is unavailable");
+    if (!PyArg_ParseTuple(args, "OiO:submit_fdsize", &ring, &fd, &user_data)) {
         return NULL;
     }
-    if (api->statx_st_size(buf, &size) < 0) {
+    if (api->ring_submit_fdsize(ring, fd, user_data) < 0) {
         return NULL;
     }
-    return PyLong_FromUnsignedLongLong(size);
+    Py_RETURN_NONE;
 }
 
 static PyObject *client_submit_statx(PyObject *module, PyObject *args) {
@@ -680,7 +681,7 @@ static PyMethodDef client_methods[] = {
     {"submit_write", _PyCFunction_CAST(client_submit_write), METH_VARARGS, NULL},
     {"submit_openat", _PyCFunction_CAST(client_submit_openat), METH_VARARGS, NULL},
     {"submit_statx", _PyCFunction_CAST(client_submit_statx), METH_VARARGS, NULL},
-    {"statx_st_size", _PyCFunction_CAST(client_statx_st_size), METH_O, NULL},
+    {"submit_fdsize", _PyCFunction_CAST(client_submit_fdsize), METH_VARARGS, NULL},
     {"submit_socket", _PyCFunction_CAST(client_submit_socket), METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL},
 };
@@ -699,8 +700,8 @@ static int client_exec(PyObject *module) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for ring_submit_statx");
         return -1;
     }
-    if (api->struct_size < offsetof(UringApi_CAPI, statx_st_size) + sizeof(api->statx_st_size)) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for statx_st_size");
+    if (api->struct_size < offsetof(UringApi_CAPI, ring_submit_fdsize) + sizeof(api->ring_submit_fdsize)) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for ring_submit_fdsize");
         return -1;
     }
     if ((api->feature_flags & URING_API_CAPI_FEATURE_CORE) == 0) {
@@ -716,12 +717,12 @@ static int client_exec(PyObject *module) {
         !api->ring_submit_poll || !api->ring_submit_poll_multishot || !api->ring_submit_poll_remove ||
         !api->ring_submit_cancel || !api->ring_submit_shutdown || !api->ring_submit_close ||
         !api->ring_submit_read || !api->ring_submit_write || !api->ring_submit_openat ||
-        !api->ring_submit_statx ||
+        !api->ring_submit_statx || !api->ring_submit_fdsize ||
         !api->ring_submit_socket || !api->ring_break_wait || !api->ring_wait ||
         !api->ring_set_callback || !api->ring_set_c_callback || !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
         !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
-        !api->completion_kind || !api->statx_st_size) {
+        !api->completion_kind) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

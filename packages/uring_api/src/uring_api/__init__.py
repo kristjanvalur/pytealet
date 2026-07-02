@@ -28,6 +28,7 @@ try:
     from _uring_api import COMPLETION_KIND_WRITE as COMPLETION_KIND_WRITE
     from _uring_api import COMPLETION_KIND_OPENAT as COMPLETION_KIND_OPENAT
     from _uring_api import COMPLETION_KIND_STATX as COMPLETION_KIND_STATX
+    from _uring_api import COMPLETION_KIND_FDSIZE as COMPLETION_KIND_FDSIZE
     from _uring_api import AT_EMPTY_PATH as AT_EMPTY_PATH
     from _uring_api import AT_FDCWD as AT_FDCWD
     from _uring_api import STATX_BASIC_STATS as STATX_BASIC_STATS
@@ -62,7 +63,6 @@ try:
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
     from _uring_api import __liburing_version__ as __liburing_version__
     from _uring_api import probe as _probe
-    from _uring_api import statx_st_size as statx_st_size
 except ImportError as exc:
     _native_import_error: ImportError | None = exc
     C_API_ABI_VERSION = 1
@@ -92,6 +92,7 @@ except ImportError as exc:
     COMPLETION_KIND_WRITE = 21
     COMPLETION_KIND_OPENAT = 22
     COMPLETION_KIND_STATX = 23
+    COMPLETION_KIND_FDSIZE = 24
     AT_FDCWD = -100
     AT_EMPTY_PATH = 0x1000
     STATX_BASIC_STATS = 0x000007FF
@@ -276,12 +277,7 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_fstatx_size(self, fd: int, buf: Any, user_data: object = None) -> Completion:
-            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
-
-        def submit_statx_size(
-            self, path: str, buf: Any, user_data: object = None, *, dfd: int = -100
-        ) -> Completion:
+        def submit_fdsize(self, fd: int, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_socket(
@@ -311,8 +307,6 @@ except ImportError as exc:
             raise ValueError("entries must be between 1 and UINT_MAX")
         return {}
 
-    def statx_st_size(buf: Any) -> int:
-        raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 else:
     _native_import_error = None
 
@@ -341,6 +335,7 @@ class CompletionKind(enum.IntEnum):
     WRITE = COMPLETION_KIND_WRITE
     OPENAT = COMPLETION_KIND_OPENAT
     STATX = COMPLETION_KIND_STATX
+    FDSIZE = COMPLETION_KIND_FDSIZE
 
 
 DEFAULT_ENTRIES = 8
@@ -386,13 +381,13 @@ __all__ = [
     "COMPLETION_KIND_WRITE",
     "COMPLETION_KIND_OPENAT",
     "COMPLETION_KIND_STATX",
+    "COMPLETION_KIND_FDSIZE",
     "AT_FDCWD",
     "AT_EMPTY_PATH",
     "STATX_BASIC_STATS",
     "STATX_SIZE",
     "STATX_BUFFER_SIZE",
     "STATX_STX_SIZE_OFFSET",
-    "statx_st_size",
     "COMPLETION_KIND_RECVMSG",
     "COMPLETION_KIND_SEND",
     "COMPLETION_KIND_SEND_ZC",

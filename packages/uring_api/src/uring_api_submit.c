@@ -1052,38 +1052,57 @@ PyObject *UringApiRing_submit_statx(UringApiRing *self, PyObject *args, PyObject
     return UringApiRing_submit_statx_impl(self, dfd, path, flags, mask, &view, user_data);
 }
 
-PyObject *UringApiRing_submit_fstatx_size(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "buf", "user_data", NULL};
-    Py_buffer view;
-    PyObject *empty_path;
-    PyObject *result;
+PyObject *UringApiRing_submit_fdsize_impl(UringApiRing *self, int fd, PyObject *user_data) {
+    struct io_uring_sqe *sqe;
+    UringApiCompletionFdsizeState *fdsize_state;
+    PyObject *completion = NULL;
+    int failed = 0;
+
+    completion = UringApiCompletion_new_pending_fdsize(user_data);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        fdsize_state = UringApiCompletion_get_fdsize_state((UringApiCompletion *)completion);
+        if (!fdsize_state) {
+            PyErr_SetString(PyExc_RuntimeError, "fdsize completion is missing buffer state");
+            failed = 1;
+        } else {
+            sqe = get_sqe(self);
+            if (!sqe) {
+                failed = 1;
+            } else {
+                io_uring_prep_statx(sqe, fd, "", URING_API_AT_EMPTY_PATH, URING_API_STATX_SIZE_MASK,
+                                    (struct statx *)fdsize_state->buf);
+                sqe_set_completion(self, sqe, completion);
+                if (submit_one(self) < 0) {
+                    failed = 1;
+                }
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return Py_NewRef(completion);
+}
+
+PyObject *UringApiRing_submit_fdsize(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "user_data", NULL};
     int fd;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|O", keywords, &fd, &user_data)) {
         return NULL;
     }
-    empty_path = PyUnicode_FromStringAndSize("", 0);
-    if (!empty_path) {
-        return NULL;
-    }
-    result = UringApiRing_submit_statx_impl(self, fd, empty_path, URING_API_AT_EMPTY_PATH, URING_API_STATX_SIZE_MASK,
-                                            &view, user_data);
-    Py_DECREF(empty_path);
-    return result;
-}
-
-PyObject *UringApiRing_submit_statx_size(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"path", "buf", "user_data", "dfd", NULL};
-    Py_buffer view;
-    PyObject *path;
-    int dfd = -100; /* AT_FDCWD */
-    PyObject *user_data = Py_None;
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Ow*|Oi", keywords, &path, &view, &user_data, &dfd)) {
-        return NULL;
-    }
-    return UringApiRing_submit_statx_impl(self, dfd, path, 0, URING_API_STATX_SIZE_MASK, &view, user_data);
+    return UringApiRing_submit_fdsize_impl(self, fd, user_data);
 }
 
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {
