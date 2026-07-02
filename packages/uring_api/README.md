@@ -99,18 +99,23 @@ same descriptor.
 For fd-only metadata, pass an empty path with `AT_EMPTY_PATH` in `flags`. Path
 lookups use `dfd=AT_FDCWD` and a normal filesystem path.
 
-After `completion.res == 0`, parse the submit buffer with the pure-Python
-helpers (payload stays in the caller buffer; `Completion` stays generic):
+The common case is file size only (append EOF, `SEEK_END`, sendfile bounds).
+Allocate a buffer once, submit with `mask=STATX_SIZE`, then convert in one step:
 
-- **`statx_st_size(buf)`** — the common file-I/O case (append EOF, `SEEK_END`,
-  sendfile bounds). Submit with `mask=STATX_SIZE` when only the byte length is
-  needed.
+```python
+buf = uring_api.statx_buffer()
+handle = ring.submit_statx(fd, "", uring_api.AT_EMPTY_PATH, uring_api.STATX_SIZE, buf)
+completion = ring.wait()
+size = uring_api.statx_st_size_from_completion(completion, buf)
+```
+
+Payload stays in the caller-owned buffer; `Completion` stays generic. Lower-level
+helpers are available when you already know `completion.res == 0`:
+
+- **`statx_st_size(buf)`** — read `stx_size` from the submit buffer.
 - **`statx_to_stat_result(buf)`** — full `os.stat_result` when you submitted
-  `STATX_BASIC_STATS` (or a superset).
-- **`statx_mask(buf)`** — inspect which fields the kernel wrote.
-
-Lower-level clients can still read `STATX_STX_SIZE_OFFSET` and the other
-`STATX_STX_*_OFFSET` constants manually.
+  `STATX_BASIC_STATS` (or a superset); use
+  `statx_to_stat_result_from_completion()` for the same one-step pattern.
 
 Provided-buffer receive uses a caller-owned ring created with
 `create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or

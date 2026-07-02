@@ -7,11 +7,13 @@ import struct
 from typing import Any
 
 try:
+    from _uring_api import COMPLETION_KIND_STATX as COMPLETION_KIND_STATX
     from _uring_api import STATX_BASIC_STATS as STATX_BASIC_STATS
     from _uring_api import STATX_BUFFER_SIZE as STATX_BUFFER_SIZE
     from _uring_api import STATX_SIZE as STATX_SIZE
     from _uring_api import STATX_STX_SIZE_OFFSET as STATX_STX_SIZE_OFFSET
 except ImportError:
+    COMPLETION_KIND_STATX = 23
     STATX_BASIC_STATS = 0x000007FF
     STATX_SIZE = 0x00000200
     STATX_BUFFER_SIZE = 256
@@ -19,20 +21,17 @@ except ImportError:
 
 # Little-endian ``struct statx`` field offsets (Linux uapi). ``stx_size`` offset is
 # checked in C via ``uring_api_statx_layout.h``.
-STATX_STX_MASK_OFFSET = 0
-STATX_STX_BLKSIZE_OFFSET = 4
-STATX_STX_NLINK_OFFSET = 16
-STATX_STX_UID_OFFSET = 20
-STATX_STX_GID_OFFSET = 24
-STATX_STX_MODE_OFFSET = 28
-STATX_STX_INO_OFFSET = 32
-STATX_STX_BLOCKS_OFFSET = 48
-STATX_STX_ATIME_OFFSET = 64
-STATX_STX_BTIME_OFFSET = 80
-STATX_STX_CTIME_OFFSET = 96
-STATX_STX_MTIME_OFFSET = 112
-STATX_STX_RDEV_OFFSET = 128
-STATX_STX_DEV_OFFSET = 136
+_STATX_STX_MASK_OFFSET = 0
+_STATX_STX_NLINK_OFFSET = 16
+_STATX_STX_UID_OFFSET = 20
+_STATX_STX_GID_OFFSET = 24
+_STATX_STX_MODE_OFFSET = 28
+_STATX_STX_INO_OFFSET = 32
+_STATX_STX_BLOCKS_OFFSET = 48
+_STATX_STX_ATIME_OFFSET = 64
+_STATX_STX_CTIME_OFFSET = 96
+_STATX_STX_MTIME_OFFSET = 112
+_STATX_STX_RDEV_OFFSET = 128
 _STATX_TIMESTAMP = struct.Struct("<qii")
 
 
@@ -45,14 +44,6 @@ def _require_buffer(view: memoryview) -> None:
         raise ValueError("statx buffer must be at least STATX_BUFFER_SIZE bytes")
 
 
-def statx_mask(buf: Any) -> int:
-    """Return the ``stx_mask`` field written by a successful statx completion."""
-
-    view = _view(buf)
-    _require_buffer(view)
-    return int.from_bytes(view[STATX_STX_MASK_OFFSET : STATX_STX_MASK_OFFSET + 4], "little", signed=False)
-
-
 def _require_mask_field(mask: int, field: int, name: str) -> None:
     if not (mask & field):
         raise ValueError(f"statx buffer does not contain {name} fields")
@@ -61,6 +52,30 @@ def _require_mask_field(mask: int, field: int, name: str) -> None:
 def _require_full_mask(mask: int, required: int, name: str) -> None:
     if (mask & required) != required:
         raise ValueError(f"statx buffer does not contain {name} fields")
+
+
+def _read_mask(view: memoryview) -> int:
+    return int.from_bytes(view[_STATX_STX_MASK_OFFSET : _STATX_STX_MASK_OFFSET + 4], "little", signed=False)
+
+
+def _require_statx_completion(completion: Any) -> int:
+    try:
+        kind = completion.kind
+        res = completion.res
+    except AttributeError as exc:
+        raise TypeError("completion must expose kind and res") from exc
+    if kind != COMPLETION_KIND_STATX:
+        raise TypeError(f"expected statx completion, got kind {kind!r}")
+    if res < 0:
+        errno = -res
+        raise OSError(errno, os.strerror(errno))
+    return res
+
+
+def statx_buffer() -> bytearray:
+    """Return a writable buffer sized for ``submit_statx()``."""
+
+    return bytearray(STATX_BUFFER_SIZE)
 
 
 def statx_st_size(buf: Any) -> int:
@@ -75,13 +90,25 @@ def statx_st_size(buf: Any) -> int:
 
     view = _view(buf)
     _require_buffer(view)
-    mask = int.from_bytes(view[STATX_STX_MASK_OFFSET : STATX_STX_MASK_OFFSET + 4], "little", signed=False)
+    mask = _read_mask(view)
     _require_mask_field(mask, STATX_SIZE, "STATX_SIZE")
     return int.from_bytes(
         view[STATX_STX_SIZE_OFFSET : STATX_STX_SIZE_OFFSET + 8],
         "little",
         signed=False,
     )
+
+
+def statx_st_size_from_completion(completion: Any, buf: Any) -> int:
+    """Read ``stx_size`` after a successful statx completion.
+
+    This is the common fast path: submit with ``mask=STATX_SIZE``, wait for the
+    completion, then convert the caller-owned buffer in one call. Raises
+    ``OSError`` when ``completion.res < 0``.
+    """
+
+    _require_statx_completion(completion)
+    return statx_st_size(buf)
 
 
 def _timestamp_seconds(view: memoryview, offset: int) -> tuple[int, int]:
@@ -105,15 +132,15 @@ def statx_to_stat_result(buf: Any) -> os.stat_result:
 
     view = _view(buf)
     _require_buffer(view)
-    mask = statx_mask(buf)
+    mask = _read_mask(view)
     _require_full_mask(mask, STATX_BASIC_STATS, "STATX_BASIC_STATS")
 
-    nlink, uid, gid, mode = struct.unpack_from("<IIIH", view, STATX_STX_NLINK_OFFSET)
-    ino, size, _blocks = struct.unpack_from("<QQQ", view, STATX_STX_INO_OFFSET)
-    atime_sec, _atime_nsec = _timestamp_seconds(view, STATX_STX_ATIME_OFFSET)
-    ctime_sec, _ctime_nsec = _timestamp_seconds(view, STATX_STX_CTIME_OFFSET)
-    mtime_sec, _mtime_nsec = _timestamp_seconds(view, STATX_STX_MTIME_OFFSET)
-    _rdev_major, _rdev_minor, dev_major, dev_minor = struct.unpack_from("<IIII", view, STATX_STX_RDEV_OFFSET)
+    nlink, uid, gid, mode = struct.unpack_from("<IIIH", view, _STATX_STX_NLINK_OFFSET)
+    ino, size, _blocks = struct.unpack_from("<QQQ", view, _STATX_STX_INO_OFFSET)
+    atime_sec, _atime_nsec = _timestamp_seconds(view, _STATX_STX_ATIME_OFFSET)
+    ctime_sec, _ctime_nsec = _timestamp_seconds(view, _STATX_STX_CTIME_OFFSET)
+    mtime_sec, _mtime_nsec = _timestamp_seconds(view, _STATX_STX_MTIME_OFFSET)
+    _rdev_major, _rdev_minor, dev_major, dev_minor = struct.unpack_from("<IIII", view, _STATX_STX_RDEV_OFFSET)
 
     # Ten-field ``os.stat_result`` uses whole seconds. Nanoseconds are not mapped
     # because the 16-field tuple layout is platform-sensitive in CPython.
@@ -131,3 +158,15 @@ def statx_to_stat_result(buf: Any) -> os.stat_result:
             ctime_sec,
         )
     )
+
+
+def statx_to_stat_result_from_completion(completion: Any, buf: Any) -> os.stat_result:
+    """Build ``os.stat_result`` after a successful statx completion.
+
+    Submit with ``mask=STATX_BASIC_STATS`` (or a superset), wait for the
+    completion, then convert the caller-owned buffer in one call. Raises
+    ``OSError`` when ``completion.res < 0``.
+    """
+
+    _require_statx_completion(completion)
+    return statx_to_stat_result(buf)
