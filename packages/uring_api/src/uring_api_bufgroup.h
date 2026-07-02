@@ -11,6 +11,7 @@ typedef struct {
     unsigned char *storage;
     unsigned int buffer_size;
     unsigned int buffer_count;
+    unsigned int leased_count;
     unsigned short group_id;
     int mask;
 } UringApiBufGroup;
@@ -19,6 +20,8 @@ extern PyTypeObject UringApiBufGroup_Type;
 
 PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, unsigned int buffer_count);
 void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id);
+void UringApiBufGroup_note_leased(UringApiBufGroup *self);
+void UringApiBufGroup_note_unleased(UringApiBufGroup *self);
 PyObject *UringApiRing_create_buf_group(UringApiRing *self, PyObject *args, PyObject *kwargs);
 
 #endif

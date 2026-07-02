@@ -24,6 +24,7 @@ jobs:
     # io_uring is Linux-only. This job is the Python compatibility gate for the
     # package on the newest hosted Ubuntu image.
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
