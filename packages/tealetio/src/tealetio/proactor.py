@@ -356,7 +356,7 @@ class _RecvGenBuffer:
         self._lock = threading.Lock()
         self._event = ThreadsafeEvent()
         self._reorder = _OrderedIngestBuffer[memoryview]()
-        self._ready: deque[tuple[int, memoryview | None]] = deque()
+        self._pressure_pending = False
         self._stream_done = False
         self._stream_error: BaseException | None = None
         self._stream: ContinuousOperation[_RecvManyResult] | None = None
@@ -384,24 +384,13 @@ class _RecvGenBuffer:
         with self._lock:
             if index == RECV_MANY_BUFFER_PRESSURE:
                 self._resume = cast(_RecvManyResume, data)
-                self._ready.appendleft((RECV_MANY_BUFFER_PRESSURE, None))
+                self._pressure_pending = True
                 notify = True
             else:
-                notify = self._ingest(index, cast(memoryview, data))
+                self._reorder.push((index, cast(memoryview, data)))
+                notify = bool(self._reorder)
         if notify:
             self._event.set()
-
-    def _ingest(self, index: int, data: memoryview) -> bool:
-        ready = self._reorder.pushpop((index, data))
-        if ready is None:
-            return False
-        self._ready.append(ready)
-        while True:
-            ready = self._reorder.pop()
-            if ready is None:
-                break
-            self._ready.append(ready)
-        return True
 
     def _pool_has_room_for_resume_locked(self) -> bool:
         if self._resume is None:
@@ -438,34 +427,29 @@ class _RecvGenBuffer:
     def take_next(self) -> _RecvGenYield | None:
         while True:
             pending_resume: _RecvManyResume | None = None
-            wait = False
-            result: _RecvGenYield | None
-            with self._lock:
-                if self._stream_error is not None:
-                    raise self._stream_error
-                self._maybe_arm_resume_locked()
-                pending_resume = self._take_pending_resume_locked()
-                if self._ready:
-                    index, chunk = self._ready.popleft()
-                    if index == RECV_MANY_BUFFER_PRESSURE:
-                        result = (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
-                    elif not chunk:
-                        self._stream_done = True
-                        result = None
-                    else:
+            try:
+                with self._lock:
+                    if self._stream_error is not None:
+                        raise self._stream_error
+                    self._maybe_arm_resume_locked()
+                    pending_resume = self._take_pending_resume_locked()
+                    if self._pressure_pending:
+                        self._pressure_pending = False
+                        return (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
+                    if self._reorder:
+                        index, chunk = self._reorder.pop()
+                        if not chunk:
+                            self._stream_done = True
+                            return None
                         if self._pool_has_room_for_resume_locked():
                             self._resume_next = True
-                        result = (index, cast(memoryview, chunk))
-                elif self._stream_done:
-                    result = None
-                else:
+                        return (index, chunk)
+                    if self._stream_done:
+                        return None
                     self._event.clear()
-                    wait = True
-                    result = None
-            if pending_resume is not None:
-                pending_resume()
-            if not wait:
-                return result
+            finally:
+                if pending_resume is not None:
+                    pending_resume()
             self._event.swait()
 
     def close(self) -> None:
@@ -475,7 +459,7 @@ class _RecvGenBuffer:
                 return
             self._closed = True
             stream = self._stream
-            self._ready.clear()
+            self._pressure_pending = False
             self._reorder.reset()
         if stream is not None and not stream.done():
             proactor = stream._proactor
