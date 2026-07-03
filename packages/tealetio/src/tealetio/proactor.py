@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from typing import Any, Generic, NoReturn, Protocol, TypeAlias, TypeVar, cast
@@ -63,8 +63,8 @@ _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
 _DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
-_DEFAULT_RECVGEN_BUFFER_SIZE = 16 * 1024
-_DEFAULT_RECVGEN_BUFFER_COUNT = 8
+_DEFAULT_RECVITER_BUFFER_SIZE = 16 * 1024
+_DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 # ``recv_many`` result-callback index signalling provided-buffer pool pressure.
 RECV_MANY_BUFFER_PRESSURE = -1
@@ -72,7 +72,7 @@ _RecvManyResume = Callable[[], None]
 _RecvManyResult = tuple[int, memoryview | _RecvManyResume]
 _RecvManyCallback = Callable[[_RecvManyResult], object]
 # ``index`` may be ``RECV_MANY_BUFFER_PRESSURE`` (-1) for pressure tokens.
-_RecvGenYield: TypeAlias = tuple[int, memoryview]
+_RecvIterYield: TypeAlias = tuple[int, memoryview]
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
 
@@ -173,7 +173,7 @@ class RecvBufferPool(Protocol):
     """Provided-buffer pool surface shared by uring and selector backends.
 
     ``leased_count`` tracks how many receive chunks consumers still hold.
-    When the pool is full, ``recv_many`` / ``recvgen`` pause and surface
+    When the pool is full, ``recv_many`` / ``sock_recv_iter`` pause and surface
     ``(RECV_MANY_BUFFER_PRESSURE, resume)`` so callers can drop views and
     call ``resume()`` to regulate inbound flow.
     """
@@ -352,8 +352,8 @@ class Proactor(Protocol):
 ProactorFactory = Callable[[], Proactor]
 
 
-class _RecvGenBuffer:
-    """Ordered receive buffer bridging ``recv_many`` callbacks and ``recvgen``."""
+class _RecvIterBuffer:
+    """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``."""
 
     def __init__(
         self,
@@ -434,7 +434,7 @@ class _RecvGenBuffer:
         if resume_fn is not None:
             resume_fn()
 
-    def take_next(self) -> _RecvGenYield | None:
+    def take_next(self) -> _RecvIterYield | None:
         while True:
             try:
                 with self._lock:
@@ -547,7 +547,7 @@ class ProactorBase:
         raise NotImplementedError(f"{type(self).__name__} does not provide receive buffer pools")
 
     def _default_shared_recv_buffer_pool_sizes(self) -> tuple[int, int]:
-        return _DEFAULT_RECVGEN_BUFFER_SIZE, _DEFAULT_RECVGEN_BUFFER_COUNT
+        return _DEFAULT_RECVITER_BUFFER_SIZE, _DEFAULT_RECVITER_BUFFER_COUNT
 
     def shared_recv_buffer_pool(self) -> RecvBufferPool:
         """Return this proactor's lazy shared provided-buffer pool."""
@@ -727,7 +727,7 @@ class SelectorProactor(ProactorBase):
         self._recv_many_repressure_pending: set[ContinuousOperation[Any]] = set()
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
-        """Create a synthetic provided-buffer pool for ``recv_many`` / ``recvgen``."""
+        """Create a synthetic provided-buffer pool for ``recv_many`` / ``sock_recv_iter``."""
 
         return _SelectorBufGroup(buffer_size, buffer_count)
 
@@ -1582,7 +1582,7 @@ class UringProactor(ProactorBase):
         return dict(self._capabilities)
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
-        """Create a provided-buffer group for ``recv_many`` / ``recvgen``."""
+        """Create a provided-buffer group for ``recv_many`` / ``sock_recv_iter``."""
 
         return self._ring.create_buf_group(buffer_size, buffer_count)
 
@@ -2532,10 +2532,10 @@ class ProactorScheduler(BaseScheduler):
         return self.wait_operation(self._proactor.recv(sock, n))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
-        """Create a provided-buffer pool for ``sock_recvgen`` and ``recv_many``.
+        """Create a provided-buffer pool for ``sock_recv_iter`` and ``recv_many``.
 
         The returned object satisfies ``RecvBufferPool`` and may be passed to
-        ``sock_recvgen(..., buffer_pool=pool)`` regardless of which proactor
+        ``sock_recv_iter(..., buffer_pool=pool)`` regardless of which proactor
         backend is mounted. Selector backends use a leased-view shim; uring
         backends use a kernel buffer group.
         """
@@ -2561,17 +2561,19 @@ class ProactorScheduler(BaseScheduler):
             return self._proactor.shared_recv_buffer_pool()
         return buffer_pool
 
-    def _open_sock_recvgen(self, sock: socket.socket, buffer_pool: RecvBufferPool | None) -> _RecvGenBuffer:
+    def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None) -> _RecvIterBuffer:
         """Start ``recv_many`` and return the ordered receive buffer."""
 
         pool = self._resolve_recv_buffer_pool(buffer_pool)
-        buffer = _RecvGenBuffer(buf_group=pool)
+        buffer = _RecvIterBuffer(buf_group=pool)
         stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=pool)
         buffer.attach_stream(stream)
         return buffer
 
-    def sock_recvgen(self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None) -> Iterator[_RecvGenYield]:
-        """Incrementally receive byte chunks until EOF as a blocking generator.
+    def sock_recv_iter(
+        self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None
+    ) -> Iterator[_RecvIterYield]:
+        """Incrementally receive byte chunks until EOF as a blocking iterator.
 
         Each ``recv_many`` chunk is reordered into stream-index order before it
         is yielded as a read-only ``memoryview``. Copy with ``bytes(data)`` when
@@ -2590,7 +2592,7 @@ class ProactorScheduler(BaseScheduler):
         block cooperatively.
         """
 
-        buffer = self._open_sock_recvgen(sock, buffer_pool)
+        buffer = self._open_sock_recv_iter(sock, buffer_pool)
         try:
             while True:
                 item = buffer.take_next()
@@ -2623,7 +2625,7 @@ class ProactorScheduler(BaseScheduler):
                     progress(cargo)
                 return cargo
 
-        return b"".join((process(chunk) for _, chunk in self.sock_recvgen(sock, buffer_pool)))
+        return b"".join((process(chunk) for _, chunk in self.sock_recv_iter(sock, buffer_pool)))
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
         """Receive bytes from a non-blocking socket into `buf`."""
@@ -2644,6 +2646,27 @@ class ProactorScheduler(BaseScheduler):
         """Send all `data` through a non-blocking socket."""
 
         return self.wait_operation(self._proactor.sendall(sock, data, progress))
+
+    def sock_send_iter(
+        self,
+        sock: socket.socket,
+        chunks: Iterable[bytes | bytearray | memoryview],
+    ) -> None:
+        """Send every chunk from ``chunks`` through a non-blocking socket.
+
+        Each non-empty chunk is sent with the proactor's ``sendall`` path before
+        the next chunk is pulled from the iterable. Track progress in the
+        iterable or generator you pass when you need it; call ``sock_sendall``
+        directly when a single buffer needs ``progress=`` reporting.
+
+        Must be called from a scheduler tealet so socket waits block
+        cooperatively.
+        """
+
+        for chunk in chunks:
+            if not chunk:
+                continue
+            self.sock_sendall(sock, memoryview(chunk))
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
         """Send one datagram through a non-blocking socket."""
