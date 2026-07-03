@@ -255,16 +255,11 @@ def _leased_selector_memoryview(data: bytes | bytearray, pool: _SelectorBufGroup
 
 
 _UringRingFactory = Callable[[int, int], _UringRing]
-_UringBufGroupFactory = Callable[[_UringRing], _UringBufGroup]
 _UringSendSubmit = Callable[[int, Any, object], _UringCompletion]
 
 
 def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
     return uring_api.Ring(entries=entries, flags=flags)
-
-
-def _default_uring_buf_group_factory(ring: _UringRing) -> _UringBufGroup:
-    return ring.create_buf_group(_DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT)
 
 
 def _configure_accepted_socket(sock: socket.socket) -> socket.socket:
@@ -1524,7 +1519,6 @@ class UringProactor(ProactorBase):
         *,
         completion_callback: _CompletionCallback | None = None,
         ring_factory: _UringRingFactory | None = None,
-        buf_group_factory: _UringBufGroupFactory | None = None,
         completion_threads: int = _DEFAULT_URING_COMPLETION_THREADS,
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
     ) -> None:
@@ -1532,11 +1526,8 @@ class UringProactor(ProactorBase):
             raise ValueError("completion_threads must be at least 1")
         if ring_factory is None:
             ring_factory = _default_uring_ring_factory
-        if buf_group_factory is None:
-            buf_group_factory = _default_uring_buf_group_factory
         super().__init__(completion_callback=completion_callback)
         self._ring = ring_factory(entries, flags)
-        self._buf_group_factory = buf_group_factory
         try:
             self._capabilities = uring_api.probe(entries=entries, flags=flags)
         except (OSError, RuntimeError, NotImplementedError):
@@ -1597,15 +1588,6 @@ class UringProactor(ProactorBase):
 
     def _default_shared_recv_buffer_pool_sizes(self) -> tuple[int, int]:
         return _DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT
-
-    def shared_recv_buffer_pool(self) -> RecvBufferPool:
-        """Return this proactor's lazy shared provided-buffer pool."""
-
-        pool = self._shared_recv_buffer_pool
-        if pool is None:
-            pool = self._buf_group_factory(self._ring)
-            self._shared_recv_buffer_pool = pool
-        return pool
 
     def _recv_many_resume_callable(self, entry: _UringEntry) -> _RecvManyResume:
         def resume() -> None:

@@ -3505,29 +3505,6 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_shared_recv_buffer_pool_uses_custom_buf_group_factory(self):
-        created: list[tuple[int, int]] = []
-
-        def factory(ring: _FakeUringRing) -> _FakeBufGroup:
-            created.append((8, 4))
-            return ring.create_buf_group(8, 4)
-
-        proactor = UringProactor(ring_factory=_FakeUringRing, buf_group_factory=factory)
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            pool = proactor.shared_recv_buffer_pool()
-            assert created == [(8, 4)]
-            proactor.recv_many(reader, lambda _result: None, buf_group=pool)
-            submitted = proactor.ring.submitted_recv_multishot[0]
-            assert submitted[1] is pool
-            assert submitted[1].buffer_size == 8
-            assert submitted[1].buffer_count == 4
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
     def test_recv_many_falls_back_to_oneshot_recv_and_finishes_on_eof(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)

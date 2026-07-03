@@ -35,8 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ProactorScheduler.set_shared_recv_buffer_pool(pool)` and
   `Proactor.set_shared_recv_buffer_pool(pool)` to replace the shared default
   pool before `sock_recvall` or explicit `sock_recvgen` calls.
-- `UringProactor.buf_group_factory` for custom default pool sizing on the lazy
-  `shared_recv_buffer_pool()`.
 - `RECV_MANY_BUFFER_PRESSURE` result index so `recv_many` consumers can release
   held views when the shared provided-buffer pool is exhausted.
 - Published runnable queue policies (`FifoRunnableQueue`,
