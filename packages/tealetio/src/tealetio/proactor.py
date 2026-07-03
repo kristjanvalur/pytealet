@@ -352,7 +352,6 @@ class _RecvGenBuffer:
     ) -> None:
         self._buf_group = buf_group
         self._resume: _RecvManyResume | None = None
-        self._resume_next = False
         self._lock = threading.Lock()
         self._event = ThreadsafeEvent()
         self._reorder = _OrderedIngestBuffer[memoryview]()
@@ -374,8 +373,7 @@ class _RecvGenBuffer:
                 exception = stream.exception()
                 if exception is not None:
                     self._stream_error = exception
-                elif not self._stream_done:
-                    self._stream_done = True
+            self._stream_done = True
         self._event.set()
 
     def on_result(self, result: _RecvManyResult) -> None:
@@ -403,16 +401,11 @@ class _RecvGenBuffer:
         required_free = max(1, buf_group.buffer_count // 2)
         return buf_group.buffer_count - buf_group.leased_count >= required_free
 
-    def _maybe_arm_resume_locked(self) -> None:
-        if self._pool_has_room_for_resume_locked():
-            self._resume_next = True
-
     def _take_pending_resume_locked(self) -> _RecvManyResume | None:
-        if not self._resume_next or self._resume is None:
+        if not self._pool_has_room_for_resume_locked():
             return None
         resume_fn = self._resume
         self._resume = None
-        self._resume_next = False
         return resume_fn
 
     def consume_pressure_resume(self) -> None:
@@ -429,9 +422,6 @@ class _RecvGenBuffer:
             pending_resume: _RecvManyResume | None = None
             try:
                 with self._lock:
-                    if self._stream_error is not None:
-                        raise self._stream_error
-                    self._maybe_arm_resume_locked()
                     pending_resume = self._take_pending_resume_locked()
                     if self._pressure_pending:
                         self._pressure_pending = False
@@ -439,12 +429,14 @@ class _RecvGenBuffer:
                     if self._reorder:
                         index, chunk = self._reorder.pop()
                         if not chunk:
+                            # ordered EOF beats a concurrent stream error/cancel race
                             self._stream_done = True
+                            self._stream_error = None
                             return None
-                        if self._pool_has_room_for_resume_locked():
-                            self._resume_next = True
                         return (index, chunk)
                     if self._stream_done:
+                        if self._stream_error is not None:
+                            raise self._stream_error
                         return None
                     self._event.clear()
             finally:
