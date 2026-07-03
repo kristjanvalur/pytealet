@@ -8,19 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
+- `recv_many(sock, callback, *, buf_group)` now requires an explicit
+  provided-buffer pool; there is no per-operation default at the proactor level.
 - `recv_many` provided-buffer exhaustion now delivers
   `(RECV_MANY_BUFFER_PRESSURE, resume)`; consumers must drop held views and
   call `resume()` to continue (no automatic resubmission).
-- `recvgen` / `sock_recvgen` always yield `(index, memoryview)` and
-  `(RECV_MANY_BUFFER_PRESSURE, None)`; the `allow_memview` option is removed.
+- `Proactor.recvall` and `Proactor.recvgen` are removed. Use
+  `ProactorScheduler.sock_recvall` and `ProactorScheduler.sock_recvgen` from
+  scheduler-owned tealets instead (blocking helpers, not `Operation` returns).
+- `sock_recvall(..., progress=...)` now calls `progress(chunk)` with each
+  non-empty chunk's `bytes` payload instead of a cumulative byte count.
+- `sock_recvgen` always yields `(index, memoryview)` and
+  `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))`; the `allow_memview` option
+  is removed.
 
 ### Added
-- `recvgen(sock)` and `ProactorScheduler.sock_recvgen(sock)` as a
-  tealet-blocking incremental consumer of `recv_many`, yielding stream-ordered
-  `(index, data)` chunks with the same provided-buffer pressure policy as
-  `recvall`.
-- `UringProactor` with a shared lazy `BufGroup` for provided-buffer multishot
-  `recv_many` / `recvall`, plus `buf_group_factory` for custom pool sizing.
+- `ProactorScheduler.sock_recvgen(sock, buffer_pool=None)` as a tealet-blocking
+  incremental consumer of `recv_many`, yielding stream-ordered `(index, data)`
+  chunks with the same provided-buffer pressure policy as `sock_recvall`.
+  ``None`` uses the proactor shared pool.
+- `ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` for
+  explicit provided-buffer pool sizing shared by `sock_recvgen` and `recv_many`.
+- `Proactor.shared_recv_buffer_pool()` as the lazy proactor-owned shared
+  `BufGroup` used by `sock_recvall`; pass it explicitly to `sock_recvgen` when
+  sharing the default pool.
+- `ProactorScheduler.set_shared_recv_buffer_pool(pool)` and
+  `Proactor.set_shared_recv_buffer_pool(pool)` to replace the shared default
+  pool before `sock_recvall` or explicit `sock_recvgen` calls.
 - `RECV_MANY_BUFFER_PRESSURE` result index so `recv_many` consumers can release
   held views when the shared provided-buffer pool is exhausted.
 - Published runnable queue policies (`FifoRunnableQueue`,
@@ -39,16 +53,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
-- `recvgen` / `sock_recvgen` always yield `(index, memoryview)` chunks and
-  `(RECV_MANY_BUFFER_PRESSURE, None)` pressure tokens; consumers release held
-  views between reads so leased kernel buffers can return to the pool.
-- Removed the `n` chunk-size argument from `recv_many`, `recvall`, `recvgen`,
-  `sock_recvall`, and `sock_recvgen`; chunk sizes are backend-defined
+- `sock_recvgen` always yields `(index, memoryview)` chunks and
+  `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens; consumers
+  release held views between reads so leased kernel buffers can return to the
+  pool. At most one pressure notification is pending until receive restarts.
+- Removed the `n` chunk-size argument from `recv_many`, `sock_recvall`, and
+  `sock_recvgen`; chunk sizes are backend-defined
   (`SelectorProactor` reads up to 8 KiB per `recv()`, `UringProactor` uses the
   shared `BufGroup` slot size).
 - `UringProactor.recv_many` delivers leased `memoryview` chunks instead of
-  copied `bytes`; `recvall` keeps views until buffer pressure, then copies all
-  held chunks to `bytes` before calling the pressure `resume()` callback.
+  copied `bytes`; `sock_recvall` converts each chunk to `bytes` as
+  `sock_recvgen` advances, with shared-pool pressure handled inside
+  `sock_recvgen`.
 - `SelectorProactor.recv_many` (Python 3.12+) uses a synthetic `BufGroup` and
   the same `(RECV_MANY_BUFFER_PRESSURE, resume)` backpressure contract as uring.
 - Made `Scheduler` use the proactor-backed synchronous scheduler by default,

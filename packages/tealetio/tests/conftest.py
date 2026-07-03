@@ -26,7 +26,7 @@ def _native_uring_recv_multishot_capability() -> tuple[bool, str]:
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
-        operation = proactor.recv_many(reader, lambda _result: None)
+        operation = proactor.recv_many(reader, lambda _result: None, buf_group=proactor.shared_recv_buffer_pool())
         operation.cancel()
         deadline = proactor.get_time() + 1.0
         while proactor.has_pending_operations() and proactor.get_time() < deadline:
