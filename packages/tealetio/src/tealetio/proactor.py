@@ -2650,13 +2650,17 @@ class ProactorScheduler(BaseScheduler):
     def sock_send_iter(
         self,
         sock: socket.socket,
-        chunks: Iterable[bytes | memoryview],
+        chunks: Iterable[bytes | bytearray | memoryview],
     ) -> None:
         """Send every chunk from ``chunks`` through a non-blocking socket.
 
         Each non-empty chunk is sent with the proactor's ``sendall`` path before
         the next chunk is pulled from the iterable. Track progress in the
-        iterable or generator you pass when you need it.
+        iterable or generator you pass when you need it; call ``sock_sendall``
+        directly when a single buffer needs ``progress=`` reporting.
+
+        Must be called from a scheduler tealet so socket waits block
+        cooperatively.
         """
 
         for chunk in chunks:

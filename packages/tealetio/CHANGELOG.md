@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduler-owned tealets instead (blocking helpers, not `Operation` returns).
 - `sock_recvall(..., progress=...)` now calls `progress(chunk)` with each
   non-empty chunk's `bytes` payload instead of a cumulative byte count.
+- `ProactorScheduler.sock_recvgen` renamed to `sock_recv_iter`.
 - `sock_recv_iter` always yields `(index, memoryview)` and
   `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))`; the `allow_memview` option
   is removed.
@@ -28,7 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chunks with the same provided-buffer pressure policy as `sock_recvall`.
   ``None`` uses the proactor shared pool.
 - `ProactorScheduler.sock_send_iter(sock, chunks)` to drain an iterable of
-  `bytes` / `memoryview` chunks through `sock_sendall`.
+  buffer chunks through `sock_sendall`. Track send progress in the iterable or
+  generator you pass; there is no separate progress callback on the helper.
 - `ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` for
   explicit provided-buffer pool sizing shared by `sock_recv_iter` and `recv_many`.
 - `Proactor.shared_recv_buffer_pool()` as the lazy proactor-owned shared

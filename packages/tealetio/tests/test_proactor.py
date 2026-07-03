@@ -1375,6 +1375,117 @@ class TestSelectorProactor:
             writer.close()
             scheduler.close()
 
+    def test_sock_send_iter_skips_empty_chunks(self):
+        scheduler = SyncProactorScheduler(SelectorProactor)
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def receive() -> bytes:
+                return scheduler.sock_recvall(reader)
+
+            def deliver() -> None:
+                scheduler.sock_send_iter(writer, [b"hello", b"", memoryview(b""), b"world"])
+                writer.shutdown(socket.SHUT_WR)
+
+            task = scheduler.spawn(receive)
+            scheduler.spawn(deliver)
+            assert scheduler.run_until_complete(task) == b"helloworld"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_sock_send_iter_accepts_bytearray_and_memoryview_chunks(self):
+        scheduler = SyncProactorScheduler(SelectorProactor)
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            payload = bytearray(b"abc")
+
+            def receive() -> bytes:
+                return scheduler.sock_recvall(reader)
+
+            def deliver() -> None:
+                scheduler.sock_send_iter(writer, [payload, memoryview(b"def")])
+                writer.shutdown(socket.SHUT_WR)
+
+            task = scheduler.spawn(receive)
+            scheduler.spawn(deliver)
+            assert scheduler.run_until_complete(task) == b"abcdef"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_sock_send_iter_pulls_chunks_lazily_from_generator(self):
+        scheduler = SyncProactorScheduler(SelectorProactor)
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        pulls: list[int] = []
+
+        def chunks() -> Any:
+            pulls.append(0)
+            yield b"hel"
+            pulls.append(1)
+            yield b"lo"
+
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def receive() -> bytes:
+                return scheduler.sock_recvall(reader)
+
+            def deliver() -> None:
+                scheduler.sock_send_iter(writer, chunks())
+                writer.shutdown(socket.SHUT_WR)
+
+            task = scheduler.spawn(receive)
+            scheduler.spawn(deliver)
+            assert scheduler.run_until_complete(task) == b"hello"
+            assert pulls == [0, 1]
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_sock_send_iter_propagates_send_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scheduler = SyncProactorScheduler(SelectorProactor)
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        calls = 0
+        real_sendall = scheduler.sock_sendall
+
+        def boom(sock: socket.socket, data: Any, progress: Any = None) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("send failed")
+            return real_sendall(sock, data, progress)
+
+        monkeypatch.setattr(scheduler, "sock_sendall", boom)
+
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def deliver() -> None:
+                scheduler.sock_send_iter(writer, [b"hello", b"world"])
+
+            task = scheduler.spawn(deliver)
+            with pytest.raises(OSError, match="send failed"):
+                scheduler.run_until_complete(task)
+            assert calls == 2
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
     def test_sendall_reports_progress(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()

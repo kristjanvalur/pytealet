@@ -155,7 +155,7 @@ event loop, or application thread.
 `ProactorScheduler.sock_recvall(sock, progress=None, *, buffer_pool=None)`
 joins chunks from `sock_recv_iter(sock, buffer_pool)`. Each non-pressure chunk is
 converted to `bytes` as the
-generator advances, so at most one leased `memoryview` is held per iteration
+iterator advances, so at most one leased `memoryview` is held per iteration
 step. Provided-buffer pressure is handled inside `sock_recv_iter`; receive
 restarts once at least half of the attached pool's slots are free.
 `sock_recvall` does not batch retain views or call `resume()` itself. When
@@ -196,10 +196,11 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can
 block cooperatively.
 
-`ProactorScheduler.sock_send_iter(sock, chunks)` drains an iterable of `bytes`
-or `memoryview` chunks through `sock_sendall`, sending each non-empty chunk
-before pulling the next. Track send progress in the iterable or generator you
-pass when you need it.
+`ProactorScheduler.sock_send_iter(sock, chunks)` drains an iterable of
+`bytes`, `bytearray`, or `memoryview` chunks through `sock_sendall`, sending
+each non-empty chunk before pulling the next. Track send progress in the
+iterable or generator you pass when you need it; use ``sock_sendall`` directly
+for per-buffer ``progress=`` callbacks. Must be called from a scheduler tealet.
 
 `Proactor` exposes `recv_many(sock, callback, *, buf_group)`,
 `create_recv_buffer_pool`, and the lazy `shared_recv_buffer_pool()` used by
