@@ -14,27 +14,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(RECV_MANY_BUFFER_PRESSURE, resume)`; consumers must drop held views and
   call `resume()` to continue (no automatic resubmission).
 - `Proactor.recvall` and `Proactor.recvgen` are removed. Use
-  `ProactorScheduler.sock_recvall` and `ProactorScheduler.sock_recvgen` from
+  `ProactorScheduler.sock_recvall` and `ProactorScheduler.sock_recv_iter` from
   scheduler-owned tealets instead (blocking helpers, not `Operation` returns).
 - `sock_recvall(..., progress=...)` now calls `progress(chunk)` with each
   non-empty chunk's `bytes` payload instead of a cumulative byte count.
-- `sock_recvgen` always yields `(index, memoryview)` and
+- `sock_recv_iter` always yields `(index, memoryview)` and
   `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))`; the `allow_memview` option
   is removed.
 
 ### Added
-- `ProactorScheduler.sock_recvgen(sock, buffer_pool=None)` as a tealet-blocking
+- `ProactorScheduler.sock_recv_iter(sock, buffer_pool=None)` as a tealet-blocking
   incremental consumer of `recv_many`, yielding stream-ordered `(index, data)`
   chunks with the same provided-buffer pressure policy as `sock_recvall`.
   ``None`` uses the proactor shared pool.
+- `ProactorScheduler.sock_send_iter(sock, chunks)` to drain an iterable of
+  `bytes` / `memoryview` chunks through `sock_sendall`.
 - `ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` for
-  explicit provided-buffer pool sizing shared by `sock_recvgen` and `recv_many`.
+  explicit provided-buffer pool sizing shared by `sock_recv_iter` and `recv_many`.
 - `Proactor.shared_recv_buffer_pool()` as the lazy proactor-owned shared
-  `BufGroup` used by `sock_recvall`; pass it explicitly to `sock_recvgen` when
+  `BufGroup` used by `sock_recvall`; pass it explicitly to `sock_recv_iter` when
   sharing the default pool.
 - `ProactorScheduler.set_shared_recv_buffer_pool(pool)` and
   `Proactor.set_shared_recv_buffer_pool(pool)` to replace the shared default
-  pool before `sock_recvall` or explicit `sock_recvgen` calls.
+  pool before `sock_recvall` or explicit `sock_recv_iter` calls.
 - `RECV_MANY_BUFFER_PRESSURE` result index so `recv_many` consumers can release
   held views when the shared provided-buffer pool is exhausted.
 - Published runnable queue policies (`FifoRunnableQueue`,
@@ -53,18 +55,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
-- `sock_recvgen` always yields `(index, memoryview)` chunks and
+- `sock_recv_iter` always yields `(index, memoryview)` chunks and
   `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens; consumers
   release held views between reads so leased kernel buffers can return to the
   pool. At most one pressure notification is pending until receive restarts.
 - Removed the `n` chunk-size argument from `recv_many`, `sock_recvall`, and
-  `sock_recvgen`; chunk sizes are backend-defined
+  `sock_recv_iter`; chunk sizes are backend-defined
   (`SelectorProactor` reads up to 8 KiB per `recv()`, `UringProactor` uses the
   shared `BufGroup` slot size).
 - `UringProactor.recv_many` delivers leased `memoryview` chunks instead of
   copied `bytes`; `sock_recvall` converts each chunk to `bytes` as
-  `sock_recvgen` advances, with shared-pool pressure handled inside
-  `sock_recvgen`.
+  `sock_recv_iter` advances, with shared-pool pressure handled inside
+  `sock_recv_iter`.
 - `SelectorProactor.recv_many` (Python 3.12+) uses a synthetic `BufGroup` and
   the same `(RECV_MANY_BUFFER_PRESSURE, resume)` backpressure contract as uring.
 - Made `Scheduler` use the proactor-backed synchronous scheduler by default,
