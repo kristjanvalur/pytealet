@@ -238,6 +238,44 @@ def test_recvgen_buffer_reorders_out_of_order_chunks():
     assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
 
 
+def test_recvgen_buffer_shared_resume_defers_until_queues_drained():
+    resumed: list[bool] = []
+
+    def resume() -> None:
+        resumed.append(True)
+
+    def exercise() -> list[bool]:
+        buffer = proactor_module._RecvGenBuffer()
+        buffer.on_result((0, memoryview(b"a")))
+        buffer.on_result((1, memoryview(b"b")))
+        buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
+        _assert_recvgen_pressure(buffer.take_next())
+        buffer.consume_pressure_resume()
+        assert resumed == []
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0
+        assert resumed == []
+        second = buffer.take_next()
+        assert second is not None and second[0] == 1
+        return resumed
+
+    assert _exercise_recvgen_buffer(exercise) == [True]
+
+
+def test_recvgen_buffer_ignores_late_callbacks_after_close():
+    def exercise() -> tuple[int, bool]:
+        buffer = proactor_module._RecvGenBuffer()
+        buffer.on_result((0, memoryview(b"a")))
+        buffer.close()
+        buffer.on_result((1, memoryview(b"b")))
+        buffer.on_result((RECV_MANY_BUFFER_PRESSURE, _noop_recv_many_resume()))
+        return len(buffer._ready), bool(buffer._reorder)
+
+    ready_len, reorder_pending = _exercise_recvgen_buffer(exercise)
+    assert ready_len == 0
+    assert not reorder_pending
+
+
 def test_recvgen_buffer_pressure_token_precedes_queued_views():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
         buffer = proactor_module._RecvGenBuffer()

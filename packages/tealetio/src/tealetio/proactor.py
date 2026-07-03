@@ -372,6 +372,7 @@ class _RecvGenBuffer:
         self._stream_error: BaseException | None = None
         self._stream: ContinuousOperation[_RecvManyResult] | None = None
         self._closed = False
+        self._shared_resume_requested = False
 
     def attach_stream(self, stream: ContinuousOperation[_RecvManyResult]) -> None:
         self._stream = stream
@@ -392,9 +393,13 @@ class _RecvGenBuffer:
         index, data = result
         notify = False
         with self._lock:
+            if self._closed:
+                return
             if index == RECV_MANY_BUFFER_PRESSURE:
                 # recv_many emits at most one pressure callback until the
                 # consumer advances past the pressure yield and recv restarts.
+                if self._pressure_pending:
+                    return
                 self._resume = cast(_RecvManyResume, data)
                 self._pressure_pending = True
                 notify = True
@@ -409,9 +414,10 @@ class _RecvGenBuffer:
     def _should_resume(self) -> _RecvManyResume | None:
         if self._resume is None:
             return None
+        if self._ready or self._reorder:
+            return None
         buf_group = self._buf_group
         if buf_group is None:
-            # shared recv_many pool: resume is yielded to the consumer
             return None
         # half the pool must be free; single-slot pools still need one free slot
         required_free = max(1, buf_group.buffer_count // 2)
@@ -421,21 +427,33 @@ class _RecvGenBuffer:
         self._resume = None
         return resume_fn
 
+    def _try_finish_shared_resume(self) -> None:
+        """Re-arm shared-pool ``recv_many`` once internal queues are drained."""
+
+        resume_fn: _RecvManyResume | None = None
+        with self._lock:
+            if not self._shared_resume_requested or self._resume is None:
+                return
+            if self._buf_group is not None:
+                return
+            if self._ready or self._reorder:
+                return
+            resume_fn = self._resume
+            self._resume = None
+            self._shared_resume_requested = False
+        resume_fn()
+
     def consume_pressure_resume(self) -> None:
         """Re-arm ``recv_many`` after the consumer drops held pressure views."""
 
         with self._lock:
-            resume_fn = self._resume
-            self._resume = None
-        if resume_fn is not None:
-            resume_fn()
+            self._shared_resume_requested = True
+        self._try_finish_shared_resume()
 
     def take_next(self) -> _RecvGenYield | None:
         while True:
-            pending_resume: _RecvManyResume | None = None
             try:
                 with self._lock:
-                    pending_resume = self._should_resume()
                     if self._pressure_pending:
                         self._pressure_pending = False
                         return (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
@@ -458,8 +476,12 @@ class _RecvGenBuffer:
                         return None
                     self._event.clear()
             finally:
+                with self._lock:
+                    pending_resume = self._should_resume()
                 if pending_resume is not None:
                     pending_resume()
+                else:
+                    self._try_finish_shared_resume()
             self._event.swait()
 
     def close(self) -> None:
@@ -470,6 +492,7 @@ class _RecvGenBuffer:
             self._closed = True
             stream = self._stream
             self._pressure_pending = False
+            self._shared_resume_requested = False
             self._ready.clear()
             self._reorder.reset()
         if stream is not None and not stream.done():
