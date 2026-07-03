@@ -58,7 +58,8 @@ Match core `tealet` extension builds:
 ```
 
 `setup.py` defines `EXTENSION_C_COMPILE_ARGS`; keep
-`tests/test_uring_api.py` in sync. Ad-hoc compiles (`build_c_api_client()`,
+`tests/conftest.py` in sync. Ad-hoc compiles (`build_c_api_client()` in
+`tests/helpers.py`,
 public header checks) must use the same flags.
 
 For intentional CPython `void*` slot conversions (for example `PyModuleDef_Slot`
@@ -83,9 +84,11 @@ missing kernel support.
 
 ## Test Policy
 
-Tests live in `packages/uring_api/tests/`. When verifying changes locally or in
-automation, wrap pytest in a 30-second process timeout so stuck tests fail fast
-instead of blocking the session.
+Tests live in `packages/uring_api/tests/`, split by concern (see
+`tests/README.md`). Shared skip helpers are in `conftest.py`; socket helpers,
+C API client build, and kernel-version utilities are in `helpers.py`. When
+verifying changes locally or in automation, wrap pytest in a 30-second process
+timeout so stuck tests fail fast instead of blocking the session.
 
 Follow existing patterns:
 

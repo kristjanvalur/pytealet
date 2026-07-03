@@ -9,7 +9,7 @@ from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as _build_ext
 from setuptools.command.build_py import build_py as _build_py
 
-# Keep in sync with EXTENSION_C_COMPILE_ARGS in tests/test_uring_api.py.
+# Keep in sync with EXTENSION_C_COMPILE_ARGS in tests/conftest.py.
 EXTENSION_C_COMPILE_ARGS = [
     "-std=c17",
     "-pedantic-errors",
