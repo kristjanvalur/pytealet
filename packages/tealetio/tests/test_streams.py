@@ -19,7 +19,7 @@ from tealetio.streams import (
     open_streams,
     run_coro,
 )
-from test_proactor import _FakeUringRing
+from test_proactor import _FakeUringRing, _patch_uring_capabilities
 
 
 def _scheduler_with_fake_ring() -> SyncProactorScheduler:
@@ -112,7 +112,8 @@ class TestStreamsPoC:
             writer.close()
             scheduler.close()
 
-    def test_async_stream_readexactly_with_fake_uring_ring(self):
+    def test_async_stream_readexactly_with_fake_uring_ring(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False, IORING_OP_SENDMSG_ZC=False)
         scheduler = _scheduler_with_fake_ring()
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()

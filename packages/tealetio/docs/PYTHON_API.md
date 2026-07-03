@@ -490,7 +490,7 @@ def exercise(sock):
 `(reader, writer)`. `open_async_connection(...)` returns asyncio-shaped
 endpoints. `open_streams()` and `open_async_streams()` wrap an existing
 non-blocking connected socket. Under the hood, `SocketTransport` calls
-`scheduler.sock_recv()` and `scheduler.sock_sendall()`.
+`scheduler.sock_recv_into()` and `scheduler.sock_sendall()`.
 
 Pass `stream_factory=` to `open_streams()`, `open_async_streams()`,
 `open_connection(...)`, or `open_async_connection(...)` to customise the stream
