@@ -292,12 +292,25 @@ def test_kernel_version_at_least_handles_release_candidate_suffixes():
     assert _kernel_version_at_least("6.6.12-1-WSL2", 5, 6)
 
 
-def test_probe_statx_matches_kernel_version_gate():
+_PROBE_KERNEL_FLOORS = {
+    "IORING_OP_STATX": (5, 6),
+    "IORING_POLL_MULTISHOT": (5, 13),
+    "IORING_ACCEPT_MULTISHOT": (5, 19),
+    "IORING_OP_SOCKET": (5, 19),
+    "IORING_RECV_MULTISHOT": (6, 0),
+    "IORING_OP_SEND_ZC": (6, 0),
+    "IORING_OP_SENDMSG_ZC": (6, 0),
+}
+
+
+def test_probe_capabilities_match_kernel_version_gates():
     require_uring()
 
     probe = uring_api.probe()
-    expected = _kernel_version_at_least(os.uname().release, 5, 6)
-    assert probe["IORING_OP_STATX"] is expected
+    release = os.uname().release
+    for name, (major, minor) in _PROBE_KERNEL_FLOORS.items():
+        expected = _kernel_version_at_least(release, major, minor)
+        assert probe[name] is expected, name
 
 
 def test_probe_capabilities_are_stable_across_calls():
