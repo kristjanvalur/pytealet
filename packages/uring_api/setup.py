@@ -106,6 +106,7 @@ setup(
                 "src/uring_api_core.h",
                 "src/uring_api_dispatch.h",
                 "src/uring_api_kernel_version.h",
+                "src/uring_api_kernel_versions.h",
                 "src/uring_api_probe.h",
                 "src/uring_api_ring.h",
                 "src/uring_api_statx.h",

@@ -136,20 +136,6 @@ static int dict_set_owned(PyObject *dict, const char *key, PyObject *value) {
     return ret;
 }
 
-PyObject *build_feature_probe_result(bool available, int errnum, const char *message) {
-    PyObject *result = PyDict_New();
-    if (!result) {
-        return NULL;
-    }
-    if (PyDict_SetItemString(result, "available", available ? Py_True : Py_False) < 0 ||
-        dict_set_owned(result, "errno", errnum ? PyLong_FromLong(errnum) : Py_NewRef(Py_None)) < 0 ||
-        dict_set_owned(result, "message", message ? PyUnicode_FromString(message) : Py_NewRef(Py_None)) < 0) {
-        Py_DECREF(result);
-        return NULL;
-    }
-    return result;
-}
-
 int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int default_entries, unsigned int *entries,
                         unsigned int *flags) {
     static char *keywords[] = {"entries", "flags", NULL};

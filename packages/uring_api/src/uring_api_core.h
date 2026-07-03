@@ -19,7 +19,7 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
-PyObject *build_feature_probe_result(bool available, int errnum, const char *message);
+
 int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int default_entries, unsigned int *entries,
                         unsigned int *flags);
 int parse_numeric_sockaddr(int fd, PyObject *address, struct sockaddr_storage *storage, socklen_t *addrlen);
