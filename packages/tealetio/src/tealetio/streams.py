@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 from collections.abc import Callable, Coroutine
 from typing import Any, Protocol, TypeVar
 
 from asynkit import coro_drive
 
+from .operations import ContinuousOperation
 from .proactor import ProactorScheduler
 
 T = TypeVar("T")
@@ -24,12 +26,19 @@ __all__ = [
     "AsyncStreamWriter",
     "StreamFactory",
     "AsyncStreamFactory",
+    "StreamServer",
     "default_stream_factory",
     "default_async_stream_factory",
     "open_connection",
+    "open_unix_connection",
     "open_streams",
     "open_async_connection",
+    "open_async_unix_connection",
     "open_async_streams",
+    "start_server",
+    "start_unix_server",
+    "start_async_server",
+    "start_async_unix_server",
     "run_coro",
 ]
 
@@ -490,4 +499,292 @@ def open_async_connection(
         limit=limit,
         stream_factory=stream_factory,
         open_streams_fn=open_async_streams,
+    )
+
+
+def _connect_unix_streams(
+    scheduler: ProactorScheduler,
+    path: str,
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: StreamFactory | AsyncStreamFactory | None,
+    open_streams_fn: Callable[..., TStreamPair],
+) -> TStreamPair:
+    if not hasattr(socket, "AF_UNIX"):
+        raise RuntimeError("AF_UNIX is not supported on this platform")
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.setblocking(False)
+    try:
+        scheduler.sock_connect(sock, path)
+    except OSError:
+        sock.close()
+        raise
+    return open_streams_fn(
+        scheduler,
+        sock,
+        limit=limit,
+        stream_factory=stream_factory,
+    )
+
+
+def open_unix_connection(
+    scheduler: ProactorScheduler,
+    path: str,
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: StreamFactory | None = None,
+) -> tuple[StreamReader, StreamWriter]:
+    """Connect to a Unix domain socket path and return native stream endpoints."""
+
+    return _connect_unix_streams(
+        scheduler,
+        path,
+        limit=limit,
+        stream_factory=stream_factory,
+        open_streams_fn=open_streams,
+    )
+
+
+def open_async_unix_connection(
+    scheduler: ProactorScheduler,
+    path: str,
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: AsyncStreamFactory | None = None,
+) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
+    """Connect to a Unix domain socket path and return asyncio-shaped stream endpoints."""
+
+    return _connect_unix_streams(
+        scheduler,
+        path,
+        limit=limit,
+        stream_factory=stream_factory,
+        open_streams_fn=open_async_streams,
+    )
+
+
+def _bind_tcp_socket(
+    host: str | None,
+    port: int,
+    *,
+    family: int = socket.AF_INET,
+    backlog: int,
+) -> socket.socket:
+    if port is None:
+        raise ValueError("port is required for TCP servers")
+
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setblocking(False)
+    bind_host = "" if host is None else host
+    sock.bind((bind_host, port))
+    sock.listen(backlog)
+    return sock
+
+
+def _bind_unix_socket(path: str, *, backlog: int) -> socket.socket:
+    if not hasattr(socket, "AF_UNIX"):
+        raise RuntimeError("AF_UNIX is not supported on this platform")
+
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.setblocking(False)
+    sock.bind(path)
+    sock.listen(backlog)
+    return sock
+
+
+class StreamServer:
+    """Listening stream server backed by a continuous ``accept_many`` operation."""
+
+    def __init__(
+        self,
+        scheduler: ProactorScheduler,
+        sockets: list[socket.socket],
+        accept_operation: ContinuousOperation[tuple[socket.socket, Any]],
+    ) -> None:
+        self._scheduler = scheduler
+        self._sockets = tuple(sockets)
+        self._accept_operation = accept_operation
+        self._closed = False
+
+    @property
+    def sockets(self) -> tuple[socket.socket, ...]:
+        return self._sockets
+
+    @property
+    def accept_operation(self) -> ContinuousOperation[tuple[socket.socket, Any]]:
+        return self._accept_operation
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._accept_operation.cancel()
+        for sock in self._sockets:
+            sock.close()
+
+
+def _spawn_stream_client(
+    scheduler: ProactorScheduler,
+    conn: socket.socket,
+    *,
+    limit: int,
+    stream_factory: StreamFactory | AsyncStreamFactory | None,
+    open_streams_fn: Callable[..., TStreamPair],
+    client_handler: Callable[..., Any],
+    async_handler: bool,
+) -> None:
+    def serve() -> None:
+        writer: StreamWriter | AsyncStreamWriter | None = None
+        try:
+            reader, writer = open_streams_fn(
+                scheduler,
+                conn,
+                limit=limit,
+                stream_factory=stream_factory,
+            )
+            if async_handler:
+                run_coro(client_handler(reader, writer))
+            else:
+                client_handler(reader, writer)
+        finally:
+            if writer is not None:
+                writer.close()
+            else:
+                conn.close()
+
+    scheduler.call_soon_threadsafe(lambda: scheduler.spawn(serve))
+
+
+def _start_stream_server(
+    scheduler: ProactorScheduler,
+    sock: socket.socket,
+    client_handler: Callable[..., Any],
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: StreamFactory | AsyncStreamFactory | None = None,
+    open_streams_fn: Callable[..., TStreamPair],
+    async_handler: bool,
+) -> StreamServer:
+    def on_accept(accepted: tuple[socket.socket, Any]) -> None:
+        conn, _address = accepted
+        _spawn_stream_client(
+            scheduler,
+            conn,
+            limit=limit,
+            stream_factory=stream_factory,
+            open_streams_fn=open_streams_fn,
+            client_handler=client_handler,
+            async_handler=async_handler,
+        )
+
+    accept_operation = scheduler.proactor.accept_many(sock, on_accept)
+    return StreamServer(scheduler, [sock], accept_operation)
+
+
+def start_server(
+    scheduler: ProactorScheduler,
+    client_handler: Callable[[StreamReader, StreamWriter], Any],
+    host: str | None = None,
+    port: int | None = None,
+    *,
+    family: int = socket.AF_INET,
+    backlog: int = 100,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: StreamFactory | None = None,
+) -> StreamServer:
+    """Start a TCP stream server that dispatches each accept to ``client_handler``.
+
+    Accepts use ``proactor.accept_many()``, so ``UringProactor`` can service
+    connections through multishot accept when the runtime probe allows it.
+    Handler tealets are spawned through ``call_soon_threadsafe`` because accept
+    callbacks may run on completion worker threads.
+    """
+
+    sock = _bind_tcp_socket(host, port if port is not None else 0, family=family, backlog=backlog)
+    return _start_stream_server(
+        scheduler,
+        sock,
+        client_handler,
+        limit=limit,
+        stream_factory=stream_factory,
+        open_streams_fn=open_streams,
+        async_handler=False,
+    )
+
+
+def start_unix_server(
+    scheduler: ProactorScheduler,
+    client_handler: Callable[[StreamReader, StreamWriter], Any],
+    path: str,
+    *,
+    backlog: int = 100,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: StreamFactory | None = None,
+) -> StreamServer:
+    """Start a Unix-domain stream server backed by ``accept_many``."""
+
+    sock = _bind_unix_socket(path, backlog=backlog)
+    return _start_stream_server(
+        scheduler,
+        sock,
+        client_handler,
+        limit=limit,
+        stream_factory=stream_factory,
+        open_streams_fn=open_streams,
+        async_handler=False,
+    )
+
+
+def start_async_server(
+    scheduler: ProactorScheduler,
+    client_handler: Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]],
+    host: str | None = None,
+    port: int | None = None,
+    *,
+    family: int = socket.AF_INET,
+    backlog: int = 100,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: AsyncStreamFactory | None = None,
+) -> StreamServer:
+    """Start a TCP server that runs an asyncio-shaped handler per connection."""
+
+    sock = _bind_tcp_socket(host, port if port is not None else 0, family=family, backlog=backlog)
+    return _start_stream_server(
+        scheduler,
+        sock,
+        client_handler,
+        limit=limit,
+        stream_factory=stream_factory,
+        open_streams_fn=open_async_streams,
+        async_handler=True,
+    )
+
+
+def start_async_unix_server(
+    scheduler: ProactorScheduler,
+    client_handler: Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]],
+    path: str,
+    *,
+    backlog: int = 100,
+    limit: int = _DEFAULT_LIMIT,
+    stream_factory: AsyncStreamFactory | None = None,
+) -> StreamServer:
+    """Start a Unix-domain server that runs an asyncio-shaped handler per connection."""
+
+    sock = _bind_unix_socket(path, backlog=backlog)
+    return _start_stream_server(
+        scheduler,
+        sock,
+        client_handler,
+        limit=limit,
+        stream_factory=stream_factory,
+        open_streams_fn=open_async_streams,
+        async_handler=True,
     )

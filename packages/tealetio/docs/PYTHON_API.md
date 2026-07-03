@@ -488,7 +488,9 @@ def exercise(sock):
 
 `open_connection(scheduler, host, port)` connects a TCP socket and returns native
 `(reader, writer)`. `open_async_connection(...)` returns asyncio-shaped
-endpoints. `open_streams()` and `open_async_streams()` wrap an existing
+endpoints. `open_unix_connection(scheduler, path)` and
+`open_async_unix_connection(...)` connect Unix-domain stream sockets without
+name resolution. `open_streams()` and `open_async_streams()` wrap an existing
 non-blocking connected socket. Under the hood, `SocketTransport` calls
 `scheduler.sock_recv_into()` and `scheduler.sock_sendall()`.
 
@@ -516,6 +518,16 @@ Module helpers `tealetio.getaddrinfo(...)`, `tealetio.getnameinfo(...)`, and
 
 `open_connection(...)` and `open_async_connection(...)` resolve hostnames through
 `scheduler.ensure_resolved(...)` before calling `sock_connect`.
+
+`start_server(scheduler, client_handler, host, port)` and
+`start_unix_server(scheduler, client_handler, path)` bind a listening socket and
+arm `proactor.accept_many()`. Each accepted connection is marshalled onto the
+scheduler with `call_soon_threadsafe()` and wrapped as stream endpoints before
+`client_handler(reader, writer)` runs in a spawned tealet. Asyncio-shaped
+handlers use `start_async_server(...)` or `start_async_unix_server(...)`, which
+drive the handler coroutine through `run_coro()`. On `UringProactor`, accept uses
+multishot `IORING_ACCEPT_MULTISHOT` when probed; otherwise the proactor falls
+back to repeated one-shot accepts (see the `accept_many` notes above).
 
 Stream reads use `scheduler.sock_recv_into()` through `SocketTransport.recv_into()`
 so `UringProactor.recv_into()` can fill caller-owned buffers without an extra
