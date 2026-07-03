@@ -46,7 +46,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-uring_api = ["py.typed", "include/uring_api_capi.h"]
+uring_api = ["py.typed", "include/uring_api_capi.h", "include/uring_api_completion_kinds.h"]
 
 [tool.ruff]
 line-length = 120
