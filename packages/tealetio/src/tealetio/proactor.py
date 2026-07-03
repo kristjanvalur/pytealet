@@ -335,7 +335,7 @@ class Proactor(Protocol):
         sock: socket.socket,
         callback: _RecvManyCallback,
         *,
-        buf_group: RecvBufferPool | None = None,
+        buf_group: RecvBufferPool,
     ) -> ContinuousOperation[_RecvManyResult]: ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
@@ -541,7 +541,7 @@ class ProactorBase:
         sock: socket.socket,
         callback: _RecvManyCallback,
         *,
-        buf_group: RecvBufferPool | None = None,
+        buf_group: RecvBufferPool,
     ) -> ContinuousOperation[_RecvManyResult]:
         raise NotImplementedError
 
@@ -1031,7 +1031,7 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         callback: _RecvManyCallback,
         *,
-        buf_group: RecvBufferPool | None = None,
+        buf_group: RecvBufferPool,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start receiving byte chunks until EOF, cancellation, or failure.
 
@@ -1043,6 +1043,9 @@ class SelectorProactor(ProactorBase):
         ``buf_group`` pool is exhausted, the callback also receives
         ``(RECV_MANY_BUFFER_PRESSURE, resume)``; call ``resume()`` after
         dropping held views to re-arm the next read.
+
+        ``buf_group`` must be a provided-buffer pool from
+        ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
         """
 
         operation = ContinuousOperation[_RecvManyResult](
@@ -1077,12 +1080,7 @@ class SelectorProactor(ProactorBase):
             return operation
 
         # paced path: one chunk per step; pool exhaustion yields RECV_MANY_BUFFER_PRESSURE.
-        resolved_group = cast(
-            _SelectorBufGroup,
-            buf_group
-            if buf_group is not None
-            else self.create_recv_buffer_pool(_DEFAULT_RECVGEN_BUFFER_SIZE, _DEFAULT_RECVGEN_BUFFER_COUNT),
-        )
+        resolved_group = cast(_SelectorBufGroup, buf_group)
         state = _SelectorRecvManyState()
 
         def step() -> ContinuousStepResult:
@@ -1600,6 +1598,15 @@ class UringProactor(ProactorBase):
     def _default_shared_recv_buffer_pool_sizes(self) -> tuple[int, int]:
         return _DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT
 
+    def shared_recv_buffer_pool(self) -> RecvBufferPool:
+        """Return this proactor's lazy shared provided-buffer pool."""
+
+        pool = self._shared_recv_buffer_pool
+        if pool is None:
+            pool = self._buf_group_factory(self._ring)
+            self._shared_recv_buffer_pool = pool
+        return pool
+
     def _recv_many_resume_callable(self, entry: _UringEntry) -> _RecvManyResume:
         def resume() -> None:
             if entry.operation.done() or entry.resubmit is None or entry.active:
@@ -2096,7 +2103,7 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         callback: _RecvManyCallback,
         *,
-        buf_group: RecvBufferPool | None = None,
+        buf_group: RecvBufferPool,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start a continuous receive operation that completes on EOF.
 
@@ -2119,6 +2126,9 @@ class UringProactor(ProactorBase):
         and ``RECV_MANY_BUFFER_PRESSURE`` is never emitted.
 
         EOF always emits a final empty view before completing the operation.
+
+        ``buf_group`` must be a provided-buffer pool from
+        ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
         """
 
         operation = ContinuousOperation[_RecvManyResult](
@@ -2128,10 +2138,7 @@ class UringProactor(ProactorBase):
             result_callback=callback,
         )
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
-            if buf_group is not None:
-                uring_group = cast(_UringBufGroup, buf_group)
-            else:
-                uring_group = self._buf_group_factory(self._ring)
+            uring_group = cast(_UringBufGroup, buf_group)
             # provided-buffer multishot: leased BufViews, ENOBUFS resume callback path.
             entry = _UringEntry(
                 operation=operation,
@@ -2543,7 +2550,7 @@ class ProactorScheduler(BaseScheduler):
         """Create a provided-buffer pool for ``sock_recvgen`` and ``recv_many``.
 
         The returned object satisfies ``RecvBufferPool`` and may be passed to
-        ``sock_recvgen(..., buf_group=pool)`` regardless of which proactor
+        ``sock_recvgen(..., buffer_pool=pool)`` regardless of which proactor
         backend is mounted. Selector backends use a leased-view shim; uring
         backends use a kernel buffer group.
         """
@@ -2555,8 +2562,6 @@ class ProactorScheduler(BaseScheduler):
 
         Lazily creates the default pool on first use unless
         ``set_shared_recv_buffer_pool()`` installed a custom pool first.
-        Used by ``sock_recvall``; pass explicitly to ``sock_recvgen`` when
-        sharing the proactor default pool.
         """
 
         return self._proactor.shared_recv_buffer_pool()
@@ -2566,23 +2571,30 @@ class ProactorScheduler(BaseScheduler):
 
         self._proactor.set_shared_recv_buffer_pool(pool)
 
-    def _open_sock_recvgen(self, sock: socket.socket, buf_group: RecvBufferPool) -> _RecvGenBuffer:
+    def _resolve_recv_buffer_pool(self, buffer_pool: RecvBufferPool | None) -> RecvBufferPool:
+        if buffer_pool is None:
+            return self._proactor.shared_recv_buffer_pool()
+        return buffer_pool
+
+    def _open_sock_recvgen(self, sock: socket.socket, buffer_pool: RecvBufferPool | None) -> _RecvGenBuffer:
         """Start ``recv_many`` and return the ordered receive buffer."""
 
-        buffer = _RecvGenBuffer(buf_group=buf_group)
-        stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=buf_group)
+        pool = self._resolve_recv_buffer_pool(buffer_pool)
+        buffer = _RecvGenBuffer(buf_group=pool)
+        stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=pool)
         buffer.attach_stream(stream)
         return buffer
 
-    def sock_recvgen(self, sock: socket.socket, buf_group: RecvBufferPool) -> Iterator[_RecvGenYield]:
+    def sock_recvgen(self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None) -> Iterator[_RecvGenYield]:
         """Incrementally receive byte chunks until EOF as a blocking generator.
 
         Each ``recv_many`` chunk is reordered into stream-index order before it
         is yielded as a read-only ``memoryview``. Copy with ``bytes(data)`` when
         owned storage is required past the current iteration step.
 
-        ``buf_group`` must be a ``RecvBufferPool`` from ``create_recv_buffer_pool()``
-        or ``shared_recv_buffer_pool()``.
+        ``buffer_pool`` selects the provided-buffer pool. ``None`` uses the
+        proactor's shared pool from ``shared_recv_buffer_pool()``; pass a pool
+        from ``create_recv_buffer_pool()`` for dedicated sizing.
 
         ``(RECV_MANY_BUFFER_PRESSURE, memoryview(b\"\"))`` is yielded when the
         provided-buffer pool is exhausted. Drop held views when that token appears.
@@ -2593,7 +2605,7 @@ class ProactorScheduler(BaseScheduler):
         block cooperatively.
         """
 
-        buffer = self._open_sock_recvgen(sock, buf_group)
+        buffer = self._open_sock_recvgen(sock, buffer_pool)
         try:
             while True:
                 item = buffer.take_next()
@@ -2603,8 +2615,18 @@ class ProactorScheduler(BaseScheduler):
         finally:
             buffer.close()
 
-    def sock_recvall(self, sock: socket.socket, progress: _RecvProgressCallback | None = None) -> bytes:
-        """Receive byte chunks until EOF and return their concatenation."""
+    def sock_recvall(
+        self,
+        sock: socket.socket,
+        progress: _RecvProgressCallback | None = None,
+        *,
+        buffer_pool: RecvBufferPool | None = None,
+    ) -> bytes:
+        """Receive byte chunks until EOF and return their concatenation.
+
+        ``buffer_pool`` selects the provided-buffer pool. ``None`` uses the
+        proactor's shared pool from ``shared_recv_buffer_pool()``.
+        """
 
         if progress is None:
             process = bytes
@@ -2616,9 +2638,7 @@ class ProactorScheduler(BaseScheduler):
                     progress(cargo)
                 return cargo
 
-        return b"".join(
-            (process(chunk) for _, chunk in self.sock_recvgen(sock, self._proactor.shared_recv_buffer_pool()))
-        )
+        return b"".join((process(chunk) for _, chunk in self.sock_recvgen(sock, buffer_pool)))
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
         """Receive bytes from a non-blocking socket into `buf`."""

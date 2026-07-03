@@ -156,9 +156,9 @@ shape remains subject to change before a stable release.
 
 ## Uring-backed receive
 
-`UringProactor` (`tealetio.proactor`) `recv_many(sock, callback)` without
-`buf_group` creates a dedicated provided-buffer pool per operation (16 KiB ×
-256 buffers by default). `recv_many` delivers borrowed `memoryview` chunks from
+`UringProactor` (`tealetio.proactor`) `recv_many(sock, callback, *, buf_group)`
+requires an explicit provided-buffer pool (from `create_recv_buffer_pool()` or
+`shared_recv_buffer_pool()`). `recv_many` delivers borrowed `memoryview` chunks from
 leased kernel buffers. When the pool is exhausted, the callback receives
 `(RECV_MANY_BUFFER_PRESSURE, resume)`; drop held views and call `resume()` to
 re-arm multishot receive (stream indices continue from the failed completion's
@@ -169,8 +169,9 @@ Each proactor lazily owns one shared `BufGroup` for `sock_recvall(...)` (16 KiB
 copied from each `sock_recvgen` chunk as the generator advances; pressure
 recovery is handled inside `sock_recvgen`. Its optional `progress` callback
 receives each non-empty chunk's `bytes` payload. `sock_recvgen(sock,
-buf_group)` requires an explicit pool from `create_recv_buffer_pool()` or
-`shared_recv_buffer_pool()`; it yields read-only `memoryview` chunks and
+buffer_pool=None)` and `sock_recvall(..., buffer_pool=None)` use the proactor
+shared pool by default; pass a pool from `create_recv_buffer_pool()` for
+dedicated sizing. `sock_recvgen` yields read-only `memoryview` chunks and
 `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens. Copy with
 `bytes(data)` when owned storage is required past the current iteration step.
 On Python 3.12+, `SelectorProactor.recv_many` uses a synthetic `BufGroup` for

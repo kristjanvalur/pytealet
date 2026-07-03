@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
+- `recv_many(sock, callback, *, buf_group)` now requires an explicit
+  provided-buffer pool; there is no per-operation default at the proactor level.
 - `recv_many` provided-buffer exhaustion now delivers
   `(RECV_MANY_BUFFER_PRESSURE, resume)`; consumers must drop held views and
   call `resume()` to continue (no automatic resubmission).
@@ -21,9 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is removed.
 
 ### Added
-- `ProactorScheduler.sock_recvgen(sock, buf_group)` as a tealet-blocking
+- `ProactorScheduler.sock_recvgen(sock, buffer_pool=None)` as a tealet-blocking
   incremental consumer of `recv_many`, yielding stream-ordered `(index, data)`
   chunks with the same provided-buffer pressure policy as `sock_recvall`.
+  ``None`` uses the proactor shared pool.
 - `ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` for
   explicit provided-buffer pool sizing shared by `sock_recvgen` and `recv_many`.
 - `Proactor.shared_recv_buffer_pool()` as the lazy proactor-owned shared
@@ -32,8 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ProactorScheduler.set_shared_recv_buffer_pool(pool)` and
   `Proactor.set_shared_recv_buffer_pool(pool)` to replace the shared default
   pool before `sock_recvall` or explicit `sock_recvgen` calls.
-- `UringProactor.buf_group_factory` for custom default pool sizing on low-level
-  `recv_many(sock, callback)` calls that omit `buf_group`.
+- `UringProactor.buf_group_factory` for custom default pool sizing on the lazy
+  `shared_recv_buffer_pool()`.
 - `RECV_MANY_BUFFER_PRESSURE` result index so `recv_many` consumers can release
   held views when the shared provided-buffer pool is exhausted.
 - Published runnable queue policies (`FifoRunnableQueue`,
