@@ -2570,7 +2570,9 @@ class ProactorScheduler(BaseScheduler):
         buffer.attach_stream(stream)
         return buffer
 
-    def sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None) -> Iterator[_RecvIterYield]:
+    def sock_recv_iter(
+        self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None
+    ) -> Iterator[_RecvIterYield]:
         """Incrementally receive byte chunks until EOF as a blocking iterator.
 
         Each ``recv_many`` chunk is reordered into stream-index order before it
