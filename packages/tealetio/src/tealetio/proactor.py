@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import errno
+import heapq
 import os
 import selectors
 import socket
@@ -112,37 +113,46 @@ class _OrderedIngestBuffer(Generic[T_Cargo]):
     """Hold out-of-order indexed items and release them in strict sequence."""
 
     def __init__(self, *, start: int = 0) -> None:
-        self._next_emit = start
-        self._pending: dict[int, T_Cargo] = {}
+        self._next_index = start
+        self._heap: list[tuple[int, T_Cargo]] = []
 
-    def ingest(self, index: int, cargo: T_Cargo) -> list[tuple[int, T_Cargo]]:
-        """Accept one item and return any consecutive ready `(index, cargo)` pairs."""
+    @property
+    def next_index(self) -> int:
+        return self._next_index
 
-        if index != self._next_emit:
-            self._pending[index] = cargo
-            return []
-        return self._drain_from(index, cargo)
+    def push(self, item: tuple[int, T_Cargo]) -> None:
+        """Buffer one out-of-order item."""
 
-    def map_pending(self, transform: Callable[[T_Cargo], T_Cargo]) -> None:
-        """Rewrite buffered items that are still waiting for earlier indices."""
+        heapq.heappush(self._heap, item)
 
-        for index in list(self._pending):
-            self._pending[index] = transform(self._pending[index])
+    def pushpop(self, item: tuple[int, T_Cargo]) -> tuple[int, T_Cargo] | None:
+        """Fast path when ``item[0]`` equals ``next_index``; else ``push()`` then ``pop()``."""
 
-    def clear(self) -> None:
-        self._pending.clear()
+        if item[0] == self._next_index:
+            self._next_index += 1
+            return item
+        self.push(item)
+        return self.pop()
 
-    def has_pending(self) -> bool:
-        return bool(self._pending)
+    def pop(self) -> tuple[int, T_Cargo] | None:
+        """Return the next ready heap item, or ``None`` when it is not ``next_index``."""
 
-    def _drain_from(self, index: int, cargo: T_Cargo) -> list[tuple[int, T_Cargo]]:
-        ready: list[tuple[int, T_Cargo]] = [(index, cargo)]
-        self._next_emit = index + 1
-        while self._next_emit in self._pending:
-            next_index = self._next_emit
-            ready.append((next_index, self._pending.pop(next_index)))
-            self._next_emit += 1
-        return ready
+        if self._heap and self._heap[0][0] == self._next_index:
+            self._next_index += 1
+            return heapq.heappop(self._heap)
+        return None
+
+    def __bool__(self) -> bool:
+        if self._heap:
+            return self._heap[0][0] == self._next_index
+        return False
+
+    def __len__(self) -> int:
+        return len(self._heap)
+
+    def reset(self, *, start: int = 0) -> None:
+        self._heap.clear()
+        self._next_index = start
 
 
 _UringRing: TypeAlias = uring_api.Ring
@@ -382,10 +392,16 @@ class _RecvGenBuffer:
             self._event.set()
 
     def _ingest(self, index: int, data: memoryview) -> bool:
-        ready = self._reorder.ingest(index, data)
-        if ready:
-            self._ready.extend(ready)
-        return bool(ready)
+        ready = self._reorder.pushpop((index, data))
+        if ready is None:
+            return False
+        self._ready.append(ready)
+        while True:
+            ready = self._reorder.pop()
+            if ready is None:
+                break
+            self._ready.append(ready)
+        return True
 
     def _pool_has_room_for_resume_locked(self) -> bool:
         if self._resume is None:
@@ -460,7 +476,7 @@ class _RecvGenBuffer:
             self._closed = True
             stream = self._stream
             self._ready.clear()
-            self._reorder.clear()
+            self._reorder.reset()
         if stream is not None and not stream.done():
             proactor = stream._proactor
             if proactor is not None:

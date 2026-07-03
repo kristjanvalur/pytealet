@@ -245,6 +245,32 @@ branching across several concrete types that callers may pass in.
 Debug-only `assert` statements are fine when they document invariants rather
 than acting as user-facing validation.
 
+### Python boolean style
+
+Avoid `bool(object)` in contexts that already apply implicit truthiness — `if`,
+`while`, `and`/`or`, and ternary conditions.
+
+Prefer direct checks: `if items:` not `if bool(items):`. Redundant `bool()` adds
+noise without changing behaviour.
+
+Be careful with `and`/`or`: they return the deciding operand, not necessarily
+`True`/`False`. An expression like `self._heap and self._heap[0][0] == index` can
+return the heap list instead of a boolean. Use an explicit `if` when you need a
+real boolean result:
+
+```python
+# prefer
+if self._heap:
+    return self._heap[0][0] == self._next_index
+return False
+
+# not
+return bool(self._heap) and self._heap[0][0] == self._next_index
+```
+
+Reserve explicit `bool()` for APIs that require a `bool` return value (for example
+`__bool__`) or when converting for storage or passing to a typed parameter.
+
 ### Runtime safety first
 
 - Treat segfaults, aborts, and debug-assert crashes as highest priority.

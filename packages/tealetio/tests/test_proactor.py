@@ -133,21 +133,69 @@ def test_completions_to_process_flushes_stored_termination():
     assert entry.completions_to_process(second) == (second, terminal)
 
 
-def test_ordered_ingest_buffer_returns_empty_when_out_of_order():
-    buffer = proactor_module._OrderedIngestBuffer[str]()
-    assert buffer.ingest(1, "b") == []
+def _drain_ordered_ingest_buffer(buffer: proactor_module._OrderedIngestBuffer[str]) -> list[tuple[int, str]]:
+    ready: list[tuple[int, str]] = []
+    while True:
+        item = buffer.pop()
+        if item is None:
+            break
+        ready.append(item)
+    return ready
 
 
-def test_ordered_ingest_buffer_returns_single_ready_item():
+def test_ordered_ingest_buffer_push_defers_out_of_order_items():
     buffer = proactor_module._OrderedIngestBuffer[str]()
-    assert buffer.ingest(0, "a") == [(0, "a")]
+    buffer.push((1, "b"))
+    assert len(buffer) == 1
+    assert not buffer
+    assert buffer.pop() is None
+    assert buffer.pushpop((1, "b")) is None
+
+
+def test_ordered_ingest_buffer_pushpop_returns_next_ready_item():
+    buffer = proactor_module._OrderedIngestBuffer[str]()
+    assert buffer.pushpop((0, "a")) == (0, "a")
+    assert not buffer
 
 
 def test_ordered_ingest_buffer_unclogs_pending_items():
     buffer = proactor_module._OrderedIngestBuffer[str]()
-    assert buffer.ingest(1, "b") == []
-    assert buffer.ingest(2, "c") == []
-    assert buffer.ingest(0, "a") == [(0, "a"), (1, "b"), (2, "c")]
+    buffer.push((1, "b"))
+    buffer.push((2, "c"))
+    ready = [buffer.pushpop((0, "a")), *_drain_ordered_ingest_buffer(buffer)]
+    assert ready == [(0, "a"), (1, "b"), (2, "c")]
+
+
+def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
+    buffer = proactor_module._OrderedIngestBuffer[str]()
+    buffer.push((2, "c"))
+    buffer.push((1, "b"))
+    assert len(buffer) == 2
+    assert not buffer
+
+    ready = [buffer.pushpop((0, "a")), *_drain_ordered_ingest_buffer(buffer)]
+    assert ready == [(0, "a"), (1, "b"), (2, "c")]
+    assert not buffer
+
+    waiting = proactor_module._OrderedIngestBuffer[str]()
+    waiting.pushpop((0, "a"))
+    waiting.push((1, "b"))
+    assert waiting
+    assert waiting.pop() == (1, "b")
+
+
+def test_ordered_ingest_buffer_reset_restores_next_index():
+    buffer = proactor_module._OrderedIngestBuffer[str](start=5)
+    buffer.pushpop((5, "a"))
+    buffer.push((7, "c"))
+    buffer.reset()
+    assert buffer.next_index == 0
+    assert not buffer
+    assert buffer.pushpop((0, "z")) == (0, "z")
+
+    buffer.reset(start=10)
+    assert buffer.next_index == 10
+    assert buffer.pushpop((10, "x")) == (10, "x")
 
 
 @pytest.mark.skipif(
