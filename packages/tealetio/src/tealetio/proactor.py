@@ -410,6 +410,9 @@ class _RecvGenBuffer:
             self._event.set()
 
     def _should_resume(self) -> _RecvManyResume | None:
+        # pressure/resume only applies while multishot recv is still active; EOF
+        # is the terminal recv_many message and completes the stream, so any
+        # leftover _resume after EOF delivery is stale and backend resume no-ops
         if self._resume is None:
             return None
         if self._ready or len(self._reorder):
