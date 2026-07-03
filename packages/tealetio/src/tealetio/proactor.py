@@ -49,6 +49,7 @@ __all__ = [
     "UringProactor",
     "ProactorFile",
     "RECV_MANY_BUFFER_PRESSURE",
+    "RecvBufferPool",
 ]
 
 
@@ -329,6 +330,8 @@ class Proactor(Protocol):
         buf_group: RecvBufferPool | None = None,
     ) -> ContinuousOperation[_RecvManyResult]: ...
 
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
+
     def poll(self, fd: int, mask: int) -> Operation[int]: ...
 
     def poll_many(
@@ -516,8 +519,8 @@ class ProactorBase:
     ) -> ContinuousOperation[_RecvManyResult]:
         raise NotImplementedError
 
-    def _create_recv_many_buf_group(self, buffer_size: int, buffer_count: int) -> RecvBufferPool | None:
-        return None
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
+        raise NotImplementedError(f"{type(self).__name__} does not provide receive buffer pools")
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
         raise NotImplementedError
@@ -679,20 +682,20 @@ class SelectorProactor(ProactorBase):
         self._recv_many_buf_group: _SelectorBufGroup | None = None
         self._recv_many_repressure_pending: set[ContinuousOperation[Any]] = set()
 
-    def create_buf_group(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
         """Create a synthetic provided-buffer pool for ``recv_many`` / ``recvgen``."""
 
         return _SelectorBufGroup(buffer_size, buffer_count)
 
+    def create_buf_group(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
+        return self.create_recv_buffer_pool(buffer_size, buffer_count)
+
     def _get_recv_many_buf_group(self) -> _SelectorBufGroup:
         buf_group = self._recv_many_buf_group
         if buf_group is None:
-            buf_group = self.create_buf_group(_DEFAULT_RECVGEN_BUFFER_SIZE, _DEFAULT_RECVGEN_BUFFER_COUNT)
+            buf_group = self.create_recv_buffer_pool(_DEFAULT_RECVGEN_BUFFER_SIZE, _DEFAULT_RECVGEN_BUFFER_COUNT)
             self._recv_many_buf_group = buf_group
         return buf_group
-
-    def _create_recv_many_buf_group(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
-        return self.create_buf_group(buffer_size, buffer_count)
 
     def _selector_recv_many_resume(
         self,
@@ -1551,13 +1554,13 @@ class UringProactor(ProactorBase):
             self._recv_many_buf_group = buf_group
         return buf_group
 
-    def create_buf_group(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
         """Create a provided-buffer group for ``recv_many`` / ``recvgen``."""
 
         return self._ring.create_buf_group(buffer_size, buffer_count)
 
-    def _create_recv_many_buf_group(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
-        return self.create_buf_group(buffer_size, buffer_count)
+    def create_buf_group(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
+        return self.create_recv_buffer_pool(buffer_size, buffer_count)
 
     def _recv_many_resume_callable(self, entry: _UringEntry) -> _RecvManyResume:
         def resume() -> None:
@@ -2497,6 +2500,17 @@ class ProactorScheduler(BaseScheduler):
 
         return self.wait_operation(self._proactor.recv(sock, n))
 
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
+        """Create a provided-buffer pool for ``sock_recvgen`` and ``recv_many``.
+
+        The returned object satisfies ``RecvBufferPool`` and may be passed to
+        ``sock_recvgen(..., buf_group=pool)`` regardless of which proactor
+        backend is mounted. Selector backends use a leased-view shim; uring
+        backends use a kernel buffer group.
+        """
+
+        return self._proactor.create_recv_buffer_pool(buffer_size, buffer_count)
+
     def _open_sock_recvgen(
         self,
         sock: socket.socket,
@@ -2509,7 +2523,7 @@ class ProactorScheduler(BaseScheduler):
 
         recv_many_group = buf_group
         if recv_many_group is None and buffer_count is not None:
-            recv_many_group = cast(ProactorBase, self._proactor)._create_recv_many_buf_group(buffer_size, buffer_count)
+            recv_many_group = self.create_recv_buffer_pool(buffer_size, buffer_count)
         buffer = _RecvGenBuffer(buf_group=recv_many_group)
         stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=recv_many_group)
         buffer.attach_stream(stream)
@@ -2532,7 +2546,9 @@ class ProactorScheduler(BaseScheduler):
         When ``buffer_count`` is ``None`` and ``buf_group`` is omitted, ``recv_many``
         uses the proactor's shared provided-buffer pool (the ``sock_recvall`` path).
         Otherwise a dedicated pool is created from ``buffer_size`` and
-        ``buffer_count`` (defaults: 16 KiB x 8).
+        ``buffer_count`` (defaults: 16 KiB x 8). Call ``create_recv_buffer_pool()``
+        to build a pool explicitly and pass it via ``buf_group`` across multiple
+        generators or tuned sizing.
 
         ``(RECV_MANY_BUFFER_PRESSURE, memoryview(b\"\"))`` is yielded when the
         provided-buffer pool is exhausted. Drop held views when that token appears.

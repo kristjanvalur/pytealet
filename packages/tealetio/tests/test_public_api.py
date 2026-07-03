@@ -53,6 +53,7 @@ def test_top_level_exports_public_scheduler_api():
         "QueueEmpty",
         "QueueFull",
         "QueueShutDown",
+        "RecvBufferPool",
         "Runner",
         "Scheduler",
         "SelectorMixin",

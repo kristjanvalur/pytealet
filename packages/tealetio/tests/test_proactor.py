@@ -3989,6 +3989,41 @@ class TestProactorScheduler:
             writer.close()
             scheduler.close()
 
+    def test_create_recv_buffer_pool_delegates_to_proactor(self):
+        scheduler = SyncProactorScheduler()
+        try:
+            pool = scheduler.create_recv_buffer_pool(8192, 4)
+            assert pool.buffer_size == 8192
+            assert pool.buffer_count == 4
+            assert pool.leased_count == 0
+        finally:
+            scheduler.close()
+
+    def test_sock_recvgen_accepts_scheduler_buffer_pool(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            pool = scheduler.create_recv_buffer_pool(8192, 2)
+
+            def receive_chunks() -> list[tuple[int, bytes]]:
+                return _recvgen_bytes(scheduler.sock_recvgen(reader, buf_group=pool))
+
+            def send_chunks() -> None:
+                scheduler.sock_sendall(writer, b"hello")
+                writer.shutdown(socket.SHUT_WR)
+
+            task = scheduler.spawn(receive_chunks)
+            scheduler.spawn(send_chunks)
+
+            assert scheduler.run_until_complete(task) == [(0, b"hello")]
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
     def test_sock_recvgen_yields_chunks_in_stream_order(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
