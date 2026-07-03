@@ -60,6 +60,16 @@ def _noop_recv_many_resume() -> Callable[[], None]:
     return lambda: None
 
 
+class _RecvGenTestPool:
+    buffer_size = 16 * 1024
+    buffer_count = 8
+    leased_count = 0
+
+
+def _recvgen_test_pool() -> _RecvGenTestPool:
+    return _RecvGenTestPool()
+
+
 def _recvgen_bytes(gen: Any) -> list[tuple[int, bytes]]:
     return [(index, bytes(chunk)) for index, chunk in gen if index >= 0]
 
@@ -228,7 +238,7 @@ def test_selector_buf_group_pressure_threshold_matches_recvgen_policy():
 
 def test_recvgen_buffer_reorders_out_of_order_chunks():
     def exercise() -> list[tuple[int, memoryview | None]]:
-        buffer = proactor_module._RecvGenBuffer()
+        buffer = proactor_module._RecvGenBuffer(buf_group=_recvgen_test_pool())
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((0, memoryview(b"a")))
         return [buffer.take_next(), buffer.take_next()]
@@ -277,7 +287,7 @@ def test_recvgen_buffer_resume_waits_until_half_pool_is_free():
 
 def test_recvgen_buffer_ignores_late_callbacks_after_close():
     def exercise() -> tuple[int, bool]:
-        buffer = proactor_module._RecvGenBuffer()
+        buffer = proactor_module._RecvGenBuffer(buf_group=_recvgen_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         buffer.close()
         buffer.on_result((1, memoryview(b"b")))
@@ -291,7 +301,7 @@ def test_recvgen_buffer_ignores_late_callbacks_after_close():
 
 def test_recvgen_buffer_pressure_token_precedes_queued_views():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = proactor_module._RecvGenBuffer()
+        buffer = proactor_module._RecvGenBuffer(buf_group=_recvgen_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, _noop_recv_many_resume()))
@@ -305,7 +315,7 @@ def test_recvgen_buffer_pressure_token_precedes_queued_views():
 
 def test_recvgen_buffer_eof_stops_iteration():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = proactor_module._RecvGenBuffer()
+        buffer = proactor_module._RecvGenBuffer(buf_group=_recvgen_test_pool())
         buffer.on_result((0, memoryview(b"done")))
         buffer.on_result((1, memoryview(b"")))
         return [buffer.take_next(), buffer.take_next()]
@@ -317,7 +327,7 @@ def test_recvgen_buffer_eof_stops_iteration():
 
 def test_recvgen_buffer_ordered_eof_wins_cancel_race():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = proactor_module._RecvGenBuffer()
+        buffer = proactor_module._RecvGenBuffer(buf_group=_recvgen_test_pool())
         buffer.on_result((0, memoryview(b"done")))
         with buffer._lock:
             buffer._stream_done = True
@@ -332,7 +342,7 @@ def test_recvgen_buffer_ordered_eof_wins_cancel_race():
 
 def test_recvgen_buffer_delivers_buffered_chunks_before_stream_error():
     def exercise() -> list[object]:
-        buffer = proactor_module._RecvGenBuffer()
+        buffer = proactor_module._RecvGenBuffer(buf_group=_recvgen_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         with buffer._lock:
@@ -356,7 +366,7 @@ def test_recvgen_buffer_delivers_buffered_chunks_before_stream_error():
 
 def test_recvgen_buffer_yields_memoryviews():
     def exercise() -> tuple[int, memoryview | None] | None:
-        buffer = proactor_module._RecvGenBuffer()
+        buffer = proactor_module._RecvGenBuffer(buf_group=_recvgen_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         return buffer.take_next()
 
@@ -374,7 +384,7 @@ def test_recvgen_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
     ready_to_wait = threading.Event()
 
     def exercise() -> tuple[int, memoryview]:
-        buffer = proactor_module._RecvGenBuffer()
+        buffer = proactor_module._RecvGenBuffer(buf_group=_recvgen_test_pool())
         real_swait = buffer._event.swait
 
         def swait_and_signal() -> bool:
@@ -591,6 +601,40 @@ def test_recvgen_buffer_defers_resume_until_next_take_after_yielding_chunk():
     eof, called = _exercise_recvgen_buffer(exercise)
     assert eof is None
     assert called == [True]
+
+
+def test_recvgen_buffer_defers_resume_while_reorder_heap_has_gap():
+    resumed: list[bool] = []
+
+    def resume() -> None:
+        resumed.append(True)
+
+    class _Pool:
+        buffer_count = 4
+        leased_count = 0
+
+    def exercise() -> list[bool]:
+        pool = _Pool()
+        buffer = proactor_module._RecvGenBuffer(buf_group=pool)
+        buffer.on_result((1, memoryview(b"b")))
+        buffer.on_result((2, memoryview(b"c")))
+        buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
+        _assert_recvgen_pressure(buffer.take_next())
+        assert resumed == []
+        buffer.on_result((0, memoryview(b"a")))
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        assert resumed == []
+        second = buffer.take_next()
+        assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
+        assert resumed == []
+        third = buffer.take_next()
+        assert third is not None and third[0] == 2 and bytes(third[1]) == b"c"
+        buffer.on_result((3, memoryview(b"")))
+        assert buffer.take_next() is None
+        return resumed
+
+    assert _exercise_recvgen_buffer(exercise) == [True]
 
 
 def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
@@ -1084,7 +1128,8 @@ class TestSelectorProactor:
                 saw_pressure = False
                 seen: list[tuple[int, bytes]] = []
                 held: list[memoryview] = []
-                for index, chunk in scheduler.sock_recvgen(reader, buffer_count=2):
+                pool = scheduler.create_recv_buffer_pool(16 * 1024, 2)
+                for index, chunk in scheduler.sock_recvgen(reader, pool):
                     if index == RECV_MANY_BUFFER_PRESSURE:
                         saw_pressure = True
                         state["got_pressure"] = True
@@ -3680,7 +3725,9 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return _recvgen_bytes(scheduler.sock_recvgen(reader))
+                return _recvgen_bytes(
+                    scheduler.sock_recvgen(reader, scheduler.create_recv_buffer_pool(16 * 1024, 8))
+                )
 
             def deliver_chunks() -> None:
                 ring = scheduler.proactor.ring
@@ -3709,8 +3756,8 @@ class TestUringProactor:
                 got_memview = False
                 saw_pressure = False
                 seen: list[tuple[int, bytes]] = []
-                buf_group = None
-                for index, chunk in scheduler.sock_recvgen(reader, buffer_count=4):
+                pool = scheduler.create_recv_buffer_pool(16 * 1024, 4)
+                for index, chunk in scheduler.sock_recvgen(reader, pool):
                     if index == RECV_MANY_BUFFER_PRESSURE:
                         saw_pressure = True
                         state["got_pressure"] = True
@@ -3722,9 +3769,7 @@ class TestUringProactor:
                     if type(chunk) is memoryview:
                         got_memview = True
                     seen.append((index, bytes(chunk)))
-                    if buf_group is None:
-                        buf_group = scheduler.proactor.ring.submitted_recv_multishot[-1][1]
-                    buf_group.note_chunk_released()
+                    pool.note_chunk_released()
                 return got_memview and saw_pressure, seen
 
             def deliver_chunks() -> None:
@@ -3764,7 +3809,8 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive_first_chunk() -> tuple[int, bytes]:
-                index, chunk = next(iter(scheduler.sock_recvgen(reader, buffer_size=4096, buffer_count=4)))
+                pool = scheduler.create_recv_buffer_pool(4096, 4)
+                index, chunk = next(iter(scheduler.sock_recvgen(reader, pool)))
                 return index, bytes(chunk)
 
             def deliver_first_chunk() -> None:
@@ -3775,7 +3821,7 @@ class TestUringProactor:
                 submitted = ring.submitted_recv_multishot[0]
                 assert submitted[1].buffer_size == 4096
                 assert submitted[1].buffer_count == 4
-                assert submitted[1] is not scheduler.shared_recv_buffer_pool()
+                assert submitted[1] is not scheduler.proactor.shared_recv_buffer_pool()
                 ring.complete_recv_multishot(b"x", more=False, sequence=0)
 
             task = scheduler.spawn(receive_first_chunk)
@@ -3796,8 +3842,8 @@ class TestUringProactor:
 
             def receive_chunks() -> list[tuple[int, bytes]]:
                 seen: list[tuple[int, bytes]] = []
-                buf_group = None
-                for index, chunk in scheduler.sock_recvgen(reader, buffer_count=4):
+                pool = scheduler.create_recv_buffer_pool(16 * 1024, 4)
+                for index, chunk in scheduler.sock_recvgen(reader, pool):
                     if index == RECV_MANY_BUFFER_PRESSURE:
                         state["got_pressure"] = True
                         deadline = scheduler.proactor.get_time() + 1.0
@@ -3806,9 +3852,7 @@ class TestUringProactor:
                         assert state["release"]
                         continue
                     seen.append((index, bytes(chunk)))
-                    if buf_group is None:
-                        buf_group = scheduler.proactor.ring.submitted_recv_multishot[-1][1]
-                    buf_group.note_chunk_released()
+                    pool.note_chunk_released()
                 return seen
 
             def deliver_chunks() -> None:
@@ -3853,7 +3897,7 @@ class TestUringProactor:
             def deliver() -> None:
                 scheduler.sleep(0.001)
                 ring = scheduler.proactor.ring
-                shared = scheduler.shared_recv_buffer_pool()
+                shared = scheduler.proactor.shared_recv_buffer_pool()
                 ring.complete_recv_multishot(b"a", more=True, sequence=0)
                 ring.complete_recv_multishot(b"b", more=True, sequence=1)
                 ring.complete_recv_multishot(b"c", more=True, sequence=2)
@@ -4122,6 +4166,33 @@ class TestProactorScheduler:
         finally:
             scheduler.close()
 
+    def test_set_shared_recv_buffer_pool_replaces_default(self):
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        set_scheduler(scheduler)
+        reader, _writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            custom = scheduler.create_recv_buffer_pool(4096, 16)
+            scheduler.set_shared_recv_buffer_pool(custom)
+
+            def receive_first_chunk() -> tuple[int, bytes]:
+                index, chunk = next(iter(scheduler.sock_recvgen(reader, scheduler.shared_recv_buffer_pool())))
+                return index, bytes(chunk)
+
+            task = scheduler.spawn(receive_first_chunk)
+            scheduler.spawn(
+                lambda: scheduler.proactor.ring.complete_recv_multishot(b"x", more=False, sequence=0)
+            )
+
+            assert scheduler.run_until_complete(task) == (0, b"x")
+            submitted = scheduler.proactor.ring.submitted_recv_multishot[0][1]
+            assert submitted is custom
+            assert scheduler.shared_recv_buffer_pool() is custom
+            assert scheduler.proactor.shared_recv_buffer_pool() is custom
+        finally:
+            reader.close()
+            scheduler.close()
+
     def test_sock_recvgen_accepts_scheduler_buffer_pool(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
@@ -4132,7 +4203,7 @@ class TestProactorScheduler:
             pool = scheduler.create_recv_buffer_pool(8192, 2)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return _recvgen_bytes(scheduler.sock_recvgen(reader, buf_group=pool))
+                return _recvgen_bytes(scheduler.sock_recvgen(reader, pool))
 
             def send_chunks() -> None:
                 scheduler.sock_sendall(writer, b"hello")
@@ -4156,7 +4227,9 @@ class TestProactorScheduler:
             writer.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return _recvgen_bytes(scheduler.sock_recvgen(reader))
+                return _recvgen_bytes(
+                    scheduler.sock_recvgen(reader, scheduler.shared_recv_buffer_pool())
+                )
 
             def send_chunks() -> None:
                 scheduler.sock_sendall(writer, b"hello")

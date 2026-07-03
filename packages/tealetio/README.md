@@ -164,17 +164,15 @@ leased kernel buffers. When the pool is exhausted, the callback receives
 re-arm multishot receive (stream indices continue from the failed completion's
 `sequence`).
 
-Each `ProactorScheduler` lazily owns one shared `BufGroup` for
-`sock_recvall(...)` and `sock_recvgen(..., buffer_count=None)` (16 KiB × 256 on
-`UringProactor` backends by default). `sock_recvall` joins `bytes` copied from
-each `sock_recvgen` chunk as the generator advances; pressure recovery is handled
-inside `sock_recvgen`. Its optional `progress` callback receives each
-non-empty chunk's `bytes` payload. `sock_recvgen(...)` yields read-only
-`memoryview` chunks and `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure
-tokens; copy with `bytes(data)` when owned storage is required past the current
-iteration step. Each `sock_recvgen` with default pool sizing owns a dedicated
-pool (not the scheduler shared `BufGroup`); pass `buffer_count=None` or an
-explicit `buf_group` to select the shared pool.
+Each proactor lazily owns one shared `BufGroup` for `sock_recvall(...)` (16 KiB
+× 256 on `UringProactor` backends by default). `sock_recvall` joins `bytes`
+copied from each `sock_recvgen` chunk as the generator advances; pressure
+recovery is handled inside `sock_recvgen`. Its optional `progress` callback
+receives each non-empty chunk's `bytes` payload. `sock_recvgen(sock,
+buf_group)` requires an explicit pool from `create_recv_buffer_pool()` or
+`shared_recv_buffer_pool()`; it yields read-only `memoryview` chunks and
+`(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens. Copy with
+`bytes(data)` when owned storage is required past the current iteration step.
 On Python 3.12+, `SelectorProactor.recv_many` uses a synthetic `BufGroup` for
 the same backpressure contract (`resume` after dropping held views). Older
 CPython falls back to unpaced reads without pool pressure; each `recv()` still

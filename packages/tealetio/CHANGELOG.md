@@ -21,13 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is removed.
 
 ### Added
-- `ProactorScheduler.sock_recvgen(sock)` as a tealet-blocking incremental
-  consumer of `recv_many`, yielding stream-ordered `(index, data)` chunks with
-  the same provided-buffer pressure policy as `sock_recvall`.
+- `ProactorScheduler.sock_recvgen(sock, buf_group)` as a tealet-blocking
+  incremental consumer of `recv_many`, yielding stream-ordered `(index, data)`
+  chunks with the same provided-buffer pressure policy as `sock_recvall`.
 - `ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` for
   explicit provided-buffer pool sizing shared by `sock_recvgen` and `recv_many`.
-- `ProactorScheduler.shared_recv_buffer_pool()` as the lazy scheduler-owned
-  shared `BufGroup` for `sock_recvall` and `sock_recvgen(..., buffer_count=None)`.
+- `Proactor.shared_recv_buffer_pool()` as the lazy proactor-owned shared
+  `BufGroup` used by `sock_recvall`; pass it explicitly to `sock_recvgen` when
+  sharing the default pool.
+- `ProactorScheduler.set_shared_recv_buffer_pool(pool)` and
+  `Proactor.set_shared_recv_buffer_pool(pool)` to replace the shared default
+  pool before `sock_recvall` or explicit `sock_recvgen` calls.
 - `UringProactor.buf_group_factory` for custom default pool sizing on low-level
   `recv_many(sock, callback)` calls that omit `buf_group`.
 - `RECV_MANY_BUFFER_PRESSURE` result index so `recv_many` consumers can release
