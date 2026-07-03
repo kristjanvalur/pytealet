@@ -390,19 +390,16 @@ class _RecvGenBuffer:
         if notify:
             self._event.set()
 
-    def _pool_has_room_for_resume_locked(self) -> bool:
+    def _should_resume(self) -> _RecvManyResume | None:
         if self._resume is None:
-            return False
+            return None
         buf_group = self._buf_group
         if buf_group is None:
             # shared recv_many pool: resume is yielded to the consumer
-            return False
+            return None
         # half the pool must be free; single-slot pools still need one free slot
         required_free = max(1, buf_group.buffer_count // 2)
-        return buf_group.buffer_count - buf_group.leased_count >= required_free
-
-    def _take_pending_resume_locked(self) -> _RecvManyResume | None:
-        if not self._pool_has_room_for_resume_locked():
+        if buf_group.buffer_count - buf_group.leased_count < required_free:
             return None
         resume_fn = self._resume
         self._resume = None
@@ -422,7 +419,7 @@ class _RecvGenBuffer:
             pending_resume: _RecvManyResume | None = None
             try:
                 with self._lock:
-                    pending_resume = self._take_pending_resume_locked()
+                    pending_resume = self._should_resume()
                     if self._pressure_pending:
                         self._pressure_pending = False
                         return (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
