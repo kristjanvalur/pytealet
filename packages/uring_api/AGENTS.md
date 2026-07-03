@@ -164,18 +164,19 @@ Check `probe(flags=...)` before constructing a real `Ring(flags=...)`.
 
 ## C Extension Layout
 
-Sources are split by concern under `src/`:
+Native sources live under `src/_uring_api/` (mirroring core `tealet`'s
+`src/_tealet/` layout). They are split by concern:
 
 | Area | Files |
 | --- | --- |
-| Module entry | `uring_api_module.c` |
-| Ring lifecycle | `uring_api_ring.c`, `uring_api_core.c` |
-| Submit path | `uring_api_submit.c`, `uring_api_submit.h` |
-| Completions | `uring_api_completion.c` |
-| Provided buffers | `uring_api_bufgroup.c`, `uring_api_bufview.c` |
-| Probing | `uring_api_probe.c` |
-| Callback service | `uring_api_dispatch.c` |
-| C API capsule | `uring_api_capi.c`, `uring_api_capi_impl.h` |
+| Module entry | `_uring_api/uring_api_module.c` |
+| Ring lifecycle | `_uring_api/uring_api_ring.c`, `_uring_api/uring_api_core.c` |
+| Submit path | `_uring_api/uring_api_submit.c`, `_uring_api/uring_api_submit.h` |
+| Completions | `_uring_api/uring_api_completion.c` |
+| Provided buffers | `_uring_api/uring_api_bufgroup.c`, `_uring_api/uring_api_bufview.c` |
+| Probing | `_uring_api/uring_api_probe.c` |
+| Callback service | `_uring_api/uring_api_dispatch.c` |
+| C API capsule | `_uring_api/uring_api_capi.c`, `_uring_api/uring_api_capi_impl.h` |
 | Completion kinds | `uring_api/include/uring_api_completion_kinds.h` |
 
 Submission follows an `_impl` + thin Python wrapper pattern:

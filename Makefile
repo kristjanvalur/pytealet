@@ -4,8 +4,8 @@ CLANG_FORMAT ?= clang-format-14
 EXT_SRC := $(sort $(wildcard src/_tealet/*.c))
 EXT_SRC_ALL := $(sort $(EXT_SRC) $(wildcard src/_tealet/*.h))
 URING_API_C_SRC := $(sort \
-	$(wildcard packages/uring_api/src/*.c) \
-	$(wildcard packages/uring_api/src/*.h) \
+	$(wildcard packages/uring_api/src/_uring_api/*.c) \
+	$(wildcard packages/uring_api/src/_uring_api/*.h) \
 	$(wildcard packages/uring_api/src/uring_api/include/*.h))
 C_FORMAT_FILES ?= $(EXT_SRC_ALL) $(URING_API_C_SRC)
 

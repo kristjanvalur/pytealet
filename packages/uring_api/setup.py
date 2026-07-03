@@ -17,6 +17,8 @@ EXTENSION_C_COMPILE_ARGS = [
     "-Wno-unused-function",
 ]
 
+_URING_API_DIR = "src/_uring_api"
+
 
 class build_ext(_build_ext):
     """Validate the Linux/liburing build environment before compiling."""
@@ -76,6 +78,10 @@ class build_py(_build_py):
         self.copy_file("src/_uring_api.pyi", os.path.join(self.build_lib, "_uring_api.pyi"))
 
 
+def _uring_api_source(name: str) -> str:
+    return f"{_URING_API_DIR}/{name}"
+
+
 setup(
     package_dir={"": "src"},
     packages=find_packages("src"),
@@ -84,33 +90,33 @@ setup(
         Extension(
             "_uring_api",
             sources=[
-                "src/uring_api_module.c",
-                "src/uring_api_capi.c",
-                "src/uring_api_bufgroup.c",
-                "src/uring_api_bufview.c",
-                "src/uring_api_completion.c",
-                "src/uring_api_core.c",
-                "src/uring_api_dispatch.c",
-                "src/uring_api_kernel_version.c",
-                "src/uring_api_probe.c",
-                "src/uring_api_ring.c",
-                "src/uring_api_statx.c",
-                "src/uring_api_submit.c",
+                _uring_api_source("uring_api_module.c"),
+                _uring_api_source("uring_api_capi.c"),
+                _uring_api_source("uring_api_bufgroup.c"),
+                _uring_api_source("uring_api_bufview.c"),
+                _uring_api_source("uring_api_completion.c"),
+                _uring_api_source("uring_api_core.c"),
+                _uring_api_source("uring_api_dispatch.c"),
+                _uring_api_source("uring_api_kernel_version.c"),
+                _uring_api_source("uring_api_probe.c"),
+                _uring_api_source("uring_api_ring.c"),
+                _uring_api_source("uring_api_statx.c"),
+                _uring_api_source("uring_api_submit.c"),
             ],
             depends=[
-                "src/uring_api_bufgroup.h",
-                "src/uring_api_bufview.h",
-                "src/uring_api_capi_impl.h",
-                "src/uring_api_completion.h",
-                "src/uring_api_common.h",
-                "src/uring_api_core.h",
-                "src/uring_api_dispatch.h",
-                "src/uring_api_kernel_version.h",
-                "src/uring_api_kernel_versions.h",
-                "src/uring_api_probe.h",
-                "src/uring_api_ring.h",
-                "src/uring_api_statx.h",
-                "src/uring_api_submit.h",
+                _uring_api_source("uring_api_bufgroup.h"),
+                _uring_api_source("uring_api_bufview.h"),
+                _uring_api_source("uring_api_capi_impl.h"),
+                _uring_api_source("uring_api_completion.h"),
+                _uring_api_source("uring_api_common.h"),
+                _uring_api_source("uring_api_core.h"),
+                _uring_api_source("uring_api_dispatch.h"),
+                _uring_api_source("uring_api_kernel_version.h"),
+                _uring_api_source("uring_api_kernel_versions.h"),
+                _uring_api_source("uring_api_probe.h"),
+                _uring_api_source("uring_api_ring.h"),
+                _uring_api_source("uring_api_statx.h"),
+                _uring_api_source("uring_api_submit.h"),
             ],
             include_dirs=["src/uring_api/include"],
             libraries=["uring"],
