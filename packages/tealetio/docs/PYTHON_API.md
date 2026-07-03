@@ -104,8 +104,9 @@ view before the operation completes. Chunk sizes are backend-defined:
 multishot provided-buffer receive is available, and `SelectorProactor` reads up
 to 8 KiB per `recv()` call. Each `UringProactor` instance lazily creates one
 `BufGroup` (16 KiB × 256 buffers by default) shared by `recv_many` and
-`recvall` when multishot receive is in use. `recvgen` creates a dedicated pool
-per generator (defaults: 16 KiB × 8). Concurrent long-lived `recv_many`
+`sock_recvall` when multishot receive is in use. `sock_recvgen` creates a
+dedicated pool per generator (defaults: 16 KiB × 8) unless
+`buffer_count=None` selects the shared pool. Concurrent long-lived `recv_many`
 streams on one `UringProactor` therefore draw from the same provided-buffer
 pool: a slow consumer on one stream can trigger `RECV_MANY_BUFFER_PRESSURE` or
 stall another stream even when the second would otherwise fit. Use separate
@@ -128,8 +129,8 @@ When `IORING_RECV_MULTISHOT` is unavailable, `UringProactor.recv_many()` falls
 back to repeated one-shot `submit_recv()` calls. Chunks are independent
 `memoryview` objects over copied bytes (not leased `BufView` results), chunk
 size is up to 8 KiB, stream indices stay in-order, and
-`RECV_MANY_BUFFER_PRESSURE` is never emitted. `recvall` and `recvgen` inherit
-this degraded mode automatically.
+`RECV_MANY_BUFFER_PRESSURE` is never emitted. `sock_recvall` and
+`sock_recvgen` inherit this degraded mode automatically.
 
 When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
 falls back to repeated one-shot `submit_accept()` after each accepted
@@ -148,33 +149,44 @@ Backends may run these result callbacks from any worker thread; code that needs
 thread affinity should marshal from the callback into the appropriate scheduler,
 event loop, or application thread.
 
-`recvall(sock, progress=None)` builds on `recv_many(...)` and returns a
-normal one-shot `Operation[bytes]`. It keeps chunk views borrowed from
+`ProactorScheduler.sock_recvall(sock, progress=None)` builds on
+`recv_many(...)` with the proactor's shared provided-buffer pool and returns
+the concatenated payload as `bytes`. It keeps chunk views borrowed from
 `recv_many` until provided-buffer pressure arrives, then copies every held
 chunk to `bytes` so leased slots return to the shared pool. At EOF it
 concatenates chunks in stream-index order with `bytes(chunk)`; for stored
 `bytes` chunks that is an identity no-op on CPython. Remaining borrowed views
 are released by dropping recvall's references. When provided,
-`progress(total)` is called after each received non-empty chunk with the
-cumulative number of bytes received.
+`progress(chunk)` is called after each received non-empty chunk with that
+chunk's `bytes` payload (not a running total).
 
-`recvgen(sock)` is a tealet-blocking generator that incrementally yields
-`(index, data)` chunks in stream-index order until EOF. Each `data` is a
-read-only `memoryview`; copy with `bytes(data)` when owned storage is required
-past the current iteration step. Unlike `recv_many`, it does not yield a final
-`(index, empty_view)` EOF tuple; iteration ends when the stream completes (the
-generator raises `StopIteration` / returns from `sock_recvgen`). Use
-`recv_many` directly when you need the documented EOF sentinel and exact
-`recv_many` callback semantics.
+`ProactorScheduler.sock_recvgen(sock, ...)` is a tealet-blocking generator that
+incrementally yields `(index, data)` chunks in stream-index order until EOF.
+Each `data` is a read-only `memoryview`; copy with `bytes(data)` when owned
+storage is required past the current iteration step. Unlike `recv_many`, it
+does not yield a final `(index, empty_view)` EOF tuple; iteration ends when
+the stream completes (the generator raises `StopIteration`). Use `recv_many`
+directly when you need the documented EOF sentinel and exact `recv_many`
+callback semantics.
 
-`(RECV_MANY_BUFFER_PRESSURE, None)` is yielded when the provided-buffer pool is
-exhausted. Consumers should drop every receive `memoryview` they still hold when
-that token appears and avoid keeping more views than needed between reads.
+`(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` is yielded when the
+provided-buffer pool is exhausted. At most one pressure notification is pending
+until the consumer advances past that yield and receive is re-armed.
+Consumers should drop every receive `memoryview` they still hold when that
+token appears and avoid keeping more views than needed between reads.
+
+`ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` returns
+a `RecvBufferPool` for explicit sizing. Pass it to
+`sock_recvgen(..., buf_group=pool)` to share a tuned pool across generators or
+with a custom `recv_many` callback.
 
 Out-of-order multishot completions are reordered before yield. The generator
 must be consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can
-block cooperatively. `ProactorScheduler.sock_recvgen(sock, ...)` exposes the
-same surface on scheduler instances.
+block cooperatively.
+
+`Proactor` exposes `recv_many` and `create_recv_buffer_pool` only; blocking
+`recvall` / `recvgen` helpers live on `ProactorScheduler` as `sock_recvall`
+and `sock_recvgen`.
 
 IO-capable schedulers also expose blocking poll helpers on top of the proactor
 or selector backends. `poll(fd, mask)` waits cooperatively and returns the

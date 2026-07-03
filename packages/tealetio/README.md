@@ -102,7 +102,7 @@ The common API is available directly from `tealetio`:
 - schedulers and runners: `Scheduler`, `ProactorScheduler`, `SyncProactorScheduler`, `AsyncProactorScheduler`, `SelectorScheduler`, `SyncSelectorScheduler`, `AsyncSelectorScheduler`, `BasicScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `Task`, `spawn`, `create_task`, `get_current`, `CancelledError`, `shield`
 - IO operations: `Operation`, `ContinuousOperation`
-- proactor socket helpers: `sendall(..., progress=...)`, `recvall(..., progress=...)`, `recvgen(...)`, `accept_many(...)`, `recv_many(...)`; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
+- proactor socket helpers: `sendall(..., progress=...)`, `accept_many(...)`, `recv_many(...)`; scheduler blocking receive helpers: `sock_recvall(..., progress=...)`, `sock_recvgen(...)`, `create_recv_buffer_pool(...)`; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - runnable scheduling policies: `FifoRunnableQueue`, `PrescheduledRunnableQueue`, `PriorityRunnableQueue`
@@ -157,19 +157,22 @@ shape remains subject to change before a stable release.
 ## Uring-backed receive
 
 `UringProactor` (`tealetio.proactor`) shares one lazy `BufGroup` pool (16 KiB ×
-256 buffers by default) across `recv_many` / `recvall` operations on that
+256 buffers by default) across `recv_many` / `sock_recvall` operations on that
 proactor. `recv_many(sock, callback)` delivers borrowed `memoryview` chunks
 from leased kernel buffers. When the pool is exhausted, the callback receives
 `(RECV_MANY_BUFFER_PRESSURE, resume)`; drop held views and call `resume()` to
 re-arm multishot receive (stream indices continue from the failed completion's
 `sequence`).
 
-`recvall(...)` keeps chunk views until pressure arrives, then copies every held
-chunk to `bytes` so slots return to the shared pool before calling `resume()`.
-`recvgen(...)` / `sock_recvgen(...)` yield read-only `memoryview` chunks and
-`(RECV_MANY_BUFFER_PRESSURE, None)` pressure tokens; copy with `bytes(data)`
-when owned storage is required past the current iteration step. Each `recvgen`
-owns a dedicated pool (not the shared proactor `BufGroup`).
+`ProactorScheduler.sock_recvall(...)` keeps chunk views until pressure arrives,
+then copies every held chunk to `bytes` so slots return to the shared pool
+before calling `resume()`. Its optional `progress` callback receives each
+non-empty chunk's `bytes` payload. `sock_recvgen(...)` yields read-only
+`memoryview` chunks and `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure
+tokens; copy with `bytes(data)` when owned storage is required past the current
+iteration step. Each `sock_recvgen` with default pool sizing owns a dedicated
+pool (not the shared proactor `BufGroup`); pass `buffer_count=None` or an
+explicit `buf_group` to select the shared pool.
 On Python 3.12+, `SelectorProactor.recv_many` uses a synthetic `BufGroup` for
 the same backpressure contract (`resume` after dropping held views). Older
 CPython falls back to unpaced reads without pool pressure; each `recv()` still

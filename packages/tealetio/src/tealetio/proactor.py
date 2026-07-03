@@ -71,6 +71,7 @@ RECV_MANY_BUFFER_PRESSURE = -1
 _RecvManyResume = Callable[[], None]
 _RecvManyResult = tuple[int, memoryview | _RecvManyResume]
 _RecvManyCallback = Callable[[_RecvManyResult], object]
+# ``index`` may be ``RECV_MANY_BUFFER_PRESSURE`` (-1) for pressure tokens.
 _RecvGenYield: TypeAlias = tuple[int, memoryview]
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
@@ -122,7 +123,10 @@ class _OrderedIngestBuffer(Generic[T_Cargo]):
         return self._next_index
 
     def push(self, item: tuple[int, T_Cargo]) -> None:
-        """Buffer one out-of-order item."""
+        """Buffer one out-of-order item.
+
+        Duplicate indices violate the ``recv_many`` transport contract.
+        """
 
         heapq.heappush(self._heap, item)
 
@@ -358,6 +362,7 @@ class _RecvGenBuffer:
         self._lock = threading.Lock()
         self._event = ThreadsafeEvent()
         self._reorder = _OrderedIngestBuffer[memoryview]()
+        self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False
         self._stream_done = False
         self._stream_error: BaseException | None = None
@@ -384,12 +389,16 @@ class _RecvGenBuffer:
         notify = False
         with self._lock:
             if index == RECV_MANY_BUFFER_PRESSURE:
+                # recv_many emits at most one pressure callback until the
+                # consumer advances past the pressure yield and recv restarts.
                 self._resume = cast(_RecvManyResume, data)
                 self._pressure_pending = True
                 notify = True
             else:
-                self._reorder.push((index, cast(memoryview, data)))
-                notify = bool(self._reorder)
+                ready = self._reorder.pushpop((index, cast(memoryview, data)))
+                if ready is not None:
+                    self._ready.append(ready)
+                notify = bool(self._ready) or bool(self._reorder)
         if notify:
             self._event.set()
 
@@ -426,8 +435,13 @@ class _RecvGenBuffer:
                     if self._pressure_pending:
                         self._pressure_pending = False
                         return (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
-                    if self._reorder:
-                        index, chunk = self._reorder.pop()
+                    ready_item: tuple[int, memoryview] | None = None
+                    if self._ready:
+                        ready_item = self._ready.popleft()
+                    elif self._reorder:
+                        ready_item = self._reorder.pop()
+                    if ready_item is not None:
+                        index, chunk = ready_item
                         if not chunk:
                             # ordered EOF beats a concurrent stream error/cancel race
                             self._stream_done = True
@@ -452,6 +466,7 @@ class _RecvGenBuffer:
             self._closed = True
             stream = self._stream
             self._pressure_pending = False
+            self._ready.clear()
             self._reorder.reset()
         if stream is not None and not stream.done():
             proactor = stream._proactor
@@ -2591,9 +2606,7 @@ class ProactorScheduler(BaseScheduler):
                     progress(cargo)
                 return cargo
 
-        return b"".join(
-            (process(chunk) for _, chunk in self.sock_recvgen(sock, buffer_count=None))
-        )
+        return b"".join((process(chunk) for _, chunk in self.sock_recvgen(sock, buffer_count=None)))
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
         """Receive bytes from a non-blocking socket into `buf`."""
