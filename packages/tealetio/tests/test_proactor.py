@@ -149,7 +149,9 @@ def test_ordered_ingest_buffer_push_defers_out_of_order_items():
     assert len(buffer) == 1
     assert not buffer
     assert buffer.pop() is None
-    assert buffer.pushpop((1, "b")) is None
+    assert buffer.pushpop((2, "c")) is None
+    assert len(buffer) == 2
+    assert not buffer
 
 
 def test_ordered_ingest_buffer_pushpop_returns_next_ready_item():
