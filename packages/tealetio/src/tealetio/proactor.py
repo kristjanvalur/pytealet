@@ -372,7 +372,6 @@ class _RecvGenBuffer:
         self._stream_error: BaseException | None = None
         self._stream: ContinuousOperation[_RecvManyResult] | None = None
         self._closed = False
-        self._shared_resume_requested = False
 
     def attach_stream(self, stream: ContinuousOperation[_RecvManyResult]) -> None:
         self._stream = stream
@@ -427,28 +426,13 @@ class _RecvGenBuffer:
         self._resume = None
         return resume_fn
 
-    def _try_finish_shared_resume(self) -> None:
-        """Re-arm shared-pool ``recv_many`` once internal queues are drained."""
-
-        resume_fn: _RecvManyResume | None = None
-        with self._lock:
-            if not self._shared_resume_requested or self._resume is None:
-                return
-            if self._buf_group is not None:
-                return
-            if self._ready or self._reorder:
-                return
-            resume_fn = self._resume
-            self._resume = None
-            self._shared_resume_requested = False
-        resume_fn()
-
     def consume_pressure_resume(self) -> None:
-        """Re-arm ``recv_many`` after the consumer drops held pressure views."""
+        """Re-arm ``recv_many`` once the buffer pool has enough free slots."""
 
         with self._lock:
-            self._shared_resume_requested = True
-        self._try_finish_shared_resume()
+            resume_fn = self._should_resume()
+        if resume_fn is not None:
+            resume_fn()
 
     def take_next(self) -> _RecvGenYield | None:
         while True:
@@ -480,8 +464,6 @@ class _RecvGenBuffer:
                     pending_resume = self._should_resume()
                 if pending_resume is not None:
                     pending_resume()
-                else:
-                    self._try_finish_shared_resume()
             self._event.swait()
 
     def close(self) -> None:
@@ -492,7 +474,6 @@ class _RecvGenBuffer:
             self._closed = True
             stream = self._stream
             self._pressure_pending = False
-            self._shared_resume_requested = False
             self._ready.clear()
             self._reorder.reset()
         if stream is not None and not stream.done():
@@ -721,7 +702,6 @@ class SelectorProactor(ProactorBase):
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
         self._selector.register(self._wakeup_reader.fileno(), selectors.EVENT_READ, None)
-        self._recv_many_buf_group: _SelectorBufGroup | None = None
         self._recv_many_repressure_pending: set[ContinuousOperation[Any]] = set()
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
@@ -731,13 +711,6 @@ class SelectorProactor(ProactorBase):
 
     def create_buf_group(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
         return self.create_recv_buffer_pool(buffer_size, buffer_count)
-
-    def _get_recv_many_buf_group(self) -> _SelectorBufGroup:
-        buf_group = self._recv_many_buf_group
-        if buf_group is None:
-            buf_group = self.create_recv_buffer_pool(_DEFAULT_RECVGEN_BUFFER_SIZE, _DEFAULT_RECVGEN_BUFFER_COUNT)
-            self._recv_many_buf_group = buf_group
-        return buf_group
 
     def _selector_recv_many_resume(
         self,
@@ -1080,7 +1053,10 @@ class SelectorProactor(ProactorBase):
 
         # paced path: one chunk per step; pool exhaustion yields RECV_MANY_BUFFER_PRESSURE.
         resolved_group = cast(
-            _SelectorBufGroup, buf_group if buf_group is not None else self._get_recv_many_buf_group()
+            _SelectorBufGroup,
+            buf_group
+            if buf_group is not None
+            else self.create_recv_buffer_pool(_DEFAULT_RECVGEN_BUFFER_SIZE, _DEFAULT_RECVGEN_BUFFER_COUNT),
         )
         state = _SelectorRecvManyState()
 
@@ -1538,7 +1514,6 @@ class UringProactor(ProactorBase):
         super().__init__(completion_callback=completion_callback)
         self._ring = ring_factory(entries, flags)
         self._buf_group_factory = buf_group_factory
-        self._recv_many_buf_group: _UringBufGroup | None = None
         try:
             self._capabilities = uring_api.probe(entries=entries, flags=flags)
         except (OSError, RuntimeError, NotImplementedError):
@@ -1588,13 +1563,6 @@ class UringProactor(ProactorBase):
         """
 
         return dict(self._capabilities)
-
-    def _get_recv_many_buf_group(self) -> _UringBufGroup:
-        buf_group = self._recv_many_buf_group
-        if buf_group is None:
-            buf_group = self._buf_group_factory(self._ring)
-            self._recv_many_buf_group = buf_group
-        return buf_group
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
         """Create a provided-buffer group for ``recv_many`` / ``recvgen``."""
@@ -2134,7 +2102,7 @@ class UringProactor(ProactorBase):
             if buf_group is not None:
                 uring_group = cast(_UringBufGroup, buf_group)
             else:
-                uring_group = self._get_recv_many_buf_group()
+                uring_group = self._buf_group_factory(self._ring)
             # provided-buffer multishot: leased BufViews, ENOBUFS resume callback path.
             entry = _UringEntry(
                 operation=operation,
@@ -2488,6 +2456,7 @@ class ProactorScheduler(BaseScheduler):
             proactor_factory = SelectorProactor
         self._proactor = proactor_factory()
         self._proactor.set_clock(self.time)
+        self._shared_recv_buffer_pool: RecvBufferPool | None = None
 
     @property
     def proactor(self) -> Proactor:
@@ -2498,6 +2467,7 @@ class ProactorScheduler(BaseScheduler):
     def close(self) -> None:
         """Close proactor and scheduler-owned resources."""
 
+        self._shared_recv_buffer_pool = None
         self._proactor.close()
         BaseScheduler.close(self)
 
@@ -2553,6 +2523,21 @@ class ProactorScheduler(BaseScheduler):
 
         return self._proactor.create_recv_buffer_pool(buffer_size, buffer_count)
 
+    def shared_recv_buffer_pool(self) -> RecvBufferPool:
+        """Return the lazy shared provided-buffer pool for scheduler receive helpers."""
+
+        pool = self._shared_recv_buffer_pool
+        if pool is None:
+            if isinstance(self._proactor, UringProactor):
+                pool = self.create_recv_buffer_pool(
+                    _DEFAULT_URING_RECV_MANY_BUFFER_SIZE,
+                    _DEFAULT_URING_RECV_MANY_BUFFER_COUNT,
+                )
+            else:
+                pool = self.create_recv_buffer_pool(_DEFAULT_RECVGEN_BUFFER_SIZE, _DEFAULT_RECVGEN_BUFFER_COUNT)
+            self._shared_recv_buffer_pool = pool
+        return pool
+
     def _open_sock_recvgen(
         self,
         sock: socket.socket,
@@ -2563,9 +2548,12 @@ class ProactorScheduler(BaseScheduler):
     ) -> _RecvGenBuffer:
         """Start ``recv_many`` and return the ordered receive buffer."""
 
-        recv_many_group = buf_group
-        if recv_many_group is None and buffer_count is not None:
+        if buf_group is not None:
+            recv_many_group = buf_group
+        elif buffer_count is not None:
             recv_many_group = self.create_recv_buffer_pool(buffer_size, buffer_count)
+        else:
+            recv_many_group = self.shared_recv_buffer_pool()
         buffer = _RecvGenBuffer(buf_group=recv_many_group)
         stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=recv_many_group)
         buffer.attach_stream(stream)
@@ -2585,24 +2573,23 @@ class ProactorScheduler(BaseScheduler):
         is yielded as a read-only ``memoryview``. Copy with ``bytes(data)`` when
         owned storage is required past the current iteration step.
 
-        When ``buffer_count`` is ``None`` and ``buf_group`` is omitted, ``recv_many``
-        uses the proactor's shared provided-buffer pool (the ``sock_recvall`` path).
-        Otherwise a dedicated pool is created from ``buffer_size`` and
+        When ``buffer_count`` is ``None`` and ``buf_group`` is omitted, the
+        scheduler's shared provided-buffer pool is attached (the ``sock_recvall``
+        path). Otherwise a dedicated pool is created from ``buffer_size`` and
         ``buffer_count`` (defaults: 16 KiB x 8). Call ``create_recv_buffer_pool()``
         to build a pool explicitly and pass it via ``buf_group`` across multiple
         generators or tuned sizing.
 
         ``(RECV_MANY_BUFFER_PRESSURE, memoryview(b\"\"))`` is yielded when the
         provided-buffer pool is exhausted. Drop held views when that token appears.
-        Dedicated pools resume on the following ``take_next()`` once enough slots
-        are free. The shared ``recv_many`` pool (``buffer_count=None``) resumes
-        automatically when the consumer advances past a pressure yield.
+        Receive restarts on a following ``take_next()`` once at least half of the
+        attached pool's slots are free (including the scheduler shared pool when
+        ``buffer_count=None``).
 
         Must be consumed from a scheduler tealet so ``ThreadsafeEvent`` waits
         block cooperatively.
         """
 
-        shared_pool = buf_group is None and buffer_count is None
         buffer = self._open_sock_recvgen(
             sock,
             buffer_size=buffer_size,
@@ -2615,8 +2602,6 @@ class ProactorScheduler(BaseScheduler):
                 if item is None:
                     break
                 yield item
-                if shared_pool and item[0] == RECV_MANY_BUFFER_PRESSURE:
-                    buffer.consume_pressure_resume()
         finally:
             buffer.close()
 

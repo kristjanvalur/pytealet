@@ -24,11 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ProactorScheduler.sock_recvgen(sock)` as a tealet-blocking incremental
   consumer of `recv_many`, yielding stream-ordered `(index, data)` chunks with
   the same provided-buffer pressure policy as `sock_recvall`.
-- `ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` and
-  `Proactor.create_recv_buffer_pool(...)` for explicit provided-buffer pool
-  sizing shared by `sock_recvgen` and `recv_many`.
-- `UringProactor` with a shared lazy `BufGroup` for provided-buffer multishot
-  `recv_many` / `sock_recvall`, plus `buf_group_factory` for custom pool sizing.
+- `ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` for
+  explicit provided-buffer pool sizing shared by `sock_recvgen` and `recv_many`.
+- `ProactorScheduler.shared_recv_buffer_pool()` as the lazy scheduler-owned
+  shared `BufGroup` for `sock_recvall` and `sock_recvgen(..., buffer_count=None)`.
+- `UringProactor.buf_group_factory` for custom default pool sizing on low-level
+  `recv_many(sock, callback)` calls that omit `buf_group`.
 - `RECV_MANY_BUFFER_PRESSURE` result index so `recv_many` consumers can release
   held views when the shared provided-buffer pool is exhausted.
 - Published runnable queue policies (`FifoRunnableQueue`,

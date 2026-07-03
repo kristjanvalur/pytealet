@@ -100,17 +100,21 @@ deliberately does not enforce selector-style per-fd exclusivity.
 chunk, where `index` is the ordinal position in the receive stream and `data`
 is a read-only `memoryview` into the received bytes. EOF emits one final empty
 view before the operation completes. Chunk sizes are backend-defined:
-`UringProactor` uses the shared `BufGroup` slot size (16 KiB by default) when
+`UringProactor` uses the operation `BufGroup` slot size (16 KiB by default) when
 multishot provided-buffer receive is available, and `SelectorProactor` reads up
-to 8 KiB per `recv()` call. Each `UringProactor` instance lazily creates one
-`BufGroup` (16 KiB × 256 buffers by default) shared by `recv_many` and
-`sock_recvall` when multishot receive is in use. `sock_recvgen` creates a
-dedicated pool per generator (defaults: 16 KiB × 8) unless
-`buffer_count=None` selects the shared pool. Concurrent long-lived `recv_many`
-streams on one `UringProactor` therefore draw from the same provided-buffer
-pool: a slow consumer on one stream can trigger `RECV_MANY_BUFFER_PRESSURE` or
-stall another stream even when the second would otherwise fit. Use separate
-`UringProactor` instances when independent streams need isolated buffer pools.
+to 8 KiB per `recv()` call. `recv_many(sock, callback)` without `buf_group`
+creates a dedicated provided-buffer pool for that operation (16 KiB × 256 on
+`UringProactor` by default, 16 KiB × 8 on `SelectorProactor`). Each
+`ProactorScheduler` lazily creates one shared `BufGroup` for
+`sock_recvall` / `sock_recvgen(..., buffer_count=None)` (16 KiB × 256 on
+`UringProactor` backends by default, 16 KiB × 8 on selector backends).
+`sock_recvgen` with default `buffer_count` creates a dedicated pool per
+generator (defaults: 16 KiB × 8). Concurrent long-lived scheduler receive
+helpers that share `buffer_count=None` therefore draw from the same
+provided-buffer pool: a slow consumer on one stream can trigger
+`RECV_MANY_BUFFER_PRESSURE` or stall another stream even when the second would
+otherwise fit. Use explicit `buf_group` pools or dedicated `buffer_count` sizing
+when independent streams need isolated buffer pools.
 When the provided-buffer pool is exhausted on `UringProactor`, the callback
 receives `(RECV_MANY_BUFFER_PRESSURE, resume)`; drop held views and call
 `resume()` to re-arm multishot receive (stream indices continue from the failed
@@ -150,12 +154,13 @@ thread affinity should marshal from the callback into the appropriate scheduler,
 event loop, or application thread.
 
 `ProactorScheduler.sock_recvall(sock, progress=None)` joins chunks from
-`sock_recvgen(sock, buffer_count=None)`, which uses the proactor's shared
+`sock_recvgen(sock, buffer_count=None)`, which uses the scheduler's shared
 provided-buffer pool. Each non-pressure chunk is converted to `bytes` as the
 generator advances, so at most one leased `memoryview` is held per iteration
-step. Provided-buffer pressure is handled inside `sock_recvgen` (shared pool
-auto-resume via `consume_pressure_resume()`); `sock_recvall` does not batch
-retain views or call `resume()` itself. When provided, `progress(chunk)` is
+step. Provided-buffer pressure is handled inside `sock_recvgen`; receive
+restarts once at least half of the attached pool's slots are free.
+`sock_recvall` does not batch retain views or call `resume()` itself. When
+provided, `progress(chunk)` is
 called after each received non-empty chunk with that chunk's `bytes` payload
 (not a running total).
 
@@ -189,9 +194,10 @@ Out-of-order multishot completions are reordered before yield. The generator
 must be consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can
 block cooperatively.
 
-`Proactor` exposes `recv_many` and `create_recv_buffer_pool` only; blocking
-`recvall` / `recvgen` helpers live on `ProactorScheduler` as `sock_recvall`
-and `sock_recvgen`.
+`Proactor` exposes `recv_many` only; blocking `recvall` / `recvgen` helpers and
+provided-buffer pool construction live on `ProactorScheduler` as `sock_recvall`,
+`sock_recvgen`, `create_recv_buffer_pool`, and the lazy `shared_recv_buffer_pool()`
+used by `sock_recvall` / `sock_recvgen(..., buffer_count=None)`.
 
 IO-capable schedulers also expose blocking poll helpers on top of the proactor
 or selector backends. `poll(fd, mask)` waits cooperatively and returns the

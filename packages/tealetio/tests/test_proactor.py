@@ -238,14 +238,23 @@ def test_recvgen_buffer_reorders_out_of_order_chunks():
     assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
 
 
-def test_recvgen_buffer_shared_resume_defers_until_queues_drained():
+def test_recvgen_buffer_resume_waits_until_half_pool_is_free():
     resumed: list[bool] = []
 
     def resume() -> None:
         resumed.append(True)
 
+    class _Pool:
+        buffer_count = 4
+        leased_count = 4
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
     def exercise() -> list[bool]:
-        buffer = proactor_module._RecvGenBuffer()
+        pool = _Pool()
+        buffer = proactor_module._RecvGenBuffer(buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
@@ -254,9 +263,13 @@ def test_recvgen_buffer_shared_resume_defers_until_queues_drained():
         assert resumed == []
         first = buffer.take_next()
         assert first is not None and first[0] == 0
+        pool.note_chunk_released()
         assert resumed == []
         second = buffer.take_next()
         assert second is not None and second[0] == 1
+        pool.note_chunk_released()
+        buffer.on_result((2, memoryview(b"")))
+        assert buffer.take_next() is None
         return resumed
 
     assert _exercise_recvgen_buffer(exercise) == [True]
@@ -392,8 +405,17 @@ def test_recvgen_buffer_resumes_on_pressure_while_waiting(monkeypatch):
     resumed: list[bool] = []
     ready_to_wait = threading.Event()
 
+    class _Pool:
+        buffer_count = 4
+        leased_count = 1
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
     def exercise() -> tuple[tuple[int, memoryview], list[bool]]:
-        buffer = proactor_module._RecvGenBuffer()
+        pool = _Pool()
+        buffer = proactor_module._RecvGenBuffer(buf_group=pool)
 
         def resume() -> None:
             resumed.append(True)
@@ -501,8 +523,17 @@ def test_recvgen_buffer_defers_resume_until_all_queued_chunks_yielded():
     def resume() -> None:
         resumed.append(True)
 
+    class _Pool:
+        buffer_count = 4
+        leased_count = 4
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
     def exercise() -> tuple[list[tuple[int, memoryview]], list[bool]]:
-        buffer = proactor_module._RecvGenBuffer()
+        pool = _Pool()
+        buffer = proactor_module._RecvGenBuffer(buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
@@ -511,11 +542,11 @@ def test_recvgen_buffer_defers_resume_until_all_queued_chunks_yielded():
         assert resumed == []
         first = buffer.take_next()
         assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        pool.note_chunk_released()
         assert resumed == []
         second = buffer.take_next()
         assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
-        assert resumed == []
-        buffer.consume_pressure_resume()
+        pool.note_chunk_released()
         buffer.on_result((2, memoryview(b"")))
         eof = buffer.take_next()
         assert eof is None
@@ -532,8 +563,17 @@ def test_recvgen_buffer_defers_resume_until_next_take_after_yielding_chunk():
     def resume() -> None:
         resumed.append(True)
 
+    class _Pool:
+        buffer_count = 2
+        leased_count = 2
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
     def exercise() -> tuple[tuple[int, memoryview | None] | None, list[bool]]:
-        buffer = proactor_module._RecvGenBuffer()
+        pool = _Pool()
+        buffer = proactor_module._RecvGenBuffer(buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
         token = buffer.take_next()
@@ -541,10 +581,11 @@ def test_recvgen_buffer_defers_resume_until_next_take_after_yielding_chunk():
         assert resumed == []
         first = buffer.take_next()
         assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        pool.note_chunk_released()
         assert resumed == []
-        buffer.consume_pressure_resume()
         buffer.on_result((1, memoryview(b"")))
         second = buffer.take_next()
+        assert resumed == [True]
         return second, resumed
 
     eof, called = _exercise_recvgen_buffer(exercise)
@@ -3456,7 +3497,6 @@ class TestUringProactor:
             proactor.ring.complete_recv_oneshot(b"")
             _wait_for_uring(proactor, lambda: operation.done())
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
-            assert proactor._recv_many_buf_group is None
         finally:
             reader.close()
             writer.close()
@@ -3473,7 +3513,6 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_recv_multishot[0]
             assert submitted[0] == reader.fileno()
-            assert submitted[1] is proactor._recv_many_buf_group
             assert submitted[1].buffer_size == 16 * 1024
             assert submitted[1].buffer_count == 256
 
@@ -3736,7 +3775,7 @@ class TestUringProactor:
                 submitted = ring.submitted_recv_multishot[0]
                 assert submitted[1].buffer_size == 4096
                 assert submitted[1].buffer_count == 4
-                assert submitted[1] is not scheduler.proactor._recv_many_buf_group
+                assert submitted[1] is not scheduler.shared_recv_buffer_pool()
                 ring.complete_recv_multishot(b"x", more=False, sequence=0)
 
             task = scheduler.spawn(receive_first_chunk)
@@ -3814,11 +3853,16 @@ class TestUringProactor:
             def deliver() -> None:
                 scheduler.sleep(0.001)
                 ring = scheduler.proactor.ring
+                shared = scheduler.shared_recv_buffer_pool()
                 ring.complete_recv_multishot(b"a", more=True, sequence=0)
                 ring.complete_recv_multishot(b"b", more=True, sequence=1)
                 ring.complete_recv_multishot(b"c", more=True, sequence=2)
                 ring.complete_recv_multishot_enobufs(sequence=3)
-                scheduler.sleep(0.05)
+                # fake-ring views do not decrement leased_count; sock_recvall drops each chunk after bytes()
+                shared.leased_count = 0
+                deadline = scheduler.proactor.get_time() + 1.0
+                while len(ring.submitted_recv_multishot) < 2 and scheduler.proactor.get_time() < deadline:
+                    scheduler.sleep(0.02)
                 ring.complete_recv_multishot(b"d", more=False, sequence=0)
 
             task = scheduler.spawn(receive)
