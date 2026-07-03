@@ -256,6 +256,7 @@ def _leased_selector_memoryview(data: bytes | bytearray, pool: _SelectorBufGroup
 
 _UringRingFactory = Callable[[int, int], _UringRing]
 _UringSendSubmit = Callable[[int, Any, object], _UringCompletion]
+_UringSendtoSubmit = Callable[[int, Any, Any, object], _UringCompletion]
 
 
 def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
@@ -1536,8 +1537,11 @@ class UringProactor(ProactorBase):
         except (OSError, RuntimeError, NotImplementedError):
             self._capabilities = {}
         self._submit_send: _UringSendSubmit = self._ring.submit_send
-        if self._capabilities.get("IORING_OP_SEND_ZC", False) and hasattr(self._ring, "submit_send_zc"):
+        if self._capabilities.get("IORING_OP_SEND_ZC", False):
             self._submit_send = self._ring.submit_send_zc
+        self._submit_sendto: _UringSendtoSubmit = self._ring.submit_sendto
+        if self._capabilities.get("IORING_OP_SENDMSG_ZC", False):
+            self._submit_sendto = self._ring.submit_sendmsg_zc
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by resubmitting the matching one-shot opcode after
         # each completion (see the *_oneshot delivery handlers below).
@@ -1828,7 +1832,7 @@ class UringProactor(ProactorBase):
         operation = Operation[int](kind="sendto", fileobj=sock, proactor=self)
         payload = memoryview(data)
         entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_sendto, data=payload)
-        self._submit_uring_entry(entry, lambda: self._ring.submit_sendto(sock.fileno(), payload, address, entry))
+        self._submit_uring_entry(entry, lambda: self._submit_sendto(sock.fileno(), payload, address, entry))
         return operation
 
     def _complete_uring_sendto(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:

@@ -694,6 +694,7 @@ def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
         "IORING_RECV_MULTISHOT": True,
         "IORING_POLL_MULTISHOT": True,
         "IORING_OP_SEND_ZC": True,
+        "IORING_OP_SENDMSG_ZC": True,
         "IORING_OP_STATX": True,
     }
     capabilities.update(overrides)
@@ -2515,6 +2516,7 @@ class _ZeroCopyFakeUringRing(_FakeUringRing):
     def __init__(self, entries: int, flags: int) -> None:
         super().__init__(entries, flags)
         self.submitted_send_zc: list[tuple[int, object, object]] = []
+        self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
 
     def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
@@ -2524,6 +2526,22 @@ class _ZeroCopyFakeUringRing(_FakeUringRing):
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_SEND_ZC,
+            res=len(payload),
+            result=len(payload),
+        )
+        self._deliver(completion)
+        return completion
+
+    def submit_sendmsg_zc(
+        self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_sendmsg_zc.append((fd, data, address, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SENDMSG_ZC,
             res=len(payload),
             result=len(payload),
         )
@@ -3431,6 +3449,47 @@ class TestUringProactor:
             assert submitted[0] == sender.fileno()
             assert submitted[1].obj is payload
             assert submitted[2] == address
+        finally:
+            sender.close()
+            proactor.close()
+
+    def test_sendto_uses_sendmsg_zc_when_probe_supports_it(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SENDMSG_ZC=True)
+        proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sender.setblocking(False)
+            payload = b"hello"
+            address = ("127.0.0.1", 12345)
+            operation = proactor.sendto(sender, payload, address)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == 5
+            assert isinstance(proactor.ring, _ZeroCopyFakeUringRing)
+            assert proactor.ring.submitted_sendto == []
+            submitted = proactor.ring.submitted_sendmsg_zc[0]
+            assert submitted[0] == sender.fileno()
+            assert isinstance(submitted[1], memoryview)
+            assert submitted[1].obj is payload
+            assert bytes(submitted[1]) == b"hello"
+            assert submitted[2] == address
+        finally:
+            sender.close()
+            proactor.close()
+
+    def test_sendto_uses_sendto_when_probe_lacks_sendmsg_zc(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SENDMSG_ZC=False)
+        proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sender.setblocking(False)
+            operation = proactor.sendto(sender, b"hello", ("127.0.0.1", 12345))
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == 5
+            assert isinstance(proactor.ring, _ZeroCopyFakeUringRing)
+            assert len(proactor.ring.submitted_sendto) == 1
+            assert proactor.ring.submitted_sendmsg_zc == []
         finally:
             sender.close()
             proactor.close()
