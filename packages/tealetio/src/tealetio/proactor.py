@@ -128,6 +128,10 @@ class _OrderedIngestBuffer(Generic[T_Cargo]):
         Duplicate indices violate the ``recv_many`` transport contract.
         """
 
+        if __debug__:
+            index = item[0]
+            assert index >= self._next_index, "stale recv_many index"
+            assert all(existing[0] != index for existing in self._heap), "duplicate recv_many index"
         heapq.heappush(self._heap, item)
 
     def pushpop(self, item: tuple[int, T_Cargo]) -> tuple[int, T_Cargo] | None:

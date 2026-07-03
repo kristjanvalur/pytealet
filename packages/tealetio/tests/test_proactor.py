@@ -262,6 +262,45 @@ def test_recvgen_buffer_eof_stops_iteration():
     assert second is None
 
 
+def test_recvgen_buffer_ordered_eof_wins_cancel_race():
+    def exercise() -> list[tuple[int, memoryview | None] | None]:
+        buffer = proactor_module._RecvGenBuffer()
+        buffer.on_result((0, memoryview(b"done")))
+        with buffer._lock:
+            buffer._stream_done = True
+            buffer._stream_error = CancelledError()
+        buffer.on_result((1, memoryview(b"")))
+        return [buffer.take_next(), buffer.take_next()]
+
+    first, second = _exercise_recvgen_buffer(exercise)
+    assert first is not None and first[0] == 0 and bytes(first[1]) == b"done"
+    assert second is None
+
+
+def test_recvgen_buffer_delivers_buffered_chunks_before_stream_error():
+    def exercise() -> list[object]:
+        buffer = proactor_module._RecvGenBuffer()
+        buffer.on_result((0, memoryview(b"a")))
+        buffer.on_result((1, memoryview(b"b")))
+        with buffer._lock:
+            buffer._stream_done = True
+            buffer._stream_error = OSError("recv failed")
+        results: list[object] = [buffer.take_next(), buffer.take_next()]
+        try:
+            buffer.take_next()
+        except OSError as exc:
+            results.append(exc)
+        else:
+            results.append(None)
+        return results
+
+    first, second, third = _exercise_recvgen_buffer(exercise)
+    assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+    assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
+    assert isinstance(third, OSError)
+    assert str(third) == "recv failed"
+
+
 def test_recvgen_buffer_yields_memoryviews():
     def exercise() -> tuple[int, memoryview | None] | None:
         buffer = proactor_module._RecvGenBuffer()

@@ -56,8 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`SelectorProactor` reads up to 8 KiB per `recv()`, `UringProactor` uses the
   shared `BufGroup` slot size).
 - `UringProactor.recv_many` delivers leased `memoryview` chunks instead of
-  copied `bytes`; `sock_recvall` keeps views until buffer pressure, then copies
-  all held chunks to `bytes` before calling the pressure `resume()` callback.
+  copied `bytes`; `sock_recvall` converts each chunk to `bytes` as
+  `sock_recvgen` advances, with shared-pool pressure handled inside
+  `sock_recvgen`.
 - `SelectorProactor.recv_many` (Python 3.12+) uses a synthetic `BufGroup` and
   the same `(RECV_MANY_BUFFER_PRESSURE, resume)` backpressure contract as uring.
 - Made `Scheduler` use the proactor-backed synchronous scheduler by default,

@@ -149,16 +149,15 @@ Backends may run these result callbacks from any worker thread; code that needs
 thread affinity should marshal from the callback into the appropriate scheduler,
 event loop, or application thread.
 
-`ProactorScheduler.sock_recvall(sock, progress=None)` builds on
-`recv_many(...)` with the proactor's shared provided-buffer pool and returns
-the concatenated payload as `bytes`. It keeps chunk views borrowed from
-`recv_many` until provided-buffer pressure arrives, then copies every held
-chunk to `bytes` so leased slots return to the shared pool. At EOF it
-concatenates chunks in stream-index order with `bytes(chunk)`; for stored
-`bytes` chunks that is an identity no-op on CPython. Remaining borrowed views
-are released by dropping recvall's references. When provided,
-`progress(chunk)` is called after each received non-empty chunk with that
-chunk's `bytes` payload (not a running total).
+`ProactorScheduler.sock_recvall(sock, progress=None)` joins chunks from
+`sock_recvgen(sock, buffer_count=None)`, which uses the proactor's shared
+provided-buffer pool. Each non-pressure chunk is converted to `bytes` as the
+generator advances, so at most one leased `memoryview` is held per iteration
+step. Provided-buffer pressure is handled inside `sock_recvgen` (shared pool
+auto-resume via `consume_pressure_resume()`); `sock_recvall` does not batch
+retain views or call `resume()` itself. When provided, `progress(chunk)` is
+called after each received non-empty chunk with that chunk's `bytes` payload
+(not a running total).
 
 `ProactorScheduler.sock_recvgen(sock, ...)` is a tealet-blocking generator that
 incrementally yields `(index, data)` chunks in stream-index order until EOF.
@@ -169,9 +168,15 @@ the stream completes (the generator raises `StopIteration`). Use `recv_many`
 directly when you need the documented EOF sentinel and exact `recv_many`
 callback semantics.
 
+Chunks already buffered in stream-index order are yielded before a terminal
+stream error or cancellation is raised. When an ordered empty chunk (EOF) is
+dequeued, iteration ends cleanly even if the underlying `recv_many` operation
+recorded cancel or error concurrently — ordered EOF wins that race.
+
 `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` is yielded when the
 provided-buffer pool is exhausted. At most one pressure notification is pending
-until the consumer advances past that yield and receive is re-armed.
+until the consumer advances past that yield and receive is re-armed; the
+backend does not emit another pressure callback until receive restarts.
 Consumers should drop every receive `memoryview` they still hold when that
 token appears and avoid keeping more views than needed between reads.
 
