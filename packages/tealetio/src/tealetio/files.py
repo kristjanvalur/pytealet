@@ -3,7 +3,7 @@ from __future__ import annotations
 import errno
 import io
 import os
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .operations import Operation
 
@@ -33,6 +33,37 @@ class OperationWaiter(Protocol):
     """Block the current tealet until a submitted ``Operation`` completes."""
 
     def wait_operation(self, operation: Operation[T]) -> T: ...
+
+
+@runtime_checkable
+class IOFile(Protocol):
+    """Positioned binary file handle returned by ``FileIO.open()``."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    def readable(self) -> bool: ...
+
+    def writable(self) -> bool: ...
+
+    def seekable(self) -> bool: ...
+
+    def fileno(self) -> int: ...
+
+    def tell(self) -> int: ...
+
+    def seek(self, pos: int, whence: int = os.SEEK_SET) -> int: ...
+
+    def read(self, size: int = -1) -> bytes: ...
+
+    def readinto(self, buffer: Any) -> int | None: ...
+
+    def write(self, b: Any) -> int | None: ...
+
+    def close(self) -> None: ...
 
 
 def parse_open_mode(mode: str) -> tuple[int, int]:

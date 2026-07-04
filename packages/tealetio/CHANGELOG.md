@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is removed.
 
 ### Added
+- `IOFile` handle protocol for positioned binary file objects returned by
+  `FileIO.open()`; `ProactorFile` is the proactor-backed implementation.
+- `ServerIO` protocol slice for stream servers (`SocketIO` plus proactor
+  submission); `ProactorSocketIO` remains a backward-compatible alias.
 - `ProactorIOManager` and `scheduler.io` on proactor-backed schedulers: composed
   blocking IO facade over `Proactor` (`wait_operation`, `sock_*`, `poll*`,
   positioned file `open`, receive-buffer pool helpers).

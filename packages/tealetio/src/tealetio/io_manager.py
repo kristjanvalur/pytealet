@@ -5,7 +5,7 @@ import socket
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
-from .files import ProactorFile, parse_open_mode
+from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, Operation
 from .socket_helpers import configure_scheduler_socket
@@ -28,11 +28,13 @@ SELECTOR_IO_UNSUPPORTED_ERROR = (
 __all__ = [
     "FileIO",
     "IO_UNSUPPORTED_ERROR",
+    "IOFile",
     "PollIO",
     "ProactorAccess",
     "ProactorIOManager",
     "ProactorSocketIO",
     "SELECTOR_IO_UNSUPPORTED_ERROR",
+    "ServerIO",
     "SocketIO",
     "SupportsProactorIO",
 ]
@@ -122,13 +124,16 @@ class PollIO(Protocol):
 
 @runtime_checkable
 class FileIO(Protocol):
-    """Positioned binary file open helper over a proactor backend."""
+    """Positioned binary file open helper over a blocking IO backend."""
 
-    def open(self, path: str, mode: str = "rb") -> ProactorFile: ...
+    def open(self, path: str, mode: str = "rb") -> IOFile: ...
 
 
-class ProactorSocketIO(SocketIO, ProactorAccess, Protocol):
+class ServerIO(SocketIO, ProactorAccess, Protocol):
     """Blocking socket IO plus proactor submission for stream servers."""
+
+
+ProactorSocketIO = ServerIO
 
 
 class ProactorIOManager:
@@ -278,7 +283,7 @@ class ProactorIOManager:
     ) -> ContinuousOperation[int]:
         return self._proactor.poll_many(fd, mask, callback)
 
-    def open(self, path: str, mode: str = "rb") -> ProactorFile:
+    def open(self, path: str, mode: str = "rb") -> IOFile:
         flags, file_mode = parse_open_mode(mode)
         try:
             fd = self.wait_operation(self._proactor.openat(path, flags, file_mode))

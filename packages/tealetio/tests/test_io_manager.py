@@ -157,8 +157,9 @@ class TestProactorIOManagerDirect:
         with patch("tealetio.io_manager.os.close"), patch("tealetio.files.os.close"):
             handle = io.open("/tmp/example.txt", "rb")
             try:
-                from tealetio.files import ProactorFile
+                from tealetio.files import IOFile, ProactorFile
 
+                assert isinstance(handle, IOFile)
                 assert isinstance(handle, ProactorFile)
                 assert handle.name == "/tmp/example.txt"
                 assert proactor.openat_calls == [("/tmp/example.txt", os.O_RDONLY | os.O_CLOEXEC, 0o666)]
