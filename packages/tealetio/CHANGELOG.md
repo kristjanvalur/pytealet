@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Blocking proactor IO (`wait_operation`, `sock_*`, `poll*`, positioned file
   `open`, and receive-buffer pool helpers) moved from the scheduler surface to
   `scheduler.io` (`ProactorIOManager`). Use `scheduler.io.sock_recv(...)` instead
-  of `scheduler.sock_recv(...)`. `BaseScheduler.io` raises when the scheduler has
-  no IO backend. Non-IO schedulers now raise ``RuntimeError`` on ``.io`` access
+  of `scheduler.sock_recv(...)`. ``BasicScheduler.io`` and ``SelectorScheduler.io``
+  raise when the scheduler has no proactor IO facade (selector schedulers get a
+  targeted error). Non-IO schedulers raise ``RuntimeError`` on ``.io`` access
   (not ``NotImplementedError`` from per-method stubs).
 - Custom `stream_factory` / `StreamFactory` callables now receive a `SocketIO`
   facade as the first argument (`io=...`) instead of a `ProactorScheduler`.
@@ -41,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FileIO.open()`; `ProactorFile` is the proactor-backed implementation.
 - `ServerIO` protocol slice for stream servers (`SocketIO` plus proactor
   submission); `ProactorSocketIO` remains a backward-compatible alias.
+- Streams internals: `_AcceptedConnection` typing, `_open_streams_for_flag`
+  helper, and `SupportsProactorIO` documentation for the capability gate.
 - `ProactorIOManager` and `scheduler.io` on proactor-backed schedulers: composed
   blocking IO facade over `Proactor` (`wait_operation`, `sock_*`, `poll*`,
   positioned file `open`, receive-buffer pool helpers).

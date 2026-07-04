@@ -41,7 +41,13 @@ __all__ = [
 
 
 class SupportsProactorIO(Protocol):
-    """Scheduler that exposes a proactor-backed ``scheduler.io`` facade."""
+    """Scheduler that exposes a proactor-backed ``scheduler.io`` facade.
+
+    Use for static typing after narrowing (for example ``isinstance(scheduler,
+    ProactorScheduler)``). Do not rely on ``isinstance(..., SupportsProactorIO)``
+    at runtime: schedulers without a real IO backend may still define an ``io``
+    property that raises.
+    """
 
     @property
     def io(self) -> "ProactorIOManager": ...
@@ -56,7 +62,7 @@ class ProactorAccess(Protocol):
 
 @runtime_checkable
 class SocketIO(Protocol):
-    """Blocking asyncio-shaped socket helpers over a proactor backend."""
+    """Blocking asyncio-shaped socket helpers over a scheduler IO backend."""
 
     def sock_recv(self, sock: socket.socket, n: int) -> bytes: ...
 
@@ -110,7 +116,7 @@ class SocketIO(Protocol):
 
 @runtime_checkable
 class PollIO(Protocol):
-    """Blocking poll helpers over a proactor backend."""
+    """Blocking poll helpers over a scheduler IO backend."""
 
     def poll(self, fd: int, mask: int) -> int: ...
 

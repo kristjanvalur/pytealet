@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 import tealetio.files as files_module
-from tealetio.files import ProactorFile
+from tealetio.files import IOFile, ProactorFile
 from tealetio.operations import Operation
 
 _TEST_FD = 901
@@ -86,6 +86,14 @@ def _make_file(
 def _noop_os_close():
     with patch("tealetio.files.os.close"):
         yield
+
+
+def test_proactor_file_satisfies_iofile_protocol() -> None:
+    handle, _proactor, _store = _make_file(data=b"hello")
+    try:
+        assert isinstance(handle, IOFile)
+    finally:
+        handle.close()
 
 
 def test_seek_and_tell_track_logical_position() -> None:

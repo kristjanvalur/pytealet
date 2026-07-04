@@ -371,6 +371,7 @@ _StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
 _NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
 _AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 _ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
+_AcceptedConnection: TypeAlias = tuple[socket.socket, object]
 
 
 def default_stream_factory(
@@ -756,7 +757,7 @@ class StreamServer:
         self,
         scheduler: BaseScheduler,
         sockets: list[socket.socket],
-        accept_operation: ContinuousOperation[tuple[socket.socket, Any]],
+        accept_operation: ContinuousOperation[_AcceptedConnection],
     ) -> None:
         self._scheduler = scheduler
         self._io = _require_proactor_io(scheduler)
@@ -778,7 +779,7 @@ class StreamServer:
         return self._sockets
 
     @property
-    def accept_operation(self) -> ContinuousOperation[tuple[socket.socket, Any]]:
+    def accept_operation(self) -> ContinuousOperation[_AcceptedConnection]:
         return self._accept_operation
 
     def close(self) -> None:
@@ -913,7 +914,7 @@ def _start_stream_server(
 
     server: StreamServer | None = None
 
-    def on_accept(accepted: tuple[socket.socket, Any]) -> None:
+    def on_accept(accepted: _AcceptedConnection) -> None:
         conn, _address = accepted
         if server is None:
             # accept_many may deliver on a worker thread before StreamServer
