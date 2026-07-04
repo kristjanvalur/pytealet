@@ -8,7 +8,7 @@ import socket
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, Callable, NoReturn, cast
 
 from .locks import Event
 from .operations import ContinuousOperation
@@ -544,6 +544,14 @@ class SelectorScheduler(SelectorMixin, BaseScheduler, ABC):
         runnable_queue_factory: RunnableQueueFactory | None = None,
     ) -> None:
         super().__init__(selector=selector, runnable_queue_factory=runnable_queue_factory)
+
+    @property
+    def io(self) -> NoReturn:
+        """Raise until ``SelectorIOManager`` wires blocking IO through ``scheduler.io``."""
+
+        from .io_manager import SELECTOR_IO_UNSUPPORTED_ERROR
+
+        raise RuntimeError(SELECTOR_IO_UNSUPPORTED_ERROR)
 
     @abstractmethod
     async def _driver_wait(self) -> None:

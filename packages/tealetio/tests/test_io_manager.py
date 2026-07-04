@@ -91,6 +91,16 @@ class TestProactorIOManager:
         with pytest.raises(RuntimeError, match="scheduler with IO support"):
             scheduler.io
 
+    def test_selector_scheduler_io_raises_targeted_message(self):
+        from tealetio.selector import SyncSelectorScheduler
+
+        scheduler = SyncSelectorScheduler()
+        try:
+            with pytest.raises(RuntimeError, match="stream helpers require a proactor scheduler"):
+                scheduler.io
+        finally:
+            scheduler.close()
+
 
 class TestProactorIOManagerDirect:
     def test_wait_operation_returns_immediate_result(self):

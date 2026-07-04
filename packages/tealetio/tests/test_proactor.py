@@ -28,6 +28,7 @@ from uring_fakes import (
 
 import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
+import tealetio.recv_iter as recv_iter_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.operations import InvalidStateError
 from tealetio.proactor import (
@@ -150,7 +151,7 @@ def test_completions_to_process_flushes_stored_termination():
     assert entry.completions_to_process(second) == (second, terminal)
 
 
-def _drain_ordered_ingest_buffer(buffer: proactor_module._OrderedIngestBuffer[str]) -> list[tuple[int, str]]:
+def _drain_ordered_ingest_buffer(buffer: recv_iter_module._OrderedIngestBuffer[str]) -> list[tuple[int, str]]:
     ready: list[tuple[int, str]] = []
     while True:
         item = buffer.pop()
@@ -161,7 +162,7 @@ def _drain_ordered_ingest_buffer(buffer: proactor_module._OrderedIngestBuffer[st
 
 
 def test_ordered_ingest_buffer_push_defers_out_of_order_items():
-    buffer = proactor_module._OrderedIngestBuffer[str]()
+    buffer = recv_iter_module._OrderedIngestBuffer[str]()
     buffer.push((1, "b"))
     assert len(buffer) == 1
     assert not buffer
@@ -172,13 +173,13 @@ def test_ordered_ingest_buffer_push_defers_out_of_order_items():
 
 
 def test_ordered_ingest_buffer_pushpop_returns_next_ready_item():
-    buffer = proactor_module._OrderedIngestBuffer[str]()
+    buffer = recv_iter_module._OrderedIngestBuffer[str]()
     assert buffer.pushpop((0, "a")) == (0, "a")
     assert not buffer
 
 
 def test_ordered_ingest_buffer_unclogs_pending_items():
-    buffer = proactor_module._OrderedIngestBuffer[str]()
+    buffer = recv_iter_module._OrderedIngestBuffer[str]()
     buffer.push((1, "b"))
     buffer.push((2, "c"))
     ready = [buffer.pushpop((0, "a")), *_drain_ordered_ingest_buffer(buffer)]
@@ -186,7 +187,7 @@ def test_ordered_ingest_buffer_unclogs_pending_items():
 
 
 def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
-    buffer = proactor_module._OrderedIngestBuffer[str]()
+    buffer = recv_iter_module._OrderedIngestBuffer[str]()
     buffer.push((2, "c"))
     buffer.push((1, "b"))
     assert len(buffer) == 2
@@ -196,7 +197,7 @@ def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
     assert ready == [(0, "a"), (1, "b"), (2, "c")]
     assert not buffer
 
-    waiting = proactor_module._OrderedIngestBuffer[str]()
+    waiting = recv_iter_module._OrderedIngestBuffer[str]()
     waiting.pushpop((0, "a"))
     waiting.push((1, "b"))
     assert waiting
@@ -204,7 +205,7 @@ def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
 
 
 def test_ordered_ingest_buffer_reset_restores_next_index():
-    buffer = proactor_module._OrderedIngestBuffer[str](start=5)
+    buffer = recv_iter_module._OrderedIngestBuffer[str](start=5)
     buffer.pushpop((5, "a"))
     buffer.push((7, "c"))
     buffer.reset()
@@ -4018,8 +4019,10 @@ class TestProactorScheduler:
             scheduler.close()
 
     def test_wait_operation_wakes_event_on_scheduler_thread_from_uring_callback(self, monkeypatch):
+        import tealetio.io_manager as io_manager_module
+
         event_set_threads: list[int] = []
-        original_event = proactor_module.ThreadsafeEvent
+        original_event = io_manager_module.ThreadsafeEvent
 
         class TrackingEvent(original_event):
             def _set(self) -> None:
@@ -4035,8 +4038,6 @@ class TestProactorScheduler:
 
         def proactor_factory() -> UringProactor:
             return UringProactor(ring_factory=ring_factory)
-
-        import tealetio.io_manager as io_manager_module
 
         monkeypatch.setattr(io_manager_module, "ThreadsafeEvent", TrackingEvent)
         scheduler = SyncProactorScheduler(proactor_factory)

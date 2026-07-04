@@ -1577,12 +1577,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             self._pending_executor_calls -= 1
         self._break_wait()
 
-    @property
-    def io(self) -> NoReturn:
-        """Raise: only proactor schedulers override with a real ``io`` facade."""
-
-        raise RuntimeError("operation requires a scheduler with IO support")
-
     def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
         """Register a callback for readability on `fd`."""
 
@@ -2004,6 +1998,14 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
     def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         super().__init__(runnable_queue_factory=runnable_queue_factory)
         self._wakeup = threading.Event()
+
+    @property
+    def io(self) -> NoReturn:
+        """Raise: only proactor schedulers expose a blocking ``io`` facade."""
+
+        from .io_manager import IO_UNSUPPORTED_ERROR
+
+        raise RuntimeError(IO_UNSUPPORTED_ERROR)
 
     # -- Driver wakeup -------------------------------------------------
 

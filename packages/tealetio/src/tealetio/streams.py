@@ -65,8 +65,9 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
     """Drive an async-stream coroutine without an asyncio event loop.
 
     ``AsyncStream*`` methods are ``async def`` for handler compatibility, but
-    they block through ``scheduler.io.wait_operation`` rather than yielding asyncio
-    futures. Unexpected yields surface as ``RuntimeError``.
+    they ultimately block through the proactor IO manager's ``wait_operation``
+    path rather than yielding asyncio futures. Public stream and factory APIs
+    depend on ``SocketIO`` only. Unexpected yields surface as ``RuntimeError``.
     """
 
     def on_yield(value: object) -> object:
@@ -396,17 +397,15 @@ def _resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:
 def _require_proactor_io(scheduler: BaseScheduler) -> ProactorIOManager:
     """Return ``scheduler.io`` for proactor schedulers or raise with a targeted message."""
 
+    from .io_manager import IO_UNSUPPORTED_ERROR, SELECTOR_IO_UNSUPPORTED_ERROR
     from .proactor import ProactorScheduler
     from .selector import SelectorScheduler
 
     if isinstance(scheduler, ProactorScheduler):
         return scheduler.io
     if isinstance(scheduler, SelectorScheduler):
-        raise RuntimeError(
-            "stream helpers require a proactor scheduler; selector schedulers "
-            "use scheduler.sock_* until SelectorIOManager is available"
-        )
-    raise RuntimeError("operation requires a scheduler with IO support")
+        raise RuntimeError(SELECTOR_IO_UNSUPPORTED_ERROR)
+    raise RuntimeError(IO_UNSUPPORTED_ERROR)
 
 
 def _open_streams(

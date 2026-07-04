@@ -49,6 +49,7 @@ def test_top_level_exports_public_scheduler_api():
         "Proactor",
         "ProactorFactory",
         "ProactorFile",
+        "ProactorIOManager",
         "ProactorSocketIO",
         "ProactorScheduler",
         "get_current",

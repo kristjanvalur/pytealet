@@ -19,12 +19,20 @@ _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
 
+IO_UNSUPPORTED_ERROR = "operation requires a scheduler with IO support"
+SELECTOR_IO_UNSUPPORTED_ERROR = (
+    "stream helpers require a proactor scheduler; selector schedulers "
+    "use scheduler.sock_* until SelectorIOManager is available"
+)
+
 __all__ = [
     "FileIO",
+    "IO_UNSUPPORTED_ERROR",
     "PollIO",
     "ProactorAccess",
     "ProactorIOManager",
     "ProactorSocketIO",
+    "SELECTOR_IO_UNSUPPORTED_ERROR",
     "SocketIO",
     "SupportsProactorIO",
 ]
@@ -177,10 +185,10 @@ class ProactorIOManager:
         return buffer_pool
 
     def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None):
-        from .proactor import _RecvIterBuffer
+        from .recv_iter import RecvIterBuffer
 
         pool = self._resolve_recv_buffer_pool(buffer_pool)
-        buffer = _RecvIterBuffer(buf_group=pool)
+        buffer = RecvIterBuffer(buf_group=pool)
         stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=pool)
         buffer.attach_stream(stream)
         return buffer
