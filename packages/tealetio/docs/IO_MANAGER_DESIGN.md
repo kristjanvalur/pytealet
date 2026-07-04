@@ -81,6 +81,14 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 | `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` + `ProactorFile` |
 | `StreamIO` (optional) | `open_connection`, `start_server` | module-level in `streams` |
 
+Slices overlap at the concrete manager: `ProactorIOManager` implements
+`SocketIO`, `PollIO`, and `FileIO` on one object. That is intentional — callers
+that only need sockets can type against `SocketIO` without depending on the full
+manager. Lifecycle helpers such as `close()` belong on handles (`ProactorFile`,
+sockets, `ContinuousOperation`) and scheduler/proactor shutdown, not on the IO
+protocols. `OperationWaiter` stays separate for `ProactorFile` even though the
+manager also exposes `wait_operation`.
+
 Module helpers:
 
 ```python
