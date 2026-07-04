@@ -221,10 +221,9 @@ class _ReaderCore:
             if self._eof:
                 return self._take_bytes(len(self._buffer))
             if len(self._buffer) >= self._limit:
-                consumed = bytes(self._buffer)
                 raise asyncio.LimitOverrunError(
                     "Separator is not found, and chunk exceed the limit",
-                    consumed,
+                    len(self._buffer),
                 )
             self._fill_buffer(len(self._buffer) + 1)
 

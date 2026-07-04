@@ -101,7 +101,7 @@ class TestStreamsPoC:
 
             with pytest.raises(asyncio.LimitOverrunError) as excinfo:
                 scheduler.run_until_complete(scheduler.spawn(exercise))
-            assert excinfo.value.consumed == b"x" * 8
+            assert excinfo.value.consumed == 8
         finally:
             reader.close()
             writer.close()
