@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol, TypeVar, overload
 
 from asynkit import coro_drive
 
-from .io_manager import ProactorIOManager, SocketIO
+from .io_manager import ProactorIOManager, ProactorSocketIO, SocketIO
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -393,6 +393,22 @@ def _resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:
     return get_running_scheduler()
 
 
+def _require_proactor_io(scheduler: BaseScheduler) -> ProactorIOManager:
+    """Return ``scheduler.io`` for proactor schedulers or raise with a targeted message."""
+
+    from .proactor import ProactorScheduler
+    from .selector import SelectorScheduler
+
+    if isinstance(scheduler, ProactorScheduler):
+        return scheduler.io
+    if isinstance(scheduler, SelectorScheduler):
+        raise RuntimeError(
+            "stream helpers require a proactor scheduler; selector schedulers "
+            "use scheduler.sock_* until SelectorIOManager is available"
+        )
+    raise RuntimeError("operation requires a scheduler with IO support")
+
+
 def _open_streams(
     io: SocketIO,
     sock: socket.socket,
@@ -446,7 +462,7 @@ def open_streams(
     """
 
     return _open_streams(
-        _resolve_scheduler(scheduler).io,
+        _require_proactor_io(_resolve_scheduler(scheduler)),
         sock,
         limit=limit,
         stream_factory=stream_factory,
@@ -464,7 +480,7 @@ def _connect_tcp_streams(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> tuple[Any, Any]:
-    io = scheduler.io
+    io = _require_proactor_io(scheduler)
     # ``ensure_resolved`` fast-paths literal IPv4/IPv6 via ``ipaddr_info`` and
     # falls back to ``scheduler.getaddrinfo()`` for hostnames (executor-backed).
     infos = scheduler.ensure_resolved(
@@ -599,7 +615,7 @@ def _connect_unix_streams(
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
-    io = scheduler.io
+    io = _require_proactor_io(scheduler)
     sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         io.sock_connect(sock, path)
@@ -682,7 +698,7 @@ class StreamServer:
         accept_operation: ContinuousOperation[tuple[socket.socket, Any]],
     ) -> None:
         self._scheduler = scheduler
-        self._io = scheduler.io
+        self._io = _require_proactor_io(scheduler)
         self._sockets = tuple(sockets)
         self._accept_operation = accept_operation
         self._shutdown = Condition()
@@ -806,6 +822,11 @@ def _start_stream_server(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> StreamServer:
+    """Start ``accept_many`` on a listening socket and return a ``StreamServer``.
+
+    Requires ``ProactorSocketIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
+    """
+
     server: StreamServer | None = None
 
     def on_accept(accepted: tuple[socket.socket, Any]) -> None:
@@ -823,7 +844,7 @@ def _start_stream_server(
             async_=async_,
         )
 
-    io: ProactorIOManager = scheduler.io
+    io: ProactorSocketIO = _require_proactor_io(scheduler)
     accept_operation = io.proactor.accept_many(sock, on_accept)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
@@ -841,7 +862,7 @@ def _start_server(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> StreamServer:
-    io = scheduler.io
+    io = _require_proactor_io(scheduler)
     if path is not None:
         if addr is not None:
             raise TypeError("start_server() accepts addr= or path=, not both")

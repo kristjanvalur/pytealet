@@ -19,7 +19,29 @@ _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
 
-__all__ = ["FileIO", "PollIO", "ProactorIOManager", "SocketIO"]
+__all__ = [
+    "FileIO",
+    "PollIO",
+    "ProactorAccess",
+    "ProactorIOManager",
+    "ProactorSocketIO",
+    "SocketIO",
+    "SupportsProactorIO",
+]
+
+
+class SupportsProactorIO(Protocol):
+    """Scheduler that exposes a proactor-backed ``scheduler.io`` facade."""
+
+    @property
+    def io(self) -> "ProactorIOManager": ...
+
+
+class ProactorAccess(Protocol):
+    """Blocking IO facade with access to proactor submission (``accept_many``, …)."""
+
+    @property
+    def proactor(self) -> "Proactor": ...
 
 
 @runtime_checkable
@@ -95,6 +117,10 @@ class FileIO(Protocol):
     """Positioned binary file open helper over a proactor backend."""
 
     def open(self, path: str, mode: str = "rb") -> ProactorFile: ...
+
+
+class ProactorSocketIO(SocketIO, ProactorAccess, Protocol):
+    """Blocking socket IO plus proactor submission for stream servers."""
 
 
 class ProactorIOManager:

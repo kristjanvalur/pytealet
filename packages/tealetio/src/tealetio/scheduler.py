@@ -20,20 +20,17 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     ContextManager,
     Coroutine,
     Literal,
+    NoReturn,
     Protocol,
     TypeAlias,
     TypeVar,
     cast,
 )
-
-if TYPE_CHECKING:
-    from .io_manager import ProactorIOManager
 
 from asynkit import coro_drive as _coro_drive
 from asynkit import syncmethod as _syncmethod
@@ -1581,8 +1578,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
 
     @property
-    def io(self) -> ProactorIOManager:
-        """Raise: blocking IO requires a proactor-backed scheduler with ``.io``."""
+    def io(self) -> NoReturn:
+        """Raise: only proactor schedulers override with a real ``io`` facade."""
 
         raise RuntimeError("operation requires a scheduler with IO support")
 

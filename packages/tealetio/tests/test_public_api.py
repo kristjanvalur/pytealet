@@ -45,9 +45,11 @@ def test_top_level_exports_public_scheduler_api():
         "open_streams",
         "Operation",
         "PollIO",
+        "ProactorAccess",
         "Proactor",
         "ProactorFactory",
         "ProactorFile",
+        "ProactorSocketIO",
         "ProactorScheduler",
         "get_current",
         "InvalidStateError",
@@ -66,6 +68,7 @@ def test_top_level_exports_public_scheduler_api():
         "run_coro",
         "Scheduler",
         "SocketIO",
+        "SupportsProactorIO",
         "SocketTransport",
         "start_server",
         "StreamFactory",
@@ -163,6 +166,9 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.FileIO is tealetio.proactor.FileIO
     assert tealetio.PollIO is tealetio.proactor.PollIO
     assert tealetio.SocketIO is tealetio.proactor.SocketIO
+    assert tealetio.ProactorAccess is tealetio.proactor.ProactorAccess
+    assert tealetio.ProactorSocketIO is tealetio.proactor.ProactorSocketIO
+    assert tealetio.SupportsProactorIO is tealetio.proactor.SupportsProactorIO
     assert tealetio.ProactorIOManager is tealetio.proactor.ProactorIOManager
     assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
     assert tealetio.SyncProactorScheduler is tealetio.proactor.SyncProactorScheduler

@@ -20,7 +20,15 @@ import uring_api
 
 from . import compat
 from .files import ProactorFile
-from .io_manager import FileIO, PollIO, ProactorIOManager, SocketIO
+from .io_manager import (
+    FileIO,
+    PollIO,
+    ProactorAccess,
+    ProactorIOManager,
+    ProactorSocketIO,
+    SocketIO,
+    SupportsProactorIO,
+)
 from .socket_helpers import configure_scheduler_socket
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, ContinuousStepResult, Operation
@@ -46,9 +54,12 @@ __all__ = [
     "ProactorFactory",
     "FileIO",
     "PollIO",
+    "ProactorAccess",
     "ProactorIOManager",
     "ProactorScheduler",
+    "ProactorSocketIO",
     "SocketIO",
+    "SupportsProactorIO",
     "SelectorProactor",
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",

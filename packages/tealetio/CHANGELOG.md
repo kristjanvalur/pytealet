@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom `stream_factory` / `StreamFactory` callables now receive a `SocketIO`
   facade as the first argument (`io=...`) instead of a `ProactorScheduler`.
   Update factories to use `io.sock_*` helpers; see `tealetio.streams.StreamFactory`.
+- `tealetio.streams` helpers require a proactor scheduler. Passing a
+  `SelectorScheduler` raises a targeted ``RuntimeError`` (selector blocking IO
+  remains on ``scheduler.sock_*`` until ``SelectorIOManager``).
 - `recv_many(sock, callback, *, buf_group)` now requires an explicit
   provided-buffer pool; there is no per-operation default at the proactor level.
 - `recv_many` provided-buffer exhaustion now delivers

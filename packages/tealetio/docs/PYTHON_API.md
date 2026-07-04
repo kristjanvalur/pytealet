@@ -530,8 +530,13 @@ def exercise(sock):
 Stream connect and server helpers are module-level functions (like asyncio).
 `open_connection(addr=(host, port))` resolves the running scheduler through
 `get_running_scheduler()` unless you pass `scheduler=`. Helpers require a
-proactor-backed scheduler with IO support (`scheduler.io`). Implementation
-routes through `streams._connect_tcp_streams(...)` /
+proactor-backed scheduler (`ProactorScheduler` / `SyncProactorScheduler`); they
+resolve blocking socket I/O through `scheduler.io`. `SelectorScheduler` still
+exposes blocking `sock_*` on the scheduler surface, but stream helpers raise a
+targeted `RuntimeError` until `SelectorIOManager` wires `scheduler.io` for
+selector paths. `start_server` additionally needs proactor submission
+(`accept_many` via the `ProactorSocketIO` slice: blocking `SocketIO` plus
+`proactor` access). Implementation routes through `streams._connect_tcp_streams(...)` /
 `streams._connect_unix_streams(...)`; the only functional difference between
 native and asyncio-shaped connect helpers at that layer is which default stream
 factory `async_` selects.

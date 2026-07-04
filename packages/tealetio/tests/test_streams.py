@@ -866,7 +866,7 @@ class TestStreamsRequiresIO:
 
         scheduler = SyncSelectorScheduler()
         try:
-            with pytest.raises(RuntimeError, match="scheduler with IO support"):
+            with pytest.raises(RuntimeError, match="stream helpers require a proactor scheduler"):
                 open_connection(addr=("127.0.0.1", 0), scheduler=scheduler)
         finally:
             scheduler.close()
