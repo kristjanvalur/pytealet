@@ -19,7 +19,7 @@ from tealetio.streams import (
     open_streams,
     run_coro,
 )
-from test_proactor import _FakeUringRing, _patch_uring_capabilities
+from uring_fakes import _FakeUringRing, _patch_uring_capabilities
 
 _HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
 
@@ -81,6 +81,48 @@ class TestStreamsPoC:
         finally:
             client.close()
             server.close()
+            scheduler.close()
+
+    def test_stream_readline_raises_limit_overrun_without_newline(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(True)
+
+            def flood() -> None:
+                writer.sendall(b"x" * 8)
+
+            def exercise() -> None:
+                stream_reader, _stream_writer = open_streams(reader, limit=8)
+                scheduler.spawn(flood)
+                stream_reader.readline()
+
+            with pytest.raises(asyncio.LimitOverrunError) as excinfo:
+                scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert excinfo.value.consumed == b"x" * 8
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_start_server_closes_listener_socket_when_bind_fails(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        blocker = scheduler.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.bind(("127.0.0.1", 0))
+        port = blocker.getsockname()[1]
+        blocker.listen(1)
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        try:
+            with pytest.raises(OSError):
+                scheduler.start_server(client_handler, addr=("127.0.0.1", port))
+        finally:
+            blocker.close()
             scheduler.close()
 
     def test_native_stream_read_and_write(self):

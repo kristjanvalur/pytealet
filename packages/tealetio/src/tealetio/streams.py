@@ -179,7 +179,7 @@ class _ReaderCore:
             return b"".join(parts)
         return self._read_some(n)
 
-    def readinto(self, b: Any) -> int | None:
+    def readinto(self, b: Any) -> int:
         view = memoryview(b).cast("B")
         if not view.nbytes:
             return 0
@@ -220,6 +220,12 @@ class _ReaderCore:
                 return self._take_bytes(newline + 1)
             if self._eof:
                 return self._take_bytes(len(self._buffer))
+            if len(self._buffer) >= self._limit:
+                consumed = bytes(self._buffer)
+                raise asyncio.LimitOverrunError(
+                    "Separator is not found, and chunk exceed the limit",
+                    consumed,
+                )
             self._fill_buffer(len(self._buffer) + 1)
 
 
@@ -258,7 +264,7 @@ class StreamReader:
     def read(self, n: int = -1) -> bytes:
         return self._core.read(n)
 
-    def readinto(self, b: Any) -> int | None:
+    def readinto(self, b: Any) -> int:
         return self._core.readinto(b)
 
     def readexactly(self, n: int) -> bytes:
@@ -281,7 +287,7 @@ class AsyncStreamReader:
     async def read(self, n: int = -1) -> bytes:
         return self._core.read(n)
 
-    async def readinto(self, b: Any) -> int | None:
+    async def readinto(self, b: Any) -> int:
         return self._core.readinto(b)
 
     async def readexactly(self, n: int) -> bytes:
@@ -614,10 +620,14 @@ def _bind_tcp_socket(
 ) -> socket.socket:
     host, port = addr
     sock = scheduler.sock_create(family, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    bind_host = "" if host is None else host
-    sock.bind((bind_host, port))
-    sock.listen(backlog)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        bind_host = "" if host is None else host
+        sock.bind((bind_host, port))
+        sock.listen(backlog)
+    except OSError:
+        sock.close()
+        raise
     return sock
 
 
@@ -631,8 +641,12 @@ def _bind_unix_socket(scheduler: ProactorScheduler, path: str, *, backlog: int) 
         pass
 
     sock = scheduler.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.bind(path)
-    sock.listen(backlog)
+    try:
+        sock.bind(path)
+        sock.listen(backlog)
+    except OSError:
+        sock.close()
+        raise
     return sock
 
 
@@ -895,7 +909,9 @@ def start_server(
     Accepts use ``proactor.accept_many()``, so ``UringProactor`` can service
     connections through multishot accept when the runtime probe allows it.
     Handler tealets are spawned through ``call_soon_threadsafe`` because accept
-    callbacks may run on completion worker threads.
+    callbacks may run on completion worker threads. Handler exceptions propagate
+    in the handler tealet and do not stop the listener. ``spawn()`` failures
+    during dispatch propagate to the dispatch callback.
     """
 
     return _start_server(
