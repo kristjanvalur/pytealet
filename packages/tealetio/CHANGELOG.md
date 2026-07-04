@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ProactorIOManager` and `scheduler.io` on proactor-backed schedulers: composed
   blocking IO facade over `Proactor` (`wait_operation`, `sock_*`, `poll*`,
   positioned file `open`, receive-buffer pool helpers).
+- `SocketIO`, `PollIO`, and `FileIO` protocols for the blocking IO facade slices;
+  `tealetio.streams` socket paths depend on `SocketIO` rather than the concrete
+  manager type.
 - `tealetio.streams` module helpers `open_connection`, `open_streams`, and
   `start_server` with optional `scheduler=`; blocking socket IO routes through
   `scheduler.io`.

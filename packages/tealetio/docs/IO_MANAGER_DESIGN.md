@@ -76,9 +76,9 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 |----------|----------------|--------|
 | `Proactor` | submit IO, return `Operation` | exists |
 | `OperationWaiter` | `wait_operation(op) -> T` | implemented in `files.py` |
-| `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, … | `ProactorIOManager` |
-| `PollIO` | `poll`, `poll_many` | `ProactorIOManager` |
-| `FileIO` | positioned `open` / read / write | `ProactorIOManager` + `ProactorFile` |
+| `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, … | protocol in `io_manager.py`; `ProactorIOManager` |
+| `PollIO` | `poll`, `poll_many` | protocol in `io_manager.py`; `ProactorIOManager` |
+| `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` + `ProactorFile` |
 | `StreamIO` (optional) | `open_connection`, `start_server` | module-level in `streams` |
 
 Module helpers:
@@ -161,7 +161,8 @@ types in new code.
 
 - Implement `SelectorIOManager` and wire `SelectorScheduler.io` when selector
   blocking IO should share the same capability gate as proactor schedulers.
-- Optional `SocketIO` / `FileIO` / `PollIO` typing protocols for static checks.
+- `SocketIO`, `PollIO`, and `FileIO` protocols are implemented; a future
+  `SelectorIOManager` could implement the same slices for selector schedulers.
 - `StreamServer.serve_forever()` sugar (implemented); signal handling stays in
   `Runner`, not the server object.
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .files import ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
@@ -18,7 +18,86 @@ _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
 
-__all__ = ["ProactorIOManager"]
+__all__ = ["FileIO", "PollIO", "ProactorIOManager", "SocketIO"]
+
+
+@runtime_checkable
+class SocketIO(Protocol):
+    """Blocking asyncio-shaped socket helpers over a proactor backend."""
+
+    def sock_recv(self, sock: socket.socket, n: int) -> bytes: ...
+
+    def sock_recv_into(self, sock: socket.socket, buf: Any) -> int: ...
+
+    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]: ...
+
+    def sock_recvfrom_into(
+        self, sock: socket.socket, buf: Any, nbytes: int = 0
+    ) -> tuple[int, Any]: ...
+
+    def sock_sendall(
+        self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None
+    ) -> None: ...
+
+    def sock_send_iter(
+        self,
+        sock: socket.socket,
+        chunks: Iterable[bytes | bytearray | memoryview],
+    ) -> None: ...
+
+    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int: ...
+
+    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]: ...
+
+    def sock_connect(self, sock: socket.socket, address: Any) -> None: ...
+
+    def sock_create(
+        self,
+        family: int,
+        type: int,
+        proto: int = 0,
+        *,
+        flags: int = 0,
+    ) -> socket.socket: ...
+
+    def sock_recv_iter(
+        self, sock: socket.socket, buffer_pool: "RecvBufferPool | None" = None
+    ) -> Iterator[_RecvIterYield]: ...
+
+    def sock_recvall(
+        self,
+        sock: socket.socket,
+        progress: _RecvProgressCallback | None = None,
+        *,
+        buffer_pool: "RecvBufferPool | None" = None,
+    ) -> bytes: ...
+
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> "RecvBufferPool": ...
+
+    def shared_recv_buffer_pool(self) -> "RecvBufferPool": ...
+
+    def set_shared_recv_buffer_pool(self, pool: "RecvBufferPool") -> None: ...
+
+
+@runtime_checkable
+class PollIO(Protocol):
+    """Blocking poll helpers over a proactor backend."""
+
+    def poll(self, fd: int, mask: int) -> int: ...
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Callable[[int], object],
+    ) -> ContinuousOperation[int]: ...
+
+
+@runtime_checkable
+class FileIO(Protocol):
+    """Positioned binary file open helper over a proactor backend."""
+
+    def open(self, path: str, mode: str = "rb") -> ProactorFile: ...
 
 
 def _configure_scheduler_socket(sock: socket.socket) -> socket.socket:
@@ -32,9 +111,10 @@ def _configure_scheduler_socket(sock: socket.socket) -> socket.socket:
 class ProactorIOManager:
     """Blocking IO facade over a ``Proactor`` backend.
 
-    Owns ``wait_operation`` and the asyncio-shaped ``sock_*``, ``poll*``, and
-    positioned file helpers. The scheduler keeps the driver; this object only
-    blocks the current tealet on submitted operations.
+    Implements ``SocketIO``, ``PollIO``, and ``FileIO``, plus
+    ``wait_operation`` for blocking on submitted ``Operation`` objects. The
+    scheduler keeps the driver; this object only blocks the current tealet on
+    submitted operations.
     """
 
     def __init__(self, proactor: Proactor) -> None:

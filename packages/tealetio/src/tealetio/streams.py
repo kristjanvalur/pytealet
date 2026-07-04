@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol, TypeVar, overload
 
 from asynkit import coro_drive
 
-from .io_manager import ProactorIOManager
+from .io_manager import SocketIO
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -42,7 +42,7 @@ class StreamFactory(Protocol):
 
     def __call__(
         self,
-        io: ProactorIOManager,
+        io: SocketIO,
         sock: socket.socket,
         *,
         limit: int = _DEFAULT_LIMIT,
@@ -54,7 +54,7 @@ class AsyncStreamFactory(Protocol):
 
     def __call__(
         self,
-        io: ProactorIOManager,
+        io: SocketIO,
         sock: socket.socket,
         *,
         limit: int = _DEFAULT_LIMIT,
@@ -78,7 +78,7 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
 class SocketTransport:
     """Blocking socket I/O through a scheduler IO facade."""
 
-    def __init__(self, io: ProactorIOManager, sock: socket.socket) -> None:
+    def __init__(self, io: SocketIO, sock: socket.socket) -> None:
         self._io = io
         self._sock = sock
         self._closed = False
@@ -358,7 +358,7 @@ class AsyncStreamWriter:
 
 
 def default_stream_factory(
-    io: ProactorIOManager,
+    io: SocketIO,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
@@ -372,7 +372,7 @@ def default_stream_factory(
 
 
 def default_async_stream_factory(
-    io: ProactorIOManager,
+    io: SocketIO,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
@@ -394,7 +394,7 @@ def _resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:
 
 
 def _open_streams(
-    io: ProactorIOManager,
+    io: SocketIO,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
@@ -616,7 +616,7 @@ def _connect_unix_streams(
 
 
 def _bind_tcp_socket(
-    io: ProactorIOManager,
+    io: SocketIO,
     addr: tuple[str | None, int],
     *,
     family: int = socket.AF_INET,
@@ -635,7 +635,7 @@ def _bind_tcp_socket(
     return sock
 
 
-def _bind_unix_socket(io: ProactorIOManager, path: str, *, backlog: int) -> socket.socket:
+def _bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket:
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
