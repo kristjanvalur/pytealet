@@ -424,28 +424,6 @@ def _require_proactor_io(scheduler: BaseScheduler) -> ProactorIOManager:
     raise RuntimeError(IO_UNSUPPORTED_ERROR)
 
 
-@overload
-def _open_streams(
-    io: SocketIO,
-    sock: socket.socket,
-    *,
-    limit: int = _DEFAULT_LIMIT,
-    stream_factory: StreamFactory | None = None,
-    async_: Literal[False] = False,
-) -> _NativeStreamPair: ...
-
-
-@overload
-def _open_streams(
-    io: SocketIO,
-    sock: socket.socket,
-    *,
-    limit: int = _DEFAULT_LIMIT,
-    stream_factory: AsyncStreamFactory | None = None,
-    async_: Literal[True],
-) -> _AsyncStreamPair: ...
-
-
 def _open_streams(
     io: SocketIO,
     sock: socket.socket,
@@ -461,31 +439,6 @@ def _open_streams(
     else:
         factory = stream_factory
     return factory(io, sock, limit=limit)
-
-
-def _open_streams_for_flag(
-    io: SocketIO,
-    sock: socket.socket,
-    *,
-    limit: int = _DEFAULT_LIMIT,
-    stream_factory: _StreamFactoryArg = None,
-    async_: bool = False,
-) -> _NativeStreamPair | _AsyncStreamPair:
-    if async_:
-        return _open_streams(
-            io,
-            sock,
-            limit=limit,
-            stream_factory=cast(AsyncStreamFactory | None, stream_factory),
-            async_=True,
-        )
-    return _open_streams(
-        io,
-        sock,
-        limit=limit,
-        stream_factory=cast(StreamFactory | None, stream_factory),
-        async_=False,
-    )
 
 
 @overload
@@ -523,7 +476,7 @@ def open_streams(
     only selects the default factory when ``stream_factory`` is omitted.
     """
 
-    return _open_streams_for_flag(
+    return _open_streams(
         _require_proactor_io(_resolve_scheduler(scheduler)),
         sock,
         limit=limit,
@@ -560,7 +513,7 @@ def _connect_tcp_streams(
         try:
             sock = io.sock_create(addr_family, socktype, addr_proto)
             io.sock_connect(sock, sockaddr)
-            return _open_streams_for_flag(
+            return _open_streams(
                 io,
                 sock,
                 limit=limit,
@@ -684,7 +637,7 @@ def _connect_unix_streams(
     except OSError:
         sock.close()
         raise
-    return _open_streams_for_flag(
+    return _open_streams(
         io,
         sock,
         limit=limit,
@@ -837,7 +790,7 @@ class StreamServer:
                     with self._shutdown:
                         if self._closed:
                             return
-                    reader, writer = _open_streams_for_flag(
+                    reader, writer = _open_streams(
                         self._io,
                         conn,
                         limit=limit,

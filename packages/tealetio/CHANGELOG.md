@@ -42,8 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FileIO.open()`; `ProactorFile` is the proactor-backed implementation.
 - `ServerIO` protocol slice for stream servers (`SocketIO` plus proactor
   submission); `ProactorSocketIO` remains a backward-compatible alias.
-- Streams internals: `_AcceptedConnection` typing, `_open_streams_for_flag`
-  helper, and `SupportsProactorIO` documentation for the capability gate.
+- Streams internals: `_AcceptedConnection` typing and `SupportsProactorIO`
+  documentation for the capability gate.
 - `ProactorIOManager` and `scheduler.io` on proactor-backed schedulers: composed
   blocking IO facade over `Proactor` (`wait_operation`, `sock_*`, `poll*`,
   positioned file `open`, receive-buffer pool helpers).
