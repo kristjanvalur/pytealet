@@ -6,7 +6,12 @@ import os
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .io_manager import ProactorIOManager
     from .proactor import Proactor, ProactorScheduler
+
+    _OperationWaiter = ProactorScheduler | ProactorIOManager
+else:
+    _OperationWaiter = object
 
 _DEFAULT_CREAT_MODE = 0o666
 _READ_CHUNK = 64 * 1024
@@ -82,7 +87,7 @@ class ProactorFile(io.RawIOBase):
 
     def __init__(
         self,
-        scheduler: ProactorScheduler,
+        scheduler: _OperationWaiter,
         proactor: Proactor,
         fd: int,
         *,

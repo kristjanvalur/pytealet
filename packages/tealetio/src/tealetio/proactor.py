@@ -19,7 +19,8 @@ from typing import Any, Generic, NoReturn, Protocol, TypeAlias, TypeVar, cast
 import uring_api
 
 from . import compat
-from .files import ProactorFile, parse_open_mode
+from .files import ProactorFile
+from .io_manager import ProactorIOManager, _configure_scheduler_socket
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, ContinuousStepResult, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
@@ -42,6 +43,7 @@ __all__ = [
     "Proactor",
     "ProactorBase",
     "ProactorFactory",
+    "ProactorIOManager",
     "ProactorScheduler",
     "SelectorProactor",
     "SyncProactorScheduler",
@@ -261,14 +263,6 @@ _UringSendtoSubmit = Callable[[int, Any, Any, object], _UringCompletion]
 
 def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
     return uring_api.Ring(entries=entries, flags=flags)
-
-
-def _configure_scheduler_socket(sock: socket.socket) -> socket.socket:
-    """Apply the scheduler socket contract: non-blocking and close-on-exec."""
-
-    sock.setblocking(False)
-    os.set_inheritable(sock.fileno(), False)
-    return sock
 
 
 class Proactor(Protocol):
@@ -2483,6 +2477,13 @@ class ProactorScheduler(BaseScheduler):
             proactor_factory = SelectorProactor
         self._proactor = proactor_factory()
         self._proactor.set_clock(self.time)
+        self._io = ProactorIOManager(self._proactor)
+
+    @property
+    def io(self) -> ProactorIOManager:
+        """Return the blocking IO facade for this scheduler."""
+
+        return self._io
 
     @property
     def proactor(self) -> Proactor:
@@ -2513,29 +2514,14 @@ class ProactorScheduler(BaseScheduler):
     def wait_operation(self, operation: Operation[T]) -> T:
         """Block the current tealet until `operation` completes."""
 
-        if operation.done():
-            return operation.result()
-
-        ready = ThreadsafeEvent()
-
-        def wake(_operation: Operation[Any]) -> None:
-            ready.set()
-
-        operation.add_done_callback(wake)
-        try:
-            ready.swait()
-        finally:
-            if not operation.done():
-                operation.remove_done_callback(wake)
-                operation.cancel()
-        return operation.result()
+        return self._io.wait_operation(operation)
 
     # -- Asyncio-style socket helpers ---------------------------------
 
     def sock_recv(self, sock: socket.socket, n: int) -> bytes:
         """Receive up to `n` bytes from a non-blocking socket."""
 
-        return self.wait_operation(self._proactor.recv(sock, n))
+        return self._io.sock_recv(sock, n)
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Create a provided-buffer pool for ``sock_recv_iter`` and ``recv_many``.
@@ -2546,7 +2532,7 @@ class ProactorScheduler(BaseScheduler):
         backends use a kernel buffer group.
         """
 
-        return self._proactor.create_recv_buffer_pool(buffer_size, buffer_count)
+        return self._io.create_recv_buffer_pool(buffer_size, buffer_count)
 
     def shared_recv_buffer_pool(self) -> RecvBufferPool:
         """Return the proactor's shared provided-buffer pool.
@@ -2555,26 +2541,12 @@ class ProactorScheduler(BaseScheduler):
         ``set_shared_recv_buffer_pool()`` installed a custom pool first.
         """
 
-        return self._proactor.shared_recv_buffer_pool()
+        return self._io.shared_recv_buffer_pool()
 
     def set_shared_recv_buffer_pool(self, pool: RecvBufferPool) -> None:
         """Replace the proactor's shared provided-buffer pool."""
 
-        self._proactor.set_shared_recv_buffer_pool(pool)
-
-    def _resolve_recv_buffer_pool(self, buffer_pool: RecvBufferPool | None) -> RecvBufferPool:
-        if buffer_pool is None:
-            return self._proactor.shared_recv_buffer_pool()
-        return buffer_pool
-
-    def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None) -> _RecvIterBuffer:
-        """Start ``recv_many`` and return the ordered receive buffer."""
-
-        pool = self._resolve_recv_buffer_pool(buffer_pool)
-        buffer = _RecvIterBuffer(buf_group=pool)
-        stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=pool)
-        buffer.attach_stream(stream)
-        return buffer
+        self._io.set_shared_recv_buffer_pool(pool)
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None
@@ -2598,15 +2570,7 @@ class ProactorScheduler(BaseScheduler):
         block cooperatively.
         """
 
-        buffer = self._open_sock_recv_iter(sock, buffer_pool)
-        try:
-            while True:
-                item = buffer.take_next()
-                if item is None:
-                    break
-                yield item
-        finally:
-            buffer.close()
+        return self._io.sock_recv_iter(sock, buffer_pool)
 
     def sock_recvall(
         self,
@@ -2621,37 +2585,27 @@ class ProactorScheduler(BaseScheduler):
         proactor's shared pool from ``shared_recv_buffer_pool()``.
         """
 
-        if progress is None:
-            process = bytes
-        else:
-
-            def process(chunk: memoryview) -> bytes:
-                cargo = bytes(chunk)
-                if cargo:
-                    progress(cargo)
-                return cargo
-
-        return b"".join((process(chunk) for _, chunk in self.sock_recv_iter(sock, buffer_pool)))
+        return self._io.sock_recvall(sock, progress, buffer_pool=buffer_pool)
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
         """Receive bytes from a non-blocking socket into `buf`."""
 
-        return self.wait_operation(self._proactor.recv_into(sock, buf))
+        return self._io.sock_recv_into(sock, buf)
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
         """Receive datagram bytes and address from a non-blocking socket."""
 
-        return self.wait_operation(self._proactor.recvfrom(sock, bufsize))
+        return self._io.sock_recvfrom(sock, bufsize)
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
         """Receive datagram bytes into `buf` from a non-blocking socket."""
 
-        return self.wait_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
+        return self._io.sock_recvfrom_into(sock, buf, nbytes)
 
     def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> None:
         """Send all `data` through a non-blocking socket."""
 
-        return self.wait_operation(self._proactor.sendall(sock, data, progress))
+        return self._io.sock_sendall(sock, data, progress)
 
     def sock_send_iter(
         self,
@@ -2669,25 +2623,22 @@ class ProactorScheduler(BaseScheduler):
         cooperatively.
         """
 
-        for chunk in chunks:
-            if not chunk:
-                continue
-            self.sock_sendall(sock, memoryview(chunk))
+        return self._io.sock_send_iter(sock, chunks)
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
         """Send one datagram through a non-blocking socket."""
 
-        return self.wait_operation(self._proactor.sendto(sock, data, address))
+        return self._io.sock_sendto(sock, data, address)
 
     def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
         """Accept one connection from a non-blocking listening socket."""
 
-        return self.wait_operation(self._proactor.accept(sock))
+        return self._io.sock_accept(sock)
 
     def sock_connect(self, sock: socket.socket, address: Any) -> None:
         """Connect a non-blocking socket to `address`."""
 
-        return self.wait_operation(self._proactor.connect(sock, address))
+        return self._io.sock_connect(sock, address)
 
     def sock_create(
         self,
@@ -2704,8 +2655,7 @@ class ProactorScheduler(BaseScheduler):
         The returned socket is always configured non-blocking and close-on-exec.
         """
 
-        del flags
-        return _configure_scheduler_socket(socket.socket(family, type, proto))
+        return self._io.sock_create(family, type, proto, flags=flags)
 
     # -- Stream helpers (asyncio-shaped layering) -----------------------
 
@@ -2785,7 +2735,7 @@ class ProactorScheduler(BaseScheduler):
     def poll(self, fd: int, mask: int) -> int:
         """Wait until an fd reports events in `mask` and return the readiness bitmask."""
 
-        return self.wait_operation(self._proactor.poll(fd, mask))
+        return self._io.poll(fd, mask)
 
     def poll_many(
         self,
@@ -2795,31 +2745,12 @@ class ProactorScheduler(BaseScheduler):
     ) -> ContinuousOperation[int]:
         """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
 
-        return self._proactor.poll_many(fd, mask, callback)
+        return self._io.poll_many(fd, mask, callback)
 
     def open(self, path: str, mode: str = "rb") -> ProactorFile:
         """Open a positioned binary file through the proactor backend."""
 
-        flags, file_mode = parse_open_mode(mode)
-        try:
-            fd = self.wait_operation(self._proactor.openat(path, flags, file_mode))
-        except NotImplementedError as exc:
-            raise NotImplementedError("scheduler file I/O requires a proactor with openat support") from exc
-        try:
-            return ProactorFile(
-                self,
-                self._proactor,
-                fd,
-                path=path,
-                flags=flags,
-                append="a" in mode,
-            )
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
+        return self._io.open(path, mode)
 
     def _has_pending_driver_work(self) -> bool:
         return self._proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)

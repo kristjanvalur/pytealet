@@ -1426,7 +1426,7 @@ class TestSelectorProactor:
                 raise OSError("send failed")
             return real_sendall(sock, data, progress)
 
-        monkeypatch.setattr(scheduler, "sock_sendall", boom)
+        monkeypatch.setattr(scheduler.io, "sock_sendall", boom)
 
         try:
             reader.setblocking(False)
@@ -4036,7 +4036,9 @@ class TestProactorScheduler:
         def proactor_factory() -> UringProactor:
             return UringProactor(ring_factory=ring_factory)
 
-        monkeypatch.setattr(proactor_module, "ThreadsafeEvent", TrackingEvent)
+        import tealetio.io_manager as io_manager_module
+
+        monkeypatch.setattr(io_manager_module, "ThreadsafeEvent", TrackingEvent)
         scheduler = SyncProactorScheduler(proactor_factory)
         set_scheduler(scheduler)
         scheduler_thread = threading.get_ident()

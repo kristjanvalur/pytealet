@@ -1577,6 +1577,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             self._pending_executor_calls -= 1
         self._break_wait()
 
+    @property
+    def io(self) -> None:
+        """Return the blocking IO facade when this scheduler has one."""
+
+        return None
+
     def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
         """Register a callback for readability on `fd`."""
 
