@@ -828,3 +828,45 @@ class TestStreamsPoC:
             if server is not None:
                 server.close()
             scheduler.close()
+
+
+class TestStreamsRequiresIO:
+    def test_open_streams_without_io_backend(self):
+        from tealetio.scheduler import BasicScheduler
+
+        scheduler = BasicScheduler()
+        reader, _writer = socket.socketpair()
+        try:
+            with pytest.raises(RuntimeError, match="scheduler with IO support"):
+                open_streams(reader, scheduler=scheduler)
+        finally:
+            reader.close()
+            _writer.close()
+
+    def test_open_connection_without_io_backend(self):
+        from tealetio.scheduler import BasicScheduler
+
+        scheduler = BasicScheduler()
+        with pytest.raises(RuntimeError, match="scheduler with IO support"):
+            open_connection(addr=("127.0.0.1", 8080), scheduler=scheduler)
+
+    def test_start_server_without_io_backend(self):
+        from tealetio.scheduler import BasicScheduler
+
+        scheduler = BasicScheduler()
+
+        def client_handler(_reader: StreamReader, _writer: StreamWriter) -> None:
+            return None
+
+        with pytest.raises(RuntimeError, match="scheduler with IO support"):
+            start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+
+    def test_open_connection_selector_scheduler_raises_until_selector_io_manager(self):
+        from tealetio.selector import SyncSelectorScheduler
+
+        scheduler = SyncSelectorScheduler()
+        try:
+            with pytest.raises(RuntimeError, match="scheduler with IO support"):
+                open_connection(addr=("127.0.0.1", 0), scheduler=scheduler)
+        finally:
+            scheduler.close()

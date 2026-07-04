@@ -6,11 +6,11 @@ import asyncio
 import os
 import socket
 from collections.abc import Callable, Coroutine
-from typing import Any, Literal, Protocol, TypeVar, cast, overload
+from typing import Any, Literal, Protocol, TypeVar, overload
 
 from asynkit import coro_drive
 
-from .io_manager import SocketIO
+from .io_manager import ProactorIOManager, SocketIO
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -682,7 +682,7 @@ class StreamServer:
         accept_operation: ContinuousOperation[tuple[socket.socket, Any]],
     ) -> None:
         self._scheduler = scheduler
-        self._io = cast(SocketIO, scheduler.io)
+        self._io = scheduler.io
         self._sockets = tuple(sockets)
         self._accept_operation = accept_operation
         self._shutdown = Condition()
@@ -823,7 +823,7 @@ def _start_stream_server(
             async_=async_,
         )
 
-    io = scheduler.io
+    io: ProactorIOManager = scheduler.io
     accept_operation = io.proactor.accept_many(sock, on_accept)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server

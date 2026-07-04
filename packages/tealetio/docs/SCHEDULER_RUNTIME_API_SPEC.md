@@ -711,7 +711,8 @@ running scheduler (or accept `scheduler=`) and route blocking socket IO through
    `UringProactor` may use `uring_api.submit_socket()` when supported, wrapping
    returned fds with `socket.socket(fileno=fd)`.
 3. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
-4. Optional `SocketIO` / `PollIO` / `FileIO` protocols for static typing.
+4. Decouple IO protocol return types (`IOFile` handle protocol, neutral concrete
+   names); see `IO_MANAGER_DESIGN.md` Return-type decoupling.
 
 ## Next Alignment Backlog (Asyncio Interop)
 

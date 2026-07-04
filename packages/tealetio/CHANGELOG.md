@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `open`, and receive-buffer pool helpers) moved from the scheduler surface to
   `scheduler.io` (`ProactorIOManager`). Use `scheduler.io.sock_recv(...)` instead
   of `scheduler.sock_recv(...)`. `BaseScheduler.io` raises when the scheduler has
-  no IO backend.
+  no IO backend. Non-IO schedulers now raise ``RuntimeError`` on ``.io`` access
+  (not ``NotImplementedError`` from per-method stubs).
 - Custom `stream_factory` / `StreamFactory` callables now receive a `SocketIO`
   facade as the first argument (`io=...`) instead of a `ProactorScheduler`.
   Update factories to use `io.sock_*` helpers; see `tealetio.streams.StreamFactory`.
