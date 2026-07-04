@@ -656,7 +656,9 @@ class StreamServer:
     tealets already spawned for accepted connections keep running until they
     finish on their own; ``close()`` does not cancel them. ``wait_closed()``
     blocks until the server is closed and every dispatched handler tealet has
-    finished.
+    finished. Accept callbacks that were already queued before ``close()`` may
+    still run one ``dispatch()`` turn; those close the connection without
+    incrementing ``_active_handlers`` when ``_closed`` is already set.
 
     Use as a context manager to call ``close()`` and ``wait_closed()`` on
     scope exit. ``serve_forever()`` blocks the current tealet until
@@ -736,6 +738,11 @@ class StreamServer:
         client_handler: Callable[..., Any],
         async_: bool,
     ) -> None:
+        with self._shutdown:
+            if self._closed:
+                conn.close()
+                return
+
         def dispatch() -> None:
             def serve() -> None:
                 writer: Any = None
