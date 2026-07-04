@@ -831,54 +831,39 @@ class StreamServer:
             return
 
         def dispatch() -> None:
-            if async_:
-
-                def serve() -> None:
-                    writer: AsyncStreamWriter | None = None
-                    try:
-                        with self._shutdown:
-                            if self._closed:
-                                return
-                        reader, writer = _open_streams(
-                            self._io,
-                            conn,
-                            limit=limit,
-                            stream_factory=cast(AsyncStreamFactory | None, stream_factory),
-                            async_=True,
+            def serve() -> None:
+                writer: StreamWriter | AsyncStreamWriter | None = None
+                try:
+                    with self._shutdown:
+                        if self._closed:
+                            return
+                    reader, writer = _open_streams_for_flag(
+                        self._io,
+                        conn,
+                        limit=limit,
+                        stream_factory=stream_factory,
+                        async_=async_,
+                    )
+                    if async_:
+                        run_coro(
+                            cast(_AsyncClientHandler, client_handler)(
+                                cast(AsyncStreamReader, reader),
+                                cast(AsyncStreamWriter, writer),
+                            )
                         )
-                        run_coro(cast(_AsyncClientHandler, client_handler)(reader, writer))
-                    finally:
-                        if writer is not None:
-                            writer.close()
-                        else:
-                            conn.close()
-                        with self._shutdown:
-                            self._active_handlers -= 1
-                            self._shutdown.notify_all()
-            else:
-
-                def serve() -> None:
-                    writer: StreamWriter | None = None
-                    try:
-                        with self._shutdown:
-                            if self._closed:
-                                return
-                        reader, writer = _open_streams(
-                            self._io,
-                            conn,
-                            limit=limit,
-                            stream_factory=cast(StreamFactory | None, stream_factory),
-                            async_=False,
+                    else:
+                        cast(_NativeClientHandler, client_handler)(
+                            cast(StreamReader, reader),
+                            cast(StreamWriter, writer),
                         )
-                        cast(_NativeClientHandler, client_handler)(reader, writer)
-                    finally:
-                        if writer is not None:
-                            writer.close()
-                        else:
-                            conn.close()
-                        with self._shutdown:
-                            self._active_handlers -= 1
-                            self._shutdown.notify_all()
+                finally:
+                    if writer is not None:
+                        writer.close()
+                    else:
+                        conn.close()
+                    with self._shutdown:
+                        self._active_handlers -= 1
+                        self._shutdown.notify_all()
 
             with self._shutdown:
                 if self._closed:
