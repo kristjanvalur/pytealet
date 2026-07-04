@@ -2045,9 +2045,7 @@ class _FakeUringRing:
         self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
-        self.submitted_send_zc: list[tuple[int, object, object]] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
-        self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object, int]] = []
         self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
@@ -2257,34 +2255,12 @@ class _FakeUringRing:
         return completion
 
     def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        payload = bytes(data)
-        self.submitted_send_zc.append((fd, data, user_data))
-        completion = self._completion(
-            user_data,
-            kind=uring_api.COMPLETION_KIND_SEND_ZC,
-            res=len(payload),
-            result=len(payload),
-        )
-        self._deliver(completion)
-        return completion
+        return self.submit_send(fd, data, user_data)
 
     def submit_sendmsg_zc(
         self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
     ) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        payload = bytes(data)
-        self.submitted_sendmsg_zc.append((fd, data, address, user_data))
-        completion = self._completion(
-            user_data,
-            kind=uring_api.COMPLETION_KIND_SENDMSG_ZC,
-            res=len(payload),
-            result=len(payload),
-        )
-        self._deliver(completion)
-        return completion
+        return self.submit_sendto(fd, data, address, user_data)
 
     def submit_accept(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:
@@ -2542,10 +2518,6 @@ class _DeferredUringRing(_FakeUringRing):
         completion.flags = 0
         completion.result = len(data)
         self._deliver(completion)
-
-
-class _ZeroCopyFakeUringRing(_FakeUringRing):
-    pass
 
 
 class _BackpressuredUringRing(_DeferredUringRing):
@@ -3343,7 +3315,7 @@ class TestUringProactor:
 
     def test_sendall_uses_send_zc_when_probe_supports_it(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
-        proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
@@ -3352,9 +3324,8 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
-            assert isinstance(proactor.ring, _ZeroCopyFakeUringRing)
-            assert proactor.ring.submitted_send == []
-            submitted = proactor.ring.submitted_send_zc[0][1]
+            assert proactor._submit_send.__name__ == "submit_send_zc"
+            submitted = proactor.ring.submitted_send[0][1]
             assert isinstance(submitted, memoryview)
             assert submitted.obj is payload
             assert bytes(submitted) == b"hello"
@@ -3365,7 +3336,7 @@ class TestUringProactor:
 
     def test_sendall_uses_send_when_probe_lacks_send_zc(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
@@ -3373,9 +3344,8 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
-            assert isinstance(proactor.ring, _ZeroCopyFakeUringRing)
+            assert proactor._submit_send.__name__ == "submit_send"
             assert len(proactor.ring.submitted_send) == 1
-            assert proactor.ring.submitted_send_zc == []
         finally:
             reader.close()
             writer.close()
@@ -3456,7 +3426,7 @@ class TestUringProactor:
 
     def test_sendto_uses_sendmsg_zc_when_probe_supports_it(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SENDMSG_ZC=True)
-        proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sender.setblocking(False)
@@ -3466,9 +3436,8 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
-            assert isinstance(proactor.ring, _ZeroCopyFakeUringRing)
-            assert proactor.ring.submitted_sendto == []
-            submitted = proactor.ring.submitted_sendmsg_zc[0]
+            assert proactor._submit_sendto.__name__ == "submit_sendmsg_zc"
+            submitted = proactor.ring.submitted_sendto[0]
             assert submitted[0] == sender.fileno()
             assert isinstance(submitted[1], memoryview)
             assert submitted[1].obj is payload
@@ -3480,7 +3449,7 @@ class TestUringProactor:
 
     def test_sendto_uses_sendto_when_probe_lacks_sendmsg_zc(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SENDMSG_ZC=False)
-        proactor = UringProactor(ring_factory=_ZeroCopyFakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sender.setblocking(False)
@@ -3488,9 +3457,8 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
-            assert isinstance(proactor.ring, _ZeroCopyFakeUringRing)
+            assert proactor._submit_sendto.__name__ == "submit_sendto"
             assert len(proactor.ring.submitted_sendto) == 1
-            assert proactor.ring.submitted_sendmsg_zc == []
         finally:
             sender.close()
             proactor.close()
