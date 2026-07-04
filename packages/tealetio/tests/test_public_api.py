@@ -5,6 +5,7 @@ import tealetio.runner
 import tealetio.scheduler
 import tealetio.selector
 import tealetio.proactor
+import tealetio.streams
 import tealetio.tasks
 
 
@@ -16,6 +17,9 @@ def test_top_level_exports_public_scheduler_api():
         "AsyncSelectorScheduler",
         "AsyncScheduler",
         "AsyncSchedulerDrivingAPI",
+        "AsyncStreamFactory",
+        "AsyncStreamReader",
+        "AsyncStreamWriter",
         "AsyncDrivingMixin",
         "BaseDrivingMixin",
         "BaseRunner",
@@ -36,6 +40,8 @@ def test_top_level_exports_public_scheduler_api():
         "Future",
         "ForwardingSelector",
         "ForwardingProactor",
+        "open_connection",
+        "open_streams",
         "Operation",
         "Proactor",
         "ProactorFactory",
@@ -55,7 +61,14 @@ def test_top_level_exports_public_scheduler_api():
         "QueueShutDown",
         "RecvBufferPool",
         "Runner",
+        "run_coro",
         "Scheduler",
+        "SocketTransport",
+        "start_server",
+        "StreamFactory",
+        "StreamReader",
+        "StreamServer",
+        "StreamWriter",
         "SelectorMixin",
         "SelectorProactor",
         "SelectorScheduler",
@@ -84,8 +97,13 @@ def test_top_level_exports_public_scheduler_api():
         "as_completed",
         "await_",
         "create_task",
+        "default_async_stream_factory",
+        "default_stream_factory",
         "ensure_future",
+        "ensure_resolved",
         "gather",
+        "getaddrinfo",
+        "getnameinfo",
         "get_running_scheduler",
         "get_scheduler",
         "run",
@@ -135,6 +153,9 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.AsyncSelectorScheduler is tealetio.selector.AsyncSelectorScheduler
     assert issubclass(tealetio.SyncSelectorScheduler, tealetio.SelectorScheduler)
     assert issubclass(tealetio.AsyncSelectorScheduler, tealetio.SelectorScheduler)
+    assert tealetio.open_connection is tealetio.streams.open_connection
+    assert tealetio.StreamServer is tealetio.streams.StreamServer
+    assert tealetio.ensure_resolved is tealetio.scheduler.ensure_resolved
     assert tealetio.Operation is tealetio.proactor.Operation
     assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
     assert tealetio.SyncProactorScheduler is tealetio.proactor.SyncProactorScheduler

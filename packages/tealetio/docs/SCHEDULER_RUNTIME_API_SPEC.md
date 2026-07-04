@@ -699,14 +699,17 @@ work.
 
 ## Immediate Next Steps
 
-1. Continue hardening the low-level IO callback and socket helper surface.
-   - Add `BaseScheduler.sock_create(...)` / `ProactorScheduler.sock_create(...)`
-     delegating to the proactor; `UringProactor` may use `uring_api.submit_socket()`
-     when supported, otherwise stdlib `socket.socket()`. Wrap uring-returned fds with
-     `socket.socket(fileno=fd)` so the public API stays `socket.socket`-shaped.
-   - Stream/server helpers (`open_connection`, `start_server`, and related paths)
-     route socket creation through `sock_create()`.
-2. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
+1. Streams POC follow-up (see `IO_MANAGER_DESIGN.md`):
+   - Extract a composed `IOManager` (`scheduler.io`) instead of growing
+     `BaseScheduler` further.
+   - Optional `StreamServer.serve_forever()` sugar; signal handling stays in
+     `Runner` / `run()`.
+2. `sock_create()` is implemented on `ProactorScheduler` (stdlib `socket.socket()`
+   today). Future: `UringProactor` may use `uring_api.submit_socket()` when
+   supported, wrapping returned fds with `socket.socket(fileno=fd)`.
+3. Stream/server helpers (`open_connection`, `start_server`, and related paths)
+   route socket creation through `sock_create()`.
+4. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
 
 ## Next Alignment Backlog (Asyncio Interop)
 

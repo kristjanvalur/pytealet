@@ -14,7 +14,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, NoReturn, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Generic, NoReturn, Protocol, TypeAlias, TypeVar, cast
 
 import uring_api
 
