@@ -14,7 +14,7 @@ from tealetio.operations import Operation
 _TEST_FD = 901
 
 
-class _ImmediateScheduler:
+class _ImmediateWaiter:
     def wait_operation(self, operation: Operation[Any]) -> Any:
         return operation.result()
 
@@ -70,9 +70,9 @@ def _make_file(
 ) -> tuple[ProactorFile, _MemoryProactor, dict[int, bytearray]]:
     store: dict[int, bytearray] = {_TEST_FD: bytearray(data)}
     proactor = _MemoryProactor(store)
-    scheduler = _ImmediateScheduler()
+    waiter = _ImmediateWaiter()
     handle = ProactorFile(
-        scheduler,  # type: ignore[arg-type]
+        waiter,
         proactor,  # type: ignore[arg-type]
         _TEST_FD,
         path="/tmp/memory.txt",

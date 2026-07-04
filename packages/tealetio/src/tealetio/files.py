@@ -3,15 +3,14 @@ from __future__ import annotations
 import errno
 import io
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+
+from .operations import Operation
 
 if TYPE_CHECKING:
-    from .io_manager import ProactorIOManager
-    from .proactor import Proactor, ProactorScheduler
+    from .proactor import Proactor
 
-    _OperationWaiter = ProactorScheduler | ProactorIOManager
-else:
-    _OperationWaiter = object
+T = TypeVar("T")
 
 _DEFAULT_CREAT_MODE = 0o666
 _READ_CHUNK = 64 * 1024
@@ -28,6 +27,12 @@ _SUPPORTED_BINARY_OPEN_MODES = frozenset(
         "ab+",
     }
 )
+
+
+class OperationWaiter(Protocol):
+    """Block the current tealet until a submitted ``Operation`` completes."""
+
+    def wait_operation(self, operation: Operation[T]) -> T: ...
 
 
 def parse_open_mode(mode: str) -> tuple[int, int]:
@@ -67,7 +72,7 @@ def parse_open_mode(mode: str) -> tuple[int, int]:
 
 
 class ProactorFile(io.RawIOBase):
-    """Unbuffered positioned file I/O backed by a proactor scheduler.
+    """Unbuffered positioned file I/O backed by a proactor and IO waiter.
 
     Tracks a logical file position in userspace and forwards reads and writes to
     positioned proactor operations. ``readinto()`` uses ``read_into`` so
@@ -87,7 +92,7 @@ class ProactorFile(io.RawIOBase):
 
     def __init__(
         self,
-        scheduler: _OperationWaiter,
+        waiter: OperationWaiter,
         proactor: Proactor,
         fd: int,
         *,
@@ -96,7 +101,7 @@ class ProactorFile(io.RawIOBase):
         append: bool = False,
     ) -> None:
         super().__init__()
-        self._scheduler = scheduler
+        self._io = waiter
         self._proactor = proactor
         self._fd = fd
         self._path = path
@@ -174,7 +179,7 @@ class ProactorFile(io.RawIOBase):
         if not view:
             # empty buffer is a no-op; keep append EOF tracking unchanged
             return 0
-        nbytes = self._scheduler.wait_operation(self._proactor.read_into(self._fd, view, self._pos))
+        nbytes = self._io.wait_operation(self._proactor.read_into(self._fd, view, self._pos))
         self._pos += nbytes
         if self._append:
             self._pos_at_eof = False
@@ -186,7 +191,7 @@ class ProactorFile(io.RawIOBase):
             raise OSError(errno.EBADF, "File is not writable")
         if self._append and not self._pos_at_eof:
             self._pos = self._file_size()
-        nbytes = self._scheduler.wait_operation(self._proactor.write(self._fd, b, self._pos))
+        nbytes = self._io.wait_operation(self._proactor.write(self._fd, b, self._pos))
         self._pos += nbytes
         if self._append:
             self._pos_at_eof = True
@@ -207,10 +212,10 @@ class ProactorFile(io.RawIOBase):
                 raise
 
     def _file_size(self) -> int:
-        return self._scheduler.wait_operation(self._proactor.stat_fdsize(self._fd))
+        return self._io.wait_operation(self._proactor.stat_fdsize(self._fd))
 
     def _read_chunk(self, size: int) -> bytes:
-        data = self._scheduler.wait_operation(self._proactor.read(self._fd, size, self._pos))
+        data = self._io.wait_operation(self._proactor.read(self._fd, size, self._pos))
         self._pos += len(data)
         if self._append:
             self._pos_at_eof = False

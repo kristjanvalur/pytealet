@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import socket
 
+import pytest
+
 from tealetio import set_scheduler
 from tealetio.io_manager import ProactorIOManager
 from tealetio.proactor import SyncProactorScheduler
@@ -32,8 +34,9 @@ class TestProactorIOManager:
             server.close()
             scheduler.close()
 
-    def test_basic_scheduler_io_is_none(self):
+    def test_basic_scheduler_io_raises(self):
         from tealetio.scheduler import BasicScheduler
 
         scheduler = BasicScheduler()
-        assert scheduler.io is None
+        with pytest.raises(RuntimeError, match="scheduler with IO support"):
+            scheduler.io

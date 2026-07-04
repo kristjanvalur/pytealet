@@ -18,16 +18,7 @@ _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
 
-__all__ = ["ProactorIOManager", "require_io"]
-
-
-def require_io(scheduler: object) -> ProactorIOManager:
-    """Return ``scheduler.io`` or raise when the scheduler has no IO backend."""
-
-    io = getattr(scheduler, "io", None)
-    if io is None:
-        raise RuntimeError("operation requires a scheduler with IO support")
-    return io
+__all__ = ["ProactorIOManager"]
 
 
 def _configure_scheduler_socket(sock: socket.socket) -> socket.socket:
@@ -189,7 +180,7 @@ class ProactorIOManager:
         try:
             fd = self.wait_operation(self._proactor.openat(path, flags, file_mode))
         except NotImplementedError as exc:
-            raise NotImplementedError("scheduler file I/O requires a proactor with openat support") from exc
+            raise NotImplementedError("file I/O requires a proactor with openat support") from exc
         try:
             return ProactorFile(
                 self,

@@ -158,7 +158,6 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.ensure_resolved is tealetio.scheduler.ensure_resolved
     assert tealetio.Operation is tealetio.proactor.Operation
     assert tealetio.ProactorIOManager is tealetio.proactor.ProactorIOManager
-    assert tealetio.require_io is tealetio.proactor.require_io
     assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
     assert tealetio.SyncProactorScheduler is tealetio.proactor.SyncProactorScheduler
     assert tealetio.AsyncProactorScheduler is tealetio.proactor.AsyncProactorScheduler

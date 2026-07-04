@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol, TypeVar, overload
 
 from asynkit import coro_drive
 
-from .io_manager import ProactorIOManager, require_io
+from .io_manager import ProactorIOManager
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -446,7 +446,7 @@ def open_streams(
     """
 
     return _open_streams(
-        require_io(_resolve_scheduler(scheduler)),
+        _resolve_scheduler(scheduler).io,
         sock,
         limit=limit,
         stream_factory=stream_factory,
@@ -464,7 +464,7 @@ def _connect_tcp_streams(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> tuple[Any, Any]:
-    io = require_io(scheduler)
+    io = scheduler.io
     # ``ensure_resolved`` fast-paths literal IPv4/IPv6 via ``ipaddr_info`` and
     # falls back to ``scheduler.getaddrinfo()`` for hostnames (executor-backed).
     infos = scheduler.ensure_resolved(
@@ -599,7 +599,7 @@ def _connect_unix_streams(
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
-    io = require_io(scheduler)
+    io = scheduler.io
     sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         io.sock_connect(sock, path)
@@ -680,7 +680,7 @@ class StreamServer:
         accept_operation: ContinuousOperation[tuple[socket.socket, Any]],
     ) -> None:
         self._scheduler = scheduler
-        self._io = require_io(scheduler)
+        self._io = scheduler.io
         self._sockets = tuple(sockets)
         self._accept_operation = accept_operation
         self._shutdown = Condition()
@@ -821,7 +821,7 @@ def _start_stream_server(
             async_=async_,
         )
 
-    io = require_io(scheduler)
+    io = scheduler.io
     accept_operation = io.proactor.accept_many(sock, on_accept)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
@@ -839,7 +839,7 @@ def _start_server(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> StreamServer:
-    io = require_io(scheduler)
+    io = scheduler.io
     if path is not None:
         if addr is not None:
             raise TypeError("start_server() accepts addr= or path=, not both")

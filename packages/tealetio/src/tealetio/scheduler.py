@@ -1578,10 +1578,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
 
     @property
-    def io(self) -> None:
+    def io(self) -> "ProactorIOManager":
         """Return the blocking IO facade when this scheduler has one."""
 
-        return None
+        raise RuntimeError("operation requires a scheduler with IO support")
 
     def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
         """Register a callback for readability on `fd`."""

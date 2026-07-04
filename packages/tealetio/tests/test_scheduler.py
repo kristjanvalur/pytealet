@@ -1531,16 +1531,13 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_basic_scheduler_socket_helpers_require_io_capable_scheduler(self):
-        from tealetio.io_manager import require_io
-
         s = BasicScheduler()
         set_scheduler(s)
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            assert s.io is None
             with pytest.raises(RuntimeError, match="scheduler with IO support"):
-                require_io(s)
+                s.io
         finally:
             reader.close()
             _writer.close()
@@ -1568,16 +1565,13 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_basic_scheduler_poll_requires_io_capable_scheduler(self):
-        from tealetio.io_manager import require_io
-
         s = BasicScheduler()
         set_scheduler(s)
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            assert s.io is None
             with pytest.raises(RuntimeError, match="scheduler with IO support"):
-                require_io(s)
+                s.io
         finally:
             reader.close()
             _writer.close()
