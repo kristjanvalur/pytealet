@@ -59,6 +59,8 @@ def ipaddr_info(
             host = host.decode("idna")
         except UnicodeDecodeError:
             return None
+    if not isinstance(host, str):
+        return None
     if "%" in host:
         return None
 

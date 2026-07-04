@@ -660,6 +660,64 @@ class TestStreamsPoC:
             server.close()
             scheduler.close()
 
+    def test_stream_server_dispatch_client_on_closed_server_closes_connection(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        _client, accepted = socket.socketpair()
+        try:
+            server.close()
+
+            def exercise() -> None:
+                server._dispatch_client(
+                    accepted,
+                    limit=2**16,
+                    stream_factory=None,
+                    client_handler=client_handler,
+                    async_=False,
+                )
+                server.wait_closed()
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert server._active_handlers == 0
+            assert accepted.fileno() == -1
+        finally:
+            _client.close()
+            server.close()
+            scheduler.close()
+
+    def test_start_server_closes_accept_before_server_is_ready(self, monkeypatch: pytest.MonkeyPatch):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        real_accept_many = scheduler.proactor.accept_many
+
+        def eager_accept_many(sock: socket.socket, callback):
+            operation = real_accept_many(sock, callback)
+            _client, accepted = socket.socketpair()
+            accepted.setblocking(False)
+            try:
+                callback((accepted, ("127.0.0.1", 0)))
+                assert accepted.fileno() == -1
+            finally:
+                _client.close()
+            return operation
+
+        monkeypatch.setattr(scheduler.proactor, "accept_many", eager_accept_many)
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        try:
+            assert server._active_handlers == 0
+        finally:
+            server.close()
+            scheduler.close()
+
     def test_start_server_uses_accept_many_and_dispatches_handler(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)

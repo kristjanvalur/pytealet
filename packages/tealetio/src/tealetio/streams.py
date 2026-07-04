@@ -657,9 +657,11 @@ class StreamServer:
     tealets already spawned for accepted connections keep running until they
     finish on their own; ``close()`` does not cancel them. ``wait_closed()``
     blocks until the server is closed and every dispatched handler tealet has
-    finished. Accept callbacks that were already queued before ``close()`` may
-    still run one ``dispatch()`` turn; those close the connection without
-    incrementing ``_active_handlers`` when ``_closed`` is already set.
+    finished. Accept callbacks may run on proactor worker threads. An early,
+    lock-free ``_closed`` check in ``_dispatch_client()`` closes stray
+    connections without touching ``Condition`` state. Queued ``dispatch()``
+    turns re-check ``_closed`` under ``_shutdown`` and close without
+    incrementing ``_active_handlers`` when the server is already shut down.
 
     Use as a context manager to call ``close()`` and ``wait_closed()`` on
     scope exit. ``serve_forever()`` blocks the current tealet until
@@ -739,10 +741,9 @@ class StreamServer:
         client_handler: Callable[..., Any],
         async_: bool,
     ) -> None:
-        with self._shutdown:
-            if self._closed:
-                conn.close()
-                return
+        if self._closed:
+            conn.close()
+            return
 
         def dispatch() -> None:
             def serve() -> None:
@@ -776,13 +777,15 @@ class StreamServer:
                     conn.close()
                     return
                 self._active_handlers += 1
-                try:
-                    self._scheduler.spawn(serve)
-                except Exception:
+
+            try:
+                self._scheduler.spawn(serve)
+            except Exception:
+                with self._shutdown:
                     self._active_handlers -= 1
                     self._shutdown.notify_all()
-                    conn.close()
-                    raise
+                conn.close()
+                raise
 
         self._scheduler.call_soon_threadsafe(dispatch)
 
@@ -796,11 +799,14 @@ def _start_stream_server(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> StreamServer:
-    server: StreamServer | None = None
+    server_box: list[StreamServer | None] = [None]
 
     def on_accept(accepted: tuple[socket.socket, Any]) -> None:
         conn, _address = accepted
-        assert server is not None
+        server = server_box[0]
+        if server is None:
+            conn.close()
+            return
         server._dispatch_client(
             conn,
             limit=limit,
@@ -811,6 +817,7 @@ def _start_stream_server(
 
     accept_operation = scheduler.proactor.accept_many(sock, on_accept)
     server = StreamServer(scheduler, [sock], accept_operation)
+    server_box[0] = server
     return server
 
 
