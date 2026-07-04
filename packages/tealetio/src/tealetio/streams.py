@@ -799,12 +799,13 @@ def _start_stream_server(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> StreamServer:
-    server_box: list[StreamServer | None] = [None]
+    server: StreamServer | None = None
 
     def on_accept(accepted: tuple[socket.socket, Any]) -> None:
         conn, _address = accepted
-        server = server_box[0]
         if server is None:
+            # accept_many may deliver on a worker thread before StreamServer
+            # exists; drop the connection (extremely unlikely race).
             conn.close()
             return
         server._dispatch_client(
@@ -817,7 +818,6 @@ def _start_stream_server(
 
     accept_operation = scheduler.proactor.accept_many(sock, on_accept)
     server = StreamServer(scheduler, [sock], accept_operation)
-    server_box[0] = server
     return server
 
 
