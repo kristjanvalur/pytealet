@@ -646,7 +646,9 @@ class StreamServer:
     finished.
 
     Use as a context manager to call ``close()`` and ``wait_closed()`` on
-    scope exit.
+    scope exit. ``serve_forever()`` blocks the current tealet until
+    ``close()`` is called; pair with ``wait_closed()`` or the context manager
+    to drain in-flight handlers.
     """
 
     def __init__(
@@ -661,6 +663,7 @@ class StreamServer:
         self._shutdown = Condition()
         self._closed = False
         self._active_handlers = 0
+        self._serving_forever = False
 
     def __enter__(self) -> StreamServer:
         return self
@@ -698,6 +701,25 @@ class StreamServer:
 
         with self._shutdown:
             self._shutdown.swait_for(lambda: self._closed and self._active_handlers == 0)
+
+    def serve_forever(self) -> None:
+        """Block until ``close()`` is called.
+
+        Accept handling is already active from ``start_server()``; this only
+        parks the current tealet. It does not install signal handlers — use
+        ``tealetio.run()`` / ``Runner`` for that.
+        """
+
+        if self._closed:
+            raise RuntimeError("server is closed")
+        if self._serving_forever:
+            raise RuntimeError("server is already in serve_forever()")
+        self._serving_forever = True
+        try:
+            with self._shutdown:
+                self._shutdown.swait_for(lambda: self._closed)
+        finally:
+            self._serving_forever = False
 
     def _dispatch_client(
         self,

@@ -560,6 +560,12 @@ accept uses multishot `IORING_ACCEPT_MULTISHOT`
 when probed; otherwise the proactor falls back to repeated one-shot accepts (see
 the `accept_many` notes above).
 
+`start_server(...)` returns a `StreamServer`. ``close()`` stops accepting;
+``wait_closed()`` blocks until in-flight handler tealets finish. Use as a context
+manager for both. ``serve_forever()`` parks the current tealet until
+``close()`` is called (accept is already active); it does not install signal
+handlers — use ``tealetio.run()`` / ``Runner`` for shutdown signals.
+
 Stream reads use `scheduler.sock_recv_into()` through `SocketTransport.recv_into()`
 so `UringProactor.recv_into()` can fill caller-owned buffers without an extra
 `recv()` copy. `StreamReader.readinto()` fills a caller buffer directly; other

@@ -702,8 +702,8 @@ work.
 1. Streams POC follow-up (see `IO_MANAGER_DESIGN.md`):
    - Extract a composed `IOManager` (`scheduler.io`) instead of growing
      `BaseScheduler` further.
-   - Optional `StreamServer.serve_forever()` sugar; signal handling stays in
-     `Runner` / `run()`.
+   - `StreamServer.serve_forever()` parks until `close()` (implemented); signal
+     handling stays in `Runner` / `run()`.
 2. `sock_create()` is implemented on `ProactorScheduler` (stdlib `socket.socket()`
    today). Future: `UringProactor` may use `uring_api.submit_socket()` when
    supported, wrapping returned fds with `socket.socket(fileno=fd)`.

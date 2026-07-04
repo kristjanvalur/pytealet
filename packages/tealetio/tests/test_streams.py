@@ -485,6 +485,34 @@ class TestStreamsPoC:
         assert listen_sock.fileno() == -1
         scheduler.close()
 
+    def test_stream_server_serve_forever_unblocks_on_close(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        finished = Event()
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        try:
+
+            def exercise() -> None:
+                def run_server() -> None:
+                    server.serve_forever()
+                    finished.set()
+
+                def shutdown() -> None:
+                    scheduler.yield_()
+                    server.close()
+
+                scheduler.spawn(run_server)
+                scheduler.spawn(shutdown)
+                finished.swait()
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.close()
+
     def test_stream_server_wait_closed_returns_after_close_with_no_handlers(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
