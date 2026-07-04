@@ -55,7 +55,10 @@ def ipaddr_info(
         afs = [family]
 
     if isinstance(host, bytes):
-        host = host.decode("idna")
+        try:
+            host = host.decode("idna")
+        except UnicodeDecodeError:
+            return None
     if "%" in host:
         return None
 

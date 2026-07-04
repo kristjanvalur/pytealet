@@ -401,7 +401,8 @@ def _open_streams(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> tuple[Any, Any]:
-    # ``async_`` only selects the default stream factory when ``stream_factory`` is omitted.
+    # ``async_`` only selects the default stream factory when ``stream_factory`` is
+    # omitted. An explicit factory must already match the intended stream types.
     if stream_factory is None:
         factory = default_async_stream_factory if async_ else default_stream_factory
     else:
@@ -910,7 +911,10 @@ def start_server(
     Use ``addr=(None, port)`` or ``addr=("", port)`` to bind all interfaces.
     ``async_=False`` uses native stream types and calls the handler directly;
     ``async_=True`` uses asyncio-shaped streams and drives the handler through
-    ``run_coro()``.
+    ``run_coro()``. Pair ``async_`` with the handler shape encoded in the
+    overloads (sync handler + ``async_=False``, or ``async def`` + ``async_=True``).
+    An explicit ``stream_factory`` must match those stream types; ``async_`` only
+    picks the default factory when it is omitted.
 
     Accepts use ``proactor.accept_many()``, so ``UringProactor`` can service
     connections through multishot accept when the runtime probe allows it.

@@ -16,6 +16,9 @@ class TestDnsResolution:
         assert info[0] == socket.AF_INET
         assert info[4] == ("127.0.0.1", 8080)
 
+    def test_ipaddr_info_invalid_byte_host_falls_through_to_lookup(self):
+        assert ipaddr_info(b"\xff\xfe", 80, socket.AF_UNSPEC, socket.SOCK_STREAM, 0) is None
+
     def test_ensure_resolved_skips_executor_for_literal_ipv4(self, monkeypatch):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
