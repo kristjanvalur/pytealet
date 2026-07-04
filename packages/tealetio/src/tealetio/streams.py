@@ -6,7 +6,7 @@ import asyncio
 import os
 import socket
 from collections.abc import Callable, Coroutine
-from typing import Any, Literal, Protocol, TypeVar, overload
+from typing import Any, Literal, Protocol, TypeVar, cast, overload
 
 from asynkit import coro_drive
 
@@ -673,6 +673,8 @@ class StreamServer:
     to drain in-flight handlers.
     """
 
+    _io: SocketIO
+
     def __init__(
         self,
         scheduler: BaseScheduler,
@@ -680,7 +682,7 @@ class StreamServer:
         accept_operation: ContinuousOperation[tuple[socket.socket, Any]],
     ) -> None:
         self._scheduler = scheduler
-        self._io = scheduler.io
+        self._io = cast(SocketIO, scheduler.io)
         self._sockets = tuple(sockets)
         self._accept_operation = accept_operation
         self._shutdown = Condition()

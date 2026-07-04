@@ -1,12 +1,58 @@
 from __future__ import annotations
 
+import os
 import socket
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from tealetio import set_scheduler
 from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, SocketIO
+from tealetio.operations import ContinuousOperation, Operation
 from tealetio.proactor import SyncProactorScheduler
+
+
+class _MockProactor:
+    def __init__(self) -> None:
+        self.recv_calls: list[tuple[socket.socket, int]] = []
+        self.poll_calls: list[tuple[int, int]] = []
+        self.sendall_calls: list[tuple[socket.socket, Any]] = []
+        self.openat_calls: list[tuple[str, int, int]] = []
+
+    def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+        self.recv_calls.append((sock, n))
+        operation = Operation[bytes](kind="recv", fileobj=sock.fileno(), proactor=self)
+        operation._set_result(b"mock")
+        return operation
+
+    def poll(self, fd: int, mask: int) -> Operation[int]:
+        self.poll_calls.append((fd, mask))
+        operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
+        operation._set_result(mask)
+        return operation
+
+    def sendall(self, sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
+        self.sendall_calls.append((sock, data))
+        operation = Operation[None](kind="sendall", fileobj=sock.fileno(), proactor=self)
+        operation._set_result(None)
+        return operation
+
+    def openat(self, path: str, flags: int, mode: int) -> Operation[int]:
+        self.openat_calls.append((path, flags, mode))
+        operation = Operation[int](kind="openat", fileobj=-1, proactor=self)
+        operation._set_result(901)
+        return operation
+
+    def poll_many(
+        self,
+        fd: int,
+        mask: int,
+        callback: Any,
+    ) -> ContinuousOperation[int]:
+        operation = ContinuousOperation[int](kind="poll_many", fileobj=fd, proactor=self)
+        operation._set_result(mask)
+        return operation
 
 
 class TestProactorIOManager:
@@ -44,3 +90,93 @@ class TestProactorIOManager:
         scheduler = BasicScheduler()
         with pytest.raises(RuntimeError, match="scheduler with IO support"):
             scheduler.io
+
+
+class TestProactorIOManagerDirect:
+    def test_wait_operation_returns_immediate_result(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        sock = socket.socketpair()[0]
+        try:
+            operation = proactor.recv(sock, 4)
+            assert io.wait_operation(operation) == b"mock"
+        finally:
+            sock.close()
+
+    def test_sock_recv_delegates_to_proactor(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        sock = socket.socketpair()[0]
+        try:
+            assert io.sock_recv(sock, 4) == b"mock"
+            assert proactor.recv_calls == [(sock, 4)]
+        finally:
+            sock.close()
+
+    def test_poll_delegates_to_proactor(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        assert io.poll(7, 3) == 3
+        assert proactor.poll_calls == [(7, 3)]
+
+    def test_sock_send_iter_drains_chunks(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        sock = socket.socketpair()[0]
+        try:
+            io.sock_send_iter(sock, [b"ab", b"", memoryview(b"cd")])
+            assert len(proactor.sendall_calls) == 2
+            assert bytes(proactor.sendall_calls[0][1]) == b"ab"
+            assert bytes(proactor.sendall_calls[1][1]) == b"cd"
+        finally:
+            sock.close()
+
+    def test_sock_create_applies_scheduler_socket_contract(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        sock = io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            assert not sock.getblocking()
+            assert not os.get_inheritable(sock.fileno())
+        finally:
+            sock.close()
+
+    def test_open_returns_proactor_file(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        with patch("tealetio.io_manager.os.close"), patch("tealetio.files.os.close"):
+            handle = io.open("/tmp/example.txt", "rb")
+            try:
+                from tealetio.files import ProactorFile
+
+                assert isinstance(handle, ProactorFile)
+                assert handle.name == "/tmp/example.txt"
+                assert proactor.openat_calls == [("/tmp/example.txt", os.O_RDONLY | os.O_CLOEXEC, 0o666)]
+            finally:
+                handle.close()
+
+    def test_poll_many_returns_continuous_operation(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        seen: list[int] = []
+
+        operation = io.poll_many(5, 1, seen.append)
+        assert isinstance(operation, ContinuousOperation)
+
+    def test_wait_operation_blocks_until_completion(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.sendall(b"z")
+
+            def exercise() -> bytes:
+                return scheduler.io.sock_recv(reader, 1)
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"z"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()

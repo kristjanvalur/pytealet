@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from typing import Any, Generic, NoReturn, Protocol, TypeAlias, TypeVar, cast
@@ -20,7 +20,8 @@ import uring_api
 
 from . import compat
 from .files import ProactorFile
-from .io_manager import FileIO, PollIO, ProactorIOManager, SocketIO, _configure_scheduler_socket
+from .io_manager import FileIO, PollIO, ProactorIOManager, SocketIO
+from .socket_helpers import configure_scheduler_socket
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, ContinuousStepResult, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
@@ -958,7 +959,7 @@ class SelectorProactor(ProactorBase):
 
         def attempt() -> tuple[socket.socket, Any]:
             conn, address = sock.accept()
-            _configure_scheduler_socket(conn)
+            configure_scheduler_socket(conn)
             return conn, address
 
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
@@ -988,7 +989,7 @@ class SelectorProactor(ProactorBase):
                     conn, address = sock.accept()
                 except (BlockingIOError, InterruptedError):
                     return ContinuousStepResult(progressed=progressed)
-                _configure_scheduler_socket(conn)
+                configure_scheduler_socket(conn)
                 operation._emit_result((conn, address))
                 progressed = True
 
@@ -1852,7 +1853,7 @@ class UringProactor(ProactorBase):
     ) -> Operation[tuple[socket.socket, Any]]:
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        _configure_scheduler_socket(conn)
+        configure_scheduler_socket(conn)
         operation = cast(Operation[tuple[socket.socket, Any]], entry.operation)
         operation._set_result((conn, address))
         return operation
@@ -1912,7 +1913,7 @@ class UringProactor(ProactorBase):
             return operation
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        _configure_scheduler_socket(conn)
+        configure_scheduler_socket(conn)
         operation._emit_result((conn, address))
         if operation.done():
             return operation
@@ -1932,7 +1933,7 @@ class UringProactor(ProactorBase):
             return operation
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        _configure_scheduler_socket(conn)
+        configure_scheduler_socket(conn)
         operation._emit_result((conn, address))
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             operation._set_result(None)

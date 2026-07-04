@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 from .files import ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, Operation
+from .socket_helpers import configure_scheduler_socket
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
@@ -31,13 +32,9 @@ class SocketIO(Protocol):
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]: ...
 
-    def sock_recvfrom_into(
-        self, sock: socket.socket, buf: Any, nbytes: int = 0
-    ) -> tuple[int, Any]: ...
+    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]: ...
 
-    def sock_sendall(
-        self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None
-    ) -> None: ...
+    def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> None: ...
 
     def sock_send_iter(
         self,
@@ -98,14 +95,6 @@ class FileIO(Protocol):
     """Positioned binary file open helper over a proactor backend."""
 
     def open(self, path: str, mode: str = "rb") -> ProactorFile: ...
-
-
-def _configure_scheduler_socket(sock: socket.socket) -> socket.socket:
-    """Apply the scheduler socket contract: non-blocking and close-on-exec."""
-
-    sock.setblocking(False)
-    os.set_inheritable(sock.fileno(), False)
-    return sock
 
 
 class ProactorIOManager:
@@ -242,7 +231,7 @@ class ProactorIOManager:
         flags: int = 0,
     ) -> socket.socket:
         del flags
-        return _configure_scheduler_socket(socket.socket(family, type, proto))
+        return configure_scheduler_socket(socket.socket(family, type, proto))
 
     def poll(self, fd: int, mask: int) -> int:
         return self.wait_operation(self._proactor.poll(fd, mask))

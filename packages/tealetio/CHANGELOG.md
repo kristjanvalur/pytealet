@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scheduler.io` (`ProactorIOManager`). Use `scheduler.io.sock_recv(...)` instead
   of `scheduler.sock_recv(...)`. `BaseScheduler.io` raises when the scheduler has
   no IO backend.
+- Custom `stream_factory` / `StreamFactory` callables now receive a `SocketIO`
+  facade as the first argument (`io=...`) instead of a `ProactorScheduler`.
+  Update factories to use `io.sock_*` helpers; see `tealetio.streams.StreamFactory`.
 - `recv_many(sock, callback, *, buf_group)` now requires an explicit
   provided-buffer pool; there is no per-operation default at the proactor level.
 - `recv_many` provided-buffer exhaustion now delivers

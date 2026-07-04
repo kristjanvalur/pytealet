@@ -25,6 +25,7 @@ from typing import (
     ContextManager,
     Coroutine,
     Literal,
+    NoReturn,
     Protocol,
     TypeAlias,
     TypeVar,
@@ -44,7 +45,6 @@ from .locks import (
     set_scheduler_resolver,
     timeout as scheduler_timeout,
 )
-from .operations import ContinuousOperation
 from . import tasks as _tasks
 
 
@@ -1578,7 +1578,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
 
     @property
-    def io(self) -> "ProactorIOManager":
+    def io(self) -> NoReturn:
         """Return the blocking IO facade when this scheduler has one."""
 
         raise RuntimeError("operation requires a scheduler with IO support")
