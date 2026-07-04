@@ -25,6 +25,7 @@ from typing import (
     ContextManager,
     Coroutine,
     Literal,
+    NoReturn,
     Protocol,
     TypeAlias,
     TypeVar,
@@ -44,7 +45,6 @@ from .locks import (
     set_scheduler_resolver,
     timeout as scheduler_timeout,
 )
-from .operations import ContinuousOperation
 from . import tasks as _tasks
 
 
@@ -1597,121 +1597,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         raise NotImplementedError("writer callbacks require an IO-capable scheduler")
 
-    def sock_recv(self, sock: socket.socket, n: int) -> bytes:
-        """Receive up to `n` bytes from a non-blocking socket."""
-
-        raise NotImplementedError("socket helpers require an IO-capable scheduler")
-
-    def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
-        """Receive bytes from a non-blocking socket into `buf`."""
-
-        raise NotImplementedError("socket helpers require an IO-capable scheduler")
-
-    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
-        """Receive datagram bytes and address from a non-blocking socket."""
-
-        raise NotImplementedError("socket helpers require an IO-capable scheduler")
-
-    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
-        """Receive datagram bytes into `buf` from a non-blocking socket."""
-
-        raise NotImplementedError("socket helpers require an IO-capable scheduler")
-
-    def sock_sendall(self, sock: socket.socket, data: Any) -> None:
-        """Send all `data` through a non-blocking socket."""
-
-        raise NotImplementedError("socket helpers require an IO-capable scheduler")
-
-    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
-        """Send one datagram through a non-blocking socket."""
-
-        raise NotImplementedError("socket helpers require an IO-capable scheduler")
-
-    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
-        """Accept one connection from a non-blocking listening socket."""
-
-        raise NotImplementedError("socket helpers require an IO-capable scheduler")
-
-    def sock_connect(self, sock: socket.socket, address: Any) -> None:
-        """Connect a non-blocking socket to `address`."""
-
-        raise NotImplementedError("socket helpers require an IO-capable scheduler")
-
-    def sock_create(
-        self,
-        family: int,
-        type: int,
-        proto: int = 0,
-        *,
-        flags: int = 0,
-    ) -> socket.socket:
-        """Create a non-blocking, close-on-exec socket through the scheduler IO backend."""
-
-        raise NotImplementedError("socket helpers require an IO-capable scheduler")
-
-    def open_streams(
-        self,
-        sock: socket.socket,
-        *,
-        limit: int = 2**16,
-        stream_factory: Any = None,
-        async_: bool = False,
-    ) -> tuple[Any, Any]:
-        """Wrap a connected non-blocking socket as stream endpoints."""
-
-        raise NotImplementedError("stream helpers require an IO-capable scheduler")
-
-    def open_connection(
-        self,
-        *,
-        addr: tuple[str, int] | None = None,
-        path: str | None = None,
-        family: int = socket.AF_UNSPEC,
-        proto: int = 0,
-        limit: int = 2**16,
-        stream_factory: Any = None,
-        async_: bool = False,
-    ) -> tuple[Any, Any]:
-        """Connect and return stream endpoints (TCP via ``addr``, Unix via ``path``)."""
-
-        raise NotImplementedError("stream helpers require an IO-capable scheduler")
-
-    def start_server(
-        self,
-        client_handler: Callable[..., Any],
-        *,
-        addr: tuple[str | None, int] | None = None,
-        path: str | None = None,
-        family: int = socket.AF_INET,
-        backlog: int = 100,
-        limit: int = 2**16,
-        stream_factory: Any = None,
-        async_: bool = False,
-    ) -> Any:
-        """Start a stream server that dispatches each accept to ``client_handler``."""
-
-        raise NotImplementedError("stream helpers require an IO-capable scheduler")
-
-    def poll(self, fd: int, mask: int) -> int:
-        """Wait until an fd reports events in `mask` and return the readiness bitmask."""
-
-        raise NotImplementedError("poll requires an IO-capable scheduler")
-
-    def poll_many(
-        self,
-        fd: int,
-        mask: int,
-        callback: Callable[[int], object],
-    ) -> ContinuousOperation[int]:
-        """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
-
-        raise NotImplementedError("poll requires an IO-capable scheduler")
-
-    def open(self, path: str, mode: str = "rb") -> Any:
-        """Open a positioned binary file through the scheduler."""
-
-        raise NotImplementedError("file I/O requires a proactor scheduler with openat support")
-
     # -- Driver state --------------------------------------------------
 
     def _verify_current_scheduler(self) -> None:
@@ -2113,6 +1998,14 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
     def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         super().__init__(runnable_queue_factory=runnable_queue_factory)
         self._wakeup = threading.Event()
+
+    @property
+    def io(self) -> NoReturn:
+        """Raise: only proactor schedulers expose a blocking ``io`` facade."""
+
+        from .io_manager import IO_UNSUPPORTED_ERROR
+
+        raise RuntimeError(IO_UNSUPPORTED_ERROR)
 
     # -- Driver wakeup -------------------------------------------------
 

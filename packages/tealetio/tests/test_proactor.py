@@ -28,6 +28,7 @@ from uring_fakes import (
 
 import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
+import tealetio.recv_iter as recv_iter_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.operations import InvalidStateError
 from tealetio.proactor import (
@@ -150,7 +151,7 @@ def test_completions_to_process_flushes_stored_termination():
     assert entry.completions_to_process(second) == (second, terminal)
 
 
-def _drain_ordered_ingest_buffer(buffer: proactor_module._OrderedIngestBuffer[str]) -> list[tuple[int, str]]:
+def _drain_ordered_ingest_buffer(buffer: recv_iter_module._OrderedIngestBuffer[str]) -> list[tuple[int, str]]:
     ready: list[tuple[int, str]] = []
     while True:
         item = buffer.pop()
@@ -161,7 +162,7 @@ def _drain_ordered_ingest_buffer(buffer: proactor_module._OrderedIngestBuffer[st
 
 
 def test_ordered_ingest_buffer_push_defers_out_of_order_items():
-    buffer = proactor_module._OrderedIngestBuffer[str]()
+    buffer = recv_iter_module._OrderedIngestBuffer[str]()
     buffer.push((1, "b"))
     assert len(buffer) == 1
     assert not buffer
@@ -172,13 +173,13 @@ def test_ordered_ingest_buffer_push_defers_out_of_order_items():
 
 
 def test_ordered_ingest_buffer_pushpop_returns_next_ready_item():
-    buffer = proactor_module._OrderedIngestBuffer[str]()
+    buffer = recv_iter_module._OrderedIngestBuffer[str]()
     assert buffer.pushpop((0, "a")) == (0, "a")
     assert not buffer
 
 
 def test_ordered_ingest_buffer_unclogs_pending_items():
-    buffer = proactor_module._OrderedIngestBuffer[str]()
+    buffer = recv_iter_module._OrderedIngestBuffer[str]()
     buffer.push((1, "b"))
     buffer.push((2, "c"))
     ready = [buffer.pushpop((0, "a")), *_drain_ordered_ingest_buffer(buffer)]
@@ -186,7 +187,7 @@ def test_ordered_ingest_buffer_unclogs_pending_items():
 
 
 def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
-    buffer = proactor_module._OrderedIngestBuffer[str]()
+    buffer = recv_iter_module._OrderedIngestBuffer[str]()
     buffer.push((2, "c"))
     buffer.push((1, "b"))
     assert len(buffer) == 2
@@ -196,7 +197,7 @@ def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
     assert ready == [(0, "a"), (1, "b"), (2, "c")]
     assert not buffer
 
-    waiting = proactor_module._OrderedIngestBuffer[str]()
+    waiting = recv_iter_module._OrderedIngestBuffer[str]()
     waiting.pushpop((0, "a"))
     waiting.push((1, "b"))
     assert waiting
@@ -204,7 +205,7 @@ def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
 
 
 def test_ordered_ingest_buffer_reset_restores_next_index():
-    buffer = proactor_module._OrderedIngestBuffer[str](start=5)
+    buffer = recv_iter_module._OrderedIngestBuffer[str](start=5)
     buffer.pushpop((5, "a"))
     buffer.push((7, "c"))
     buffer.reset()
@@ -1086,8 +1087,8 @@ class TestSelectorProactor:
                 saw_pressure = False
                 seen: list[tuple[int, bytes]] = []
                 held: list[memoryview] = []
-                pool = scheduler.create_recv_buffer_pool(16 * 1024, 2)
-                for index, chunk in scheduler.sock_recv_iter(reader, pool):
+                pool = scheduler.io.create_recv_buffer_pool(16 * 1024, 2)
+                for index, chunk in scheduler.io.sock_recv_iter(reader, pool):
                     if index == RECV_MANY_BUFFER_PRESSURE:
                         saw_pressure = True
                         state["got_pressure"] = True
@@ -1106,18 +1107,18 @@ class TestSelectorProactor:
                 return got_memview and saw_pressure, seen
 
             def deliver_chunks() -> None:
-                scheduler.sock_sendall(writer, b"a")
+                scheduler.io.sock_sendall(writer, b"a")
                 scheduler.sleep(0.02)
-                scheduler.sock_sendall(writer, b"b")
+                scheduler.io.sock_sendall(writer, b"b")
                 scheduler.sleep(0.02)
-                scheduler.sock_sendall(writer, b"c")
+                scheduler.io.sock_sendall(writer, b"c")
                 deadline = scheduler.proactor.get_time() + 1.0
                 while not state["got_pressure"] and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.02)
                 assert state["got_pressure"]
                 state["release"] = True
                 scheduler.sleep(0.05)
-                scheduler.sock_sendall(writer, b"d")
+                scheduler.io.sock_sendall(writer, b"d")
                 writer.shutdown(socket.SHUT_WR)
 
             task = scheduler.spawn(receive_chunks)
@@ -1293,12 +1294,12 @@ class TestSelectorProactor:
             writer.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader, progress.append)
+                return scheduler.io.sock_recvall(reader, progress.append)
 
             def deliver() -> None:
-                scheduler.sock_sendall(writer, b"hello")
+                scheduler.io.sock_sendall(writer, b"hello")
                 scheduler.sleep(0.02)
-                scheduler.sock_sendall(writer, b"world")
+                scheduler.io.sock_sendall(writer, b"world")
                 writer.shutdown(socket.SHUT_WR)
 
             task = scheduler.spawn(receive)
@@ -1319,10 +1320,10 @@ class TestSelectorProactor:
             writer.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader)
+                return scheduler.io.sock_recvall(reader)
 
             def deliver() -> None:
-                scheduler.sock_send_iter(writer, [b"hello", b"world"])
+                scheduler.io.sock_send_iter(writer, [b"hello", b"world"])
                 writer.shutdown(socket.SHUT_WR)
 
             task = scheduler.spawn(receive)
@@ -1342,10 +1343,10 @@ class TestSelectorProactor:
             writer.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader)
+                return scheduler.io.sock_recvall(reader)
 
             def deliver() -> None:
-                scheduler.sock_send_iter(writer, [b"hello", b"", memoryview(b""), b"world"])
+                scheduler.io.sock_send_iter(writer, [b"hello", b"", memoryview(b""), b"world"])
                 writer.shutdown(socket.SHUT_WR)
 
             task = scheduler.spawn(receive)
@@ -1366,10 +1367,10 @@ class TestSelectorProactor:
             payload = bytearray(b"abc")
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader)
+                return scheduler.io.sock_recvall(reader)
 
             def deliver() -> None:
-                scheduler.sock_send_iter(writer, [payload, memoryview(b"def")])
+                scheduler.io.sock_send_iter(writer, [payload, memoryview(b"def")])
                 writer.shutdown(socket.SHUT_WR)
 
             task = scheduler.spawn(receive)
@@ -1397,10 +1398,10 @@ class TestSelectorProactor:
             writer.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader)
+                return scheduler.io.sock_recvall(reader)
 
             def deliver() -> None:
-                scheduler.sock_send_iter(writer, chunks())
+                scheduler.io.sock_send_iter(writer, chunks())
                 writer.shutdown(socket.SHUT_WR)
 
             task = scheduler.spawn(receive)
@@ -1417,7 +1418,7 @@ class TestSelectorProactor:
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
         calls = 0
-        real_sendall = scheduler.sock_sendall
+        real_sendall = scheduler.io.sock_sendall
 
         def boom(sock: socket.socket, data: Any, progress: Any = None) -> None:
             nonlocal calls
@@ -1426,14 +1427,14 @@ class TestSelectorProactor:
                 raise OSError("send failed")
             return real_sendall(sock, data, progress)
 
-        monkeypatch.setattr(scheduler, "sock_sendall", boom)
+        monkeypatch.setattr(scheduler.io, "sock_sendall", boom)
 
         try:
             reader.setblocking(False)
             writer.setblocking(False)
 
             def deliver() -> None:
-                scheduler.sock_send_iter(writer, [b"hello", b"world"])
+                scheduler.io.sock_send_iter(writer, [b"hello", b"world"])
 
             task = scheduler.spawn(deliver)
             with pytest.raises(OSError, match="send failed"):
@@ -1947,7 +1948,7 @@ class TestThreadedSelectorProactor:
                 writer.setblocking(False)
 
                 def receive() -> bytes:
-                    return scheduler.sock_recv(reader, 5)
+                    return scheduler.io.sock_recv(reader, 5)
 
                 task = scheduler.spawn(receive)
                 await asyncio.sleep(0)
@@ -3317,7 +3318,7 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader)
+                return scheduler.io.sock_recvall(reader)
 
             def deliver() -> None:
                 ring = scheduler.proactor.ring
@@ -3342,7 +3343,7 @@ class TestUringProactor:
 
             def receive_chunks() -> list[tuple[int, bytes]]:
                 return _recviter_bytes(
-                    scheduler.sock_recv_iter(reader, scheduler.create_recv_buffer_pool(16 * 1024, 8))
+                    scheduler.io.sock_recv_iter(reader, scheduler.io.create_recv_buffer_pool(16 * 1024, 8))
                 )
 
             def deliver_chunks() -> None:
@@ -3372,8 +3373,8 @@ class TestUringProactor:
                 got_memview = False
                 saw_pressure = False
                 seen: list[tuple[int, bytes]] = []
-                pool = scheduler.create_recv_buffer_pool(16 * 1024, 4)
-                for index, chunk in scheduler.sock_recv_iter(reader, pool):
+                pool = scheduler.io.create_recv_buffer_pool(16 * 1024, 4)
+                for index, chunk in scheduler.io.sock_recv_iter(reader, pool):
                     if index == RECV_MANY_BUFFER_PRESSURE:
                         saw_pressure = True
                         state["got_pressure"] = True
@@ -3425,8 +3426,8 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive_first_chunk() -> tuple[int, bytes]:
-                pool = scheduler.create_recv_buffer_pool(4096, 4)
-                index, chunk = next(iter(scheduler.sock_recv_iter(reader, pool)))
+                pool = scheduler.io.create_recv_buffer_pool(4096, 4)
+                index, chunk = next(iter(scheduler.io.sock_recv_iter(reader, pool)))
                 return index, bytes(chunk)
 
             def deliver_first_chunk() -> None:
@@ -3458,8 +3459,8 @@ class TestUringProactor:
 
             def receive_chunks() -> list[tuple[int, bytes]]:
                 seen: list[tuple[int, bytes]] = []
-                pool = scheduler.create_recv_buffer_pool(16 * 1024, 4)
-                for index, chunk in scheduler.sock_recv_iter(reader, pool):
+                pool = scheduler.io.create_recv_buffer_pool(16 * 1024, 4)
+                for index, chunk in scheduler.io.sock_recv_iter(reader, pool):
                     if index == RECV_MANY_BUFFER_PRESSURE:
                         state["got_pressure"] = True
                         deadline = scheduler.proactor.get_time() + 1.0
@@ -3508,7 +3509,7 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader)
+                return scheduler.io.sock_recvall(reader)
 
             def deliver() -> None:
                 scheduler.sleep(0.001)
@@ -3542,7 +3543,7 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader)
+                return scheduler.io.sock_recvall(reader)
 
             def deliver() -> None:
                 ring = scheduler.proactor.ring
@@ -3570,7 +3571,7 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader, progress.append)
+                return scheduler.io.sock_recvall(reader, progress.append)
 
             def deliver() -> None:
                 ring = scheduler.proactor.ring
@@ -3628,10 +3629,10 @@ class TestUringProactor:
             writer.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recvall(reader, progress.append)
+                return scheduler.io.sock_recvall(reader, progress.append)
 
             def cancel_after_first_chunk() -> None:
-                scheduler.sock_sendall(writer, b"hello")
+                scheduler.io.sock_sendall(writer, b"hello")
                 deadline = scheduler.proactor.get_time() + 2.0
                 while progress != [b"hello"] and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.01)
@@ -3712,7 +3713,7 @@ class TestProactorScheduler:
     def test_sock_create_uses_stdlib_socket(self):
         scheduler = SyncProactorScheduler()
         try:
-            sock = scheduler.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 assert isinstance(sock, socket.socket)
                 assert sock.family == socket.AF_INET
@@ -3750,11 +3751,11 @@ class TestProactorScheduler:
             writer.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recv(reader, 5)
+                return scheduler.io.sock_recv(reader, 5)
 
             def send() -> None:
                 scheduler.sleep(0.001)
-                scheduler.sock_sendall(writer, b"hello")
+                scheduler.io.sock_sendall(writer, b"hello")
 
             task = scheduler.spawn(receive)
             scheduler.spawn(send)
@@ -3777,8 +3778,8 @@ class TestProactorScheduler:
             buf = bytearray(5)
 
             def exchange() -> tuple[int, bytes]:
-                scheduler.sock_sendall(writer, b"world")
-                count = scheduler.sock_recv_into(reader, buf)
+                scheduler.io.sock_sendall(writer, b"world")
+                count = scheduler.io.sock_recv_into(reader, buf)
                 return count, bytes(buf)
 
             task = scheduler.spawn(exchange)
@@ -3792,7 +3793,7 @@ class TestProactorScheduler:
     def test_create_recv_buffer_pool_delegates_to_proactor(self):
         scheduler = SyncProactorScheduler()
         try:
-            pool = scheduler.create_recv_buffer_pool(8192, 4)
+            pool = scheduler.io.create_recv_buffer_pool(8192, 4)
             assert pool.buffer_size == 8192
             assert pool.buffer_count == 4
             assert pool.leased_count == 0
@@ -3805,11 +3806,11 @@ class TestProactorScheduler:
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            custom = scheduler.create_recv_buffer_pool(4096, 16)
-            scheduler.set_shared_recv_buffer_pool(custom)
+            custom = scheduler.io.create_recv_buffer_pool(4096, 16)
+            scheduler.io.set_shared_recv_buffer_pool(custom)
 
             def receive_first_chunk() -> tuple[int, bytes]:
-                index, chunk = next(iter(scheduler.sock_recv_iter(reader)))
+                index, chunk = next(iter(scheduler.io.sock_recv_iter(reader)))
                 return index, bytes(chunk)
 
             task = scheduler.spawn(receive_first_chunk)
@@ -3820,7 +3821,7 @@ class TestProactorScheduler:
             assert scheduler.run_until_complete(task) == (0, b"x")
             submitted = scheduler.proactor.ring.submitted_recv_multishot[0][1]
             assert submitted is custom
-            assert scheduler.shared_recv_buffer_pool() is custom
+            assert scheduler.io.shared_recv_buffer_pool() is custom
             assert scheduler.proactor.shared_recv_buffer_pool() is custom
         finally:
             reader.close()
@@ -3833,13 +3834,13 @@ class TestProactorScheduler:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            pool = scheduler.create_recv_buffer_pool(8192, 2)
+            pool = scheduler.io.create_recv_buffer_pool(8192, 2)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return _recviter_bytes(scheduler.sock_recv_iter(reader, pool))
+                return _recviter_bytes(scheduler.io.sock_recv_iter(reader, pool))
 
             def send_chunks() -> None:
-                scheduler.sock_sendall(writer, b"hello")
+                scheduler.io.sock_sendall(writer, b"hello")
                 writer.shutdown(socket.SHUT_WR)
 
             task = scheduler.spawn(receive_chunks)
@@ -3860,12 +3861,12 @@ class TestProactorScheduler:
             writer.setblocking(False)
 
             def receive_chunks() -> list[tuple[int, bytes]]:
-                return _recviter_bytes(scheduler.sock_recv_iter(reader))
+                return _recviter_bytes(scheduler.io.sock_recv_iter(reader))
 
             def send_chunks() -> None:
-                scheduler.sock_sendall(writer, b"hello")
+                scheduler.io.sock_sendall(writer, b"hello")
                 scheduler.sleep(0.05)
-                scheduler.sock_sendall(writer, b"world")
+                scheduler.io.sock_sendall(writer, b"world")
                 writer.shutdown(socket.SHUT_WR)
 
             task = scheduler.spawn(receive_chunks)
@@ -3886,7 +3887,7 @@ class TestProactorScheduler:
             writer.setblocking(False)
 
             def wait_for_read() -> int:
-                return scheduler.poll(reader.fileno(), select.POLLIN)
+                return scheduler.io.poll(reader.fileno(), select.POLLIN)
 
             def send() -> None:
                 scheduler.sleep(0.001)
@@ -3910,7 +3911,7 @@ class TestProactorScheduler:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = scheduler.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            operation = scheduler.io.poll_many(reader.fileno(), select.POLLIN, seen.append)
 
             def send() -> None:
                 scheduler.sleep(0.001)
@@ -3944,15 +3945,15 @@ class TestProactorScheduler:
             server.listen()
 
             def accept_and_read() -> bytes:
-                conn, _address = scheduler.sock_accept(server)
+                conn, _address = scheduler.io.sock_accept(server)
                 try:
-                    return scheduler.sock_recv(conn, 4)
+                    return scheduler.io.sock_recv(conn, 4)
                 finally:
                     conn.close()
 
             def connect_and_send() -> None:
-                scheduler.sock_connect(client, server.getsockname())
-                scheduler.sock_sendall(client, b"ping")
+                scheduler.io.sock_connect(client, server.getsockname())
+                scheduler.io.sock_sendall(client, b"ping")
 
             task = scheduler.spawn(accept_and_read)
             scheduler.spawn(connect_and_send)
@@ -3975,11 +3976,11 @@ class TestProactorScheduler:
             buf = bytearray(5)
 
             def receive() -> tuple[int, object]:
-                return scheduler.sock_recvfrom_into(receiver, buf)
+                return scheduler.io.sock_recvfrom_into(receiver, buf)
 
             def send() -> int:
                 scheduler.sleep(0.001)
-                return scheduler.sock_sendto(sender, b"hello", receiver.getsockname())
+                return scheduler.io.sock_sendto(sender, b"hello", receiver.getsockname())
 
             receive_task = scheduler.spawn(receive)
             send_task = scheduler.spawn(send)
@@ -4006,7 +4007,7 @@ class TestProactorScheduler:
             def wait_with_timeout() -> bool:
                 with pytest.raises(TimeoutError):
                     with timeout(0.001):
-                        scheduler.wait_operation(operation)
+                        scheduler.io.wait_operation(operation)
                 return operation.cancelled() and not scheduler.proactor.has_pending_operations()
 
             task = scheduler.spawn(wait_with_timeout)
@@ -4018,8 +4019,10 @@ class TestProactorScheduler:
             scheduler.close()
 
     def test_wait_operation_wakes_event_on_scheduler_thread_from_uring_callback(self, monkeypatch):
+        import tealetio.io_manager as io_manager_module
+
         event_set_threads: list[int] = []
-        original_event = proactor_module.ThreadsafeEvent
+        original_event = io_manager_module.ThreadsafeEvent
 
         class TrackingEvent(original_event):
             def _set(self) -> None:
@@ -4036,7 +4039,7 @@ class TestProactorScheduler:
         def proactor_factory() -> UringProactor:
             return UringProactor(ring_factory=ring_factory)
 
-        monkeypatch.setattr(proactor_module, "ThreadsafeEvent", TrackingEvent)
+        monkeypatch.setattr(io_manager_module, "ThreadsafeEvent", TrackingEvent)
         scheduler = SyncProactorScheduler(proactor_factory)
         set_scheduler(scheduler)
         scheduler_thread = threading.get_ident()
@@ -4045,7 +4048,7 @@ class TestProactorScheduler:
             reader.setblocking(False)
 
             def receive() -> bytes:
-                return scheduler.sock_recv(reader, 5)
+                return scheduler.io.sock_recv(reader, 5)
 
             def complete_from_worker() -> None:
                 scheduler.sleep(0.001)
@@ -4074,7 +4077,7 @@ class TestProactorScheduler:
                 writer.setblocking(False)
 
                 def receive() -> bytes:
-                    return scheduler.sock_recv(reader, 5)
+                    return scheduler.io.sock_recv(reader, 5)
 
                 task = scheduler.spawn(receive)
                 await asyncio.sleep(0)
@@ -4132,7 +4135,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> tuple[bytes, bytes]:
-                with scheduler.open("/tmp/example.txt", "w+b") as handle:
+                with scheduler.io.open("/tmp/example.txt", "w+b") as handle:
                     assert isinstance(handle, io.RawIOBase)
                     assert handle.name == "/tmp/example.txt"
                     assert handle.write(b"hello") == 5
@@ -4163,7 +4166,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> tuple[int, bytes]:
-                with scheduler.open("/tmp/buffered.txt", "w+b") as handle:
+                with scheduler.io.open("/tmp/buffered.txt", "w+b") as handle:
                     handle.write(b"hello")
                     handle.seek(0)
                     buf = bytearray(5)
@@ -4183,7 +4186,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> bytes:
-                with scheduler.open("/tmp/stacked.txt", "w+b") as handle:
+                with scheduler.io.open("/tmp/stacked.txt", "w+b") as handle:
                     handle.write(b"hello")
                     handle.seek(0)
                     return io.BufferedReader(handle, buffer_size=2).read()
@@ -4197,7 +4200,7 @@ class TestProactorScheduler:
         set_scheduler(scheduler)
         try:
             with pytest.raises(NotImplementedError, match="openat support"):
-                scheduler.open("/tmp/x", "rb")
+                scheduler.io.open("/tmp/x", "rb")
         finally:
             scheduler.close()
 
@@ -4210,10 +4213,10 @@ class TestProactorScheduler:
             try:
 
                 def exercise() -> bytes:
-                    with scheduler.open(path, "wb") as handle:
+                    with scheduler.io.open(path, "wb") as handle:
                         assert handle.write(b"hello") == 5
 
-                    with scheduler.open(path, "rb") as handle:
+                    with scheduler.io.open(path, "rb") as handle:
                         buffered = io.BufferedReader(handle)
                         return buffered.read()
 
@@ -4230,7 +4233,7 @@ class TestProactorScheduler:
             try:
 
                 def exercise() -> tuple[int, bytes, int]:
-                    with scheduler.open(path, "w+b") as handle:
+                    with scheduler.io.open(path, "w+b") as handle:
                         handle.write(b"hello")
                         handle.seek(1)
                         buf = bytearray(3)
@@ -4250,7 +4253,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> int:
-                with scheduler.open("/tmp/seek-cur.txt", "w+b") as handle:
+                with scheduler.io.open("/tmp/seek-cur.txt", "w+b") as handle:
                     handle.write(b"hello")
                     handle.seek(2, os.SEEK_CUR)
                     return handle.tell()
@@ -4266,7 +4269,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> tuple[int, bytes]:
-                with scheduler.open("/tmp/seek-end.txt", "w+b") as handle:
+                with scheduler.io.open("/tmp/seek-end.txt", "w+b") as handle:
                     handle.write(b"hello")
                     handle.seek(0, os.SEEK_END)
                     end_pos = handle.tell()
@@ -4289,7 +4292,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> bytes:
-                with scheduler.open("/tmp/append.txt", "a+b") as handle:
+                with scheduler.io.open("/tmp/append.txt", "a+b") as handle:
                     handle.write(b"hello")
                     handle.seek(0)
                     handle.write(b"!")
@@ -4310,7 +4313,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> None:
-                with scheduler.open("/tmp/append-seq.txt", "ab") as handle:
+                with scheduler.io.open("/tmp/append-seq.txt", "ab") as handle:
                     handle.write(b"hello")
                     handle.write(b"world")
 
@@ -4342,7 +4345,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> None:
-                scheduler.open("/tmp/leak.txt", "ab")
+                scheduler.io.open("/tmp/leak.txt", "ab")
 
             with pytest.raises(OSError, match="stat failed"):
                 scheduler.run_until_complete(scheduler.spawn(exercise))
@@ -4357,7 +4360,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> int:
-                with scheduler.open("/tmp/append-seek-end.txt", "ab") as handle:
+                with scheduler.io.open("/tmp/append-seek-end.txt", "ab") as handle:
                     handle.write(b"hello")
                     handle.seek(0, os.SEEK_END)
                     return handle.tell()
@@ -4373,7 +4376,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> None:
-                with scheduler.open("/tmp/write-only.txt", "wb") as handle:
+                with scheduler.io.open("/tmp/write-only.txt", "wb") as handle:
                     with pytest.raises(OSError) as excinfo:
                         handle.read(1)
                     assert excinfo.value.errno == errno.EBADF
@@ -4388,7 +4391,7 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> None:
-                with scheduler.open("/tmp/read-only.txt", "rb") as handle:
+                with scheduler.io.open("/tmp/read-only.txt", "rb") as handle:
                     with pytest.raises(OSError) as excinfo:
                         handle.write(b"y")
                     assert excinfo.value.errno == errno.EBADF
@@ -4406,12 +4409,12 @@ class TestProactorScheduler:
             try:
 
                 def exercise() -> bytes:
-                    with scheduler.open(path, "wb") as handle:
+                    with scheduler.io.open(path, "wb") as handle:
                         handle.write(b"hello")
-                    with scheduler.open(path, "ab") as handle:
+                    with scheduler.io.open(path, "ab") as handle:
                         handle.seek(0)
                         handle.write(b"!")
-                    with scheduler.open(path, "rb") as handle:
+                    with scheduler.io.open(path, "rb") as handle:
                         return handle.read()
 
                 assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello!"

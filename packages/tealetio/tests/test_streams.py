@@ -18,6 +18,7 @@ from tealetio.streams import (
     open_connection,
     open_streams,
     run_coro,
+    start_server,
 )
 from uring_fakes import _FakeUringRing, _patch_uring_capabilities
 
@@ -110,7 +111,7 @@ class TestStreamsPoC:
     def test_start_server_closes_listener_socket_when_bind_fails(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
-        blocker = scheduler.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+        blocker = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
         blocker.bind(("127.0.0.1", 0))
         port = blocker.getsockname()[1]
         blocker.listen(1)
@@ -120,7 +121,7 @@ class TestStreamsPoC:
 
         try:
             with pytest.raises(OSError):
-                scheduler.start_server(client_handler, addr=("127.0.0.1", port))
+                start_server(client_handler, addr=("127.0.0.1", port), scheduler=scheduler)
         finally:
             blocker.close()
             scheduler.close()
@@ -188,15 +189,16 @@ class TestStreamsPoC:
             class TaggedStreamReader(StreamReader):
                 tag = "native-custom"
 
-            def custom_factory(scheduler, sock, *, limit):
-                transport = SocketTransport(scheduler, sock)
+            def custom_factory(io, sock, *, limit):
+                transport = SocketTransport(io, sock)
                 stream_reader = TaggedStreamReader(transport, limit=limit)
                 stream_writer = StreamWriter(transport, stream_reader)
                 return stream_reader, stream_writer
 
-            stream_reader, _stream_writer = scheduler.open_streams(
+            stream_reader, _stream_writer = open_streams(
                 reader,
                 stream_factory=custom_factory,
+                scheduler=scheduler,
             )
             assert isinstance(stream_reader, TaggedStreamReader)
             assert stream_reader.tag == "native-custom"
@@ -215,16 +217,17 @@ class TestStreamsPoC:
             class TaggedAsyncStreamReader(AsyncStreamReader):
                 tag = "async-custom"
 
-            def custom_factory(scheduler, sock, *, limit):
-                transport = SocketTransport(scheduler, sock)
+            def custom_factory(io, sock, *, limit):
+                transport = SocketTransport(io, sock)
                 stream_reader = TaggedAsyncStreamReader(transport, limit=limit)
                 stream_writer = AsyncStreamWriter(transport, stream_reader)
                 return stream_reader, stream_writer
 
-            stream_reader, _stream_writer = scheduler.open_streams(
+            stream_reader, _stream_writer = open_streams(
                 reader,
                 stream_factory=custom_factory,
                 async_=True,
+                scheduler=scheduler,
             )
             assert isinstance(stream_reader, TaggedAsyncStreamReader)
             assert stream_reader.tag == "async-custom"
@@ -245,10 +248,10 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_and_echo() -> None:
-                conn, _address = scheduler.sock_accept(server)
+                conn, _address = scheduler.io.sock_accept(server)
                 try:
-                    payload = scheduler.sock_recv(conn, len(client_greeting))
-                    scheduler.sock_sendall(conn, payload.upper())
+                    payload = scheduler.io.sock_recv(conn, len(client_greeting))
+                    scheduler.io.sock_sendall(conn, payload.upper())
                 finally:
                     conn.close()
 
@@ -276,9 +279,9 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_and_echo() -> None:
-                conn, _address = scheduler.sock_accept(server)
+                conn, _address = scheduler.io.sock_accept(server)
                 try:
-                    scheduler.sock_sendall(conn, b"PONG")
+                    scheduler.io.sock_sendall(conn, b"PONG")
                 finally:
                     conn.close()
 
@@ -314,7 +317,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_side() -> None:
-                conn, _address = scheduler.sock_accept(server)
+                conn, _address = scheduler.io.sock_accept(server)
                 conn.close()
 
             def connect_via_literal_ip() -> None:
@@ -348,7 +351,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_side() -> None:
-                conn, _address = scheduler.sock_accept(server)
+                conn, _address = scheduler.io.sock_accept(server)
                 conn.close()
 
             def connect_via_hostname() -> None:
@@ -380,9 +383,9 @@ class TestStreamsPoC:
                 return await stream_reader.readexactly(4)
 
             def accept_side() -> None:
-                conn, _address = scheduler.sock_accept(server)
+                conn, _address = scheduler.io.sock_accept(server)
                 try:
-                    scheduler.sock_sendall(conn, b"pong")
+                    scheduler.io.sock_sendall(conn, b"pong")
                 finally:
                     conn.close()
 
@@ -430,8 +433,8 @@ class TestStreamsPoC:
         reader, writer = socket.socketpair()
         recv_calls: list[tuple[object, ...]] = []
         recv_into_calls: list[tuple[object, ...]] = []
-        real_recv = scheduler.sock_recv
-        real_recv_into = scheduler.sock_recv_into
+        real_recv = scheduler.io.sock_recv
+        real_recv_into = scheduler.io.sock_recv_into
 
         def tracking_recv(sock, n):
             recv_calls.append((sock, n))
@@ -441,8 +444,8 @@ class TestStreamsPoC:
             recv_into_calls.append((sock, memoryview(buf).nbytes))
             return real_recv_into(sock, buf)
 
-        monkeypatch.setattr(scheduler, "sock_recv", tracking_recv)
-        monkeypatch.setattr(scheduler, "sock_recv_into", tracking_recv_into)
+        monkeypatch.setattr(scheduler.io, "sock_recv", tracking_recv)
+        monkeypatch.setattr(scheduler.io, "sock_recv_into", tracking_recv_into)
         try:
             reader.setblocking(False)
             writer.setblocking(True)
@@ -492,10 +495,10 @@ class TestStreamsPoC:
                 server.setblocking(False)
 
                 def accept_and_echo() -> None:
-                    conn, _address = scheduler.sock_accept(server)
+                    conn, _address = scheduler.io.sock_accept(server)
                     try:
-                        payload = scheduler.sock_recv(conn, 5)
-                        scheduler.sock_sendall(conn, payload.upper())
+                        payload = scheduler.io.sock_recv(conn, 5)
+                        scheduler.io.sock_sendall(conn, payload.upper())
                     finally:
                         conn.close()
 
@@ -519,7 +522,7 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         listen_sock = server.sockets[0]
         with server:
             assert listen_sock.fileno() != -1
@@ -535,7 +538,7 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         try:
 
             def exercise() -> None:
@@ -562,7 +565,7 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         try:
             server.close()
 
@@ -585,7 +588,7 @@ class TestStreamsPoC:
             release_handler.swait()
             writer.close()
 
-        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         try:
             _host, port = server.sockets[0].getsockname()
 
@@ -634,7 +637,7 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         _client, accepted = socket.socketpair()
         try:
             accepted.setblocking(False)
@@ -667,7 +670,7 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         _client, accepted = socket.socketpair()
         try:
             server.close()
@@ -711,7 +714,7 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         try:
             assert server._active_handlers == 0
         finally:
@@ -729,7 +732,7 @@ class TestStreamsPoC:
             writer.close()
             handled.set()
 
-        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         try:
             assert server.accept_operation.kind == "accept_many"
             _host, port = server.sockets[0].getsockname()
@@ -765,7 +768,7 @@ class TestStreamsPoC:
                     await writer.drain()
                     writer.close()
 
-                server = scheduler.start_server(client_handler, path=path, async_=True)
+                server = start_server(client_handler, path=path, async_=True, scheduler=scheduler)
 
                 responses: list[bytes] = []
                 finished = Event()
@@ -801,7 +804,7 @@ class TestStreamsPoC:
                 await writer.drain()
                 writer.close()
 
-            server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0), async_=True)
+            server = start_server(client_handler, addr=("127.0.0.1", 0), async_=True, scheduler=scheduler)
             _host, port = server.sockets[0].getsockname()
 
             responses: list[bytes] = []
@@ -824,4 +827,46 @@ class TestStreamsPoC:
         finally:
             if server is not None:
                 server.close()
+            scheduler.close()
+
+
+class TestStreamsRequiresIO:
+    def test_open_streams_without_io_backend(self):
+        from tealetio.scheduler import BasicScheduler
+
+        scheduler = BasicScheduler()
+        reader, _writer = socket.socketpair()
+        try:
+            with pytest.raises(RuntimeError, match="scheduler with IO support"):
+                open_streams(reader, scheduler=scheduler)
+        finally:
+            reader.close()
+            _writer.close()
+
+    def test_open_connection_without_io_backend(self):
+        from tealetio.scheduler import BasicScheduler
+
+        scheduler = BasicScheduler()
+        with pytest.raises(RuntimeError, match="scheduler with IO support"):
+            open_connection(addr=("127.0.0.1", 8080), scheduler=scheduler)
+
+    def test_start_server_without_io_backend(self):
+        from tealetio.scheduler import BasicScheduler
+
+        scheduler = BasicScheduler()
+
+        def client_handler(_reader: StreamReader, _writer: StreamWriter) -> None:
+            return None
+
+        with pytest.raises(RuntimeError, match="scheduler with IO support"):
+            start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+
+    def test_open_connection_selector_scheduler_raises_until_selector_io_manager(self):
+        from tealetio.selector import SyncSelectorScheduler
+
+        scheduler = SyncSelectorScheduler()
+        try:
+            with pytest.raises(RuntimeError, match="stream helpers require a proactor scheduler"):
+                open_connection(addr=("127.0.0.1", 0), scheduler=scheduler)
+        finally:
             scheduler.close()

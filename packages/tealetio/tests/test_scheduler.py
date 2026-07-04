@@ -1536,8 +1536,8 @@ class TestSchedulerAccessors:
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            with pytest.raises(NotImplementedError, match="IO-capable scheduler"):
-                s.sock_recv(reader, 1)
+            with pytest.raises(RuntimeError, match="scheduler with IO support"):
+                s.io
         finally:
             reader.close()
             _writer.close()
@@ -1550,11 +1550,11 @@ class TestSchedulerAccessors:
             writer.setblocking(False)
 
             def receive() -> bytes:
-                return s.sock_recv(reader, 5)
+                return s.io.sock_recv(reader, 5)
 
             def send() -> None:
                 s.sleep(0.001)
-                s.sock_sendall(writer, b"hello")
+                s.io.sock_sendall(writer, b"hello")
 
             task = s.spawn(receive)
             s.spawn(send)
@@ -1570,8 +1570,8 @@ class TestSchedulerAccessors:
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            with pytest.raises(NotImplementedError, match="poll requires"):
-                s.poll(reader.fileno(), select.POLLIN)
+            with pytest.raises(RuntimeError, match="scheduler with IO support"):
+                s.io
         finally:
             reader.close()
             _writer.close()

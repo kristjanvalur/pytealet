@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import errno
-import heapq
 import os
 import selectors
 import socket
@@ -10,17 +9,30 @@ import struct
 import sys
 import threading
 import time
-from collections import deque
-from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import CancelledError
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Generic, NoReturn, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, NoReturn, Protocol, TypeAlias, TypeVar, cast
 
 import uring_api
 
 from . import compat
-from .files import ProactorFile, parse_open_mode
-from .locks import ThreadsafeEvent
+from .files import ProactorFile
+from .io_manager import (
+    FileIO,
+    PollIO,
+    ProactorAccess,
+    ProactorIOManager,
+    ProactorSocketIO,
+    SocketIO,
+    SupportsProactorIO,
+)
+from .recv_iter import (
+    RECV_MANY_BUFFER_PRESSURE,
+    RecvIterBuffer,
+    _RecvManyResult,
+    _RecvManyResume,
+)
+from .socket_helpers import configure_scheduler_socket
 from .operations import ContinuousOperation, ContinuousStepResult, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
@@ -42,7 +54,14 @@ __all__ = [
     "Proactor",
     "ProactorBase",
     "ProactorFactory",
+    "FileIO",
+    "PollIO",
+    "ProactorAccess",
+    "ProactorIOManager",
     "ProactorScheduler",
+    "ProactorSocketIO",
+    "SocketIO",
+    "SupportsProactorIO",
     "SelectorProactor",
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",
@@ -66,17 +85,10 @@ _DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
 _DEFAULT_RECVITER_BUFFER_SIZE = 16 * 1024
 _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
-# ``recv_many`` result-callback index signalling provided-buffer pool pressure.
-RECV_MANY_BUFFER_PRESSURE = -1
-_RecvManyResume = Callable[[], None]
-_RecvManyResult = tuple[int, memoryview | _RecvManyResume]
 _RecvManyCallback = Callable[[_RecvManyResult], object]
-# ``index`` may be ``RECV_MANY_BUFFER_PRESSURE`` (-1) for pressure tokens.
-_RecvIterYield: TypeAlias = tuple[int, memoryview]
+_RecvIterBuffer = RecvIterBuffer
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
-
-T_Cargo = TypeVar("T_Cargo")
 
 
 def _stat_result_from_statx(buf: bytes | bytearray | memoryview) -> os.stat_result:
@@ -109,59 +121,6 @@ def _stat_result_from_statx(buf: bytes | bytearray | memoryview) -> os.stat_resu
             ctime_sec + ctime_nsec / 1_000_000_000,
         )
     )
-
-
-class _OrderedIngestBuffer(Generic[T_Cargo]):
-    """Hold out-of-order indexed items and release them in strict sequence."""
-
-    def __init__(self, *, start: int = 0) -> None:
-        self._next_index = start
-        self._heap: list[tuple[int, T_Cargo]] = []
-
-    @property
-    def next_index(self) -> int:
-        return self._next_index
-
-    def push(self, item: tuple[int, T_Cargo]) -> None:
-        """Buffer one out-of-order item.
-
-        Duplicate indices violate the ``recv_many`` transport contract.
-        """
-
-        if __debug__:
-            index = item[0]
-            assert index >= self._next_index, "stale recv_many index"
-            assert all(existing[0] != index for existing in self._heap), "duplicate recv_many index"
-        heapq.heappush(self._heap, item)
-
-    def pushpop(self, item: tuple[int, T_Cargo]) -> tuple[int, T_Cargo] | None:
-        """Fast path when ``item[0]`` equals ``next_index``; else ``push()`` then ``pop()``."""
-
-        if item[0] == self._next_index:
-            self._next_index += 1
-            return item
-        self.push(item)
-        return self.pop()
-
-    def pop(self) -> tuple[int, T_Cargo] | None:
-        """Return the next ready heap item, or ``None`` when it is not ``next_index``."""
-
-        if self._heap and self._heap[0][0] == self._next_index:
-            self._next_index += 1
-            return heapq.heappop(self._heap)
-        return None
-
-    def __bool__(self) -> bool:
-        if self._heap:
-            return self._heap[0][0] == self._next_index
-        return False
-
-    def __len__(self) -> int:
-        return len(self._heap)
-
-    def reset(self, *, start: int = 0) -> None:
-        self._heap.clear()
-        self._next_index = start
 
 
 _UringRing: TypeAlias = uring_api.Ring
@@ -263,14 +222,6 @@ def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
     return uring_api.Ring(entries=entries, flags=flags)
 
 
-def _configure_scheduler_socket(sock: socket.socket) -> socket.socket:
-    """Apply the scheduler socket contract: non-blocking and close-on-exec."""
-
-    sock.setblocking(False)
-    os.set_inheritable(sock.fileno(), False)
-    return sock
-
-
 class Proactor(Protocol):
     """Minimal completion-oriented IO backend used by `ProactorScheduler`."""
 
@@ -353,138 +304,6 @@ class Proactor(Protocol):
 
 
 ProactorFactory = Callable[[], Proactor]
-
-
-class _RecvIterBuffer:
-    """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``."""
-
-    def __init__(
-        self,
-        *,
-        buf_group: RecvBufferPool,
-    ) -> None:
-        self._buf_group = buf_group
-        self._resume: _RecvManyResume | None = None
-        self._lock = threading.Lock()
-        self._event = ThreadsafeEvent()
-        self._reorder = _OrderedIngestBuffer[memoryview]()
-        self._ready: deque[tuple[int, memoryview]] = deque()
-        self._pressure_pending = False
-        self._stream_done = False
-        self._stream_error: BaseException | None = None
-        self._stream: ContinuousOperation[_RecvManyResult] | None = None
-        self._closed = False
-
-    def attach_stream(self, stream: ContinuousOperation[_RecvManyResult]) -> None:
-        self._stream = stream
-        stream.add_done_callback(self._on_stream_done)
-
-    def _on_stream_done(self, stream: Operation[Any]) -> None:
-        with self._lock:
-            if stream.cancelled():
-                self._stream_error = CancelledError()
-            else:
-                exception = stream.exception()
-                if exception is not None:
-                    self._stream_error = exception
-            self._stream_done = True
-        self._event.set()
-
-    def on_result(self, result: _RecvManyResult) -> None:
-        index, data = result
-        notify = False
-        with self._lock:
-            if self._closed:
-                return
-            if index == RECV_MANY_BUFFER_PRESSURE:
-                # recv_many emits at most one pressure callback until the
-                # consumer advances past the pressure yield and recv restarts.
-                if self._pressure_pending:
-                    return
-                self._resume = cast(_RecvManyResume, data)
-                self._pressure_pending = True
-                notify = True
-            else:
-                ready = self._reorder.pushpop((index, cast(memoryview, data)))
-                if ready is not None:
-                    self._ready.append(ready)
-                notify = bool(self._ready) or len(self._reorder)
-        if notify:
-            self._event.set()
-
-    def _should_resume(self) -> _RecvManyResume | None:
-        # pressure/resume only applies while multishot recv is still active; EOF
-        # is the terminal recv_many message and completes the stream, so any
-        # leftover _resume after EOF delivery is stale and backend resume no-ops
-        if self._resume is None:
-            return None
-        if self._ready or len(self._reorder):
-            return None
-        buf_group = self._buf_group
-        # half the pool must be free; single-slot pools still need one free slot
-        required_free = max(1, buf_group.buffer_count // 2)
-        if buf_group.buffer_count - buf_group.leased_count < required_free:
-            return None
-        resume_fn = self._resume
-        self._resume = None
-        return resume_fn
-
-    def consume_pressure_resume(self) -> None:
-        """Re-arm ``recv_many`` once the buffer pool has enough free slots."""
-
-        with self._lock:
-            resume_fn = self._should_resume()
-        if resume_fn is not None:
-            resume_fn()
-
-    def take_next(self) -> _RecvIterYield | None:
-        while True:
-            try:
-                with self._lock:
-                    if self._pressure_pending:
-                        self._pressure_pending = False
-                        return (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
-                    ready_item: tuple[int, memoryview] | None = None
-                    if self._ready:
-                        ready_item = self._ready.popleft()
-                    elif self._reorder:
-                        ready_item = self._reorder.pop()
-                    if ready_item is not None:
-                        index, chunk = ready_item
-                        if not chunk:
-                            # ordered EOF beats a concurrent stream error/cancel race
-                            self._stream_done = True
-                            self._stream_error = None
-                            return None
-                        return (index, chunk)
-                    if self._stream_done:
-                        if self._stream_error is not None:
-                            raise self._stream_error
-                        return None
-                    self._event.clear()
-            finally:
-                with self._lock:
-                    pending_resume = self._should_resume()
-                if pending_resume is not None:
-                    pending_resume()
-            self._event.swait()
-
-    def close(self) -> None:
-        stream: ContinuousOperation[_RecvManyResult] | None
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            stream = self._stream
-            self._pressure_pending = False
-            self._ready.clear()
-            self._reorder.reset()
-        if stream is not None and not stream.done():
-            proactor = stream._proactor
-            if proactor is not None:
-                proactor.cancel_operation(stream)
-            else:
-                stream.cancel()
 
 
 class ProactorBase:
@@ -961,7 +780,7 @@ class SelectorProactor(ProactorBase):
 
         def attempt() -> tuple[socket.socket, Any]:
             conn, address = sock.accept()
-            _configure_scheduler_socket(conn)
+            configure_scheduler_socket(conn)
             return conn, address
 
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
@@ -991,7 +810,7 @@ class SelectorProactor(ProactorBase):
                     conn, address = sock.accept()
                 except (BlockingIOError, InterruptedError):
                     return ContinuousStepResult(progressed=progressed)
-                _configure_scheduler_socket(conn)
+                configure_scheduler_socket(conn)
                 operation._emit_result((conn, address))
                 progressed = True
 
@@ -1855,7 +1674,7 @@ class UringProactor(ProactorBase):
     ) -> Operation[tuple[socket.socket, Any]]:
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        _configure_scheduler_socket(conn)
+        configure_scheduler_socket(conn)
         operation = cast(Operation[tuple[socket.socket, Any]], entry.operation)
         operation._set_result((conn, address))
         return operation
@@ -1915,7 +1734,7 @@ class UringProactor(ProactorBase):
             return operation
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        _configure_scheduler_socket(conn)
+        configure_scheduler_socket(conn)
         operation._emit_result((conn, address))
         if operation.done():
             return operation
@@ -1935,7 +1754,7 @@ class UringProactor(ProactorBase):
             return operation
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        _configure_scheduler_socket(conn)
+        configure_scheduler_socket(conn)
         operation._emit_result((conn, address))
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             operation._set_result(None)
@@ -2483,6 +2302,13 @@ class ProactorScheduler(BaseScheduler):
             proactor_factory = SelectorProactor
         self._proactor = proactor_factory()
         self._proactor.set_clock(self.time)
+        self._io = ProactorIOManager(self._proactor)
+
+    @property
+    def io(self) -> ProactorIOManager:
+        """Return the blocking IO facade for this scheduler."""
+
+        return self._io
 
     @property
     def proactor(self) -> Proactor:
@@ -2507,319 +2333,6 @@ class ProactorScheduler(BaseScheduler):
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()
         self._proactor.wait(deadline)
-
-    # -- Operation waits ----------------------------------------------
-
-    def wait_operation(self, operation: Operation[T]) -> T:
-        """Block the current tealet until `operation` completes."""
-
-        if operation.done():
-            return operation.result()
-
-        ready = ThreadsafeEvent()
-
-        def wake(_operation: Operation[Any]) -> None:
-            ready.set()
-
-        operation.add_done_callback(wake)
-        try:
-            ready.swait()
-        finally:
-            if not operation.done():
-                operation.remove_done_callback(wake)
-                operation.cancel()
-        return operation.result()
-
-    # -- Asyncio-style socket helpers ---------------------------------
-
-    def sock_recv(self, sock: socket.socket, n: int) -> bytes:
-        """Receive up to `n` bytes from a non-blocking socket."""
-
-        return self.wait_operation(self._proactor.recv(sock, n))
-
-    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
-        """Create a provided-buffer pool for ``sock_recv_iter`` and ``recv_many``.
-
-        The returned object satisfies ``RecvBufferPool`` and may be passed to
-        ``sock_recv_iter(..., buffer_pool=pool)`` regardless of which proactor
-        backend is mounted. Selector backends use a leased-view shim; uring
-        backends use a kernel buffer group.
-        """
-
-        return self._proactor.create_recv_buffer_pool(buffer_size, buffer_count)
-
-    def shared_recv_buffer_pool(self) -> RecvBufferPool:
-        """Return the proactor's shared provided-buffer pool.
-
-        Lazily creates the default pool on first use unless
-        ``set_shared_recv_buffer_pool()`` installed a custom pool first.
-        """
-
-        return self._proactor.shared_recv_buffer_pool()
-
-    def set_shared_recv_buffer_pool(self, pool: RecvBufferPool) -> None:
-        """Replace the proactor's shared provided-buffer pool."""
-
-        self._proactor.set_shared_recv_buffer_pool(pool)
-
-    def _resolve_recv_buffer_pool(self, buffer_pool: RecvBufferPool | None) -> RecvBufferPool:
-        if buffer_pool is None:
-            return self._proactor.shared_recv_buffer_pool()
-        return buffer_pool
-
-    def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None) -> _RecvIterBuffer:
-        """Start ``recv_many`` and return the ordered receive buffer."""
-
-        pool = self._resolve_recv_buffer_pool(buffer_pool)
-        buffer = _RecvIterBuffer(buf_group=pool)
-        stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=pool)
-        buffer.attach_stream(stream)
-        return buffer
-
-    def sock_recv_iter(
-        self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None
-    ) -> Iterator[_RecvIterYield]:
-        """Incrementally receive byte chunks until EOF as a blocking iterator.
-
-        Each ``recv_many`` chunk is reordered into stream-index order before it
-        is yielded as a read-only ``memoryview``. Copy with ``bytes(data)`` when
-        owned storage is required past the current iteration step.
-
-        ``buffer_pool`` selects the provided-buffer pool. ``None`` uses the
-        proactor's shared pool from ``shared_recv_buffer_pool()``; pass a pool
-        from ``create_recv_buffer_pool()`` for dedicated sizing.
-
-        ``(RECV_MANY_BUFFER_PRESSURE, memoryview(b\"\"))`` is yielded when the
-        provided-buffer pool is exhausted. Drop held views when that token appears.
-        Receive restarts on a following ``take_next()`` once internal queues drain
-        and at least half of the attached pool's slots are free.
-
-        Must be consumed from a scheduler tealet so ``ThreadsafeEvent`` waits
-        block cooperatively.
-        """
-
-        buffer = self._open_sock_recv_iter(sock, buffer_pool)
-        try:
-            while True:
-                item = buffer.take_next()
-                if item is None:
-                    break
-                yield item
-        finally:
-            buffer.close()
-
-    def sock_recvall(
-        self,
-        sock: socket.socket,
-        progress: _RecvProgressCallback | None = None,
-        *,
-        buffer_pool: RecvBufferPool | None = None,
-    ) -> bytes:
-        """Receive byte chunks until EOF and return their concatenation.
-
-        ``buffer_pool`` selects the provided-buffer pool. ``None`` uses the
-        proactor's shared pool from ``shared_recv_buffer_pool()``.
-        """
-
-        if progress is None:
-            process = bytes
-        else:
-
-            def process(chunk: memoryview) -> bytes:
-                cargo = bytes(chunk)
-                if cargo:
-                    progress(cargo)
-                return cargo
-
-        return b"".join((process(chunk) for _, chunk in self.sock_recv_iter(sock, buffer_pool)))
-
-    def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
-        """Receive bytes from a non-blocking socket into `buf`."""
-
-        return self.wait_operation(self._proactor.recv_into(sock, buf))
-
-    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
-        """Receive datagram bytes and address from a non-blocking socket."""
-
-        return self.wait_operation(self._proactor.recvfrom(sock, bufsize))
-
-    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
-        """Receive datagram bytes into `buf` from a non-blocking socket."""
-
-        return self.wait_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
-
-    def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> None:
-        """Send all `data` through a non-blocking socket."""
-
-        return self.wait_operation(self._proactor.sendall(sock, data, progress))
-
-    def sock_send_iter(
-        self,
-        sock: socket.socket,
-        chunks: Iterable[bytes | bytearray | memoryview],
-    ) -> None:
-        """Send every chunk from ``chunks`` through a non-blocking socket.
-
-        Each non-empty chunk is sent with the proactor's ``sendall`` path before
-        the next chunk is pulled from the iterable. Track progress in the
-        iterable or generator you pass when you need it; call ``sock_sendall``
-        directly when a single buffer needs ``progress=`` reporting.
-
-        Must be called from a scheduler tealet so socket waits block
-        cooperatively.
-        """
-
-        for chunk in chunks:
-            if not chunk:
-                continue
-            self.sock_sendall(sock, memoryview(chunk))
-
-    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
-        """Send one datagram through a non-blocking socket."""
-
-        return self.wait_operation(self._proactor.sendto(sock, data, address))
-
-    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
-        """Accept one connection from a non-blocking listening socket."""
-
-        return self.wait_operation(self._proactor.accept(sock))
-
-    def sock_connect(self, sock: socket.socket, address: Any) -> None:
-        """Connect a non-blocking socket to `address`."""
-
-        return self.wait_operation(self._proactor.connect(sock, address))
-
-    def sock_create(
-        self,
-        family: int,
-        type: int,
-        proto: int = 0,
-        *,
-        flags: int = 0,
-    ) -> socket.socket:
-        """Create a non-blocking, close-on-exec socket for scheduler-backed IO.
-
-        Stdlib ``socket.socket()`` for now. ``flags`` is reserved for a future
-        proactor path (for example ``UringProactor`` via ``submit_socket()``).
-        The returned socket is always configured non-blocking and close-on-exec.
-        """
-
-        del flags
-        return _configure_scheduler_socket(socket.socket(family, type, proto))
-
-    # -- Stream helpers (asyncio-shaped layering) -----------------------
-
-    def open_streams(
-        self,
-        sock: socket.socket,
-        *,
-        limit: int = 2**16,
-        stream_factory: Any = None,
-        async_: bool = False,
-    ) -> tuple[Any, Any]:
-        from .streams import _open_streams
-
-        return _open_streams(self, sock, limit=limit, stream_factory=stream_factory, async_=async_)
-
-    def open_connection(
-        self,
-        *,
-        addr: tuple[str, int] | None = None,
-        path: str | None = None,
-        family: int = socket.AF_UNSPEC,
-        proto: int = 0,
-        limit: int = 2**16,
-        stream_factory: Any = None,
-        async_: bool = False,
-    ) -> tuple[Any, Any]:
-        from .streams import _connect_tcp_streams, _connect_unix_streams
-
-        if path is not None:
-            if addr is not None:
-                raise TypeError("open_connection() accepts addr= or path=, not both")
-            return _connect_unix_streams(
-                self,
-                path,
-                limit=limit,
-                stream_factory=stream_factory,
-                async_=async_,
-            )
-        if addr is None:
-            raise TypeError("open_connection() requires addr= or path=")
-        return _connect_tcp_streams(
-            self,
-            addr,
-            family=family,
-            proto=proto,
-            limit=limit,
-            stream_factory=stream_factory,
-            async_=async_,
-        )
-
-    def start_server(
-        self,
-        client_handler: Callable[..., Any],
-        *,
-        addr: tuple[str | None, int] | None = None,
-        path: str | None = None,
-        family: int = socket.AF_INET,
-        backlog: int = 100,
-        limit: int = 2**16,
-        stream_factory: Any = None,
-        async_: bool = False,
-    ) -> Any:
-        from .streams import _start_server
-
-        return _start_server(
-            self,
-            client_handler,
-            addr=addr,
-            path=path,
-            family=family,
-            backlog=backlog,
-            limit=limit,
-            stream_factory=stream_factory,
-            async_=async_,
-        )
-
-    def poll(self, fd: int, mask: int) -> int:
-        """Wait until an fd reports events in `mask` and return the readiness bitmask."""
-
-        return self.wait_operation(self._proactor.poll(fd, mask))
-
-    def poll_many(
-        self,
-        fd: int,
-        mask: int,
-        callback: Callable[[int], object],
-    ) -> ContinuousOperation[int]:
-        """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
-
-        return self._proactor.poll_many(fd, mask, callback)
-
-    def open(self, path: str, mode: str = "rb") -> ProactorFile:
-        """Open a positioned binary file through the proactor backend."""
-
-        flags, file_mode = parse_open_mode(mode)
-        try:
-            fd = self.wait_operation(self._proactor.openat(path, flags, file_mode))
-        except NotImplementedError as exc:
-            raise NotImplementedError("scheduler file I/O requires a proactor with openat support") from exc
-        try:
-            return ProactorFile(
-                self,
-                self._proactor,
-                fd,
-                path=path,
-                flags=flags,
-                append="a" in mode,
-            )
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
 
     def _has_pending_driver_work(self) -> bool:
         return self._proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)

@@ -10,9 +10,10 @@ from typing import Any, Literal, Protocol, TypeVar, overload
 
 from asynkit import coro_drive
 
+from .io_manager import ProactorIOManager, ProactorSocketIO, SocketIO
 from .locks import Condition
 from .operations import ContinuousOperation
-from .proactor import ProactorScheduler
+from .scheduler import BaseScheduler
 
 T = TypeVar("T")
 
@@ -41,7 +42,7 @@ class StreamFactory(Protocol):
 
     def __call__(
         self,
-        scheduler: ProactorScheduler,
+        io: SocketIO,
         sock: socket.socket,
         *,
         limit: int = _DEFAULT_LIMIT,
@@ -53,7 +54,7 @@ class AsyncStreamFactory(Protocol):
 
     def __call__(
         self,
-        scheduler: ProactorScheduler,
+        io: SocketIO,
         sock: socket.socket,
         *,
         limit: int = _DEFAULT_LIMIT,
@@ -64,8 +65,9 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
     """Drive an async-stream coroutine without an asyncio event loop.
 
     ``AsyncStream*`` methods are ``async def`` for handler compatibility, but
-    they block through ``scheduler.wait_operation`` rather than yielding asyncio
-    futures. Unexpected yields surface as ``RuntimeError``.
+    they ultimately block through the proactor IO manager's ``wait_operation``
+    path rather than yielding asyncio futures. Public stream and factory APIs
+    depend on ``SocketIO`` only. Unexpected yields surface as ``RuntimeError``.
     """
 
     def on_yield(value: object) -> object:
@@ -75,10 +77,10 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
 
 
 class SocketTransport:
-    """Blocking socket I/O through a proactor scheduler."""
+    """Blocking socket I/O through a scheduler IO facade."""
 
-    def __init__(self, scheduler: ProactorScheduler, sock: socket.socket) -> None:
-        self._scheduler = scheduler
+    def __init__(self, io: SocketIO, sock: socket.socket) -> None:
+        self._io = io
         self._sock = sock
         self._closed = False
 
@@ -87,13 +89,13 @@ class SocketTransport:
         return self._sock
 
     def recv(self, n: int) -> bytes:
-        return self._scheduler.sock_recv(self._sock, n)
+        return self._io.sock_recv(self._sock, n)
 
     def recv_into(self, buf: Any) -> int:
-        return self._scheduler.sock_recv_into(self._sock, buf)
+        return self._io.sock_recv_into(self._sock, buf)
 
     def sendall(self, data: bytes | bytearray | memoryview) -> None:
-        self._scheduler.sock_sendall(self._sock, data)
+        self._io.sock_sendall(self._sock, data)
 
     def close(self) -> None:
         if self._closed:
@@ -357,44 +359,57 @@ class AsyncStreamWriter:
 
 
 def default_stream_factory(
-    scheduler: ProactorScheduler,
+    io: SocketIO,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
 ) -> tuple[StreamReader, StreamWriter]:
     """Construct the default native stream pair for a connected socket."""
 
-    transport = SocketTransport(scheduler, sock)
+    transport = SocketTransport(io, sock)
     reader = StreamReader(transport, limit=limit)
     writer = StreamWriter(transport, reader)
     return reader, writer
 
 
 def default_async_stream_factory(
-    scheduler: ProactorScheduler,
+    io: SocketIO,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
     """Construct the default asyncio-shaped stream pair for a connected socket."""
 
-    transport = SocketTransport(scheduler, sock)
+    transport = SocketTransport(io, sock)
     reader = AsyncStreamReader(transport, limit=limit)
     writer = AsyncStreamWriter(transport, reader)
     return reader, writer
 
 
-def _running_proactor_scheduler() -> ProactorScheduler:
+def _resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:
+    if scheduler is not None:
+        return scheduler
     from .scheduler import get_running_scheduler
 
-    scheduler = get_running_scheduler()
-    if not isinstance(scheduler, ProactorScheduler):
-        raise RuntimeError("stream helpers require a proactor scheduler")
-    return scheduler
+    return get_running_scheduler()
+
+
+def _require_proactor_io(scheduler: BaseScheduler) -> ProactorIOManager:
+    """Return ``scheduler.io`` for proactor schedulers or raise with a targeted message."""
+
+    from .io_manager import IO_UNSUPPORTED_ERROR, SELECTOR_IO_UNSUPPORTED_ERROR
+    from .proactor import ProactorScheduler
+    from .selector import SelectorScheduler
+
+    if isinstance(scheduler, ProactorScheduler):
+        return scheduler.io
+    if isinstance(scheduler, SelectorScheduler):
+        raise RuntimeError(SELECTOR_IO_UNSUPPORTED_ERROR)
+    raise RuntimeError(IO_UNSUPPORTED_ERROR)
 
 
 def _open_streams(
-    scheduler: ProactorScheduler,
+    io: SocketIO,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
@@ -407,7 +422,7 @@ def _open_streams(
         factory = default_async_stream_factory if async_ else default_stream_factory
     else:
         factory = stream_factory
-    return factory(scheduler, sock, limit=limit)
+    return factory(io, sock, limit=limit)
 
 
 @overload
@@ -436,6 +451,7 @@ def open_streams(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: Any = None,
     async_: bool = False,
+    scheduler: BaseScheduler | None = None,
 ) -> tuple[Any, Any]:
     """Wrap a connected non-blocking socket as stream endpoints.
 
@@ -445,7 +461,7 @@ def open_streams(
     """
 
     return _open_streams(
-        _running_proactor_scheduler(),
+        _require_proactor_io(_resolve_scheduler(scheduler)),
         sock,
         limit=limit,
         stream_factory=stream_factory,
@@ -454,7 +470,7 @@ def open_streams(
 
 
 def _connect_tcp_streams(
-    scheduler: ProactorScheduler,
+    scheduler: BaseScheduler,
     addr: tuple[str, int],
     *,
     family: int = socket.AF_UNSPEC,
@@ -463,6 +479,7 @@ def _connect_tcp_streams(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> tuple[Any, Any]:
+    io = _require_proactor_io(scheduler)
     # ``ensure_resolved`` fast-paths literal IPv4/IPv6 via ``ipaddr_info`` and
     # falls back to ``scheduler.getaddrinfo()`` for hostnames (executor-backed).
     infos = scheduler.ensure_resolved(
@@ -478,10 +495,10 @@ def _connect_tcp_streams(
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
         sock: socket.socket | None = None
         try:
-            sock = scheduler.sock_create(addr_family, socktype, addr_proto)
-            scheduler.sock_connect(sock, sockaddr)
+            sock = io.sock_create(addr_family, socktype, addr_proto)
+            io.sock_connect(sock, sockaddr)
             return _open_streams(
-                scheduler,
+                io,
                 sock,
                 limit=limit,
                 stream_factory=stream_factory,
@@ -549,6 +566,7 @@ def open_connection(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: Any = None,
     async_: bool = False,
+    scheduler: BaseScheduler | None = None,
 ) -> tuple[Any, Any]:
     """Connect and return stream endpoints.
 
@@ -561,12 +579,12 @@ def open_connection(
     default factory when ``stream_factory`` is omitted.
     """
 
-    scheduler = _running_proactor_scheduler()
+    sched = _resolve_scheduler(scheduler)
     if path is not None:
         if addr is not None:
             raise TypeError("open_connection() accepts addr= or path=, not both")
         return _connect_unix_streams(
-            scheduler,
+            sched,
             path,
             limit=limit,
             stream_factory=stream_factory,
@@ -575,7 +593,7 @@ def open_connection(
     if addr is None:
         raise TypeError("open_connection() requires addr= or path=")
     return _connect_tcp_streams(
-        scheduler,
+        sched,
         addr,
         family=family,
         proto=proto,
@@ -586,7 +604,7 @@ def open_connection(
 
 
 def _connect_unix_streams(
-    scheduler: ProactorScheduler,
+    scheduler: BaseScheduler,
     path: str,
     *,
     limit: int = _DEFAULT_LIMIT,
@@ -596,14 +614,15 @@ def _connect_unix_streams(
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
-    sock = scheduler.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
+    io = _require_proactor_io(scheduler)
+    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        scheduler.sock_connect(sock, path)
+        io.sock_connect(sock, path)
     except OSError:
         sock.close()
         raise
     return _open_streams(
-        scheduler,
+        io,
         sock,
         limit=limit,
         stream_factory=stream_factory,
@@ -612,14 +631,14 @@ def _connect_unix_streams(
 
 
 def _bind_tcp_socket(
-    scheduler: ProactorScheduler,
+    io: SocketIO,
     addr: tuple[str | None, int],
     *,
     family: int = socket.AF_INET,
     backlog: int,
 ) -> socket.socket:
     host, port = addr
-    sock = scheduler.sock_create(family, socket.SOCK_STREAM)
+    sock = io.sock_create(family, socket.SOCK_STREAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         bind_host = "" if host is None else host
@@ -631,7 +650,7 @@ def _bind_tcp_socket(
     return sock
 
 
-def _bind_unix_socket(scheduler: ProactorScheduler, path: str, *, backlog: int) -> socket.socket:
+def _bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket:
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
@@ -640,7 +659,7 @@ def _bind_unix_socket(scheduler: ProactorScheduler, path: str, *, backlog: int) 
     except FileNotFoundError:
         pass
 
-    sock = scheduler.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.bind(path)
         sock.listen(backlog)
@@ -669,13 +688,16 @@ class StreamServer:
     to drain in-flight handlers.
     """
 
+    _io: SocketIO
+
     def __init__(
         self,
-        scheduler: ProactorScheduler,
+        scheduler: BaseScheduler,
         sockets: list[socket.socket],
         accept_operation: ContinuousOperation[tuple[socket.socket, Any]],
     ) -> None:
         self._scheduler = scheduler
+        self._io = _require_proactor_io(scheduler)
         self._sockets = tuple(sockets)
         self._accept_operation = accept_operation
         self._shutdown = Condition()
@@ -753,7 +775,7 @@ class StreamServer:
                         if self._closed:
                             return
                     reader, writer = _open_streams(
-                        self._scheduler,
+                        self._io,
                         conn,
                         limit=limit,
                         stream_factory=stream_factory,
@@ -791,7 +813,7 @@ class StreamServer:
 
 
 def _start_stream_server(
-    scheduler: ProactorScheduler,
+    scheduler: BaseScheduler,
     sock: socket.socket,
     client_handler: Callable[..., Any],
     *,
@@ -799,6 +821,11 @@ def _start_stream_server(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> StreamServer:
+    """Start ``accept_many`` on a listening socket and return a ``StreamServer``.
+
+    Requires ``ProactorSocketIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
+    """
+
     server: StreamServer | None = None
 
     def on_accept(accepted: tuple[socket.socket, Any]) -> None:
@@ -816,13 +843,14 @@ def _start_stream_server(
             async_=async_,
         )
 
-    accept_operation = scheduler.proactor.accept_many(sock, on_accept)
+    io: ProactorSocketIO = _require_proactor_io(scheduler)
+    accept_operation = io.proactor.accept_many(sock, on_accept)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
 
 
 def _start_server(
-    scheduler: ProactorScheduler,
+    scheduler: BaseScheduler,
     client_handler: Callable[..., Any],
     *,
     addr: tuple[str | None, int] | None = None,
@@ -833,12 +861,13 @@ def _start_server(
     stream_factory: Any = None,
     async_: bool = False,
 ) -> StreamServer:
+    io = _require_proactor_io(scheduler)
     if path is not None:
         if addr is not None:
             raise TypeError("start_server() accepts addr= or path=, not both")
-        sock = _bind_unix_socket(scheduler, path, backlog=backlog)
+        sock = _bind_unix_socket(io, path, backlog=backlog)
     elif addr is not None:
-        sock = _bind_tcp_socket(scheduler, addr, family=family, backlog=backlog)
+        sock = _bind_tcp_socket(io, addr, family=family, backlog=backlog)
     else:
         raise TypeError("start_server() requires addr= or path=")
     return _start_stream_server(
@@ -911,6 +940,7 @@ def start_server(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: Any = None,
     async_: bool = False,
+    scheduler: BaseScheduler | None = None,
 ) -> StreamServer:
     """Start a stream server that dispatches each accept to ``client_handler``.
 
@@ -932,7 +962,7 @@ def start_server(
     """
 
     return _start_server(
-        _running_proactor_scheduler(),
+        _resolve_scheduler(scheduler),
         client_handler,
         addr=addr,
         path=path,
