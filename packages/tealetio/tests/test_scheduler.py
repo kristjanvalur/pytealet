@@ -3035,6 +3035,116 @@ class TestSchedulerAccessors:
             s.run_until_complete(object())  # type: ignore[arg-type]
 
 
+class TestSchedulerCallbackExceptions:
+    def test_call_soon_callback_exception_routes_to_handler(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[BaseException] = []
+        s.set_exception_handler(lambda context: seen.append(context["exception"]))
+
+        def boom() -> None:
+            raise RuntimeError("boom")
+
+        def worker() -> None:
+            s.call_soon(boom)
+            s.yield_()
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+
+        assert len(seen) == 1
+        assert str(seen[0]) == "boom"
+
+    def test_call_soon_threadsafe_callback_exception_routes_to_handler(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[BaseException] = []
+        s.set_exception_handler(lambda context: seen.append(context["exception"]))
+
+        def boom() -> None:
+            raise RuntimeError("threadsafe boom")
+
+        def worker() -> None:
+            s.call_soon_threadsafe(boom)
+            s.yield_()
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+
+        assert len(seen) == 1
+        assert str(seen[0]) == "threadsafe boom"
+
+    def test_call_later_callback_exception_routes_to_handler(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[BaseException] = []
+        s.set_exception_handler(lambda context: seen.append(context["exception"]))
+
+        def boom() -> None:
+            raise RuntimeError("timer boom")
+
+        def worker() -> None:
+            s.call_later(0.0, boom)
+            s.yield_()
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+
+        assert len(seen) == 1
+        assert str(seen[0]) == "timer boom"
+
+    def test_threadsafe_callback_drain_stops_on_cancelled_error_leaving_queue_tail(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def tail() -> None:
+            seen.append("tail")
+
+        def worker() -> None:
+            s.call_soon_threadsafe(_tealet.current().cancel)
+            s.call_soon_threadsafe(seen.append, "queued")
+            s.call_soon_threadsafe(tail)
+            try:
+                s.yield_()
+            except CancelledError:
+                seen.append("caught")
+            s.yield_()
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+
+        assert seen == ["caught", "queued", "tail"]
+
+    def test_scheduled_cancel_propagates_cancelled_error_not_exception_handler(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        handler_errors: list[BaseException] = []
+        s.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+
+        def worker() -> None:
+            current = _tealet.current()
+            seen.append("before")
+            s.call_soon_threadsafe(current.cancel)
+            try:
+                s.yield_()
+            except asyncio.CancelledError:
+                seen.append("cancelled")
+                raise
+
+        main = s.spawn(worker)
+        with pytest.raises(asyncio.CancelledError):
+            s.run_until_complete(main)
+
+        assert seen == ["before", "cancelled"]
+        assert handler_errors == []
+
+
 class TestSchedulerExamples:
     def test_scheduler_is_running_for_run_only(self):
         s = _new_scheduler()

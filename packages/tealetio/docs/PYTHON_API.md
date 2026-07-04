@@ -460,6 +460,120 @@ iterator that yields scheduler futures in child completion order. If the timeout
 expires before all children finish, iteration raises `TimeoutError`; unfinished
 children are not cancelled by `as_completed(...)`.
 
+## Streams (proof of concept)
+
+> **Planned refactor:** IO helpers currently live on `ProactorScheduler` for
+> ergonomics. A follow-up change will introduce a composed `IOManager` exposed
+> as `scheduler.io`; see `IO_MANAGER_DESIGN.md`.
+
+`tealetio.streams` provides tealet-native stream endpoints backed by blocking
+socket I/O through the scheduler. `StreamReader` and `StreamWriter` are the
+default native types with synchronous methods. `AsyncStreamReader` and
+`AsyncStreamWriter` mirror the asyncio stream API shape (`async def read`,
+`drain`, and so on) so handlers written for asyncio-style web code can run under
+`run_coro()` or `scheduler.await_()` without creating asyncio futures for socket
+reads and writes.
+
+```python
+from tealetio.proactor import SyncProactorScheduler
+from tealetio.streams import open_streams, run_coro
+
+scheduler = SyncProactorScheduler()
+
+async def handler(reader, writer):
+    line = await reader.readline()
+    writer.write(line.upper())
+    await writer.drain()
+
+def exercise(sock):
+    reader, writer = open_streams(sock, async_=True)
+    return run_coro(handler(reader, writer))
+```
+
+Like asyncio, stream connect and server helpers exist at module level and as
+scheduler instance methods. `open_connection(addr=(host, port))` resolves the
+running scheduler through `get_running_scheduler()` and calls the same
+implementation as `scheduler.open_connection(addr=...)`. Module helpers and
+instance methods both end up in `streams._connect_tcp_streams(...)` /
+`streams._connect_unix_streams(...)`; the only functional difference between
+native and asyncio-shaped connect helpers at that layer is which default stream
+factory `async_` selects.
+
+`open_connection(addr=(host, port), async_=False)` connects a TCP socket and
+returns `(reader, writer)`. The host may be a hostname or literal IPv4/IPv6
+address; TCP connects resolve through `scheduler.ensure_resolved()`, which
+fast-paths literal IPs and calls `getaddrinfo` on a worker thread for names.
+Resolved addresses are tried in order (no happy eyeballs). Pass `path=` for
+Unix-domain stream sockets without name resolution, e.g.
+`open_connection(path="/tmp/sock")`. Pass `async_=True`
+for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
+wraps an existing non-blocking connected socket. The `async_` flag only selects
+the default stream factory when `stream_factory` is omitted.
+Under the hood, `SocketTransport` calls `scheduler.sock_recv_into()` and
+`scheduler.sock_sendall()`.
+
+Pass `stream_factory=` to `open_streams()` or `open_connection(...)` to customise the stream
+types created for each connection. Use `StreamFactory` for native
+`(StreamReader, StreamWriter)` pairs and `AsyncStreamFactory` for asyncio-shaped
+pairs. `default_stream_factory` and `default_async_stream_factory` are the
+built-in implementations.
+
+Proactor socket operations accept `socket.socket` objects. `UringProactor`
+submits the socket's file descriptor to io_uring internally; the public API
+still expects a non-blocking `socket.socket` so accepted connections, peer
+metadata, and selector-backed backends share one handle type.
+
+`scheduler.sock_create(family, type, proto=0, *, flags=0)` is the socket
+creation entry point for scheduler-backed IO. The returned socket is always
+non-blocking and close-on-exec. `ProactorScheduler.sock_create()` currently
+calls stdlib `socket.socket()` and applies that configuration; `flags` is
+reserved for a future proactor path where `UringProactor` may use
+`uring_api.Ring.submit_socket()`
+(`IORING_OP_SOCKET`) when policy and kernel probe allow it, then wrap the
+returned fd with `socket.socket(fileno=fd)` (the same pattern already used for
+`accept_many` completions). Stream connect/server helpers call
+`scheduler.sock_create()` so uring-native creation can stay behind one policy
+gate.
+
+## Name resolution
+
+`scheduler.getaddrinfo(host, port, ...)` and `scheduler.getnameinfo(sockaddr,
+flags=0)` run the stdlib resolver on a worker thread through
+`run_in_executor`, matching asyncio's `loop.getaddrinfo()` /
+`loop.getnameinfo()`. `scheduler.ensure_resolved(address, ...)` skips the
+executor when `host` is already a literal IP, like asyncio's `_ensure_resolved`.
+Module helpers `tealetio.getaddrinfo(...)`, `tealetio.getnameinfo(...)`, and
+`tealetio.ensure_resolved(...)` delegate to the running scheduler.
+
+`open_connection(addr=...)` always calls `scheduler.ensure_resolved(...)` before
+`sock_connect`; see the name-resolution section above for the literal-IP
+fast path.
+
+`start_server(client_handler, addr=(host, port), async_=False)` binds a TCP
+listening socket; use ``addr=(None, port)`` or ``addr=("", port)`` for all
+interfaces. Pass ``path=`` for Unix-domain listeners. Each accept arms
+`proactor.accept_many()`. Accepted connections are marshalled onto the scheduler
+with `call_soon_threadsafe()` and wrapped as stream endpoints before the handler
+runs in a spawned tealet. ``async_=True`` selects asyncio-shaped streams and
+drives the handler through ``run_coro()``. On ``UringProactor``,
+accept uses multishot `IORING_ACCEPT_MULTISHOT`
+when probed; otherwise the proactor falls back to repeated one-shot accepts (see
+the `accept_many` notes above).
+
+`start_server(...)` returns a `StreamServer`. ``close()`` stops accepting;
+``wait_closed()`` blocks until in-flight handler tealets finish. Use as a context
+manager for both. ``serve_forever()`` parks the current tealet until
+``close()`` is called (accept is already active); it does not install signal
+handlers — use ``tealetio.run()`` / ``Runner`` for shutdown signals.
+
+Stream reads use `scheduler.sock_recv_into()` through `SocketTransport.recv_into()`
+so `UringProactor.recv_into()` can fill caller-owned buffers without an extra
+`recv()` copy. `StreamReader.readinto()` fills a caller buffer directly; other
+read methods assemble data in an internal `bytearray` before returning `bytes`.
+
+This module is an early proof of concept. It does not integrate with stdlib
+`asyncio.StreamReader` instances or the `ForwardingProactor` guest loop.
+
 ## Synchronisation Primitives
 
 `tealetio` provides scheduler-aware synchronisation primitives modelled after

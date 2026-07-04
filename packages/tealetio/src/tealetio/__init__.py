@@ -7,6 +7,7 @@ from . import selector as selector
 from . import tasks as tasks
 from . import proactor as proactor
 from . import asyncio as asyncio
+from . import streams as streams
 from .locks import *
 from .tasks import *
 from .scheduler import *
@@ -14,6 +15,7 @@ from .runner import *
 from .selector import *
 from .proactor import *
 from .asyncio import *
+from .streams import *
 
 __all__ = (
     locks.__all__
@@ -23,4 +25,5 @@ __all__ = (
     + selector.__all__
     + proactor.__all__
     + asyncio.__all__
+    + streams.__all__
 )

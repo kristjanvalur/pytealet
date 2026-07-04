@@ -8,6 +8,7 @@ import heapq
 import importlib
 import inspect
 import itertools
+import logging
 import queue
 import socket
 import threading
@@ -49,6 +50,7 @@ from . import tasks as _tasks
 
 T = TypeVar("T")
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
 
@@ -80,6 +82,9 @@ __all__ = [
     "create_task",
     "ensure_future",
     "gather",
+    "getaddrinfo",
+    "getnameinfo",
+    "ensure_resolved",
     "get_scheduler",
     "get_running_scheduler",
     "set_scheduler",
@@ -670,6 +675,55 @@ def to_thread(func: Callable[..., T], /, *args: object, **kwargs: object) -> T:
     return get_running_scheduler().run_in_executor(None, call).wait()
 
 
+def getaddrinfo(
+    host: str | bytes | None,
+    port: str | int | bytes | None,
+    *,
+    family: int = 0,
+    type: int = 0,
+    proto: int = 0,
+    flags: int = 0,
+) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+    """Resolve ``host``/``port`` on a worker thread and wait from the current tealet."""
+
+    return get_running_scheduler().getaddrinfo(
+        host,
+        port,
+        family=family,
+        type=type,
+        proto=proto,
+        flags=flags,
+    )
+
+
+def getnameinfo(sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
+    """Reverse-resolve ``sockaddr`` on a worker thread and wait from the current tealet."""
+
+    return get_running_scheduler().getnameinfo(sockaddr, flags=flags)
+
+
+def ensure_resolved(
+    address: tuple[Any, ...],
+    *,
+    family: int = 0,
+    type: int = socket.SOCK_STREAM,
+    proto: int = 0,
+    flags: int = 0,
+) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+    """Resolve ``address`` like asyncio ``loop._ensure_resolved``."""
+
+    from . import dns
+
+    return dns.ensure_resolved(
+        get_running_scheduler(),
+        address,
+        family=family,
+        type=type,
+        proto=proto,
+        flags=flags,
+    )
+
+
 def sleep(delay: float) -> None:
     """Suspend the current task for `delay` seconds.
 
@@ -981,6 +1035,14 @@ class DeadlockError(RuntimeError):
     """Raised when the scheduler has no runnable tasks."""
 
 
+def _format_callback_source(callback: Callable[..., object], args: tuple[object, ...]) -> str:
+    func_repr = getattr(callback, "__qualname__", repr(callback))
+    if args:
+        arg_repr = ", ".join(repr(arg) for arg in args)
+        return f"{func_repr}({arg_repr})"
+    return f"{func_repr}()"
+
+
 class TimerHandle:
     """Cancellable callback scheduled to run in the future."""
 
@@ -1017,13 +1079,10 @@ class TimerHandle:
 
     # -- Execution -----------------------------------------------------
 
-    def _run(self) -> None:
+    def _run(self, scheduler: BaseScheduler) -> None:
         if self._cancelled:
             return
-        if self._context is None:
-            self._callback(*self._args)
-            return
-        self._context.run(self._callback, *self._args)
+        scheduler._run_callback(self._callback, self._args, self._context, handle=self)
 
     def __enter__(self) -> "TimerHandle":
         return self
@@ -1231,6 +1290,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._target_count = None
         self._default_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._task_factory: _tasks.TaskFactory = _tasks.DefaultTaskFactory()
+        self._exception_handler: Callable[[dict[str, Any]], object] | None = None
 
     # -- Basic state ---------------------------------------------------
 
@@ -1278,6 +1338,75 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Set the task factory, or restore the default when `factory` is None."""
 
         self._task_factory = _tasks.DefaultTaskFactory() if factory is None else factory
+
+    def set_exception_handler(self, handler: Callable[[dict[str, Any]], object] | None) -> None:
+        """Set the callback invoked for exceptions raised by scheduled callbacks."""
+
+        self._exception_handler = handler
+
+    def get_exception_handler(self) -> Callable[[dict[str, Any]], object] | None:
+        """Return the current scheduled-callback exception handler."""
+
+        return self._exception_handler
+
+    def default_exception_handler(self, context: dict[str, Any]) -> None:
+        """Log an exception raised by a scheduled callback."""
+
+        message = context.get("message") or "Unhandled exception in scheduler callback"
+        exception = context.get("exception")
+        exc_info: bool | tuple[type[BaseException], BaseException, Any] = False
+        if exception is not None:
+            exc_info = (type(exception), exception, exception.__traceback__)
+        log_lines = [message]
+        for key in sorted(context):
+            if key in {"message", "exception"}:
+                continue
+            log_lines.append(f"{key}: {context[key]!r}")
+        logger.error("\n".join(log_lines), exc_info=exc_info)
+
+    def call_exception_handler(self, context: dict[str, Any]) -> None:
+        """Dispatch a scheduled-callback exception to the configured handler."""
+
+        handler = self._exception_handler
+        if handler is None:
+            try:
+                self.default_exception_handler(context)
+            except (SystemExit, KeyboardInterrupt):
+                raise
+            except BaseException:
+                logger.error("Exception in default exception handler", exc_info=True)
+            return
+        try:
+            handler(context)
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException:
+            logger.error("Exception in exception handler", exc_info=True)
+
+    def _run_callback(
+        self,
+        callback: Callable[..., object],
+        args: tuple[object, ...],
+        context: contextvars.Context | None = None,
+        *,
+        handle: TimerHandle | None = None,
+    ) -> None:
+        try:
+            if context is None:
+                callback(*args)
+            else:
+                context.run(callback, *args)
+        except (SystemExit, KeyboardInterrupt, _tasks.CancelledError):
+            raise
+        except BaseException as exc:
+            self.call_exception_handler(
+                {
+                    "message": f"Exception in callback {_format_callback_source(callback, args)}",
+                    "exception": exc,
+                    "scheduler": self,
+                    "handle": handle,
+                }
+            )
 
     def main_context(self) -> ContextManager[None]:
         """Use this scheduler's task factory for the current main tealet wrapper."""
@@ -1342,6 +1471,59 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return self.spawn(wait_for_shutdown)
 
     # -- External integration APIs ------------------------------------
+
+    def getaddrinfo(
+        self,
+        host: str | bytes | None,
+        port: str | int | bytes | None,
+        *,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        """Resolve ``host``/``port`` on a worker thread without blocking the scheduler thread."""
+
+        return cast(
+            list[tuple[int, int, int, str, tuple[Any, ...]]],
+            self.run_in_executor(
+                None,
+                socket.getaddrinfo,
+                host,
+                port,
+                family,
+                type,
+                proto,
+                flags,
+            ).wait(),
+        )
+
+    def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
+        """Reverse-resolve ``sockaddr`` on a worker thread without blocking the scheduler thread."""
+
+        return self.run_in_executor(None, socket.getnameinfo, sockaddr, flags).wait()
+
+    def ensure_resolved(
+        self,
+        address: tuple[Any, ...],
+        *,
+        family: int = 0,
+        type: int = socket.SOCK_STREAM,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        """Resolve ``address``, skipping executor lookup for literal IP hosts."""
+
+        from . import dns
+
+        return dns.ensure_resolved(
+            self,
+            address,
+            family=family,
+            type=type,
+            proto=proto,
+            flags=flags,
+        )
 
     def run_in_executor(
         self,
@@ -1455,6 +1637,61 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
+    def sock_create(
+        self,
+        family: int,
+        type: int,
+        proto: int = 0,
+        *,
+        flags: int = 0,
+    ) -> socket.socket:
+        """Create a non-blocking, close-on-exec socket through the scheduler IO backend."""
+
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
+
+    def open_streams(
+        self,
+        sock: socket.socket,
+        *,
+        limit: int = 2**16,
+        stream_factory: Any = None,
+        async_: bool = False,
+    ) -> tuple[Any, Any]:
+        """Wrap a connected non-blocking socket as stream endpoints."""
+
+        raise NotImplementedError("stream helpers require an IO-capable scheduler")
+
+    def open_connection(
+        self,
+        *,
+        addr: tuple[str, int] | None = None,
+        path: str | None = None,
+        family: int = socket.AF_UNSPEC,
+        proto: int = 0,
+        limit: int = 2**16,
+        stream_factory: Any = None,
+        async_: bool = False,
+    ) -> tuple[Any, Any]:
+        """Connect and return stream endpoints (TCP via ``addr``, Unix via ``path``)."""
+
+        raise NotImplementedError("stream helpers require an IO-capable scheduler")
+
+    def start_server(
+        self,
+        client_handler: Callable[..., Any],
+        *,
+        addr: tuple[str | None, int] | None = None,
+        path: str | None = None,
+        family: int = socket.AF_INET,
+        backlog: int = 100,
+        limit: int = 2**16,
+        stream_factory: Any = None,
+        async_: bool = False,
+    ) -> Any:
+        """Start a stream server that dispatches each accept to ``client_handler``."""
+
+        raise NotImplementedError("stream helpers require an IO-capable scheduler")
+
     def poll(self, fd: int, mask: int) -> int:
         """Wait until an fd reports events in `mask` and return the readiness bitmask."""
 
@@ -1513,7 +1750,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if context is None:
             context = contextvars.copy_context()
         if immediate and self._owner_thread == threading.get_ident():
-            context.run(callback, *args)
+            self._run_callback(callback, args, context)
             return
         self._threadsafe_callbacks.put((callback, args, context))
         self._break_wait_threadsafe()
@@ -1551,22 +1788,26 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
 
     def _drain_threadsafe_callbacks(self) -> None:
-        while True:
+        # Drain one queued entry at a time. If a callback raises (e.g.
+        # CancelledError from task.cancel() targeting the current tealet),
+        # leave any remaining entries for a later drain. Bound work to the
+        # queue depth observed at entry so callbacks enqueued during this
+        # drain are not serviced until the next scheduler turn.
+        pending = self._threadsafe_callbacks.qsize()
+        while pending > 0:
+            pending -= 1
             try:
                 callback, args, context = self._threadsafe_callbacks.get_nowait()
             except queue.Empty:
-                return
-            if context is None:
-                callback(*args)
-            else:
-                context.run(callback, *args)
+                break
+            self._run_callback(callback, args, context)
 
     def _run_ready_timers(self) -> None:
         self._drain_threadsafe_callbacks()
         now = self.time()
         while self._timers and self._timers[0][0] <= now:
             _, _, handle = heapq.heappop(self._timers)
-            handle._run()
+            handle._run(self)
 
     def _next_timer_deadline(self) -> float | None:
         while self._timers and self._timers[0][2].cancelled():

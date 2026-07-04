@@ -263,7 +263,9 @@ def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
     return uring_api.Ring(entries=entries, flags=flags)
 
 
-def _configure_accepted_socket(sock: socket.socket) -> socket.socket:
+def _configure_scheduler_socket(sock: socket.socket) -> socket.socket:
+    """Apply the scheduler socket contract: non-blocking and close-on-exec."""
+
     sock.setblocking(False)
     os.set_inheritable(sock.fileno(), False)
     return sock
@@ -959,7 +961,7 @@ class SelectorProactor(ProactorBase):
 
         def attempt() -> tuple[socket.socket, Any]:
             conn, address = sock.accept()
-            _configure_accepted_socket(conn)
+            _configure_scheduler_socket(conn)
             return conn, address
 
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
@@ -989,7 +991,7 @@ class SelectorProactor(ProactorBase):
                     conn, address = sock.accept()
                 except (BlockingIOError, InterruptedError):
                     return ContinuousStepResult(progressed=progressed)
-                _configure_accepted_socket(conn)
+                _configure_scheduler_socket(conn)
                 operation._emit_result((conn, address))
                 progressed = True
 
@@ -1853,7 +1855,7 @@ class UringProactor(ProactorBase):
     ) -> Operation[tuple[socket.socket, Any]]:
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        _configure_accepted_socket(conn)
+        _configure_scheduler_socket(conn)
         operation = cast(Operation[tuple[socket.socket, Any]], entry.operation)
         operation._set_result((conn, address))
         return operation
@@ -1913,7 +1915,7 @@ class UringProactor(ProactorBase):
             return operation
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        _configure_accepted_socket(conn)
+        _configure_scheduler_socket(conn)
         operation._emit_result((conn, address))
         if operation.done():
             return operation
@@ -1933,7 +1935,7 @@ class UringProactor(ProactorBase):
             return operation
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
-        _configure_accepted_socket(conn)
+        _configure_scheduler_socket(conn)
         operation._emit_result((conn, address))
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             operation._set_result(None)
@@ -2686,6 +2688,99 @@ class ProactorScheduler(BaseScheduler):
         """Connect a non-blocking socket to `address`."""
 
         return self.wait_operation(self._proactor.connect(sock, address))
+
+    def sock_create(
+        self,
+        family: int,
+        type: int,
+        proto: int = 0,
+        *,
+        flags: int = 0,
+    ) -> socket.socket:
+        """Create a non-blocking, close-on-exec socket for scheduler-backed IO.
+
+        Stdlib ``socket.socket()`` for now. ``flags`` is reserved for a future
+        proactor path (for example ``UringProactor`` via ``submit_socket()``).
+        The returned socket is always configured non-blocking and close-on-exec.
+        """
+
+        del flags
+        return _configure_scheduler_socket(socket.socket(family, type, proto))
+
+    # -- Stream helpers (asyncio-shaped layering) -----------------------
+
+    def open_streams(
+        self,
+        sock: socket.socket,
+        *,
+        limit: int = 2**16,
+        stream_factory: Any = None,
+        async_: bool = False,
+    ) -> tuple[Any, Any]:
+        from .streams import _open_streams
+
+        return _open_streams(self, sock, limit=limit, stream_factory=stream_factory, async_=async_)
+
+    def open_connection(
+        self,
+        *,
+        addr: tuple[str, int] | None = None,
+        path: str | None = None,
+        family: int = socket.AF_UNSPEC,
+        proto: int = 0,
+        limit: int = 2**16,
+        stream_factory: Any = None,
+        async_: bool = False,
+    ) -> tuple[Any, Any]:
+        from .streams import _connect_tcp_streams, _connect_unix_streams
+
+        if path is not None:
+            if addr is not None:
+                raise TypeError("open_connection() accepts addr= or path=, not both")
+            return _connect_unix_streams(
+                self,
+                path,
+                limit=limit,
+                stream_factory=stream_factory,
+                async_=async_,
+            )
+        if addr is None:
+            raise TypeError("open_connection() requires addr= or path=")
+        return _connect_tcp_streams(
+            self,
+            addr,
+            family=family,
+            proto=proto,
+            limit=limit,
+            stream_factory=stream_factory,
+            async_=async_,
+        )
+
+    def start_server(
+        self,
+        client_handler: Callable[..., Any],
+        *,
+        addr: tuple[str | None, int] | None = None,
+        path: str | None = None,
+        family: int = socket.AF_INET,
+        backlog: int = 100,
+        limit: int = 2**16,
+        stream_factory: Any = None,
+        async_: bool = False,
+    ) -> Any:
+        from .streams import _start_server
+
+        return _start_server(
+            self,
+            client_handler,
+            addr=addr,
+            path=path,
+            family=family,
+            backlog=backlog,
+            limit=limit,
+            stream_factory=stream_factory,
+            async_=async_,
+        )
 
     def poll(self, fd: int, mask: int) -> int:
         """Wait until an fd reports events in `mask` and return the readiness bitmask."""
