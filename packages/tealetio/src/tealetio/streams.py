@@ -663,7 +663,6 @@ class StreamServer:
         self._shutdown = Condition()
         self._closed = False
         self._active_handlers = 0
-        self._serving_forever = False
 
     def __enter__(self) -> StreamServer:
         return self
@@ -712,14 +711,8 @@ class StreamServer:
 
         if self._closed:
             raise RuntimeError("server is closed")
-        if self._serving_forever:
-            raise RuntimeError("server is already in serve_forever()")
-        self._serving_forever = True
-        try:
-            with self._shutdown:
-                self._shutdown.swait_for(lambda: self._closed)
-        finally:
-            self._serving_forever = False
+        with self._shutdown:
+            self._shutdown.swait_for(lambda: self._closed)
 
     def _dispatch_client(
         self,
