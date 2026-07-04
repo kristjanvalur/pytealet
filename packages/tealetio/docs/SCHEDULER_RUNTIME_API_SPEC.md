@@ -686,6 +686,17 @@ Status: In progress.
 - Add user-facing examples and migration guidance.
 - Clarify when to use direct scheduler APIs vs high-level runtime APIs.
 
+## IO manager refactor (planned, post-streams POC)
+
+The streams proof-of-concept lands unified connect/server helpers on the
+scheduler surface. A follow-up PR should **not** grow `BaseScheduler` further;
+instead, extract a composed **`IOManager`** (blocking `sock_*` / `wait_operation`
+facade over `Proactor`) and expose it as `scheduler.io`.
+
+See **`IO_MANAGER_DESIGN.md`** for motivation, protocol layering, migration
+phases, and open questions. Merge the streams POC branch before starting that
+work.
+
 ## Immediate Next Steps
 
 1. Continue hardening the low-level IO callback and socket helper surface.

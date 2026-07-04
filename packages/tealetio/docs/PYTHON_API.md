@@ -462,6 +462,10 @@ children are not cancelled by `as_completed(...)`.
 
 ## Streams (proof of concept)
 
+> **Planned refactor:** IO helpers currently live on `ProactorScheduler` for
+> ergonomics. A follow-up change will introduce a composed `IOManager` exposed
+> as `scheduler.io`; see `IO_MANAGER_DESIGN.md`.
+
 `tealetio.streams` provides tealet-native stream endpoints backed by blocking
 socket I/O through the scheduler. `StreamReader` and `StreamWriter` are the
 default native types with synchronous methods. `AsyncStreamReader` and
