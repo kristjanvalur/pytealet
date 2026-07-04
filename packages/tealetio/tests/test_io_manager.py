@@ -26,7 +26,7 @@ class TestProactorIOManager:
                 return scheduler.io.sock_recv(server, 4)
 
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"ping"
-            assert scheduler.sock_recv(server, 0) == b""
+            assert scheduler.io.sock_recv(server, 0) == b""
         finally:
             client.close()
             server.close()

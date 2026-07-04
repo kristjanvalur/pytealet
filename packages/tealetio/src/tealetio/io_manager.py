@@ -18,7 +18,16 @@ _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
 
-__all__ = ["ProactorIOManager"]
+__all__ = ["ProactorIOManager", "require_io"]
+
+
+def require_io(scheduler: object) -> ProactorIOManager:
+    """Return ``scheduler.io`` or raise when the scheduler has no IO backend."""
+
+    io = getattr(scheduler, "io", None)
+    if io is None:
+        raise RuntimeError("operation requires a scheduler with IO support")
+    return io
 
 
 def _configure_scheduler_socket(sock: socket.socket) -> socket.socket:

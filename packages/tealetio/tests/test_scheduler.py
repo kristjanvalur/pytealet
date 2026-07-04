@@ -1531,13 +1531,16 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_basic_scheduler_socket_helpers_require_io_capable_scheduler(self):
+        from tealetio.io_manager import require_io
+
         s = BasicScheduler()
         set_scheduler(s)
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            with pytest.raises(NotImplementedError, match="IO-capable scheduler"):
-                s.sock_recv(reader, 1)
+            assert s.io is None
+            with pytest.raises(RuntimeError, match="scheduler with IO support"):
+                require_io(s)
         finally:
             reader.close()
             _writer.close()
@@ -1550,11 +1553,11 @@ class TestSchedulerAccessors:
             writer.setblocking(False)
 
             def receive() -> bytes:
-                return s.sock_recv(reader, 5)
+                return s.io.sock_recv(reader, 5)
 
             def send() -> None:
                 s.sleep(0.001)
-                s.sock_sendall(writer, b"hello")
+                s.io.sock_sendall(writer, b"hello")
 
             task = s.spawn(receive)
             s.spawn(send)
@@ -1565,13 +1568,16 @@ class TestSchedulerAccessors:
             s.close()
 
     def test_basic_scheduler_poll_requires_io_capable_scheduler(self):
+        from tealetio.io_manager import require_io
+
         s = BasicScheduler()
         set_scheduler(s)
         reader, _writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            with pytest.raises(NotImplementedError, match="poll requires"):
-                s.poll(reader.fileno(), select.POLLIN)
+            assert s.io is None
+            with pytest.raises(RuntimeError, match="scheduler with IO support"):
+                require_io(s)
         finally:
             reader.close()
             _writer.close()
