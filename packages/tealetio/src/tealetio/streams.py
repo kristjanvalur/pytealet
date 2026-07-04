@@ -917,7 +917,7 @@ def start_server(
     Handler tealets are spawned through ``call_soon_threadsafe`` because accept
     callbacks may run on completion worker threads. Handler exceptions propagate
     in the handler tealet and do not stop the listener. ``spawn()`` failures
-    during dispatch propagate to the dispatch callback.
+    during dispatch are reported through the scheduler exception handler.
     """
 
     return _start_server(

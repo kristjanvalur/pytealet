@@ -619,6 +619,7 @@ class TestStreamsPoC:
         set_scheduler(scheduler)
         real_spawn = scheduler.spawn
         serve_spawn_attempts = 0
+        callback_errors: list[BaseException] = []
 
         def failing_spawn(func, **kwargs):
             nonlocal serve_spawn_attempts
@@ -628,6 +629,7 @@ class TestStreamsPoC:
             return real_spawn(func, **kwargs)
 
         monkeypatch.setattr(scheduler, "spawn", failing_spawn)
+        scheduler.set_exception_handler(lambda context: callback_errors.append(context["exception"]))
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
@@ -649,9 +651,10 @@ class TestStreamsPoC:
                 server.close()
                 server.wait_closed()
 
-            with pytest.raises(RuntimeError, match="spawn failed"):
-                scheduler.run_until_complete(scheduler.spawn(exercise))
+            scheduler.run_until_complete(scheduler.spawn(exercise))
             assert serve_spawn_attempts == 1
+            assert len(callback_errors) == 1
+            assert str(callback_errors[0]) == "spawn failed"
         finally:
             _client.close()
             server.close()
