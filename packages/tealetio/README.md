@@ -102,7 +102,7 @@ The common API is available directly from `tealetio`:
 - schedulers and runners: `Scheduler`, `ProactorScheduler`, `SyncProactorScheduler`, `AsyncProactorScheduler`, `SelectorScheduler`, `SyncSelectorScheduler`, `AsyncSelectorScheduler`, `BasicScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `Task`, `spawn`, `create_task`, `get_current`, `CancelledError`, `shield`
 - IO operations: `Operation`, `ContinuousOperation`
-- proactor socket helpers: `sendall(..., progress=...)`, `accept_many(...)`, `recv_many(...)`; scheduler blocking socket helpers: `sock_recvall(..., progress=...)`, `sock_recv_iter(...)`, `sock_send_iter(...)`, `create_recv_buffer_pool(...)`; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
+- proactor submission: `Operation`, `sendall(..., progress=...)`, `accept_many(...)`, `recv_many(...)` on `scheduler.proactor`; blocking facade on `scheduler.io` (`ProactorIOManager`): `sock_recvall`, `sock_recv_iter`, `sock_send_iter`, `sock_*`, `poll*`, `open`, `create_recv_buffer_pool`, and related helpers; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
 - runnable scheduling policies: `FifoRunnableQueue`, `PrescheduledRunnableQueue`, `PriorityRunnableQueue`
@@ -164,13 +164,14 @@ leased kernel buffers. When the pool is exhausted, the callback receives
 re-arm multishot receive (stream indices continue from the failed completion's
 `sequence`).
 
-Each proactor lazily owns one shared `BufGroup` for `sock_recvall(...)` (16 KiB
-× 256 on `UringProactor` backends by default). `sock_recvall` joins `bytes`
-copied from each `sock_recv_iter` chunk as the iterator advances; pressure
-recovery is handled inside `sock_recv_iter`. Its optional `progress` callback
-receives each non-empty chunk's `bytes` payload. `sock_recv_iter(sock,
-buffer_pool=None)` and `sock_recvall(..., buffer_pool=None)` use the proactor
-shared pool by default; pass a pool from `create_recv_buffer_pool()` for
+Each proactor lazily owns one shared `BufGroup` for `scheduler.io.sock_recvall(...)` (16 KiB
+× 256 on `UringProactor` backends by default). `scheduler.io.sock_recvall` joins
+`bytes` copied from each `sock_recv_iter` chunk as the iterator advances;
+pressure recovery is handled inside `sock_recv_iter`. Its optional `progress`
+callback receives each non-empty chunk's `bytes` payload.
+`scheduler.io.sock_recv_iter(sock, buffer_pool=None)` and
+`scheduler.io.sock_recvall(..., buffer_pool=None)` use the proactor shared pool
+by default; pass a pool from `scheduler.io.create_recv_buffer_pool()` for
 dedicated sizing. `sock_recv_iter` yields read-only `memoryview` chunks and
 `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens. Copy with
 `bytes(data)` when owned storage is required past the current iteration step.

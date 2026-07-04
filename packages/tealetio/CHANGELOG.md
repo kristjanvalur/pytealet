@@ -8,37 +8,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
+- Blocking proactor IO (`wait_operation`, `sock_*`, `poll*`, positioned file
+  `open`, and receive-buffer pool helpers) moved from the scheduler surface to
+  `scheduler.io` (`ProactorIOManager`). Use `scheduler.io.sock_recv(...)` instead
+  of `scheduler.sock_recv(...)`. `BaseScheduler.io` raises when the scheduler has
+  no IO backend.
 - `recv_many(sock, callback, *, buf_group)` now requires an explicit
   provided-buffer pool; there is no per-operation default at the proactor level.
 - `recv_many` provided-buffer exhaustion now delivers
   `(RECV_MANY_BUFFER_PRESSURE, resume)`; consumers must drop held views and
   call `resume()` to continue (no automatic resubmission).
 - `Proactor.recvall` and `Proactor.recvgen` are removed. Use
-  `ProactorScheduler.sock_recvall` and `ProactorScheduler.sock_recv_iter` from
+  `scheduler.io.sock_recvall` and `scheduler.io.sock_recv_iter` from
   scheduler-owned tealets instead (blocking helpers, not `Operation` returns).
 - `sock_recvall(..., progress=...)` now calls `progress(chunk)` with each
   non-empty chunk's `bytes` payload instead of a cumulative byte count.
-- `ProactorScheduler.sock_recvgen` renamed to `sock_recv_iter`.
+- `sock_recvgen` renamed to `sock_recv_iter` on the blocking IO facade
+  (`scheduler.io`).
 - `sock_recv_iter` always yields `(index, memoryview)` and
   `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))`; the `allow_memview` option
   is removed.
 
 ### Added
-- `ProactorScheduler.sock_recv_iter(sock, buffer_pool=None)` as a tealet-blocking
+- `ProactorIOManager` and `scheduler.io` on proactor-backed schedulers: composed
+  blocking IO facade over `Proactor` (`wait_operation`, `sock_*`, `poll*`,
+  positioned file `open`, receive-buffer pool helpers).
+- `tealetio.streams` module helpers `open_connection`, `open_streams`, and
+  `start_server` with optional `scheduler=`; blocking socket IO routes through
+  `scheduler.io`.
+- `scheduler.io.sock_recv_iter(sock, buffer_pool=None)` as a tealet-blocking
   incremental consumer of `recv_many`, yielding stream-ordered `(index, data)`
   chunks with the same provided-buffer pressure policy as `sock_recvall`.
   ``None`` uses the proactor shared pool.
-- `ProactorScheduler.sock_send_iter(sock, chunks)` to drain an iterable of
-  buffer chunks through `sock_sendall`. Track send progress in the iterable or
-  generator you pass; there is no separate progress callback on the helper.
-- `ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` for
-  explicit provided-buffer pool sizing shared by `sock_recv_iter` and `recv_many`.
+- `scheduler.io.sock_send_iter(sock, chunks)` to drain an iterable of buffer
+  chunks through `sock_sendall`. Track send progress in the iterable or generator
+  you pass; there is no separate progress callback on the helper.
+- `scheduler.io.create_recv_buffer_pool(buffer_size, buffer_count)` for explicit
+  provided-buffer pool sizing shared by `sock_recv_iter` and `recv_many`.
 - `Proactor.shared_recv_buffer_pool()` as the lazy proactor-owned shared
   `BufGroup` used by `sock_recvall`; pass it explicitly to `sock_recv_iter` when
   sharing the default pool.
-- `ProactorScheduler.set_shared_recv_buffer_pool(pool)` and
-  `Proactor.set_shared_recv_buffer_pool(pool)` to replace the shared default
-  pool before `sock_recvall` or explicit `sock_recv_iter` calls.
+- `scheduler.io.set_shared_recv_buffer_pool(pool)` and
+  `Proactor.set_shared_recv_buffer_pool(pool)` to replace the shared default pool
+  before `sock_recvall` or explicit `sock_recv_iter` calls.
 - `RECV_MANY_BUFFER_PRESSURE` result index so `recv_many` consumers can release
   held views when the shared provided-buffer pool is exhausted.
 - Published runnable queue policies (`FifoRunnableQueue`,
@@ -57,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
+- `ProactorFile` blocks through the `OperationWaiter` protocol; production opens
+  pass `ProactorIOManager` from `scheduler.io.open(...)`.
 - `sock_recv_iter` always yields `(index, memoryview)` chunks and
   `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens; consumers
   release held views between reads so leased kernel buffers can return to the

@@ -686,30 +686,32 @@ Status: In progress.
 - Add user-facing examples and migration guidance.
 - Clarify when to use direct scheduler APIs vs high-level runtime APIs.
 
-## IO manager refactor (planned, post-streams POC)
+## IO manager refactor (implemented)
 
-The streams proof-of-concept lands unified connect/server helpers on the
-scheduler surface. A follow-up PR should **not** grow `BaseScheduler` further;
-instead, extract a composed **`IOManager`** (blocking `sock_*` / `wait_operation`
-facade over `Proactor`) and expose it as `scheduler.io`.
+Blocking proactor IO is composed into **`ProactorIOManager`** and exposed as
+`scheduler.io` on proactor-backed schedulers. `BaseScheduler.io` raises when the
+scheduler has no IO backend. Blocking `sock_*`, `poll*`, `wait_operation`, and
+positioned file `open` were removed from the scheduler surface; callers use
+`scheduler.io` instead.
 
-See **`IO_MANAGER_DESIGN.md`** for motivation, protocol layering, migration
-phases, and open questions. Merge the streams POC branch before starting that
-work.
+`SelectorScheduler` still exposes blocking `sock_*` and `poll*` on the scheduler
+via `SelectorMixin`. A future **`SelectorIOManager`** could adopt the same
+`scheduler.io` gate without changing proactor callers. See
+**`IO_MANAGER_DESIGN.md`** for layering, protocol notes, and follow-ups.
+
+`tealetio.streams` module helpers (`open_connection`, `start_server`) resolve the
+running scheduler (or accept `scheduler=`) and route blocking socket IO through
+`scheduler.io`.
 
 ## Immediate Next Steps
 
-1. Streams POC follow-up (see `IO_MANAGER_DESIGN.md`):
-   - Extract a composed `IOManager` (`scheduler.io`) instead of growing
-     `BaseScheduler` further.
-   - `StreamServer.serve_forever()` parks until `close()` (implemented); signal
-     handling stays in `Runner` / `run()`.
-2. `sock_create()` is implemented on `ProactorScheduler` (stdlib `socket.socket()`
-   today). Future: `UringProactor` may use `uring_api.submit_socket()` when
-   supported, wrapping returned fds with `socket.socket(fileno=fd)`.
-3. Stream/server helpers (`open_connection`, `start_server`, and related paths)
-   route socket creation through `sock_create()`.
-4. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
+1. Optional `SelectorIOManager` to unify `scheduler.io` on selector schedulers
+   (see `IO_MANAGER_DESIGN.md`).
+2. `scheduler.io.sock_create()` uses stdlib `socket.socket()` today. Future:
+   `UringProactor` may use `uring_api.submit_socket()` when supported, wrapping
+   returned fds with `socket.socket(fileno=fd)`.
+3. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
+4. Optional `SocketIO` / `PollIO` / `FileIO` protocols for static typing.
 
 ## Next Alignment Backlog (Asyncio Interop)
 

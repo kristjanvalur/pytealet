@@ -103,9 +103,9 @@ view before the operation completes. Chunk sizes are backend-defined:
 `UringProactor` uses the operation `BufGroup` slot size (16 KiB by default) when
 multishot provided-buffer receive is available, and `SelectorProactor` reads up
 to 8 KiB per `recv()` call. `recv_many(sock, callback, *, buf_group)` requires an explicit provided-buffer
-pool from `create_recv_buffer_pool()` or `shared_recv_buffer_pool()`. Each
-proactor lazily creates one shared `BufGroup` for scheduler helpers (16 KiB ×
-256 on `UringProactor` backends by default, 16 KiB × 8 on selector backends).
+pool from `create_recv_buffer_pool()` or `shared_recv_buffer_pool()`. Each proactor lazily creates one shared `BufGroup` for `scheduler.io` receive
+helpers (16 KiB × 256 on `UringProactor` backends by default, 16 KiB × 8 on
+selector backends).
 `sock_recv_iter(sock, buffer_pool=None)` and `sock_recvall(sock, ...,
 buffer_pool=None)` use that shared pool when ``buffer_pool`` is omitted; pass a
 dedicated pool from `create_recv_buffer_pool()` for isolated sizing. Concurrent
@@ -152,8 +152,8 @@ Backends may run these result callbacks from any worker thread; code that needs
 thread affinity should marshal from the callback into the appropriate scheduler,
 event loop, or application thread.
 
-`ProactorScheduler.sock_recvall(sock, progress=None, *, buffer_pool=None)`
-joins chunks from `sock_recv_iter(sock, buffer_pool)`. Each non-pressure chunk is
+`scheduler.io.sock_recvall(sock, progress=None, *, buffer_pool=None)` joins
+chunks from `sock_recv_iter(sock, buffer_pool)`. Each non-pressure chunk is
 converted to `bytes` as the
 iterator advances, so at most one leased `memoryview` is held per iteration
 step. Provided-buffer pressure is handled inside `sock_recv_iter`; receive
@@ -163,7 +163,7 @@ provided, `progress(chunk)` is
 called after each received non-empty chunk with that chunk's `bytes` payload
 (not a running total).
 
-`ProactorScheduler.sock_recv_iter(sock, buffer_pool=None)` is a tealet-blocking iterator that
+`scheduler.io.sock_recv_iter(sock, buffer_pool=None)` is a tealet-blocking iterator that
 incrementally yields `(index, data)` chunks in stream-index order until EOF.
 Each `data` is a read-only `memoryview`; copy with `bytes(data)` when owned
 storage is required past the current iteration step. Unlike `recv_many`, it
@@ -184,37 +184,39 @@ backend does not emit another pressure callback until receive restarts.
 Consumers should drop every receive `memoryview` they still hold when that
 token appears and avoid keeping more views than needed between reads.
 
-`ProactorScheduler.create_recv_buffer_pool(buffer_size, buffer_count)` returns
-a `RecvBufferPool` for explicit sizing. Pass it to `sock_recv_iter(sock, pool)`
+`scheduler.io.create_recv_buffer_pool(buffer_size, buffer_count)` returns a
+`RecvBufferPool` for explicit sizing. Pass it to `sock_recv_iter(sock, pool)`
 or `sock_recvall(sock, buffer_pool=pool)` to share a tuned pool across
 generators or with a custom `recv_many` callback.
-`ProactorScheduler.shared_recv_buffer_pool()` and
-`ProactorScheduler.set_shared_recv_buffer_pool(pool)` delegate to the mounted
+`scheduler.io.shared_recv_buffer_pool()` and
+`scheduler.io.set_shared_recv_buffer_pool(pool)` delegate to the mounted
 proactor's shared pool.
 
 Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can
 block cooperatively.
 
-`ProactorScheduler.sock_send_iter(sock, chunks)` drains an iterable of
-`bytes`, `bytearray`, or `memoryview` chunks through `sock_sendall`, sending
-each non-empty chunk before pulling the next. Track send progress in the
-iterable or generator you pass when you need it; use ``sock_sendall`` directly
-for per-buffer ``progress=`` callbacks. Must be called from a scheduler tealet.
+`scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
+`bytearray`, or `memoryview` chunks through `sock_sendall`, sending each
+non-empty chunk before pulling the next. Track send progress in the iterable or
+generator you pass when you need it; use ``sock_sendall`` directly for
+per-buffer ``progress=`` callbacks. Must be called from a scheduler tealet.
 
 `Proactor` exposes `recv_many(sock, callback, *, buf_group)`,
 `create_recv_buffer_pool`, and the lazy `shared_recv_buffer_pool()` used by
-scheduler receive helpers when `buffer_pool=None`. Blocking socket streaming
-helpers live on `ProactorScheduler` as `sock_recvall`, `sock_recv_iter`, and
-`sock_send_iter`.
+`scheduler.io` receive helpers when `buffer_pool=None`. Blocking socket
+streaming helpers live on `scheduler.io` as `sock_recvall`, `sock_recv_iter`,
+and `sock_send_iter`.
 
-IO-capable schedulers also expose blocking poll helpers on top of the proactor
-or selector backends. `poll(fd, mask)` waits cooperatively and returns the
-readiness bitmask. `poll_many(fd, mask, callback)` starts a continuous poll
-and forwards each readiness event to `callback`. `ProactorScheduler` implements
-these through `wait_operation()` and proactor `poll`/`poll_many`.
-`SelectorScheduler` implements them with selector-backed readiness waits and
-the same `select.POLL*` mask semantics as `SelectorProactor`. When a bidirectional
+Proactor-backed schedulers expose blocking poll helpers on `scheduler.io`.
+`scheduler.io.poll(fd, mask)` waits cooperatively and returns the readiness
+bitmask. `scheduler.io.poll_many(fd, mask, callback)` starts a continuous poll
+and forwards each readiness event to `callback`, implemented through
+`wait_operation()` and proactor `poll`/`poll_many`. `SelectorScheduler` still
+implements `poll` / `poll_many` directly on the scheduler surface via
+selector-backed readiness waits and the same `select.POLL*` mask semantics as
+`SelectorProactor`; a future `SelectorIOManager` could expose the same helpers
+through `scheduler.io` without changing the proactor path. When a bidirectional
 poll mask arms the same callback on both read and write, the selector scheduler
 delivers at most one callback invocation per readiness event even if both
 direction bits are set.
@@ -223,7 +225,7 @@ direction bits are set.
 same callback and args, one combined selector wakeup schedules a single call.
 Register distinct callbacks when you need separate per-direction invocations.
 
-`ProactorScheduler.open(path, mode="rb")` returns an unbuffered `ProactorFile`
+`scheduler.io.open(path, mode="rb")` returns an unbuffered `ProactorFile`
 (`io.RawIOBase`) for positioned binary I/O through the proactor backend. The
 handle tracks a logical file position and uses `read_into()` for in-buffer reads,
 so `io.BufferedReader` and `io.TextIOWrapper` can stack on top without an extra
@@ -269,6 +271,44 @@ proactor should call this callback when completions are queued so an async host
 can wake its event loop, for example with `loop.call_soon_threadsafe(...)`.
 `break_wait()` remains separate: it interrupts a blocking proactor wait without
 reporting an IO completion.
+
+## Blocking IO facade (`scheduler.io`)
+
+Proactor-backed schedulers (`SyncProactorScheduler`, `AsyncProactorScheduler`)
+expose a composed `ProactorIOManager` at `scheduler.io`. This object owns
+blocking tealet IO over the scheduler's `Proactor` backend: `wait_operation`,
+asyncio-shaped `sock_*` helpers, `poll` / `poll_many`, positioned file `open`,
+and receive-buffer pool helpers. Call it from scheduler-owned tealets; it blocks
+the current tealet through `ThreadsafeEvent.swait()` rather than yielding
+asyncio futures.
+
+```python
+import socket
+
+from tealetio import SyncProactorScheduler, get_running_scheduler, set_scheduler
+
+scheduler = SyncProactorScheduler()
+set_scheduler(scheduler)
+
+def exercise(sock: socket.socket) -> bytes:
+    return get_running_scheduler().io.sock_recv(sock, 4096)
+```
+
+`BasicScheduler` and other schedulers without an IO backend raise
+`RuntimeError` when `.io` is accessed. Prefer `scheduler.io` (or module helpers
+that resolve the running scheduler) over `isinstance(scheduler, ProactorScheduler)`
+when you only need blocking IO capability.
+
+`SelectorScheduler` is different today: blocking `sock_*` and `poll*` helpers
+remain on the scheduler via `SelectorMixin` for the selector driving path.
+`scheduler.io` is not wired for selector schedulers yet; a future
+`SelectorIOManager` could provide the same capability gate without changing
+proactor callers. `tealetio.streams` requires a proactor scheduler and always
+goes through `scheduler.io`.
+
+Low-level submission stays on `scheduler.proactor` (`Operation` returns,
+`recv_many`, `accept_many`, and similar). `ProactorFile` blocks through an
+`OperationWaiter` protocol implemented by `ProactorIOManager`.
 
 `SelectorProactor` is the simple single-threaded selector-backed prototype.
 `ThreadedSelectorProactor` uses the same socket operation surface, but polls the
@@ -460,14 +500,11 @@ iterator that yields scheduler futures in child completion order. If the timeout
 expires before all children finish, iteration raises `TimeoutError`; unfinished
 children are not cancelled by `as_completed(...)`.
 
-## Streams (proof of concept)
-
-> **Planned refactor:** IO helpers currently live on `ProactorScheduler` for
-> ergonomics. A follow-up change will introduce a composed `IOManager` exposed
-> as `scheduler.io`; see `IO_MANAGER_DESIGN.md`.
+## Streams
 
 `tealetio.streams` provides tealet-native stream endpoints backed by blocking
-socket I/O through the scheduler. `StreamReader` and `StreamWriter` are the
+socket I/O through `scheduler.io` on proactor schedulers. `StreamReader` and
+`StreamWriter` are the
 default native types with synchronous methods. `AsyncStreamReader` and
 `AsyncStreamWriter` mirror the asyncio stream API shape (`async def read`,
 `drain`, and so on) so handlers written for asyncio-style web code can run under
@@ -490,11 +527,11 @@ def exercise(sock):
     return run_coro(handler(reader, writer))
 ```
 
-Like asyncio, stream connect and server helpers exist at module level and as
-scheduler instance methods. `open_connection(addr=(host, port))` resolves the
-running scheduler through `get_running_scheduler()` and calls the same
-implementation as `scheduler.open_connection(addr=...)`. Module helpers and
-instance methods both end up in `streams._connect_tcp_streams(...)` /
+Stream connect and server helpers are module-level functions (like asyncio).
+`open_connection(addr=(host, port))` resolves the running scheduler through
+`get_running_scheduler()` unless you pass `scheduler=`. Helpers require a
+proactor-backed scheduler with IO support (`scheduler.io`). Implementation
+routes through `streams._connect_tcp_streams(...)` /
 `streams._connect_unix_streams(...)`; the only functional difference between
 native and asyncio-shaped connect helpers at that layer is which default stream
 factory `async_` selects.
@@ -509,8 +546,8 @@ Unix-domain stream sockets without name resolution, e.g.
 for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
 wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
-Under the hood, `SocketTransport` calls `scheduler.sock_recv_into()` and
-`scheduler.sock_sendall()`.
+Under the hood, `SocketTransport` calls `scheduler.io.sock_recv_into()` and
+`scheduler.io.sock_sendall()`.
 
 Pass `stream_factory=` to `open_streams()` or `open_connection(...)` to customise the stream
 types created for each connection. Use `StreamFactory` for native
@@ -523,16 +560,16 @@ submits the socket's file descriptor to io_uring internally; the public API
 still expects a non-blocking `socket.socket` so accepted connections, peer
 metadata, and selector-backed backends share one handle type.
 
-`scheduler.sock_create(family, type, proto=0, *, flags=0)` is the socket
-creation entry point for scheduler-backed IO. The returned socket is always
-non-blocking and close-on-exec. `ProactorScheduler.sock_create()` currently
-calls stdlib `socket.socket()` and applies that configuration; `flags` is
-reserved for a future proactor path where `UringProactor` may use
+`scheduler.io.sock_create(family, type, proto=0, *, flags=0)` is the socket
+creation entry point for proactor-backed blocking IO. The returned socket is
+always non-blocking and close-on-exec. `ProactorIOManager.sock_create()`
+currently calls stdlib `socket.socket()` and applies that configuration; `flags`
+is reserved for a future proactor path where `UringProactor` may use
 `uring_api.Ring.submit_socket()`
 (`IORING_OP_SOCKET`) when policy and kernel probe allow it, then wrap the
 returned fd with `socket.socket(fileno=fd)` (the same pattern already used for
 `accept_many` completions). Stream connect/server helpers call
-`scheduler.sock_create()` so uring-native creation can stay behind one policy
+`scheduler.io.sock_create()` so uring-native creation can stay behind one policy
 gate.
 
 ## Name resolution
@@ -566,13 +603,14 @@ manager for both. ``serve_forever()`` parks the current tealet until
 ``close()`` is called (accept is already active); it does not install signal
 handlers — use ``tealetio.run()`` / ``Runner`` for shutdown signals.
 
-Stream reads use `scheduler.sock_recv_into()` through `SocketTransport.recv_into()`
-so `UringProactor.recv_into()` can fill caller-owned buffers without an extra
-`recv()` copy. `StreamReader.readinto()` fills a caller buffer directly; other
-read methods assemble data in an internal `bytearray` before returning `bytes`.
+Stream reads use `scheduler.io.sock_recv_into()` through
+`SocketTransport.recv_into()` so `UringProactor.recv_into()` can fill
+caller-owned buffers without an extra `recv()` copy. `StreamReader.readinto()`
+fills a caller buffer directly; other read methods assemble data in an internal
+`bytearray` before returning `bytes`.
 
-This module is an early proof of concept. It does not integrate with stdlib
-`asyncio.StreamReader` instances or the `ForwardingProactor` guest loop.
+This module does not integrate with stdlib `asyncio.StreamReader` instances or
+the `ForwardingProactor` guest loop.
 
 ## Synchronisation Primitives
 
