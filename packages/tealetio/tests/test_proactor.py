@@ -2045,7 +2045,9 @@ class _FakeUringRing:
         self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
+        self.submitted_send_zc: list[tuple[int, object, object]] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
+        self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object, int]] = []
         self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
@@ -2248,6 +2250,36 @@ class _FakeUringRing:
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_SENDTO,
+            res=len(payload),
+            result=len(payload),
+        )
+        self._deliver(completion)
+        return completion
+
+    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_send_zc.append((fd, data, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SEND_ZC,
+            res=len(payload),
+            result=len(payload),
+        )
+        self._deliver(completion)
+        return completion
+
+    def submit_sendmsg_zc(
+        self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_sendmsg_zc.append((fd, data, address, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SENDMSG_ZC,
             res=len(payload),
             result=len(payload),
         )
@@ -2513,40 +2545,7 @@ class _DeferredUringRing(_FakeUringRing):
 
 
 class _ZeroCopyFakeUringRing(_FakeUringRing):
-    def __init__(self, entries: int, flags: int) -> None:
-        super().__init__(entries, flags)
-        self.submitted_send_zc: list[tuple[int, object, object]] = []
-        self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
-
-    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        payload = bytes(data)
-        self.submitted_send_zc.append((fd, data, user_data))
-        completion = self._completion(
-            user_data,
-            kind=uring_api.COMPLETION_KIND_SEND_ZC,
-            res=len(payload),
-            result=len(payload),
-        )
-        self._deliver(completion)
-        return completion
-
-    def submit_sendmsg_zc(
-        self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
-    ) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        payload = bytes(data)
-        self.submitted_sendmsg_zc.append((fd, data, address, user_data))
-        completion = self._completion(
-            user_data,
-            kind=uring_api.COMPLETION_KIND_SENDMSG_ZC,
-            res=len(payload),
-            result=len(payload),
-        )
-        self._deliver(completion)
-        return completion
+    pass
 
 
 class _BackpressuredUringRing(_DeferredUringRing):
@@ -3321,7 +3320,8 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_sendall_completes_from_ring_completion(self):
+    def test_sendall_completes_from_ring_completion(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -3433,7 +3433,8 @@ class TestUringProactor:
             receiver.close()
             proactor.close()
 
-    def test_sendto_completes_from_ring_completion(self):
+    def test_sendto_completes_from_ring_completion(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SENDMSG_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
