@@ -371,7 +371,7 @@ _StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
 _NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
 _AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 _ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
-_AcceptedConnection: TypeAlias = tuple[socket.socket, object]
+_AcceptedConnection: TypeAlias = tuple[socket.socket, Any]
 
 
 def default_stream_factory(
@@ -798,6 +798,16 @@ class StreamServer:
                         async_=async_,
                     )
                     if async_:
+                        if not isinstance(reader, AsyncStreamReader):
+                            raise TypeError(
+                                "async_=True requires asyncio-shaped streams from "
+                                "stream_factory or the default async factory"
+                            )
+                    elif not isinstance(reader, StreamReader):
+                        raise TypeError(
+                            "async_=False requires native streams from stream_factory or the default native factory"
+                        )
+                    if async_:
                         run_coro(
                             cast(_AsyncClientHandler, client_handler)(
                                 cast(AsyncStreamReader, reader),
@@ -867,7 +877,7 @@ def _start_stream_server(
             async_=async_,
         )
 
-    io: ServerIO = _require_proactor_io(scheduler)
+    io = cast(ServerIO, _require_proactor_io(scheduler))
     accept_operation = io.proactor.accept_many(sock, on_accept)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server

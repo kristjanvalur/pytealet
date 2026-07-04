@@ -39,7 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `IOFile` handle protocol for positioned binary file objects returned by
-  `FileIO.open()`; `ProactorFile` is the proactor-backed implementation.
+  `FileIO.open()`; `ProactorFile` is the proactor-backed implementation. Static
+  typing only (not ``@runtime_checkable`` on Python 3.10–3.11); import from
+  ``tealetio`` / ``tealetio.proactor``.
 - `ServerIO` protocol slice for stream servers (`SocketIO` plus proactor
   submission); `ProactorSocketIO` remains a backward-compatible alias.
 - Streams internals: `_AcceptedConnection` typing and `SupportsProactorIO`

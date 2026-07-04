@@ -145,10 +145,10 @@ ProactorSocketIO = ServerIO
 class ProactorIOManager:
     """Blocking IO facade over a ``Proactor`` backend.
 
-    Implements ``SocketIO``, ``PollIO``, and ``FileIO``, plus
-    ``wait_operation`` for blocking on submitted ``Operation`` objects. The
-    scheduler keeps the driver; this object only blocks the current tealet on
-    submitted operations.
+    Structurally implements ``SocketIO``, ``ServerIO``, ``PollIO``, and
+    ``FileIO``, plus ``wait_operation`` for blocking on submitted ``Operation``
+    objects. The scheduler keeps the driver; this object only blocks the current
+    tealet on submitted operations.
     """
 
     def __init__(self, proactor: Proactor) -> None:

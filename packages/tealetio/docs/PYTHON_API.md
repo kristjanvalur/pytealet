@@ -227,7 +227,10 @@ Register distinct callbacks when you need separate per-direction invocations.
 
 `scheduler.io.open(path, mode="rb")` returns an `IOFile` handle (today the
 concrete `ProactorFile`, an unbuffered `io.RawIOBase`) for positioned binary I/O
-through the proactor backend. The handle tracks a logical file position and uses
+through the proactor backend. Import the protocol as `from tealetio import IOFile`
+(also re-exported from `tealetio.proactor`); it lives in `tealetio.files` for
+implementation sharing but that module path is not the primary public import.
+The handle tracks a logical file position and uses
 `read_into()` for in-buffer reads, so `io.BufferedReader` and `io.TextIOWrapper`
 can stack on top without an extra copy through `read()`. File helpers require a
 proactor with `openat` support (`UringProactor` today). Low-level `openat` /

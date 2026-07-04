@@ -3,7 +3,7 @@ from __future__ import annotations
 import errno
 import io
 import os
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from .operations import Operation
 
@@ -11,6 +11,13 @@ if TYPE_CHECKING:
     from .proactor import Proactor
 
 T = TypeVar("T")
+
+__all__ = [
+    "IOFile",
+    "OperationWaiter",
+    "ProactorFile",
+    "parse_open_mode",
+]
 
 _DEFAULT_CREAT_MODE = 0o666
 _READ_CHUNK = 64 * 1024
@@ -35,9 +42,14 @@ class OperationWaiter(Protocol):
     def wait_operation(self, operation: Operation[T]) -> T: ...
 
 
-@runtime_checkable
 class IOFile(Protocol):
-    """Positioned binary file handle returned by ``FileIO.open()``."""
+    """Positioned binary file handle returned by ``FileIO.open()``.
+
+    Static typing only: not ``@runtime_checkable`` because ``name`` and
+    ``closed`` are properties, which breaks ``isinstance`` on Python 3.10–3.11.
+    Import from ``tealetio`` (or ``tealetio.proactor``), not only
+    ``tealetio.files``.
+    """
 
     @property
     def name(self) -> str: ...

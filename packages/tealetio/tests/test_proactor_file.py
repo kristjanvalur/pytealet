@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 import tealetio.files as files_module
-from tealetio.files import IOFile, ProactorFile
+from tealetio.files import ProactorFile
 from tealetio.operations import Operation
 
 _TEST_FD = 901
@@ -88,10 +88,24 @@ def _noop_os_close():
         yield
 
 
-def test_proactor_file_satisfies_iofile_protocol() -> None:
+def test_proactor_file_exposes_iofile_surface() -> None:
     handle, _proactor, _store = _make_file(data=b"hello")
     try:
-        assert isinstance(handle, IOFile)
+        for attr in (
+            "name",
+            "closed",
+            "readable",
+            "writable",
+            "seekable",
+            "fileno",
+            "tell",
+            "seek",
+            "read",
+            "readinto",
+            "write",
+            "close",
+        ):
+            assert hasattr(handle, attr)
     finally:
         handle.close()
 

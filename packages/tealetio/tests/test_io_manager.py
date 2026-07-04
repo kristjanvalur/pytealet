@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from tealetio import set_scheduler
-from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, SocketIO
+from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, ServerIO, SocketIO
 from tealetio.operations import ContinuousOperation, Operation
 from tealetio.proactor import SyncProactorScheduler
 
@@ -63,6 +63,7 @@ class TestProactorIOManager:
         assert isinstance(io, SocketIO)
         assert isinstance(io, PollIO)
         assert isinstance(io, FileIO)
+        _: ServerIO = io
         assert io.proactor is scheduler.proactor
 
     def test_scheduler_io_forwards_sock_recv(self):
@@ -157,10 +158,11 @@ class TestProactorIOManagerDirect:
         with patch("tealetio.io_manager.os.close"), patch("tealetio.files.os.close"):
             handle = io.open("/tmp/example.txt", "rb")
             try:
-                from tealetio.files import IOFile, ProactorFile
+                from tealetio.files import ProactorFile
 
-                assert isinstance(handle, IOFile)
                 assert isinstance(handle, ProactorFile)
+                assert hasattr(handle, "read")
+                assert hasattr(handle, "seek")
                 assert handle.name == "/tmp/example.txt"
                 assert proactor.openat_calls == [("/tmp/example.txt", os.O_RDONLY | os.O_CLOEXEC, 0o666)]
             finally:
