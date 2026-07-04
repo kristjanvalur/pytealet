@@ -15,17 +15,9 @@ from tealetio.streams import (
     SocketTransport,
     StreamReader,
     StreamWriter,
-    open_async_connection,
-    open_async_streams,
-    open_async_unix_connection,
     open_connection,
     open_streams,
-    open_unix_connection,
     run_coro,
-    start_async_server,
-    start_async_unix_server,
-    start_server,
-    start_unix_server,
 )
 from test_proactor import _FakeUringRing, _patch_uring_capabilities
 
@@ -46,7 +38,7 @@ class TestStreamsPoC:
             writer.setblocking(True)
 
             async def handler() -> bytes:
-                stream_reader, _stream_writer = open_async_streams(scheduler, reader)
+                stream_reader, _stream_writer = open_streams(reader, async_=True)
                 return await stream_reader.readexactly(5)
 
             def deliver() -> None:
@@ -71,7 +63,7 @@ class TestStreamsPoC:
             server.setblocking(False)
 
             async def echo_handler() -> bytes:
-                stream_reader, stream_writer = open_async_streams(scheduler, server)
+                stream_reader, stream_writer = open_streams(server, async_=True)
                 line = await stream_reader.readline()
                 stream_writer.write(line.upper())
                 await stream_writer.drain()
@@ -100,7 +92,7 @@ class TestStreamsPoC:
             writer.setblocking(True)
 
             def handler() -> bytes:
-                stream_reader, stream_writer = open_streams(scheduler, reader)
+                stream_reader, stream_writer = open_streams(reader)
                 assert isinstance(stream_reader, StreamReader)
                 assert isinstance(stream_writer, StreamWriter)
                 payload = stream_reader.readexactly(5)
@@ -131,7 +123,7 @@ class TestStreamsPoC:
             reader.setblocking(False)
 
             async def handler() -> bytes:
-                stream_reader, _stream_writer = open_async_streams(scheduler, reader)
+                stream_reader, _stream_writer = open_streams(reader, async_=True)
                 return await stream_reader.readexactly(5)
 
             def exercise() -> bytes:
@@ -160,8 +152,7 @@ class TestStreamsPoC:
                 stream_writer = StreamWriter(transport, stream_reader)
                 return stream_reader, stream_writer
 
-            stream_reader, _stream_writer = open_streams(
-                scheduler,
+            stream_reader, _stream_writer = scheduler.open_streams(
                 reader,
                 stream_factory=custom_factory,
             )
@@ -188,10 +179,10 @@ class TestStreamsPoC:
                 stream_writer = AsyncStreamWriter(transport, stream_reader)
                 return stream_reader, stream_writer
 
-            stream_reader, _stream_writer = open_async_streams(
-                scheduler,
+            stream_reader, _stream_writer = scheduler.open_streams(
                 reader,
                 stream_factory=custom_factory,
+                async_=True,
             )
             assert isinstance(stream_reader, TaggedAsyncStreamReader)
             assert stream_reader.tag == "async-custom"
@@ -220,7 +211,7 @@ class TestStreamsPoC:
                     conn.close()
 
             def connect_via_streams() -> bytes:
-                stream_reader, stream_writer = open_connection(scheduler, "127.0.0.1", port)
+                stream_reader, stream_writer = open_connection(addr=("127.0.0.1", port))
                 stream_writer.write(client_greeting)
                 stream_writer.drain()
                 return stream_reader.readexactly(len(client_greeting))
@@ -228,6 +219,104 @@ class TestStreamsPoC:
             connect_task = scheduler.spawn(connect_via_streams)
             scheduler.spawn(accept_and_echo)
             assert scheduler.run_until_complete(connect_task) == b"HELLO"
+        finally:
+            server.close()
+            scheduler.close()
+
+    def test_open_connection_resolves_hostname_via_scheduler(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+
+            def accept_and_echo() -> None:
+                conn, _address = scheduler.sock_accept(server)
+                try:
+                    scheduler.sock_sendall(conn, b"PONG")
+                finally:
+                    conn.close()
+
+            def connect_via_hostname() -> bytes:
+                stream_reader, stream_writer = open_connection(addr=("localhost", port))
+                stream_writer.write(b"ping")
+                stream_writer.drain()
+                return stream_reader.readexactly(4)
+
+            connect_task = scheduler.spawn(connect_via_hostname)
+            scheduler.spawn(accept_and_echo)
+            assert scheduler.run_until_complete(connect_task) == b"PONG"
+        finally:
+            server.close()
+            scheduler.close()
+
+    def test_open_connection_literal_ip_skips_executor(self, monkeypatch: pytest.MonkeyPatch):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        calls: list[object] = []
+        real_run = scheduler.run_in_executor
+
+        def tracking_run(executor, func, *args):
+            calls.append(func)
+            return real_run(executor, func, *args)
+
+        monkeypatch.setattr(scheduler, "run_in_executor", tracking_run)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+
+            def accept_side() -> None:
+                conn, _address = scheduler.sock_accept(server)
+                conn.close()
+
+            def connect_via_literal_ip() -> None:
+                _reader, writer = open_connection(addr=("127.0.0.1", port))
+                writer.close()
+
+            connect_task = scheduler.spawn(connect_via_literal_ip)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+            assert calls == []
+        finally:
+            server.close()
+            scheduler.close()
+
+    def test_open_connection_hostname_uses_executor(self, monkeypatch: pytest.MonkeyPatch):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        calls: list[object] = []
+        real_run = scheduler.run_in_executor
+
+        def tracking_run(executor, func, *args):
+            calls.append(func)
+            return real_run(executor, func, *args)
+
+        monkeypatch.setattr(scheduler, "run_in_executor", tracking_run)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+
+            def accept_side() -> None:
+                conn, _address = scheduler.sock_accept(server)
+                conn.close()
+
+            def connect_via_hostname() -> None:
+                _reader, writer = open_connection(addr=("localhost", port))
+                writer.close()
+
+            connect_task = scheduler.spawn(connect_via_hostname)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+            assert calls == [socket.getaddrinfo]
         finally:
             server.close()
             scheduler.close()
@@ -243,7 +332,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             async def connect_and_ping() -> bytes:
-                stream_reader, stream_writer = open_async_connection(scheduler, "127.0.0.1", port)
+                stream_reader, stream_writer = open_connection(addr=("127.0.0.1", port), async_=True)
                 stream_writer.write(b"ping")
                 await stream_writer.drain()
                 return await stream_reader.readexactly(4)
@@ -273,7 +362,7 @@ class TestStreamsPoC:
             writer.setblocking(True)
 
             def handler() -> tuple[int, bytes]:
-                stream_reader, _stream_writer = open_streams(scheduler, reader)
+                stream_reader, _stream_writer = open_streams(reader)
                 buf = bytearray(8)
                 nbytes = stream_reader.readinto(buf)
                 return nbytes, bytes(buf)
@@ -317,7 +406,7 @@ class TestStreamsPoC:
             writer.setblocking(True)
 
             def handler() -> bytes:
-                stream_reader, _stream_writer = open_streams(scheduler, reader)
+                stream_reader, _stream_writer = open_streams(reader)
                 return stream_reader.readexactly(5)
 
             def deliver() -> None:
@@ -349,7 +438,7 @@ class TestStreamsPoC:
             loop.close()
 
     @pytest.mark.skipif(not _HAS_AF_UNIX, reason="AF_UNIX is not supported")
-    def test_open_unix_connection_round_trip(self):
+    def test_open_connection_unix_path_round_trip(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -369,7 +458,7 @@ class TestStreamsPoC:
                         conn.close()
 
                 def connect_via_unix_streams() -> bytes:
-                    stream_reader, stream_writer = open_unix_connection(scheduler, path)
+                    stream_reader, stream_writer = open_connection(path=path)
                     stream_writer.write(b"hello")
                     stream_writer.drain()
                     return stream_reader.readexactly(5)
@@ -380,6 +469,123 @@ class TestStreamsPoC:
             finally:
                 server.close()
                 scheduler.close()
+
+    def test_stream_server_context_manager_closes_listener(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        listen_sock = server.sockets[0]
+        with server:
+            assert listen_sock.fileno() != -1
+            assert server.accept_operation.kind == "accept_many"
+        assert listen_sock.fileno() == -1
+        scheduler.close()
+
+    def test_stream_server_wait_closed_returns_after_close_with_no_handlers(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        try:
+            server.close()
+
+            def exercise() -> None:
+                server.wait_closed()
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.close()
+
+    def test_stream_server_wait_closed_waits_for_in_flight_handler(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        handler_started = Event()
+        release_handler = Event()
+        wait_finished = Event()
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            handler_started.set()
+            release_handler.swait()
+            writer.close()
+
+        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        try:
+            _host, port = server.sockets[0].getsockname()
+
+            def exercise() -> None:
+                def connect() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    writer.write(b"x")
+                    writer.drain()
+                    writer.close()
+
+                def wait_for_closed() -> None:
+                    server.close()
+                    server.wait_closed()
+                    wait_finished.set()
+
+                scheduler.spawn(connect)
+                handler_started.swait()
+                wait_task = scheduler.spawn(wait_for_closed)
+                scheduler.yield_()
+                assert not wait_finished.is_set()
+                release_handler.set()
+                wait_task.wait()
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert wait_finished.is_set()
+        finally:
+            scheduler.close()
+
+    def test_stream_server_spawn_failure_restores_handler_count(self, monkeypatch: pytest.MonkeyPatch):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        real_spawn = scheduler.spawn
+        serve_spawn_attempts = 0
+
+        def failing_spawn(func, **kwargs):
+            nonlocal serve_spawn_attempts
+            if func.__name__ == "serve":
+                serve_spawn_attempts += 1
+                raise RuntimeError("spawn failed")
+            return real_spawn(func, **kwargs)
+
+        monkeypatch.setattr(scheduler, "spawn", failing_spawn)
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
+        _client, accepted = socket.socketpair()
+        try:
+            accepted.setblocking(False)
+
+            def exercise() -> None:
+                server._dispatch_client(
+                    accepted,
+                    limit=2**16,
+                    stream_factory=None,
+                    client_handler=client_handler,
+                    async_=False,
+                )
+                scheduler.yield_()
+                server.close()
+                server.wait_closed()
+
+            with pytest.raises(RuntimeError, match="spawn failed"):
+                scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert serve_spawn_attempts == 1
+        finally:
+            _client.close()
+            server.close()
+            scheduler.close()
 
     def test_start_server_uses_accept_many_and_dispatches_handler(self):
         scheduler = SyncProactorScheduler()
@@ -392,13 +598,13 @@ class TestStreamsPoC:
             writer.close()
             handled.set()
 
-        server = start_server(scheduler, client_handler, "127.0.0.1", 0)
+        server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0))
         try:
             assert server.accept_operation.kind == "accept_many"
             _host, port = server.sockets[0].getsockname()
 
             def connect_and_send() -> None:
-                _reader, writer = open_connection(scheduler, "127.0.0.1", port)
+                _reader, writer = open_connection(addr=("127.0.0.1", port))
                 writer.write(b"abc")
                 writer.drain()
                 writer.close()
@@ -414,7 +620,7 @@ class TestStreamsPoC:
             scheduler.close()
 
     @pytest.mark.skipif(not _HAS_AF_UNIX, reason="AF_UNIX is not supported")
-    def test_start_unix_server_dispatches_async_handler(self):
+    def test_start_server_unix_path_dispatches_async_handler(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -428,13 +634,13 @@ class TestStreamsPoC:
                     await writer.drain()
                     writer.close()
 
-                server = start_async_unix_server(scheduler, client_handler, path)
+                server = scheduler.start_server(client_handler, path=path, async_=True)
 
                 responses: list[bytes] = []
                 finished = Event()
 
                 def connect_and_read() -> None:
-                    stream_reader, stream_writer = open_unix_connection(scheduler, path)
+                    stream_reader, stream_writer = open_connection(path=path)
                     stream_writer.write(b"ping")
                     stream_writer.drain()
                     responses.append(stream_reader.readexactly(4))
@@ -464,14 +670,14 @@ class TestStreamsPoC:
                 await writer.drain()
                 writer.close()
 
-            server = start_async_server(scheduler, client_handler, "127.0.0.1", 0)
+            server = scheduler.start_server(client_handler, addr=("127.0.0.1", 0), async_=True)
             _host, port = server.sockets[0].getsockname()
 
             responses: list[bytes] = []
             finished = Event()
 
             async def connect_and_read() -> None:
-                stream_reader, stream_writer = open_async_connection(scheduler, "127.0.0.1", port)
+                stream_reader, stream_writer = open_connection(addr=("127.0.0.1", port), async_=True)
                 stream_writer.write(b"xyz")
                 await stream_writer.drain()
                 responses.append(await stream_reader.readexactly(3))

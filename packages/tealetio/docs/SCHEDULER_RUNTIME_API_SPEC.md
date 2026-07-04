@@ -689,6 +689,12 @@ Status: In progress.
 ## Immediate Next Steps
 
 1. Continue hardening the low-level IO callback and socket helper surface.
+   - Add `BaseScheduler.sock_create(...)` / `ProactorScheduler.sock_create(...)`
+     delegating to the proactor; `UringProactor` may use `uring_api.submit_socket()`
+     when supported, otherwise stdlib `socket.socket()`. Wrap uring-returned fds with
+     `socket.socket(fileno=fd)` so the public API stays `socket.socket`-shaped.
+   - Stream/server helpers (`open_connection`, `start_server`, and related paths)
+     route socket creation through `sock_create()`.
 2. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
 
 ## Next Alignment Backlog (Asyncio Interop)

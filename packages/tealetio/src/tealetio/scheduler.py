@@ -1560,6 +1560,61 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         raise NotImplementedError("socket helpers require an IO-capable scheduler")
 
+    def sock_create(
+        self,
+        family: int,
+        type: int,
+        proto: int = 0,
+        *,
+        flags: int = 0,
+    ) -> socket.socket:
+        """Create a non-blocking, close-on-exec socket through the scheduler IO backend."""
+
+        raise NotImplementedError("socket helpers require an IO-capable scheduler")
+
+    def open_streams(
+        self,
+        sock: socket.socket,
+        *,
+        limit: int = 2**16,
+        stream_factory: Any = None,
+        async_: bool = False,
+    ) -> tuple[Any, Any]:
+        """Wrap a connected non-blocking socket as stream endpoints."""
+
+        raise NotImplementedError("stream helpers require an IO-capable scheduler")
+
+    def open_connection(
+        self,
+        *,
+        addr: tuple[str, int] | None = None,
+        path: str | None = None,
+        family: int = socket.AF_UNSPEC,
+        proto: int = 0,
+        limit: int = 2**16,
+        stream_factory: Any = None,
+        async_: bool = False,
+    ) -> tuple[Any, Any]:
+        """Connect and return stream endpoints (TCP via ``addr``, Unix via ``path``)."""
+
+        raise NotImplementedError("stream helpers require an IO-capable scheduler")
+
+    def start_server(
+        self,
+        client_handler: Callable[..., Any],
+        *,
+        addr: tuple[str | None, int] | None = None,
+        path: str | None = None,
+        family: int = socket.AF_INET,
+        backlog: int = 100,
+        limit: int = 2**16,
+        stream_factory: Any = None,
+        async_: bool = False,
+    ) -> Any:
+        """Start a stream server that dispatches each accept to ``client_handler``."""
+
+        raise NotImplementedError("stream helpers require an IO-capable scheduler")
+
     def poll(self, fd: int, mask: int) -> int:
         """Wait until an fd reports events in `mask` and return the readiness bitmask."""
 

@@ -4277,6 +4277,21 @@ class TestProactorScheduler:
         with pytest.raises(TypeError, match="abstract"):
             ProactorScheduler()
 
+    def test_sock_create_uses_stdlib_socket(self):
+        scheduler = SyncProactorScheduler()
+        try:
+            sock = scheduler.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                assert isinstance(sock, socket.socket)
+                assert sock.family == socket.AF_INET
+                assert sock.type == socket.SOCK_STREAM
+                assert sock.getblocking() is False
+                assert os.get_inheritable(sock.fileno()) is False
+            finally:
+                sock.close()
+        finally:
+            scheduler.close()
+
     def test_scheduler_clock_drives_proactor_clock(self):
         scheduler = SyncProactorScheduler()
         try:
