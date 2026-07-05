@@ -117,7 +117,7 @@ def _multishot_test_entry() -> proactor_module._UringEntry:
     return proactor_module._UringEntry(
         operation=operation,
         complete=lambda *_args: None,
-        multishot_leg=proactor_module._MultishotLegState(),
+        multishot=True,
     )
 
 
@@ -663,12 +663,6 @@ def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) ->
         if proactor.get_time() >= deadline:
             raise TimeoutError("timed out waiting for uring condition")
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
-
-
-
-
-
-
 
 
 class TestOperation:
@@ -1963,8 +1957,6 @@ class TestThreadedSelectorProactor:
         assert asyncio.run(run()) == b"hello"
 
 
-
-
 class _DeferredUringRing(_FakeUringRing):
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
@@ -1982,6 +1974,32 @@ class _DeferredUringRing(_FakeUringRing):
         completion.flags = 0
         completion.result = len(data)
         self._deliver(completion)
+
+
+class _FailingSubmitUringRing(_DeferredUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.fail_next_submit = False
+        self.last_user_data: object | None = None
+
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+        self.last_user_data = user_data
+        if self.fail_next_submit:
+            self.fail_next_submit = False
+            raise RuntimeError("submit_recv failed")
+        return super().submit_recv(fd, buf, user_data)
+
+
+class _FailOnResubmitUringRing(_FakeUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.recv_submit_count = 0
+
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+        self.recv_submit_count += 1
+        if self.recv_submit_count > 1:
+            raise RuntimeError("deferred recv resubmit failed")
+        return super().submit_recv(fd, buf, user_data)
 
 
 class _BackpressuredUringRing(_DeferredUringRing):
@@ -2569,6 +2587,26 @@ class TestUringProactor:
                     os.close(fd)
                 proactor.close()
 
+    def test_submit_uring_entry_clears_pending_token_when_submit_raises(self):
+        proactor = UringProactor(ring_factory=_FailingSubmitUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            ring = proactor.ring
+            assert isinstance(ring, _FailingSubmitUringRing)
+            ring.fail_next_submit = True
+            with pytest.raises(RuntimeError, match="submit_recv failed"):
+                proactor.recv(reader, 5)
+            entry = ring.last_user_data
+            assert entry is not None
+            assert entry.active is False
+            assert proactor.has_pending_operations() is False
+            assert ring.submitted_recv == []
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_uring_entry_keeps_pending_completion_handle(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()
@@ -2579,6 +2617,46 @@ class TestUringProactor:
             _fd, _buf, entry = proactor.ring.submitted_recv[-1]
 
             assert entry.completion is proactor.ring.pending_recv[-1]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_uring_entry_clears_completion_handle_after_delivery(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            _fd, _buf, entry = proactor.ring.submitted_recv[-1]
+            assert entry.completion is not None
+
+            proactor.ring.complete_recv()
+            proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.result() == b"hello"
+            assert entry.completion is None
+            assert operation._cancel_target is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_multishot_recv_many_clears_completion_handle_when_done(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, lambda _chunk: None, buf_group=proactor.shared_recv_buffer_pool())
+            _fd, _group, entry = proactor.ring.submitted_recv_multishot[-1]
+            assert entry.completion is not None
+
+            proactor.ring.complete_recv_multishot(b"hello", more=False, sequence=0)
+            proactor.ring.complete_recv_multishot(b"", more=False, sequence=1)
+            _wait_for_uring(proactor, lambda: operation.done())
+
+            assert entry.completion is None
+            assert operation._cancel_target is None
         finally:
             reader.close()
             writer.close()
@@ -3129,6 +3207,27 @@ class TestUringProactor:
             for conn, _address in accepted:
                 conn.close()
             server.close()
+            proactor.close()
+
+    def test_deferred_recv_many_resubmit_failure_fails_operation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FailOnResubmitUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(
+                reader, _recv_many_auto_resume_callback(seen), buf_group=proactor.shared_recv_buffer_pool()
+            )
+            proactor.ring.complete_recv_oneshot(b"hello")
+            assert _recv_many_bytes(seen) == [(0, b"hello")]
+            assert operation.done() is True
+            assert isinstance(operation.exception(), RuntimeError)
+            assert str(operation.exception()) == "deferred recv resubmit failed"
+            assert proactor.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
             proactor.close()
 
     def test_recv_many_falls_back_to_oneshot_recv_and_finishes_on_eof(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3814,9 +3913,7 @@ class TestProactorScheduler:
                 return index, bytes(chunk)
 
             task = scheduler.spawn(receive_first_chunk)
-            scheduler.spawn(
-                lambda: scheduler.proactor.ring.complete_recv_multishot(b"x", more=False, sequence=0)
-            )
+            scheduler.spawn(lambda: scheduler.proactor.ring.complete_recv_multishot(b"x", more=False, sequence=0))
 
             assert scheduler.run_until_complete(task) == (0, b"x")
             submitted = scheduler.proactor.ring.submitted_recv_multishot[0][1]
