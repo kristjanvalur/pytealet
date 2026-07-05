@@ -181,6 +181,12 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         self.break_count += 1
 
+    def _recv_buffer_for_entry(self, entry: object) -> memoryview:
+        for _fd, buf, user_data in reversed(self.submitted_recv):
+            if user_data is entry:
+                return memoryview(buf)
+        raise RuntimeError("recv buffer not found for entry")
+
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -203,7 +209,7 @@ class _FakeUringRing:
     def complete_recv_oneshot(self, data: bytes) -> None:
         completion = self.pending_recv_oneshot.pop(0)
         entry = completion.user_data
-        view = memoryview(entry.data)
+        view = self._recv_buffer_for_entry(entry)
         if data:
             view[: len(data)] = data
             completion.res = len(data)

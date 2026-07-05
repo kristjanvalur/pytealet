@@ -476,19 +476,32 @@ class _MultishotLegState:
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
-@dataclass
 class _UringEntry:
-    operation: Operation[Any]
-    complete: _UringEntryComplete
-    data: memoryview | None = None
-    offset: int = 0
-    progress: _ProgressCallback | None = None
-    completion: _UringCompletion | None = None
-    active: bool = True
-    stream_sequence: int = 0
-    resubmit: _UringEntrySubmit | None = None
-    multishot_leg: _MultishotLegState | None = None
-    buf_group: _UringBufGroup | None = None
+    """Per-submission io_uring completion state.
+
+    Operation-specific context is captured by the ``complete`` callback closure.
+    ``multishot_leg`` is the only optional per-entry field outside that path;
+    it is consulted before ``complete`` runs to order multishot CQEs.
+    """
+
+    __slots__ = ("operation", "complete", "completion", "active", "resubmit", "multishot_leg")
+
+    def __init__(
+        self,
+        operation: Operation[Any],
+        complete: _UringEntryComplete,
+        *,
+        completion: _UringCompletion | None = None,
+        active: bool = True,
+        resubmit: _UringEntrySubmit | None = None,
+        multishot_leg: _MultishotLegState | None = None,
+    ) -> None:
+        self.operation = operation
+        self.complete = complete
+        self.completion = completion
+        self.active = active
+        self.resubmit = resubmit
+        self.multishot_leg = multishot_leg
 
     def completions_to_process(
         self,
@@ -1555,21 +1568,28 @@ class UringProactor(ProactorBase):
 
         operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
         data = memoryview(bytearray(n))
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv, data=data)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_recv(entry, completion, data),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), data, entry))
         return operation
 
-    def _complete_uring_recv(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[bytes]:
-        assert entry.data is not None
+    def _complete_uring_recv(
+        self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
+    ) -> Operation[bytes]:
         operation = cast(Operation[bytes], entry.operation)
-        operation._set_result(entry.data[: completion.res].tobytes())
+        operation._set_result(data[: completion.res].tobytes())
         return operation
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""
 
         operation = Operation[int](kind="recv_into", fileobj=sock, proactor=self)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_recv_into, data=memoryview(buf))
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_recv_into(entry, completion),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), buf, entry))
         return operation
 
@@ -1583,15 +1603,19 @@ class UringProactor(ProactorBase):
 
         operation = Operation[tuple[bytes, Any]](kind="recvfrom", fileobj=sock, proactor=self)
         data = memoryview(bytearray(bufsize))
-        self._submit_recvmsg(sock, operation, data, UringProactor._complete_uring_recvfrom)
+        self._submit_recvmsg(
+            sock,
+            operation,
+            data,
+            lambda proactor, entry, completion: proactor._complete_uring_recvfrom(entry, completion, data),
+        )
         return operation
 
     def _complete_uring_recvfrom(
-        self, entry: _UringEntry, completion: _UringCompletion
+        self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
     ) -> Operation[tuple[bytes, Any]]:
-        assert entry.data is not None
         operation = cast(Operation[tuple[bytes, Any]], entry.operation)
-        operation._set_result((entry.data[: completion.res].tobytes(), completion.result))
+        operation._set_result((data[: completion.res].tobytes(), completion.result))
         return operation
 
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
@@ -1605,7 +1629,12 @@ class UringProactor(ProactorBase):
             raise ValueError("nbytes is greater than the length of the buffer")
         if nbytes:
             data = data[:nbytes]
-        self._submit_recvmsg(sock, operation, data, UringProactor._complete_uring_recvfrom_into)
+        self._submit_recvmsg(
+            sock,
+            operation,
+            data,
+            lambda proactor, entry, completion: proactor._complete_uring_recvfrom_into(entry, completion),
+        )
         return operation
 
     def _complete_uring_recvfrom_into(
@@ -1629,25 +1658,31 @@ class UringProactor(ProactorBase):
         self._submit_sendall(sock, operation, payload, 0, progress)
         return operation
 
-    def _complete_uring_sendall(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None] | None:
+    def _complete_uring_sendall(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+        data: memoryview,
+        offset: int,
+        progress: _ProgressCallback | None,
+    ) -> Operation[None] | None:
         operation = cast(Operation[None], entry.operation)
         res = completion.res
         if res == 0:
             operation._set_exception(BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
             return operation
-        assert entry.data is not None
-        offset = entry.offset + res
-        if entry.progress is not None:
+        offset += res
+        if progress is not None:
             try:
-                entry.progress(offset)
+                progress(offset)
             except BaseException as exc:
                 operation._set_exception(exc)
                 return operation
-        if offset >= len(entry.data):
+        if offset >= len(data):
             operation._set_result(None)
             return operation
         sock = cast(socket.socket, operation.fileobj)
-        self._submit_sendall(sock, operation, entry.data, offset, entry.progress)
+        self._submit_sendall(sock, operation, data, offset, progress)
         return None
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -1655,7 +1690,10 @@ class UringProactor(ProactorBase):
 
         operation = Operation[int](kind="sendto", fileobj=sock, proactor=self)
         payload = memoryview(data)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_sendto, data=payload)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_sendto(entry, completion),
+        )
         self._submit_uring_entry(entry, lambda: self._submit_sendto(sock.fileno(), payload, address, entry))
         return operation
 
@@ -1668,7 +1706,10 @@ class UringProactor(ProactorBase):
         """Submit a socket accept operation."""
 
         operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock, proactor=self)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_accept)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_accept(entry, completion),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS))
         return operation
 
@@ -1704,7 +1745,7 @@ class UringProactor(ProactorBase):
             # one multishot accept stays armed until F_MORE clears or we cancel.
             entry = _UringEntry(
                 operation=operation,
-                complete=UringProactor._deliver_uring_accept_many,
+                complete=lambda proactor, entry, completion: proactor._deliver_uring_accept_many(entry, completion),
                 multishot_leg=_MultishotLegState(),
             )
             self._submit_uring_entry(
@@ -1714,7 +1755,10 @@ class UringProactor(ProactorBase):
             return operation
 
         # fallback: accept one connection, emit it, queue another submit_accept().
-        entry = _UringEntry(operation=operation, complete=UringProactor._deliver_uring_accept_many_oneshot)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._deliver_uring_accept_many_oneshot(entry, completion),
+        )
 
         def submit_accept() -> _UringCompletion:
             return self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS)
@@ -1768,7 +1812,10 @@ class UringProactor(ProactorBase):
         """Submit a non-blocking socket connect operation."""
 
         operation = Operation[None](kind="connect", fileobj=sock, proactor=self)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_connect)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_connect(entry, completion),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
         return operation
 
@@ -1781,7 +1828,10 @@ class UringProactor(ProactorBase):
         """Submit an io_uring openat operation and return the opened fd on success."""
 
         operation = Operation[int](kind="openat", fileobj=path, proactor=self)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_openat)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_openat(entry, completion),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_openat(path, flags, mode, entry, dfd=dfd))
         return operation
 
@@ -1795,21 +1845,28 @@ class UringProactor(ProactorBase):
 
         operation = Operation[bytes](kind="read", fileobj=fd, proactor=self)
         data = memoryview(bytearray(n))
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_read, data=data)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_read(entry, completion, data),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, data, offset, entry))
         return operation
 
-    def _complete_uring_read(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[bytes]:
-        assert entry.data is not None
+    def _complete_uring_read(
+        self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
+    ) -> Operation[bytes]:
         operation = cast(Operation[bytes], entry.operation)
-        operation._set_result(entry.data[: completion.res].tobytes())
+        operation._set_result(data[: completion.res].tobytes())
         return operation
 
     def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
         """Submit a positioned file read into a caller-provided buffer."""
 
         operation = Operation[int](kind="read_into", fileobj=fd, proactor=self)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_read_into, data=memoryview(buf))
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_read_into(entry, completion),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, buf, offset, entry))
         return operation
 
@@ -1823,7 +1880,10 @@ class UringProactor(ProactorBase):
 
         operation = Operation[int](kind="write", fileobj=fd, proactor=self)
         payload = memoryview(data)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_write, data=payload)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_write(entry, completion),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_write(fd, payload, offset, entry))
         return operation
 
@@ -1855,7 +1915,11 @@ class UringProactor(ProactorBase):
             dfd = uring_api.AT_FDCWD
             stat_path = path
             stat_flags = 0
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_stat, data=memoryview(buf))
+        stat_buf = memoryview(buf)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_stat(entry, completion, stat_buf),
+        )
         self._submit_uring_entry(
             entry,
             lambda: self._ring.submit_statx(
@@ -1869,11 +1933,12 @@ class UringProactor(ProactorBase):
         )
         return operation
 
-    def _complete_uring_stat(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[os.stat_result]:
-        assert entry.data is not None
+    def _complete_uring_stat(
+        self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
+    ) -> Operation[os.stat_result]:
         operation = cast(Operation[os.stat_result], entry.operation)
         try:
-            operation._set_result(_stat_result_from_statx(entry.data))
+            operation._set_result(_stat_result_from_statx(data))
         except ValueError as exc:
             operation._set_exception(exc)
         return operation
@@ -1894,7 +1959,10 @@ class UringProactor(ProactorBase):
             return super().stat_fdsize(fd)
 
         operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_stat_fdsize)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_stat_fdsize(entry, completion),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_statx_fdsize(fd, entry))
         return operation
 
@@ -1953,11 +2021,13 @@ class UringProactor(ProactorBase):
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
             uring_group = cast(_UringBufGroup, buf_group)
             # provided-buffer multishot: leased BufViews, ENOBUFS resume callback path.
+            stream_sequence = [0]
             entry = _UringEntry(
                 operation=operation,
-                complete=UringProactor._deliver_uring_recv_many,
+                complete=lambda proactor, entry, completion: proactor._deliver_uring_recv_many(
+                    entry, completion, stream_sequence
+                ),
                 multishot_leg=_MultishotLegState(),
-                buf_group=uring_group,
             )
 
             def submit_recv_many() -> _UringCompletion:
@@ -1969,10 +2039,13 @@ class UringProactor(ProactorBase):
 
         # degraded fallback: copy each recv into an owned view and resubmit recv.
         buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
+        view = memoryview(buffer)
+        stream_sequence = [0]
         entry = _UringEntry(
             operation=operation,
-            complete=UringProactor._deliver_uring_recv_many_oneshot,
-            data=memoryview(buffer),
+            complete=lambda proactor, entry, completion: proactor._deliver_uring_recv_many_oneshot(
+                entry, completion, view, stream_sequence
+            ),
         )
 
         def submit_recv() -> _UringCompletion:
@@ -1983,7 +2056,11 @@ class UringProactor(ProactorBase):
         return operation
 
     def _deliver_uring_recv_many_oneshot(
-        self, entry: _UringEntry, completion: _UringCompletion
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+        data: memoryview,
+        stream_sequence: list[int],
     ) -> Operation[Any] | None:
         # not BufView-based: copy out of the reused recv buffer so resubmit is safe.
         operation = cast(ContinuousOperation[_RecvManyResult], entry.operation)
@@ -1992,17 +2069,15 @@ class UringProactor(ProactorBase):
             self._deactivate_uring_entry(entry)
             operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
-        index = entry.stream_sequence
+        index = stream_sequence[0]
         if res == 0:
             operation._emit_result((index, memoryview(b"")))
             operation._set_result(None)
             self._deactivate_uring_entry(entry)
             return operation
-        view = entry.data
-        assert view is not None
-        chunk = bytes(view[:res])
+        chunk = bytes(data[:res])
         operation._emit_result((index, memoryview(chunk)))
-        entry.stream_sequence += 1
+        stream_sequence[0] = index + 1
         if operation.done():
             return operation
         self._queue_entry_resubmit(entry)
@@ -2014,7 +2089,10 @@ class UringProactor(ProactorBase):
         # mask and fd go straight to io_uring; bad values show up as CQE errors.
         # selector validates masks (select() fd lists) and fd>=0; no per-fd exclusivity.
         operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
-        entry = _UringEntry(operation=operation, complete=UringProactor._complete_uring_poll)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_poll(entry, completion),
+        )
         self._submit_uring_entry(entry, lambda: self._ring.submit_poll(fd, mask, entry))
         return operation
 
@@ -2047,14 +2125,17 @@ class UringProactor(ProactorBase):
             # kernel keeps the poll armed; cancel via submit_poll_remove().
             entry = _UringEntry(
                 operation=operation,
-                complete=UringProactor._deliver_uring_poll_many,
+                complete=lambda proactor, entry, completion: proactor._deliver_uring_poll_many(entry, completion),
                 multishot_leg=_MultishotLegState(),
             )
             self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
             return operation
 
         # fallback: one-shot submit_poll per readiness event.
-        entry = _UringEntry(operation=operation, complete=UringProactor._deliver_uring_poll_many_oneshot)
+        entry = _UringEntry(
+            operation=operation,
+            complete=lambda proactor, entry, completion: proactor._deliver_uring_poll_many_oneshot(entry, completion),
+        )
 
         def submit_poll() -> _UringCompletion:
             return self._ring.submit_poll(fd, mask, entry)
@@ -2092,18 +2173,24 @@ class UringProactor(ProactorBase):
             self._deactivate_uring_entry(entry)
         return operation
 
-    def _deliver_uring_recv_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+    def _deliver_uring_recv_many(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+        stream_sequence: list[int],
+    ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[_RecvManyResult], entry.operation)
         res = completion.res
-        index = entry.stream_sequence + completion.sequence
+        index = stream_sequence[0] + completion.sequence
 
         if res < 0:
             self._deactivate_uring_entry(entry)
             if res == -errno.ENOBUFS:
-                entry.stream_sequence += completion.sequence
-                if entry.multishot_leg is not None:
-                    entry.multishot_leg.nonterminal_seen = 0
-                    entry.multishot_leg.pending_final = None
+                stream_sequence[0] += completion.sequence
+                multishot_leg = entry.multishot_leg
+                if multishot_leg is not None:
+                    multishot_leg.nonterminal_seen = 0
+                    multishot_leg.pending_final = None
                 operation._emit_result((RECV_MANY_BUFFER_PRESSURE, self._recv_many_resume_callable(entry)))
                 return None
             operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
@@ -2248,10 +2335,9 @@ class UringProactor(ProactorBase):
     ) -> None:
         entry = _UringEntry(
             operation=operation,
-            complete=UringProactor._complete_uring_sendall,
-            data=data,
-            offset=offset,
-            progress=progress,
+            complete=lambda proactor, entry, completion: proactor._complete_uring_sendall(
+                entry, completion, data, offset, progress
+            ),
         )
         self._submit_uring_entry(entry, lambda: self._submit_send(sock.fileno(), data[offset:], entry))
 
@@ -2262,7 +2348,7 @@ class UringProactor(ProactorBase):
         data: memoryview,
         complete: _UringEntryComplete,
     ) -> None:
-        entry = _UringEntry(operation=operation, complete=complete, data=data)
+        entry = _UringEntry(operation=operation, complete=complete)
         self._submit_uring_entry(entry, lambda: self._ring.submit_recvmsg(sock.fileno(), data, entry))
 
     def _complete_uring_operation(
