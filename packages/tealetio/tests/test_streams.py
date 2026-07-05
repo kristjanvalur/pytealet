@@ -736,27 +736,35 @@ class TestStreamsPoC:
             writer.close()
             scheduler.close()
 
-    def test_start_server_arms_accept_many_with_default_recv_size(self, monkeypatch: pytest.MonkeyPatch):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        captured: list[int | None] = []
-        real_accept_many = scheduler.proactor.accept_many
-
-        def capture_accept_many(sock: socket.socket, callback, *, recv_size=None):
-            captured.append(recv_size)
-            return real_accept_many(sock, callback, recv_size=recv_size)
-
-        monkeypatch.setattr(scheduler.proactor, "accept_many", capture_accept_many)
-
+    def test_start_server_passes_recv_size_only_when_opted_in(self, monkeypatch: pytest.MonkeyPatch):
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-        try:
-            assert captured == [1024]
-        finally:
-            server.close()
-            scheduler.close()
+        def run_with_recv_size(recv_size: int | None) -> int | None:
+            scheduler = SyncProactorScheduler()
+            set_scheduler(scheduler)
+            captured: list[int | None] = []
+            real_accept_many = scheduler.proactor.accept_many
+
+            def capture_accept_many(sock: socket.socket, callback, *, recv_size=None):
+                captured.append(recv_size)
+                return real_accept_many(sock, callback, recv_size=recv_size)
+
+            monkeypatch.setattr(scheduler.proactor, "accept_many", capture_accept_many)
+            server = start_server(
+                client_handler,
+                addr=("127.0.0.1", 0),
+                recv_size=recv_size,
+                scheduler=scheduler,
+            )
+            try:
+                return captured[-1]
+            finally:
+                server.close()
+                scheduler.close()
+
+        assert run_with_recv_size(None) is None
+        assert run_with_recv_size(1024) == 1024
 
     def test_start_server_prefills_reader_from_accept_preread(self, monkeypatch: pytest.MonkeyPatch):
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
@@ -770,7 +778,7 @@ class TestStreamsPoC:
             writer.close()
             handled.set()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+        server = start_server(client_handler, addr=("127.0.0.1", 0), recv_size=64, scheduler=scheduler)
         try:
             proactor = scheduler.proactor
 

@@ -94,7 +94,19 @@ _RecvManyCallback = Callable[[_RecvManyResult], object]
 _RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = tuple[socket.socket, Any, bytes | None]
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
+_MAX_ACCEPT_RECV_SIZE = 2**16
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
+
+
+def _validate_accept_recv_size(recv_size: int | None) -> None:
+    if recv_size is None:
+        return
+    if recv_size <= 0:
+        raise ValueError("recv_size must be positive when provided")
+    if recv_size > _MAX_ACCEPT_RECV_SIZE:
+        raise ValueError(f"recv_size must not exceed {_MAX_ACCEPT_RECV_SIZE}")
+
+
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
 
 
@@ -848,8 +860,7 @@ class SelectorProactor(ProactorBase):
         delivers ``initial_data`` as ``None``.
         """
 
-        if recv_size is not None and recv_size <= 0:
-            raise ValueError("recv_size must be positive when provided")
+        _validate_accept_recv_size(recv_size)
 
         operation = ContinuousOperation[AcceptManyResult](
             kind="accept_many",
@@ -1881,8 +1892,7 @@ class UringProactor(ProactorBase):
         ``None``.
         """
 
-        if recv_size is not None and recv_size <= 0:
-            raise ValueError("recv_size must be positive when provided")
+        _validate_accept_recv_size(recv_size)
 
         operation = ContinuousOperation[AcceptManyResult](
             kind="accept_many",
@@ -1890,11 +1900,14 @@ class UringProactor(ProactorBase):
             result_callback=callback,
         )
         pending_recv: list[_UringEntry] = []
+        accept_finished: list[bool] = [False]
         if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
             # one multishot accept stays armed until F_MORE clears or we cancel.
             entry = self._uring_entry(
                 operation,
-                lambda entry, completion: self._deliver_uring_accept_many(entry, completion, recv_size, pending_recv),
+                lambda entry, completion: self._deliver_uring_accept_many(
+                    entry, completion, recv_size, pending_recv, accept_finished
+                ),
                 multishot=True,
             )
             self._bind_accept_many_cancel(operation, pending_recv)
@@ -1943,6 +1956,15 @@ class UringProactor(ProactorBase):
                 self._submit_cancel(completion)
             cast(socket.socket, entry.operation.fileobj).close()
 
+    def _finish_accept_many_if_ready(
+        self,
+        operation: ContinuousOperation[AcceptManyResult],
+        pending_recv: list[_UringEntry],
+        accept_finished: list[bool],
+    ) -> None:
+        if accept_finished[0] and not pending_recv and not operation.done():
+            operation._set_result(None)
+
     def _deliver_uring_accept_many_oneshot(
         self,
         entry: _UringEntry,
@@ -1971,6 +1993,7 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
         recv_size: int | None,
         pending_recv: list[_UringEntry],
+        accept_finished: list[bool],
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[AcceptManyResult], entry.operation)
         res = completion.res
@@ -1998,13 +2021,17 @@ class UringProactor(ProactorBase):
                     address,
                     view,
                     pending_recv,
+                    accept_finished,
                 ),
             )
             pending_recv.append(recv_entry)
             self._submit_uring_entry(recv_entry, lambda: self._ring.submit_recv(conn.fileno(), buffer, recv_entry))
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
-            operation._set_result(None)
             self._deactivate_uring_entry(entry)
+            if pending_recv:
+                accept_finished[0] = True
+            else:
+                operation._set_result(None)
         return operation
 
     def _deliver_receive_on_accept(
@@ -2016,6 +2043,7 @@ class UringProactor(ProactorBase):
         address: Any,
         data: memoryview,
         pending_recv: list[_UringEntry],
+        accept_finished: list[bool],
     ) -> Operation[Any] | None:
         recv_operation = entry.operation
         res = completion.res
@@ -2023,12 +2051,20 @@ class UringProactor(ProactorBase):
             pending_recv.remove(entry)
         except ValueError:
             pass
-        if res <= 0:
+        if res < 0:
+            # recv errors after accept are dropped; the idle peer is not delivered.
             conn.close()
             recv_operation._set_result(None)
+            self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
+            return recv_operation
+        if res == 0:
+            conn.close()
+            recv_operation._set_result(None)
+            self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
             return recv_operation
         parent._emit_result((conn, address, data[:res].tobytes()))
         recv_operation._set_result(None)
+        self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
         return recv_operation
 
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]:

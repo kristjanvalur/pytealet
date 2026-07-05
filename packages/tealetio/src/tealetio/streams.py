@@ -26,7 +26,6 @@ from .scheduler import BaseScheduler
 T = TypeVar("T")
 
 _DEFAULT_LIMIT = 2**16
-_DEFAULT_ACCEPT_RECV_SIZE = 1024
 
 __all__ = [
     "SocketTransport",
@@ -862,12 +861,17 @@ def _start_stream_server(
     client_handler: _ClientHandler,
     *,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
     """Start ``accept_many`` on a listening socket and return a ``StreamServer``.
 
     Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
+    ``recv_size`` opts into accept-time pre-read on backends that honour the
+    hint (multishot io_uring accept). Use only for client-speaks-first
+    protocols such as HTTP; server-speaks-first clients will not reach the
+    handler until they send data or close.
     """
 
     server: StreamServer | None = None
@@ -889,7 +893,7 @@ def _start_stream_server(
         )
 
     io = cast(ServerIO, _require_proactor_io(scheduler))
-    accept_operation = io.proactor.accept_many(sock, on_accept, recv_size=_DEFAULT_ACCEPT_RECV_SIZE)
+    accept_operation = io.proactor.accept_many(sock, on_accept, recv_size=recv_size)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
 
@@ -903,6 +907,7 @@ def _start_server(
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
@@ -920,6 +925,7 @@ def _start_server(
         sock,
         client_handler,
         limit=limit,
+        recv_size=recv_size,
         stream_factory=stream_factory,
         async_=async_,
     )
@@ -933,6 +939,7 @@ def start_server(
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -946,6 +953,7 @@ def start_server(
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -958,6 +966,7 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -970,6 +979,7 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -983,6 +993,7 @@ def start_server(
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
@@ -1000,7 +1011,10 @@ def start_server(
 
     Accepts use ``proactor.accept_many()``, so ``UringProactor`` can service
     connections through multishot accept when the runtime probe allows it.
-    Handler tealets are spawned through ``call_soon_threadsafe`` because accept
+    ``recv_size`` opts into accept-time pre-read and reader prefill for
+    client-speaks-first protocols (for example HTTP); leave it ``None`` when
+    the server may speak first. Handler tealets are spawned through
+    ``call_soon_threadsafe`` because accept
     callbacks may run on completion worker threads. Handler exceptions propagate
     in the handler tealet and do not stop the listener. ``spawn()`` failures
     during dispatch are reported through the scheduler exception handler.
@@ -1014,6 +1028,7 @@ def start_server(
         family=family,
         backlog=backlog,
         limit=limit,
+        recv_size=recv_size,
         stream_factory=stream_factory,
         async_=async_,
     )

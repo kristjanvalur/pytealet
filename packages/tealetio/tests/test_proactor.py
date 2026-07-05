@@ -3359,6 +3359,28 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
+    def test_accept_many_recv_size_cancel_closes_pending_recv(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+            assert len(proactor.ring.pending_accept_recv) == 1
+            operation.cancel()
+            assert operation.cancelled() is True
+            assert accepted == []
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+        finally:
+            for conn, _address, _data in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
     def test_accept_many_recv_size_closes_idle_peer_without_delivery(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
