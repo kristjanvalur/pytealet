@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, NoReturn, cast
 
 from .locks import Event
-from .operations import ContinuousOperation, OperationCancelHost
+from .operations import ContinuousOperation
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
@@ -39,33 +39,6 @@ class _FdCallbacks:
 
     def empty(self) -> bool:
         return self.reader is None and self.writer is None
-
-
-class _SelectorPollMany(ContinuousOperation[int]):
-    def __init__(
-        self,
-        *,
-        kind: str,
-        fileobj: object | None = None,
-        proactor: OperationCancelHost | None = None,
-        result_callback: Callable[[int], object] | None = None,
-        on_cancel: Callable[[], None] | None = None,
-    ) -> None:
-        super().__init__(
-            kind=kind,
-            fileobj=fileobj,
-            proactor=proactor,
-            result_callback=result_callback,
-        )
-        self._on_cancel = on_cancel
-
-    def cancel(self) -> None:
-        if self.done():
-            return
-        on_cancel = self._on_cancel
-        if on_cancel is not None:
-            on_cancel()
-        self._set_cancelled()
 
 
 class SelectorMixin:
@@ -348,12 +321,17 @@ class SelectorMixin:
                 self.remove_writer(fd)
                 armed["write"] = False
 
-        operation = _SelectorPollMany(
+        operation = ContinuousOperation[int](
             kind="poll_many",
             fileobj=fd,
             result_callback=callback,
-            on_cancel=disarm,
         )
+
+        def cancel() -> None:
+            disarm()
+            operation._set_cancelled()
+
+        operation.set_cancel(cancel)
 
         def arm() -> None:
             if operation.done():

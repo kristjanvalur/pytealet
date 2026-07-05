@@ -112,7 +112,6 @@ def _multishot_test_entry() -> proactor_module._UringEntry:
     operation = ContinuousOperation(
         kind="recv_many",
         fileobj=socket.socketpair()[0],
-        proactor=None,
         result_callback=lambda _result: None,
     )
     return proactor_module._UringEntry(
@@ -123,7 +122,7 @@ def _multishot_test_entry() -> proactor_module._UringEntry:
 
 
 def test_uring_entry_omits_multishot_leg_for_one_shot_operations():
-    operation = Operation(kind="recv", fileobj=socket.socketpair()[0], proactor=None)
+    operation = Operation(kind="recv", fileobj=socket.socketpair()[0])
     entry = proactor_module._UringEntry(operation=operation, complete=lambda *_args: None)
     assert entry.multishot_leg is None
 
@@ -2637,7 +2636,7 @@ class TestUringProactor:
 
             assert operation.result() == b"hello"
             assert entry.completion is None
-            assert operation._cancel_target is None
+            assert operation._cancel is None
         finally:
             reader.close()
             writer.close()
@@ -2657,7 +2656,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: operation.done())
 
             assert entry.completion is None
-            assert operation._cancel_target is None
+            assert operation._cancel is None
         finally:
             reader.close()
             writer.close()
@@ -4462,7 +4461,7 @@ class TestProactorScheduler:
         monkeypatch.setattr(os, "close", tracking_close)
 
         def failing_stat_fdsize(self: UringProactor, fd: int) -> Operation[int]:
-            operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
+            operation = Operation[int](kind="stat_fdsize", fileobj=fd)
             operation._set_exception(OSError(errno.EIO, "stat failed"))
             return operation
 

@@ -206,8 +206,4 @@ class RecvIterBuffer:
             self._ready.clear()
             self._reorder.reset()
         if stream is not None and not stream.done():
-            proactor = stream._proactor
-            if proactor is not None:
-                proactor.cancel_operation(stream)
-            else:
-                stream.cancel()
+            stream.cancel()

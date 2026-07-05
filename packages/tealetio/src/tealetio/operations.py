@@ -4,7 +4,7 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
-from typing import Any, Generic, Protocol, TypeVar, cast
+from typing import Any, Generic, TypeVar, cast
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -14,12 +14,9 @@ class InvalidStateError(Exception):
     """Raised when an operation result is requested before completion."""
 
 
-class OperationCancelHost(Protocol):
-    def cancel_operation(self, operation: Operation[Any]) -> None: ...
-
-
 _DoneCallback = Callable[["Operation[Any]"], object]
 _ResultCallback = Callable[[T_co], object]
+_CancelHook = Callable[[], None]
 
 
 @dataclass
@@ -36,18 +33,16 @@ class Operation(Generic[T]):
         *,
         kind: str,
         fileobj: object | None = None,
-        proactor: OperationCancelHost | None = None,
     ) -> None:
         self.kind = kind
         self.fileobj = fileobj
-        self._proactor = proactor
         self._lock = threading.Lock()
         self._done = False
         self._cancelled = False
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] | None = []
-        self._cancel_target: object | None = None
+        self._cancel: _CancelHook | None = None
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -59,14 +54,19 @@ class Operation(Generic[T]):
 
         return self._cancelled
 
+    def set_cancel(self, cancel: _CancelHook | None) -> None:
+        """Install or clear the backend cancel hook for this operation."""
+
+        self._cancel = cancel
+
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
 
         if self._done:
             return
-        proactor = self._proactor
-        if proactor is not None:
-            proactor.cancel_operation(self)
+        cancel = self._cancel
+        if cancel is not None:
+            cancel()
             return
         self._set_cancelled()
 
@@ -163,10 +163,9 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         *,
         kind: str,
         fileobj: object | None = None,
-        proactor: OperationCancelHost | None = None,
         result_callback: _ResultCallback[T_co] | None = None,
     ) -> None:
-        super().__init__(kind=kind, fileobj=fileobj, proactor=proactor)
+        super().__init__(kind=kind, fileobj=fileobj)
         self._result_callbacks: list[_ResultCallback[T_co]] = []
         if result_callback is not None:
             self._result_callbacks.append(result_callback)

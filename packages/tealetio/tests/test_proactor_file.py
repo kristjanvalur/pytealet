@@ -29,7 +29,7 @@ class _MemoryProactor:
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
         self.read_calls.append((fd, n, offset))
         data = bytes(self._store.get(fd, b"")[offset : offset + n])
-        operation = Operation[bytes](kind="read", fileobj=fd, proactor=self)
+        operation = Operation[bytes](kind="read", fileobj=fd)
         operation._set_result(data)
         return operation
 
@@ -41,7 +41,7 @@ class _MemoryProactor:
         if end > len(buf):
             buf.extend(b"\x00" * (end - len(buf)))
         buf[offset:end] = payload
-        operation = Operation[int](kind="write", fileobj=fd, proactor=self)
+        operation = Operation[int](kind="write", fileobj=fd)
         operation._set_result(len(payload))
         return operation
 
@@ -52,12 +52,12 @@ class _MemoryProactor:
         nbytes = min(len(view), len(payload))
         if nbytes:
             view[:nbytes] = payload[:nbytes]
-        operation = Operation[int](kind="read_into", fileobj=fd, proactor=self)
+        operation = Operation[int](kind="read_into", fileobj=fd)
         operation._set_result(nbytes)
         return operation
 
     def stat_fdsize(self, fd: int) -> Operation[int]:
-        operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
+        operation = Operation[int](kind="stat_fdsize", fileobj=fd)
         operation._set_result(len(self._store.get(fd, b"")))
         return operation
 
