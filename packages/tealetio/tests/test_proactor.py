@@ -117,7 +117,7 @@ def _multishot_test_entry() -> proactor_module._UringEntry:
     return proactor_module._UringEntry(
         operation=operation,
         complete=lambda *_args: None,
-        multishot_leg=proactor_module._MultishotLegState(),
+        multishot=True,
     )
 
 

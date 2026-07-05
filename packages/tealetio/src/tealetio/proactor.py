@@ -480,9 +480,9 @@ class _UringEntry:
     """Per-submission io_uring completion state.
 
     Operation-specific context and the owning proactor are captured by the
-    ``complete`` callback closure. ``multishot_leg`` is the only optional
-    per-entry field outside that path;
-    it is consulted before ``complete`` runs to order multishot CQEs.
+    ``complete`` callback closure. ``multishot_leg`` is created automatically
+    when ``multishot=True`` and is consulted before ``complete`` runs to order
+    multishot CQEs.
     """
 
     __slots__ = ("operation", "complete", "completion", "active", "multishot_leg")
@@ -492,14 +492,13 @@ class _UringEntry:
         operation: Operation[Any],
         complete: _UringEntryComplete,
         *,
-        completion: _UringCompletion | None = None,
-        multishot_leg: _MultishotLegState | None = None,
+        multishot: bool = False,
     ) -> None:
         self.operation = operation
         self.complete = complete
-        self.completion = completion
+        self.completion = None
         self.active = False
-        self.multishot_leg = multishot_leg
+        self.multishot_leg = _MultishotLegState() if multishot else None
 
     def completions_to_process(
         self,
@@ -1744,7 +1743,7 @@ class UringProactor(ProactorBase):
             entry = _UringEntry(
                 operation=operation,
                 complete=lambda entry, completion: self._deliver_uring_accept_many(entry, completion),
-                multishot_leg=_MultishotLegState(),
+                multishot=True,
             )
             self._submit_uring_entry(
                 entry,
@@ -2030,7 +2029,7 @@ class UringProactor(ProactorBase):
                 complete=lambda entry, completion: self._deliver_uring_recv_many(
                     entry, completion, stream_sequence, submit_box
                 ),
-                multishot_leg=_MultishotLegState(),
+                multishot=True,
             )
 
             def submit_recv_many() -> _UringCompletion:
@@ -2131,7 +2130,7 @@ class UringProactor(ProactorBase):
             entry = _UringEntry(
                 operation=operation,
                 complete=lambda entry, completion: self._deliver_uring_poll_many(entry, completion),
-                multishot_leg=_MultishotLegState(),
+                multishot=True,
             )
             self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
             return operation
