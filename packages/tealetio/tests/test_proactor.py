@@ -130,13 +130,13 @@ def test_uring_entry_omits_multishot_leg_for_one_shot_operations():
 def test_completions_to_process_passes_through_non_multishot():
     entry = _multishot_test_entry()
     completion = SimpleNamespace(multishot=False)
-    assert entry.completions_to_process(completion) == (completion, None)
+    assert entry.completions_to_process(completion) == (completion,)
 
 
 def test_completions_to_process_defers_out_of_order_termination():
     entry = _multishot_test_entry()
     terminal = _multishot_test_completion(sequence=2, more=False)
-    assert entry.completions_to_process(terminal) == (None, None)
+    assert entry.completions_to_process(terminal) == ()
     assert entry.multishot_leg is not None
     assert entry.multishot_leg.pending_final is terminal
 
@@ -146,7 +146,7 @@ def test_completions_to_process_flushes_stored_termination():
     terminal = _multishot_test_completion(sequence=2, more=False)
     entry.completions_to_process(terminal)
     first = _multishot_test_completion(sequence=0)
-    assert entry.completions_to_process(first) == (first, None)
+    assert entry.completions_to_process(first) == (first,)
     second = _multishot_test_completion(sequence=1)
     assert entry.completions_to_process(second) == (second, terminal)
 
