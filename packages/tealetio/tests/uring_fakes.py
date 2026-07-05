@@ -383,6 +383,12 @@ class _FakeUringRing:
             completion.result = 0
         self._deliver(completion)
 
+    def complete_accept_recv_error(self, err: int) -> None:
+        completion = self.pending_accept_recv.pop(0)
+        completion.res = err
+        completion.result = err
+        self._deliver(completion)
+
     def submit_accept_multishot(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")

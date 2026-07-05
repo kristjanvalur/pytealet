@@ -1901,15 +1901,22 @@ class UringProactor(ProactorBase):
         )
         pending_recv: list[_UringEntry] = []
         accept_finished: list[bool] = [False]
+        accept_entry_ref: list[_UringEntry | None] = [None]
         if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
             # one multishot accept stays armed until F_MORE clears or we cancel.
             entry = self._uring_entry(
                 operation,
                 lambda entry, completion: self._deliver_uring_accept_many(
-                    entry, completion, recv_size, pending_recv, accept_finished
+                    entry,
+                    completion,
+                    recv_size,
+                    pending_recv,
+                    accept_finished,
+                    accept_entry_ref,
                 ),
                 multishot=True,
             )
+            accept_entry_ref[0] = entry
             self._bind_accept_many_cancel(operation, pending_recv)
             self._submit_uring_entry(
                 entry,
@@ -1965,6 +1972,25 @@ class UringProactor(ProactorBase):
         if accept_finished[0] and not pending_recv and not operation.done():
             operation._set_result(None)
 
+    def _fail_accept_many_operation(
+        self,
+        operation: ContinuousOperation[AcceptManyResult],
+        pending_recv: list[_UringEntry],
+        accept_entry_ref: list[_UringEntry | None],
+        exc: BaseException,
+    ) -> None:
+        self._cancel_pending_receive_on_accept(pending_recv)
+        accept_entry = accept_entry_ref[0]
+        if accept_entry is not None:
+            if accept_entry.active:
+                completion = accept_entry.completion
+                if completion is not None:
+                    self._submit_cancel(completion)
+                accept_entry.active = False
+            accept_entry_ref[0] = None
+        if not operation.done():
+            operation._set_exception(exc)
+
     def _deliver_uring_accept_many_oneshot(
         self,
         entry: _UringEntry,
@@ -1994,13 +2020,19 @@ class UringProactor(ProactorBase):
         recv_size: int | None,
         pending_recv: list[_UringEntry],
         accept_finished: list[bool],
+        accept_entry_ref: list[_UringEntry | None],
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[AcceptManyResult], entry.operation)
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            self._cancel_pending_receive_on_accept(pending_recv)
-            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            accept_entry_ref[0] = None
+            self._fail_accept_many_operation(
+                operation,
+                pending_recv,
+                accept_entry_ref,
+                OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
             return operation
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
@@ -2022,12 +2054,14 @@ class UringProactor(ProactorBase):
                     view,
                     pending_recv,
                     accept_finished,
+                    accept_entry_ref,
                 ),
             )
             pending_recv.append(recv_entry)
             self._submit_uring_entry(recv_entry, lambda: self._ring.submit_recv(conn.fileno(), buffer, recv_entry))
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             self._deactivate_uring_entry(entry)
+            accept_entry_ref[0] = None
             if pending_recv:
                 accept_finished[0] = True
             else:
@@ -2044,6 +2078,7 @@ class UringProactor(ProactorBase):
         data: memoryview,
         pending_recv: list[_UringEntry],
         accept_finished: list[bool],
+        accept_entry_ref: list[_UringEntry | None],
     ) -> Operation[Any] | None:
         recv_operation = entry.operation
         res = completion.res
@@ -2052,11 +2087,14 @@ class UringProactor(ProactorBase):
         except ValueError:
             pass
         if res < 0:
-            # recv errors after accept are dropped; the idle peer is not delivered.
             conn.close()
-            recv_operation._set_result(None)
-            self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
-            return recv_operation
+            self._fail_accept_many_operation(
+                parent,
+                pending_recv,
+                accept_entry_ref,
+                OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
+            return parent
         if res == 0:
             conn.close()
             recv_operation._set_result(None)
@@ -2644,7 +2682,7 @@ class UringProactor(ProactorBase):
             self._deactivate_uring_entry(entry)
         if entry.operation.done():
             return entry.operation
-        if res < 0:
+        if res < 0 and entry.operation.kind != "receive_on_accept":
             entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return entry.operation
         return entry.complete(entry, completion)
