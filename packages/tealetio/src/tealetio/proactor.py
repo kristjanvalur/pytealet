@@ -485,7 +485,7 @@ class _UringEntry:
     it is consulted before ``complete`` runs to order multishot CQEs.
     """
 
-    __slots__ = ("operation", "complete", "completion", "active", "resubmit", "multishot_leg")
+    __slots__ = ("operation", "complete", "completion", "active", "multishot_leg")
 
     def __init__(
         self,
@@ -493,14 +493,12 @@ class _UringEntry:
         complete: _UringEntryComplete,
         *,
         completion: _UringCompletion | None = None,
-        resubmit: _UringEntrySubmit | None = None,
         multishot_leg: _MultishotLegState | None = None,
     ) -> None:
         self.operation = operation
         self.complete = complete
         self.completion = completion
         self.active = False
-        self.resubmit = resubmit
         self.multishot_leg = multishot_leg
 
     def completions_to_process(
@@ -1433,11 +1431,11 @@ class UringProactor(ProactorBase):
     def _default_shared_recv_buffer_pool_sizes(self) -> tuple[int, int]:
         return _DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT
 
-    def _recv_many_resume_callable(self, entry: _UringEntry) -> _RecvManyResume:
+    def _recv_many_resume_callable(self, entry: _UringEntry, submit_box: list[_UringEntrySubmit]) -> _RecvManyResume:
         def resume() -> None:
-            if entry.operation.done() or entry.resubmit is None or entry.active:
+            if entry.operation.done() or entry.active or not submit_box:
                 return
-            self._queue_entry_resubmit(entry)
+            self._queue_entry_resubmit(entry, submit_box[0])
             self._retry_deferred_submissions()
 
         return resume
@@ -1755,15 +1753,18 @@ class UringProactor(ProactorBase):
             return operation
 
         # fallback: accept one connection, emit it, queue another submit_accept().
+        submit_box: list[_UringEntrySubmit] = []
         entry = _UringEntry(
             operation=operation,
-            complete=lambda entry, completion: self._deliver_uring_accept_many_oneshot(entry, completion),
+            complete=lambda entry, completion: self._deliver_uring_accept_many_oneshot(
+                entry, completion, submit_box
+            ),
         )
 
         def submit_accept() -> _UringCompletion:
             return self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS)
 
-        entry.resubmit = submit_accept
+        submit_box.append(submit_accept)
         self._submit_uring_entry(entry, submit_accept)
         return operation
 
@@ -1771,6 +1772,7 @@ class UringProactor(ProactorBase):
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
+        submit_box: list[_UringEntrySubmit],
     ) -> Operation[Any] | None:
         # one-shot accept completes per connection; re-arm via the deferred queue.
         operation = cast(ContinuousOperation[tuple[socket.socket, Any]], entry.operation)
@@ -1785,7 +1787,7 @@ class UringProactor(ProactorBase):
         operation._emit_result((conn, address))
         if operation.done():
             return operation
-        self._queue_entry_resubmit(entry)
+        self._queue_entry_resubmit(entry, submit_box[0])
         return None
 
     def _deliver_uring_accept_many(
@@ -2022,10 +2024,11 @@ class UringProactor(ProactorBase):
             uring_group = cast(_UringBufGroup, buf_group)
             # provided-buffer multishot: leased BufViews, ENOBUFS resume callback path.
             stream_sequence = [0]
+            submit_box: list[_UringEntrySubmit] = []
             entry = _UringEntry(
                 operation=operation,
                 complete=lambda entry, completion: self._deliver_uring_recv_many(
-                    entry, completion, stream_sequence
+                    entry, completion, stream_sequence, submit_box
                 ),
                 multishot_leg=_MultishotLegState(),
             )
@@ -2033,7 +2036,7 @@ class UringProactor(ProactorBase):
             def submit_recv_many() -> _UringCompletion:
                 return self._ring.submit_recv_multishot(sock.fileno(), uring_group, entry)
 
-            entry.resubmit = submit_recv_many
+            submit_box.append(submit_recv_many)
             self._submit_uring_entry(entry, submit_recv_many)
             return operation
 
@@ -2041,17 +2044,18 @@ class UringProactor(ProactorBase):
         buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
         view = memoryview(buffer)
         stream_sequence = [0]
+        submit_box: list[_UringEntrySubmit] = []
         entry = _UringEntry(
             operation=operation,
             complete=lambda entry, completion: self._deliver_uring_recv_many_oneshot(
-                entry, completion, view, stream_sequence
+                entry, completion, view, stream_sequence, submit_box
             ),
         )
 
         def submit_recv() -> _UringCompletion:
             return self._ring.submit_recv(sock.fileno(), buffer, entry)
 
-        entry.resubmit = submit_recv
+        submit_box.append(submit_recv)
         self._submit_uring_entry(entry, submit_recv)
         return operation
 
@@ -2061,6 +2065,7 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
         data: memoryview,
         stream_sequence: list[int],
+        submit_box: list[_UringEntrySubmit],
     ) -> Operation[Any] | None:
         # not BufView-based: copy out of the reused recv buffer so resubmit is safe.
         operation = cast(ContinuousOperation[_RecvManyResult], entry.operation)
@@ -2080,7 +2085,7 @@ class UringProactor(ProactorBase):
         stream_sequence[0] = index + 1
         if operation.done():
             return operation
-        self._queue_entry_resubmit(entry)
+        self._queue_entry_resubmit(entry, submit_box[0])
         return None
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -2132,20 +2137,26 @@ class UringProactor(ProactorBase):
             return operation
 
         # fallback: one-shot submit_poll per readiness event.
+        submit_box: list[_UringEntrySubmit] = []
         entry = _UringEntry(
             operation=operation,
-            complete=lambda entry, completion: self._deliver_uring_poll_many_oneshot(entry, completion),
+            complete=lambda entry, completion: self._deliver_uring_poll_many_oneshot(
+                entry, completion, submit_box
+            ),
         )
 
         def submit_poll() -> _UringCompletion:
             return self._ring.submit_poll(fd, mask, entry)
 
-        entry.resubmit = submit_poll
+        submit_box.append(submit_poll)
         self._submit_uring_entry(entry, submit_poll)
         return operation
 
     def _deliver_uring_poll_many_oneshot(
-        self, entry: _UringEntry, completion: _UringCompletion
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+        submit_box: list[_UringEntrySubmit],
     ) -> Operation[Any] | None:
         # emit the mask, then queue another submit_poll() unless cancelled.
         operation = cast(ContinuousOperation[int], entry.operation)
@@ -2157,7 +2168,7 @@ class UringProactor(ProactorBase):
         operation._emit_result(res)
         if operation.done():
             return operation
-        self._queue_entry_resubmit(entry)
+        self._queue_entry_resubmit(entry, submit_box[0])
         return None
 
     def _deliver_uring_poll_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
@@ -2178,6 +2189,7 @@ class UringProactor(ProactorBase):
         entry: _UringEntry,
         completion: _UringCompletion,
         stream_sequence: list[int],
+        submit_box: list[_UringEntrySubmit],
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[_RecvManyResult], entry.operation)
         res = completion.res
@@ -2191,7 +2203,9 @@ class UringProactor(ProactorBase):
                 if multishot_leg is not None:
                     multishot_leg.nonterminal_seen = 0
                     multishot_leg.pending_final = None
-                operation._emit_result((RECV_MANY_BUFFER_PRESSURE, self._recv_many_resume_callable(entry)))
+                operation._emit_result(
+                    (RECV_MANY_BUFFER_PRESSURE, self._recv_many_resume_callable(entry, submit_box))
+                )
                 return None
             operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
@@ -2249,9 +2263,7 @@ class UringProactor(ProactorBase):
         if completed_operation is not None:
             self._notify_completed()
 
-    def _queue_entry_resubmit(self, entry: _UringEntry) -> None:
-        submit = entry.resubmit
-        assert submit is not None
+    def _queue_entry_resubmit(self, entry: _UringEntry, submit: _UringEntrySubmit) -> None:
         self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
         self.break_wait()
 
