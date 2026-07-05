@@ -1195,6 +1195,26 @@ class SelectorProactor(ProactorBase):
                 return True
         return False
 
+    def _require_fd_slot_driver(
+        self,
+        fd: int,
+        operation: Operation[Any],
+        slot: _FdSlot,
+        *,
+        continuous: bool,
+    ) -> Callable[[], Any]:
+        if continuous:
+            step = slot.step
+            if step is None:
+                self._remove_operation(operation)
+                raise RuntimeError(f"continuous operation {operation.kind!r} missing step driver on fd {fd}")
+            return step
+        attempt = slot.attempt
+        if attempt is None:
+            self._remove_operation(operation)
+            raise RuntimeError(f"operation {operation.kind!r} missing attempt driver on fd {fd}")
+        return attempt
+
     def _step_fd_operation(self, fd: int, event: int, completed: list[Operation[Any]]) -> None:
         entry = self._fd_operations.get(fd)
         if entry is None:
@@ -1206,12 +1226,10 @@ class SelectorProactor(ProactorBase):
         if operation.done():
             return
         if isinstance(operation, ContinuousOperation):
-            step = slot.step
-            assert step is not None
+            step = self._require_fd_slot_driver(fd, operation, slot, continuous=True)
             self._step_continuous_fd_operation(fd, event, operation, step, completed)
             return
-        attempt = slot.attempt
-        assert attempt is not None
+        attempt = self._require_fd_slot_driver(fd, operation, slot, continuous=False)
         try:
             result = attempt()
         except (BlockingIOError, InterruptedError):
@@ -1512,6 +1530,8 @@ class UringProactor(ProactorBase):
         teardown = self._submit_poll_remove if poll_remove else self._submit_cancel
 
         def cancel() -> None:
+            # Deferred resubmit legs are dropped here; in-flight legs use the
+            # pending Completion handle when entry.completion is still set.
             if self._cancel_deferred_operation(operation):
                 self.break_wait()
                 return

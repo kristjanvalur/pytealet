@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
+- Removed private `Operation` backend fields `_proactor`, `_attempt`, and
+  `_cancel_target`. Use `operation.cancel()` (backend hooks via `set_cancel()`)
+  and proactor-side structures (`_FdSlot` for selector fd drivers,
+  `_uring_entry()` cancel binding for io_uring) instead of reaching into
+  operation attributes.
 - Blocking proactor IO (`wait_operation`, `sock_*`, `poll*`, positioned file
   `open`, and receive-buffer pool helpers) moved from the scheduler surface to
   `scheduler.io` (`ProactorIOManager`). Use `scheduler.io.sock_recv(...)` instead
