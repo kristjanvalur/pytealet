@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import socket
 from collections.abc import Callable, Coroutine
@@ -26,6 +27,8 @@ from .scheduler import BaseScheduler
 T = TypeVar("T")
 
 _DEFAULT_LIMIT = 2**16
+
+_logger = logging.getLogger(__name__)
 
 __all__ = [
     "SocketTransport",
@@ -382,7 +385,7 @@ _StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
 _NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
 _AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 _ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
-_AcceptedConnection: TypeAlias = tuple[socket.socket, SocketAddress, bytes | None]
+_AcceptedConnection: TypeAlias = tuple[socket.socket, SocketAddress, bytes | None, BaseException | None]
 
 
 def default_stream_factory(
@@ -877,7 +880,11 @@ def _start_stream_server(
     server: StreamServer | None = None
 
     def on_accept(accepted: _AcceptedConnection) -> None:
-        conn, _address, initial_data = accepted
+        conn, address, initial_data, recv_error = accepted
+        if recv_error is not None:
+            _logger.warning("accept recv failed for %s: %s", address, recv_error)
+            conn.close()
+            return
         if server is None:
             # accept_many may deliver on a worker thread before StreamServer
             # exists; drop the connection (extremely unlikely race).

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import socket
 import tempfile
 from pathlib import Path
@@ -704,7 +705,7 @@ class TestStreamsPoC:
             _client, accepted = socket.socketpair()
             accepted.setblocking(False)
             try:
-                callback((accepted, ("127.0.0.1", 0), None))
+                callback((accepted, ("127.0.0.1", 0), None, None))
                 assert accepted.fileno() == -1
             finally:
                 _client.close()
@@ -765,6 +766,29 @@ class TestStreamsPoC:
 
         assert run_with_recv_size(None) is None
         assert run_with_recv_size(1024) == 1024
+
+    def test_start_server_closes_connection_on_recv_error(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
+        scheduler = _scheduler_with_fake_ring()
+        set_scheduler(scheduler)
+        handled = Event()
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            handled.set()
+            writer.close()
+
+        server = start_server(client_handler, addr=("127.0.0.1", 0), recv_size=64, scheduler=scheduler)
+        try:
+            proactor = scheduler.proactor
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            proactor.ring.complete_accept_recv_error(-errno.EIO)
+            proactor.wait(proactor.get_time() + 0.05)
+            assert handled.is_set() is False
+            assert server._active_handlers == 0
+        finally:
+            server.close()
+            scheduler.close()
 
     def test_start_server_prefills_reader_from_accept_preread(self, monkeypatch: pytest.MonkeyPatch):
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
