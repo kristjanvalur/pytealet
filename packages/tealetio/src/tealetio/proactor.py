@@ -479,10 +479,10 @@ class _MultishotLegState:
 class _UringEntry:
     """Per-submission io_uring completion state.
 
-    Operation-specific context and the owning proactor are captured by the
-    ``complete`` callback closure. ``multishot_leg`` is created automatically
-    when ``multishot=True`` and is consulted before ``complete`` runs to order
-    multishot CQEs.
+    Operation-specific context, re-arm submit callables, and the owning proactor
+    are captured by the ``complete`` callback closure. ``multishot_leg`` is
+    created automatically when ``multishot=True`` and is consulted before
+    ``complete`` runs to order multishot CQEs.
     """
 
     __slots__ = ("operation", "complete", "completion", "active", "multishot_leg")
@@ -2020,6 +2020,7 @@ class UringProactor(ProactorBase):
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
             uring_group = cast(_UringBufGroup, buf_group)
             # provided-buffer multishot: leased BufViews, ENOBUFS resume callback path.
+            # mutable box so ENOBUFS recovery can advance the base index in-place.
             stream_sequence = [0]
             submit_box: list[_UringEntrySubmit] = []
             entry = _UringEntry(

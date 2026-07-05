@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import uring_api
 
+
 def _pack_fake_statx_buffer(
     buf: bytearray | memoryview,
     *,
@@ -42,6 +43,7 @@ def _pack_fake_statx_buffer(
 
 def _native_uring_extension_imported() -> bool:
     return getattr(uring_api, "_native_import_error", None) is None
+
 
 def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
     capabilities = {
@@ -182,10 +184,18 @@ class _FakeUringRing:
         self.break_count += 1
 
     def _recv_buffer_for_entry(self, entry: object) -> memoryview:
-        for _fd, buf, user_data in reversed(self.submitted_recv):
-            if user_data is entry:
-                return memoryview(buf)
-        raise RuntimeError("recv buffer not found for entry")
+        """Return the recv buffer for a oneshot entry.
+
+        Oneshot recv_many may re-submit the same entry with the same reused
+        buffer; distinct buffers for one entry indicate a fake-ring setup bug.
+        """
+        matches = [buf for _fd, buf, user_data in self.submitted_recv if user_data is entry]
+        if not matches:
+            raise RuntimeError("recv buffer not found for entry")
+        distinct_buffers = {id(buf) for buf in matches}
+        if len(distinct_buffers) > 1:
+            raise RuntimeError("multiple distinct recv buffers found for entry")
+        return memoryview(matches[-1])
 
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:

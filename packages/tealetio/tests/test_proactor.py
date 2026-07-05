@@ -665,12 +665,6 @@ def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) ->
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
-
-
-
-
-
-
 class TestOperation:
     def test_operation_result_requires_completion(self):
         operation: Operation[int] = Operation(kind="test")
@@ -1963,8 +1957,6 @@ class TestThreadedSelectorProactor:
         assert asyncio.run(run()) == b"hello"
 
 
-
-
 class _DeferredUringRing(_FakeUringRing):
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
@@ -1982,6 +1974,20 @@ class _DeferredUringRing(_FakeUringRing):
         completion.flags = 0
         completion.result = len(data)
         self._deliver(completion)
+
+
+class _FailingSubmitUringRing(_DeferredUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.fail_next_submit = False
+        self.last_user_data: object | None = None
+
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+        self.last_user_data = user_data
+        if self.fail_next_submit:
+            self.fail_next_submit = False
+            raise RuntimeError("submit_recv failed")
+        return super().submit_recv(fd, buf, user_data)
 
 
 class _BackpressuredUringRing(_DeferredUringRing):
@@ -2568,6 +2574,26 @@ class TestUringProactor:
                 if fd is not None:
                     os.close(fd)
                 proactor.close()
+
+    def test_submit_uring_entry_clears_pending_token_when_submit_raises(self):
+        proactor = UringProactor(ring_factory=_FailingSubmitUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            ring = proactor.ring
+            assert isinstance(ring, _FailingSubmitUringRing)
+            ring.fail_next_submit = True
+            with pytest.raises(RuntimeError, match="submit_recv failed"):
+                proactor.recv(reader, 5)
+            entry = ring.last_user_data
+            assert entry is not None
+            assert entry.active is False
+            assert proactor.has_pending_operations() is False
+            assert ring.submitted_recv == []
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
 
     def test_uring_entry_keeps_pending_completion_handle(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing)
@@ -3814,9 +3840,7 @@ class TestProactorScheduler:
                 return index, bytes(chunk)
 
             task = scheduler.spawn(receive_first_chunk)
-            scheduler.spawn(
-                lambda: scheduler.proactor.ring.complete_recv_multishot(b"x", more=False, sequence=0)
-            )
+            scheduler.spawn(lambda: scheduler.proactor.ring.complete_recv_multishot(b"x", more=False, sequence=0))
 
             assert scheduler.run_until_complete(task) == (0, b"x")
             submitted = scheduler.proactor.ring.submitted_recv_multishot[0][1]
