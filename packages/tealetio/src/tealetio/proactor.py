@@ -98,13 +98,14 @@ _MAX_ACCEPT_RECV_SIZE = 2**16
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 
 
-def _validate_accept_recv_size(recv_size: int | None) -> None:
+def _normalize_accept_recv_size(recv_size: int | None) -> int | None:
     if recv_size is None:
-        return
+        return None
     if recv_size <= 0:
         raise ValueError("recv_size must be positive when provided")
     if recv_size > _MAX_ACCEPT_RECV_SIZE:
-        raise ValueError(f"recv_size must not exceed {_MAX_ACCEPT_RECV_SIZE}")
+        return _MAX_ACCEPT_RECV_SIZE
+    return recv_size
 
 
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
@@ -870,7 +871,7 @@ class SelectorProactor(ProactorBase):
         ``None``.
         """
 
-        _validate_accept_recv_size(recv_size)
+        recv_size = _normalize_accept_recv_size(recv_size)
 
         operation = ContinuousOperation[AcceptManyResult](
             kind="accept_many",
@@ -1904,7 +1905,7 @@ class UringProactor(ProactorBase):
         ``None``.
         """
 
-        _validate_accept_recv_size(recv_size)
+        recv_size = _normalize_accept_recv_size(recv_size)
 
         operation = ContinuousOperation[AcceptManyResult](
             kind="accept_many",

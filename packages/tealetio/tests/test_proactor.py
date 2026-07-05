@@ -718,7 +718,7 @@ class TestOperation:
         pytest.param(lambda: UringProactor(ring_factory=_FakeUringRing), id="uring"),
     ],
 )
-@pytest.mark.parametrize("recv_size", [0, -1, 2**16 + 1])
+@pytest.mark.parametrize("recv_size", [0, -1])
 def test_accept_many_rejects_invalid_recv_size(factory: Callable[[], Any], recv_size: int) -> None:
     proactor = factory()
     server = socket.socket()
@@ -726,6 +726,22 @@ def test_accept_many_rejects_invalid_recv_size(factory: Callable[[], Any], recv_
         server.setblocking(False)
         with pytest.raises(ValueError):
             proactor.accept_many(server, lambda _: None, recv_size=recv_size)
+    finally:
+        server.close()
+        proactor.close()
+
+
+def test_accept_many_caps_oversized_recv_size() -> None:
+    proactor = UringProactor(ring_factory=_FakeUringRing)
+    server = socket.socket()
+    try:
+        server.setblocking(False)
+        proactor.accept_many(server, lambda _: None, recv_size=2**16 + 1)
+        proactor.ring.complete_accept_multishot("peer-1")
+        proactor.wait(proactor.get_time() + 0.05)
+        assert len(proactor.ring.submitted_recv) == 1
+        _fd, buf, _entry = proactor.ring.submitted_recv[0]
+        assert len(buf) == 2**16
     finally:
         server.close()
         proactor.close()
