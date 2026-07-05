@@ -479,10 +479,11 @@ class _MultishotLegState:
 class _UringEntry:
     """Per-submission io_uring completion state.
 
-    Operation-specific context, re-arm submit callables, and the owning proactor
-    are captured by the ``complete`` callback closure. ``multishot_leg`` is
-    created automatically when ``multishot=True`` and is consulted before
-    ``complete`` runs to order multishot CQEs.
+    Operation-specific context and the owning proactor are captured by the
+    ``complete`` callback closure. One-shot re-arm submit callables live in
+    ``submit_box`` lists referenced from ``complete`` and resume closures.
+    ``multishot_leg`` is created automatically when ``multishot=True`` and is
+    consulted before ``complete`` runs to order multishot CQEs.
     """
 
     __slots__ = ("operation", "complete", "completion", "active", "multishot_leg")
@@ -1432,7 +1433,7 @@ class UringProactor(ProactorBase):
 
     def _recv_many_resume_callable(self, entry: _UringEntry, submit_box: list[_UringEntrySubmit]) -> _RecvManyResume:
         def resume() -> None:
-            if entry.operation.done() or entry.active or not submit_box:
+            if entry.operation.done() or entry.active:
                 return
             self._queue_entry_resubmit(entry, submit_box[0])
             self._retry_deferred_submissions()
