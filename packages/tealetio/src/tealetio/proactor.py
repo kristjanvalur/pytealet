@@ -493,14 +493,13 @@ class _UringEntry:
         complete: _UringEntryComplete,
         *,
         completion: _UringCompletion | None = None,
-        active: bool = True,
         resubmit: _UringEntrySubmit | None = None,
         multishot_leg: _MultishotLegState | None = None,
     ) -> None:
         self.operation = operation
         self.complete = complete
         self.completion = completion
-        self.active = active
+        self.active = False
         self.resubmit = resubmit
         self.multishot_leg = multishot_leg
 
@@ -2259,9 +2258,10 @@ class UringProactor(ProactorBase):
     def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
         self._pending_tokens.append(None)
         try:
-            entry.completion = submit()
             entry.active = True
+            entry.completion = submit()
         except uring_api.SubmissionQueueFull:
+            entry.active = False
             self._pending_tokens.pop()
             self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
             return False
