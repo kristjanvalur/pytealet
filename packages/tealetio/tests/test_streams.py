@@ -951,17 +951,25 @@ class TestStreamsPoC:
             client.close()
             scheduler.close()
 
-    def test_open_connection_passes_initial_send_to_sock_connect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_open_connection_passes_initial_send_to_sock_stream_connect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         captured: list[bytes | None] = []
-        real_sock_connect = scheduler.io.sock_connect
+        real_sock_stream_connect = scheduler.io.sock_stream_connect
 
-        def capture_sock_connect(sock: socket.socket, address, *, initial: bytes | None = None) -> None:
+        def capture_sock_stream_connect(address, *, family, type, proto=0, initial: bytes | None = None):
             captured.append(initial)
-            return real_sock_connect(sock, address, initial=initial)
+            return real_sock_stream_connect(
+                address,
+                family=family,
+                type=type,
+                proto=proto,
+                initial=initial,
+            )
 
-        monkeypatch.setattr(scheduler.io, "sock_connect", capture_sock_connect)
+        monkeypatch.setattr(scheduler.io, "sock_stream_connect", capture_sock_stream_connect)
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:

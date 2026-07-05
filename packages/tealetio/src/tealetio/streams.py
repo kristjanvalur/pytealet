@@ -531,10 +531,14 @@ def _connect_tcp_streams(
 
     last_error: OSError | None = None
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
-        sock: socket.socket | None = None
         try:
-            sock = io.sock_create(addr_family, socktype, addr_proto)
-            io.sock_connect(sock, sockaddr, initial=initial_send)
+            sock, _is_connected, _nbytes = io.sock_stream_connect(
+                sockaddr,
+                family=addr_family,
+                type=socktype,
+                proto=addr_proto,
+                initial=initial_send,
+            )
             return _open_streams(
                 io,
                 sock,
@@ -544,8 +548,6 @@ def _connect_tcp_streams(
             )
         except OSError as exc:
             last_error = exc
-            if sock is not None:
-                sock.close()
     if last_error is not None:
         raise last_error
     raise OSError("open_connection failed without address resolution results")

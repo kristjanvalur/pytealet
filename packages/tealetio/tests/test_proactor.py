@@ -981,6 +981,30 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
+    def test_stream_connect_completes_on_selector(self) -> None:
+        proactor = SelectorProactor()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            addr = server.getsockname()
+            operation = proactor.stream_connect(addr, initial=b"ping")
+            while not operation.done():
+                try:
+                    conn, _peer = server.accept()
+                except BlockingIOError:
+                    proactor.wait(proactor.get_time() + 0.05)
+                    continue
+                conn.close()
+            sock, is_connected, nbytes = operation.result()
+            assert is_connected is True
+            assert nbytes == 4
+            sock.close()
+        finally:
+            server.close()
+            proactor.close()
+
     def test_recv_many_emits_chunks_and_completes_on_eof(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -2071,6 +2095,21 @@ class TestThreadedSelectorProactor:
                 scheduler.close()
 
         assert asyncio.run(run()) == b"hello"
+
+
+class _FailingConnectUringRing(_FakeUringRing):
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_connect.append((fd, address, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_CONNECT,
+            res=-errno.ECONNREFUSED,
+            result=None,
+        )
+        self._deliver(completion)
+        return completion
 
 
 class _DeferredConnectUringRing(_FakeUringRing):
@@ -4231,6 +4270,43 @@ class TestUringProactor:
             assert operation.cancelled() is True
         finally:
             sock.close()
+            proactor.close()
+
+    def test_stream_connect_completes_without_initial_on_uring(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.stream_connect(("127.0.0.1", 9))
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, nbytes = operation.result()
+            assert is_connected is True
+            assert nbytes == 0
+            assert sock.getblocking() is False
+            sock.close()
+        finally:
+            proactor.close()
+
+    def test_stream_connect_completes_with_initial_on_uring(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.stream_connect(("127.0.0.1", 9), initial=b"hi")
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            proactor.ring.complete_connect_send(2)
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, nbytes = operation.result()
+            assert is_connected is True
+            assert nbytes == 2
+            sock.close()
+        finally:
+            proactor.close()
+
+    def test_stream_connect_failure_does_not_leak_socket(self) -> None:
+        proactor = UringProactor(ring_factory=_FailingConnectUringRing)
+        try:
+            operation = proactor.stream_connect(("127.0.0.1", 9))
+            _wait_for_uring(proactor, operation.done)
+            with pytest.raises(OSError):
+                operation.result()
+        finally:
             proactor.close()
 
     def test_operations_reject_closed_proactor(self):

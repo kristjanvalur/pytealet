@@ -103,6 +103,16 @@ class SocketIO(Protocol):
         initial: SocketSendBuffer | None = None,
     ) -> None: ...
 
+    def sock_stream_connect(
+        self,
+        address: Any,
+        *,
+        family: int,
+        type: int,
+        proto: int = 0,
+        initial: SocketSendBuffer | None = None,
+    ) -> tuple[socket.socket, bool, int]: ...
+
     def sock_create(
         self,
         family: int,
@@ -303,6 +313,30 @@ class ProactorIOManager:
         remainder = memoryview(initial)[nbytes:]
         if remainder.nbytes:
             self.sock_sendall(sock, remainder)
+
+    def sock_stream_connect(
+        self,
+        address: Any,
+        *,
+        family: int,
+        type: int,
+        proto: int = 0,
+        initial: SocketSendBuffer | None = None,
+    ) -> tuple[socket.socket, bool, int]:
+        sock, is_connected, nbytes = self.wait_operation(
+            self._proactor.stream_connect(
+                address,
+                family=family,
+                type=type,
+                proto=proto,
+                initial=initial,
+            )
+        )
+        if initial is not None:
+            remainder = memoryview(initial)[nbytes:]
+            if remainder.nbytes:
+                self.sock_sendall(sock, remainder)
+        return sock, is_connected, nbytes
 
     def sock_create(
         self,

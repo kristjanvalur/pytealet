@@ -268,6 +268,27 @@ class ForwardingProactor:
 
         return self._future_from_operation(self._proactor.connect(sock, address, initial=initial))
 
+    def stream_connect(
+        self,
+        address: Any,
+        *,
+        family: int = socket.AF_INET,
+        type: int = socket.SOCK_STREAM,
+        proto: int = 0,
+        initial: SocketSendBuffer | None = None,
+    ) -> _asyncio.Future[tuple[socket.socket, bool, int]]:
+        """Create, connect, and optionally pre-send through the host proactor."""
+
+        return self._future_from_operation(
+            self._proactor.stream_connect(
+                address,
+                family=family,
+                type=type,
+                proto=proto,
+                initial=initial,
+            )
+        )
+
     def sendfile(self, sock: socket.socket, file: Any, offset: int, blocksize: int) -> _asyncio.Future[int]:
         """Report that native proactor sendfile is not available."""
 

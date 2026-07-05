@@ -67,6 +67,7 @@ __all__ = [
     "SocketIO",
     "SupportsProactorIO",
     "SelectorProactor",
+    "StreamConnectResult",
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",
     "UringProactor",
@@ -96,6 +97,14 @@ _RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = tuple[socket.socket, Any, bytes | None, BaseException | None]
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
 _MAX_ACCEPT_RECV_SIZE = 2**16
+StreamConnectResult: TypeAlias = tuple[socket.socket, bool, int]
+
+
+def _close_owned_socket(sock: socket.socket) -> None:
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def _handoff_accept_many(
@@ -325,6 +334,27 @@ class Proactor(Protocol):
         ``bytes``, ``bytearray``, or ``memoryview``. Backends that do not support
         connect-time send complete with ``0``. A send failure after a successful
         connect fails the operation; the caller owns the socket.
+        """
+
+        ...
+
+    def stream_connect(
+        self,
+        address: Any,
+        *,
+        family: int = socket.AF_INET,
+        type: int = socket.SOCK_STREAM,
+        proto: int = 0,
+        initial: SocketSendBuffer | None = None,
+    ) -> Operation[StreamConnectResult]:
+        """Create a socket, connect it, and optionally send initial bytes.
+
+        On success the operation completes with ``(socket, is_connected,
+        bytes_sent)``. ``is_connected`` is ``True`` when the connect leg
+        finished successfully. ``bytes_sent`` is the number of bytes sent from
+        ``initial`` in one ``send`` attempt, or ``0`` when ``initial`` is omitted
+        or empty. Any failure closes the created socket before the operation
+        completes; no socket is returned to the caller on error.
         """
 
         ...
@@ -975,6 +1005,80 @@ class SelectorProactor(ProactorBase):
 
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt_with_initial)
         return operation
+
+    def stream_connect(
+        self,
+        address: Any,
+        *,
+        family: int = socket.AF_INET,
+        type: int = socket.SOCK_STREAM,
+        proto: int = 0,
+        initial: SocketSendBuffer | None = None,
+    ) -> Operation[StreamConnectResult]:
+        """Create a socket, connect it, and optionally send one initial chunk."""
+
+        operation = Operation[StreamConnectResult](kind="stream_connect", fileobj=address)
+        try:
+            sock = configure_scheduler_socket(socket.socket(family, type, proto))
+        except OSError as exc:
+            operation._set_exception(exc)
+            return operation
+
+        connect_started = False
+        send_payload = memoryview(initial) if initial is not None else memoryview(b"")
+        send_pending = bool(send_payload.nbytes)
+
+        def finish_connect() -> None:
+            nonlocal connect_started
+            if not connect_started:
+                connect_started = True
+                try:
+                    sock.connect(address)
+                except (BlockingIOError, InterruptedError):
+                    raise BlockingIOError(errno.EINPROGRESS, "connect in progress") from None
+                except OSError as exc:
+                    if exc.errno in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+                        raise BlockingIOError(exc.errno, exc.strerror) from None
+                    raise
+                return
+            err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err == 0:
+                return
+            if err in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+                raise BlockingIOError(err, errno.errorcode.get(err, "connect in progress"))
+            raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
+
+        def attempt() -> StreamConnectResult:
+            finish_connect()
+            if not send_pending:
+                return sock, True, 0
+            nbytes = sock.send(send_payload)
+            return sock, True, nbytes
+
+        def attempt_wrapper() -> StreamConnectResult:
+            try:
+                return attempt()
+            except (BlockingIOError, InterruptedError):
+                raise
+            except BaseException:
+                _close_owned_socket(sock)
+                raise
+
+        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt_wrapper)
+        self._bind_owned_socket_cancel(operation, sock)
+        return operation
+
+    def _bind_owned_socket_cancel(self, operation: Operation[Any], sock: socket.socket) -> None:
+        backend_cancel = operation._cancel
+
+        def cancel() -> None:
+            _close_owned_socket(sock)
+            if backend_cancel is not None:
+                backend_cancel()
+            elif not operation.done():
+                operation._set_cancelled()
+
+        operation.set_cancel(cancel)
 
     def recv_many(
         self,
@@ -2298,6 +2402,140 @@ class UringProactor(ProactorBase):
             send_operation._set_result(None)
             return parent
         parent._set_result(res)
+        send_operation._set_result(None)
+        return parent
+
+    def stream_connect(
+        self,
+        address: Any,
+        *,
+        family: int = socket.AF_INET,
+        type: int = socket.SOCK_STREAM,
+        proto: int = 0,
+        initial: SocketSendBuffer | None = None,
+    ) -> Operation[StreamConnectResult]:
+        """Create a socket, connect it, and optionally send one initial chunk."""
+
+        operation = Operation[StreamConnectResult](kind="stream_connect", fileobj=address)
+        try:
+            sock = configure_scheduler_socket(socket.socket(family, type, proto))
+        except OSError as exc:
+            operation._set_exception(exc)
+            return operation
+
+        payload = memoryview(initial) if initial is not None else memoryview(b"")
+        pending_send: list[_UringEntry | None] = [None]
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_stream_connect(
+                entry,
+                completion,
+                sock,
+                payload,
+                pending_send,
+            ),
+        )
+        self._bind_stream_connect_cancel(operation, sock, pending_send)
+        self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
+        return operation
+
+    def _bind_stream_connect_cancel(
+        self,
+        operation: Operation[StreamConnectResult],
+        sock: socket.socket,
+        pending_send: list[_UringEntry | None],
+    ) -> None:
+        backend_cancel = operation._cancel
+        if backend_cancel is None:
+            return
+
+        def cancel() -> None:
+            send_entry = pending_send[0]
+            if send_entry is not None:
+                completion = send_entry.completion
+                if completion is not None:
+                    self._submit_cancel(completion)
+                if send_entry.active:
+                    self._deactivate_uring_entry(send_entry)
+                else:
+                    send_entry.completion = None
+                if not send_entry.operation.done():
+                    send_entry.operation._set_cancelled()
+                pending_send[0] = None
+            _close_owned_socket(sock)
+            backend_cancel()
+
+        operation.set_cancel(cancel)
+
+    def _fail_stream_connect(
+        self,
+        operation: Operation[StreamConnectResult],
+        sock: socket.socket,
+        exc: BaseException,
+    ) -> Operation[StreamConnectResult]:
+        _close_owned_socket(sock)
+        if not operation.done():
+            operation._set_exception(exc)
+        return operation
+
+    def _complete_uring_stream_connect(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+        sock: socket.socket,
+        payload: memoryview,
+        pending_send: list[_UringEntry | None],
+    ) -> Operation[StreamConnectResult] | None:
+        operation = cast(Operation[StreamConnectResult], entry.operation)
+        res = completion.res
+        if res < 0:
+            return self._fail_stream_connect(
+                operation,
+                sock,
+                OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
+        if operation.done():
+            _close_owned_socket(sock)
+            return operation
+        if not payload.nbytes:
+            operation._set_result((sock, True, 0))
+            return operation
+        if operation.done():
+            _close_owned_socket(sock)
+            return operation
+        send_operation = Operation[None](kind="send_on_connect", fileobj=sock)
+        send_entry = self._uring_entry(
+            send_operation,
+            lambda send_entry, send_completion: self._deliver_stream_connect_send(
+                send_entry,
+                send_completion,
+                operation,
+                sock,
+            ),
+        )
+        pending_send[0] = send_entry
+        self._submit_uring_entry(send_entry, lambda: self._submit_send(sock.fileno(), payload, send_entry))
+        return None
+
+    def _deliver_stream_connect_send(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+        parent: Operation[StreamConnectResult],
+        sock: socket.socket,
+    ) -> Operation[StreamConnectResult]:
+        send_operation = entry.operation
+        res = completion.res
+        if parent.done():
+            send_operation._set_result(None)
+            return parent
+        if res < 0:
+            return self._fail_stream_connect(
+                parent,
+                sock,
+                OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
+        parent._set_result((sock, True, res))
         send_operation._set_result(None)
         return parent
 

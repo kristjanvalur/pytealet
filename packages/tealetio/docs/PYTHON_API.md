@@ -85,6 +85,15 @@ bitmask on each readiness event and remains active until cancelled or the
 backend reports a terminal error. Poll works on any file descriptor, not only
 sockets.
 
+`stream_connect(address, *, family=..., type=..., proto=0, initial=None)`
+submits a one-shot operation that creates a configured socket, connects it, and
+optionally performs one ``send`` attempt from ``initial``. On success it
+completes with ``(socket, is_connected, bytes_sent)``; ``is_connected`` is
+``True`` when the connect leg succeeded. Failures close the created socket
+before the operation completes. ``scheduler.io.sock_stream_connect(...)`` blocks
+on the operation and flushes any unsent ``initial`` remainder with ``sendall``.
+TCP ``open_connection(..., initial_send=...)`` uses this path.
+
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
 maps `POLLIN`, `POLLPRI`, `POLLOUT`, `POLLERR`, `POLLHUP`, and `POLLRDHUP`

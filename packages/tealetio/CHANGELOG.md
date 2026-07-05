@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is removed.
 
 ### Added
+- `Proactor.stream_connect()` and `scheduler.io.sock_stream_connect()` to create a
+  socket, connect, and optionally send one initial chunk in a single submitted
+  operation, returning ``(socket, is_connected, bytes_sent)`` on success.
+  ``open_connection(..., initial_send=...)`` uses this path for TCP connects.
 - `IOFile` handle protocol for positioned binary file objects returned by
   `FileIO.open()`; `ProactorFile` is the proactor-backed implementation. Static
   typing only (not ``@runtime_checkable`` on Python 3.10–3.11); import from
