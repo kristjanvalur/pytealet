@@ -2637,7 +2637,7 @@ class TestUringProactor:
 
             assert operation.result() == b"hello"
             assert entry.completion is None
-            assert operation._cancel_target is None
+            assert id(operation) not in proactor._active_uring_entries
         finally:
             reader.close()
             writer.close()
@@ -2657,7 +2657,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: operation.done())
 
             assert entry.completion is None
-            assert operation._cancel_target is None
+            assert id(operation) not in proactor._active_uring_entries
         finally:
             reader.close()
             writer.close()
