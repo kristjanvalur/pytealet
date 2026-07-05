@@ -699,12 +699,12 @@ class TestStreamsPoC:
         set_scheduler(scheduler)
         real_accept_many = scheduler.proactor.accept_many
 
-        def eager_accept_many(sock: socket.socket, callback):
-            operation = real_accept_many(sock, callback)
+        def eager_accept_many(sock: socket.socket, callback, *, recv_size=None):
+            operation = real_accept_many(sock, callback, recv_size=recv_size)
             _client, accepted = socket.socketpair()
             accepted.setblocking(False)
             try:
-                callback((accepted, ("127.0.0.1", 0)))
+                callback((accepted, ("127.0.0.1", 0), None))
                 assert accepted.fileno() == -1
             finally:
                 _client.close()
@@ -718,6 +718,70 @@ class TestStreamsPoC:
         server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         try:
             assert server._active_handlers == 0
+        finally:
+            server.close()
+            scheduler.close()
+
+    def test_stream_reader_feed_initial_avoids_socket_recv(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
+            stream_reader.feed_initial(b"cached")
+            assert stream_reader.read(6) == b"cached"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_start_server_arms_accept_many_with_default_recv_size(self, monkeypatch: pytest.MonkeyPatch):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        captured: list[int | None] = []
+        real_accept_many = scheduler.proactor.accept_many
+
+        def capture_accept_many(sock: socket.socket, callback, *, recv_size=None):
+            captured.append(recv_size)
+            return real_accept_many(sock, callback, recv_size=recv_size)
+
+        monkeypatch.setattr(scheduler.proactor, "accept_many", capture_accept_many)
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+        try:
+            assert captured == [1024]
+        finally:
+            server.close()
+            scheduler.close()
+
+    def test_start_server_prefills_reader_from_accept_preread(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
+        scheduler = _scheduler_with_fake_ring()
+        set_scheduler(scheduler)
+        handled = Event()
+        received: list[bytes] = []
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            received.append(reader.read(5))
+            writer.close()
+            handled.set()
+
+        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+        try:
+            proactor = scheduler.proactor
+
+            def exercise() -> None:
+                proactor.ring.complete_accept_multishot("peer-1")
+                proactor.wait(proactor.get_time() + 0.05)
+                proactor.ring.complete_accept_recv(b"early")
+                handled.swait()
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert received == [b"early"]
         finally:
             server.close()
             scheduler.close()

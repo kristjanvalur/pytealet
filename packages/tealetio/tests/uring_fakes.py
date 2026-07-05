@@ -132,6 +132,7 @@ class _FakeUringRing:
         self.pending_poll_multishot: list[SimpleNamespace] = []
         self.pending_poll_oneshot: list[SimpleNamespace] = []
         self.pending_accept_oneshot: list[SimpleNamespace] = []
+        self.pending_accept_recv: list[SimpleNamespace] = []
         self.pending_recv_oneshot: list[SimpleNamespace] = []
         self.recv_multishot_sequence = 0
 
@@ -204,6 +205,10 @@ class _FakeUringRing:
         operation = getattr(user_data, "operation", None)
         kind = getattr(operation, "kind", None)
         self.submitted_recv.append((fd, buf, user_data))
+        if kind == "receive_on_accept":
+            completion = self._completion(user_data, res=0, result=0)
+            self.pending_accept_recv.append(completion)
+            return completion
         if kind == "recv_many":
             completion = self._completion(user_data, res=0, result=0)
             self.pending_recv_oneshot.append(completion)
@@ -363,6 +368,19 @@ class _FakeUringRing:
 
     def complete_accept_oneshot(self) -> None:
         completion = self.pending_accept_oneshot.pop(0)
+        self._deliver(completion)
+
+    def complete_accept_recv(self, data: bytes) -> None:
+        completion = self.pending_accept_recv.pop(0)
+        entry = completion.user_data
+        view = self._recv_buffer_for_entry(entry)
+        if data:
+            view[: len(data)] = data
+            completion.res = len(data)
+            completion.result = len(data)
+        else:
+            completion.res = 0
+            completion.result = 0
         self._deliver(completion)
 
     def submit_accept_multishot(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:

@@ -26,6 +26,7 @@ from .scheduler import BaseScheduler
 T = TypeVar("T")
 
 _DEFAULT_LIMIT = 2**16
+_DEFAULT_ACCEPT_RECV_SIZE = 1024
 
 __all__ = [
     "SocketTransport",
@@ -150,6 +151,10 @@ class _ReaderCore:
         chunk = bytearray(chunk_size)
         nbytes = self._recv_into_socket(memoryview(chunk))
         return bytes(chunk[:nbytes])
+
+    def feed_initial(self, data: bytes) -> None:
+        if data:
+            self._buffer.extend(data)
 
     def _fill_buffer(self, min_bytes: int) -> None:
         while len(self._buffer) < min_bytes and not self._eof:
@@ -282,6 +287,9 @@ class StreamReader:
     def readline(self) -> bytes:
         return self._core.readline()
 
+    def feed_initial(self, data: bytes) -> None:
+        self._core.feed_initial(data)
+
 
 class AsyncStreamReader:
     """Asyncio-shaped stream reader backed by tealet-blocking socket I/O."""
@@ -304,6 +312,9 @@ class AsyncStreamReader:
 
     async def readline(self) -> bytes:
         return self._core.readline()
+
+    def feed_initial(self, data: bytes) -> None:
+        self._core.feed_initial(data)
 
 
 class StreamWriter:
@@ -372,7 +383,7 @@ _StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
 _NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
 _AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 _ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
-_AcceptedConnection: TypeAlias = tuple[socket.socket, SocketAddress]
+_AcceptedConnection: TypeAlias = tuple[socket.socket, SocketAddress, bytes | None]
 
 
 def default_stream_factory(
@@ -432,6 +443,7 @@ def _open_streams(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
+    initial: bytes | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
     # ``async_`` only selects the default stream factory when ``stream_factory`` is
     # omitted. An explicit factory must already match the intended stream types.
@@ -439,7 +451,12 @@ def _open_streams(
         factory = default_async_stream_factory if async_ else default_stream_factory
     else:
         factory = stream_factory
-    return factory(io, sock, limit=limit)
+    reader, writer = factory(io, sock, limit=limit)
+    if initial:
+        reader.feed_initial(initial)
+    if async_:
+        return cast(_AsyncStreamPair, (reader, writer))
+    return cast(_NativeStreamPair, (reader, writer))
 
 
 @overload
@@ -775,6 +792,7 @@ class StreamServer:
         self,
         conn: socket.socket,
         *,
+        initial_data: bytes | None = None,
         limit: int,
         stream_factory: _StreamFactoryArg,
         client_handler: _ClientHandler,
@@ -797,6 +815,7 @@ class StreamServer:
                         limit=limit,
                         stream_factory=stream_factory,
                         async_=async_,
+                        initial=initial_data,
                     )
                     if async_:
                         run_coro(
@@ -854,7 +873,7 @@ def _start_stream_server(
     server: StreamServer | None = None
 
     def on_accept(accepted: _AcceptedConnection) -> None:
-        conn, _address = accepted
+        conn, _address, initial_data = accepted
         if server is None:
             # accept_many may deliver on a worker thread before StreamServer
             # exists; drop the connection (extremely unlikely race).
@@ -862,6 +881,7 @@ def _start_stream_server(
             return
         server._dispatch_client(
             conn,
+            initial_data=initial_data,
             limit=limit,
             stream_factory=stream_factory,
             client_handler=client_handler,
@@ -869,7 +889,7 @@ def _start_stream_server(
         )
 
     io = cast(ServerIO, _require_proactor_io(scheduler))
-    accept_operation = io.proactor.accept_many(sock, on_accept)
+    accept_operation = io.proactor.accept_many(sock, on_accept, recv_size=_DEFAULT_ACCEPT_RECV_SIZE)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
 
