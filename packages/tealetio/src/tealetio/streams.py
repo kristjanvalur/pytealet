@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import socket
 from collections.abc import Callable, Coroutine
@@ -27,8 +26,6 @@ from .scheduler import BaseScheduler
 T = TypeVar("T")
 
 _DEFAULT_LIMIT = 2**16
-
-_logger = logging.getLogger(__name__)
 
 __all__ = [
     "SocketTransport",
@@ -880,9 +877,8 @@ def _start_stream_server(
     server: StreamServer | None = None
 
     def on_accept(accepted: _AcceptedConnection) -> None:
-        conn, address, initial_data, recv_error = accepted
+        conn, _address, initial_data, recv_error = accepted
         if recv_error is not None:
-            _logger.warning("accept recv failed for %s: %s", address, recv_error)
             conn.close()
             return
         if server is None:
