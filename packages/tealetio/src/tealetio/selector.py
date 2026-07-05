@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, NoReturn, cast
 
 from .locks import Event
-from .operations import ContinuousOperation
+from .operations import ContinuousOperation, OperationCancelHost
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
@@ -42,14 +42,29 @@ class _FdCallbacks:
 
 
 class _SelectorPollMany(ContinuousOperation[int]):
-    _cleanup: Callable[[], None] | None = None
+    def __init__(
+        self,
+        *,
+        kind: str,
+        fileobj: object | None = None,
+        proactor: OperationCancelHost | None = None,
+        result_callback: Callable[[int], object] | None = None,
+        on_cancel: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(
+            kind=kind,
+            fileobj=fileobj,
+            proactor=proactor,
+            result_callback=result_callback,
+        )
+        self._on_cancel = on_cancel
 
     def cancel(self) -> None:
         if self.done():
             return
-        cleanup = self._cleanup
-        if cleanup is not None:
-            cleanup()
+        on_cancel = self._on_cancel
+        if on_cancel is not None:
+            on_cancel()
         self._set_cancelled()
 
 
@@ -322,7 +337,6 @@ class SelectorMixin:
         """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
 
         fd = self._fileobj_to_fd(fd)
-        operation = _SelectorPollMany(kind="poll_many", fileobj=fd, result_callback=callback)
         events = poll_mask_to_selector_events(mask)
         armed = {"read": False, "write": False}
 
@@ -333,6 +347,13 @@ class SelectorMixin:
             if armed["write"]:
                 self.remove_writer(fd)
                 armed["write"] = False
+
+        operation = _SelectorPollMany(
+            kind="poll_many",
+            fileobj=fd,
+            result_callback=callback,
+            on_cancel=disarm,
+        )
 
         def arm() -> None:
             if operation.done():
@@ -361,7 +382,6 @@ class SelectorMixin:
                 return
             operation._emit_result(result)
 
-        operation._cleanup = disarm
         try:
             result = probe_poll_fd_now(fd, mask)
         except (BlockingIOError, InterruptedError):
