@@ -2266,8 +2266,12 @@ class UringProactor(ProactorBase):
         pending_send: list[_UringEntry | None],
     ) -> Operation[int] | None:
         operation = cast(Operation[int], entry.operation)
+        if operation.done():
+            return operation
         if not payload:
             operation._set_result(0)
+            return operation
+        if operation.done():
             return operation
         send_operation = Operation[None](kind="send_on_connect", fileobj=sock)
         send_entry = self._uring_entry(
@@ -2286,6 +2290,9 @@ class UringProactor(ProactorBase):
     ) -> Operation[int]:
         send_operation = entry.operation
         res = completion.res
+        if parent.done():
+            send_operation._set_result(None)
+            return parent
         if res < 0:
             parent._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             send_operation._set_result(None)

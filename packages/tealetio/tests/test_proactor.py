@@ -2073,6 +2073,24 @@ class TestThreadedSelectorProactor:
         assert asyncio.run(run()) == b"hello"
 
 
+class _DeferredConnectUringRing(_FakeUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.pending_connect: list[SimpleNamespace] = []
+
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_connect.append((fd, address, user_data))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CONNECT, res=0, result=None)
+        self.pending_connect.append(completion)
+        return completion
+
+    def complete_connect(self) -> None:
+        completion = self.pending_connect.pop(0)
+        self._deliver(completion)
+
+
 class _DeferredUringRing(_FakeUringRing):
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
@@ -4178,6 +4196,39 @@ class TestUringProactor:
             proactor.ring.complete_connect_send(4)
             _wait_for_uring(proactor, operation.done)
             assert operation.result() == 4
+        finally:
+            sock.close()
+            proactor.close()
+
+    def test_connect_with_initial_cancel_before_send_arms(self) -> None:
+        proactor = UringProactor(ring_factory=_DeferredConnectUringRing)
+        sock = socket.socket()
+        try:
+            sock.setblocking(False)
+            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"hello")
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_connect()
+            proactor.wait(proactor.get_time() + 0.05)
+            assert proactor.ring.pending_connect_send == []
+            assert proactor.ring.submitted_send == []
+        finally:
+            sock.close()
+            proactor.close()
+
+    def test_connect_with_initial_cancel_during_pending_send(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        sock = socket.socket()
+        try:
+            sock.setblocking(False)
+            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"hello")
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_connect_send()
+            proactor.wait(proactor.get_time() + 0.05)
+            assert operation.cancelled() is True
         finally:
             sock.close()
             proactor.close()
