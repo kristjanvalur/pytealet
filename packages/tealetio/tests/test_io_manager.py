@@ -22,25 +22,25 @@ class _MockProactor:
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         self.recv_calls.append((sock, n))
-        operation = Operation[bytes](kind="recv", fileobj=sock.fileno(), proactor=self)
+        operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
         operation._set_result(b"mock")
         return operation
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
         self.poll_calls.append((fd, mask))
-        operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
+        operation = Operation[int](kind="poll", fileobj=fd)
         operation._set_result(mask)
         return operation
 
     def sendall(self, sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
         self.sendall_calls.append((sock, data))
-        operation = Operation[None](kind="sendall", fileobj=sock.fileno(), proactor=self)
+        operation = Operation[None](kind="sendall", fileobj=sock.fileno())
         operation._set_result(None)
         return operation
 
     def openat(self, path: str, flags: int, mode: int) -> Operation[int]:
         self.openat_calls.append((path, flags, mode))
-        operation = Operation[int](kind="openat", fileobj=-1, proactor=self)
+        operation = Operation[int](kind="openat", fileobj=-1)
         operation._set_result(901)
         return operation
 
@@ -50,7 +50,7 @@ class _MockProactor:
         mask: int,
         callback: Any,
     ) -> ContinuousOperation[int]:
-        operation = ContinuousOperation[int](kind="poll_many", fileobj=fd, proactor=self)
+        operation = ContinuousOperation[int](kind="poll_many", fileobj=fd)
         operation._set_result(mask)
         return operation
 

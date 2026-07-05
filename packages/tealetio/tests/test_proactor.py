@@ -112,7 +112,6 @@ def _multishot_test_entry() -> proactor_module._UringEntry:
     operation = ContinuousOperation(
         kind="recv_many",
         fileobj=socket.socketpair()[0],
-        proactor=None,
         result_callback=lambda _result: None,
     )
     return proactor_module._UringEntry(
@@ -123,7 +122,7 @@ def _multishot_test_entry() -> proactor_module._UringEntry:
 
 
 def test_uring_entry_omits_multishot_leg_for_one_shot_operations():
-    operation = Operation(kind="recv", fileobj=socket.socketpair()[0], proactor=None)
+    operation = Operation(kind="recv", fileobj=socket.socketpair()[0])
     entry = proactor_module._UringEntry(operation=operation, complete=lambda *_args: None)
     assert entry.multishot_leg is None
 
@@ -131,13 +130,13 @@ def test_uring_entry_omits_multishot_leg_for_one_shot_operations():
 def test_completions_to_process_passes_through_non_multishot():
     entry = _multishot_test_entry()
     completion = SimpleNamespace(multishot=False)
-    assert entry.completions_to_process(completion) == (completion, None)
+    assert entry.completions_to_process(completion) == (completion,)
 
 
 def test_completions_to_process_defers_out_of_order_termination():
     entry = _multishot_test_entry()
     terminal = _multishot_test_completion(sequence=2, more=False)
-    assert entry.completions_to_process(terminal) == (None, None)
+    assert entry.completions_to_process(terminal) == ()
     assert entry.multishot_leg is not None
     assert entry.multishot_leg.pending_final is terminal
 
@@ -147,7 +146,7 @@ def test_completions_to_process_flushes_stored_termination():
     terminal = _multishot_test_completion(sequence=2, more=False)
     entry.completions_to_process(terminal)
     first = _multishot_test_completion(sequence=0)
-    assert entry.completions_to_process(first) == (first, None)
+    assert entry.completions_to_process(first) == (first,)
     second = _multishot_test_completion(sequence=1)
     assert entry.completions_to_process(second) == (second, terminal)
 
@@ -1166,6 +1165,54 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_continuous_fd_slot_stores_step_and_cancel_clears_registration(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            fd = reader.fileno()
+            operation = proactor.poll_many(fd, select.POLLIN, lambda _mask: None)
+            with proactor._lock:
+                entry = proactor._fd_operations[fd]
+                assert entry.reader is not None
+                assert entry.reader.operation is operation
+                assert entry.reader.step is not None
+            operation.cancel()
+            assert operation.cancelled() is True
+            assert operation._cancel is None
+            with proactor._lock:
+                assert fd not in proactor._fd_operations
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_repressure_finds_operation_via_fd_slot(self):
+        proactor = SelectorProactor()
+        buf_group = proactor.create_buf_group(1024, 2)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            fd = reader.fileno()
+            operation = proactor.recv_many(reader, lambda _chunk: None, buf_group=buf_group)
+            with proactor._lock:
+                slot = proactor._fd_operations[fd].reader
+                assert slot is not None
+                assert slot.operation is operation
+                assert slot.step is not None
+            proactor._recv_many_repressure_pending.add(operation)
+            completed = proactor._service_recv_many_repressure_pending()
+            assert operation not in proactor._recv_many_repressure_pending
+            assert completed == []
+            with proactor._lock:
+                assert proactor._fd_operations[fd].reader is slot
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_poll_rejects_empty_mask(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -2003,6 +2050,15 @@ class _FailOnResubmitUringRing(_FakeUringRing):
         return super().submit_recv(fd, buf, user_data)
 
 
+class _BackpressuredPollUringRing(_FakeUringRing):
+    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        if self.submitted_poll:
+            raise uring_api.SubmissionQueueFull("no submission queue entries available")
+        return super().submit_poll(fd, mask, user_data)
+
+
 class _BackpressuredUringRing(_DeferredUringRing):
     def __init__(self, entries: int = 8, flags: int = 0) -> None:
         super().__init__(entries, flags)
@@ -2637,7 +2693,7 @@ class TestUringProactor:
 
             assert operation.result() == b"hello"
             assert entry.completion is None
-            assert operation._cancel_target is None
+            assert operation._cancel is None
         finally:
             reader.close()
             writer.close()
@@ -2657,7 +2713,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: operation.done())
 
             assert entry.completion is None
-            assert operation._cancel_target is None
+            assert operation._cancel is None
         finally:
             reader.close()
             writer.close()
@@ -3128,6 +3184,30 @@ class TestUringProactor:
             assert operation.done() is False
             operation.cancel()
             assert operation.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_oneshot_cancel_while_resubmit_deferred(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_BackpressuredPollUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert len(proactor.ring.submitted_poll) == 1
+
+            proactor.ring.complete_poll_oneshot(select.POLLIN)
+            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
+            assert len(proactor.ring.submitted_poll) == 1
+
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.wait(proactor.get_time() + 1.0)
+            assert len(proactor.ring.submitted_poll) == 1
         finally:
             reader.close()
             writer.close()
@@ -4462,7 +4542,7 @@ class TestProactorScheduler:
         monkeypatch.setattr(os, "close", tracking_close)
 
         def failing_stat_fdsize(self: UringProactor, fd: int) -> Operation[int]:
-            operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
+            operation = Operation[int](kind="stat_fdsize", fileobj=fd)
             operation._set_exception(OSError(errno.EIO, "stat failed"))
             return operation
 

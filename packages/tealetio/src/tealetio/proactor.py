@@ -233,8 +233,6 @@ class Proactor(Protocol):
 
     def break_wait(self) -> None: ...
 
-    def cancel_operation(self, operation: Operation[Any]) -> None: ...
-
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None: ...
 
     def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None: ...
@@ -456,9 +454,16 @@ class _SelectorRecvManyState:
 
 
 @dataclass
+class _FdSlot:
+    operation: Operation[Any] | ContinuousOperation[Any]
+    attempt: Callable[[], Any] | None = None
+    step: Callable[[], ContinuousStepResult] | None = None
+
+
+@dataclass
 class _FdEntry:
-    reader: Operation[Any] | ContinuousOperation[Any] | None = None
-    writer: Operation[Any] | ContinuousOperation[Any] | None = None
+    reader: _FdSlot | None = None
+    writer: _FdSlot | None = None
 
     def empty(self) -> bool:
         return self.reader is None and self.writer is None
@@ -487,7 +492,13 @@ class _UringEntry:
     consulted before ``complete`` runs to order multishot CQEs.
     """
 
-    __slots__ = ("operation", "complete", "completion", "active", "multishot_leg")
+    __slots__ = (
+        "operation",
+        "complete",
+        "completion",
+        "active",
+        "multishot_leg",
+    )
 
     def __init__(
         self,
@@ -505,37 +516,36 @@ class _UringEntry:
     def completions_to_process(
         self,
         completion: _UringCompletion,
-    ) -> tuple[_UringCompletion | None, _UringCompletion | None]:
-        """Return which completions are ready for ``_complete_uring_operation``.
+    ) -> tuple[_UringCompletion, ...]:
+        """Return completions ready for ``_complete_uring_operation``.
 
-        Non-multishot completions are always returned as ``(completion, None)``.
-        Multishot legs may defer a terminating completion (no ``F_MORE``) until
-        every earlier non-terminating completion in the leg has been observed.
-        When a deferred termination becomes ready, it is returned as the second
-        element alongside the completion that unblocked it.
+        Returns an empty tuple when the CQE should be dropped (operation done,
+        or a multishot termination is being deferred). One-shot completions
+        return a single-element tuple. Multishot legs may return two when a
+        deferred termination becomes ready alongside the unblocking CQE.
         """
 
         if not completion.multishot:
-            return (completion, None)
+            return (completion,)
         leg = self.multishot_leg
         assert leg is not None
         with leg.lock:
             if self.operation.done():
                 leg.pending_final = None
-                return (None, None)
+                return ()
             is_termination = not bool(completion.flags & uring_api.IORING_CQE_F_MORE)
             if is_termination:
                 if leg.nonterminal_seen < completion.sequence:
                     leg.pending_final = completion
-                    return (None, None)
+                    return ()
                 leg.pending_final = None
-                return (completion, None)
+                return (completion,)
             leg.nonterminal_seen += 1
             pending = leg.pending_final
             if pending is not None and leg.nonterminal_seen >= pending.sequence:
                 leg.pending_final = None
                 return (completion, pending)
-            return (completion, None)
+            return (completion,)
 
 
 @dataclass(frozen=True)
@@ -615,10 +625,13 @@ class SelectorProactor(ProactorBase):
             if fileobj is None:
                 continue
             fd = fileobj if isinstance(fileobj, int) else cast(socket.socket, fileobj).fileno()
-            step = operation._continuous_step
-            if step is None:
+            entry = self._fd_operations.get(fd)
+            if entry is None or entry.reader is None:
                 continue
-            self._step_continuous_fd_operation(fd, selectors.EVENT_READ, operation, completed)
+            slot = entry.reader
+            if slot.operation is not operation or slot.step is None:
+                continue
+            self._step_continuous_fd_operation(fd, selectors.EVENT_READ, operation, slot.step, completed)
         return completed
 
     def has_pending_operations(self) -> bool:
@@ -716,7 +729,7 @@ class SelectorProactor(ProactorBase):
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
+        operation = Operation[bytes](kind="recv", fileobj=sock)
 
         def attempt() -> bytes:
             return sock.recv(n)
@@ -727,7 +740,7 @@ class SelectorProactor(ProactorBase):
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""
 
-        operation = Operation[int](kind="recv_into", fileobj=sock, proactor=self)
+        operation = Operation[int](kind="recv_into", fileobj=sock)
 
         def attempt() -> int:
             return sock.recv_into(buf)
@@ -738,7 +751,7 @@ class SelectorProactor(ProactorBase):
     def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
         """Submit a datagram receive operation."""
 
-        operation = Operation[tuple[bytes, Any]](kind="recvfrom", fileobj=sock, proactor=self)
+        operation = Operation[tuple[bytes, Any]](kind="recvfrom", fileobj=sock)
 
         def attempt() -> tuple[bytes, Any]:
             return sock.recvfrom(bufsize)
@@ -749,7 +762,7 @@ class SelectorProactor(ProactorBase):
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
         """Submit a datagram receive-into operation."""
 
-        operation = Operation[tuple[int, Any]](kind="recvfrom_into", fileobj=sock, proactor=self)
+        operation = Operation[tuple[int, Any]](kind="recvfrom_into", fileobj=sock)
 
         def attempt() -> tuple[int, Any]:
             if nbytes:
@@ -762,7 +775,7 @@ class SelectorProactor(ProactorBase):
     def send(self, sock: socket.socket, data: Any) -> Operation[int]:
         """Submit a socket send operation."""
 
-        operation = Operation[int](kind="send", fileobj=sock, proactor=self)
+        operation = Operation[int](kind="send", fileobj=sock)
 
         def attempt() -> int:
             return sock.send(data)
@@ -773,7 +786,7 @@ class SelectorProactor(ProactorBase):
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
 
-        operation = Operation[int](kind="sendto", fileobj=sock, proactor=self)
+        operation = Operation[int](kind="sendto", fileobj=sock)
 
         def attempt() -> int:
             return sock.sendto(data, address)
@@ -784,7 +797,7 @@ class SelectorProactor(ProactorBase):
     def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]:
         """Submit a socket send-all operation."""
 
-        operation = Operation[None](kind="sendall", fileobj=sock, proactor=self)
+        operation = Operation[None](kind="sendall", fileobj=sock)
         view = memoryview(data)
         offset = 0
 
@@ -805,7 +818,7 @@ class SelectorProactor(ProactorBase):
     def accept(self, sock: socket.socket) -> Operation[tuple[socket.socket, Any]]:
         """Submit a socket accept operation."""
 
-        operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock, proactor=self)
+        operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock)
 
         def attempt() -> tuple[socket.socket, Any]:
             conn, address = sock.accept()
@@ -828,7 +841,6 @@ class SelectorProactor(ProactorBase):
         operation = ContinuousOperation[tuple[socket.socket, Any]](
             kind="accept_many",
             fileobj=sock,
-            proactor=self,
             result_callback=callback,
         )
 
@@ -849,7 +861,7 @@ class SelectorProactor(ProactorBase):
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
         """Submit a non-blocking socket connect operation."""
 
-        operation = Operation[None](kind="connect", fileobj=sock, proactor=self)
+        operation = Operation[None](kind="connect", fileobj=sock)
         started = False
 
         def attempt() -> None:
@@ -900,7 +912,6 @@ class SelectorProactor(ProactorBase):
         operation = ContinuousOperation[_RecvManyResult](
             kind="recv_many",
             fileobj=sock,
-            proactor=self,
             result_callback=callback,
         )
         sequence = 0
@@ -967,7 +978,7 @@ class SelectorProactor(ProactorBase):
     def poll(self, fd: int, mask: int) -> Operation[int]:
         """Wait until an fd reports the requested poll events."""
 
-        operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
+        operation = Operation[int](kind="poll", fileobj=fd)
 
         def attempt() -> int:
             return _probe_poll_fd_now(fd, mask)
@@ -989,7 +1000,6 @@ class SelectorProactor(ProactorBase):
         operation = ContinuousOperation[int](
             kind="poll_many",
             fileobj=fd,
-            proactor=self,
             result_callback=callback,
         )
 
@@ -1021,8 +1031,7 @@ class SelectorProactor(ProactorBase):
                 self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
             if self._try_complete_operation(operation, attempt):
                 return
-            self._reserve_fd_poll_operation(fd, selector_events, operation)
-            operation._attempt = attempt
+            self._reserve_fd_poll_operation(fd, selector_events, operation, attempt)
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -1041,8 +1050,7 @@ class SelectorProactor(ProactorBase):
                 self._check_fd_operation_available(fd, selectors.EVENT_READ)
             if selector_events & selectors.EVENT_WRITE:
                 self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
-            self._reserve_fd_poll_operation(fd, selector_events, operation)
-            operation._continuous_step = step
+            self._reserve_fd_poll_operation(fd, selector_events, operation, step=step)
             if self._try_step_continuous_operation(fd, operation, step):
                 return
             self._update_selector_registration(fd)
@@ -1072,12 +1080,22 @@ class SelectorProactor(ProactorBase):
             self._update_selector_registration(fd)
         return False
 
-    def _reserve_fd_poll_operation(self, fd: int, selector_events: int, operation: Operation[Any]) -> None:
+    def _reserve_fd_poll_operation(
+        self,
+        fd: int,
+        selector_events: int,
+        operation: Operation[Any],
+        attempt: Callable[[], Any] | None = None,
+        *,
+        step: Callable[[], ContinuousStepResult] | None = None,
+    ) -> None:
+        slot = _FdSlot(operation=operation, attempt=attempt, step=step)
         entry = self._fd_operations.setdefault(fd, _FdEntry())
         if selector_events & selectors.EVENT_READ:
-            entry.reader = operation
+            entry.reader = slot
         if selector_events & selectors.EVENT_WRITE:
-            entry.writer = operation
+            entry.writer = slot
+        self._bind_selector_cancel(operation)
 
     def _submit_socket_operation(
         self,
@@ -1093,8 +1111,7 @@ class SelectorProactor(ProactorBase):
             self._check_fd_operation_available(fd, event)
             if self._try_complete_operation(operation, attempt):
                 return
-            self._reserve_fd_operation(fd, event, operation)
-            operation._attempt = attempt
+            self._reserve_fd_operation(fd, event, operation, attempt=attempt)
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -1110,8 +1127,7 @@ class SelectorProactor(ProactorBase):
             self._check_socket(sock)
             fd = sock.fileno()
             self._check_fd_operation_available(fd, event)
-            self._reserve_fd_operation(fd, event, operation)
-            operation._continuous_step = step
+            self._reserve_fd_operation(fd, event, operation, step=step)
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -1134,29 +1150,42 @@ class SelectorProactor(ProactorBase):
         if current is not None:
             raise RuntimeError("an operation is already pending for this fd and direction")
 
-    def _reserve_fd_operation(self, fd: int, event: int, operation: Operation[Any]) -> None:
+    def _reserve_fd_operation(
+        self,
+        fd: int,
+        event: int,
+        operation: Operation[Any],
+        *,
+        attempt: Callable[[], Any] | None = None,
+        step: Callable[[], ContinuousStepResult] | None = None,
+    ) -> None:
         self._check_fd_operation_available(fd, event)
+        slot = _FdSlot(operation=operation, attempt=attempt, step=step)
         entry = self._fd_operations.setdefault(fd, _FdEntry())
         if event == selectors.EVENT_READ:
-            entry.reader = operation
+            entry.reader = slot
         else:
-            entry.writer = operation
+            entry.writer = slot
+        self._bind_selector_cancel(operation)
 
-    def cancel_operation(self, operation: Operation[Any]) -> None:
-        with self._lock:
-            removed = self._remove_operation(operation)
-        if not removed:
-            return
-        operation._set_cancelled()
-        self._after_selector_registration_changed()
+    def _bind_selector_cancel(self, operation: Operation[Any]) -> None:
+        def cancel() -> None:
+            with self._lock:
+                removed = self._remove_operation(operation)
+            if not removed:
+                return
+            if operation._set_cancelled():
+                self._after_selector_registration_changed()
+
+        operation.set_cancel(cancel)
 
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
             removed = False
-            if entry.reader is operation:
+            if entry.reader is not None and entry.reader.operation is operation:
                 entry.reader = None
                 removed = True
-            if entry.writer is operation:
+            if entry.writer is not None and entry.writer.operation is operation:
                 entry.writer = None
                 removed = True
             if removed:
@@ -1166,18 +1195,41 @@ class SelectorProactor(ProactorBase):
                 return True
         return False
 
+    def _require_fd_slot_driver(
+        self,
+        fd: int,
+        operation: Operation[Any],
+        slot: _FdSlot,
+        *,
+        continuous: bool,
+    ) -> Callable[[], Any]:
+        if continuous:
+            step = slot.step
+            if step is None:
+                self._remove_operation(operation)
+                raise RuntimeError(f"continuous operation {operation.kind!r} missing step driver on fd {fd}")
+            return step
+        attempt = slot.attempt
+        if attempt is None:
+            self._remove_operation(operation)
+            raise RuntimeError(f"operation {operation.kind!r} missing attempt driver on fd {fd}")
+        return attempt
+
     def _step_fd_operation(self, fd: int, event: int, completed: list[Operation[Any]]) -> None:
         entry = self._fd_operations.get(fd)
         if entry is None:
             return
-        operation = entry.reader if event == selectors.EVENT_READ else entry.writer
-        if operation is None or operation.done():
+        slot = entry.reader if event == selectors.EVENT_READ else entry.writer
+        if slot is None:
+            return
+        operation = slot.operation
+        if operation.done():
             return
         if isinstance(operation, ContinuousOperation):
-            self._step_continuous_fd_operation(fd, event, operation, completed)
+            step = self._require_fd_slot_driver(fd, operation, slot, continuous=True)
+            self._step_continuous_fd_operation(fd, event, operation, step, completed)
             return
-        attempt = cast(Callable[[], Any], operation._attempt)
-        assert attempt is not None
+        attempt = self._require_fd_slot_driver(fd, operation, slot, continuous=False)
         try:
             result = attempt()
         except (BlockingIOError, InterruptedError):
@@ -1196,10 +1248,9 @@ class SelectorProactor(ProactorBase):
         fd: int,
         event: int,
         operation: ContinuousOperation[Any],
+        step: Callable[[], ContinuousStepResult],
         completed: list[Operation[Any]],
     ) -> None:
-        step = operation._continuous_step
-        assert step is not None
         try:
             step_result = step()
         except (BlockingIOError, InterruptedError):
@@ -1467,6 +1518,32 @@ class UringProactor(ProactorBase):
         if deferred_count > self._deferred_queue_peak:
             self._deferred_queue_peak = deferred_count
 
+    def _uring_entry(
+        self,
+        operation: Operation[Any],
+        complete: _UringEntryComplete,
+        *,
+        multishot: bool = False,
+        poll_remove: bool = False,
+    ) -> _UringEntry:
+        entry = _UringEntry(operation=operation, complete=complete, multishot=multishot)
+        teardown = self._submit_poll_remove if poll_remove else self._submit_cancel
+
+        def cancel() -> None:
+            # Deferred resubmit legs are dropped here; in-flight legs use the
+            # pending Completion handle when entry.completion is still set.
+            if self._cancel_deferred_operation(operation):
+                self.break_wait()
+                return
+            completion = entry.completion
+            if completion is not None:
+                teardown(completion)
+            if operation._set_cancelled():
+                self.break_wait()
+
+        operation.set_cancel(cancel)
+        return entry
+
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
         """Create a provided-buffer group for ``recv_many`` / ``sock_recv_iter``."""
 
@@ -1611,11 +1688,11 @@ class UringProactor(ProactorBase):
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        operation = Operation[bytes](kind="recv", fileobj=sock, proactor=self)
+        operation = Operation[bytes](kind="recv", fileobj=sock)
         data = memoryview(bytearray(n))
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_recv(entry, completion, data),
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_recv(entry, completion, data),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), data, entry))
         return operation
@@ -1630,10 +1707,10 @@ class UringProactor(ProactorBase):
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""
 
-        operation = Operation[int](kind="recv_into", fileobj=sock, proactor=self)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_recv_into(entry, completion),
+        operation = Operation[int](kind="recv_into", fileobj=sock)
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_recv_into(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), buf, entry))
         return operation
@@ -1646,7 +1723,7 @@ class UringProactor(ProactorBase):
     def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
         """Submit a datagram receive operation."""
 
-        operation = Operation[tuple[bytes, Any]](kind="recvfrom", fileobj=sock, proactor=self)
+        operation = Operation[tuple[bytes, Any]](kind="recvfrom", fileobj=sock)
         data = memoryview(bytearray(bufsize))
         self._submit_recvmsg(
             sock,
@@ -1666,7 +1743,7 @@ class UringProactor(ProactorBase):
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
         """Submit a datagram receive-into operation."""
 
-        operation = Operation[tuple[int, Any]](kind="recvfrom_into", fileobj=sock, proactor=self)
+        operation = Operation[tuple[int, Any]](kind="recvfrom_into", fileobj=sock)
         data = memoryview(buf)
         if nbytes < 0:
             raise ValueError("negative buffersize in recvfrom_into")
@@ -1694,7 +1771,7 @@ class UringProactor(ProactorBase):
     def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]:
         """Submit a socket send-all operation."""
 
-        operation = Operation[None](kind="sendall", fileobj=sock, proactor=self)
+        operation = Operation[None](kind="sendall", fileobj=sock)
         payload = memoryview(data)
         if not payload:
             self._check_open()
@@ -1733,11 +1810,11 @@ class UringProactor(ProactorBase):
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
 
-        operation = Operation[int](kind="sendto", fileobj=sock, proactor=self)
+        operation = Operation[int](kind="sendto", fileobj=sock)
         payload = memoryview(data)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_sendto(entry, completion),
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_sendto(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._submit_sendto(sock.fileno(), payload, address, entry))
         return operation
@@ -1750,10 +1827,10 @@ class UringProactor(ProactorBase):
     def accept(self, sock: socket.socket) -> Operation[tuple[socket.socket, Any]]:
         """Submit a socket accept operation."""
 
-        operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock, proactor=self)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_accept(entry, completion),
+        operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock)
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_accept(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS))
         return operation
@@ -1783,14 +1860,13 @@ class UringProactor(ProactorBase):
         operation = ContinuousOperation[tuple[socket.socket, Any]](
             kind="accept_many",
             fileobj=sock,
-            proactor=self,
             result_callback=callback,
         )
         if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
             # one multishot accept stays armed until F_MORE clears or we cancel.
-            entry = _UringEntry(
-                operation=operation,
-                complete=lambda entry, completion: self._deliver_uring_accept_many(entry, completion),
+            entry = self._uring_entry(
+                operation,
+                lambda entry, completion: self._deliver_uring_accept_many(entry, completion),
                 multishot=True,
             )
             self._submit_uring_entry(
@@ -1801,9 +1877,9 @@ class UringProactor(ProactorBase):
 
         # fallback: accept one connection, emit it, queue another submit_accept().
         submit_box: list[_UringEntrySubmit] = []
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._deliver_uring_accept_many_oneshot(entry, completion, submit_box),
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._deliver_uring_accept_many_oneshot(entry, completion, submit_box),
         )
 
         def submit_accept() -> _UringCompletion:
@@ -1858,10 +1934,10 @@ class UringProactor(ProactorBase):
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
         """Submit a non-blocking socket connect operation."""
 
-        operation = Operation[None](kind="connect", fileobj=sock, proactor=self)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_connect(entry, completion),
+        operation = Operation[None](kind="connect", fileobj=sock)
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_connect(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
         return operation
@@ -1874,10 +1950,10 @@ class UringProactor(ProactorBase):
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
         """Submit an io_uring openat operation and return the opened fd on success."""
 
-        operation = Operation[int](kind="openat", fileobj=path, proactor=self)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_openat(entry, completion),
+        operation = Operation[int](kind="openat", fileobj=path)
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_openat(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_openat(path, flags, mode, entry, dfd=dfd))
         return operation
@@ -1890,11 +1966,11 @@ class UringProactor(ProactorBase):
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
         """Submit a positioned file read that completes with the bytes read."""
 
-        operation = Operation[bytes](kind="read", fileobj=fd, proactor=self)
+        operation = Operation[bytes](kind="read", fileobj=fd)
         data = memoryview(bytearray(n))
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_read(entry, completion, data),
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_read(entry, completion, data),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, data, offset, entry))
         return operation
@@ -1909,10 +1985,10 @@ class UringProactor(ProactorBase):
     def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
         """Submit a positioned file read into a caller-provided buffer."""
 
-        operation = Operation[int](kind="read_into", fileobj=fd, proactor=self)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_read_into(entry, completion),
+        operation = Operation[int](kind="read_into", fileobj=fd)
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_read_into(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, buf, offset, entry))
         return operation
@@ -1925,11 +2001,11 @@ class UringProactor(ProactorBase):
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
         """Submit a positioned file write and return the byte count written."""
 
-        operation = Operation[int](kind="write", fileobj=fd, proactor=self)
+        operation = Operation[int](kind="write", fileobj=fd)
         payload = memoryview(data)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_write(entry, completion),
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_write(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_write(fd, payload, offset, entry))
         return operation
@@ -1951,7 +2027,6 @@ class UringProactor(ProactorBase):
         operation = Operation[os.stat_result](
             kind="stat",
             fileobj=fd if fd >= 0 else path,
-            proactor=self,
         )
         buf = bytearray(uring_api.STATX_BUFFER_SIZE)
         if fd >= 0:
@@ -1963,9 +2038,9 @@ class UringProactor(ProactorBase):
             stat_path = path
             stat_flags = 0
         stat_buf = memoryview(buf)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_stat(entry, completion, stat_buf),
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_stat(entry, completion, stat_buf),
         )
         self._submit_uring_entry(
             entry,
@@ -2005,10 +2080,10 @@ class UringProactor(ProactorBase):
         if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "submit_statx_fdsize"):
             return super().stat_fdsize(fd)
 
-        operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_stat_fdsize(entry, completion),
+        operation = Operation[int](kind="stat_fdsize", fileobj=fd)
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_stat_fdsize(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_statx_fdsize(fd, entry))
         return operation
@@ -2062,7 +2137,6 @@ class UringProactor(ProactorBase):
         operation = ContinuousOperation[_RecvManyResult](
             kind="recv_many",
             fileobj=sock,
-            proactor=self,
             result_callback=callback,
         )
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
@@ -2071,11 +2145,9 @@ class UringProactor(ProactorBase):
             # mutable box so ENOBUFS recovery can advance the base index in-place.
             stream_sequence = [0]
             submit_box: list[_UringEntrySubmit] = []
-            entry = _UringEntry(
-                operation=operation,
-                complete=lambda entry, completion: self._deliver_uring_recv_many(
-                    entry, completion, stream_sequence, submit_box
-                ),
+            entry = self._uring_entry(
+                operation,
+                lambda entry, completion: self._deliver_uring_recv_many(entry, completion, stream_sequence, submit_box),
                 multishot=True,
             )
 
@@ -2091,9 +2163,9 @@ class UringProactor(ProactorBase):
         view = memoryview(buffer)
         stream_sequence = [0]
         submit_box: list[_UringEntrySubmit] = []
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._deliver_uring_recv_many_oneshot(
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._deliver_uring_recv_many_oneshot(
                 entry, completion, view, stream_sequence, submit_box
             ),
         )
@@ -2139,10 +2211,10 @@ class UringProactor(ProactorBase):
 
         # mask and fd go straight to io_uring; bad values show up as CQE errors.
         # selector validates masks (select() fd lists) and fd>=0; no per-fd exclusivity.
-        operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_poll(entry, completion),
+        operation = Operation[int](kind="poll", fileobj=fd)
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_poll(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_poll(fd, mask, entry))
         return operation
@@ -2169,24 +2241,24 @@ class UringProactor(ProactorBase):
         operation = ContinuousOperation[int](
             kind="poll_many",
             fileobj=fd,
-            proactor=self,
             result_callback=callback,
         )
         if self._capabilities.get("IORING_POLL_MULTISHOT", False):
             # kernel keeps the poll armed; cancel via submit_poll_remove().
-            entry = _UringEntry(
-                operation=operation,
-                complete=lambda entry, completion: self._deliver_uring_poll_many(entry, completion),
+            entry = self._uring_entry(
+                operation,
+                lambda entry, completion: self._deliver_uring_poll_many(entry, completion),
                 multishot=True,
+                poll_remove=True,
             )
             self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
             return operation
 
         # fallback: one-shot submit_poll per readiness event.
         submit_box: list[_UringEntrySubmit] = []
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._deliver_uring_poll_many_oneshot(entry, completion, submit_box),
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._deliver_uring_poll_many_oneshot(entry, completion, submit_box),
         )
 
         def submit_poll() -> _UringCompletion:
@@ -2270,29 +2342,17 @@ class UringProactor(ProactorBase):
             entry.active = False
             self._pending_tokens.pop()
         entry.completion = None
-        entry.operation._cancel_target = None
+        # Break operation._cancel -> entry closure cycles once the operation is
+        # finished. Mid-stream legs (ENOBUFS resume, sendall chunking) rebind or
+        # keep the hook while the operation is still live.
+        if entry.operation.done():
+            entry.operation.set_cancel(None)
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
         if entry.operation._set_exception(exc):
             self.break_wait()
             self._notify_completed()
-
-    def cancel_operation(self, operation: Operation[Any]) -> None:
-        if self._cancel_deferred_operation(operation):
-            self.break_wait()
-            return
-        cancel_target = operation._cancel_target
-        if cancel_target is not None:
-            # multishot poll registrations tear down via poll_remove; one-shot
-            # fallbacks (poll/accept/recv *many) cancel the pending sqe instead.
-            if operation.kind == "poll_many" and self._capabilities.get("IORING_POLL_MULTISHOT", False):
-                self._submit_poll_remove(cast(_UringCompletion, cancel_target))
-            else:
-                self._submit_cancel(cast(_UringCompletion, cancel_target))
-        cancelled = operation._set_cancelled()
-        if cancelled:
-            self.break_wait()
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
         if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
@@ -2304,11 +2364,16 @@ class UringProactor(ProactorBase):
             self._retry_deferred_submissions()
             return
         entry = cast(_UringEntry, completion.user_data)
-        first, second = entry.completions_to_process(completion)
+        to_process = entry.completions_to_process(completion)
+        if not to_process and entry.operation.done():
+            # Late multishot CQEs after cancel/terminal finish: drop the leg
+            # without re-entering delivery (completions_to_process already
+            # discarded them).
+            self._deactivate_uring_entry(entry)
+            self._retry_deferred_submissions()
+            return
         completed_operation: Operation[Any] | None = None
-        for pending in (first, second):
-            if pending is None:
-                continue
+        for pending in to_process:
             result = self._complete_uring_operation(pending)
             if result is not None:
                 completed_operation = result
@@ -2337,7 +2402,6 @@ class UringProactor(ProactorBase):
             entry.active = False
             self.break_wait()
             raise
-        entry.operation._cancel_target = entry.completion
         return True
 
     def _submit_cancel(self, completion: _UringCompletion) -> bool:
@@ -2411,9 +2475,9 @@ class UringProactor(ProactorBase):
         offset: int,
         progress: _ProgressCallback | None,
     ) -> None:
-        entry = _UringEntry(
-            operation=operation,
-            complete=lambda entry, completion: self._complete_uring_sendall(entry, completion, data, offset, progress),
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_sendall(entry, completion, data, offset, progress),
         )
         self._submit_uring_entry(entry, lambda: self._submit_send(sock.fileno(), data[offset:], entry))
 
@@ -2424,7 +2488,7 @@ class UringProactor(ProactorBase):
         data: memoryview,
         complete: _UringEntryComplete,
     ) -> None:
-        entry = _UringEntry(operation=operation, complete=complete)
+        entry = self._uring_entry(operation, complete)
         self._submit_uring_entry(entry, lambda: self._ring.submit_recvmsg(sock.fileno(), data, entry))
 
     def _complete_uring_operation(
@@ -2437,6 +2501,7 @@ class UringProactor(ProactorBase):
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         if completion.multishot:
             if entry.operation.done():
+                self._deactivate_uring_entry(entry)
                 return entry.operation
             return entry.complete(entry, completion)
         if not has_more:

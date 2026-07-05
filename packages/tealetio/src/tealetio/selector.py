@@ -41,18 +41,6 @@ class _FdCallbacks:
         return self.reader is None and self.writer is None
 
 
-class _SelectorPollMany(ContinuousOperation[int]):
-    _cleanup: Callable[[], None] | None = None
-
-    def cancel(self) -> None:
-        if self.done():
-            return
-        cleanup = self._cleanup
-        if cleanup is not None:
-            cleanup()
-        self._set_cancelled()
-
-
 class SelectorMixin:
     """Selector-backed readiness waits for schedulers.
 
@@ -322,7 +310,6 @@ class SelectorMixin:
         """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
 
         fd = self._fileobj_to_fd(fd)
-        operation = _SelectorPollMany(kind="poll_many", fileobj=fd, result_callback=callback)
         events = poll_mask_to_selector_events(mask)
         armed = {"read": False, "write": False}
 
@@ -333,6 +320,18 @@ class SelectorMixin:
             if armed["write"]:
                 self.remove_writer(fd)
                 armed["write"] = False
+
+        operation = ContinuousOperation[int](
+            kind="poll_many",
+            fileobj=fd,
+            result_callback=callback,
+        )
+
+        def cancel() -> None:
+            disarm()
+            operation._set_cancelled()
+
+        operation.set_cancel(cancel)
 
         def arm() -> None:
             if operation.done():
@@ -361,7 +360,6 @@ class SelectorMixin:
                 return
             operation._emit_result(result)
 
-        operation._cleanup = disarm
         try:
             result = probe_poll_fd_now(fd, mask)
         except (BlockingIOError, InterruptedError):
