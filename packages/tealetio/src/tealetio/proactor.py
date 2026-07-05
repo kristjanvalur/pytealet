@@ -25,6 +25,7 @@ from .io_manager import (
     ProactorSocketIO,
     ServerIO,
     SocketIO,
+    SocketSendBuffer,
     SupportsProactorIO,
 )
 from .recv_iter import (
@@ -315,15 +316,15 @@ class Proactor(Protocol):
         sock: socket.socket,
         address: Any,
         *,
-        initial: bytes | None = None,
+        initial: SocketSendBuffer | None = None,
     ) -> Operation[None] | Operation[int]:
         """Connect a socket.
 
         When ``initial`` is provided the operation completes with the number of
-        bytes sent from that buffer in one ``send`` attempt. Backends that do
-        not support connect-time send complete with ``0``. A send failure after
-        a successful connect fails the operation; the socket may still be
-        connected and must be closed by the caller.
+        bytes sent from that buffer in one ``send`` attempt. ``initial`` may be
+        ``bytes``, ``bytearray``, or ``memoryview``. Backends that do not support
+        connect-time send complete with ``0``. A send failure after a successful
+        connect fails the operation; the caller owns the socket.
         """
 
         ...
@@ -931,7 +932,7 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         address: Any,
         *,
-        initial: bytes | None = None,
+        initial: SocketSendBuffer | None = None,
     ) -> Operation[None] | Operation[int]:
         """Submit a non-blocking socket connect operation."""
 
@@ -2195,7 +2196,7 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         address: Any,
         *,
-        initial: bytes | None = None,
+        initial: SocketSendBuffer | None = None,
     ) -> Operation[None] | Operation[int]:
         """Submit a non-blocking socket connect operation."""
 

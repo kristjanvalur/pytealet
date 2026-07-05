@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tealetio import Event, set_scheduler
+from tealetio.operations import Operation
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.streams import (
     AsyncStreamReader,
@@ -924,6 +925,69 @@ class TestStreamsPoC:
         finally:
             if server is not None:
                 server.close()
+            scheduler.close()
+
+    def test_sock_connect_initial_send_flushes_remainder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        io = scheduler.io
+        client, _peer = socket.socketpair()
+        sent: list[bytes] = []
+
+        def fake_connect(sock: socket.socket, address, *, initial=None):
+            del sock, address, initial
+            operation = Operation[int](kind="connect", fileobj=client)
+            operation._set_result(4)
+            return operation
+
+        monkeypatch.setattr(scheduler.proactor, "connect", fake_connect)
+        monkeypatch.setattr(io, "sock_sendall", lambda _sock, data: sent.append(bytes(data)))
+
+        try:
+            client.setblocking(False)
+            io.sock_connect(client, ("127.0.0.1", 0), initial=b"helloworld")
+            assert sent == [b"oworld"]
+        finally:
+            client.close()
+            scheduler.close()
+
+    def test_open_connection_passes_initial_send_to_sock_connect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        captured: list[bytes | None] = []
+        real_sock_connect = scheduler.io.sock_connect
+
+        def capture_sock_connect(sock: socket.socket, address, *, initial: bytes | None = None) -> None:
+            captured.append(initial)
+            return real_sock_connect(sock, address, initial=initial)
+
+        monkeypatch.setattr(scheduler.io, "sock_connect", capture_sock_connect)
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+
+            def accept_side() -> None:
+                conn, _address = scheduler.io.sock_accept(server)
+                conn.close()
+
+            def connect_with_initial() -> None:
+                _reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    initial_send=b"early",
+                    scheduler=scheduler,
+                )
+                writer.close()
+
+            connect_task = scheduler.spawn(connect_with_initial)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+            assert captured == [b"early"]
+        finally:
+            server.close()
             scheduler.close()
 
 

@@ -27,6 +27,7 @@ from .tasks import (
 )
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
+from .io_manager import SocketSendBuffer
 from .proactor import Operation, Proactor, ProactorScheduler
 from .selector import SelectorScheduler
 
@@ -256,7 +257,7 @@ class ForwardingProactor:
         sock: socket.socket,
         address: Any,
         *,
-        initial: bytes | None = None,
+        initial: SocketSendBuffer | None = None,
     ) -> _asyncio.Future[None] | _asyncio.Future[int]:
         """Connect a socket through the host proactor."""
 

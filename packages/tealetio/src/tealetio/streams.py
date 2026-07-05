@@ -17,6 +17,7 @@ from .io_manager import (
     ServerIO,
     SocketAddress,
     SocketIO,
+    SocketSendBuffer,
     SupportsProactorIO,
 )
 from .locks import Condition
@@ -514,6 +515,7 @@ def _connect_tcp_streams(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
+    initial_send: SocketSendBuffer | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
     io = _require_proactor_io(scheduler)
     # ``ensure_resolved`` fast-paths literal IPv4/IPv6 via ``ipaddr_info`` and
@@ -532,7 +534,7 @@ def _connect_tcp_streams(
         sock: socket.socket | None = None
         try:
             sock = io.sock_create(addr_family, socktype, addr_proto)
-            io.sock_connect(sock, sockaddr)
+            io.sock_connect(sock, sockaddr, initial=initial_send)
             return _open_streams(
                 io,
                 sock,
@@ -557,6 +559,7 @@ def open_connection(
     proto: int = 0,
     limit: int = _DEFAULT_LIMIT,
     stream_factory: StreamFactory | None = None,
+    initial_send: SocketSendBuffer | None = None,
     async_: Literal[False] = False,
 ) -> tuple[StreamReader, StreamWriter]: ...
 
@@ -569,6 +572,7 @@ def open_connection(
     proto: int = 0,
     limit: int = _DEFAULT_LIMIT,
     stream_factory: AsyncStreamFactory | None = None,
+    initial_send: SocketSendBuffer | None = None,
     async_: Literal[True],
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
@@ -601,6 +605,7 @@ def open_connection(
     proto: int = 0,
     limit: int = _DEFAULT_LIMIT,
     stream_factory: _StreamFactoryArg = None,
+    initial_send: SocketSendBuffer | None = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
@@ -613,6 +618,10 @@ def open_connection(
     (no happy eyeballs). ``async_=False`` returns native streams;
     ``async_=True`` returns asyncio-shaped streams. The flag only selects the
     default factory when ``stream_factory`` is omitted.
+
+    ``initial_send`` opts into connect-time pre-send on backends that honour
+    the proactor hint; any unsent remainder is flushed with ``sendall`` before
+    streams are returned.
     """
 
     sched = _resolve_scheduler(scheduler)
@@ -636,6 +645,7 @@ def open_connection(
         limit=limit,
         stream_factory=stream_factory,
         async_=async_,
+        initial_send=initial_send,
     )
 
 

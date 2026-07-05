@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, cast, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
@@ -21,6 +21,7 @@ _RecvIterYield = tuple[int, memoryview]
 
 # sockaddr shapes vary by family; tighten when accept/connect types are unified.
 SocketAddress: TypeAlias = Any
+SocketSendBuffer: TypeAlias = bytes | bytearray | memoryview
 
 IO_UNSUPPORTED_ERROR = "operation requires a scheduler with IO support"
 SELECTOR_IO_UNSUPPORTED_ERROR = (
@@ -39,6 +40,7 @@ __all__ = [
     "SELECTOR_IO_UNSUPPORTED_ERROR",
     "ServerIO",
     "SocketAddress",
+    "SocketSendBuffer",
     "SocketIO",
     "SupportsProactorIO",
 ]
@@ -76,19 +78,30 @@ class SocketIO(Protocol):
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]: ...
 
-    def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> None: ...
+    def sock_sendall(
+        self,
+        sock: socket.socket,
+        data: SocketSendBuffer,
+        progress: _ProgressCallback | None = None,
+    ) -> None: ...
 
     def sock_send_iter(
         self,
         sock: socket.socket,
-        chunks: Iterable[bytes | bytearray | memoryview],
+        chunks: Iterable[SocketSendBuffer],
     ) -> None: ...
 
-    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int: ...
+    def sock_sendto(self, sock: socket.socket, data: SocketSendBuffer, address: Any) -> int: ...
 
     def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, SocketAddress]: ...
 
-    def sock_connect(self, sock: socket.socket, address: Any) -> None: ...
+    def sock_connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: SocketSendBuffer | None = None,
+    ) -> None: ...
 
     def sock_create(
         self,
@@ -273,8 +286,23 @@ class ProactorIOManager:
     def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
         return self.wait_operation(self._proactor.accept(sock))
 
-    def sock_connect(self, sock: socket.socket, address: Any) -> None:
-        return self.wait_operation(self._proactor.connect(sock, address))
+    def sock_connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: SocketSendBuffer | None = None,
+    ) -> None:
+        if initial is None:
+            self.wait_operation(self._proactor.connect(sock, address))
+            return
+        nbytes = cast(
+            int,
+            self.wait_operation(self._proactor.connect(sock, address, initial=initial)),
+        )
+        remainder = memoryview(initial)[nbytes:]
+        if remainder.nbytes:
+            self.sock_sendall(sock, remainder)
 
     def sock_create(
         self,
