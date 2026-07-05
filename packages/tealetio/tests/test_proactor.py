@@ -3453,6 +3453,25 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
+    def test_accept_many_drops_connection_when_accept_completes_after_cancel(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+            assert proactor.ring.pending_accept_recv == []
+        finally:
+            for conn, _address, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
     def test_accept_many_recv_size_late_recv_after_cancel_is_ignored(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()

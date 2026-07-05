@@ -1962,8 +1962,8 @@ class UringProactor(ProactorBase):
             return
 
         def cancel() -> None:
-            self._cancel_pending_receive_on_accept(pending_recv)
             backend_cancel()
+            self._cancel_pending_receive_on_accept(pending_recv)
 
         operation.set_cancel(cancel)
 
@@ -2025,7 +2025,10 @@ class UringProactor(ProactorBase):
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
         configure_scheduler_socket(conn)
-        operation._emit_result((conn, address, None, None))
+        if not operation.done():
+            operation._emit_result((conn, address, None, None))
+        else:
+            conn.close()
         if operation.done():
             return operation
         self._queue_entry_resubmit(entry, submit_box[0])
@@ -2055,7 +2058,9 @@ class UringProactor(ProactorBase):
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
         configure_scheduler_socket(conn)
-        if recv_size is None:
+        if operation.done():
+            conn.close()
+        elif recv_size is None:
             operation._emit_result((conn, address, None, None))
         else:
             buffer = bytearray(recv_size)
@@ -2104,6 +2109,11 @@ class UringProactor(ProactorBase):
             pending_recv.remove(entry)
         except ValueError:
             pass
+        if parent.done():
+            conn.close()
+            recv_operation._set_result(None)
+            self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
+            return recv_operation
         if res < 0:
             parent._emit_result(
                 (
@@ -2692,7 +2702,7 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
-        if entry.operation.kind == "receive_on_accept" and (not entry.active or entry.operation.done()):
+        if entry.operation.kind == "receive_on_accept" and not entry.active:
             self._deactivate_uring_entry(entry)
             return None
         assert entry.active
