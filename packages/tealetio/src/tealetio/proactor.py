@@ -106,7 +106,7 @@ def _handoff_accept_many(
 ) -> bool:
     """Emit one accepted connection or close the socket when the parent is done."""
 
-    if parent._try_emit_result((conn, address, initial_data, recv_error)):
+    if parent._emit_result((conn, address, initial_data, recv_error)):
         return True
     conn.close()
     return False

@@ -710,14 +710,14 @@ class TestOperation:
         with pytest.raises(InvalidStateError, match="already done"):
             operation.add_result_callback(seen.append)
 
-    def test_continuous_operation_try_emit_result_skips_when_done(self):
+    def test_continuous_operation_emit_result_skips_when_done(self):
         operation: ContinuousOperation[int] = ContinuousOperation(kind="test")
         seen: list[int] = []
 
         operation.add_result_callback(seen.append)
-        assert operation._try_emit_result(1) is True
+        assert operation._emit_result(1) is True
         operation._set_cancelled()
-        assert operation._try_emit_result(2) is False
+        assert operation._emit_result(2) is False
         assert seen == [1]
 
 
