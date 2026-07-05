@@ -48,7 +48,6 @@ class Operation(Generic[T]):
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] | None = []
         self._attempt: Callable[[], T] | None = None
-        self._cancel_target: object | None = None
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
