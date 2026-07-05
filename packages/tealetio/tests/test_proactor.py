@@ -731,22 +731,6 @@ def test_accept_many_rejects_invalid_recv_size(factory: Callable[[], Any], recv_
         proactor.close()
 
 
-def test_accept_many_caps_oversized_recv_size() -> None:
-    proactor = UringProactor(ring_factory=_FakeUringRing)
-    server = socket.socket()
-    try:
-        server.setblocking(False)
-        proactor.accept_many(server, lambda _: None, recv_size=2**16 + 1)
-        proactor.ring.complete_accept_multishot("peer-1")
-        proactor.wait(proactor.get_time() + 0.05)
-        assert len(proactor.ring.submitted_recv) == 1
-        _fd, buf, _entry = proactor.ring.submitted_recv[0]
-        assert len(buf) == 2**16
-    finally:
-        server.close()
-        proactor.close()
-
-
 class TestSelectorProactor:
     def test_clock_can_be_replaced(self):
         proactor = SelectorProactor()
@@ -3357,6 +3341,21 @@ class TestUringProactor:
         finally:
             for conn, _address, _data, _recv_error in accepted:
                 conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_caps_oversized_recv_size(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        try:
+            server.setblocking(False)
+            proactor.accept_many(server, lambda _: None, recv_size=2**16 + 1)
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert len(proactor.ring.submitted_recv) == 1
+            _fd, buf, _entry = proactor.ring.submitted_recv[0]
+            assert len(buf) == 2**16
+        finally:
             server.close()
             proactor.close()
 
