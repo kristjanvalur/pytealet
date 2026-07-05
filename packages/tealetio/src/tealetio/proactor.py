@@ -463,7 +463,7 @@ class _FdEntry:
         return self.reader is None and self.writer is None
 
 
-_UringEntryComplete = Callable[["UringProactor", "_UringEntry", "_UringCompletion"], Operation[Any] | None]
+_UringEntryComplete = Callable[["_UringEntry", "_UringCompletion"], Operation[Any] | None]
 _UringEntrySubmit = Callable[[], _UringCompletion]
 
 
@@ -479,8 +479,9 @@ class _MultishotLegState:
 class _UringEntry:
     """Per-submission io_uring completion state.
 
-    Operation-specific context is captured by the ``complete`` callback closure.
-    ``multishot_leg`` is the only optional per-entry field outside that path;
+    Operation-specific context and the owning proactor are captured by the
+    ``complete`` callback closure. ``multishot_leg`` is the only optional
+    per-entry field outside that path;
     it is consulted before ``complete`` runs to order multishot CQEs.
     """
 
@@ -1570,7 +1571,7 @@ class UringProactor(ProactorBase):
         data = memoryview(bytearray(n))
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_recv(entry, completion, data),
+            complete=lambda entry, completion: self._complete_uring_recv(entry, completion, data),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), data, entry))
         return operation
@@ -1588,7 +1589,7 @@ class UringProactor(ProactorBase):
         operation = Operation[int](kind="recv_into", fileobj=sock, proactor=self)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_recv_into(entry, completion),
+            complete=lambda entry, completion: self._complete_uring_recv_into(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), buf, entry))
         return operation
@@ -1607,7 +1608,7 @@ class UringProactor(ProactorBase):
             sock,
             operation,
             data,
-            lambda proactor, entry, completion: proactor._complete_uring_recvfrom(entry, completion, data),
+            lambda entry, completion: self._complete_uring_recvfrom(entry, completion, data),
         )
         return operation
 
@@ -1633,7 +1634,7 @@ class UringProactor(ProactorBase):
             sock,
             operation,
             data,
-            lambda proactor, entry, completion: proactor._complete_uring_recvfrom_into(entry, completion),
+            lambda entry, completion: self._complete_uring_recvfrom_into(entry, completion),
         )
         return operation
 
@@ -1692,7 +1693,7 @@ class UringProactor(ProactorBase):
         payload = memoryview(data)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_sendto(entry, completion),
+            complete=lambda entry, completion: self._complete_uring_sendto(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._submit_sendto(sock.fileno(), payload, address, entry))
         return operation
@@ -1708,7 +1709,7 @@ class UringProactor(ProactorBase):
         operation = Operation[tuple[socket.socket, Any]](kind="accept", fileobj=sock, proactor=self)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_accept(entry, completion),
+            complete=lambda entry, completion: self._complete_uring_accept(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS))
         return operation
@@ -1745,7 +1746,7 @@ class UringProactor(ProactorBase):
             # one multishot accept stays armed until F_MORE clears or we cancel.
             entry = _UringEntry(
                 operation=operation,
-                complete=lambda proactor, entry, completion: proactor._deliver_uring_accept_many(entry, completion),
+                complete=lambda entry, completion: self._deliver_uring_accept_many(entry, completion),
                 multishot_leg=_MultishotLegState(),
             )
             self._submit_uring_entry(
@@ -1757,7 +1758,7 @@ class UringProactor(ProactorBase):
         # fallback: accept one connection, emit it, queue another submit_accept().
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._deliver_uring_accept_many_oneshot(entry, completion),
+            complete=lambda entry, completion: self._deliver_uring_accept_many_oneshot(entry, completion),
         )
 
         def submit_accept() -> _UringCompletion:
@@ -1814,7 +1815,7 @@ class UringProactor(ProactorBase):
         operation = Operation[None](kind="connect", fileobj=sock, proactor=self)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_connect(entry, completion),
+            complete=lambda entry, completion: self._complete_uring_connect(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
         return operation
@@ -1830,7 +1831,7 @@ class UringProactor(ProactorBase):
         operation = Operation[int](kind="openat", fileobj=path, proactor=self)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_openat(entry, completion),
+            complete=lambda entry, completion: self._complete_uring_openat(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_openat(path, flags, mode, entry, dfd=dfd))
         return operation
@@ -1847,7 +1848,7 @@ class UringProactor(ProactorBase):
         data = memoryview(bytearray(n))
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_read(entry, completion, data),
+            complete=lambda entry, completion: self._complete_uring_read(entry, completion, data),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, data, offset, entry))
         return operation
@@ -1865,7 +1866,7 @@ class UringProactor(ProactorBase):
         operation = Operation[int](kind="read_into", fileobj=fd, proactor=self)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_read_into(entry, completion),
+            complete=lambda entry, completion: self._complete_uring_read_into(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, buf, offset, entry))
         return operation
@@ -1882,7 +1883,7 @@ class UringProactor(ProactorBase):
         payload = memoryview(data)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_write(entry, completion),
+            complete=lambda entry, completion: self._complete_uring_write(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_write(fd, payload, offset, entry))
         return operation
@@ -1918,7 +1919,7 @@ class UringProactor(ProactorBase):
         stat_buf = memoryview(buf)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_stat(entry, completion, stat_buf),
+            complete=lambda entry, completion: self._complete_uring_stat(entry, completion, stat_buf),
         )
         self._submit_uring_entry(
             entry,
@@ -1961,7 +1962,7 @@ class UringProactor(ProactorBase):
         operation = Operation[int](kind="stat_fdsize", fileobj=fd, proactor=self)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_stat_fdsize(entry, completion),
+            complete=lambda entry, completion: self._complete_uring_stat_fdsize(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_statx_fdsize(fd, entry))
         return operation
@@ -2024,7 +2025,7 @@ class UringProactor(ProactorBase):
             stream_sequence = [0]
             entry = _UringEntry(
                 operation=operation,
-                complete=lambda proactor, entry, completion: proactor._deliver_uring_recv_many(
+                complete=lambda entry, completion: self._deliver_uring_recv_many(
                     entry, completion, stream_sequence
                 ),
                 multishot_leg=_MultishotLegState(),
@@ -2043,7 +2044,7 @@ class UringProactor(ProactorBase):
         stream_sequence = [0]
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._deliver_uring_recv_many_oneshot(
+            complete=lambda entry, completion: self._deliver_uring_recv_many_oneshot(
                 entry, completion, view, stream_sequence
             ),
         )
@@ -2091,7 +2092,7 @@ class UringProactor(ProactorBase):
         operation = Operation[int](kind="poll", fileobj=fd, proactor=self)
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_poll(entry, completion),
+            complete=lambda entry, completion: self._complete_uring_poll(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_poll(fd, mask, entry))
         return operation
@@ -2125,7 +2126,7 @@ class UringProactor(ProactorBase):
             # kernel keeps the poll armed; cancel via submit_poll_remove().
             entry = _UringEntry(
                 operation=operation,
-                complete=lambda proactor, entry, completion: proactor._deliver_uring_poll_many(entry, completion),
+                complete=lambda entry, completion: self._deliver_uring_poll_many(entry, completion),
                 multishot_leg=_MultishotLegState(),
             )
             self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
@@ -2134,7 +2135,7 @@ class UringProactor(ProactorBase):
         # fallback: one-shot submit_poll per readiness event.
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._deliver_uring_poll_many_oneshot(entry, completion),
+            complete=lambda entry, completion: self._deliver_uring_poll_many_oneshot(entry, completion),
         )
 
         def submit_poll() -> _UringCompletion:
@@ -2335,7 +2336,7 @@ class UringProactor(ProactorBase):
     ) -> None:
         entry = _UringEntry(
             operation=operation,
-            complete=lambda proactor, entry, completion: proactor._complete_uring_sendall(
+            complete=lambda entry, completion: self._complete_uring_sendall(
                 entry, completion, data, offset, progress
             ),
         )
@@ -2362,7 +2363,7 @@ class UringProactor(ProactorBase):
         if completion.multishot:
             if entry.operation.done():
                 return entry.operation
-            return entry.complete(self, entry, completion)
+            return entry.complete(entry, completion)
         if not has_more:
             self._deactivate_uring_entry(entry)
         if entry.operation.done():
@@ -2370,7 +2371,7 @@ class UringProactor(ProactorBase):
         if res < 0:
             entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return entry.operation
-        return entry.complete(self, entry, completion)
+        return entry.complete(entry, completion)
 
     def _raise_unsupported(self, operation: str) -> NoReturn:
         self._check_open()
