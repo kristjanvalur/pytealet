@@ -456,9 +456,16 @@ class _SelectorRecvManyState:
 
 
 @dataclass
+class _FdSlot:
+    operation: Operation[Any] | ContinuousOperation[Any]
+    attempt: Callable[[], Any] | None = None
+    step: Callable[[], ContinuousStepResult] | None = None
+
+
+@dataclass
 class _FdEntry:
-    reader: Operation[Any] | ContinuousOperation[Any] | None = None
-    writer: Operation[Any] | ContinuousOperation[Any] | None = None
+    reader: _FdSlot | None = None
+    writer: _FdSlot | None = None
 
     def empty(self) -> bool:
         return self.reader is None and self.writer is None
@@ -624,10 +631,13 @@ class SelectorProactor(ProactorBase):
             if fileobj is None:
                 continue
             fd = fileobj if isinstance(fileobj, int) else cast(socket.socket, fileobj).fileno()
-            step = operation._continuous_step
-            if step is None:
+            entry = self._fd_operations.get(fd)
+            if entry is None or entry.reader is None:
                 continue
-            self._step_continuous_fd_operation(fd, selectors.EVENT_READ, operation, completed)
+            slot = entry.reader
+            if slot.operation is not operation or slot.step is None:
+                continue
+            self._step_continuous_fd_operation(fd, selectors.EVENT_READ, operation, slot.step, completed)
         return completed
 
     def has_pending_operations(self) -> bool:
@@ -1030,8 +1040,7 @@ class SelectorProactor(ProactorBase):
                 self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
             if self._try_complete_operation(operation, attempt):
                 return
-            self._reserve_fd_poll_operation(fd, selector_events, operation)
-            operation._attempt = attempt
+            self._reserve_fd_poll_operation(fd, selector_events, operation, attempt)
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -1050,8 +1059,7 @@ class SelectorProactor(ProactorBase):
                 self._check_fd_operation_available(fd, selectors.EVENT_READ)
             if selector_events & selectors.EVENT_WRITE:
                 self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
-            self._reserve_fd_poll_operation(fd, selector_events, operation)
-            operation._continuous_step = step
+            self._reserve_fd_poll_operation(fd, selector_events, operation, step=step)
             if self._try_step_continuous_operation(fd, operation, step):
                 return
             self._update_selector_registration(fd)
@@ -1081,12 +1089,21 @@ class SelectorProactor(ProactorBase):
             self._update_selector_registration(fd)
         return False
 
-    def _reserve_fd_poll_operation(self, fd: int, selector_events: int, operation: Operation[Any]) -> None:
+    def _reserve_fd_poll_operation(
+        self,
+        fd: int,
+        selector_events: int,
+        operation: Operation[Any],
+        attempt: Callable[[], Any] | None = None,
+        *,
+        step: Callable[[], ContinuousStepResult] | None = None,
+    ) -> None:
+        slot = _FdSlot(operation=operation, attempt=attempt, step=step)
         entry = self._fd_operations.setdefault(fd, _FdEntry())
         if selector_events & selectors.EVENT_READ:
-            entry.reader = operation
+            entry.reader = slot
         if selector_events & selectors.EVENT_WRITE:
-            entry.writer = operation
+            entry.writer = slot
 
     def _submit_socket_operation(
         self,
@@ -1102,8 +1119,7 @@ class SelectorProactor(ProactorBase):
             self._check_fd_operation_available(fd, event)
             if self._try_complete_operation(operation, attempt):
                 return
-            self._reserve_fd_operation(fd, event, operation)
-            operation._attempt = attempt
+            self._reserve_fd_operation(fd, event, operation, attempt=attempt)
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -1119,8 +1135,7 @@ class SelectorProactor(ProactorBase):
             self._check_socket(sock)
             fd = sock.fileno()
             self._check_fd_operation_available(fd, event)
-            self._reserve_fd_operation(fd, event, operation)
-            operation._continuous_step = step
+            self._reserve_fd_operation(fd, event, operation, step=step)
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -1143,13 +1158,22 @@ class SelectorProactor(ProactorBase):
         if current is not None:
             raise RuntimeError("an operation is already pending for this fd and direction")
 
-    def _reserve_fd_operation(self, fd: int, event: int, operation: Operation[Any]) -> None:
+    def _reserve_fd_operation(
+        self,
+        fd: int,
+        event: int,
+        operation: Operation[Any],
+        *,
+        attempt: Callable[[], Any] | None = None,
+        step: Callable[[], ContinuousStepResult] | None = None,
+    ) -> None:
         self._check_fd_operation_available(fd, event)
+        slot = _FdSlot(operation=operation, attempt=attempt, step=step)
         entry = self._fd_operations.setdefault(fd, _FdEntry())
         if event == selectors.EVENT_READ:
-            entry.reader = operation
+            entry.reader = slot
         else:
-            entry.writer = operation
+            entry.writer = slot
 
     def cancel_operation(self, operation: Operation[Any]) -> None:
         with self._lock:
@@ -1162,10 +1186,10 @@ class SelectorProactor(ProactorBase):
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
             removed = False
-            if entry.reader is operation:
+            if entry.reader is not None and entry.reader.operation is operation:
                 entry.reader = None
                 removed = True
-            if entry.writer is operation:
+            if entry.writer is not None and entry.writer.operation is operation:
                 entry.writer = None
                 removed = True
             if removed:
@@ -1179,13 +1203,18 @@ class SelectorProactor(ProactorBase):
         entry = self._fd_operations.get(fd)
         if entry is None:
             return
-        operation = entry.reader if event == selectors.EVENT_READ else entry.writer
-        if operation is None or operation.done():
+        slot = entry.reader if event == selectors.EVENT_READ else entry.writer
+        if slot is None:
+            return
+        operation = slot.operation
+        if operation.done():
             return
         if isinstance(operation, ContinuousOperation):
-            self._step_continuous_fd_operation(fd, event, operation, completed)
+            step = slot.step
+            assert step is not None
+            self._step_continuous_fd_operation(fd, event, operation, step, completed)
             return
-        attempt = cast(Callable[[], Any], operation._attempt)
+        attempt = slot.attempt
         assert attempt is not None
         try:
             result = attempt()
@@ -1205,10 +1234,9 @@ class SelectorProactor(ProactorBase):
         fd: int,
         event: int,
         operation: ContinuousOperation[Any],
+        step: Callable[[], ContinuousStepResult],
         completed: list[Operation[Any]],
     ) -> None:
-        step = operation._continuous_step
-        assert step is not None
         try:
             step_result = step()
         except (BlockingIOError, InterruptedError):

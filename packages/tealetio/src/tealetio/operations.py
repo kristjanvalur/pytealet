@@ -47,7 +47,6 @@ class Operation(Generic[T]):
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] | None = []
-        self._attempt: Callable[[], T] | None = None
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -168,7 +167,6 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj, proactor=proactor)
         self._result_callbacks: list[_ResultCallback[T_co]] = []
-        self._continuous_step: Callable[[], ContinuousStepResult] | None = None
         if result_callback is not None:
             self._result_callbacks.append(result_callback)
 
