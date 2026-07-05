@@ -500,7 +500,6 @@ class _UringEntry:
         "completion",
         "active",
         "multishot_leg",
-        "cancel_via_poll_remove",
     )
 
     def __init__(
@@ -509,14 +508,12 @@ class _UringEntry:
         complete: _UringEntryComplete,
         *,
         multishot: bool = False,
-        cancel_via_poll_remove: bool = False,
     ) -> None:
         self.operation = operation
         self.complete = complete
         self.completion = None
         self.active = False
         self.multishot_leg = _MultishotLegState() if multishot else None
-        self.cancel_via_poll_remove = cancel_via_poll_remove
 
     def completions_to_process(
         self,
@@ -1434,7 +1431,6 @@ class UringProactor(ProactorBase):
         # each completion (see the *_oneshot delivery handlers below).
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
-        self._active_uring_entries: dict[int, _UringEntry] = {}
         self._deferred_submissions: list[_UringSubmission] = []
         self._retrying_deferred_submissions = False
         self._submit_attempts = 0
@@ -2216,7 +2212,6 @@ class UringProactor(ProactorBase):
                 operation=operation,
                 complete=lambda entry, completion: self._deliver_uring_poll_many(entry, completion),
                 multishot=True,
-                cancel_via_poll_remove=True,
             )
             self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
             return operation
@@ -2309,7 +2304,7 @@ class UringProactor(ProactorBase):
             entry.active = False
             self._pending_tokens.pop()
         entry.completion = None
-        self._active_uring_entries.pop(id(entry.operation), None)
+        entry.operation._cancel_target = None
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
@@ -2321,12 +2316,14 @@ class UringProactor(ProactorBase):
         if self._cancel_deferred_operation(operation):
             self.break_wait()
             return
-        entry = self._active_uring_entries.get(id(operation))
-        if entry is not None and entry.active and entry.completion is not None:
-            if entry.cancel_via_poll_remove:
-                self._submit_poll_remove(entry.completion)
+        cancel_target = operation._cancel_target
+        if cancel_target is not None:
+            # multishot poll registrations tear down via poll_remove; one-shot
+            # fallbacks (poll/accept/recv *many) cancel the pending sqe instead.
+            if operation.kind == "poll_many" and self._capabilities.get("IORING_POLL_MULTISHOT", False):
+                self._submit_poll_remove(cast(_UringCompletion, cancel_target))
             else:
-                self._submit_cancel(entry.completion)
+                self._submit_cancel(cast(_UringCompletion, cancel_target))
         cancelled = operation._set_cancelled()
         if cancelled:
             self.break_wait()
@@ -2374,7 +2371,7 @@ class UringProactor(ProactorBase):
             entry.active = False
             self.break_wait()
             raise
-        self._active_uring_entries[id(entry.operation)] = entry
+        entry.operation._cancel_target = entry.completion
         return True
 
     def _submit_cancel(self, completion: _UringCompletion) -> bool:
@@ -2436,7 +2433,6 @@ class UringProactor(ProactorBase):
                 del self._deferred_submissions[index]
                 entry.active = False
                 entry.completion = None
-                self._active_uring_entries.pop(id(operation), None)
                 operation._set_cancelled()
                 return True
         return False
