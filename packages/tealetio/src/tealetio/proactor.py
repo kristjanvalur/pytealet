@@ -1755,9 +1755,7 @@ class UringProactor(ProactorBase):
         submit_box: list[_UringEntrySubmit] = []
         entry = _UringEntry(
             operation=operation,
-            complete=lambda entry, completion: self._deliver_uring_accept_many_oneshot(
-                entry, completion, submit_box
-            ),
+            complete=lambda entry, completion: self._deliver_uring_accept_many_oneshot(entry, completion, submit_box),
         )
 
         def submit_accept() -> _UringCompletion:
@@ -2139,9 +2137,7 @@ class UringProactor(ProactorBase):
         submit_box: list[_UringEntrySubmit] = []
         entry = _UringEntry(
             operation=operation,
-            complete=lambda entry, completion: self._deliver_uring_poll_many_oneshot(
-                entry, completion, submit_box
-            ),
+            complete=lambda entry, completion: self._deliver_uring_poll_many_oneshot(entry, completion, submit_box),
         )
 
         def submit_poll() -> _UringCompletion:
@@ -2202,9 +2198,7 @@ class UringProactor(ProactorBase):
                 if multishot_leg is not None:
                     multishot_leg.nonterminal_seen = 0
                     multishot_leg.pending_final = None
-                operation._emit_result(
-                    (RECV_MANY_BUFFER_PRESSURE, self._recv_many_resume_callable(entry, submit_box))
-                )
+                operation._emit_result((RECV_MANY_BUFFER_PRESSURE, self._recv_many_resume_callable(entry, submit_box)))
                 return None
             operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
@@ -2347,9 +2341,7 @@ class UringProactor(ProactorBase):
     ) -> None:
         entry = _UringEntry(
             operation=operation,
-            complete=lambda entry, completion: self._complete_uring_sendall(
-                entry, completion, data, offset, progress
-            ),
+            complete=lambda entry, completion: self._complete_uring_sendall(entry, completion, data, offset, progress),
         )
         self._submit_uring_entry(entry, lambda: self._submit_send(sock.fileno(), data[offset:], entry))
 
