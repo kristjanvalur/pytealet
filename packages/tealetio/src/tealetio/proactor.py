@@ -2215,9 +2215,14 @@ class UringProactor(ProactorBase):
         return operation
 
     def _deactivate_uring_entry(self, entry: _UringEntry) -> None:
+        # Drop the pending Completion handle so entry <-> completion.user_data
+        # cycles do not linger after this leg is done. Multishot entries keep the
+        # handle only while active (cancel/poll_remove still need it).
         if entry.active:
             entry.active = False
             self._pending_tokens.pop()
+        entry.completion = None
+        entry.operation._cancel_target = None
 
     def cancel_operation(self, operation: Operation[Any]) -> None:
         if self._cancel_deferred_operation(operation):
@@ -2328,6 +2333,7 @@ class UringProactor(ProactorBase):
             if entry is not None and entry.operation is operation:
                 del self._deferred_submissions[index]
                 entry.active = False
+                entry.completion = None
                 operation._set_cancelled()
                 return True
         return False

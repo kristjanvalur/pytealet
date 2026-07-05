@@ -2610,6 +2610,46 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_uring_entry_clears_completion_handle_after_delivery(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            _fd, _buf, entry = proactor.ring.submitted_recv[-1]
+            assert entry.completion is not None
+
+            proactor.ring.complete_recv()
+            proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.result() == b"hello"
+            assert entry.completion is None
+            assert operation._cancel_target is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_multishot_recv_many_clears_completion_handle_when_done(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, lambda _chunk: None, buf_group=proactor.shared_recv_buffer_pool())
+            _fd, _group, entry = proactor.ring.submitted_recv_multishot[-1]
+            assert entry.completion is not None
+
+            proactor.ring.complete_recv_multishot(b"hello", more=False, sequence=0)
+            proactor.ring.complete_recv_multishot(b"", more=False, sequence=1)
+            _wait_for_uring(proactor, lambda: operation.done())
+
+            assert entry.completion is None
+            assert operation._cancel_target is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_recv_into_completes_from_ring_completion(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
