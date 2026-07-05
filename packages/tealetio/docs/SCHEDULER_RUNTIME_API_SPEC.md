@@ -689,8 +689,9 @@ Status: In progress.
 ## IO manager refactor (implemented)
 
 Blocking proactor IO is composed into **`ProactorIOManager`** and exposed as
-`scheduler.io` on proactor-backed schedulers. `BaseScheduler.io` raises when the
-scheduler has no IO backend. Blocking `sock_*`, `poll*`, `wait_operation`, and
+`scheduler.io` on proactor-backed schedulers. `BasicScheduler.io` and
+`SelectorScheduler.io` raise when the scheduler has no proactor IO facade.
+Blocking `sock_*`, `poll*`, `wait_operation`, and
 positioned file `open` were removed from the scheduler surface; callers use
 `scheduler.io` instead.
 
@@ -711,8 +712,9 @@ running scheduler (or accept `scheduler=`) and route blocking socket IO through
    `UringProactor` may use `uring_api.submit_socket()` when supported, wrapping
    returned fds with `socket.socket(fileno=fd)`.
 3. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
-4. Decouple IO protocol return types (`IOFile` handle protocol, neutral concrete
-   names); see `IO_MANAGER_DESIGN.md` Return-type decoupling.
+4. Finish return-type decoupling (rename `ProactorFile`, neutral `RecvBufferPool`
+   in `SocketIO`); `IOFile` and `ServerIO` are implemented — see
+   `IO_MANAGER_DESIGN.md`.
 
 ## Next Alignment Backlog (Asyncio Interop)
 

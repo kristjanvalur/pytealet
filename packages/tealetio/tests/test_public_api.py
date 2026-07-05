@@ -38,6 +38,7 @@ def test_top_level_exports_public_scheduler_api():
         "FIRST_COMPLETED",
         "FIRST_EXCEPTION",
         "FileIO",
+        "IOFile",
         "Future",
         "ForwardingSelector",
         "ForwardingProactor",
@@ -51,6 +52,7 @@ def test_top_level_exports_public_scheduler_api():
         "ProactorFile",
         "ProactorIOManager",
         "ProactorSocketIO",
+        "ServerIO",
         "ProactorScheduler",
         "get_current",
         "InvalidStateError",
@@ -165,10 +167,13 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.ensure_resolved is tealetio.scheduler.ensure_resolved
     assert tealetio.Operation is tealetio.proactor.Operation
     assert tealetio.FileIO is tealetio.proactor.FileIO
+    assert tealetio.IOFile is tealetio.proactor.IOFile
     assert tealetio.PollIO is tealetio.proactor.PollIO
     assert tealetio.SocketIO is tealetio.proactor.SocketIO
     assert tealetio.ProactorAccess is tealetio.proactor.ProactorAccess
+    assert tealetio.ServerIO is tealetio.proactor.ServerIO
     assert tealetio.ProactorSocketIO is tealetio.proactor.ProactorSocketIO
+    assert tealetio.ProactorSocketIO is tealetio.ServerIO
     assert tealetio.SupportsProactorIO is tealetio.proactor.SupportsProactorIO
     assert tealetio.ProactorIOManager is tealetio.proactor.ProactorIOManager
     assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler

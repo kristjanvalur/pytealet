@@ -6,11 +6,19 @@ import asyncio
 import os
 import socket
 from collections.abc import Callable, Coroutine
-from typing import Any, Literal, Protocol, TypeVar, overload
+from typing import Any, Literal, Protocol, TypeAlias, TypeVar, cast, overload
 
 from asynkit import coro_drive
 
-from .io_manager import ProactorIOManager, ProactorSocketIO, SocketIO
+from .io_manager import (
+    IO_UNSUPPORTED_ERROR,
+    SELECTOR_IO_UNSUPPORTED_ERROR,
+    ProactorIOManager,
+    ServerIO,
+    SocketAddress,
+    SocketIO,
+    SupportsProactorIO,
+)
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -358,6 +366,15 @@ class AsyncStreamWriter:
         return None
 
 
+_NativeStreamPair: TypeAlias = tuple[StreamReader, StreamWriter]
+_AsyncStreamPair: TypeAlias = tuple[AsyncStreamReader, AsyncStreamWriter]
+_StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
+_NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
+_AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
+_ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
+_AcceptedConnection: TypeAlias = tuple[socket.socket, SocketAddress]
+
+
 def default_stream_factory(
     io: SocketIO,
     sock: socket.socket,
@@ -397,12 +414,12 @@ def _resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:
 def _require_proactor_io(scheduler: BaseScheduler) -> ProactorIOManager:
     """Return ``scheduler.io`` for proactor schedulers or raise with a targeted message."""
 
-    from .io_manager import IO_UNSUPPORTED_ERROR, SELECTOR_IO_UNSUPPORTED_ERROR
     from .proactor import ProactorScheduler
     from .selector import SelectorScheduler
 
     if isinstance(scheduler, ProactorScheduler):
-        return scheduler.io
+        proactor_scheduler: SupportsProactorIO = scheduler
+        return proactor_scheduler.io
     if isinstance(scheduler, SelectorScheduler):
         raise RuntimeError(SELECTOR_IO_UNSUPPORTED_ERROR)
     raise RuntimeError(IO_UNSUPPORTED_ERROR)
@@ -413,9 +430,9 @@ def _open_streams(
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
-    stream_factory: Any = None,
+    stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
-) -> tuple[Any, Any]:
+) -> _NativeStreamPair | _AsyncStreamPair:
     # ``async_`` only selects the default stream factory when ``stream_factory`` is
     # omitted. An explicit factory must already match the intended stream types.
     if stream_factory is None:
@@ -449,10 +466,10 @@ def open_streams(
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
-    stream_factory: Any = None,
+    stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
-) -> tuple[Any, Any]:
+) -> _NativeStreamPair | _AsyncStreamPair:
     """Wrap a connected non-blocking socket as stream endpoints.
 
     ``async_=False`` returns native ``StreamReader`` / ``StreamWriter`` pairs;
@@ -476,9 +493,9 @@ def _connect_tcp_streams(
     family: int = socket.AF_UNSPEC,
     proto: int = 0,
     limit: int = _DEFAULT_LIMIT,
-    stream_factory: Any = None,
+    stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
-) -> tuple[Any, Any]:
+) -> _NativeStreamPair | _AsyncStreamPair:
     io = _require_proactor_io(scheduler)
     # ``ensure_resolved`` fast-paths literal IPv4/IPv6 via ``ipaddr_info`` and
     # falls back to ``scheduler.getaddrinfo()`` for hostnames (executor-backed).
@@ -564,10 +581,10 @@ def open_connection(
     family: int = socket.AF_UNSPEC,
     proto: int = 0,
     limit: int = _DEFAULT_LIMIT,
-    stream_factory: Any = None,
+    stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
-) -> tuple[Any, Any]:
+) -> _NativeStreamPair | _AsyncStreamPair:
     """Connect and return stream endpoints.
 
     Pass ``addr=(host, port)`` for TCP, or ``path`` for a Unix-domain socket.
@@ -608,9 +625,9 @@ def _connect_unix_streams(
     path: str,
     *,
     limit: int = _DEFAULT_LIMIT,
-    stream_factory: Any = None,
+    stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
-) -> tuple[Any, Any]:
+) -> _NativeStreamPair | _AsyncStreamPair:
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
@@ -694,7 +711,7 @@ class StreamServer:
         self,
         scheduler: BaseScheduler,
         sockets: list[socket.socket],
-        accept_operation: ContinuousOperation[tuple[socket.socket, Any]],
+        accept_operation: ContinuousOperation[_AcceptedConnection],
     ) -> None:
         self._scheduler = scheduler
         self._io = _require_proactor_io(scheduler)
@@ -716,7 +733,7 @@ class StreamServer:
         return self._sockets
 
     @property
-    def accept_operation(self) -> ContinuousOperation[tuple[socket.socket, Any]]:
+    def accept_operation(self) -> ContinuousOperation[_AcceptedConnection]:
         return self._accept_operation
 
     def close(self) -> None:
@@ -759,8 +776,8 @@ class StreamServer:
         conn: socket.socket,
         *,
         limit: int,
-        stream_factory: Any,
-        client_handler: Callable[..., Any],
+        stream_factory: _StreamFactoryArg,
+        client_handler: _ClientHandler,
         async_: bool,
     ) -> None:
         if self._closed:
@@ -769,7 +786,7 @@ class StreamServer:
 
         def dispatch() -> None:
             def serve() -> None:
-                writer: Any = None
+                writer: StreamWriter | AsyncStreamWriter | None = None
                 try:
                     with self._shutdown:
                         if self._closed:
@@ -782,9 +799,17 @@ class StreamServer:
                         async_=async_,
                     )
                     if async_:
-                        run_coro(client_handler(reader, writer))
+                        run_coro(
+                            cast(_AsyncClientHandler, client_handler)(
+                                cast(AsyncStreamReader, reader),
+                                cast(AsyncStreamWriter, writer),
+                            )
+                        )
                     else:
-                        client_handler(reader, writer)
+                        cast(_NativeClientHandler, client_handler)(
+                            cast(StreamReader, reader),
+                            cast(StreamWriter, writer),
+                        )
                 finally:
                     if writer is not None:
                         writer.close()
@@ -815,20 +840,20 @@ class StreamServer:
 def _start_stream_server(
     scheduler: BaseScheduler,
     sock: socket.socket,
-    client_handler: Callable[..., Any],
+    client_handler: _ClientHandler,
     *,
     limit: int = _DEFAULT_LIMIT,
-    stream_factory: Any = None,
+    stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
     """Start ``accept_many`` on a listening socket and return a ``StreamServer``.
 
-    Requires ``ProactorSocketIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
+    Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
     """
 
     server: StreamServer | None = None
 
-    def on_accept(accepted: tuple[socket.socket, Any]) -> None:
+    def on_accept(accepted: _AcceptedConnection) -> None:
         conn, _address = accepted
         if server is None:
             # accept_many may deliver on a worker thread before StreamServer
@@ -843,7 +868,7 @@ def _start_stream_server(
             async_=async_,
         )
 
-    io: ProactorSocketIO = _require_proactor_io(scheduler)
+    io = cast(ServerIO, _require_proactor_io(scheduler))
     accept_operation = io.proactor.accept_many(sock, on_accept)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
@@ -851,14 +876,14 @@ def _start_stream_server(
 
 def _start_server(
     scheduler: BaseScheduler,
-    client_handler: Callable[..., Any],
+    client_handler: _ClientHandler,
     *,
     addr: tuple[str | None, int] | None = None,
     path: str | None = None,
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    stream_factory: Any = None,
+    stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
     io = _require_proactor_io(scheduler)
@@ -931,14 +956,14 @@ def start_server(
 
 
 def start_server(
-    client_handler: Callable[..., Any],
+    client_handler: _ClientHandler,
     *,
     addr: tuple[str | None, int] | None = None,
     path: str | None = None,
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    stream_factory: Any = None,
+    stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
 ) -> StreamServer:

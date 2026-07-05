@@ -78,48 +78,34 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 | `OperationWaiter` | `wait_operation(op) -> T` | implemented in `files.py` |
 | `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, … | protocol in `io_manager.py`; `ProactorIOManager` |
 | `PollIO` | `poll`, `poll_many` | protocol in `io_manager.py`; `ProactorIOManager` |
-| `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` + `ProactorFile` |
-| `IOFile` (planned) | positioned binary read/write/seek/close on an opened handle | *not implemented*; see below |
+| `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` |
+| `IOFile` | positioned binary read/write/seek/close on an opened handle | protocol in `files.py`; `ProactorFile` today |
+| `ServerIO` | `SocketIO` + proactor submission (`accept_many`, …) | protocol in `io_manager.py`; stream servers |
 | `StreamIO` (optional) | `open_connection`, `start_server` | module-level in `streams` |
 
-### Return-type decoupling (planned)
+### Return-type decoupling (partial)
 
 IO manager *entry* protocols (`SocketIO`, `PollIO`, `FileIO`) should not leak
 backend-specific concrete types in their return annotations where a neutral handle
 protocol suffices.
 
-Today:
+Done:
 
-- `SocketIO` returns stdlib `socket.socket` — already backend-neutral.
-- `PollIO` returns `ContinuousOperation[int]` — shared operations type.
-- `FileIO.open()` returns `ProactorFile` — **proactor-specific** name and class.
+- `FileIO.open()` annotates `-> IOFile`; `ProactorIOManager.open()` returns the
+  proactor-backed `ProactorFile` implementation.
+- `ServerIO` documents the stream-server requirement (`SocketIO` + `proactor`
+  submission) without naming `ProactorIOManager` at call sites.
 
-That last point is the main gap. Callers typing against `FileIO` still depend on
-`ProactorFile` even when they only need positioned binary I/O (`read`, `write`,
-`seek`, `close`, `fileno`, …). A future `SelectorIOManager` (or another backend)
-should be able to return a different implementation without changing consumer
-code.
+Still open:
 
-**Planned direction:**
+- Rename the concrete file handle (`ProactorFile` → neutral name) so
+  implementation naming matches the decoupling goal.
+- Neutral `RecvBufferPool` protocol in `SocketIO` signatures instead of the
+  proactor-module type.
 
-1. Introduce a handle protocol such as **`IOFile`** (or `PositionedBinaryIO`) for
-   the object returned by `FileIO.open()`. Shape mirrors today's `ProactorFile` /
-   `io.RawIOBase` usage; implementations remain backend-specific.
-2. Rename the concrete file handle (`ProactorFile` → neutral name, e.g.
-   `SchedulerFile` / `BlockingFile`) so implementation naming matches the
-   decoupling goal. `ProactorIOManager.open()` would still construct the
-   proactor-backed class but annotate `-> IOFile`.
-3. Apply the same pattern elsewhere if needed — e.g. a neutral
-   `RecvBufferPool` protocol instead of the proactor-module type in `SocketIO`
-   signatures.
-
-Lifecycle (`close()`, and similar) stays on the returned handle protocols, not on
-`SocketIO` / `FileIO` themselves. Overlap at the syscall level (socket `close()`
-vs `IOFile.close()` → `os.close()`) is expected; public names stay distinct per
-handle type.
-
-Deferred until after the current `scheduler.io` migration lands; no change to
-runtime behaviour required to document the intent.
+`SocketIO` already returns stdlib `socket.socket`; `PollIO` returns shared
+`ContinuousOperation[int]`. Lifecycle (`close()`, and similar) stays on returned
+handle protocols, not on `SocketIO` / `FileIO` themselves.
 
 Slices overlap at the concrete manager: `ProactorIOManager` implements
 `SocketIO`, `PollIO`, and `FileIO` on one object. That is intentional — callers
@@ -164,7 +150,7 @@ Do **not** force a single inheritance tree for all IO styles.
 - `wait_operation`
 - all `sock_*` helpers and `create_recv_buffer_pool` / `sock_recv_iter`
 - `poll` / `poll_many`
-- positioned file `open` → `ProactorFile`
+- positioned file `open` → `IOFile` (`ProactorFile` on proactor schedulers)
 
 Stream helpers (`open_connection`, `start_server`) remain module-level in
 `streams`; they take an optional `scheduler=` and use `scheduler.io` internally.
@@ -181,9 +167,11 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 | High-level streams | `asyncio.start_server` | `tealetio.streams` via `scheduler.io` |
 | Capability gate | `get_running_loop()` | `get_running_scheduler().io` |
 
-`BaseScheduler.io` raises `RuntimeError` when the scheduler has no IO backend
-(`BasicScheduler`). Prefer accessing `.io` over probing scheduler concrete
-types in new code.
+`BasicScheduler.io` and `SelectorScheduler.io` raise `RuntimeError` when the
+scheduler has no proactor IO facade (selector schedulers get a targeted message).
+Only `ProactorScheduler` exposes a real `scheduler.io`. Prefer accessing `.io`
+over probing scheduler concrete types in new code; use `SupportsProactorIO` for
+static typing after `ProactorScheduler` narrowing.
 
 ## Migration (completed)
 
@@ -193,7 +181,7 @@ types in new code.
 | 2 | `streams` uses `scheduler.io`; IO methods removed from scheduler surface | done (breaking) |
 | 3 | Document `scheduler.io`; steer new code away from `isinstance(..., ProactorScheduler)` for IO | done (this doc pass) |
 | 4 | Optional: `SelectorIOManager`; stream methods only at module level | streams already module-only; selector manager open |
-| 5 | Decouple IO protocol return types (`IOFile`, neutral handle names) | planned; see Return-type decoupling |
+| 5 | Decouple IO protocol return types (`IOFile`, neutral handle names) | partial (`IOFile`, `ServerIO`); rename `ProactorFile` open |
 
 ## Resolved decisions
 
@@ -212,9 +200,8 @@ types in new code.
   blocking IO should share the same capability gate as proactor schedulers.
 - `SocketIO`, `PollIO`, and `FileIO` entry protocols are implemented; a future
   `SelectorIOManager` could implement the same slices for selector schedulers.
-- Decouple **return types** from concrete implementations: `IOFile` (or similar)
-  for `FileIO.open()`, rename `ProactorFile`, and review proactor-specific names
-  in other protocol signatures (`RecvBufferPool`, and similar).
+- Rename `ProactorFile` and review proactor-specific names in other protocol
+  signatures (`RecvBufferPool`, and similar). `IOFile` and `ServerIO` are done.
 - `StreamServer.serve_forever()` sugar (implemented); signal handling stays in
   `Runner`, not the server object.
 

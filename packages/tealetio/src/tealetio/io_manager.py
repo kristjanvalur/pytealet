@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, runtime_checkable
 
-from .files import ProactorFile, parse_open_mode
+from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, Operation
 from .socket_helpers import configure_scheduler_socket
@@ -19,6 +19,9 @@ _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
 
+# sockaddr shapes vary by family; tighten when accept/connect types are unified.
+SocketAddress: TypeAlias = Any
+
 IO_UNSUPPORTED_ERROR = "operation requires a scheduler with IO support"
 SELECTOR_IO_UNSUPPORTED_ERROR = (
     "stream helpers require a proactor scheduler; selector schedulers "
@@ -28,18 +31,27 @@ SELECTOR_IO_UNSUPPORTED_ERROR = (
 __all__ = [
     "FileIO",
     "IO_UNSUPPORTED_ERROR",
+    "IOFile",
     "PollIO",
     "ProactorAccess",
     "ProactorIOManager",
     "ProactorSocketIO",
     "SELECTOR_IO_UNSUPPORTED_ERROR",
+    "ServerIO",
+    "SocketAddress",
     "SocketIO",
     "SupportsProactorIO",
 ]
 
 
 class SupportsProactorIO(Protocol):
-    """Scheduler that exposes a proactor-backed ``scheduler.io`` facade."""
+    """Scheduler that exposes a proactor-backed ``scheduler.io`` facade.
+
+    Use for static typing after narrowing (for example ``isinstance(scheduler,
+    ProactorScheduler)``). Do not rely on ``isinstance(..., SupportsProactorIO)``
+    at runtime: schedulers without a real IO backend may still define an ``io``
+    property that raises.
+    """
 
     @property
     def io(self) -> "ProactorIOManager": ...
@@ -54,7 +66,7 @@ class ProactorAccess(Protocol):
 
 @runtime_checkable
 class SocketIO(Protocol):
-    """Blocking asyncio-shaped socket helpers over a proactor backend."""
+    """Blocking asyncio-shaped socket helpers over a scheduler IO backend."""
 
     def sock_recv(self, sock: socket.socket, n: int) -> bytes: ...
 
@@ -74,7 +86,7 @@ class SocketIO(Protocol):
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int: ...
 
-    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]: ...
+    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, SocketAddress]: ...
 
     def sock_connect(self, sock: socket.socket, address: Any) -> None: ...
 
@@ -108,7 +120,7 @@ class SocketIO(Protocol):
 
 @runtime_checkable
 class PollIO(Protocol):
-    """Blocking poll helpers over a proactor backend."""
+    """Blocking poll helpers over a scheduler IO backend."""
 
     def poll(self, fd: int, mask: int) -> int: ...
 
@@ -122,22 +134,30 @@ class PollIO(Protocol):
 
 @runtime_checkable
 class FileIO(Protocol):
-    """Positioned binary file open helper over a proactor backend."""
+    """Positioned binary file open helper over a blocking IO backend."""
 
-    def open(self, path: str, mode: str = "rb") -> ProactorFile: ...
+    def open(self, path: str, mode: str = "rb") -> IOFile: ...
 
 
-class ProactorSocketIO(SocketIO, ProactorAccess, Protocol):
-    """Blocking socket IO plus proactor submission for stream servers."""
+class ServerIO(SocketIO, ProactorAccess, Protocol):
+    """Blocking socket IO plus proactor submission for stream servers.
+
+    Static typing only: ``proactor`` is a property (same limitation as ``IOFile``).
+    At runtime use ``isinstance(io, SocketIO)`` and ``io.proactor``; do not rely
+    on ``isinstance(io, ServerIO)`` or ``isinstance(io, ProactorSocketIO)``.
+    """
+
+
+ProactorSocketIO = ServerIO
 
 
 class ProactorIOManager:
     """Blocking IO facade over a ``Proactor`` backend.
 
-    Implements ``SocketIO``, ``PollIO``, and ``FileIO``, plus
-    ``wait_operation`` for blocking on submitted ``Operation`` objects. The
-    scheduler keeps the driver; this object only blocks the current tealet on
-    submitted operations.
+    Structurally implements ``SocketIO``, ``ServerIO``, ``PollIO``, and
+    ``FileIO``, plus ``wait_operation`` for blocking on submitted ``Operation``
+    objects. The scheduler keeps the driver; this object only blocks the current
+    tealet on submitted operations.
     """
 
     def __init__(self, proactor: Proactor) -> None:
@@ -278,7 +298,7 @@ class ProactorIOManager:
     ) -> ContinuousOperation[int]:
         return self._proactor.poll_many(fd, mask, callback)
 
-    def open(self, path: str, mode: str = "rb") -> ProactorFile:
+    def open(self, path: str, mode: str = "rb") -> IOFile:
         flags, file_mode = parse_open_mode(mode)
         try:
             fd = self.wait_operation(self._proactor.openat(path, flags, file_mode))

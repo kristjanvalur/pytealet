@@ -12,6 +12,13 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+__all__ = [
+    "IOFile",
+    "OperationWaiter",
+    "ProactorFile",
+    "parse_open_mode",
+]
+
 _DEFAULT_CREAT_MODE = 0o666
 _READ_CHUNK = 64 * 1024
 _SUPPORTED_BINARY_OPEN_MODES = frozenset(
@@ -33,6 +40,42 @@ class OperationWaiter(Protocol):
     """Block the current tealet until a submitted ``Operation`` completes."""
 
     def wait_operation(self, operation: Operation[T]) -> T: ...
+
+
+class IOFile(Protocol):
+    """Positioned binary file handle returned by ``FileIO.open()``.
+
+    Static typing only: not ``@runtime_checkable`` because ``name`` and
+    ``closed`` are properties, which breaks ``isinstance`` on Python 3.10–3.11.
+    Import from ``tealetio`` (or ``tealetio.proactor``), not only
+    ``tealetio.files``.
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    def readable(self) -> bool: ...
+
+    def writable(self) -> bool: ...
+
+    def seekable(self) -> bool: ...
+
+    def fileno(self) -> int: ...
+
+    def tell(self) -> int: ...
+
+    def seek(self, pos: int, whence: int = os.SEEK_SET) -> int: ...
+
+    def read(self, size: int = -1) -> bytes: ...
+
+    def readinto(self, buffer: Any) -> int | None: ...
+
+    def write(self, b: Any) -> int | None: ...
+
+    def close(self) -> None: ...
 
 
 def parse_open_mode(mode: str) -> tuple[int, int]:

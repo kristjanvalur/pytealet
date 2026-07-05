@@ -88,6 +88,28 @@ def _noop_os_close():
         yield
 
 
+def test_proactor_file_exposes_iofile_surface() -> None:
+    handle, _proactor, _store = _make_file(data=b"hello")
+    try:
+        for attr in (
+            "name",
+            "closed",
+            "readable",
+            "writable",
+            "seekable",
+            "fileno",
+            "tell",
+            "seek",
+            "read",
+            "readinto",
+            "write",
+            "close",
+        ):
+            assert hasattr(handle, attr)
+    finally:
+        handle.close()
+
+
 def test_seek_and_tell_track_logical_position() -> None:
     handle, proactor, _store = _make_file(data=b"hello")
     try:

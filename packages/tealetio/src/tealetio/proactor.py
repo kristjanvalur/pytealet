@@ -16,13 +16,14 @@ from typing import Any, NoReturn, Protocol, TypeAlias, TypeVar, cast
 import uring_api
 
 from . import compat
-from .files import ProactorFile
+from .files import IOFile, ProactorFile
 from .io_manager import (
     FileIO,
     PollIO,
     ProactorAccess,
     ProactorIOManager,
     ProactorSocketIO,
+    ServerIO,
     SocketIO,
     SupportsProactorIO,
 )
@@ -55,11 +56,13 @@ __all__ = [
     "ProactorBase",
     "ProactorFactory",
     "FileIO",
+    "IOFile",
     "PollIO",
     "ProactorAccess",
     "ProactorIOManager",
     "ProactorScheduler",
     "ProactorSocketIO",
+    "ServerIO",
     "SocketIO",
     "SupportsProactorIO",
     "SelectorProactor",

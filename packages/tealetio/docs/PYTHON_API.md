@@ -225,19 +225,22 @@ direction bits are set.
 same callback and args, one combined selector wakeup schedules a single call.
 Register distinct callbacks when you need separate per-direction invocations.
 
-`scheduler.io.open(path, mode="rb")` returns an unbuffered `ProactorFile`
-(`io.RawIOBase`) for positioned binary I/O through the proactor backend. The
-handle tracks a logical file position and uses `read_into()` for in-buffer reads,
-so `io.BufferedReader` and `io.TextIOWrapper` can stack on top without an extra
-copy through `read()`. File helpers require a proactor with `openat` support
-(`UringProactor` today). Low-level `openat` / positioned `read` / `write` remain
-on `scheduler.proactor` for callers that need explicit flags, offsets, `dfd`, or
-metadata via `stat(path=...)` / `stat(fd=...)`.
+`scheduler.io.open(path, mode="rb")` returns an `IOFile` handle (today the
+concrete `ProactorFile`, an unbuffered `io.RawIOBase`) for positioned binary I/O
+through the proactor backend. Import the protocol as `from tealetio import IOFile`
+(also re-exported from `tealetio.proactor`); it lives in `tealetio.files` for
+implementation sharing but that module path is not the primary public import.
+The handle tracks a logical file position and uses
+`read_into()` for in-buffer reads, so `io.BufferedReader` and `io.TextIOWrapper`
+can stack on top without an extra copy through `read()`. File helpers require a
+proactor with `openat` support (`UringProactor` today). Low-level `openat` /
+positioned `read` / `write` remain on `scheduler.proactor` for callers that need
+explicit flags, offsets, `dfd`, or metadata via `stat(path=...)` / `stat(fd=...)`.
 
-`ProactorFile.fileno()` exposes the raw OS descriptor. I/O through the handle
-uses the tracked logical offset; calling `os.read()` / `os.write()` on that fd
-directly bypasses position tracking and can desynchronise `tell()` and subsequent
-proactor reads or writes.
+`IOFile.fileno()` exposes the raw OS descriptor. I/O through the handle uses the
+tracked logical offset; calling `os.read()` / `os.write()` on that fd directly
+bypasses position tracking and can desynchronise `tell()` and subsequent proactor
+reads or writes.
 
 Supported binary modes mirror the usual stdlib subset: `rb`, `wb`, `ab`, `r+b`,
 `w+b`, and `a+b` (plus `rb+` / `wb+` / `ab+` spellings). Text modes (`t`) and
@@ -535,8 +538,9 @@ resolve blocking socket I/O through `scheduler.io`. `SelectorScheduler` still
 exposes blocking `sock_*` on the scheduler surface, but stream helpers raise a
 targeted `RuntimeError` until `SelectorIOManager` wires `scheduler.io` for
 selector paths. `start_server` additionally needs proactor submission
-(`accept_many` via the `ProactorSocketIO` slice: blocking `SocketIO` plus
-`proactor` access). Implementation routes through `streams._connect_tcp_streams(...)` /
+(`accept_many` via the `ServerIO` slice: blocking `SocketIO` plus `proactor`
+access; `ProactorSocketIO` is a backward-compatible alias). Implementation routes
+through `streams._connect_tcp_streams(...)` /
 `streams._connect_unix_streams(...)`; the only functional difference between
 native and asyncio-shaped connect helpers at that layer is which default stream
 factory `async_` selects.
