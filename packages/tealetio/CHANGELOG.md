@@ -44,9 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``tealetio`` / ``tealetio.proactor``.
 - `ServerIO` protocol slice for stream servers (`SocketIO` plus proactor
   submission); `ProactorSocketIO` remains a backward-compatible alias.
-- Streams internals: `_AcceptedConnection` / `SocketAddress` typing,
-  `_validate_stream_pair` guard for ``async_`` / ``stream_factory`` mismatches,
-  and `SupportsProactorIO` documentation for the capability gate.
+- Streams internals: `_AcceptedConnection` / `SocketAddress` typing and
+  `SupportsProactorIO` documentation for the capability gate.
 - `ProactorIOManager` and `scheduler.io` on proactor-backed schedulers: composed
   blocking IO facade over `Proactor` (`wait_operation`, `sock_*`, `poll*`,
   positioned file `open`, receive-buffer pool helpers).

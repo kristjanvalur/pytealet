@@ -425,28 +425,6 @@ def _require_proactor_io(scheduler: BaseScheduler) -> ProactorIOManager:
     raise RuntimeError(IO_UNSUPPORTED_ERROR)
 
 
-def _validate_stream_pair(
-    reader: StreamReader | AsyncStreamReader,
-    writer: StreamWriter | AsyncStreamWriter,
-    *,
-    async_: bool,
-) -> None:
-    if async_:
-        if not isinstance(reader, AsyncStreamReader):
-            raise TypeError(
-                "async_=True requires asyncio-shaped streams from stream_factory or the default async factory"
-            )
-        if not isinstance(writer, AsyncStreamWriter):
-            raise TypeError(
-                "async_=True requires asyncio-shaped streams from stream_factory or the default async factory"
-            )
-        return
-    if not isinstance(reader, StreamReader):
-        raise TypeError("async_=False requires native streams from stream_factory or the default native factory")
-    if not isinstance(writer, StreamWriter):
-        raise TypeError("async_=False requires native streams from stream_factory or the default native factory")
-
-
 def _open_streams(
     io: SocketIO,
     sock: socket.socket,
@@ -461,11 +439,7 @@ def _open_streams(
         factory = default_async_stream_factory if async_ else default_stream_factory
     else:
         factory = stream_factory
-    reader, writer = factory(io, sock, limit=limit)
-    _validate_stream_pair(reader, writer, async_=async_)
-    if async_:
-        return cast(_AsyncStreamPair, (reader, writer))
-    return cast(_NativeStreamPair, (reader, writer))
+    return factory(io, sock, limit=limit)
 
 
 @overload
