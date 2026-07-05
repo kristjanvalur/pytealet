@@ -152,6 +152,7 @@ class _ReaderCore:
         return bytes(chunk[:nbytes])
 
     def feed_initial(self, data: bytes) -> None:
+        """Pre-fill the read buffer; empty ``b""`` is ignored."""
         if data:
             self._buffer.extend(data)
 

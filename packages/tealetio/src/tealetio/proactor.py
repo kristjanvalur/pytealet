@@ -1895,7 +1895,8 @@ class UringProactor(ProactorBase):
 
         Each accepted connection is delivered as ``(socket, address, initial_data,
         recv_error)``. ``recv_error`` is ``None`` on success; when set the
-        callback must close the socket. ``initial_data`` is ``None`` when no
+        callback must close the socket (or delegate to a helper such as
+        ``start_server`` that does). ``initial_data`` is ``None`` when no
         initial bytes were captured. ``recv_size`` is an optional hint: when
         multishot accept is available,
         each accept completion arms a ``receive_on_accept`` recv leg and the
@@ -2080,8 +2081,12 @@ class UringProactor(ProactorBase):
                     accept_entry_ref,
                 ),
             )
-            pending_recv.append(recv_entry)
-            self._submit_uring_entry(recv_entry, lambda: self._ring.submit_recv(conn.fileno(), buffer, recv_entry))
+            # Re-check before arming: cancel may have completed after the guard above.
+            if operation.done():
+                conn.close()
+            else:
+                pending_recv.append(recv_entry)
+                self._submit_uring_entry(recv_entry, lambda: self._ring.submit_recv(conn.fileno(), buffer, recv_entry))
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             self._deactivate_uring_entry(entry)
             accept_entry_ref[0] = None
@@ -2131,7 +2136,10 @@ class UringProactor(ProactorBase):
             recv_operation._set_result(None)
             self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
             return recv_operation
-        parent._emit_result((conn, address, data[:res].tobytes(), None))
+        if parent.done():
+            conn.close()
+        else:
+            parent._emit_result((conn, address, data[:res].tobytes(), None))
         recv_operation._set_result(None)
         self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
         return recv_operation
