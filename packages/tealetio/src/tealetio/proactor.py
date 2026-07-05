@@ -282,7 +282,15 @@ class Proactor(Protocol):
         callback: _AcceptManyCallback,
         *,
         recv_size: int | None = None,
-    ) -> ContinuousOperation[AcceptManyResult]: ...
+    ) -> ContinuousOperation[AcceptManyResult]:
+        """Accept connections until cancelled or failed.
+
+        Callback results are ``(socket, address, initial_data, recv_error)``.
+        When ``recv_error`` is set the callback must close the socket (or
+        delegate to a helper such as ``start_server`` that does).
+        """
+
+        ...
 
     def connect(self, sock: socket.socket, address: Any) -> Operation[None]: ...
 
@@ -856,9 +864,10 @@ class SelectorProactor(ProactorBase):
 
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as ``(socket, address, initial_data, recv_error)``.
-        ``recv_error`` is ``None`` on success. ``recv_size`` is an optional
-        hint; this backend does not capture initial bytes and always delivers
-        ``initial_data`` as ``None``.
+        ``recv_error`` is ``None`` on success. When it is set the callback must
+        close the socket. ``recv_size`` is an optional hint; this backend does
+        not capture initial bytes and always delivers ``initial_data`` as
+        ``None``.
         """
 
         _validate_accept_recv_size(recv_size)
@@ -1884,9 +1893,10 @@ class UringProactor(ProactorBase):
         may run on any uring completion service thread.
 
         Each accepted connection is delivered as ``(socket, address, initial_data,
-        recv_error)``. ``recv_error`` is ``None`` on success. ``initial_data``
-        is ``None`` when no initial bytes were captured.
-        ``recv_size`` is an optional hint: when multishot accept is available,
+        recv_error)``. ``recv_error`` is ``None`` on success; when set the
+        callback must close the socket. ``initial_data`` is ``None`` when no
+        initial bytes were captured. ``recv_size`` is an optional hint: when
+        multishot accept is available,
         each accept completion arms a ``receive_on_accept`` recv leg and the
         parent callback runs only after data arrives (or the peer closes without
         sending, in which case the connection is dropped). When the hint cannot
@@ -1959,11 +1969,16 @@ class UringProactor(ProactorBase):
     def _cancel_pending_receive_on_accept(self, pending_recv: list[_UringEntry]) -> None:
         while pending_recv:
             entry = pending_recv.pop()
-            entry.active = False
             completion = entry.completion
             if completion is not None:
                 self._submit_cancel(completion)
             cast(socket.socket, entry.operation.fileobj).close()
+            if not entry.operation.done():
+                entry.operation._set_cancelled()
+            if entry.active:
+                self._deactivate_uring_entry(entry)
+            else:
+                entry.completion = None
 
     def _finish_accept_many_if_ready(
         self,
@@ -2676,6 +2691,9 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
+        if entry.operation.kind == "receive_on_accept" and (not entry.active or entry.operation.done()):
+            self._deactivate_uring_entry(entry)
+            return None
         assert entry.active
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         if completion.multishot:

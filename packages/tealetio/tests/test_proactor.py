@@ -711,6 +711,26 @@ class TestOperation:
             operation.add_result_callback(seen.append)
 
 
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda: SelectorProactor(), id="selector"),
+        pytest.param(lambda: UringProactor(ring_factory=_FakeUringRing), id="uring"),
+    ],
+)
+@pytest.mark.parametrize("recv_size", [0, -1, 2**16 + 1])
+def test_accept_many_rejects_invalid_recv_size(factory: Callable[[], Any], recv_size: int) -> None:
+    proactor = factory()
+    server = socket.socket()
+    try:
+        server.setblocking(False)
+        with pytest.raises(ValueError):
+            proactor.accept_many(server, lambda _: None, recv_size=recv_size)
+    finally:
+        server.close()
+        proactor.close()
+
+
 class TestSelectorProactor:
     def test_clock_can_be_replaced(self):
         proactor = SelectorProactor()
@@ -3410,6 +3430,27 @@ class TestUringProactor:
             operation.cancel()
             assert operation.cancelled() is True
             assert accepted == []
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+        finally:
+            for conn, _address, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_recv_size_late_recv_after_cancel_is_ignored(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert len(proactor.ring.pending_accept_recv) == 1
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_accept_recv(b"late")
             proactor.wait(proactor.get_time() + 0.05)
             assert accepted == []
         finally:
