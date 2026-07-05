@@ -67,8 +67,17 @@ and CQE errors surface as operation failures. `uring_api` may still raise
 `ValueError` synchronously at submit time for some invalid offsets or buffers.
 
 Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
-callback)` emits `(conn, address)` for each accepted connection and remains
-active until it is cancelled or the backend reports a terminal error.
+callback, *, recv_size=None)` emits
+`(conn, address, initial_data, recv_error)` for each accepted connection and
+remains active until it is cancelled or the backend reports a terminal error.
+`initial_data` holds accept-time pre-read bytes when the backend honours
+`recv_size`; otherwise it is `None`. `recv_error` is `None` on success; when it
+is set the callback must close `conn` (or delegate to a helper such as
+`start_server` that does). `recv_size` must be positive when provided; values
+above 64 KiB (`2**16`) are silently capped. On `UringProactor` with multishot
+accept, a non-`None` `recv_size` arms `receive_on_accept` and the callback runs
+only after the peer sends data or closes without sending (idle peers are
+dropped). Leave `recv_size` at the default for server-speaks-first protocols.
 `poll(fd, mask)` waits for fd readiness and returns a one-shot `Operation[int]`.
 The result is the event bitmask currently set on the fd (`select.POLL*` bits
 among those requested in `mask`). `poll_many(fd, mask, callback)` emits that
@@ -595,9 +604,11 @@ Module helpers `tealetio.getaddrinfo(...)`, `tealetio.getnameinfo(...)`, and
 `sock_connect`; see the name-resolution section above for the literal-IP
 fast path.
 
-`start_server(client_handler, addr=(host, port), async_=False)` binds a TCP
-listening socket; use ``addr=(None, port)`` or ``addr=("", port)`` for all
-interfaces. Pass ``path=`` for Unix-domain listeners. Each accept arms
+`start_server(client_handler, addr=(host, port), async_=False, recv_size=None)`
+binds a TCP listening socket; use ``addr=(None, port)`` or ``addr=("", port)`` for
+all interfaces. Pass ``path=`` for Unix-domain listeners. ``recv_size`` opts into
+accept-time pre-read and reader prefill on backends that honour the proactor hint
+(same semantics as ``accept_many`` above; default ``None``). Each accept arms
 `proactor.accept_many()`. Accepted connections are marshalled onto the scheduler
 with `call_soon_threadsafe()` and wrapped as stream endpoints before the handler
 runs in a spawned tealet. ``async_=True`` selects asyncio-shaped streams and
@@ -616,7 +627,10 @@ Stream reads use `scheduler.io.sock_recv_into()` through
 `SocketTransport.recv_into()` so `UringProactor.recv_into()` can fill
 caller-owned buffers without an extra `recv()` copy. `StreamReader.readinto()`
 fills a caller buffer directly; other read methods assemble data in an internal
-`bytearray` before returning `bytes`.
+`bytearray` before returning `bytes`. ``StreamReader.feed_initial(data)`` and
+``AsyncStreamReader.feed_initial(data)`` pre-fill that buffer from accept-time
+bytes (for example after ``start_server(recv_size=...)``); empty ``b""`` is
+ignored.
 
 This module does not integrate with stdlib `asyncio.StreamReader` instances or
 the `ForwardingProactor` guest loop.

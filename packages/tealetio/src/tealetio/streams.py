@@ -151,6 +151,11 @@ class _ReaderCore:
         nbytes = self._recv_into_socket(memoryview(chunk))
         return bytes(chunk[:nbytes])
 
+    def feed_initial(self, data: bytes) -> None:
+        """Pre-fill the read buffer; empty ``b""`` is ignored."""
+        if data:
+            self._buffer.extend(data)
+
     def _fill_buffer(self, min_bytes: int) -> None:
         while len(self._buffer) < min_bytes and not self._eof:
             chunk_size = min(self._limit, max(min_bytes - len(self._buffer), 1))
@@ -282,6 +287,10 @@ class StreamReader:
     def readline(self) -> bytes:
         return self._core.readline()
 
+    def feed_initial(self, data: bytes) -> None:
+        """Pre-fill the read buffer; empty ``b""`` is ignored."""
+        self._core.feed_initial(data)
+
 
 class AsyncStreamReader:
     """Asyncio-shaped stream reader backed by tealet-blocking socket I/O."""
@@ -304,6 +313,10 @@ class AsyncStreamReader:
 
     async def readline(self) -> bytes:
         return self._core.readline()
+
+    def feed_initial(self, data: bytes) -> None:
+        """Pre-fill the read buffer; empty ``b""`` is ignored."""
+        self._core.feed_initial(data)
 
 
 class StreamWriter:
@@ -372,7 +385,7 @@ _StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
 _NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
 _AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 _ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
-_AcceptedConnection: TypeAlias = tuple[socket.socket, SocketAddress]
+_AcceptedConnection: TypeAlias = tuple[socket.socket, SocketAddress, bytes | None, BaseException | None]
 
 
 def default_stream_factory(
@@ -432,6 +445,7 @@ def _open_streams(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
+    initial: bytes | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
     # ``async_`` only selects the default stream factory when ``stream_factory`` is
     # omitted. An explicit factory must already match the intended stream types.
@@ -439,7 +453,12 @@ def _open_streams(
         factory = default_async_stream_factory if async_ else default_stream_factory
     else:
         factory = stream_factory
-    return factory(io, sock, limit=limit)
+    reader, writer = factory(io, sock, limit=limit)
+    if initial:
+        reader.feed_initial(initial)
+    if async_:
+        return cast(_AsyncStreamPair, (reader, writer))
+    return cast(_NativeStreamPair, (reader, writer))
 
 
 @overload
@@ -775,6 +794,7 @@ class StreamServer:
         self,
         conn: socket.socket,
         *,
+        initial_data: bytes | None = None,
         limit: int,
         stream_factory: _StreamFactoryArg,
         client_handler: _ClientHandler,
@@ -797,6 +817,7 @@ class StreamServer:
                         limit=limit,
                         stream_factory=stream_factory,
                         async_=async_,
+                        initial=initial_data,
                     )
                     if async_:
                         run_coro(
@@ -843,18 +864,26 @@ def _start_stream_server(
     client_handler: _ClientHandler,
     *,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
     """Start ``accept_many`` on a listening socket and return a ``StreamServer``.
 
     Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
+    ``recv_size`` opts into accept-time pre-read on backends that honour the
+    hint (multishot io_uring accept). Use only for client-speaks-first
+    protocols such as HTTP; server-speaks-first clients will not reach the
+    handler until they send data or close.
     """
 
     server: StreamServer | None = None
 
     def on_accept(accepted: _AcceptedConnection) -> None:
-        conn, _address = accepted
+        conn, _address, initial_data, recv_error = accepted
+        if recv_error is not None:
+            conn.close()
+            return
         if server is None:
             # accept_many may deliver on a worker thread before StreamServer
             # exists; drop the connection (extremely unlikely race).
@@ -862,6 +891,7 @@ def _start_stream_server(
             return
         server._dispatch_client(
             conn,
+            initial_data=initial_data,
             limit=limit,
             stream_factory=stream_factory,
             client_handler=client_handler,
@@ -869,7 +899,7 @@ def _start_stream_server(
         )
 
     io = cast(ServerIO, _require_proactor_io(scheduler))
-    accept_operation = io.proactor.accept_many(sock, on_accept)
+    accept_operation = io.proactor.accept_many(sock, on_accept, recv_size=recv_size)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
 
@@ -883,6 +913,7 @@ def _start_server(
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
@@ -900,6 +931,7 @@ def _start_server(
         sock,
         client_handler,
         limit=limit,
+        recv_size=recv_size,
         stream_factory=stream_factory,
         async_=async_,
     )
@@ -913,6 +945,7 @@ def start_server(
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -926,6 +959,7 @@ def start_server(
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -938,6 +972,7 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -950,6 +985,7 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -963,6 +999,7 @@ def start_server(
     family: int = socket.AF_INET,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
@@ -980,7 +1017,10 @@ def start_server(
 
     Accepts use ``proactor.accept_many()``, so ``UringProactor`` can service
     connections through multishot accept when the runtime probe allows it.
-    Handler tealets are spawned through ``call_soon_threadsafe`` because accept
+    ``recv_size`` opts into accept-time pre-read and reader prefill for
+    client-speaks-first protocols (for example HTTP); leave it ``None`` when
+    the server may speak first. Handler tealets are spawned through
+    ``call_soon_threadsafe`` because accept
     callbacks may run on completion worker threads. Handler exceptions propagate
     in the handler tealet and do not stop the listener. ``spawn()`` failures
     during dispatch are reported through the scheduler exception handler.
@@ -994,6 +1034,7 @@ def start_server(
         family=family,
         backlog=backlog,
         limit=limit,
+        recv_size=recv_size,
         stream_factory=stream_factory,
         async_=async_,
     )

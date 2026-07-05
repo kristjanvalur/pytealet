@@ -179,10 +179,17 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
                 raise InvalidStateError("continuous operation is already done")
             self._result_callbacks.append(callback)
 
-    def _emit_result(self, result: T_co) -> None:
+    def _emit_result(self, result: T_co) -> bool:
+        """Deliver one result when the operation is still active.
+
+        Returns ``True`` when callbacks ran, ``False`` when the operation was
+        already done (including cancelled).
+        """
+
         with self._lock:
             if self._done:
-                return
+                return False
             callbacks = list(self._result_callbacks)
         for callback in callbacks:
             callback(result)
+        return True

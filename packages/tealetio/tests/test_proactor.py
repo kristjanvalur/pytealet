@@ -710,6 +710,36 @@ class TestOperation:
         with pytest.raises(InvalidStateError, match="already done"):
             operation.add_result_callback(seen.append)
 
+    def test_continuous_operation_emit_result_skips_when_done(self):
+        operation: ContinuousOperation[int] = ContinuousOperation(kind="test")
+        seen: list[int] = []
+
+        operation.add_result_callback(seen.append)
+        assert operation._emit_result(1) is True
+        operation._set_cancelled()
+        assert operation._emit_result(2) is False
+        assert seen == [1]
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda: SelectorProactor(), id="selector"),
+        pytest.param(lambda: UringProactor(ring_factory=_FakeUringRing), id="uring"),
+    ],
+)
+@pytest.mark.parametrize("recv_size", [0, -1])
+def test_accept_many_rejects_invalid_recv_size(factory: Callable[[], Any], recv_size: int) -> None:
+    proactor = factory()
+    server = socket.socket()
+    try:
+        server.setblocking(False)
+        with pytest.raises(ValueError):
+            proactor.accept_many(server, lambda _: None, recv_size=recv_size)
+    finally:
+        server.close()
+        proactor.close()
+
 
 class TestSelectorProactor:
     def test_clock_can_be_replaced(self):
@@ -900,16 +930,33 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
 
             assert operation.done() is False
-            assert [address[0] for _conn, address in accepted] == ["127.0.0.1", "127.0.0.1"]
-            assert [conn.getblocking() for conn, _address in accepted] == [False, False]
-            assert [os.get_inheritable(conn.fileno()) for conn, _address in accepted] == [False, False]
+            assert [address[0] for _conn, address, _data, _recv_error in accepted] == ["127.0.0.1", "127.0.0.1"]
+            assert [data for _conn, _address, data, _recv_error in accepted] == [None, None]
+            assert [recv_error for _conn, _address, _data, recv_error in accepted] == [None, None]
+            assert [conn.getblocking() for conn, _address, _data, _recv_error in accepted] == [False, False]
+            assert [os.get_inheritable(conn.fileno()) for conn, _address, _data, _recv_error in accepted] == [
+                False,
+                False,
+            ]
             operation.cancel()
             assert operation.cancelled() is True
         finally:
-            for conn, _address in accepted:
+            for conn, _address, _data, _recv_error in accepted:
                 conn.close()
             for client in clients:
                 client.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_caps_oversized_recv_size(self) -> None:
+        proactor = SelectorProactor()
+        server = socket.socket()
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            proactor.accept_many(server, lambda _: None, recv_size=2**16 + 1)
+        finally:
             server.close()
             proactor.close()
 
@@ -3286,7 +3333,7 @@ class TestUringProactor:
             operation.cancel()
             assert operation.cancelled() is True
         finally:
-            for conn, _address in accepted:
+            for conn, _address, _data, _recv_error in accepted:
                 conn.close()
             server.close()
             proactor.close()
@@ -3309,10 +3356,191 @@ class TestUringProactor:
 
             assert operation.done() is False
             assert accepted[0][1] == "peer-1"
+            assert accepted[0][2] is None
+            assert accepted[0][3] is None
             assert accepted[0][0].getblocking() is False
             assert os.get_inheritable(accepted[0][0].fileno()) is False
         finally:
-            for conn, _address in accepted:
+            for conn, _address, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_caps_oversized_recv_size(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        try:
+            server.setblocking(False)
+            proactor.accept_many(server, lambda _: None, recv_size=2**16 + 1)
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert len(proactor.ring.submitted_recv) == 1
+            _fd, buf, _entry = proactor.ring.submitted_recv[0]
+            assert len(buf) == 2**16
+        finally:
+            server.close()
+            proactor.close()
+
+    def test_accept_many_recv_size_defers_until_data(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+            assert len(proactor.ring.pending_accept_recv) == 1
+            proactor.ring.complete_accept_recv(b"hello")
+            _wait_for_uring(proactor, lambda: len(accepted) == 1)
+            assert accepted[0][1] == "peer-1"
+            assert accepted[0][2] == b"hello"
+            assert accepted[0][3] is None
+            assert operation.done() is False
+        finally:
+            for conn, _address, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_recv_size_hint_falls_back_without_multishot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            proactor.ring.complete_accept_oneshot()
+            _wait_for_uring(proactor, lambda: len(accepted) == 1)
+            assert accepted[0][2] is None
+            assert accepted[0][3] is None
+            assert operation.done() is False
+        finally:
+            for conn, _address, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_recv_size_delivers_recv_error_to_callback(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            proactor.ring.complete_accept_recv_error(-errno.EIO)
+            _wait_for_uring(proactor, lambda: len(accepted) == 1)
+            conn, address, initial_data, recv_error = accepted[0]
+            assert address == "peer-1"
+            assert initial_data is None
+            assert isinstance(recv_error, OSError)
+            assert recv_error.errno == errno.EIO
+            assert conn.fileno() != -1
+            assert operation.done() is False
+            proactor.ring.complete_accept_multishot("peer-2")
+            proactor.wait(proactor.get_time() + 0.05)
+            proactor.ring.complete_accept_recv(b"ok")
+            _wait_for_uring(proactor, lambda: len(accepted) == 2)
+            assert accepted[1][2] == b"ok"
+            assert accepted[1][3] is None
+        finally:
+            for conn, _address, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_recv_size_cancel_closes_pending_recv(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+            assert len(proactor.ring.pending_accept_recv) == 1
+            operation.cancel()
+            assert operation.cancelled() is True
+            assert accepted == []
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+        finally:
+            for conn, _address, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_handoff_accept_many_closes_socket_when_parent_done(self) -> None:
+        parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=object())
+        parent._set_cancelled()
+        client, server = socket.socketpair()
+        try:
+            assert proactor_module._handoff_accept_many(parent, client, ("peer", 1), None, None) is False
+            with pytest.raises(OSError):
+                client.getsockname()
+        finally:
+            server.close()
+
+    def test_accept_many_drops_connection_when_accept_completes_after_cancel(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+            assert proactor.ring.pending_accept_recv == []
+        finally:
+            for conn, _address, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_recv_size_late_recv_after_cancel_is_ignored(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert len(proactor.ring.pending_accept_recv) == 1
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_accept_recv(b"late")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+        finally:
+            for conn, _address, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_recv_size_closes_idle_peer_without_delivery(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, Any, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            proactor.accept_many(server, accepted.append, recv_size=64)
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+            proactor.ring.complete_accept_recv(b"")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+        finally:
+            for conn, _address, _data, _recv_error in accepted:
                 conn.close()
             server.close()
             proactor.close()
