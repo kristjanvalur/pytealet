@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
@@ -18,6 +18,9 @@ T = TypeVar("T")
 _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
+
+# sockaddr shapes vary by family; tighten when accept/connect types are unified.
+SocketAddress: TypeAlias = Any
 
 IO_UNSUPPORTED_ERROR = "operation requires a scheduler with IO support"
 SELECTOR_IO_UNSUPPORTED_ERROR = (
@@ -35,6 +38,7 @@ __all__ = [
     "ProactorSocketIO",
     "SELECTOR_IO_UNSUPPORTED_ERROR",
     "ServerIO",
+    "SocketAddress",
     "SocketIO",
     "SupportsProactorIO",
 ]
@@ -82,7 +86,7 @@ class SocketIO(Protocol):
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int: ...
 
-    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]: ...
+    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, SocketAddress]: ...
 
     def sock_connect(self, sock: socket.socket, address: Any) -> None: ...
 
@@ -136,7 +140,12 @@ class FileIO(Protocol):
 
 
 class ServerIO(SocketIO, ProactorAccess, Protocol):
-    """Blocking socket IO plus proactor submission for stream servers."""
+    """Blocking socket IO plus proactor submission for stream servers.
+
+    Static typing only: ``proactor`` is a property (same limitation as ``IOFile``).
+    At runtime use ``isinstance(io, SocketIO)`` and ``io.proactor``; do not rely
+    on ``isinstance(io, ServerIO)`` or ``isinstance(io, ProactorSocketIO)``.
+    """
 
 
 ProactorSocketIO = ServerIO

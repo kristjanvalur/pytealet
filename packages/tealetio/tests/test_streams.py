@@ -15,6 +15,8 @@ from tealetio.streams import (
     SocketTransport,
     StreamReader,
     StreamWriter,
+    _validate_stream_pair,
+    default_stream_factory,
     open_connection,
     open_streams,
     run_coro,
@@ -231,6 +233,49 @@ class TestStreamsPoC:
             )
             assert isinstance(stream_reader, TaggedAsyncStreamReader)
             assert stream_reader.tag == "async-custom"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_open_streams_rejects_native_factory_with_async_true(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            with pytest.raises(TypeError, match="async_=True requires asyncio-shaped streams"):
+                open_streams(
+                    reader,
+                    stream_factory=default_stream_factory,
+                    async_=True,
+                    scheduler=scheduler,
+                )
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_open_streams_rejects_mismatched_async_reader_and_native_writer(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def mismatched_factory(io, sock, *, limit):
+                transport = SocketTransport(io, sock)
+                async_reader = AsyncStreamReader(transport, limit=limit)
+                native_writer = StreamWriter(transport, StreamReader(transport, limit=limit))
+                return async_reader, native_writer
+
+            with pytest.raises(TypeError, match="async_=True requires asyncio-shaped streams"):
+                open_streams(
+                    reader,
+                    stream_factory=mismatched_factory,
+                    async_=True,
+                    scheduler=scheduler,
+                )
         finally:
             reader.close()
             writer.close()
@@ -661,6 +706,22 @@ class TestStreamsPoC:
         finally:
             _client.close()
             server.close()
+            scheduler.close()
+
+    def test_validate_stream_pair_rejects_native_pair_with_async_true(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            transport = SocketTransport(scheduler.io, reader)
+            native_reader = StreamReader(transport)
+            native_writer = StreamWriter(transport, native_reader)
+            with pytest.raises(TypeError, match="async_=True requires asyncio-shaped streams"):
+                _validate_stream_pair(native_reader, native_writer, async_=True)
+        finally:
+            reader.close()
+            writer.close()
             scheduler.close()
 
     def test_stream_server_dispatch_client_on_closed_server_closes_connection(self):
