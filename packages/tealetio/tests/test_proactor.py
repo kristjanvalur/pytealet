@@ -1990,6 +1990,18 @@ class _FailingSubmitUringRing(_DeferredUringRing):
         return super().submit_recv(fd, buf, user_data)
 
 
+class _FailOnResubmitUringRing(_FakeUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.recv_submit_count = 0
+
+    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+        self.recv_submit_count += 1
+        if self.recv_submit_count > 1:
+            raise RuntimeError("deferred recv resubmit failed")
+        return super().submit_recv(fd, buf, user_data)
+
+
 class _BackpressuredUringRing(_DeferredUringRing):
     def __init__(self, entries: int = 8, flags: int = 0) -> None:
         super().__init__(entries, flags)
@@ -3195,6 +3207,27 @@ class TestUringProactor:
             for conn, _address in accepted:
                 conn.close()
             server.close()
+            proactor.close()
+
+    def test_deferred_recv_many_resubmit_failure_fails_operation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FailOnResubmitUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(
+                reader, _recv_many_auto_resume_callback(seen), buf_group=proactor.shared_recv_buffer_pool()
+            )
+            proactor.ring.complete_recv_oneshot(b"hello")
+            assert _recv_many_bytes(seen) == [(0, b"hello")]
+            assert operation.done() is True
+            assert isinstance(operation.exception(), RuntimeError)
+            assert str(operation.exception()) == "deferred recv resubmit failed"
+            assert proactor.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
             proactor.close()
 
     def test_recv_many_falls_back_to_oneshot_recv_and_finishes_on_eof(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2225,6 +2225,12 @@ class UringProactor(ProactorBase):
         entry.completion = None
         entry.operation._cancel_target = None
 
+    def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
+        self._deactivate_uring_entry(entry)
+        if entry.operation._set_exception(exc):
+            self.break_wait()
+            self._notify_completed()
+
     def cancel_operation(self, operation: Operation[Any]) -> None:
         if self._cancel_deferred_operation(operation):
             self.break_wait()
@@ -2323,8 +2329,11 @@ class UringProactor(ProactorBase):
                 if entry.operation.done():
                     entry.active = False
                     continue
-                if not self._submit_uring_entry(entry, submission.submit):
-                    break
+                try:
+                    if not self._submit_uring_entry(entry, submission.submit):
+                        break
+                except Exception as exc:
+                    self._fail_uring_entry(entry, exc)
         finally:
             self._retrying_deferred_submissions = False
 
