@@ -95,6 +95,21 @@ _RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = tuple[socket.socket, Any, bytes | None, BaseException | None]
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
 _MAX_ACCEPT_RECV_SIZE = 2**16
+
+
+def _handoff_accept_many(
+    parent: ContinuousOperation[AcceptManyResult],
+    conn: socket.socket,
+    address: Any,
+    initial_data: bytes | None,
+    recv_error: BaseException | None,
+) -> bool:
+    """Emit one accepted connection or close the socket when the parent is done."""
+
+    if parent._try_emit_result((conn, address, initial_data, recv_error)):
+        return True
+    conn.close()
+    return False
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 
 
@@ -887,7 +902,7 @@ class SelectorProactor(ProactorBase):
                 except (BlockingIOError, InterruptedError):
                     return ContinuousStepResult(progressed=progressed)
                 configure_scheduler_socket(conn)
-                operation._emit_result((conn, address, None, None))
+                _handoff_accept_many(operation, conn, address, None, None)
                 progressed = True
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
@@ -2026,10 +2041,7 @@ class UringProactor(ProactorBase):
         fd, address = cast(tuple[int, Any], completion.result)
         conn = socket.socket(fileno=fd)
         configure_scheduler_socket(conn)
-        if not operation.done():
-            operation._emit_result((conn, address, None, None))
-        else:
-            conn.close()
+        _handoff_accept_many(operation, conn, address, None, None)
         if operation.done():
             return operation
         self._queue_entry_resubmit(entry, submit_box[0])
@@ -2062,7 +2074,7 @@ class UringProactor(ProactorBase):
         if operation.done():
             conn.close()
         elif recv_size is None:
-            operation._emit_result((conn, address, None, None))
+            _handoff_accept_many(operation, conn, address, None, None)
         else:
             buffer = bytearray(recv_size)
             view = memoryview(buffer)
@@ -2120,13 +2132,12 @@ class UringProactor(ProactorBase):
             self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
             return recv_operation
         if res < 0:
-            parent._emit_result(
-                (
-                    conn,
-                    address,
-                    None,
-                    OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
-                )
+            _handoff_accept_many(
+                parent,
+                conn,
+                address,
+                None,
+                OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
             )
             recv_operation._set_result(None)
             self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
@@ -2136,10 +2147,7 @@ class UringProactor(ProactorBase):
             recv_operation._set_result(None)
             self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
             return recv_operation
-        if parent.done():
-            conn.close()
-        else:
-            parent._emit_result((conn, address, data[:res].tobytes(), None))
+        _handoff_accept_many(parent, conn, address, data[:res].tobytes(), None)
         recv_operation._set_result(None)
         self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
         return recv_operation

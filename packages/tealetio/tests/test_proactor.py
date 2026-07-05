@@ -710,6 +710,16 @@ class TestOperation:
         with pytest.raises(InvalidStateError, match="already done"):
             operation.add_result_callback(seen.append)
 
+    def test_continuous_operation_try_emit_result_skips_when_done(self):
+        operation: ContinuousOperation[int] = ContinuousOperation(kind="test")
+        seen: list[int] = []
+
+        operation.add_result_callback(seen.append)
+        assert operation._try_emit_result(1) is True
+        operation._set_cancelled()
+        assert operation._try_emit_result(2) is False
+        assert seen == [1]
+
 
 @pytest.mark.parametrize(
     "factory",
@@ -3452,6 +3462,17 @@ class TestUringProactor:
                 conn.close()
             server.close()
             proactor.close()
+
+    def test_handoff_accept_many_closes_socket_when_parent_done(self) -> None:
+        parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=object())
+        parent._set_cancelled()
+        client, server = socket.socketpair()
+        try:
+            assert proactor_module._handoff_accept_many(parent, client, ("peer", 1), None, None) is False
+            with pytest.raises(OSError):
+                client.getsockname()
+        finally:
+            server.close()
 
     def test_accept_many_drops_connection_when_accept_completes_after_cancel(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
