@@ -110,6 +110,8 @@ def _handoff_accept_many(
         return True
     conn.close()
     return False
+
+
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 
 

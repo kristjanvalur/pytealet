@@ -288,6 +288,7 @@ class StreamReader:
         return self._core.readline()
 
     def feed_initial(self, data: bytes) -> None:
+        """Pre-fill the read buffer; empty ``b""`` is ignored."""
         self._core.feed_initial(data)
 
 
@@ -314,6 +315,7 @@ class AsyncStreamReader:
         return self._core.readline()
 
     def feed_initial(self, data: bytes) -> None:
+        """Pre-fill the read buffer; empty ``b""`` is ignored."""
         self._core.feed_initial(data)
 
 

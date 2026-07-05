@@ -948,6 +948,18 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
+    def test_accept_many_caps_oversized_recv_size(self) -> None:
+        proactor = SelectorProactor()
+        server = socket.socket()
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            proactor.accept_many(server, lambda _: None, recv_size=2**16 + 1)
+        finally:
+            server.close()
+            proactor.close()
+
     def test_recv_many_emits_chunks_and_completes_on_eof(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
