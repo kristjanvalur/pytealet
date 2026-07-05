@@ -27,6 +27,7 @@ from .tasks import (
 )
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
+from .io_manager import SocketSendBuffer
 from .proactor import Operation, Proactor, ProactorScheduler
 from .selector import SelectorScheduler
 
@@ -251,10 +252,21 @@ class ForwardingProactor:
 
         return self._future_from_operation(self._proactor.accept(sock))
 
-    def connect(self, sock: socket.socket, address: Any) -> _asyncio.Future[None]:
-        """Connect a socket through the host proactor."""
+    def connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: SocketSendBuffer | None = None,
+    ) -> _asyncio.Future[None] | _asyncio.Future[int]:
+        """Connect a socket through the host proactor.
 
-        return self._future_from_operation(self._proactor.connect(sock, address))
+        When ``initial`` is provided the future completes with the number of
+        bytes sent from that buffer in one ``send`` attempt. Backends that do
+        not support connect-time send complete with ``0``.
+        """
+
+        return self._future_from_operation(self._proactor.connect(sock, address, initial=initial))
 
     def sendfile(self, sock: socket.socket, file: Any, offset: int, blocksize: int) -> _asyncio.Future[int]:
         """Report that native proactor sendfile is not available."""
