@@ -906,6 +906,27 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
+    def test_connect_with_initial_returns_zero_on_selector(self):
+        proactor = SelectorProactor()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: socket.socket | None = None
+        try:
+            server.setblocking(False)
+            client.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            operation = proactor.connect(client, server.getsockname(), initial=b"hello")
+            _wait_until_done(proactor, operation)
+            accepted, _address = server.accept()
+            assert operation.result() == 0
+        finally:
+            if accepted is not None:
+                accepted.close()
+            client.close()
+            server.close()
+            proactor.close()
+
     def test_accept_many_emits_connections_until_cancelled(self):
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -4115,6 +4136,48 @@ class TestUringProactor:
             submitted = proactor.ring.submitted_connect[0]
             assert submitted[0] == sock.fileno()
             assert submitted[1] == address
+        finally:
+            sock.close()
+            proactor.close()
+
+    def test_connect_with_initial_send_completes_on_uring(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        sock = socket.socket()
+        try:
+            sock.setblocking(False)
+            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"hello")
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            proactor.ring.complete_connect_send()
+            _wait_for_uring(proactor, operation.done)
+            assert operation.result() == 5
+            assert bytes(proactor.ring.submitted_send[0][1]) == b"hello"
+        finally:
+            sock.close()
+            proactor.close()
+
+    def test_connect_with_empty_initial_returns_zero_without_send(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        sock = socket.socket()
+        try:
+            sock.setblocking(False)
+            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"")
+            proactor.wait(proactor.get_time() + 0.05)
+            assert operation.result() == 0
+            assert proactor.ring.submitted_send == []
+        finally:
+            sock.close()
+            proactor.close()
+
+    def test_connect_with_initial_reports_partial_send(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        sock = socket.socket()
+        try:
+            sock.setblocking(False)
+            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"helloworld")
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            proactor.ring.complete_connect_send(4)
+            _wait_for_uring(proactor, operation.done)
+            assert operation.result() == 4
         finally:
             sock.close()
             proactor.close()

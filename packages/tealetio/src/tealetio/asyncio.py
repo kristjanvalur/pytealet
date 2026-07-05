@@ -251,10 +251,16 @@ class ForwardingProactor:
 
         return self._future_from_operation(self._proactor.accept(sock))
 
-    def connect(self, sock: socket.socket, address: Any) -> _asyncio.Future[None]:
+    def connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: bytes | None = None,
+    ) -> _asyncio.Future[None] | _asyncio.Future[int]:
         """Connect a socket through the host proactor."""
 
-        return self._future_from_operation(self._proactor.connect(sock, address))
+        return self._future_from_operation(self._proactor.connect(sock, address, initial=initial))
 
     def sendfile(self, sock: socket.socket, file: Any, offset: int, blocksize: int) -> _asyncio.Future[int]:
         """Report that native proactor sendfile is not available."""

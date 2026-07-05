@@ -310,7 +310,23 @@ class Proactor(Protocol):
 
         ...
 
-    def connect(self, sock: socket.socket, address: Any) -> Operation[None]: ...
+    def connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: bytes | None = None,
+    ) -> Operation[None] | Operation[int]:
+        """Connect a socket.
+
+        When ``initial`` is provided the operation completes with the number of
+        bytes sent from that buffer in one ``send`` attempt. Backends that do
+        not support connect-time send complete with ``0``. A send failure after
+        a successful connect fails the operation; the socket may still be
+        connected and must be closed by the caller.
+        """
+
+        ...
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]: ...
 
@@ -910,33 +926,53 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
         return operation
 
-    def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
+    def connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: bytes | None = None,
+    ) -> Operation[None] | Operation[int]:
         """Submit a non-blocking socket connect operation."""
 
-        operation = Operation[None](kind="connect", fileobj=sock)
         started = False
 
-        def attempt() -> None:
+        def finish_connect() -> None:
             nonlocal started
             if not started:
                 started = True
                 try:
                     sock.connect(address)
-                    return None
                 except (BlockingIOError, InterruptedError):
                     raise BlockingIOError(errno.EINPROGRESS, "connect in progress") from None
                 except OSError as exc:
                     if exc.errno in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
                         raise BlockingIOError(exc.errno, exc.strerror) from None
                     raise
+                return
             err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
             if err == 0:
-                return None
+                return
             if err in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
                 raise BlockingIOError(err, errno.errorcode.get(err, "connect in progress"))
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
-        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+        if initial is None:
+            operation = Operation[None](kind="connect", fileobj=sock)
+
+            def attempt() -> None:
+                finish_connect()
+
+            self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+            return operation
+
+        operation = Operation[int](kind="connect", fileobj=sock)
+
+        def attempt_with_initial() -> int:
+            finish_connect()
+            return 0
+
+        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt_with_initial)
         return operation
 
     def recv_many(
@@ -2154,21 +2190,108 @@ class UringProactor(ProactorBase):
         self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
         return recv_operation
 
-    def connect(self, sock: socket.socket, address: Any) -> Operation[None]:
+    def connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: bytes | None = None,
+    ) -> Operation[None] | Operation[int]:
         """Submit a non-blocking socket connect operation."""
 
-        operation = Operation[None](kind="connect", fileobj=sock)
+        if initial is None:
+            operation = Operation[None](kind="connect", fileobj=sock)
+            entry = self._uring_entry(
+                operation,
+                lambda entry, completion: self._complete_uring_connect(entry, completion),
+            )
+            self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
+            return operation
+
+        operation = Operation[int](kind="connect", fileobj=sock)
+        payload = memoryview(initial)
+        pending_send: list[_UringEntry | None] = [None]
         entry = self._uring_entry(
             operation,
-            lambda entry, completion: self._complete_uring_connect(entry, completion),
+            lambda entry, completion: self._complete_uring_connect_with_initial(
+                entry,
+                completion,
+                sock,
+                payload,
+                pending_send,
+            ),
         )
+        self._bind_connect_initial_cancel(operation, pending_send)
         self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
         return operation
+
+    def _bind_connect_initial_cancel(
+        self,
+        operation: Operation[int],
+        pending_send: list[_UringEntry | None],
+    ) -> None:
+        backend_cancel = operation._cancel
+        if backend_cancel is None:
+            return
+
+        def cancel() -> None:
+            send_entry = pending_send[0]
+            if send_entry is not None:
+                completion = send_entry.completion
+                if completion is not None:
+                    self._submit_cancel(completion)
+                if send_entry.active:
+                    self._deactivate_uring_entry(send_entry)
+                else:
+                    send_entry.completion = None
+                if not send_entry.operation.done():
+                    send_entry.operation._set_cancelled()
+                pending_send[0] = None
+            backend_cancel()
+
+        operation.set_cancel(cancel)
 
     def _complete_uring_connect(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
         operation = cast(Operation[None], entry.operation)
         operation._set_result(None)
         return operation
+
+    def _complete_uring_connect_with_initial(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+        sock: socket.socket,
+        payload: memoryview,
+        pending_send: list[_UringEntry | None],
+    ) -> Operation[int] | None:
+        operation = cast(Operation[int], entry.operation)
+        if not payload:
+            operation._set_result(0)
+            return operation
+        send_operation = Operation[None](kind="send_on_connect", fileobj=sock)
+        send_entry = self._uring_entry(
+            send_operation,
+            lambda send_entry, send_completion: self._deliver_send_on_connect(send_entry, send_completion, operation),
+        )
+        pending_send[0] = send_entry
+        self._submit_uring_entry(send_entry, lambda: self._submit_send(sock.fileno(), payload, send_entry))
+        return None
+
+    def _deliver_send_on_connect(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
+        parent: Operation[int],
+    ) -> Operation[int]:
+        send_operation = entry.operation
+        res = completion.res
+        if res < 0:
+            parent._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            send_operation._set_result(None)
+            return parent
+        parent._set_result(res)
+        send_operation._set_result(None)
+        return parent
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
         """Submit an io_uring openat operation and return the opened fd on success."""
@@ -2720,7 +2843,7 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
-        if entry.operation.kind == "receive_on_accept" and not entry.active:
+        if entry.operation.kind in ("receive_on_accept", "send_on_connect") and not entry.active:
             self._deactivate_uring_entry(entry)
             return None
         assert entry.active
@@ -2734,7 +2857,7 @@ class UringProactor(ProactorBase):
             self._deactivate_uring_entry(entry)
         if entry.operation.done():
             return entry.operation
-        if res < 0 and entry.operation.kind != "receive_on_accept":
+        if res < 0 and entry.operation.kind not in ("receive_on_accept", "send_on_connect"):
             entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return entry.operation
         return entry.complete(entry, completion)

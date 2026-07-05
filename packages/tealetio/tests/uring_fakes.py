@@ -115,6 +115,7 @@ class _FakeUringRing:
         self.submitted_accept: list[tuple[int, object, int]] = []
         self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
+        self.pending_connect_send: list[SimpleNamespace] = []
         self.submitted_cancel: list[object] = []
         self.submitted_poll: list[tuple[int, int, object]] = []
         self.submitted_poll_multishot: list[tuple[int, int, object]] = []
@@ -307,8 +308,19 @@ class _FakeUringRing:
         completion = self._completion(
             user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
         )
+        operation = getattr(user_data, "operation", None)
+        if getattr(operation, "kind", None) == "send_on_connect":
+            self.pending_connect_send.append(completion)
+            return completion
         self._deliver(completion)
         return completion
+
+    def complete_connect_send(self, nbytes: int | None = None) -> None:
+        completion = self.pending_connect_send.pop(0)
+        if nbytes is not None:
+            completion.res = nbytes
+            completion.result = nbytes
+        self._deliver(completion)
 
     def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
