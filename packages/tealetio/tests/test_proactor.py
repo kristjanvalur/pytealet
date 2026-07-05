@@ -41,6 +41,7 @@ from tealetio.proactor import (
     SyncProactorScheduler,
     ThreadedSelectorProactor,
     UringProactor,
+    UringSubmissionStats,
 )
 
 
@@ -2779,6 +2780,33 @@ class TestUringProactor:
             proactor.ring.complete_recv(b"again")
             assert second.result() == b"again"
             assert proactor.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_submission_stats_track_queue_full_backpressure(self):
+        proactor = UringProactor(ring_factory=_BackpressuredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            proactor.recv(reader, 5)
+            assert proactor.submission_stats == UringSubmissionStats(
+                submit_attempts=1,
+                submit_queue_full=0,
+                deferred_queue_peak=0,
+            )
+
+            proactor.ring.fail_next_recv = True
+            proactor.recv(reader, 5)
+            assert proactor.submission_stats == UringSubmissionStats(
+                submit_attempts=2,
+                submit_queue_full=1,
+                deferred_queue_peak=1,
+            )
+
+            proactor.reset_submission_stats()
+            assert proactor.submission_stats == UringSubmissionStats(0, 0, 0)
         finally:
             reader.close()
             writer.close()

@@ -69,6 +69,7 @@ __all__ = [
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",
     "UringProactor",
+    "UringSubmissionStats",
     "ProactorFile",
     "RECV_MANY_BUFFER_PRESSURE",
     "RecvBufferPool",
@@ -535,6 +536,20 @@ class _UringEntry:
                 leg.pending_final = None
                 return (completion, pending)
             return (completion, None)
+
+
+@dataclass(frozen=True)
+class UringSubmissionStats:
+    """Observed io_uring submission pressure for tuning ring queue depth.
+
+    Counters are updated without locking and may be slightly inconsistent
+    under concurrent completion-thread delivery; they are intended for
+    operator tuning, not exact accounting.
+    """
+
+    submit_attempts: int
+    submit_queue_full: int
+    deferred_queue_peak: int
 
 
 @dataclass
@@ -1384,6 +1399,9 @@ class UringProactor(ProactorBase):
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
         self._retrying_deferred_submissions = False
+        self._submit_attempts = 0
+        self._submit_queue_full = 0
+        self._deferred_queue_peak = 0
         self._wait_ready = threading.Event()
         self._async_wait_thread_id: int | None = None
         self._async_wait_event: _asyncio.Event | None = None
@@ -1419,6 +1437,35 @@ class UringProactor(ProactorBase):
         """
 
         return dict(self._capabilities)
+
+    @property
+    def submission_stats(self) -> UringSubmissionStats:
+        """Return observed submission-queue pressure counters."""
+
+        return UringSubmissionStats(
+            submit_attempts=self._submit_attempts,
+            submit_queue_full=self._submit_queue_full,
+            deferred_queue_peak=self._deferred_queue_peak,
+        )
+
+    def reset_submission_stats(self) -> None:
+        """Reset submission pressure counters to zero."""
+
+        self._submit_attempts = 0
+        self._submit_queue_full = 0
+        self._deferred_queue_peak = 0
+
+    def _note_submit_attempt(self) -> None:
+        self._submit_attempts += 1
+
+    def _note_submit_queue_full(self) -> None:
+        self._submit_queue_full += 1
+
+    def _enqueue_deferred_submission(self, submission: _UringSubmission) -> None:
+        self._deferred_submissions.append(submission)
+        deferred_count = len(self._deferred_submissions)
+        if deferred_count > self._deferred_queue_peak:
+            self._deferred_queue_peak = deferred_count
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
         """Create a provided-buffer group for ``recv_many`` / ``sock_recv_iter``."""
@@ -2270,18 +2317,20 @@ class UringProactor(ProactorBase):
             self._notify_completed()
 
     def _queue_entry_resubmit(self, entry: _UringEntry, submit: _UringEntrySubmit) -> None:
-        self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
+        self._enqueue_deferred_submission(_UringSubmission(entry=entry, submit=submit))
         self.break_wait()
 
     def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
         self._pending_tokens.append(None)
         try:
             entry.active = True
+            self._note_submit_attempt()
             entry.completion = submit()
         except uring_api.SubmissionQueueFull:
+            self._note_submit_queue_full()
             entry.active = False
             self._pending_tokens.pop()
-            self._deferred_submissions.append(_UringSubmission(entry=entry, submit=submit))
+            self._enqueue_deferred_submission(_UringSubmission(entry=entry, submit=submit))
             return False
         except BaseException:
             self._pending_tokens.pop()
@@ -2293,9 +2342,11 @@ class UringProactor(ProactorBase):
 
     def _submit_cancel(self, completion: _UringCompletion) -> bool:
         try:
+            self._note_submit_attempt()
             self._ring.submit_cancel(completion)
         except uring_api.SubmissionQueueFull:
-            self._deferred_submissions.append(
+            self._note_submit_queue_full()
+            self._enqueue_deferred_submission(
                 _UringSubmission(entry=None, submit=lambda: self._ring.submit_cancel(completion))
             )
             return False
@@ -2303,9 +2354,11 @@ class UringProactor(ProactorBase):
 
     def _submit_poll_remove(self, completion: _UringCompletion) -> bool:
         try:
+            self._note_submit_attempt()
             self._ring.submit_poll_remove(completion)
         except uring_api.SubmissionQueueFull:
-            self._deferred_submissions.append(
+            self._note_submit_queue_full()
+            self._enqueue_deferred_submission(
                 _UringSubmission(entry=None, submit=lambda: self._ring.submit_poll_remove(completion))
             )
             return False
@@ -2321,9 +2374,11 @@ class UringProactor(ProactorBase):
                 entry = submission.entry
                 if entry is None:
                     try:
+                        self._note_submit_attempt()
                         submission.submit()
                     except uring_api.SubmissionQueueFull:
-                        self._deferred_submissions.append(submission)
+                        self._note_submit_queue_full()
+                        self._enqueue_deferred_submission(submission)
                         break
                     continue
                 if entry.operation.done():
