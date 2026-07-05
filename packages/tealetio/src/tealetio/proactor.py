@@ -2323,7 +2323,11 @@ class UringProactor(ProactorBase):
             entry.active = False
             self._pending_tokens.pop()
         entry.completion = None
-        entry.operation.set_cancel(None)
+        # Break operation._cancel -> entry closure cycles once the operation is
+        # finished. Mid-stream legs (ENOBUFS resume, sendall chunking) rebind or
+        # keep the hook while the operation is still live.
+        if entry.operation.done():
+            entry.operation.set_cancel(None)
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)

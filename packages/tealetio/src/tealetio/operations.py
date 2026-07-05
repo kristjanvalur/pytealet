@@ -142,6 +142,7 @@ class Operation(Generic[T]):
             self._exception = exception
             self._cancelled = cancelled
             self._done = True
+            self._cancel = None
             callbacks = self._callbacks
             self._callbacks = None
         assert callbacks is not None
