@@ -604,7 +604,6 @@ class _ChainState:
     sock: socket.socket | None = None
     payload: memoryview = field(default_factory=lambda: memoryview(b""))
     owned_sock: socket.socket | None = None
-    root_skip_cancel: bool = False
     send_offset: int = 0
 
 
@@ -1711,7 +1710,6 @@ class UringProactor(ProactorBase):
         *,
         deliver: Callable[[_ChainDeliver | None], None],
         fail: Callable[[BaseException], None],
-        root_skip_cancel: bool = False,
     ) -> _UringEntry:
         """Create the root leg of a multi-submission chain with chain-aware cancel."""
 
@@ -1721,7 +1719,6 @@ class UringProactor(ProactorBase):
             current=entry,
             deliver=deliver,
             fail=fail,
-            root_skip_cancel=root_skip_cancel,
         )
         entry.chain = chain
 
@@ -1841,11 +1838,9 @@ class UringProactor(ProactorBase):
 
         entry = chain.current
         while entry is not None:
-            submit_cancel = not (entry is chain.root and chain.root_skip_cancel)
-            if submit_cancel:
-                completion = entry.completion
-                if completion is not None:
-                    self._submit_cancel(completion)
+            completion = entry.completion
+            if completion is not None:
+                self._submit_cancel(completion)
             if entry is not chain.root:
                 if entry.active:
                     self._deactivate_uring_entry(entry)
@@ -2490,7 +2485,6 @@ class UringProactor(ProactorBase):
                 ),
                 deliver=lambda _result: None,
                 fail=operation._set_exception,
-                root_skip_cancel=True,
             )
             chain = entry.chain
             assert chain is not None
