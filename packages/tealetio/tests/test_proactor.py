@@ -21,6 +21,15 @@ import pytest
 import uring_api
 
 from uring_fakes import (
+    _BackpressuredPollUringRing,
+    _BackpressuredUringRing,
+    _DeferredConnectUringRing,
+    _DeferredCreateSocketUringRing,
+    _DeferredSocketUringRing,
+    _DeferredUringRing,
+    _FailOnResubmitUringRing,
+    _FailingConnectUringRing,
+    _FailingSubmitUringRing,
     _FakeUringRing,
     _force_uring_multishot_probes,
     _pack_fake_statx_buffer,
@@ -2098,171 +2107,6 @@ class TestThreadedSelectorProactor:
                 scheduler.close()
 
         assert asyncio.run(run()) == b"hello"
-
-
-class _FailingConnectUringRing(_FakeUringRing):
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        self.submitted_connect.append((fd, address, user_data))
-        completion = self._completion(
-            user_data,
-            kind=uring_api.COMPLETION_KIND_CONNECT,
-            res=-errno.ECONNREFUSED,
-            result=None,
-        )
-        self._deliver(completion)
-        return completion
-
-
-class _DeferredConnectUringRing(_FakeUringRing):
-    def __init__(self, entries: int = 8, flags: int = 0) -> None:
-        super().__init__(entries, flags)
-        self.pending_connect: list[SimpleNamespace] = []
-
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        self.submitted_connect.append((fd, address, user_data))
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CONNECT, res=0, result=None)
-        self.pending_connect.append(completion)
-        return completion
-
-    def complete_connect(self) -> None:
-        completion = self.pending_connect.pop(0)
-        self._deliver(completion)
-
-
-class _DeferredSocketUringRing(_FakeUringRing):
-    def __init__(self, entries: int = 8, flags: int = 0) -> None:
-        super().__init__(entries, flags)
-        self.pending_socket: list[SimpleNamespace] = []
-        self.last_socket_fd: int | None = None
-
-    def submit_socket(
-        self,
-        domain: int,
-        type: int,
-        protocol: int = 0,
-        flags: int = 0,
-        user_data: object = None,
-    ) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        self.submitted_socket.append((domain, type, protocol, flags, user_data))
-        completion = self._completion(
-            user_data,
-            kind=uring_api.COMPLETION_KIND_SOCKET,
-            res=0,
-            result=0,
-        )
-        self.pending_socket.append(completion)
-        return completion
-
-    def complete_socket(self) -> None:
-        completion = self.pending_socket.pop(0)
-        domain, type, protocol, flags, _user_data = self.submitted_socket[-1]
-        sock = socket.socket(domain, type, protocol)
-        if flags & getattr(socket, "SOCK_NONBLOCK", 0):
-            sock.setblocking(False)
-        if flags & getattr(socket, "SOCK_CLOEXEC", 0):
-            os.set_inheritable(sock.fileno(), False)
-        fd = sock.detach()
-        self.last_socket_fd = fd
-        completion.res = fd
-        completion.result = fd
-        self._deliver(completion)
-
-
-class _DeferredCreateSocketUringRing(_DeferredSocketUringRing):
-    def __init__(self, entries: int = 8, flags: int = 0) -> None:
-        super().__init__(entries, flags)
-        self.pending_connect: list[SimpleNamespace] = []
-
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        self.submitted_connect.append((fd, address, user_data))
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CONNECT, res=0, result=None)
-        self.pending_connect.append(completion)
-        return completion
-
-    def complete_connect(self) -> None:
-        completion = self.pending_connect.pop(0)
-        self._deliver(completion)
-
-
-class _DeferredUringRing(_FakeUringRing):
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        self.submitted_recv.append((fd, buf, user_data))
-        completion = self._completion(user_data)
-        self.pending_recv.append(completion)
-        return completion
-
-    def complete_recv(self, data: bytes = b"hello") -> None:
-        _fd, buf, user_data = self.submitted_recv[-1]
-        memoryview(buf)[: len(data)] = data
-        completion = self.pending_recv[-1]
-        completion.res = len(data)
-        completion.flags = 0
-        completion.result = len(data)
-        self._deliver(completion)
-
-
-class _FailingSubmitUringRing(_DeferredUringRing):
-    def __init__(self, entries: int = 8, flags: int = 0) -> None:
-        super().__init__(entries, flags)
-        self.fail_next_submit = False
-        self.last_user_data: object | None = None
-
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
-        self.last_user_data = user_data
-        if self.fail_next_submit:
-            self.fail_next_submit = False
-            raise RuntimeError("submit_recv failed")
-        return super().submit_recv(fd, buf, user_data)
-
-
-class _FailOnResubmitUringRing(_FakeUringRing):
-    def __init__(self, entries: int = 8, flags: int = 0) -> None:
-        super().__init__(entries, flags)
-        self.recv_submit_count = 0
-
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
-        self.recv_submit_count += 1
-        if self.recv_submit_count > 1:
-            raise RuntimeError("deferred recv resubmit failed")
-        return super().submit_recv(fd, buf, user_data)
-
-
-class _BackpressuredPollUringRing(_FakeUringRing):
-    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        if self.submitted_poll:
-            raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_poll(fd, mask, user_data)
-
-
-class _BackpressuredUringRing(_DeferredUringRing):
-    def __init__(self, entries: int = 8, flags: int = 0) -> None:
-        super().__init__(entries, flags)
-        self.fail_next_recv = False
-        self.fail_next_cancel = False
-
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> None:
-        if self.fail_next_recv:
-            self.fail_next_recv = False
-            raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_recv(fd, buf, user_data)
-
-    def submit_cancel(self, completion: SimpleNamespace) -> SimpleNamespace:
-        if self.fail_next_cancel:
-            self.fail_next_cancel = False
-            raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_cancel(completion)
 
 
 class TestUringProactor:
