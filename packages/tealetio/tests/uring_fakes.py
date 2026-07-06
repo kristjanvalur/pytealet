@@ -130,6 +130,9 @@ class _FakeUringRing:
         self.submitted_read: list[tuple[int, object, int, object]] = []
         self.submitted_write: list[tuple[int, bytes, int, object]] = []
         self.open_fds: dict[int, bytes] = {}
+
+    def submitted_stream_sends(self) -> list[tuple[int, object, object]]:
+        return self.submitted_send_zc + self.submitted_send
         self.next_open_fd = 200
         self.pending_recv: list[SimpleNamespace] = []
         self.pending_recv_multishot: list[SimpleNamespace] = []

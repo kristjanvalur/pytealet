@@ -4321,7 +4321,7 @@ class TestUringProactor:
             proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
             assert operation.result() is True
-            assert bytes(proactor.ring.submitted_send[0][1]) == b"hello"
+            assert bytes(proactor.ring.submitted_stream_sends()[0][1]) == b"hello"
         finally:
             sock.close()
             proactor.close()
@@ -4334,7 +4334,7 @@ class TestUringProactor:
             operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"")
             proactor.wait(proactor.get_time() + 0.05)
             assert operation.result() is True
-            assert proactor.ring.submitted_send == []
+            assert proactor.ring.submitted_stream_sends() == []
         finally:
             sock.close()
             proactor.close()
@@ -4351,9 +4351,10 @@ class TestUringProactor:
             proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
             assert operation.result() is True
-            assert len(proactor.ring.submitted_send) == 2
-            assert bytes(proactor.ring.submitted_send[0][1]) == b"helloworld"
-            assert bytes(proactor.ring.submitted_send[1][1]) == b"oworld"
+            stream_sends = proactor.ring.submitted_stream_sends()
+            assert len(stream_sends) == 2
+            assert bytes(stream_sends[0][1]) == b"helloworld"
+            assert bytes(stream_sends[1][1]) == b"oworld"
         finally:
             sock.close()
             proactor.close()
@@ -4370,7 +4371,7 @@ class TestUringProactor:
             proactor.ring.complete_connect()
             proactor.wait(proactor.get_time() + 0.05)
             assert proactor.ring.pending_connect_send == []
-            assert proactor.ring.submitted_send == []
+            assert proactor.ring.submitted_stream_sends() == []
         finally:
             sock.close()
             proactor.close()
