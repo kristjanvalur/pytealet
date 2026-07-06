@@ -2292,6 +2292,7 @@ class UringProactor(ProactorBase):
                     connect_to,
                     initial_data,
                     owned_sock,
+                    pending_socket,
                     pending_connect,
                     pending_send,
                 ),
@@ -2405,7 +2406,9 @@ class UringProactor(ProactorBase):
         send_operation = Operation[None](kind="send_on_connect", fileobj=sock)
         send_entry = self._uring_entry(
             send_operation,
-            lambda send_entry, send_completion: self._deliver_send_on_connect(send_entry, send_completion, operation),
+            lambda send_entry, send_completion: self._deliver_send_on_connect(
+                send_entry, send_completion, operation, pending_send
+            ),
         )
         pending_send[0] = send_entry
         self._submit_uring_entry(send_entry, lambda: self._submit_send(sock.fileno(), payload, send_entry))
@@ -2416,7 +2419,9 @@ class UringProactor(ProactorBase):
         entry: _UringEntry,
         completion: _UringCompletion,
         parent: Operation[int],
+        pending_send: list[_UringEntry | None],
     ) -> Operation[int]:
+        pending_send[0] = None
         send_operation = entry.operation
         res = completion.res
         if parent.done():
@@ -2500,9 +2505,11 @@ class UringProactor(ProactorBase):
         connect_to: Any | None,
         initial_data: SocketSendBuffer | None,
         owned_sock: list[socket.socket | None],
+        pending_socket: list[_UringEntry | None],
         pending_connect: list[_UringEntry | None],
         pending_send: list[_UringEntry | None],
     ) -> Operation[CreateSocketResult] | None:
+        pending_socket[0] = None
         res = completion.res
         if res < 0:
             if not operation.done():
@@ -2552,6 +2559,7 @@ class UringProactor(ProactorBase):
                 operation,
                 sock,
                 payload,
+                pending_connect,
                 pending_send,
             ),
         )
@@ -2569,8 +2577,10 @@ class UringProactor(ProactorBase):
         operation: Operation[CreateSocketResult],
         sock: socket.socket,
         payload: memoryview,
+        pending_connect: list[_UringEntry | None],
         pending_send: list[_UringEntry | None],
     ) -> Operation[CreateSocketResult] | None:
+        pending_connect[0] = None
         res = completion.res
         if res < 0:
             return self._fail_create_socket(
@@ -2592,6 +2602,7 @@ class UringProactor(ProactorBase):
                 send_completion,
                 operation,
                 sock,
+                pending_send,
             ),
         )
         pending_send[0] = send_entry
@@ -2604,7 +2615,9 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
         operation: Operation[CreateSocketResult],
         sock: socket.socket,
+        pending_send: list[_UringEntry | None],
     ) -> Operation[CreateSocketResult]:
+        pending_send[0] = None
         send_operation = entry.operation
         res = completion.res
         if operation.done():
