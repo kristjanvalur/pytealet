@@ -27,7 +27,6 @@ from .tasks import (
 )
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
-from .io_manager import SocketSendBuffer
 from .proactor import Operation, Proactor, ProactorScheduler
 from .selector import SelectorScheduler
 
@@ -233,10 +232,47 @@ class ForwardingProactor:
 
         return self._future_from_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
 
-    def send(self, sock: socket.socket, data: Any) -> _asyncio.Future[None]:
-        """Send all bytes through the host proactor."""
+    def send(self, sock: socket.socket, data: Any) -> _asyncio.Future[int]:
+        """Send bytes through the host proactor.
 
-        return self._future_from_operation(self._proactor.sendall(sock, data))
+        Matches asyncio proactor semantics: the buffer is fully drained before
+        the future completes. The result is the number of bytes sent.
+        """
+
+        payload = bytes(data)
+        operation = self._proactor.send(sock, data)
+        loop = self._require_loop()
+        future: _asyncio.Future[int] = loop.create_future()
+
+        def complete_future() -> None:
+            if future.cancelled():
+                return
+            if operation.cancelled():
+                future.cancel()
+                return
+            try:
+                operation.result()
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(len(payload))
+
+        def complete_operation(_operation: Operation[Any]) -> None:
+            try:
+                loop.call_soon_threadsafe(complete_future)
+            except RuntimeError:
+                pass
+
+        def cancel_operation(asyncio_future: _asyncio.Future[int]) -> None:
+            if asyncio_future.cancelled():
+                operation.cancel()
+
+        if operation.done():
+            complete_future()
+        else:
+            operation.add_done_callback(complete_operation)
+            future.add_done_callback(cancel_operation)
+        return future
 
     def sendto(self, sock: socket.socket, data: Any, flags: int, address: Any) -> _asyncio.Future[int]:
         """Send datagram bytes through the host proactor."""
@@ -252,21 +288,12 @@ class ForwardingProactor:
 
         return self._future_from_operation(self._proactor.accept(sock))
 
-    def connect(
-        self,
-        sock: socket.socket,
-        address: Any,
-        *,
-        initial: SocketSendBuffer | None = None,
-    ) -> _asyncio.Future[None] | _asyncio.Future[int]:
-        """Connect a socket through the host proactor.
+    def connect(self, sock: socket.socket, address: Any) -> _asyncio.Future[None]:
+        """Connect a socket through the host proactor."""
 
-        When ``initial`` is provided the future completes with the number of
-        bytes sent from that buffer in one ``send`` attempt. Backends that do
-        not support connect-time send complete with ``0``.
-        """
-
-        return self._future_from_operation(self._proactor.connect(sock, address, initial=initial))
+        # Plain connect never passes ``initial``; the bool result variant is tealetio-only.
+        operation = cast(Operation[None], self._proactor.connect(sock, address))
+        return self._future_from_operation(operation)
 
     def sendfile(self, sock: socket.socket, file: Any, offset: int, blocksize: int) -> _asyncio.Future[int]:
         """Report that native proactor sendfile is not available."""

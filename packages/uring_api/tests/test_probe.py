@@ -7,7 +7,7 @@ import uring_api
 from helpers import kernel_version_at_least
 from conftest import require_uring
 
-_PROBE_KERNEL_FLOORS = {
+_VERSION_GATED_CAPABILITIES = {
     "IORING_OP_STATX": (5, 6),
     "IORING_POLL_MULTISHOT": (5, 13),
     "IORING_ACCEPT_MULTISHOT": (5, 19),
@@ -52,7 +52,7 @@ def test_probe_capabilities_match_kernel_version_gates():
 
     probe = uring_api.probe()
     release = os.uname().release
-    for name, (major, minor) in _PROBE_KERNEL_FLOORS.items():
+    for name, (major, minor) in _VERSION_GATED_CAPABILITIES.items():
         expected = kernel_version_at_least(release, major, minor)
         assert probe[name] is expected, name
 

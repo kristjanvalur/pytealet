@@ -54,6 +54,7 @@ def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
         "IORING_OP_SEND_ZC": True,
         "IORING_OP_SENDMSG_ZC": True,
         "IORING_OP_STATX": True,
+        "IORING_OP_SOCKET": True,
     }
     capabilities.update(overrides)
     return capabilities
@@ -111,10 +112,13 @@ class _FakeUringRing:
         self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
+        self.submitted_send_zc: list[tuple[int, object, object]] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
+        self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object, int]] = []
         self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
+        self.submitted_socket: list[tuple[int, int, int, int, object]] = []
         self.pending_connect_send: list[SimpleNamespace] = []
         self.submitted_cancel: list[object] = []
         self.submitted_poll: list[tuple[int, int, object]] = []
@@ -136,6 +140,9 @@ class _FakeUringRing:
         self.pending_accept_recv: list[SimpleNamespace] = []
         self.pending_recv_oneshot: list[SimpleNamespace] = []
         self.recv_multishot_sequence = 0
+
+    def submitted_stream_sends(self) -> list[tuple[int, object, object]]:
+        return self.submitted_send_zc + self.submitted_send
 
     def _completion(
         self,
@@ -308,8 +315,7 @@ class _FakeUringRing:
         completion = self._completion(
             user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
         )
-        operation = getattr(user_data, "operation", None)
-        if getattr(operation, "kind", None) == "send_on_connect":
+        if getattr(user_data, "parent", None) is not None:
             self.pending_connect_send.append(completion)
             return completion
         self._deliver(completion)
@@ -352,12 +358,34 @@ class _FakeUringRing:
         return completion
 
     def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        return self.submit_send(fd, data, user_data)
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_send_zc.append((fd, data, user_data))
+        completion = self._completion(
+            user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=len(payload), result=len(payload)
+        )
+        if getattr(user_data, "parent", None) is not None:
+            self.pending_connect_send.append(completion)
+            return completion
+        self._deliver(completion)
+        return completion
 
     def submit_sendmsg_zc(
         self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
     ) -> SimpleNamespace:
-        return self.submit_sendto(fd, data, address, user_data)
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_sendmsg_zc.append((fd, data, address, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SENDMSG_ZC,
+            res=len(payload),
+            result=len(payload),
+        )
+        self._deliver(completion)
+        return completion
 
     def submit_accept(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:
@@ -433,6 +461,32 @@ class _FakeUringRing:
             multishot=True,
         )
         self._deliver(completion)
+
+    def submit_socket(
+        self,
+        domain: int,
+        type: int,
+        protocol: int = 0,
+        flags: int = 0,
+        user_data: object = None,
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        sock = socket.socket(domain, type, protocol)
+        if flags & getattr(socket, "SOCK_NONBLOCK", 0):
+            sock.setblocking(False)
+        if flags & getattr(socket, "SOCK_CLOEXEC", 0):
+            os.set_inheritable(sock.fileno(), False)
+        fd = sock.detach()
+        self.submitted_socket.append((domain, type, protocol, flags, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SOCKET,
+            res=fd,
+            result=fd,
+        )
+        self._deliver(completion)
+        return completion
 
     def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:

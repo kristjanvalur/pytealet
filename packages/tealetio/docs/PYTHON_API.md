@@ -85,6 +85,33 @@ bitmask on each readiness event and remains active until cancelled or the
 backend reports a terminal error. Poll works on any file descriptor, not only
 sockets.
 
+`create_socket(family, type, proto=0, *, flags=0, connect_to=None,
+initial_data=None)` creates a scheduler-contract socket (non-blocking,
+close-on-exec). On success it completes with ``(socket, is_connected,
+initial_sent)``. ``initial_sent`` is a bool: ``True`` when ``initial_data``
+was provided and the connect/send chain flushed it (including an empty buffer),
+``False`` when ``initial_data`` was omitted or the backend ignored connect/send
+hints. ``connect_to`` and ``initial_data`` are optional hints; backends may
+ignore them and return ``(socket, False, False)`` after creation only.
+``UringProactor`` honours the hints when practical, using
+``uring_api.Ring.submit_socket()`` when ``IORING_OP_SOCKET`` is available and
+chaining connect plus sendall-style chunking for ``initial_data``. Extra
+``flags`` are ORed with non-blocking and close-on-exec on the uring socket
+path. ``SelectorProactor`` ignores ``flags`` beyond the scheduler defaults from
+``configure_scheduler_socket()`` (non-blocking, close-on-exec). ``initial_data``
+without ``connect_to`` raises ``ValueError`` on all proactor backends.
+``scheduler.io.sock_create()`` blocks on the operation and, when hints were not
+honoured, falls back to ``sock_connect()`` so callers still get a connected
+socket. ``open_connection(..., initial_send=...)`` passes ``connect_to`` and
+``initial_data`` through this path for TCP and Unix ``path=`` connects.
+
+`connect(sock, address, *, initial=None)` may chain connect-time send on
+``UringProactor``. ``SelectorProactor`` connects only: when ``initial`` is
+provided the operation completes with ``False`` and does not perform a kernel
+send. Prefer ``scheduler.io.sock_connect()`` or ``sock_create()`` when you need
+connect-time data on any backend; those helpers flush via ``sock_sendall`` when
+the proactor returns a falsy connect-time result.
+
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
 maps `POLLIN`, `POLLPRI`, `POLLOUT`, `POLLERR`, `POLLHUP`, and `POLLRDHUP`
@@ -273,7 +300,9 @@ blocking `os.fstat()` / `os.stat()`. When `statx_fdsize` completes without a
 parsed size, the uring completion path falls back to a rare blocking `os.fstat()`
 on the completion thread before delivering the operation result.
 
-`sendall(sock, data, progress=None)` also accepts an optional progress callback.
+`send(sock, data, progress=None)` drains stream buffers before completing and
+accepts an optional progress callback. Use `sendto(sock, data, address)` for
+datagram sockets.
 Backends call `progress(total)` with the cumulative number of bytes sent as
 progress becomes observable. Some backends may only expose a single completion
 for the whole send, in which case they report one final total.
@@ -578,16 +607,16 @@ submits the socket's file descriptor to io_uring internally; the public API
 still expects a non-blocking `socket.socket` so accepted connections, peer
 metadata, and selector-backed backends share one handle type.
 
-`scheduler.io.sock_create(family, type, proto=0, *, flags=0)` is the socket
-creation entry point for proactor-backed blocking IO. The returned socket is
-always non-blocking and close-on-exec. `ProactorIOManager.sock_create()`
-currently calls stdlib `socket.socket()` and applies that configuration; `flags`
-is reserved for a future proactor path where `UringProactor` may use
-`uring_api.Ring.submit_socket()`
-(`IORING_OP_SOCKET`) when policy and kernel probe allow it, then wrap the
-returned fd with `socket.socket(fileno=fd)` (the same pattern already used for
-`accept_many` completions). Stream connect/server helpers call
-`scheduler.io.sock_create()` so uring-native creation can stay behind one policy
+`scheduler.io.sock_create(family, type, proto=0, *, flags=0, connect_to=None,
+initial_data=None)` is the socket creation entry point for proactor-backed
+blocking IO. It returns ``(socket, is_connected, initial_sent)``. The socket is
+always non-blocking and close-on-exec. `ProactorIOManager.sock_create()` blocks
+on `Proactor.create_socket()`; when connect hints were not honoured it calls
+`sock_connect()` before returning. `UringProactor` uses
+`uring_api.Ring.submit_socket()` (`IORING_OP_SOCKET`) when probed, then wraps
+the returned fd with `socket.socket(fileno=fd)` (the same
+pattern already used for `accept_many` completions). Connect/server helpers call
+`scheduler.io.sock_create()` so uring-native creation stays behind one policy
 gate.
 
 ## Name resolution

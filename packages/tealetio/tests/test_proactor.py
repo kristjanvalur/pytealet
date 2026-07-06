@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import fcntl
 import io
 import os
 import select
@@ -46,6 +47,15 @@ from tealetio.proactor import (
 
 
 _RecvManySeen = tuple[int, memoryview | Callable[[], None]]
+
+
+def _assert_scheduler_socket_fd(sock: socket.socket) -> None:
+    """Uring socket fds are non-blocking and close-on-exec; wrapper state must match."""
+
+    assert sock.getblocking() is False
+    flags = fcntl.fcntl(sock.fileno(), fcntl.F_GETFL)
+    assert flags & os.O_NONBLOCK
+    assert not os.get_inheritable(sock.fileno())
 
 
 def _recv_many_auto_resume_callback(seen: list[_RecvManySeen]) -> Callable[[_RecvManySeen], None]:
@@ -840,14 +850,14 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_sendall_can_complete_immediately(self):
+    def test_send_can_complete_immediately(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.sendall(writer, b"hello")
+            operation = proactor.send(writer, b"hello")
 
             assert operation.done() is True
             assert operation.result() is None
@@ -906,7 +916,7 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
-    def test_connect_with_initial_returns_zero_on_selector(self):
+    def test_connect_with_initial_ignores_payload_on_selector(self):
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -919,7 +929,7 @@ class TestSelectorProactor:
             operation = proactor.connect(client, server.getsockname(), initial=b"hello")
             _wait_until_done(proactor, operation)
             accepted, _address = server.accept()
-            assert operation.result() == 0
+            assert operation.result() is False
         finally:
             if accepted is not None:
                 accepted.close()
@@ -979,6 +989,23 @@ class TestSelectorProactor:
             proactor.accept_many(server, lambda _: None, recv_size=2**16 + 1)
         finally:
             server.close()
+            proactor.close()
+
+    def test_create_socket_ignores_connect_hints_on_selector(self) -> None:
+        proactor = SelectorProactor()
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"ping",
+            )
+            assert operation.done()
+            sock, is_connected, initial_sent = operation.result()
+            assert is_connected is False
+            assert initial_sent is False
+            sock.close()
+        finally:
             proactor.close()
 
     def test_recv_many_emits_chunks_and_completes_on_eof(self):
@@ -1555,7 +1582,7 @@ class TestSelectorProactor:
             writer.close()
             scheduler.close()
 
-    def test_sendall_reports_progress(self):
+    def test_send_reports_progress(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         progress: list[int] = []
@@ -1563,7 +1590,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.sendall(writer, b"hello", progress.append)
+            operation = proactor.send(writer, b"hello", progress.append)
 
             assert operation.result() is None
             assert progress == [5]
@@ -1929,7 +1956,7 @@ class TestThreadedSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.sendall(writer, b"hello")
+            operation = proactor.send(writer, b"hello")
 
             assert operation.done() is True
             proactor.wait(0)
@@ -2073,7 +2100,81 @@ class TestThreadedSelectorProactor:
         assert asyncio.run(run()) == b"hello"
 
 
+class _FailingConnectUringRing(_FakeUringRing):
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_connect.append((fd, address, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_CONNECT,
+            res=-errno.ECONNREFUSED,
+            result=None,
+        )
+        self._deliver(completion)
+        return completion
+
+
 class _DeferredConnectUringRing(_FakeUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.pending_connect: list[SimpleNamespace] = []
+
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_connect.append((fd, address, user_data))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CONNECT, res=0, result=None)
+        self.pending_connect.append(completion)
+        return completion
+
+    def complete_connect(self) -> None:
+        completion = self.pending_connect.pop(0)
+        self._deliver(completion)
+
+
+class _DeferredSocketUringRing(_FakeUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.pending_socket: list[SimpleNamespace] = []
+        self.last_socket_fd: int | None = None
+
+    def submit_socket(
+        self,
+        domain: int,
+        type: int,
+        protocol: int = 0,
+        flags: int = 0,
+        user_data: object = None,
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_socket.append((domain, type, protocol, flags, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SOCKET,
+            res=0,
+            result=0,
+        )
+        self.pending_socket.append(completion)
+        return completion
+
+    def complete_socket(self) -> None:
+        completion = self.pending_socket.pop(0)
+        domain, type, protocol, flags, _user_data = self.submitted_socket[-1]
+        sock = socket.socket(domain, type, protocol)
+        if flags & getattr(socket, "SOCK_NONBLOCK", 0):
+            sock.setblocking(False)
+        if flags & getattr(socket, "SOCK_CLOEXEC", 0):
+            os.set_inheritable(sock.fileno(), False)
+        fd = sock.detach()
+        self.last_socket_fd = fd
+        completion.res = fd
+        completion.result = fd
+        self._deliver(completion)
+
+
+class _DeferredCreateSocketUringRing(_DeferredSocketUringRing):
     def __init__(self, entries: int = 8, flags: int = 0) -> None:
         super().__init__(entries, flags)
         self.pending_connect: list[SimpleNamespace] = []
@@ -3004,14 +3105,14 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_sendall_completes_from_ring_completion(self, monkeypatch):
+    def test_send_completes_from_ring_completion(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation = proactor.sendall(writer, payload)
+            operation = proactor.send(writer, payload)
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
@@ -3025,39 +3126,69 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_sendall_uses_send_zc_when_probe_supports_it(self, monkeypatch):
+    def test_send_uses_send_zc_when_probe_supports_it(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        reader = None
+        writer = None
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            writer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            writer.connect(server.getsockname())
+            reader, _address = server.accept()
+            writer.setblocking(False)
+            payload = b"hello"
+            operation = proactor.send(writer, payload)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() is None
+            assert len(proactor.ring.submitted_send_zc) == 1
+            assert proactor.ring.submitted_send == []
+            submitted = proactor.ring.submitted_send_zc[0][1]
+            assert isinstance(submitted, memoryview)
+            assert submitted.obj is payload
+            assert bytes(submitted) == b"hello"
+        finally:
+            if reader is not None:
+                reader.close()
+            if writer is not None:
+                writer.close()
+            server.close()
+            proactor.close()
+
+    def test_send_uses_plain_send_for_unix_even_when_probe_supports_send_zc(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            payload = b"hello"
-            operation = proactor.sendall(writer, payload)
+            operation = proactor.send(writer, b"hello")
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
-            assert proactor._submit_send.__name__ == "submit_send_zc"
-            submitted = proactor.ring.submitted_send[0][1]
-            assert isinstance(submitted, memoryview)
-            assert submitted.obj is payload
-            assert bytes(submitted) == b"hello"
+            assert len(proactor.ring.submitted_send) == 1
+            assert proactor.ring.submitted_send_zc == []
+            assert proactor._send_zc_supported is True
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_sendall_uses_send_when_probe_lacks_send_zc(self, monkeypatch):
+    def test_send_uses_plain_send_when_probe_lacks_send_zc(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            operation = proactor.sendall(writer, b"hello")
+            operation = proactor.send(writer, b"hello")
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
-            assert proactor._submit_send.__name__ == "submit_send"
             assert len(proactor.ring.submitted_send) == 1
+            assert proactor.ring.submitted_send_zc == []
         finally:
             reader.close()
             writer.close()
@@ -3148,13 +3279,33 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
-            assert proactor._submit_sendto.__name__ == "submit_sendmsg_zc"
-            submitted = proactor.ring.submitted_sendto[0]
+            assert len(proactor.ring.submitted_sendmsg_zc) == 1
+            assert proactor.ring.submitted_sendto == []
+            submitted = proactor.ring.submitted_sendmsg_zc[0]
             assert submitted[0] == sender.fileno()
             assert isinstance(submitted[1], memoryview)
             assert submitted[1].obj is payload
             assert bytes(submitted[1]) == b"hello"
             assert submitted[2] == address
+        finally:
+            sender.close()
+            proactor.close()
+
+    def test_sendto_uses_plain_sendto_for_unix_even_when_probe_supports_sendmsg_zc(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SENDMSG_ZC=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        sender = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            sender.setblocking(False)
+            payload = b"hello"
+            address = "/tmp/tealetio-sendto-test"
+            operation = proactor.sendto(sender, payload, address)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == 5
+            assert len(proactor.ring.submitted_sendto) == 1
+            assert proactor.ring.submitted_sendmsg_zc == []
+            assert proactor._sendmsg_zc_supported is True
         finally:
             sender.close()
             proactor.close()
@@ -3169,8 +3320,8 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
-            assert proactor._submit_sendto.__name__ == "submit_sendto"
             assert len(proactor.ring.submitted_sendto) == 1
+            assert proactor.ring.submitted_sendmsg_zc == []
         finally:
             sender.close()
             proactor.close()
@@ -4106,7 +4257,9 @@ class TestUringProactor:
                 return scheduler.io.sock_recvall(reader, progress.append)
 
             def cancel_after_first_chunk() -> None:
-                scheduler.io.sock_sendall(writer, b"hello")
+                # Use a direct socket send so this recv-focused test does not
+                # depend on native io_uring stream send support.
+                writer.send(b"hello")
                 deadline = scheduler.proactor.get_time() + 2.0
                 while progress != [b"hello"] and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.01)
@@ -4114,7 +4267,7 @@ class TestUringProactor:
 
             task = scheduler.spawn(receive)
             scheduler.spawn(cancel_after_first_chunk)
-            with pytest.raises(CancelledError):
+            with pytest.raises((CancelledError, asyncio.CancelledError)):
                 scheduler.run_until_complete(task)
 
             assert progress == [b"hello"]
@@ -4124,13 +4277,13 @@ class TestUringProactor:
             writer.close()
             scheduler.close()
 
-    def test_sendall_reports_uring_progress(self):
+    def test_send_reports_uring_progress(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         progress: list[int] = []
         try:
             writer.setblocking(False)
-            operation = proactor.sendall(writer, b"hello", progress.append)
+            operation = proactor.send(writer, b"hello", progress.append)
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
@@ -4167,8 +4320,8 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
-            assert operation.result() == 5
-            assert bytes(proactor.ring.submitted_send[0][1]) == b"hello"
+            assert operation.result() is True
+            assert bytes(proactor.ring.submitted_stream_sends()[0][1]) == b"hello"
         finally:
             sock.close()
             proactor.close()
@@ -4180,13 +4333,13 @@ class TestUringProactor:
             sock.setblocking(False)
             operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"")
             proactor.wait(proactor.get_time() + 0.05)
-            assert operation.result() == 0
-            assert proactor.ring.submitted_send == []
+            assert operation.result() is True
+            assert proactor.ring.submitted_stream_sends() == []
         finally:
             sock.close()
             proactor.close()
 
-    def test_connect_with_initial_reports_partial_send(self) -> None:
+    def test_connect_with_initial_sendall_drains_partial_chunks(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
         try:
@@ -4194,8 +4347,14 @@ class TestUringProactor:
             operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"helloworld")
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send(4)
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
-            assert operation.result() == 4
+            assert operation.result() is True
+            stream_sends = proactor.ring.submitted_stream_sends()
+            assert len(stream_sends) == 2
+            assert bytes(stream_sends[0][1]) == b"helloworld"
+            assert bytes(stream_sends[1][1]) == b"oworld"
         finally:
             sock.close()
             proactor.close()
@@ -4212,7 +4371,7 @@ class TestUringProactor:
             proactor.ring.complete_connect()
             proactor.wait(proactor.get_time() + 0.05)
             assert proactor.ring.pending_connect_send == []
-            assert proactor.ring.submitted_send == []
+            assert proactor.ring.submitted_stream_sends() == []
         finally:
             sock.close()
             proactor.close()
@@ -4233,6 +4392,129 @@ class TestUringProactor:
             sock.close()
             proactor.close()
 
+    def test_create_socket_connects_without_initial_on_uring(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+            )
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, initial_sent = operation.result()
+            assert is_connected is True
+            assert initial_sent is False
+            _assert_scheduler_socket_fd(sock)
+            sock.close()
+        finally:
+            proactor.close()
+
+    def test_create_socket_connects_with_initial_on_uring(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            proactor.ring.complete_connect_send(2)
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, initial_sent = operation.result()
+            assert is_connected is True
+            assert initial_sent is True
+            sock.close()
+        finally:
+            proactor.close()
+
+    def test_create_socket_connect_failure_does_not_leak_socket(self) -> None:
+        proactor = UringProactor(ring_factory=_FailingConnectUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+            )
+            _wait_for_uring(proactor, operation.done)
+            with pytest.raises(OSError):
+                operation.result()
+        finally:
+            proactor.close()
+
+    def test_create_socket_cancel_before_socket_completes(self) -> None:
+        proactor = UringProactor(ring_factory=_DeferredSocketUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+            )
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
+            operation.cancel()
+            assert operation.cancelled() is True
+            assert len(proactor.ring.submitted_cancel) == 1
+            proactor.ring.complete_socket()
+            proactor.wait(proactor.get_time() + 0.05)
+            assert operation.cancelled() is True
+            assert proactor.ring.submitted_connect == []
+            leaked_fd = proactor.ring.last_socket_fd
+            assert leaked_fd is not None
+            with pytest.raises(OSError):
+                os.fstat(leaked_fd)
+        finally:
+            proactor.close()
+
+    def test_create_socket_rejects_initial_data_without_connect_to(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            with pytest.raises(ValueError, match="initial_data requires connect_to"):
+                proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM, initial_data=b"hello")
+        finally:
+            proactor.close()
+
+    def test_create_socket_cancel_during_pending_connect(self) -> None:
+        proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+            )
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
+            proactor.ring.complete_socket()
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_connect()
+            proactor.wait(proactor.get_time() + 0.05)
+            assert operation.cancelled() is True
+            assert proactor.ring.pending_connect_send == []
+        finally:
+            proactor.close()
+
+    def test_create_socket_cancel_during_pending_send(self) -> None:
+        proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hello",
+            )
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
+            proactor.ring.complete_socket()
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            proactor.ring.complete_connect()
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_connect_send()
+            proactor.wait(proactor.get_time() + 0.05)
+            assert operation.cancelled() is True
+        finally:
+            proactor.close()
+
     def test_operations_reject_closed_proactor(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -4242,7 +4524,7 @@ class TestUringProactor:
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.recv(reader, 1)
             with pytest.raises(RuntimeError, match="closed"):
-                proactor.sendall(writer, b"")
+                proactor.send(writer, b"")
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.wait(0)
         finally:
@@ -4259,20 +4541,85 @@ class TestProactorScheduler:
         with pytest.raises(TypeError, match="abstract"):
             ProactorScheduler()
 
-    def test_sock_create_uses_stdlib_socket(self):
+    def test_sock_create_uses_proactor_create_socket(self):
         scheduler = SyncProactorScheduler()
         try:
-            sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            sock, is_connected, initial_sent = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 assert isinstance(sock, socket.socket)
                 assert sock.family == socket.AF_INET
                 assert sock.type == socket.SOCK_STREAM
-                assert sock.getblocking() is False
-                assert os.get_inheritable(sock.fileno()) is False
+                _assert_scheduler_socket_fd(sock)
+                assert is_connected is False
+                assert initial_sent is False
             finally:
                 sock.close()
         finally:
             scheduler.close()
+
+    def test_create_socket_uses_uring_submit_when_available(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, initial_sent = operation.result()
+            try:
+                assert len(proactor.ring.submitted_socket) == 1
+                _domain, _type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
+                assert submit_flags & (socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC) == (
+                    socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
+                )
+                assert is_connected is False
+                assert initial_sent is False
+                _assert_scheduler_socket_fd(sock)
+            finally:
+                sock.close()
+        finally:
+            proactor.close()
+
+    def test_create_socket_connect_uses_uring_socket_submit(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+            )
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, initial_sent = operation.result()
+            try:
+                assert len(proactor.ring.submitted_socket) == 1
+                assert len(proactor.ring.submitted_connect) == 1
+                assert is_connected is True
+                assert initial_sent is False
+            finally:
+                sock.close()
+        finally:
+            proactor.close()
+
+    def test_create_socket_without_uring_socket_opcode_ignores_connect_hints(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SOCKET=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            assert operation.done()
+            sock, is_connected, initial_sent = operation.result()
+            try:
+                assert len(proactor.ring.submitted_socket) == 0
+                assert len(proactor.ring.submitted_connect) == 0
+                assert is_connected is False
+                assert initial_sent is False
+            finally:
+                sock.close()
+        finally:
+            proactor.close()
 
     def test_scheduler_clock_drives_proactor_clock(self):
         scheduler = SyncProactorScheduler()

@@ -3,12 +3,11 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, Operation
-from .socket_helpers import configure_scheduler_socket
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
@@ -110,7 +109,9 @@ class SocketIO(Protocol):
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> socket.socket: ...
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
+    ) -> tuple[socket.socket, bool, bool]: ...
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: "RecvBufferPool | None" = None
@@ -268,7 +269,7 @@ class ProactorIOManager:
         return self.wait_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
 
     def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> None:
-        return self.wait_operation(self._proactor.sendall(sock, data, progress))
+        return self.wait_operation(self._proactor.send(sock, data, progress))
 
     def sock_send_iter(
         self,
@@ -296,13 +297,10 @@ class ProactorIOManager:
         if initial is None:
             self.wait_operation(self._proactor.connect(sock, address))
             return
-        nbytes = cast(
-            int,
-            self.wait_operation(self._proactor.connect(sock, address, initial=initial)),
-        )
-        remainder = memoryview(initial)[nbytes:]
-        if remainder.nbytes:
-            self.sock_sendall(sock, remainder)
+        sent = self.wait_operation(self._proactor.connect(sock, address, initial=initial))
+        if sent:
+            return
+        self.sock_sendall(sock, initial)
 
     def sock_create(
         self,
@@ -311,9 +309,32 @@ class ProactorIOManager:
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> socket.socket:
-        del flags
-        return configure_scheduler_socket(socket.socket(family, type, proto))
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
+    ) -> tuple[socket.socket, bool, bool]:
+        if initial_data is not None and connect_to is None:
+            raise ValueError("initial_data requires connect_to")
+        sock, is_connected, initial_sent = self.wait_operation(
+            self._proactor.create_socket(
+                family,
+                type,
+                proto,
+                flags=flags,
+                connect_to=connect_to,
+                initial_data=initial_data,
+            )
+        )
+        try:
+            if connect_to is not None and not is_connected:
+                self.sock_connect(sock, connect_to, initial=initial_data)
+                return sock, True, initial_data is not None
+            if initial_data is not None and is_connected and not initial_sent:
+                self.sock_sendall(sock, initial_data)
+                return sock, is_connected, True
+            return sock, is_connected, initial_sent
+        except BaseException:
+            sock.close()
+            raise
 
     def poll(self, fd: int, mask: int) -> int:
         return self.wait_operation(self._proactor.poll(fd, mask))

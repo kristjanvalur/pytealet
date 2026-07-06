@@ -533,19 +533,28 @@ def _connect_tcp_streams(
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
         sock: socket.socket | None = None
         try:
-            sock = io.sock_create(addr_family, socktype, addr_proto)
-            io.sock_connect(sock, sockaddr, initial=initial_send)
-            return _open_streams(
-                io,
-                sock,
-                limit=limit,
-                stream_factory=stream_factory,
-                async_=async_,
+            sock, _is_connected, _initial_sent = io.sock_create(
+                addr_family,
+                socktype,
+                addr_proto,
+                connect_to=sockaddr,
+                initial_data=initial_send,
             )
+            try:
+                return _open_streams(
+                    io,
+                    sock,
+                    limit=limit,
+                    stream_factory=stream_factory,
+                    async_=async_,
+                )
+            except BaseException:
+                sock.close()
+                raise
         except OSError as exc:
-            last_error = exc
             if sock is not None:
                 sock.close()
+            last_error = exc
     if last_error is not None:
         raise last_error
     raise OSError("open_connection failed without address resolution results")
@@ -583,6 +592,7 @@ def open_connection(
     path: str,
     limit: int = _DEFAULT_LIMIT,
     stream_factory: StreamFactory | None = None,
+    initial_send: SocketSendBuffer | None = None,
     async_: Literal[False] = False,
 ) -> tuple[StreamReader, StreamWriter]: ...
 
@@ -593,6 +603,7 @@ def open_connection(
     path: str,
     limit: int = _DEFAULT_LIMIT,
     stream_factory: AsyncStreamFactory | None = None,
+    initial_send: SocketSendBuffer | None = None,
     async_: Literal[True],
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
@@ -620,7 +631,7 @@ def open_connection(
     default factory when ``stream_factory`` is omitted.
 
     ``initial_send`` opts into connect-time pre-send on backends that honour
-    the proactor hint; any unsent remainder is flushed with ``sendall`` before
+    the proactor hint; any unsent remainder is flushed with ``sock_sendall`` before
     streams are returned.
     """
 
@@ -634,6 +645,7 @@ def open_connection(
             limit=limit,
             stream_factory=stream_factory,
             async_=async_,
+            initial_send=initial_send,
         )
     if addr is None:
         raise TypeError("open_connection() requires addr= or path=")
@@ -656,24 +668,29 @@ def _connect_unix_streams(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
+    initial_send: SocketSendBuffer | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
     io = _require_proactor_io(scheduler)
-    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock, _, _ = io.sock_create(
+        socket.AF_UNIX,
+        socket.SOCK_STREAM,
+        connect_to=path,
+        initial_data=initial_send,
+    )
     try:
-        io.sock_connect(sock, path)
-    except OSError:
+        return _open_streams(
+            io,
+            sock,
+            limit=limit,
+            stream_factory=stream_factory,
+            async_=async_,
+        )
+    except BaseException:
         sock.close()
         raise
-    return _open_streams(
-        io,
-        sock,
-        limit=limit,
-        stream_factory=stream_factory,
-        async_=async_,
-    )
 
 
 def _bind_tcp_socket(
@@ -684,7 +701,7 @@ def _bind_tcp_socket(
     backlog: int,
 ) -> socket.socket:
     host, port = addr
-    sock = io.sock_create(family, socket.SOCK_STREAM)
+    sock, _, _ = io.sock_create(family, socket.SOCK_STREAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         bind_host = "" if host is None else host
@@ -705,7 +722,7 @@ def _bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket
     except FileNotFoundError:
         pass
 
-    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock, _, _ = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.bind(path)
         sock.listen(backlog)
