@@ -113,6 +113,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   awaited by sibling tealet tasks in both host modes.
 
 ### Changed
+- Default proactor-backed schedulers (`Scheduler`, `SyncProactorScheduler`,
+  `AsyncProactorScheduler` without an explicit factory) now construct
+  `UringProactor` when `uring_api.is_available()` is true, and fall back to
+  `SelectorProactor` otherwise.
+- `UringProactor.create_socket()` submits ``IORING_OP_SOCKET`` with ``flags=0``
+  and applies the scheduler socket contract in Python. ``AF_UNIX`` always uses
+  stdlib socket creation on the uring backend (same policy as plain send for
+  Unix-domain sockets).
+- `UringProactor.connect()` and ``recv(..., 0)`` use stdlib fast paths for
+  ``AF_UNIX`` and zero-length reads respectively on the uring backend.
+- ``run_asyncio_in_tealet()`` hosts asyncio socket helpers on a
+  ``SelectorProactor`` bridge when the scheduler proactor is
+  ``UringProactor``; tealet blocking IO still uses ``scheduler.proactor``.
 - `ProactorFile` blocks through the `OperationWaiter` protocol; production opens
   pass `ProactorIOManager` from `scheduler.io.open(...)`.
 - `sock_recv_iter` always yields `(index, memoryview)` chunks and

@@ -381,9 +381,11 @@ class Proactor(Protocol):
         ``connect_to`` and ``initial_data`` are optional hints; backends may
         ignore them and return ``(socket, False, False)`` after creation only.
         ``UringProactor`` honours the hints only when ``IORING_OP_SOCKET`` is
-        probed, chaining socket creation, connect, and ``sendall``. Without that
-        opcode it falls back to stdlib creation and does not connect or send. Any
-        failure after creation closes the socket before the operation completes.
+        probed for non-``AF_UNIX`` families, chaining socket creation, connect,
+        and ``sendall``. ``AF_UNIX`` always uses stdlib creation on the uring
+        backend; without the socket opcode other families also fall back to
+        stdlib creation and do not connect or send. Any failure after creation
+        closes the socket before the operation completes.
         ``SelectorProactor`` ignores ``flags`` beyond the scheduler socket defaults
         applied by ``configure_scheduler_socket()`` (non-blocking, close-on-exec).
         """
@@ -2084,6 +2086,9 @@ class UringProactor(ProactorBase):
         """Submit a socket receive operation."""
 
         operation = Operation[bytes](kind="recv", fileobj=sock)
+        if n == 0:
+            operation._set_result(b"")
+            return operation
         data = memoryview(bytearray(n))
         entry = self._uring_entry(
             operation,
@@ -2521,8 +2526,7 @@ class UringProactor(ProactorBase):
         _validate_create_socket_hints(connect_to, initial_data)
         operation = Operation[CreateSocketResult](kind="create_socket", fileobj=(family, type, proto))
 
-        if self._capabilities.get("IORING_OP_SOCKET", False):
-            socket_flags = flags | _DEFAULT_ACCEPT_FLAGS
+        if self._capabilities.get("IORING_OP_SOCKET", False) and family != socket.AF_UNIX:
             owned_sock: list[socket.socket | None] = [None]
 
             def deliver(_result: _ChainDeliver | None) -> None:
@@ -2554,7 +2558,7 @@ class UringProactor(ProactorBase):
             )
             self._submit_uring_entry(
                 entry,
-                lambda: self._ring.submit_socket(family, type, proto, socket_flags, entry),
+                lambda: self._ring.submit_socket(family, type, proto, flags, entry),
             )
             return operation
 
@@ -2566,6 +2570,31 @@ class UringProactor(ProactorBase):
         operation._set_result((sock, False, False))
         return operation
 
+    def _sync_unix_connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: SocketSendBuffer | None = None,
+    ) -> Operation[None] | Operation[bool]:
+        if initial is None:
+            operation = Operation[None](kind="connect", fileobj=sock)
+        else:
+            operation = Operation[bool](kind="connect", fileobj=sock)
+        try:
+            sock.setblocking(True)
+            try:
+                sock.connect(address)
+            finally:
+                sock.setblocking(False)
+            if initial is None:
+                operation._set_result(None)
+            else:
+                operation._set_result(False)
+        except OSError as exc:
+            operation._set_exception(exc)
+        return operation
+
     def connect(
         self,
         sock: socket.socket,
@@ -2574,6 +2603,9 @@ class UringProactor(ProactorBase):
         initial: SocketSendBuffer | None = None,
     ) -> Operation[None] | Operation[bool]:
         """Submit a non-blocking socket connect operation."""
+
+        if sock.family == socket.AF_UNIX:
+            return self._sync_unix_connect(sock, address, initial=initial)
 
         if initial is None:
             operation = Operation[None](kind="connect", fileobj=sock)
@@ -3239,6 +3271,8 @@ class UringProactor(ProactorBase):
 
 
 def _default_proactor_factory() -> Proactor:
+    if uring_api.is_available():
+        return UringProactor()
     return SelectorProactor()
 
 

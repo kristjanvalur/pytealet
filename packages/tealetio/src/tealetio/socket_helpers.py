@@ -11,16 +11,11 @@ __all__ = ["configure_scheduler_socket", "socket_from_uring_fd"]
 def socket_from_uring_fd(fd: int) -> socket.socket:
     """Wrap an io_uring-returned socket fd for scheduler use.
 
-    The fd is expected to already be non-blocking and close-on-exec from
-    ``SOCK_NONBLOCK | SOCK_CLOEXEC`` on the uring submission.
-    ``socket.socket(fileno=...)`` does not import those flags into
-    ``getblocking()``; ``setblocking(False)`` syncs the wrapper without
-    changing fd flags when they are already set.
+    ``IORING_OP_SOCKET`` submissions pass ``flags=0``; the scheduler contract
+    (non-blocking and close-on-exec) is applied here after the fd is returned.
     """
 
-    sock = socket.socket(fileno=fd)
-    sock.setblocking(False)
-    return sock
+    return configure_scheduler_socket(socket.socket(fileno=fd))
 
 
 def configure_scheduler_socket(sock: socket.socket) -> socket.socket:

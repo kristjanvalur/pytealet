@@ -65,12 +65,16 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture(autouse=True)
 def _reset_scheduler_tls():
     from tealetio import BasicScheduler
-    from tealetio.scheduler import _scheduler
+    from tealetio.proactor import ProactorScheduler
+    from tealetio.scheduler import _current_scheduler, _scheduler
 
     _scheduler.instance = BasicScheduler()
     try:
         yield
     finally:
+        current = _current_scheduler()
+        if isinstance(current, ProactorScheduler):
+            current.close()
         _scheduler.instance = BasicScheduler()
 
 

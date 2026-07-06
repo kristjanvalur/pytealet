@@ -4385,10 +4385,35 @@ class TestProactorScheduler:
         with pytest.raises(TypeError, match="abstract"):
             ProactorScheduler()
 
-    def test_sock_create_uses_proactor_create_socket(self):
+    def test_default_proactor_factory_uses_uring_when_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(uring_api, "is_available", lambda: True)
         scheduler = SyncProactorScheduler()
         try:
-            sock, is_connected, initial_sent = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            assert isinstance(scheduler.proactor, UringProactor)
+        finally:
+            scheduler.close()
+
+    def test_default_proactor_factory_uses_selector_when_uring_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(uring_api, "is_available", lambda: False)
+        scheduler = SyncProactorScheduler()
+        try:
+            assert isinstance(scheduler.proactor, SelectorProactor)
+        finally:
+            scheduler.close()
+
+    def test_sock_create_uses_proactor_create_socket(self):
+        scheduler = SyncProactorScheduler()
+        set_scheduler(scheduler)
+        try:
+
+            def exercise() -> tuple[socket.socket, bool, bool]:
+                return scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+
+            sock, is_connected, initial_sent = scheduler.run_until_complete(scheduler.spawn(exercise))
             try:
                 assert isinstance(sock, socket.socket)
                 assert sock.family == socket.AF_INET
@@ -4410,12 +4435,28 @@ class TestProactorScheduler:
             try:
                 assert len(proactor.ring.submitted_socket) == 1
                 _domain, _type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
-                assert submit_flags & (socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC) == (
-                    socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
-                )
+                assert submit_flags == 0
                 assert is_connected is False
                 assert initial_sent is False
                 _assert_scheduler_socket_fd(sock)
+            finally:
+                sock.close()
+        finally:
+            proactor.close()
+
+    @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
+    def test_create_socket_uses_sync_path_for_unix(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            assert operation.done()
+            sock, is_connected, initial_sent = operation.result()
+            try:
+                assert len(proactor.ring.submitted_socket) == 0
+                assert sock.family == socket.AF_UNIX
+                _assert_scheduler_socket_fd(sock)
+                assert is_connected is False
+                assert initial_sent is False
             finally:
                 sock.close()
         finally:
@@ -4734,7 +4775,7 @@ class TestProactorScheduler:
             scheduler.close()
 
     def test_wait_operation_timeout_cancels_operation(self):
-        scheduler = SyncProactorScheduler()
+        scheduler = SyncProactorScheduler(SelectorProactor)
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
         try:
@@ -4746,6 +4787,13 @@ class TestProactorScheduler:
                 with pytest.raises(TimeoutError):
                     with timeout(0.001):
                         scheduler.io.wait_operation(operation)
+                deadline = scheduler.time() + 1.0
+                while (
+                    not operation.cancelled()
+                    and scheduler.proactor.has_pending_operations()
+                    and scheduler.time() < deadline
+                ):
+                    scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
                 return operation.cancelled() and not scheduler.proactor.has_pending_operations()
 
             task = scheduler.spawn(wait_with_timeout)
@@ -4934,7 +4982,7 @@ class TestProactorScheduler:
             scheduler.close()
 
     def test_open_requires_proactor_with_openat_support(self):
-        scheduler = SyncProactorScheduler()
+        scheduler = SyncProactorScheduler(SelectorProactor)
         set_scheduler(scheduler)
         try:
             with pytest.raises(NotImplementedError, match="openat support"):

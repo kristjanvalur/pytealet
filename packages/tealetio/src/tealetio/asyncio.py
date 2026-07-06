@@ -27,7 +27,7 @@ from .tasks import (
 )
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
-from .proactor import Operation, Proactor, ProactorScheduler
+from .proactor import Operation, Proactor, ProactorScheduler, SelectorProactor, UringProactor
 from .selector import SelectorScheduler
 
 T = TypeVar("T")
@@ -371,6 +371,15 @@ class TealetProactorEventLoop(_proactor_events.BaseProactorEventLoop):
                 self_reading_future.cancel()
                 self._self_reading_future = None
 
+    def close(self) -> None:
+        owned = getattr(self, "_owned_loop_proactor", None)
+        try:
+            super().close()
+        finally:
+            if owned is not None:
+                owned.close()
+                self._owned_loop_proactor = None
+
 
 class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI):
     """Cooperative scheduler for asyncio-hosted driving."""
@@ -652,7 +661,17 @@ def run_asyncio_in_tealet(
             if loop_factory is not None:
                 return loop_factory()
             if isinstance(scheduler, ProactorScheduler):
-                loop = TealetProactorEventLoop(scheduler.proactor)
+                # asyncio proactor loops still use selector readiness for their
+                # internal self-pipe and loop.sock_* helpers; host tealet IO stays
+                # on scheduler.proactor (often UringProactor).
+                loop_proactor: Proactor = (
+                    SelectorProactor()
+                    if isinstance(scheduler.proactor, UringProactor)
+                    else scheduler.proactor
+                )
+                loop = TealetProactorEventLoop(loop_proactor)
+                if loop_proactor is not scheduler.proactor:
+                    loop._owned_loop_proactor = loop_proactor
             elif isinstance(scheduler, SelectorScheduler):
                 loop = TealetSelectorEventLoop(scheduler)
             else:

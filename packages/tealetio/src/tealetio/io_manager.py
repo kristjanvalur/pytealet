@@ -182,9 +182,33 @@ class ProactorIOManager:
         return self._proactor
 
     def wait_operation(self, operation: Operation[T]) -> T:
-        """Block the current tealet until ``operation`` completes."""
+        """Block until ``operation`` completes.
+
+        When called from a running scheduler tealet, park through
+        ``ThreadsafeEvent``. Otherwise poll the proactor from the caller thread
+        (for example module-level ``streams`` helpers that create sockets before
+        spawning handler tealets).
+        """
 
         if operation.done():
+            return operation.result()
+
+        running_scheduler = False
+        try:
+            from .scheduler import get_running_scheduler
+
+            get_running_scheduler()
+            running_scheduler = True
+        except RuntimeError:
+            running_scheduler = False
+
+        if not running_scheduler:
+            try:
+                while not operation.done():
+                    self._proactor.wait(self._proactor.get_time() + 0.05)
+            finally:
+                if not operation.done():
+                    operation.cancel()
             return operation.result()
 
         ready = ThreadsafeEvent()

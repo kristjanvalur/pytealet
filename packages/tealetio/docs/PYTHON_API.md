@@ -31,9 +31,11 @@ from tealetio.runner import run
 ```
 
 `Scheduler` is an alias for the default synchronous scheduler and is backed by a proactor.
-Use `SyncProactorScheduler` directly when you want to provide a custom proactor
-factory for synchronous driving, and use `AsyncProactorScheduler` for the same
-proactor-backed IO model under an async driving facade. `ProactorScheduler` is
+When no custom factory is supplied, proactor-backed schedulers choose
+`UringProactor` if `uring_api.is_available()` is true and otherwise
+`SelectorProactor`. Use `SyncProactorScheduler` directly when you want to provide
+a custom proactor factory for synchronous driving, and use `AsyncProactorScheduler`
+for the same proactor-backed IO model under an async driving facade. `ProactorScheduler` is
 the shared abstract proactor core. Likewise, `SelectorScheduler` is the shared
 abstract selector core, with `SyncSelectorScheduler` and `AsyncSelectorScheduler`
 as concrete driving variants. `run_asyncio_in_tealet(...)` chooses the hosted
