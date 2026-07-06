@@ -310,8 +310,7 @@ class _FakeUringRing:
         completion = self._completion(
             user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
         )
-        operation = getattr(user_data, "operation", None)
-        if getattr(operation, "kind", None) == "send_on_connect":
+        if getattr(user_data, "parent", None) is not None:
             self.pending_connect_send.append(completion)
             return completion
         self._deliver(completion)
