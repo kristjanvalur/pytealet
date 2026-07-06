@@ -4236,6 +4236,28 @@ class TestUringProactor:
             sock.close()
             proactor.close()
 
+    @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
+    def test_create_socket_unix_connect_to_defers_connect_hints(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_UNIX,
+                socket.SOCK_STREAM,
+                connect_to="/tmp/example.sock",
+                initial_data=b"hi",
+            )
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, initial_sent = operation.result()
+            try:
+                assert len(proactor.ring.submitted_socket) == 1
+                assert len(proactor.ring.submitted_connect) == 0
+                assert is_connected is False
+                assert initial_sent is False
+            finally:
+                sock.close()
+        finally:
+            proactor.close()
+
     def test_create_socket_connects_without_initial_on_uring(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
@@ -4434,7 +4456,11 @@ class TestProactorScheduler:
             sock, is_connected, initial_sent = operation.result()
             try:
                 assert len(proactor.ring.submitted_socket) == 1
-                _domain, _type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
+                _domain, submit_type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
+                expected_type = socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(
+                    socket, "SOCK_CLOEXEC", 0
+                )
+                assert submit_type == expected_type
                 assert submit_flags == 0
                 assert is_connected is False
                 assert initial_sent is False
@@ -4445,14 +4471,21 @@ class TestProactorScheduler:
             proactor.close()
 
     @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
-    def test_create_socket_uses_sync_path_for_unix(self) -> None:
+    def test_create_socket_uses_uring_submit_for_unix(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             operation = proactor.create_socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            assert operation.done()
+            _wait_for_uring(proactor, operation.done)
             sock, is_connected, initial_sent = operation.result()
             try:
-                assert len(proactor.ring.submitted_socket) == 0
+                assert len(proactor.ring.submitted_socket) == 1
+                domain, submit_type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
+                assert domain == socket.AF_UNIX
+                expected_type = socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(
+                    socket, "SOCK_CLOEXEC", 0
+                )
+                assert submit_type == expected_type
+                assert submit_flags == 0
                 assert sock.family == socket.AF_UNIX
                 _assert_scheduler_socket_fd(sock)
                 assert is_connected is False

@@ -13,6 +13,14 @@ from tealetio.operations import ContinuousOperation, Operation
 from tealetio.proactor import SyncProactorScheduler
 
 
+class _StubScheduler:
+    """Minimal scheduler stand-in for direct ``ProactorIOManager`` unit tests."""
+
+
+def _manager(proactor: _MockProactor) -> ProactorIOManager:
+    return ProactorIOManager(_StubScheduler(), proactor)  # type: ignore[arg-type]
+
+
 class _MockProactor:
     def __init__(self) -> None:
         self.recv_calls: list[tuple[socket.socket, int]] = []
@@ -147,7 +155,7 @@ class TestProactorIOManager:
 class TestProactorIOManagerDirect:
     def test_wait_operation_returns_immediate_result(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         sock = socket.socketpair()[0]
         try:
             operation = proactor.recv(sock, 4)
@@ -157,7 +165,7 @@ class TestProactorIOManagerDirect:
 
     def test_sock_recv_delegates_to_proactor(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         sock = socket.socketpair()[0]
         try:
             assert io.sock_recv(sock, 4) == b"mock"
@@ -167,7 +175,7 @@ class TestProactorIOManagerDirect:
 
     def test_sock_sendall_delegates_to_proactor(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         sock = socket.socketpair()[0]
         try:
             io.sock_sendall(sock, b"hello")
@@ -177,13 +185,13 @@ class TestProactorIOManagerDirect:
 
     def test_poll_delegates_to_proactor(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         assert io.poll(7, 3) == 3
         assert proactor.poll_calls == [(7, 3)]
 
     def test_sock_send_iter_drains_chunks(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         sock = socket.socketpair()[0]
         try:
             io.sock_send_iter(sock, [b"ab", b"", memoryview(b"cd")])
@@ -195,7 +203,7 @@ class TestProactorIOManagerDirect:
 
     def test_sock_create_applies_scheduler_socket_contract(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         sock, is_connected, initial_sent = io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
         try:
             import fcntl
@@ -210,7 +218,7 @@ class TestProactorIOManagerDirect:
 
     def test_sock_create_fallback_without_initial_data_reports_initial_sent_false(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         connect_calls: list[tuple[socket.socket, Any, Any | None]] = []
 
         def fake_sock_connect(sock: socket.socket, address: Any, *, initial: Any | None = None) -> None:
@@ -233,7 +241,7 @@ class TestProactorIOManagerDirect:
 
     def test_sock_create_falls_back_to_sock_connect_when_hints_ignored(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         connect_calls: list[tuple[socket.socket, Any, Any | None]] = []
 
         def fake_sock_connect(sock: socket.socket, address: Any, *, initial: Any | None = None) -> None:
@@ -259,7 +267,7 @@ class TestProactorIOManagerDirect:
 
     def test_sock_create_rejects_initial_data_without_connect_to(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         with pytest.raises(ValueError, match="initial_data requires connect_to"):
             io.sock_create(
                 socket.AF_INET,
@@ -269,7 +277,7 @@ class TestProactorIOManagerDirect:
 
     def test_sock_create_closes_socket_when_connect_fallback_fails(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
 
         def failing_sock_connect(sock: socket.socket, address: Any, *, initial: Any | None = None) -> None:
             del sock, address, initial
@@ -287,7 +295,7 @@ class TestProactorIOManagerDirect:
 
     def test_open_returns_proactor_file(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         with patch("tealetio.io_manager.os.close"), patch("tealetio.files.os.close"):
             handle = io.open("/tmp/example.txt", "rb")
             try:
@@ -303,7 +311,7 @@ class TestProactorIOManagerDirect:
 
     def test_poll_many_returns_continuous_operation(self):
         proactor = _MockProactor()
-        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        io = _manager(proactor)
         seen: list[int] = []
 
         operation = io.poll_many(5, 1, seen.append)

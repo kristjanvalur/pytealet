@@ -473,10 +473,6 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         sock = socket.socket(domain, type, protocol)
-        if flags & getattr(socket, "SOCK_NONBLOCK", 0):
-            sock.setblocking(False)
-        if flags & getattr(socket, "SOCK_CLOEXEC", 0):
-            os.set_inheritable(sock.fileno(), False)
         fd = sock.detach()
         self.submitted_socket.append((domain, type, protocol, flags, user_data))
         completion = self._completion(
@@ -732,12 +728,8 @@ class _DeferredSocketUringRing(_FakeUringRing):
 
     def complete_socket(self) -> None:
         completion = self.pending_socket.pop(0)
-        domain, type, protocol, flags, _user_data = self.submitted_socket[-1]
+        domain, type, protocol, _flags, _user_data = self.submitted_socket[-1]
         sock = socket.socket(domain, type, protocol)
-        if flags & getattr(socket, "SOCK_NONBLOCK", 0):
-            sock.setblocking(False)
-        if flags & getattr(socket, "SOCK_CLOEXEC", 0):
-            os.set_inheritable(sock.fileno(), False)
         fd = sock.detach()
         self.last_socket_fd = fd
         completion.res = fd

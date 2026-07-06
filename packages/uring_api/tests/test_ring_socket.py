@@ -445,6 +445,75 @@ def test_ring_socket_completion_when_available():
         elif completion.res >= 0:
             os.close(completion.res)
 
+
+def test_ring_socket_nonblock_cloexec_flags_when_available():
+    require_uring()
+
+    socket_flags = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
+    if not socket_flags:
+        pytest.skip("SOCK_NONBLOCK/SOCK_CLOEXEC are not available")
+
+    sock = None
+    with uring_api.Ring() as ring:
+        pending = ring.submit_socket(
+            socket.AF_INET,
+            socket.SOCK_STREAM | socket_flags,
+            user_data={"operation": "socket_flags"},
+        )
+        completion = ring.wait(1.0)
+
+    assert completion is pending
+    assert completion.kind == uring_api.COMPLETION_KIND_SOCKET
+    if completion.res < 0:
+        errno_value = -completion.res
+        if errno_value in {errno.ENOSYS, errno.EOPNOTSUPP, errno.EINVAL}:
+            pytest.skip(f"IORING_OP_SOCKET is not supported: errno {errno_value}")
+    assert completion.res >= 0
+    try:
+        assert_fd_nonblocking_cloexec(completion.res)
+        sock = socket.socket(fileno=completion.res)
+        assert sock.family == socket.AF_INET
+        assert sock.type & socket.SOCK_STREAM
+    finally:
+        if sock is not None:
+            sock.close()
+        elif completion.res >= 0:
+            os.close(completion.res)
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
+def test_ring_socket_unix_when_available():
+    require_uring()
+
+    sock = None
+    socket_flags = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
+    with uring_api.Ring() as ring:
+        pending = ring.submit_socket(
+            socket.AF_UNIX,
+            socket.SOCK_STREAM | socket_flags,
+            user_data={"operation": "socket_unix"},
+        )
+        completion = ring.wait(1.0)
+
+    assert completion is pending
+    assert completion.kind == uring_api.COMPLETION_KIND_SOCKET
+    if completion.res < 0:
+        errno_value = -completion.res
+        if errno_value in {errno.ENOSYS, errno.EOPNOTSUPP, errno.EINVAL}:
+            pytest.skip(f"IORING_OP_SOCKET for AF_UNIX is not supported: errno {errno_value}")
+    assert completion.res >= 0
+    try:
+        if socket_flags:
+            assert_fd_nonblocking_cloexec(completion.res)
+        sock = socket.socket(fileno=completion.res)
+        assert sock.family == socket.AF_UNIX
+        assert sock.type & socket.SOCK_STREAM
+    finally:
+        if sock is not None:
+            sock.close()
+        elif completion.res >= 0:
+            os.close(completion.res)
+
 def test_ring_socketpair_round_trip_when_available():
     require_uring()
 

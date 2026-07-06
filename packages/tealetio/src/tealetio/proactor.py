@@ -380,11 +380,10 @@ class Proactor(Protocol):
         omitted or the backend ignored connect/send hints.
         ``connect_to`` and ``initial_data`` are optional hints; backends may
         ignore them and return ``(socket, False, False)`` after creation only.
-        ``UringProactor`` honours the hints only when ``IORING_OP_SOCKET`` is
-        probed for non-``AF_UNIX`` families, chaining socket creation, connect,
-        and ``sendall``. ``AF_UNIX`` always uses stdlib creation on the uring
-        backend; without the socket opcode other families also fall back to
-        stdlib creation and do not connect or send. Any failure after creation
+        ``UringProactor`` honours the hints when ``IORING_OP_SOCKET`` is probed,
+        chaining socket creation, connect, and ``sendall``. Without the socket
+        opcode it falls back to stdlib creation and does not connect or send.
+        Any failure after creation
         closes the socket before the operation completes.
         ``SelectorProactor`` ignores ``flags`` beyond the scheduler socket defaults
         applied by ``configure_scheduler_socket()`` (non-blocking, close-on-exec).
@@ -2526,7 +2525,8 @@ class UringProactor(ProactorBase):
         _validate_create_socket_hints(connect_to, initial_data)
         operation = Operation[CreateSocketResult](kind="create_socket", fileobj=(family, type, proto))
 
-        if self._capabilities.get("IORING_OP_SOCKET", False) and family != socket.AF_UNIX:
+        if self._capabilities.get("IORING_OP_SOCKET", False):
+            socket_type = type | flags | _DEFAULT_ACCEPT_FLAGS
             owned_sock: list[socket.socket | None] = [None]
 
             def deliver(_result: _ChainDeliver | None) -> None:
@@ -2558,7 +2558,7 @@ class UringProactor(ProactorBase):
             )
             self._submit_uring_entry(
                 entry,
-                lambda: self._ring.submit_socket(family, type, proto, flags, entry),
+                lambda: self._ring.submit_socket(family, socket_type, proto, 0, entry),
             )
             return operation
 
@@ -2577,20 +2577,26 @@ class UringProactor(ProactorBase):
         *,
         initial: SocketSendBuffer | None = None,
     ) -> Operation[None] | Operation[bool]:
-        if initial is None:
-            operation = Operation[None](kind="connect", fileobj=sock)
-        else:
-            operation = Operation[bool](kind="connect", fileobj=sock)
-        try:
+        def finish_connect() -> None:
             sock.setblocking(True)
             try:
                 sock.connect(address)
             finally:
                 sock.setblocking(False)
-            if initial is None:
+
+        if initial is None:
+            operation = Operation[None](kind="connect", fileobj=sock)
+            try:
+                finish_connect()
                 operation._set_result(None)
-            else:
-                operation._set_result(False)
+            except OSError as exc:
+                operation._set_exception(exc)
+            return operation
+
+        operation = Operation[bool](kind="connect", fileobj=sock)
+        try:
+            finish_connect()
+            operation._set_result(False)
         except OSError as exc:
             operation._set_exception(exc)
         return operation
@@ -2664,7 +2670,9 @@ class UringProactor(ProactorBase):
             return operation
         sock = socket_from_uring_fd(res)
         owned_sock[0] = sock
-        if connect_to is None:
+        # uring submit_connect only accepts numeric inet addresses today; defer unix
+        # connect/send hints to io_manager.sock_connect() via _sync_unix_connect().
+        if connect_to is None or sock.family == socket.AF_UNIX:
             operation._set_result((sock, False, False))
             return operation
         payload = memoryview(initial_data) if initial_data is not None else memoryview(b"")
@@ -3289,7 +3297,7 @@ class ProactorScheduler(BaseScheduler):
         factory = proactor_factory if proactor_factory is not None else _default_proactor_factory
         self._proactor = factory()
         self._proactor.set_clock(self.time)
-        self._io = ProactorIOManager(self._proactor)
+        self._io = ProactorIOManager(self, self._proactor)
 
     @property
     def io(self) -> ProactorIOManager:
@@ -3306,6 +3314,7 @@ class ProactorScheduler(BaseScheduler):
     def close(self) -> None:
         """Close proactor and scheduler-owned resources."""
 
+        self._io.close()
         self._proactor.close()
         BaseScheduler.close(self)
 

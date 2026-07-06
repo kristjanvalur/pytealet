@@ -11,6 +11,7 @@ from .operations import ContinuousOperation, Operation
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
+    from .scheduler import BaseScheduler
 
 T = TypeVar("T")
 
@@ -170,48 +171,41 @@ class ProactorIOManager:
 
     Structurally implements ``SocketIO``, ``ServerIO``, ``PollIO``, and
     ``FileIO``, plus ``wait_operation`` for blocking on submitted ``Operation``
-    objects. The scheduler keeps the driver; this object only blocks the current
-    tealet on submitted operations.
+    objects. Always owned by a proactor scheduler and holds a direct reference
+    to that scheduler instead of querying thread-local scheduler state.
     """
 
-    def __init__(self, proactor: Proactor) -> None:
+    def __init__(self, scheduler: BaseScheduler, proactor: Proactor) -> None:
+        self._scheduler = scheduler
         self._proactor = proactor
+        self._closed = False
 
     @property
     def proactor(self) -> Proactor:
+        self._check_open()
         return self._proactor
+
+    def close(self) -> None:
+        """Release scheduler ownership; called from ``ProactorScheduler.close()``."""
+
+        self._closed = True
+        self._scheduler = None
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("IO manager is closed")
 
     def wait_operation(self, operation: Operation[T]) -> T:
         """Block until ``operation`` completes.
 
-        When called from a running scheduler tealet, park through
-        ``ThreadsafeEvent``. Otherwise poll the proactor from the caller thread
-        (for example module-level ``streams`` helpers that create sockets before
-        spawning handler tealets).
+        Park the current tealet through ``ThreadsafeEvent`` until the operation
+        callback fires. Call only from scheduler-owned tealets.
         """
 
         if operation.done():
             return operation.result()
 
-        running_scheduler = False
-        try:
-            from .scheduler import get_running_scheduler
-
-            get_running_scheduler()
-            running_scheduler = True
-        except RuntimeError:
-            running_scheduler = False
-
-        if not running_scheduler:
-            try:
-                while not operation.done():
-                    self._proactor.wait(self._proactor.get_time() + 0.05)
-            finally:
-                if not operation.done():
-                    operation.cancel()
-            return operation.result()
-
-        ready = ThreadsafeEvent()
+        ready = ThreadsafeEvent(self._scheduler)
 
         def wake(_operation: Operation[Any]) -> None:
             ready.set()

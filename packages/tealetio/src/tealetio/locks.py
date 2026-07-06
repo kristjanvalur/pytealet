@@ -215,10 +215,10 @@ class Event:
 class ThreadsafeEvent:
     """Synchronous event whose `set` method is safe from another thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, scheduler: BaseScheduler | None = None) -> None:
         self._waiters: list[tealet.tealet] = []
         self._is_set = False
-        self._scheduler = _get_current_scheduler()
+        self._scheduler = _get_current_scheduler() if scheduler is None else scheduler
 
     def _link(self, t: tealet.tealet) -> None:
         assert t.link is None

@@ -74,7 +74,8 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
     """Drive an async-stream coroutine without an asyncio event loop.
 
     ``AsyncStream*`` methods are ``async def`` for handler compatibility, but
-    they ultimately block through the proactor IO manager's ``wait_operation``
+    they ultimately block through the scheduler-owned IO manager's
+    ``wait_operation``
     path rather than yielding asyncio futures. Public stream and factory APIs
     depend on ``SocketIO`` only. Unexpected yields surface as ``RuntimeError``.
     """

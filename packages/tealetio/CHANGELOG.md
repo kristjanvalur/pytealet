@@ -117,10 +117,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AsyncProactorScheduler` without an explicit factory) now construct
   `UringProactor` when `uring_api.is_available()` is true, and fall back to
   `SelectorProactor` otherwise.
-- `UringProactor.create_socket()` submits ``IORING_OP_SOCKET`` with ``flags=0``
-  and applies the scheduler socket contract in Python. ``AF_UNIX`` always uses
-  stdlib socket creation on the uring backend (same policy as plain send for
-  Unix-domain sockets).
+- `UringProactor.create_socket()` submits ``IORING_OP_SOCKET`` for inet and
+  ``AF_UNIX`` when probed, ORing ``SOCK_NONBLOCK | SOCK_CLOEXEC`` into the
+  socket ``type`` (matching ``socket(2)``). Unix ``connect_to`` / ``initial_data``
+  hints still defer to ``io_manager.sock_connect()`` because uring
+  ``submit_connect()`` is inet-only today.
+- `ProactorIOManager` holds a direct scheduler reference; ``wait_operation()``
+  always parks the current tealet through ``ThreadsafeEvent`` and is torn down
+  from ``ProactorScheduler.close()``.
 - `UringProactor.connect()` and ``recv(..., 0)`` use stdlib fast paths for
   ``AF_UNIX`` and zero-length reads respectively on the uring backend.
 - ``run_asyncio_in_tealet()`` hosts asyncio socket helpers on a
