@@ -584,9 +584,13 @@ class _MultishotLegState:
 
 @dataclass(frozen=True, slots=True)
 class _ChainDeliver:
-    """Successful chain outcome passed to the owning operation's deliver hook."""
+    """Successful chain outcome passed to the owning operation's deliver hook.
 
-    nbytes: int
+    Fields are optional so new legs can attach data without changing call sites.
+    ``None`` at the deliver hook means no boxed outcome (reserved for future legs).
+    """
+
+    nbytes: int | None = None
 
 
 @dataclass
@@ -595,7 +599,7 @@ class _ChainState:
 
     root: _UringEntry
     current: _UringEntry
-    deliver: Callable[[_ChainDeliver], None]
+    deliver: Callable[[_ChainDeliver | None], None]
     fail: Callable[[BaseException], None]
     sock: socket.socket | None = None
     payload: memoryview = field(default_factory=lambda: memoryview(b""))
@@ -1705,7 +1709,7 @@ class UringProactor(ProactorBase):
         operation: Operation[Any],
         complete: _UringEntryComplete,
         *,
-        deliver: Callable[[_ChainDeliver], None],
+        deliver: Callable[[_ChainDeliver | None], None],
         fail: Callable[[BaseException], None],
         root_skip_cancel: bool = False,
     ) -> _UringEntry:
@@ -1782,7 +1786,7 @@ class UringProactor(ProactorBase):
             return operation
         chain.send_offset += res
         if chain.send_offset >= chain.payload.nbytes:
-            chain.deliver(_ChainDeliver(chain.send_offset))
+            chain.deliver(_ChainDeliver(nbytes=chain.send_offset))
             return operation
         assert chain.sock is not None
         self._submit_chained_sendall_chunk(chain, entry, chain.sock)
@@ -1805,7 +1809,7 @@ class UringProactor(ProactorBase):
                 chain.sock = None
             return operation
         if not chain.payload:
-            chain.deliver(_ChainDeliver(0))
+            chain.deliver(_ChainDeliver())
             return operation
         assert chain.sock is not None
         self._chained_sendall(chain, entry, chain.sock)
@@ -2491,7 +2495,7 @@ class UringProactor(ProactorBase):
             chain = entry.chain
             assert chain is not None
 
-            def deliver(_result: _ChainDeliver) -> None:
+            def deliver(_result: _ChainDeliver | None) -> None:
                 sock = chain.sock
                 assert sock is not None
                 operation._set_result((sock, True, True))
