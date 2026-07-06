@@ -17,6 +17,7 @@ class _MockProactor:
     def __init__(self) -> None:
         self.recv_calls: list[tuple[socket.socket, int]] = []
         self.poll_calls: list[tuple[int, int]] = []
+        self.send_calls: list[tuple[socket.socket, Any]] = []
         self.sendall_calls: list[tuple[socket.socket, Any]] = []
         self.openat_calls: list[tuple[str, int, int]] = []
 
@@ -30,6 +31,12 @@ class _MockProactor:
         self.poll_calls.append((fd, mask))
         operation = Operation[int](kind="poll", fileobj=fd)
         operation._set_result(mask)
+        return operation
+
+    def send(self, sock: socket.socket, data: Any) -> Operation[int]:
+        self.send_calls.append((sock, data))
+        operation = Operation[int](kind="send", fileobj=sock.fileno())
+        operation._set_result(len(bytes(data)))
         return operation
 
     def sendall(self, sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
@@ -139,6 +146,16 @@ class TestProactorIOManagerDirect:
         try:
             assert io.sock_recv(sock, 4) == b"mock"
             assert proactor.recv_calls == [(sock, 4)]
+        finally:
+            sock.close()
+
+    def test_sock_send_delegates_to_proactor(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        sock = socket.socketpair()[0]
+        try:
+            assert io.sock_send(sock, b"hello") == 5
+            assert proactor.send_calls == [(sock, b"hello")]
         finally:
             sock.close()
 

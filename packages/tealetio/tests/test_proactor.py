@@ -50,8 +50,9 @@ _RecvManySeen = tuple[int, memoryview | Callable[[], None]]
 
 
 def _assert_scheduler_socket_fd(sock: socket.socket) -> None:
-    """IORING_OP_SOCKET sets O_NONBLOCK and CLOEXEC on the fd; Python fileno import may not sync getblocking()."""
+    """Uring socket fds are non-blocking and close-on-exec; wrapper state must match."""
 
+    assert sock.getblocking() is False
     flags = fcntl.fcntl(sock.fileno(), fcntl.F_GETFL)
     assert flags & os.O_NONBLOCK
     assert not os.get_inheritable(sock.fileno())
@@ -844,6 +845,23 @@ class TestSelectorProactor:
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
             assert bytes(buf) == b"world"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_can_complete_immediately(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            operation = proactor.send(writer, b"hello")
+
+            assert operation.done() is True
+            assert operation.result() == 5
+            assert reader.recv(5) == b"hello"
         finally:
             reader.close()
             writer.close()
@@ -3079,6 +3097,27 @@ class TestUringProactor:
             assert proactor.has_pending_operations() is False
             with pytest.raises(CancelledError):
                 operation.result()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_completes_from_ring_completion(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            operation = proactor.send(writer, payload)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == 5
+            assert isinstance(proactor.ring, _FakeUringRing)
+            submitted = proactor.ring.submitted_send[0][1]
+            assert isinstance(submitted, memoryview)
+            assert submitted.obj is payload
+            assert bytes(submitted) == b"hello"
         finally:
             reader.close()
             writer.close()

@@ -77,6 +77,8 @@ class SocketIO(Protocol):
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]: ...
 
+    def sock_send(self, sock: socket.socket, data: SocketSendBuffer) -> int: ...
+
     def sock_sendall(
         self,
         sock: socket.socket,
@@ -267,6 +269,9 @@ class ProactorIOManager:
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
         return self.wait_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
+
+    def sock_send(self, sock: socket.socket, data: Any) -> int:
+        return self.wait_operation(self._proactor.send(sock, data))
 
     def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> None:
         return self.wait_operation(self._proactor.sendall(sock, data, progress))

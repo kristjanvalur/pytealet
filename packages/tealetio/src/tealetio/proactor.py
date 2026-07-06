@@ -34,7 +34,7 @@ from .recv_iter import (
     _RecvManyResult,
     _RecvManyResume,
 )
-from .socket_helpers import configure_scheduler_socket
+from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
 from .operations import ContinuousOperation, ContinuousStepResult, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
@@ -301,6 +301,8 @@ class Proactor(Protocol):
     def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]: ...
 
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]: ...
+
+    def send(self, sock: socket.socket, data: Any) -> Operation[int]: ...
 
     def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]: ...
 
@@ -601,10 +603,6 @@ class _ChainState:
     current: _UringEntry
     deliver: Callable[[_ChainDeliver | None], None]
     fail: Callable[[BaseException], None]
-    sock: socket.socket | None = None
-    payload: memoryview = field(default_factory=lambda: memoryview(b""))
-    owned_sock: socket.socket | None = None
-    send_offset: int = 0
 
 
 class _UringEntry:
@@ -1710,6 +1708,7 @@ class UringProactor(ProactorBase):
         *,
         deliver: Callable[[_ChainDeliver | None], None],
         fail: Callable[[BaseException], None],
+        owned_sock: list[socket.socket | None] | None = None,
     ) -> _UringEntry:
         """Create the root leg of a multi-submission chain with chain-aware cancel."""
 
@@ -1723,7 +1722,7 @@ class UringProactor(ProactorBase):
         entry.chain = chain
 
         def cancel() -> None:
-            self._cancel_uring_chain(chain, operation)
+            self._cancel_uring_chain(chain, operation, owned_sock)
 
         operation.set_cancel(cancel)
         return entry
@@ -1750,67 +1749,72 @@ class UringProactor(ProactorBase):
         chain: _ChainState,
         parent: _UringEntry,
         sock: socket.socket,
+        payload: memoryview,
     ) -> _UringEntry:
-        chain.send_offset = 0
-        send_entry = self._arm_chain_leg(chain, parent, self._fini_chained_sendall_leg)
-        self._submit_chained_sendall_chunk(chain, send_entry, sock)
+        send_offset = [0]
+
+        def fini_chained_sendall(entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+            operation = entry.operation
+            if operation.done():
+                return operation
+            res = completion.res
+            if res == 0:
+                chain.fail(BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
+                return operation
+            if res < 0:
+                chain.fail(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+                return operation
+            send_offset[0] += res
+            if send_offset[0] >= payload.nbytes:
+                chain.deliver(_ChainDeliver(nbytes=send_offset[0]))
+                return operation
+            self._submit_chained_sendall_chunk(entry, sock, payload, send_offset)
+            return None
+
+        send_entry = self._arm_chain_leg(chain, parent, fini_chained_sendall)
+        self._submit_chained_sendall_chunk(send_entry, sock, payload, send_offset)
         return send_entry
 
     def _submit_chained_sendall_chunk(
         self,
-        chain: _ChainState,
         entry: _UringEntry,
         sock: socket.socket,
+        payload: memoryview,
+        send_offset: list[int],
     ) -> None:
-        payload = chain.payload
         self._submit_uring_entry(
             entry,
-            lambda: self._submit_send(sock.fileno(), payload[chain.send_offset :], entry),
+            lambda: self._submit_send(sock.fileno(), payload[send_offset[0] :], entry),
         )
 
-    def _fini_chained_sendall_leg(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
-        chain = entry.chain
-        assert chain is not None
-        operation = entry.operation
-        if operation.done():
-            return operation
-        res = completion.res
-        if res == 0:
-            chain.fail(BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
-            return operation
-        if res < 0:
-            chain.fail(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
-            return operation
-        chain.send_offset += res
-        if chain.send_offset >= chain.payload.nbytes:
-            chain.deliver(_ChainDeliver(nbytes=chain.send_offset))
-            return operation
-        assert chain.sock is not None
-        self._submit_chained_sendall_chunk(chain, entry, chain.sock)
-        return None
+    def _fini_sock_connect_leg(
+        self,
+        sock: socket.socket,
+        payload: memoryview,
+        owned_sock: list[socket.socket | None] | None = None,
+    ) -> _UringEntryComplete:
+        def fini(entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+            chain = entry.chain
+            assert chain is not None
+            operation = entry.operation
+            if operation.done():
+                return operation
+            res = completion.res
+            if res < 0:
+                chain.fail(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+                return operation
+            if operation.done():
+                if owned_sock is not None and owned_sock[0] is not None:
+                    _close_owned_socket(owned_sock[0])
+                    owned_sock[0] = None
+                return operation
+            if not payload:
+                chain.deliver(_ChainDeliver())
+                return operation
+            self._chained_sendall(chain, entry, sock, payload)
+            return None
 
-    def _fini_sock_connect_leg(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
-        chain = entry.chain
-        assert chain is not None
-        operation = entry.operation
-        if operation.done():
-            return operation
-        res = completion.res
-        if res < 0:
-            chain.fail(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
-            return operation
-        if operation.done():
-            if chain.owned_sock is not None:
-                _close_owned_socket(chain.owned_sock)
-                chain.owned_sock = None
-                chain.sock = None
-            return operation
-        if not chain.payload:
-            chain.deliver(_ChainDeliver())
-            return operation
-        assert chain.sock is not None
-        self._chained_sendall(chain, entry, chain.sock)
-        return None
+        return fini
 
     def _chained_sock_connect(
         self,
@@ -1818,20 +1822,31 @@ class UringProactor(ProactorBase):
         parent: _UringEntry,
         sock: socket.socket,
         address: Any,
+        payload: memoryview,
+        *,
+        owned_sock: list[socket.socket | None] | None = None,
     ) -> _UringEntry:
-        connect_entry = self._arm_chain_leg(chain, parent, self._fini_sock_connect_leg)
+        connect_entry = self._arm_chain_leg(
+            chain,
+            parent,
+            self._fini_sock_connect_leg(sock, payload, owned_sock),
+        )
         self._submit_uring_entry(
             connect_entry,
             lambda: self._ring.submit_connect(sock.fileno(), address, connect_entry),
         )
         return connect_entry
 
-    def _cancel_uring_chain(self, chain: _ChainState, operation: Operation[Any]) -> None:
+    def _cancel_uring_chain(
+        self,
+        chain: _ChainState,
+        operation: Operation[Any],
+        owned_sock: list[socket.socket | None] | None = None,
+    ) -> None:
         if self._cancel_all_deferred_for_operation(operation):
-            if chain.owned_sock is not None:
-                _close_owned_socket(chain.owned_sock)
-                chain.owned_sock = None
-                chain.sock = None
+            if owned_sock is not None and owned_sock[0] is not None:
+                _close_owned_socket(owned_sock[0])
+                owned_sock[0] = None
             if operation._set_cancelled():
                 self.break_wait()
             return
@@ -1848,10 +1863,9 @@ class UringProactor(ProactorBase):
                     entry.completion = None
             entry = entry.parent
 
-        if chain.owned_sock is not None:
-            _close_owned_socket(chain.owned_sock)
-            chain.owned_sock = None
-            chain.sock = None
+        if owned_sock is not None and owned_sock[0] is not None:
+            _close_owned_socket(owned_sock[0])
+            owned_sock[0] = None
 
         if operation._set_cancelled():
             self.break_wait()
@@ -2123,6 +2137,27 @@ class UringProactor(ProactorBase):
         operation._set_result((completion.res, completion.result))
         return operation
 
+    def send(self, sock: socket.socket, data: Any) -> Operation[int]:
+        """Submit a socket send operation."""
+
+        operation = Operation[int](kind="send", fileobj=sock)
+        payload = memoryview(data)
+        if not payload:
+            self._check_open()
+            operation._set_result(0)
+            return operation
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_send(entry, completion),
+        )
+        self._submit_uring_entry(entry, lambda: self._submit_send(sock.fileno(), payload, entry))
+        return operation
+
+    def _complete_uring_send(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], entry.operation)
+        operation._set_result(completion.res)
+        return operation
+
     def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]:
         """Submit a socket send-all operation."""
 
@@ -2194,8 +2229,7 @@ class UringProactor(ProactorBase):
         self, entry: _UringEntry, completion: _UringCompletion
     ) -> Operation[tuple[socket.socket, Any]]:
         fd, address = cast(tuple[int, Any], completion.result)
-        conn = socket.socket(fileno=fd)
-        configure_scheduler_socket(conn)
+        conn = socket_from_uring_fd(fd)
         operation = cast(Operation[tuple[socket.socket, Any]], entry.operation)
         operation._set_result((conn, address))
         return operation
@@ -2344,8 +2378,7 @@ class UringProactor(ProactorBase):
             operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
         fd, address = cast(tuple[int, Any], completion.result)
-        conn = socket.socket(fileno=fd)
-        configure_scheduler_socket(conn)
+        conn = socket_from_uring_fd(fd)
         _handoff_accept_many(operation, conn, address, None, None)
         if operation.done():
             return operation
@@ -2374,8 +2407,7 @@ class UringProactor(ProactorBase):
             )
             return operation
         fd, address = cast(tuple[int, Any], completion.result)
-        conn = socket.socket(fileno=fd)
-        configure_scheduler_socket(conn)
+        conn = socket_from_uring_fd(fd)
         if operation.done():
             conn.close()
         elif recv_size is None:
@@ -2473,6 +2505,20 @@ class UringProactor(ProactorBase):
 
         if self._capabilities.get("IORING_OP_SOCKET", False):
             socket_flags = flags | _DEFAULT_ACCEPT_FLAGS
+            owned_sock: list[socket.socket | None] = [None]
+
+            def deliver(_result: _ChainDeliver | None) -> None:
+                sock = owned_sock[0]
+                assert sock is not None
+                operation._set_result((sock, True, True))
+
+            def fail(exc: BaseException) -> None:
+                sock = owned_sock[0]
+                if sock is not None:
+                    self._fail_create_socket(operation, sock, exc)
+                    owned_sock[0] = None
+                elif not operation.done():
+                    operation._set_exception(exc)
 
             entry = self._uring_chain_root_entry(
                 operation,
@@ -2482,27 +2528,12 @@ class UringProactor(ProactorBase):
                     operation,
                     connect_to,
                     initial_data,
+                    owned_sock,
                 ),
-                deliver=lambda _result: None,
-                fail=operation._set_exception,
+                deliver=deliver,
+                fail=fail,
+                owned_sock=owned_sock,
             )
-            chain = entry.chain
-            assert chain is not None
-
-            def deliver(_result: _ChainDeliver | None) -> None:
-                sock = chain.sock
-                assert sock is not None
-                operation._set_result((sock, True, True))
-
-            def fail(exc: BaseException) -> None:
-                sock = chain.sock
-                if sock is not None:
-                    self._fail_create_socket(operation, sock, exc)
-                elif not operation.done():
-                    operation._set_exception(exc)
-
-            chain.deliver = deliver
-            chain.fail = fail
             self._submit_uring_entry(
                 entry,
                 lambda: self._ring.submit_socket(family, type, proto, socket_flags, entry),
@@ -2539,14 +2570,10 @@ class UringProactor(ProactorBase):
         payload = memoryview(initial)
         entry = self._uring_chain_root_entry(
             operation,
-            self._fini_sock_connect_leg,
+            self._fini_sock_connect_leg(sock, payload),
             deliver=lambda _result: operation._set_result(True),
             fail=operation._set_exception,
         )
-        chain = entry.chain
-        assert chain is not None
-        chain.sock = sock
-        chain.payload = payload
         self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
         return operation
 
@@ -2573,6 +2600,7 @@ class UringProactor(ProactorBase):
         operation: Operation[CreateSocketResult],
         connect_to: Any | None,
         initial_data: SocketSendBuffer | None,
+        owned_sock: list[socket.socket | None],
     ) -> Operation[CreateSocketResult] | None:
         chain = entry.chain
         assert chain is not None
@@ -2587,19 +2615,17 @@ class UringProactor(ProactorBase):
             except OSError:
                 pass
             return operation
-        sock = socket.socket(fileno=res)
-        chain.sock = sock
-        chain.owned_sock = sock
+        sock = socket_from_uring_fd(res)
+        owned_sock[0] = sock
         if connect_to is None:
             operation._set_result((sock, False, False))
             return operation
         if operation.done():
             _close_owned_socket(sock)
-            chain.owned_sock = None
-            chain.sock = None
+            owned_sock[0] = None
             return operation
-        chain.payload = memoryview(initial_data) if initial_data is not None else memoryview(b"")
-        self._chained_sock_connect(chain, entry, sock, connect_to)
+        payload = memoryview(initial_data) if initial_data is not None else memoryview(b"")
+        self._chained_sock_connect(chain, entry, sock, connect_to, payload, owned_sock=owned_sock)
         return None
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:

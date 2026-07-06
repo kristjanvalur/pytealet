@@ -233,10 +233,10 @@ class ForwardingProactor:
 
         return self._future_from_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
 
-    def send(self, sock: socket.socket, data: Any) -> _asyncio.Future[None]:
-        """Send all bytes through the host proactor."""
+    def send(self, sock: socket.socket, data: Any) -> _asyncio.Future[int]:
+        """Send bytes through the host proactor."""
 
-        return self._future_from_operation(self._proactor.sendall(sock, data))
+        return self._future_from_operation(self._proactor.send(sock, data))
 
     def sendto(self, sock: socket.socket, data: Any, flags: int, address: Any) -> _asyncio.Future[int]:
         """Send datagram bytes through the host proactor."""
@@ -461,6 +461,15 @@ class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI)
 
         loop = _asyncio.get_running_loop()
         return self.await_(compat.sock_recvfrom_into(loop, sock, buf, nbytes))
+
+    def sock_send(self, sock: socket.socket, data: Any) -> int:
+        """Send `data` using asyncio socket readiness."""
+
+        loop = _asyncio.get_running_loop()
+        sock_send = getattr(loop, "sock_send", None)
+        if sock_send is None:
+            raise NotImplementedError("event loop does not support sock_send")
+        return self.await_(sock_send(sock, data))
 
     def sock_sendall(self, sock: socket.socket, data: Any) -> None:
         """Send all `data` using asyncio socket readiness."""
