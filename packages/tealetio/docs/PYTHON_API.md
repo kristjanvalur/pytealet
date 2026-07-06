@@ -637,7 +637,14 @@ fast path.
 
 `start_server(client_handler, addr=(host, port), async_=False, recv_size=None)`
 binds a TCP listening socket; use ``addr=(None, port)`` or ``addr=("", port)`` for
-all interfaces. Pass ``path=`` for Unix-domain listeners. ``recv_size`` opts into
+all interfaces. Pass ``path=`` for Unix-domain listeners, or ``sock=`` with a
+caller-prepared stream socket (``addr``/``path`` must not be passed as well).
+When binding via ``addr``, ``reuse_address`` and ``reuse_port`` mirror
+``asyncio.loop.create_server()``: ``reuse_address=None`` defaults to ``True`` on
+POSIX platforms other than Cygwin; ``reuse_port`` is off unless set to ``True``.
+With ``sock=``, tealetio applies the scheduler listen-socket contract
+(non-blocking, close-on-exec) and calls ``listen(backlog)``, like asyncio.
+``recv_size`` opts into
 accept-time pre-read and reader prefill on backends that honour the proactor hint
 (same semantics as ``accept_many`` above; default ``None``). Each accept arms
 `proactor.accept_many()`. Accepted connections are marshalled onto the scheduler

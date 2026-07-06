@@ -18,7 +18,6 @@ from tealetio.streams import (
     SocketTransport,
     StreamReader,
     StreamWriter,
-
     open_connection,
     open_streams,
     run_coro,
@@ -30,6 +29,8 @@ from uring_fakes import (
     _patch_uring_capabilities,
     run_scheduler_task,
 )
+
+from tealetio.streams import _default_reuse_address
 
 _HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
 
@@ -46,7 +47,6 @@ class TestStreamsPoC:
         set_scheduler(sched)
         yield sched
         sched.close()
-
 
     def test_async_stream_readexactly(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
@@ -269,7 +269,9 @@ class TestStreamsPoC:
         finally:
             server.close()
 
-    def test_open_connection_literal_ip_skips_executor(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_open_connection_literal_ip_skips_executor(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         calls: list[object] = []
         real_run = scheduler.run_in_executor
 
@@ -300,7 +302,9 @@ class TestStreamsPoC:
         finally:
             server.close()
 
-    def test_open_connection_hostname_uses_executor(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_open_connection_hostname_uses_executor(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         calls: list[object] = []
         real_run = scheduler.run_in_executor
 
@@ -492,7 +496,9 @@ class TestStreamsPoC:
 
         run_scheduler_task(scheduler, exercise)
 
-    def test_stream_server_wait_closed_returns_after_close_with_no_handlers(self, scheduler: SyncProactorScheduler) -> None:
+    def test_stream_server_wait_closed_returns_after_close_with_no_handlers(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
@@ -539,7 +545,9 @@ class TestStreamsPoC:
         run_scheduler_task(scheduler, exercise)
         assert wait_finished.is_set()
 
-    def test_stream_server_spawn_failure_restores_handler_count(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_stream_server_spawn_failure_restores_handler_count(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         real_spawn = scheduler.spawn
         serve_spawn_attempts = 0
         callback_errors: list[BaseException] = []
@@ -584,13 +592,16 @@ class TestStreamsPoC:
         finally:
             _client.close()
 
-    def test_stream_server_dispatch_client_on_closed_server_closes_connection(self, scheduler: SyncProactorScheduler) -> None:
+    def test_stream_server_dispatch_client_on_closed_server_closes_connection(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
         _client, accepted = socket.socketpair()
         try:
+
             def exercise() -> None:
                 server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
                 server.close()
@@ -609,7 +620,9 @@ class TestStreamsPoC:
         finally:
             _client.close()
 
-    def test_start_server_closes_accept_before_server_is_ready(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_start_server_closes_accept_before_server_is_ready(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         real_accept_many = scheduler.proactor.accept_many
 
         def eager_accept_many(sock: socket.socket, callback, *, recv_size=None):
@@ -648,7 +661,9 @@ class TestStreamsPoC:
             reader.close()
             writer.close()
 
-    def test_start_server_passes_recv_size_only_when_opted_in(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_start_server_passes_recv_size_only_when_opted_in(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
@@ -966,9 +981,7 @@ class TestStreamsPoC:
                 server.close()
 
 
-
 class TestStreamsFakeUring:
-
     def test_async_stream_readexactly_with_fake_uring_ring(self, monkeypatch: pytest.MonkeyPatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False, IORING_OP_SENDMSG_ZC=False)
         scheduler = _scheduler_with_fake_ring()
@@ -1054,6 +1067,98 @@ def test_run_coro_rejects_real_yields() -> None:
             run_coro(waits_on_future())
     finally:
         loop.close()
+
+
+def test_default_reuse_address_matches_asyncio() -> None:
+    import os
+    import sys
+
+    expected = os.name == "posix" and sys.platform != "cygwin"
+    assert _default_reuse_address() is expected
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+class TestStartServerListenOptions:
+    @pytest.fixture
+    def scheduler(self, scheduler_factory) -> SyncProactorScheduler:
+        sched = scheduler_factory()
+        set_scheduler(sched)
+        yield sched
+        sched.close()
+
+    def test_start_server_rejects_sock_with_addr(self, scheduler: SyncProactorScheduler) -> None:
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        def exercise() -> None:
+            listen_sock, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock.bind(("127.0.0.1", 0))
+            try:
+                with pytest.raises(ValueError, match="addr/path and sock cannot be specified"):
+                    start_server(
+                        client_handler,
+                        addr=("127.0.0.1", 0),
+                        sock=listen_sock,
+                        scheduler=scheduler,
+                    )
+            finally:
+                listen_sock.close()
+
+        run_scheduler_task(scheduler, exercise)
+
+    def test_start_server_accepts_prebound_sock(self, scheduler: SyncProactorScheduler) -> None:
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        def exercise() -> None:
+            listen_sock, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock.bind(("127.0.0.1", 0))
+            port = listen_sock.getsockname()[1]
+            server = start_server(client_handler, sock=listen_sock, scheduler=scheduler)
+            try:
+                assert server.sockets[0].fileno() == listen_sock.fileno()
+                assert listen_sock.getsockname() == ("127.0.0.1", port)
+                assert server.accept_operation.kind == "accept_many"
+            finally:
+                server.close()
+
+        run_scheduler_task(scheduler, exercise)
+
+    def test_start_server_honours_reuse_address_flag(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.streams as streams_module
+
+        captured: list[bool | None] = []
+        real_bind = streams_module._bind_tcp_socket
+
+        def capture_bind(io, addr, **kwargs):
+            captured.append(kwargs.get("reuse_address"))
+            return real_bind(io, addr, **kwargs)
+
+        monkeypatch.setattr(streams_module, "_bind_tcp_socket", capture_bind)
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        def exercise_without_reuse() -> None:
+            server = start_server(
+                client_handler,
+                addr=("127.0.0.1", 0),
+                reuse_address=False,
+                scheduler=scheduler,
+            )
+            server.close()
+
+        run_scheduler_task(scheduler, exercise_without_reuse)
+        assert captured == [False]
+
+        def exercise_with_default_reuse() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            server.close()
+
+        run_scheduler_task(scheduler, exercise_with_default_reuse)
+        assert captured[-1] is None
 
 
 class TestStreamsRequiresIO:

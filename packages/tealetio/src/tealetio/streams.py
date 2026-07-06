@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import sys
 from collections.abc import Callable, Coroutine
 from typing import Any, Literal, Protocol, TypeAlias, TypeVar, cast, overload
 
@@ -694,17 +695,52 @@ def _connect_unix_streams(
         raise
 
 
+def _default_reuse_address() -> bool:
+    return os.name == "posix" and sys.platform != "cygwin"
+
+
+def _set_reuseport(sock: socket.socket) -> None:
+    if not hasattr(socket, "SO_REUSEPORT"):
+        raise ValueError("reuse_port not supported by socket module")
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except OSError as exc:
+        raise ValueError(
+            "reuse_port not supported by socket module, SO_REUSEPORT defined but not implemented."
+        ) from exc
+
+
+def _apply_listen_socket_contract(sock: socket.socket) -> None:
+    sock.setblocking(False)
+    os.set_inheritable(sock.fileno(), False)
+
+
+def _prepare_listen_socket(sock: socket.socket, *, backlog: int) -> socket.socket:
+    if sock.type != socket.SOCK_STREAM:
+        raise ValueError(f"A stream socket was expected, got {sock!r}")
+    _apply_listen_socket_contract(sock)
+    sock.listen(backlog)
+    return sock
+
+
 def _bind_tcp_socket(
     io: SocketIO,
     addr: tuple[str | None, int],
     *,
     family: int = socket.AF_INET,
     backlog: int,
+    reuse_address: bool | None = None,
+    reuse_port: bool | None = None,
 ) -> socket.socket:
+    if reuse_address is None:
+        reuse_address = _default_reuse_address()
     host, port = addr
     sock, _, _ = io.sock_create(family, socket.SOCK_STREAM)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if reuse_address:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if reuse_port:
+            _set_reuseport(sock)
         bind_host = "" if host is None else host
         sock.bind((bind_host, port))
         sock.listen(backlog)
@@ -938,25 +974,39 @@ def _start_server(
     *,
     addr: tuple[str | None, int] | None = None,
     path: str | None = None,
+    sock: socket.socket | None = None,
     family: int = socket.AF_INET,
     backlog: int = 100,
+    reuse_address: bool | None = None,
+    reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
     io = _require_proactor_io(scheduler)
-    if path is not None:
+    if sock is not None:
+        if addr is not None or path is not None:
+            raise ValueError("addr/path and sock cannot be specified at the same time")
+        listen_sock = _prepare_listen_socket(sock, backlog=backlog)
+    elif path is not None:
         if addr is not None:
             raise TypeError("start_server() accepts addr= or path=, not both")
-        sock = _bind_unix_socket(io, path, backlog=backlog)
+        listen_sock = _bind_unix_socket(io, path, backlog=backlog)
     elif addr is not None:
-        sock = _bind_tcp_socket(io, addr, family=family, backlog=backlog)
+        listen_sock = _bind_tcp_socket(
+            io,
+            addr,
+            family=family,
+            backlog=backlog,
+            reuse_address=reuse_address,
+            reuse_port=reuse_port,
+        )
     else:
-        raise TypeError("start_server() requires addr= or path=")
+        raise TypeError("start_server() requires addr=, path=, or sock=")
     return _start_stream_server(
         scheduler,
-        sock,
+        listen_sock,
         client_handler,
         limit=limit,
         recv_size=recv_size,
@@ -972,6 +1022,8 @@ def start_server(
     addr: tuple[str | None, int],
     family: int = socket.AF_INET,
     backlog: int = 100,
+    reuse_address: bool | None = None,
+    reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
     stream_factory: StreamFactory | None = None,
@@ -986,6 +1038,8 @@ def start_server(
     addr: tuple[str | None, int],
     family: int = socket.AF_INET,
     backlog: int = 100,
+    reuse_address: bool | None = None,
+    reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
     stream_factory: AsyncStreamFactory | None = None,
@@ -1019,13 +1073,42 @@ def start_server(
 ) -> StreamServer: ...
 
 
+@overload
+def start_server(
+    client_handler: Callable[[StreamReader, StreamWriter], Any],
+    *,
+    sock: socket.socket,
+    backlog: int = 100,
+    limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
+    stream_factory: StreamFactory | None = None,
+    async_: Literal[False] = False,
+) -> StreamServer: ...
+
+
+@overload
+def start_server(
+    client_handler: Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]],
+    *,
+    sock: socket.socket,
+    backlog: int = 100,
+    limit: int = _DEFAULT_LIMIT,
+    recv_size: int | None = None,
+    stream_factory: AsyncStreamFactory | None = None,
+    async_: Literal[True],
+) -> StreamServer: ...
+
+
 def start_server(
     client_handler: _ClientHandler,
     *,
     addr: tuple[str | None, int] | None = None,
     path: str | None = None,
+    sock: socket.socket | None = None,
     family: int = socket.AF_INET,
     backlog: int = 100,
+    reuse_address: bool | None = None,
+    reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
     stream_factory: _StreamFactoryArg = None,
@@ -1034,8 +1117,14 @@ def start_server(
 ) -> StreamServer:
     """Start a stream server that dispatches each accept to ``client_handler``.
 
-    Pass ``addr=(host, port)`` for a TCP listener, or ``path`` for Unix-domain.
-    Use ``addr=(None, port)`` or ``addr=("", port)`` to bind all interfaces.
+    Pass ``addr=(host, port)`` for a TCP listener, ``path`` for Unix-domain, or
+    ``sock`` for a caller-prepared stream socket. Use ``addr=(None, port)`` or
+    ``addr=("", port)`` to bind all interfaces. When ``sock`` is passed, do not
+    also pass ``addr`` or ``path``; the socket is made non-blocking and
+    ``listen(backlog)`` is called, matching ``asyncio.loop.create_server()``.
+    ``reuse_address`` and ``reuse_port`` apply only when binding via ``addr``;
+    when ``reuse_address`` is ``None``, it defaults to ``True`` on POSIX
+    platforms other than Cygwin, like asyncio.
     ``async_=False`` uses native stream types and calls the handler directly;
     ``async_=True`` uses asyncio-shaped streams and drives the handler through
     ``run_coro()``. Pair ``async_`` with the handler shape encoded in the
@@ -1059,8 +1148,11 @@ def start_server(
         client_handler,
         addr=addr,
         path=path,
+        sock=sock,
         family=family,
         backlog=backlog,
+        reuse_address=reuse_address,
+        reuse_port=reuse_port,
         limit=limit,
         recv_size=recv_size,
         stream_factory=stream_factory,
