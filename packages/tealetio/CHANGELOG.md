@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sock_recv_iter` always yields `(index, memoryview)` and
   `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))`; the `allow_memview` option
   is removed.
+- `Proactor.sendall()` is removed. Use `Proactor.send()` for stream sends that
+  drain the full buffer before completing (`Operation[None]`). Datagram sends
+  remain `Proactor.sendto()`.
+- `Proactor.connect(..., initial=...)` now completes with `Operation[bool]`
+  (`True` when connect-time send ran, including an empty buffer) instead of
+  `Operation[int]` bytes sent. `SelectorProactor` still returns a falsy result
+  for connect-time send; use `scheduler.io.sock_connect()` / `sock_create()`
+  when you need initial data on any backend.
 
 ### Added
 - `Proactor.create_socket()` and `scheduler.io.sock_create()` to create

@@ -94,8 +94,12 @@ was provided and the connect/send chain flushed it (including an empty buffer),
 hints. ``connect_to`` and ``initial_data`` are optional hints; backends may
 ignore them and return ``(socket, False, False)`` after creation only.
 ``UringProactor`` honours the hints when practical, using
-``uring_api.Ring.submit_socket()`` when ``IORING_OP_SOCKET`` is probed and
-chaining connect plus sendall-style chunking for ``initial_data``.
+``uring_api.Ring.submit_socket()`` when ``IORING_OP_SOCKET`` is available and
+chaining connect plus sendall-style chunking for ``initial_data``. Extra
+``flags`` are ORed with non-blocking and close-on-exec on the uring socket
+path. ``SelectorProactor`` ignores ``flags`` beyond the scheduler defaults from
+``configure_scheduler_socket()`` (non-blocking, close-on-exec). ``initial_data``
+without ``connect_to`` raises ``ValueError`` on all proactor backends.
 ``scheduler.io.sock_create()`` blocks on the operation and, when hints were not
 honoured, falls back to ``sock_connect()`` so callers still get a connected
 socket. ``open_connection(..., initial_send=...)`` passes ``connect_to`` and
@@ -609,8 +613,8 @@ blocking IO. It returns ``(socket, is_connected, initial_sent)``. The socket is
 always non-blocking and close-on-exec. `ProactorIOManager.sock_create()` blocks
 on `Proactor.create_socket()`; when connect hints were not honoured it calls
 `sock_connect()` before returning. `UringProactor` uses
-`uring_api.Ring.submit_socket()` (`IORING_OP_SOCKET`) when the runtime probe
-accepts it, then wraps the returned fd with `socket.socket(fileno=fd)` (the same
+`uring_api.Ring.submit_socket()` (`IORING_OP_SOCKET`) when probed, then wraps
+the returned fd with `socket.socket(fileno=fd)` (the same
 pattern already used for `accept_many` completions). Connect/server helpers call
 `scheduler.io.sock_create()` so uring-native creation stays behind one policy
 gate.

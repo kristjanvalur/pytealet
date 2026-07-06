@@ -384,6 +384,8 @@ class Proactor(Protocol):
         probed, chaining socket creation, connect, and ``sendall``. Without that
         opcode it falls back to stdlib creation and does not connect or send. Any
         failure after creation closes the socket before the operation completes.
+        ``SelectorProactor`` ignores ``flags`` beyond the scheduler socket defaults
+        applied by ``configure_scheduler_socket()`` (non-blocking, close-on-exec).
         """
 
         ...
@@ -1724,11 +1726,22 @@ class UringProactor(ProactorBase):
         """Create the root leg of a multi-submission chain with chain-aware cancel."""
 
         entry = _UringEntry(operation=operation, complete=complete)
+
+        def guarded_deliver(result: _ChainDeliver | None) -> None:
+            if operation.done():
+                return
+            deliver(result)
+
+        def guarded_fail(exc: BaseException) -> None:
+            if operation.done():
+                return
+            fail(exc)
+
         chain = _ChainState(
             root=entry,
             current=entry,
-            deliver=deliver,
-            fail=fail,
+            deliver=guarded_deliver,
+            fail=guarded_fail,
         )
         entry.chain = chain
 
@@ -1813,15 +1826,11 @@ class UringProactor(ProactorBase):
             assert chain is not None
             operation = entry.operation
             if operation.done():
+                # cancel already closed owned_sock when the socket was adopted
                 return operation
             res = completion.res
             if res < 0:
                 chain.fail(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
-                return operation
-            if operation.done():
-                if owned_sock is not None and owned_sock[0] is not None:
-                    _close_owned_socket(owned_sock[0])
-                    owned_sock[0] = None
                 return operation
             if not payload:
                 chain.deliver(_ChainDeliver())
