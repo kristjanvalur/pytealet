@@ -7,15 +7,18 @@ import uring_api
 from helpers import kernel_version_at_least
 from conftest import require_uring
 
-_PROBE_KERNEL_FLOORS = {
+_VERSION_GATED_CAPABILITIES = {
     "IORING_OP_STATX": (5, 6),
     "IORING_POLL_MULTISHOT": (5, 13),
     "IORING_ACCEPT_MULTISHOT": (5, 19),
     "IORING_OP_SOCKET": (5, 19),
     "IORING_RECV_MULTISHOT": (6, 0),
-    "IORING_OP_SEND_ZC": (6, 0),
-    "IORING_OP_SENDMSG_ZC": (6, 0),
 }
+
+_RUNTIME_ZC_CAPABILITIES = (
+    "IORING_OP_SEND_ZC",
+    "IORING_OP_SENDMSG_ZC",
+)
 
 
 def test_probe_returns_structured_result():
@@ -52,8 +55,40 @@ def test_probe_capabilities_match_kernel_version_gates():
 
     probe = uring_api.probe()
     release = os.uname().release
-    for name, (major, minor) in _PROBE_KERNEL_FLOORS.items():
+    for name, (major, minor) in _VERSION_GATED_CAPABILITIES.items():
         expected = kernel_version_at_least(release, major, minor)
+        assert probe[name] is expected, name
+
+
+def test_probe_send_zc_capabilities_match_runtime_probe():
+    require_uring()
+
+    probe = uring_api.probe()
+    release = os.uname().release
+    if not kernel_version_at_least(release, 6, 0):
+        for name in _RUNTIME_ZC_CAPABILITIES:
+            assert probe[name] is False, name
+        return
+
+    import socket as std_socket
+
+    sender = std_socket.socket(std_socket.AF_INET, std_socket.SOCK_DGRAM)
+    receiver = std_socket.socket(std_socket.AF_INET, std_socket.SOCK_DGRAM)
+    sender.bind(("127.0.0.1", 0))
+    receiver.bind(("127.0.0.1", 0))
+    expected = False
+    try:
+        with uring_api.Ring() as ring:
+            pending = ring.submit_sendmsg_zc(sender.fileno(), b"x", receiver.getsockname(), None)
+            completion = ring.wait(1.0)
+            expected = completion.res > 0
+            if completion.flags & uring_api.IORING_CQE_F_MORE:
+                ring.wait(1.0)
+    finally:
+        sender.close()
+        receiver.close()
+
+    for name in _RUNTIME_ZC_CAPABILITIES:
         assert probe[name] is expected, name
 
 

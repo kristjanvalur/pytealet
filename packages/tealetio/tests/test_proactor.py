@@ -3127,19 +3127,49 @@ class TestUringProactor:
     def test_send_uses_send_zc_when_probe_supports_it(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
-        reader, writer = socket.socketpair()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        reader = None
+        writer = None
         try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            writer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            writer.connect(server.getsockname())
+            reader, _address = server.accept()
             writer.setblocking(False)
             payload = b"hello"
             operation = proactor.send(writer, payload)
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
-            assert proactor._submit_send.__name__ == "submit_send_zc"
-            submitted = proactor.ring.submitted_send[0][1]
+            assert len(proactor.ring.submitted_send_zc) == 1
+            assert proactor.ring.submitted_send == []
+            submitted = proactor.ring.submitted_send_zc[0][1]
             assert isinstance(submitted, memoryview)
             assert submitted.obj is payload
             assert bytes(submitted) == b"hello"
+        finally:
+            if reader is not None:
+                reader.close()
+            if writer is not None:
+                writer.close()
+            server.close()
+            proactor.close()
+
+    def test_send_uses_plain_send_for_unix_even_when_probe_supports_send_zc(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            operation = proactor.send(writer, b"hello")
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() is None
+            assert len(proactor.ring.submitted_send) == 1
+            assert proactor.ring.submitted_send_zc == []
+            assert proactor._send_zc_supported is True
         finally:
             reader.close()
             writer.close()
@@ -3155,8 +3185,8 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
-            assert proactor._submit_send.__name__ == "submit_send"
             assert len(proactor.ring.submitted_send) == 1
+            assert proactor.ring.submitted_send_zc == []
         finally:
             reader.close()
             writer.close()
@@ -3247,13 +3277,33 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
-            assert proactor._submit_sendto.__name__ == "submit_sendmsg_zc"
-            submitted = proactor.ring.submitted_sendto[0]
+            assert len(proactor.ring.submitted_sendmsg_zc) == 1
+            assert proactor.ring.submitted_sendto == []
+            submitted = proactor.ring.submitted_sendmsg_zc[0]
             assert submitted[0] == sender.fileno()
             assert isinstance(submitted[1], memoryview)
             assert submitted[1].obj is payload
             assert bytes(submitted[1]) == b"hello"
             assert submitted[2] == address
+        finally:
+            sender.close()
+            proactor.close()
+
+    def test_sendto_uses_plain_sendto_for_unix_even_when_probe_supports_sendmsg_zc(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SENDMSG_ZC=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        sender = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            sender.setblocking(False)
+            payload = b"hello"
+            address = "/tmp/tealetio-sendto-test"
+            operation = proactor.sendto(sender, payload, address)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() == 5
+            assert len(proactor.ring.submitted_sendto) == 1
+            assert proactor.ring.submitted_sendmsg_zc == []
+            assert proactor._sendmsg_zc_supported is True
         finally:
             sender.close()
             proactor.close()
@@ -3268,8 +3318,8 @@ class TestUringProactor:
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
-            assert proactor._submit_sendto.__name__ == "submit_sendto"
             assert len(proactor.ring.submitted_sendto) == 1
+            assert proactor.ring.submitted_sendmsg_zc == []
         finally:
             sender.close()
             proactor.close()

@@ -112,7 +112,9 @@ class _FakeUringRing:
         self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
+        self.submitted_send_zc: list[tuple[int, object, object]] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
+        self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object, int]] = []
         self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
@@ -353,12 +355,34 @@ class _FakeUringRing:
         return completion
 
     def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        return self.submit_send(fd, data, user_data)
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_send_zc.append((fd, data, user_data))
+        completion = self._completion(
+            user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=len(payload), result=len(payload)
+        )
+        if getattr(user_data, "parent", None) is not None:
+            self.pending_connect_send.append(completion)
+            return completion
+        self._deliver(completion)
+        return completion
 
     def submit_sendmsg_zc(
         self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
     ) -> SimpleNamespace:
-        return self.submit_sendto(fd, data, address, user_data)
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        self.submitted_sendmsg_zc.append((fd, data, address, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SENDMSG_ZC,
+            res=len(payload),
+            result=len(payload),
+        )
+        self._deliver(completion)
+        return completion
 
     def submit_accept(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:

@@ -265,8 +265,7 @@ def _leased_selector_memoryview(data: bytes | bytearray, pool: _SelectorBufGroup
 
 
 _UringRingFactory = Callable[[int, int], _UringRing]
-_UringSendSubmit = Callable[[int, Any, object], _UringCompletion]
-_UringSendtoSubmit = Callable[[int, Any, Any, object], _UringCompletion]
+
 
 
 def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
@@ -1621,12 +1620,8 @@ class UringProactor(ProactorBase):
             self._capabilities = uring_api.probe(entries=entries, flags=flags)
         except (OSError, RuntimeError, NotImplementedError):
             self._capabilities = {}
-        self._submit_send: _UringSendSubmit = self._ring.submit_send
-        if self._capabilities.get("IORING_OP_SEND_ZC", False):
-            self._submit_send = self._ring.submit_send_zc
-        self._submit_sendto: _UringSendtoSubmit = self._ring.submit_sendto
-        if self._capabilities.get("IORING_OP_SENDMSG_ZC", False):
-            self._submit_sendto = self._ring.submit_sendmsg_zc
+        self._send_zc_supported = self._capabilities.get("IORING_OP_SEND_ZC", False)
+        self._sendmsg_zc_supported = self._capabilities.get("IORING_OP_SENDMSG_ZC", False)
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by resubmitting the matching one-shot opcode after
         # each completion (see the *_oneshot delivery handlers below).
@@ -1785,7 +1780,11 @@ class UringProactor(ProactorBase):
     ) -> None:
         self._submit_uring_entry(
             entry,
-            lambda: self._submit_send(sock.fileno(), payload[send_offset[0] :], entry),
+            lambda: (
+                self._ring.submit_send_zc(sock.fileno(), payload[send_offset[0] :], entry)
+                if self._send_zc_supported and sock.family != socket.AF_UNIX
+                else self._ring.submit_send(sock.fileno(), payload[send_offset[0] :], entry)
+            ),
         )
 
     def _fini_sock_connect_leg(
@@ -2193,7 +2192,14 @@ class UringProactor(ProactorBase):
             operation,
             lambda entry, completion: self._complete_uring_sendto(entry, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._submit_sendto(sock.fileno(), payload, address, entry))
+        self._submit_uring_entry(
+            entry,
+            lambda: (
+                self._ring.submit_sendmsg_zc(sock.fileno(), payload, address, entry)
+                if self._sendmsg_zc_supported and sock.family != socket.AF_UNIX
+                else self._ring.submit_sendto(sock.fileno(), payload, address, entry)
+            ),
+        )
         return operation
 
     def _complete_uring_sendto(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
@@ -3147,7 +3153,14 @@ class UringProactor(ProactorBase):
             operation,
             lambda entry, completion: self._complete_uring_sendall(entry, completion, data, offset, progress),
         )
-        self._submit_uring_entry(entry, lambda: self._submit_send(sock.fileno(), data[offset:], entry))
+        self._submit_uring_entry(
+            entry,
+            lambda: (
+                self._ring.submit_send_zc(sock.fileno(), data[offset:], entry)
+                if self._send_zc_supported and sock.family != socket.AF_UNIX
+                else self._ring.submit_send(sock.fileno(), data[offset:], entry)
+            ),
+        )
 
     def _submit_recvmsg(
         self,
