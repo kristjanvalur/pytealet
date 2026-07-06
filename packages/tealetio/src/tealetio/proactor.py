@@ -282,7 +282,6 @@ def _leased_selector_memoryview(data: bytes | bytearray, pool: _SelectorBufGroup
 _UringRingFactory = Callable[[int, int], _UringRing]
 
 
-
 def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
     return uring_api.Ring(entries=entries, flags=flags)
 
