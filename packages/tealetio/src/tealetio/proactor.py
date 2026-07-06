@@ -582,14 +582,20 @@ class _MultishotLegState:
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
+@dataclass(frozen=True, slots=True)
+class _ChainDeliver:
+    """Successful chain outcome passed to the owning operation's deliver hook."""
+
+    nbytes: int
+
+
 @dataclass
 class _ChainState:
     """Per-operation io_uring chain metadata for multi-leg submissions."""
 
     root: _UringEntry
     current: _UringEntry
-    deliver_sent: Callable[[int], None]
-    deliver_empty: Callable[[], None]
+    deliver: Callable[[_ChainDeliver], None]
     fail: Callable[[BaseException], None]
     sock: socket.socket | None = None
     payload: memoryview = field(default_factory=lambda: memoryview(b""))
@@ -1699,8 +1705,7 @@ class UringProactor(ProactorBase):
         operation: Operation[Any],
         complete: _UringEntryComplete,
         *,
-        deliver_sent: Callable[[int], None],
-        deliver_empty: Callable[[], None],
+        deliver: Callable[[_ChainDeliver], None],
         fail: Callable[[BaseException], None],
         root_skip_cancel: bool = False,
     ) -> _UringEntry:
@@ -1710,8 +1715,7 @@ class UringProactor(ProactorBase):
         chain = _ChainState(
             root=entry,
             current=entry,
-            deliver_sent=deliver_sent,
-            deliver_empty=deliver_empty,
+            deliver=deliver,
             fail=fail,
             root_skip_cancel=root_skip_cancel,
         )
@@ -1778,7 +1782,7 @@ class UringProactor(ProactorBase):
             return operation
         chain.send_offset += res
         if chain.send_offset >= chain.payload.nbytes:
-            chain.deliver_sent(chain.send_offset)
+            chain.deliver(_ChainDeliver(chain.send_offset))
             return operation
         assert chain.sock is not None
         self._submit_chained_sendall_chunk(chain, entry, chain.sock)
@@ -1801,7 +1805,7 @@ class UringProactor(ProactorBase):
                 chain.sock = None
             return operation
         if not chain.payload:
-            chain.deliver_empty()
+            chain.deliver(_ChainDeliver(0))
             return operation
         assert chain.sock is not None
         self._chained_sendall(chain, entry, chain.sock)
@@ -2480,20 +2484,14 @@ class UringProactor(ProactorBase):
                     connect_to,
                     initial_data,
                 ),
-                deliver_sent=lambda _sent: None,
-                deliver_empty=lambda: None,
+                deliver=lambda _result: None,
                 fail=operation._set_exception,
                 root_skip_cancel=True,
             )
             chain = entry.chain
             assert chain is not None
 
-            def deliver_sent(_sent: int) -> None:
-                sock = chain.sock
-                assert sock is not None
-                operation._set_result((sock, True, True))
-
-            def deliver_empty() -> None:
+            def deliver(_result: _ChainDeliver) -> None:
                 sock = chain.sock
                 assert sock is not None
                 operation._set_result((sock, True, True))
@@ -2505,8 +2503,7 @@ class UringProactor(ProactorBase):
                 elif not operation.done():
                     operation._set_exception(exc)
 
-            chain.deliver_sent = deliver_sent
-            chain.deliver_empty = deliver_empty
+            chain.deliver = deliver
             chain.fail = fail
             self._submit_uring_entry(
                 entry,
@@ -2545,8 +2542,7 @@ class UringProactor(ProactorBase):
         entry = self._uring_chain_root_entry(
             operation,
             self._fini_sock_connect_leg,
-            deliver_sent=lambda _sent: operation._set_result(True),
-            deliver_empty=lambda: operation._set_result(True),
+            deliver=lambda _result: operation._set_result(True),
             fail=operation._set_exception,
         )
         chain = entry.chain
