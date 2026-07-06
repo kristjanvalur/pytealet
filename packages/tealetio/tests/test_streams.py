@@ -28,6 +28,7 @@ from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
     _FakeUringRing,
     _patch_uring_capabilities,
+    run_scheduler_task,
 )
 
 _HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
@@ -117,19 +118,21 @@ class TestStreamsPoC:
             writer.close()
 
     def test_start_server_closes_listener_socket_when_bind_fails(self, scheduler: SyncProactorScheduler) -> None:
-        blocker, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
-        blocker.bind(("127.0.0.1", 0))
-        port = blocker.getsockname()[1]
-        blocker.listen(1)
-
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        try:
-            with pytest.raises(OSError):
-                start_server(client_handler, addr=("127.0.0.1", port), scheduler=scheduler)
-        finally:
-            blocker.close()
+        def exercise() -> None:
+            blocker, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            blocker.bind(("127.0.0.1", 0))
+            port = blocker.getsockname()[1]
+            blocker.listen(1)
+            try:
+                with pytest.raises(OSError):
+                    start_server(client_handler, addr=("127.0.0.1", port), scheduler=scheduler)
+            finally:
+                blocker.close()
+
+        run_scheduler_task(scheduler, exercise)
 
     def test_native_stream_read_and_write(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
@@ -453,16 +456,18 @@ class TestStreamsPoC:
                 server.close()
 
     def test_stream_server_context_manager_closes_listener(self, scheduler: SyncProactorScheduler) -> None:
-
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-        listen_sock = server.sockets[0]
-        with server:
-            assert listen_sock.fileno() != -1
-            assert server.accept_operation.kind == "accept_many"
-        assert listen_sock.fileno() == -1
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            listen_sock = server.sockets[0]
+            with server:
+                assert listen_sock.fileno() != -1
+                assert server.accept_operation.kind == "accept_many"
+            assert listen_sock.fileno() == -1
+
+        run_scheduler_task(scheduler, exercise)
 
     def test_stream_server_serve_forever_unblocks_on_close(self, scheduler: SyncProactorScheduler) -> None:
         finished = Event()
@@ -470,9 +475,9 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-
         def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+
             def run_server() -> None:
                 server.serve_forever()
                 finished.set()
@@ -485,20 +490,18 @@ class TestStreamsPoC:
             scheduler.spawn(shutdown)
             finished.swait()
 
-        scheduler.run_until_complete(scheduler.spawn(exercise))
+        run_scheduler_task(scheduler, exercise)
 
     def test_stream_server_wait_closed_returns_after_close_with_no_handlers(self, scheduler: SyncProactorScheduler) -> None:
-
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-        server.close()
-
         def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            server.close()
             server.wait_closed()
 
-        scheduler.run_until_complete(scheduler.spawn(exercise))
+        run_scheduler_task(scheduler, exercise)
 
     def test_stream_server_wait_closed_waits_for_in_flight_handler(self, scheduler: SyncProactorScheduler) -> None:
         handler_started = Event()
@@ -510,10 +513,10 @@ class TestStreamsPoC:
             release_handler.swait()
             writer.close()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-        _host, port = server.sockets[0].getsockname()
-
         def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            _host, port = server.sockets[0].getsockname()
+
             def connect() -> None:
                 _reader, writer = open_connection(addr=("127.0.0.1", port))
                 writer.write(b"x")
@@ -533,7 +536,7 @@ class TestStreamsPoC:
             release_handler.set()
             wait_task.wait()
 
-        scheduler.run_until_complete(scheduler.spawn(exercise))
+        run_scheduler_task(scheduler, exercise)
         assert wait_finished.is_set()
 
     def test_stream_server_spawn_failure_restores_handler_count(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -554,42 +557,43 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         _client, accepted = socket.socketpair()
         try:
             accepted.setblocking(False)
 
             def exercise() -> None:
-                server._dispatch_client(
-                    accepted,
-                    limit=2**16,
-                    stream_factory=None,
-                    client_handler=client_handler,
-                    async_=False,
-                )
-                scheduler.yield_()
-                server.close()
-                server.wait_closed()
+                server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+                try:
+                    server._dispatch_client(
+                        accepted,
+                        limit=2**16,
+                        stream_factory=None,
+                        client_handler=client_handler,
+                        async_=False,
+                    )
+                    scheduler.yield_()
+                    server.close()
+                    server.wait_closed()
+                finally:
+                    server.close()
 
-            scheduler.run_until_complete(scheduler.spawn(exercise))
+            run_scheduler_task(scheduler, exercise)
             assert serve_spawn_attempts == 1
             assert len(callback_errors) == 1
             assert str(callback_errors[0]) == "spawn failed"
         finally:
             _client.close()
-            server.close()
 
     def test_stream_server_dispatch_client_on_closed_server_closes_connection(self, scheduler: SyncProactorScheduler) -> None:
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
         _client, accepted = socket.socketpair()
         try:
-            server.close()
-
             def exercise() -> None:
+                server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+                server.close()
                 server._dispatch_client(
                     accepted,
                     limit=2**16,
@@ -598,13 +602,12 @@ class TestStreamsPoC:
                     async_=False,
                 )
                 server.wait_closed()
+                assert server._active_handlers == 0
+                assert accepted.fileno() == -1
 
-            scheduler.run_until_complete(scheduler.spawn(exercise))
-            assert server._active_handlers == 0
-            assert accepted.fileno() == -1
+            run_scheduler_task(scheduler, exercise)
         finally:
             _client.close()
-            server.close()
 
     def test_start_server_closes_accept_before_server_is_ready(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
         real_accept_many = scheduler.proactor.accept_many
@@ -625,11 +628,14 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-        try:
-            assert server._active_handlers == 0
-        finally:
-            server.close()
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            try:
+                assert server._active_handlers == 0
+            finally:
+                server.close()
+
+        run_scheduler_task(scheduler, exercise)
 
     def test_stream_reader_feed_initial_avoids_socket_recv(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
@@ -646,7 +652,9 @@ class TestStreamsPoC:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
-        def run_with_recv_size(recv_size: int | None) -> int | None:
+        captured_results: list[int | None] = []
+
+        def run_with_recv_size(recv_size: int | None) -> None:
             captured: list[int | None] = []
             real_accept_many = scheduler.proactor.accept_many
 
@@ -655,19 +663,24 @@ class TestStreamsPoC:
                 return real_accept_many(sock, callback, recv_size=recv_size)
 
             monkeypatch.setattr(scheduler.proactor, "accept_many", capture_accept_many)
-            server = start_server(
-                client_handler,
-                addr=("127.0.0.1", 0),
-                recv_size=recv_size,
-                scheduler=scheduler,
-            )
-            try:
-                return captured[-1]
-            finally:
-                server.close()
 
-        assert run_with_recv_size(None) is None
-        assert run_with_recv_size(1024) == 1024
+            def exercise() -> None:
+                server = start_server(
+                    client_handler,
+                    addr=("127.0.0.1", 0),
+                    recv_size=recv_size,
+                    scheduler=scheduler,
+                )
+                try:
+                    captured_results.append(captured[-1])
+                finally:
+                    server.close()
+
+            run_scheduler_task(scheduler, exercise)
+
+        run_with_recv_size(None)
+        run_with_recv_size(1024)
+        assert captured_results == [None, 1024]
 
     def test_start_server_uses_accept_many_and_dispatches_handler(self, scheduler: SyncProactorScheduler) -> None:
         handled = Event()
@@ -678,25 +691,25 @@ class TestStreamsPoC:
             writer.close()
             handled.set()
 
-        server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-        try:
-            assert server.accept_operation.kind == "accept_many"
-            _host, port = server.sockets[0].getsockname()
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            try:
+                assert server.accept_operation.kind == "accept_many"
+                _host, port = server.sockets[0].getsockname()
 
-            def connect_and_send() -> None:
-                _reader, writer = open_connection(addr=("127.0.0.1", port))
-                writer.write(b"abc")
-                writer.drain()
-                writer.close()
+                def connect_and_send() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    writer.write(b"abc")
+                    writer.drain()
+                    writer.close()
 
-            def exercise() -> None:
                 scheduler.spawn(connect_and_send)
                 handled.swait()
+            finally:
+                server.close()
 
-            scheduler.run_until_complete(scheduler.spawn(exercise))
-            assert received == [b"abc"]
-        finally:
-            server.close()
+        run_scheduler_task(scheduler, exercise)
+        assert received == [b"abc"]
 
     def test_start_server_unix_path_dispatches_async_handler(self, scheduler: SyncProactorScheduler) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -710,8 +723,6 @@ class TestStreamsPoC:
                     await writer.drain()
                     writer.close()
 
-                server = start_server(client_handler, path=path, async_=True, scheduler=scheduler)
-
                 responses: list[bytes] = []
                 finished = Event()
 
@@ -724,10 +735,12 @@ class TestStreamsPoC:
                     finished.set()
 
                 def exercise() -> None:
+                    nonlocal server
+                    server = start_server(client_handler, path=path, async_=True, scheduler=scheduler)
                     scheduler.spawn(connect_and_read)
                     finished.swait()
 
-                scheduler.run_until_complete(scheduler.spawn(exercise))
+                run_scheduler_task(scheduler, exercise)
                 assert responses == [b"PING"]
             finally:
                 if server is not None:
@@ -743,25 +756,26 @@ class TestStreamsPoC:
                 await writer.drain()
                 writer.close()
 
-            server = start_server(client_handler, addr=("127.0.0.1", 0), async_=True, scheduler=scheduler)
-            _host, port = server.sockets[0].getsockname()
-
             responses: list[bytes] = []
             finished = Event()
 
-            async def connect_and_read() -> None:
-                stream_reader, stream_writer = open_connection(addr=("127.0.0.1", port), async_=True)
-                stream_writer.write(b"xyz")
-                await stream_writer.drain()
-                responses.append(await stream_reader.readexactly(3))
-                stream_writer.close()
-                finished.set()
-
             def exercise() -> None:
+                nonlocal server
+                server = start_server(client_handler, addr=("127.0.0.1", 0), async_=True, scheduler=scheduler)
+                _host, port = server.sockets[0].getsockname()
+
+                async def connect_and_read() -> None:
+                    stream_reader, stream_writer = open_connection(addr=("127.0.0.1", port), async_=True)
+                    stream_writer.write(b"xyz")
+                    await stream_writer.drain()
+                    responses.append(await stream_reader.readexactly(3))
+                    stream_writer.close()
+                    finished.set()
+
                 scheduler.spawn(lambda: run_coro(connect_and_read()))
                 finished.swait()
 
-            scheduler.run_until_complete(scheduler.spawn(exercise))
+            run_scheduler_task(scheduler, exercise)
             assert responses == [b"XYZ"]
         finally:
             if server is not None:

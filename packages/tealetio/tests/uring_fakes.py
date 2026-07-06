@@ -9,7 +9,8 @@ import socket
 import struct
 import threading
 from types import SimpleNamespace
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import pytest
 import uring_api
@@ -120,6 +121,18 @@ SCHEDULER_INTEGRATION_FACTORIES: list[Any] = [
 ]
 if uring_api.is_available():
     SCHEDULER_INTEGRATION_FACTORIES.append(pytest.param(make_default_uring_scheduler, id="uring"))
+
+
+T = TypeVar("T")
+
+
+def run_scheduler_task(scheduler: Any, func: Callable[[], T]) -> T:
+    """Run ``func`` under ``scheduler`` with the main tealet factory installed.
+
+    Matches ``Runner.run()``: IO waits park a scheduler-owned task, not the raw
+    pytest main tealet.
+    """
+    return scheduler.run_until_complete(scheduler.spawn(func))
 
 
 class _FakeBufGroup:
