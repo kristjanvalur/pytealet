@@ -330,13 +330,13 @@ class Proactor(Protocol):
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-    ) -> Operation[None] | Operation[int]:
+    ) -> Operation[None] | Operation[bool]:
         """Connect a socket.
 
-        When ``initial`` is provided the operation completes with the number of
-        bytes sent from that buffer in one ``send`` attempt. ``initial`` may be
-        ``bytes``, ``bytearray``, or ``memoryview``. Backends that do not support
-        connect-time send complete with ``0``. A send failure after a successful
+        When ``initial`` is provided the operation completes with ``True`` when
+        the full buffer was sent after connect, or ``False`` when ``initial`` is
+        empty. Backends that do not support connect-time send ignore ``initial``
+        and complete like a plain connect. A send failure after a successful
         connect fails the operation; the caller owns the socket.
         """
 
@@ -592,6 +592,7 @@ class _ChainState:
     payload: memoryview = field(default_factory=lambda: memoryview(b""))
     owned_sock: socket.socket | None = None
     root_skip_cancel: bool = False
+    send_offset: int = 0
 
 
 class _UringEntry:
@@ -1013,7 +1014,7 @@ class SelectorProactor(ProactorBase):
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-    ) -> Operation[None] | Operation[int]:
+    ) -> Operation[None] | Operation[bool]:
         """Submit a non-blocking socket connect operation."""
 
         started = False
@@ -1744,6 +1745,69 @@ class UringProactor(ProactorBase):
         send_entry = self._arm_chain_leg(chain, parent, self._fini_send_leg)
         self._submit_uring_entry(send_entry, lambda: self._submit_send(sock.fileno(), payload, send_entry))
         return send_entry
+
+    def _chained_sendall(
+        self,
+        chain: _ChainState,
+        parent: _UringEntry,
+        sock: socket.socket,
+    ) -> _UringEntry:
+        chain.send_offset = 0
+        send_entry = self._arm_chain_leg(chain, parent, self._fini_chained_sendall_leg)
+        self._submit_chained_sendall_chunk(chain, send_entry, sock)
+        return send_entry
+
+    def _submit_chained_sendall_chunk(
+        self,
+        chain: _ChainState,
+        entry: _UringEntry,
+        sock: socket.socket,
+    ) -> None:
+        payload = chain.payload
+        self._submit_uring_entry(
+            entry,
+            lambda: self._submit_send(sock.fileno(), payload[chain.send_offset :], entry),
+        )
+
+    def _fini_chained_sendall_leg(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+        chain = entry.chain
+        assert chain is not None
+        operation = entry.operation
+        if operation.done():
+            return operation
+        res = completion.res
+        if res == 0:
+            chain.fail(BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
+            return operation
+        if res < 0:
+            chain.fail(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        chain.send_offset += res
+        if chain.send_offset >= chain.payload.nbytes:
+            chain.deliver(True)
+            return operation
+        assert chain.sock is not None
+        self._submit_chained_sendall_chunk(chain, entry, chain.sock)
+        return None
+
+    def _fini_connect_sendall_leg(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+        chain = entry.chain
+        assert chain is not None
+        operation = entry.operation
+        if operation.done():
+            return operation
+        res = completion.res
+        if res < 0:
+            chain.fail(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        if operation.done():
+            return operation
+        if not chain.payload:
+            chain.deliver(False)
+            return operation
+        assert chain.sock is not None
+        self._chained_sendall(chain, entry, chain.sock)
+        return None
 
     def _chained_connect(
         self,
@@ -2495,7 +2559,7 @@ class UringProactor(ProactorBase):
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-    ) -> Operation[None] | Operation[int]:
+    ) -> Operation[None] | Operation[bool]:
         """Submit a non-blocking socket connect operation."""
 
         if initial is None:
@@ -2507,11 +2571,11 @@ class UringProactor(ProactorBase):
             self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
             return operation
 
-        operation = Operation[int](kind="connect", fileobj=sock)
+        operation = Operation[bool](kind="connect", fileobj=sock)
         payload = memoryview(initial)
         entry = self._uring_chain_root_entry(
             operation,
-            self._fini_connect_leg,
+            self._fini_connect_sendall_leg,
             deliver=operation._set_result,
             fail=operation._set_exception,
         )

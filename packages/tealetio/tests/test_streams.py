@@ -927,7 +927,9 @@ class TestStreamsPoC:
                 server.close()
             scheduler.close()
 
-    def test_sock_connect_initial_send_flushes_remainder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_sock_connect_initial_send_flushes_when_backend_ignores_hint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         io = scheduler.io
@@ -936,8 +938,8 @@ class TestStreamsPoC:
 
         def fake_connect(sock: socket.socket, address, *, initial=None):
             del sock, address, initial
-            operation = Operation[int](kind="connect", fileobj=client)
-            operation._set_result(4)
+            operation = Operation[None](kind="connect", fileobj=client)
+            operation._set_result(None)
             return operation
 
         monkeypatch.setattr(scheduler.proactor, "connect", fake_connect)
@@ -946,7 +948,7 @@ class TestStreamsPoC:
         try:
             client.setblocking(False)
             io.sock_connect(client, ("127.0.0.1", 0), initial=b"helloworld")
-            assert sent == [b"oworld"]
+            assert sent == [b"helloworld"]
         finally:
             client.close()
             scheduler.close()

@@ -4199,7 +4199,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
-            assert operation.result() == 5
+            assert operation.result() is True
             assert bytes(proactor.ring.submitted_send[0][1]) == b"hello"
         finally:
             sock.close()
@@ -4212,13 +4212,13 @@ class TestUringProactor:
             sock.setblocking(False)
             operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"")
             proactor.wait(proactor.get_time() + 0.05)
-            assert operation.result() == 0
+            assert operation.result() is False
             assert proactor.ring.submitted_send == []
         finally:
             sock.close()
             proactor.close()
 
-    def test_connect_with_initial_reports_partial_send(self) -> None:
+    def test_connect_with_initial_sendall_drains_partial_chunks(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
         try:
@@ -4226,8 +4226,13 @@ class TestUringProactor:
             operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"helloworld")
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send(4)
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
-            assert operation.result() == 4
+            assert operation.result() is True
+            assert len(proactor.ring.submitted_send) == 2
+            assert bytes(proactor.ring.submitted_send[0][1]) == b"helloworld"
+            assert bytes(proactor.ring.submitted_send[1][1]) == b"oworld"
         finally:
             sock.close()
             proactor.close()
