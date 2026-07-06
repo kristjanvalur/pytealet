@@ -981,7 +981,7 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
-    def test_stream_connect_completes_on_selector(self) -> None:
+    def test_create_connected_socket_completes_on_selector(self) -> None:
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -989,7 +989,7 @@ class TestSelectorProactor:
             server.bind(("127.0.0.1", 0))
             server.listen()
             addr = server.getsockname()
-            operation = proactor.stream_connect(addr, initial=b"ping")
+            operation = proactor.create_connected_socket(addr, initial=b"ping")
             while not operation.done():
                 try:
                     conn, _peer = server.accept()
@@ -4272,10 +4272,10 @@ class TestUringProactor:
             sock.close()
             proactor.close()
 
-    def test_stream_connect_completes_without_initial_on_uring(self) -> None:
+    def test_create_connected_socket_completes_without_initial_on_uring(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            operation = proactor.stream_connect(("127.0.0.1", 9))
+            operation = proactor.create_connected_socket(("127.0.0.1", 9))
             _wait_for_uring(proactor, operation.done)
             sock, is_connected, nbytes = operation.result()
             assert is_connected is True
@@ -4285,10 +4285,10 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_stream_connect_completes_with_initial_on_uring(self) -> None:
+    def test_create_connected_socket_completes_with_initial_on_uring(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            operation = proactor.stream_connect(("127.0.0.1", 9), initial=b"hi")
+            operation = proactor.create_connected_socket(("127.0.0.1", 9), initial=b"hi")
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send(2)
             _wait_for_uring(proactor, operation.done)
@@ -4299,10 +4299,10 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_stream_connect_failure_does_not_leak_socket(self) -> None:
+    def test_create_connected_socket_failure_does_not_leak_socket(self) -> None:
         proactor = UringProactor(ring_factory=_FailingConnectUringRing)
         try:
-            operation = proactor.stream_connect(("127.0.0.1", 9))
+            operation = proactor.create_connected_socket(("127.0.0.1", 9))
             _wait_for_uring(proactor, operation.done)
             with pytest.raises(OSError):
                 operation.result()
@@ -4335,7 +4335,7 @@ class TestProactorScheduler:
         with pytest.raises(TypeError, match="abstract"):
             ProactorScheduler()
 
-    def test_sock_create_uses_stdlib_socket(self):
+    def test_sock_create_uses_proactor_create_socket(self):
         scheduler = SyncProactorScheduler()
         try:
             sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
@@ -4349,6 +4349,37 @@ class TestProactorScheduler:
                 sock.close()
         finally:
             scheduler.close()
+
+    def test_create_socket_uses_uring_submit_when_available(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+            _wait_for_uring(proactor, operation.done)
+            sock = operation.result()
+            try:
+                assert len(proactor.ring.submitted_socket) == 1
+                assert sock.getblocking() is False
+                assert os.get_inheritable(sock.fileno()) is False
+            finally:
+                sock.close()
+        finally:
+            proactor.close()
+
+    def test_create_connected_socket_uses_uring_socket_submit(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_connected_socket(("127.0.0.1", 9))
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, nbytes = operation.result()
+            try:
+                assert len(proactor.ring.submitted_socket) == 1
+                assert len(proactor.ring.submitted_connect) == 1
+                assert is_connected is True
+                assert nbytes == 0
+            finally:
+                sock.close()
+        finally:
+            proactor.close()
 
     def test_scheduler_clock_drives_proactor_clock(self):
         scheduler = SyncProactorScheduler()

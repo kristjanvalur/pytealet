@@ -54,6 +54,7 @@ def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
         "IORING_OP_SEND_ZC": True,
         "IORING_OP_SENDMSG_ZC": True,
         "IORING_OP_STATX": True,
+        "IORING_OP_SOCKET": True,
     }
     capabilities.update(overrides)
     return capabilities
@@ -115,6 +116,7 @@ class _FakeUringRing:
         self.submitted_accept: list[tuple[int, object, int]] = []
         self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
+        self.submitted_socket: list[tuple[int, int, int, int, object]] = []
         self.pending_connect_send: list[SimpleNamespace] = []
         self.submitted_cancel: list[object] = []
         self.submitted_poll: list[tuple[int, int, object]] = []
@@ -433,6 +435,30 @@ class _FakeUringRing:
             multishot=True,
         )
         self._deliver(completion)
+
+    def submit_socket(
+        self,
+        domain: int,
+        type: int,
+        protocol: int = 0,
+        flags: int = 0,
+        user_data: object = None,
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        sock = socket.socket(domain, type, protocol)
+        sock.setblocking(False)
+        os.set_inheritable(sock.fileno(), False)
+        fd = sock.detach()
+        self.submitted_socket.append((domain, type, protocol, flags, user_data))
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SOCKET,
+            res=fd,
+            result=fd,
+        )
+        self._deliver(completion)
+        return completion
 
     def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:

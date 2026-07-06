@@ -532,7 +532,7 @@ def _connect_tcp_streams(
     last_error: OSError | None = None
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
         try:
-            sock, _is_connected, _nbytes = io.sock_stream_connect(
+            sock, _is_connected, _nbytes = io.sock_create_connected_socket(
                 sockaddr,
                 family=addr_family,
                 type=socktype,

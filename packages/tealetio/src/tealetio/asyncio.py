@@ -268,7 +268,7 @@ class ForwardingProactor:
 
         return self._future_from_operation(self._proactor.connect(sock, address, initial=initial))
 
-    def stream_connect(
+    def create_connected_socket(
         self,
         address: Any,
         *,
@@ -280,7 +280,7 @@ class ForwardingProactor:
         """Create, connect, and optionally pre-send through the host proactor."""
 
         return self._future_from_operation(
-            self._proactor.stream_connect(
+            self._proactor.create_connected_socket(
                 address,
                 family=family,
                 type=type,

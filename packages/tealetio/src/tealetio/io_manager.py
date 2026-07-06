@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, cast, runti
 from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, Operation
-from .socket_helpers import configure_scheduler_socket
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
@@ -103,7 +102,7 @@ class SocketIO(Protocol):
         initial: SocketSendBuffer | None = None,
     ) -> None: ...
 
-    def sock_stream_connect(
+    def sock_create_connected_socket(
         self,
         address: Any,
         *,
@@ -314,7 +313,7 @@ class ProactorIOManager:
         if remainder.nbytes:
             self.sock_sendall(sock, remainder)
 
-    def sock_stream_connect(
+    def sock_create_connected_socket(
         self,
         address: Any,
         *,
@@ -324,7 +323,7 @@ class ProactorIOManager:
         initial: SocketSendBuffer | None = None,
     ) -> tuple[socket.socket, bool, int]:
         sock, is_connected, nbytes = self.wait_operation(
-            self._proactor.stream_connect(
+            self._proactor.create_connected_socket(
                 address,
                 family=family,
                 type=type,
@@ -346,8 +345,7 @@ class ProactorIOManager:
         *,
         flags: int = 0,
     ) -> socket.socket:
-        del flags
-        return configure_scheduler_socket(socket.socket(family, type, proto))
+        return self.wait_operation(self._proactor.create_socket(family, type, proto, flags=flags))
 
     def poll(self, fd: int, mask: int) -> int:
         return self.wait_operation(self._proactor.poll(fd, mask))

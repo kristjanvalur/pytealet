@@ -44,6 +44,22 @@ class _MockProactor:
         operation._set_result(901)
         return operation
 
+    def create_socket(
+        self,
+        family: int,
+        type: int,
+        proto: int = 0,
+        *,
+        flags: int = 0,
+    ) -> Operation[socket.socket]:
+        del flags
+        operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
+        sock = socket.socket(family, type, proto)
+        sock.setblocking(False)
+        os.set_inheritable(sock.fileno(), False)
+        operation._set_result(sock)
+        return operation
+
     def poll_many(
         self,
         fd: int,

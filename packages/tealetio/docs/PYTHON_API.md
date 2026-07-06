@@ -85,14 +85,21 @@ bitmask on each readiness event and remains active until cancelled or the
 backend reports a terminal error. Poll works on any file descriptor, not only
 sockets.
 
-`stream_connect(address, *, family=..., type=..., proto=0, initial=None)`
+`create_socket(family, type, proto=0, *, flags=0)` creates a scheduler-contract
+socket (non-blocking, close-on-exec). ``UringProactor`` uses
+``uring_api.Ring.submit_socket()`` when ``IORING_OP_SOCKET`` is probed;
+otherwise backends fall back to stdlib ``socket.socket()`` with
+``configure_scheduler_socket()``. ``scheduler.io.sock_create()`` blocks on this
+operation.
+
+`create_connected_socket(address, *, family=..., type=..., proto=0, initial=None)`
 submits a one-shot operation that creates a configured socket, connects it, and
 optionally performs one ``send`` attempt from ``initial``. On success it
 completes with ``(socket, is_connected, bytes_sent)``; ``is_connected`` is
 ``True`` when the connect leg succeeded. Failures close the created socket
-before the operation completes. ``scheduler.io.sock_stream_connect(...)`` blocks
-on the operation and flushes any unsent ``initial`` remainder with ``sendall``.
-TCP ``open_connection(..., initial_send=...)`` uses this path.
+before the operation completes. ``scheduler.io.sock_create_connected_socket(...)``
+blocks on the operation and flushes any unsent ``initial`` remainder with
+``sendall``. TCP ``open_connection(..., initial_send=...)`` uses this path.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
@@ -589,14 +596,12 @@ metadata, and selector-backed backends share one handle type.
 
 `scheduler.io.sock_create(family, type, proto=0, *, flags=0)` is the socket
 creation entry point for proactor-backed blocking IO. The returned socket is
-always non-blocking and close-on-exec. `ProactorIOManager.sock_create()`
-currently calls stdlib `socket.socket()` and applies that configuration; `flags`
-is reserved for a future proactor path where `UringProactor` may use
-`uring_api.Ring.submit_socket()`
-(`IORING_OP_SOCKET`) when policy and kernel probe allow it, then wrap the
-returned fd with `socket.socket(fileno=fd)` (the same pattern already used for
-`accept_many` completions). Stream connect/server helpers call
-`scheduler.io.sock_create()` so uring-native creation can stay behind one policy
+always non-blocking and close-on-exec. `ProactorIOManager.sock_create()` blocks
+on `Proactor.create_socket()`; `UringProactor` uses
+`uring_api.Ring.submit_socket()` (`IORING_OP_SOCKET`) when the runtime probe
+accepts it, then wraps the returned fd with `socket.socket(fileno=fd)` (the same
+pattern already used for `accept_many` completions). Connect/server helpers call
+`scheduler.io.sock_create()` so uring-native creation stays behind one policy
 gate.
 
 ## Name resolution
