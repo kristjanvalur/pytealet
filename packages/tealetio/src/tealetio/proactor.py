@@ -67,7 +67,7 @@ __all__ = [
     "SocketIO",
     "SupportsProactorIO",
     "SelectorProactor",
-    "CreateConnectedSocketResult",
+    "CreateSocketResult",
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",
     "UringProactor",
@@ -97,7 +97,7 @@ _RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = tuple[socket.socket, Any, bytes | None, BaseException | None]
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
 _MAX_ACCEPT_RECV_SIZE = 2**16
-CreateConnectedSocketResult: TypeAlias = tuple[socket.socket, bool, int]
+CreateSocketResult: TypeAlias = tuple[socket.socket, bool, int]
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
@@ -349,34 +349,19 @@ class Proactor(Protocol):
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> Operation[socket.socket]:
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
+    ) -> Operation[CreateSocketResult]:
         """Create a scheduler-contract socket.
 
-        Returns a non-blocking, close-on-exec ``socket.socket``. ``UringProactor``
-        uses ``IORING_OP_SOCKET`` when the runtime probe accepts it; otherwise
-        backends fall back to stdlib ``socket.socket()`` with
-        ``configure_scheduler_socket()``.
-        """
-
-        ...
-
-    def create_connected_socket(
-        self,
-        address: Any,
-        *,
-        family: int = socket.AF_INET,
-        type: int = socket.SOCK_STREAM,
-        proto: int = 0,
-        initial: SocketSendBuffer | None = None,
-    ) -> Operation[CreateConnectedSocketResult]:
-        """Create a socket, connect it, and optionally send initial bytes.
-
-        On success the operation completes with ``(socket, is_connected,
-        bytes_sent)``. ``is_connected`` is ``True`` when the connect leg
-        finished successfully. ``bytes_sent`` is the number of bytes sent from
-        ``initial`` in one ``send`` attempt, or ``0`` when ``initial`` is omitted
-        or empty. Any failure closes the created socket before the operation
-        completes; no socket is returned to the caller on error.
+        Returns a non-blocking, close-on-exec ``socket.socket`` together with
+        connect/send outcome flags. On success the operation completes with
+        ``(socket, is_connected, bytes_sent)``. ``connect_to`` and
+        ``initial_data`` are optional hints; backends may ignore them and return
+        ``(socket, False, 0)`` after creation only. ``UringProactor`` honours
+        the hints when practical, chaining ``IORING_OP_SOCKET``, connect, and
+        one ``send`` attempt. Any failure after creation closes the socket
+        before the operation completes.
         """
 
         ...
@@ -986,17 +971,19 @@ class SelectorProactor(ProactorBase):
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> Operation[socket.socket]:
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
+    ) -> Operation[CreateSocketResult]:
         """Create a scheduler-contract socket."""
 
-        del flags
-        operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
+        del flags, connect_to, initial_data
+        operation = Operation[CreateSocketResult](kind="create_socket", fileobj=(family, type, proto))
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
         except OSError as exc:
             operation._set_exception(exc)
             return operation
-        operation._set_result(sock)
+        operation._set_result((sock, False, 0))
         return operation
 
     def connect(
@@ -1046,68 +1033,6 @@ class SelectorProactor(ProactorBase):
             return 0
 
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt_with_initial)
-        return operation
-
-    def create_connected_socket(
-        self,
-        address: Any,
-        *,
-        family: int = socket.AF_INET,
-        type: int = socket.SOCK_STREAM,
-        proto: int = 0,
-        initial: SocketSendBuffer | None = None,
-    ) -> Operation[CreateConnectedSocketResult]:
-        """Create a socket, connect it, and optionally send one initial chunk."""
-
-        operation = Operation[CreateConnectedSocketResult](kind="create_connected_socket", fileobj=address)
-        try:
-            sock = _sync_create_scheduler_socket(family, type, proto)
-        except OSError as exc:
-            operation._set_exception(exc)
-            return operation
-
-        connect_started = False
-        send_payload = memoryview(initial) if initial is not None else memoryview(b"")
-        send_pending = bool(send_payload.nbytes)
-
-        def finish_connect() -> None:
-            nonlocal connect_started
-            if not connect_started:
-                connect_started = True
-                try:
-                    sock.connect(address)
-                except (BlockingIOError, InterruptedError):
-                    raise BlockingIOError(errno.EINPROGRESS, "connect in progress") from None
-                except OSError as exc:
-                    if exc.errno in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
-                        raise BlockingIOError(exc.errno, exc.strerror) from None
-                    raise
-                return
-            err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-            if err == 0:
-                return
-            if err in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
-                raise BlockingIOError(err, errno.errorcode.get(err, "connect in progress"))
-            raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
-
-        def attempt() -> CreateConnectedSocketResult:
-            finish_connect()
-            if not send_pending:
-                return sock, True, 0
-            nbytes = sock.send(send_payload)
-            return sock, True, nbytes
-
-        def attempt_wrapper() -> CreateConnectedSocketResult:
-            try:
-                return attempt()
-            except (BlockingIOError, InterruptedError):
-                raise
-            except BaseException:
-                _close_owned_socket(sock)
-                raise
-
-        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt_wrapper)
-        self._bind_owned_socket_cancel(operation, sock)
         return operation
 
     def _bind_owned_socket_cancel(self, operation: Operation[Any], sock: socket.socket) -> None:
@@ -2344,41 +2269,91 @@ class UringProactor(ProactorBase):
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> Operation[socket.socket]:
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
+    ) -> Operation[CreateSocketResult]:
         """Create a scheduler-contract socket."""
 
-        operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
-        socket_flags = flags | _DEFAULT_ACCEPT_FLAGS
-        if not self._capabilities.get("IORING_OP_SOCKET", False) or not hasattr(self._ring, "submit_socket"):
-            try:
-                sock = _sync_create_scheduler_socket(family, type, proto)
-            except OSError as exc:
-                operation._set_exception(exc)
+        operation = Operation[CreateSocketResult](kind="create_socket", fileobj=(family, type, proto))
+        if connect_to is None:
+            socket_flags = flags | _DEFAULT_ACCEPT_FLAGS
+            if not self._capabilities.get("IORING_OP_SOCKET", False) or not hasattr(self._ring, "submit_socket"):
+                try:
+                    sock = _sync_create_scheduler_socket(family, type, proto)
+                except OSError as exc:
+                    operation._set_exception(exc)
+                    return operation
+                operation._set_result((sock, False, 0))
                 return operation
-            operation._set_result(sock)
+
+            entry = self._uring_entry(
+                operation,
+                lambda entry, completion: self._complete_uring_create_socket(entry, completion),
+            )
+            self._submit_uring_entry(
+                entry,
+                lambda: self._ring.submit_socket(family, type, proto, socket_flags, entry),
+            )
             return operation
 
-        entry = self._uring_entry(
-            operation,
-            lambda entry, completion: self._complete_uring_create_socket(entry, completion),
-        )
-        self._submit_uring_entry(
-            entry,
-            lambda: self._ring.submit_socket(family, type, proto, socket_flags, entry),
-        )
+        payload = memoryview(initial_data) if initial_data is not None else memoryview(b"")
+        pending_send: list[_UringEntry | None] = [None]
+        owned_sock: list[socket.socket | None] = [None]
+
+        def begin_connect(sock: socket.socket) -> None:
+            owned_sock[0] = sock
+            entry = self._uring_entry(
+                operation,
+                lambda entry, completion: self._complete_uring_create_socket_connect(
+                    entry,
+                    completion,
+                    sock,
+                    payload,
+                    pending_send,
+                ),
+            )
+            self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), connect_to, entry))
+
+        pending_socket: list[_UringEntry | None] = [None]
+        if self._capabilities.get("IORING_OP_SOCKET", False) and hasattr(self._ring, "submit_socket"):
+            socket_operation = Operation[socket.socket](kind="create_socket_leg", fileobj=(family, type, proto))
+            socket_entry = self._uring_entry(
+                socket_operation,
+                lambda entry, completion: self._complete_uring_create_socket_leg(
+                    entry,
+                    completion,
+                    begin_connect,
+                    operation,
+                ),
+            )
+            pending_socket[0] = socket_entry
+            self._bind_create_socket_cancel(operation, owned_sock, pending_send, pending_socket)
+            self._submit_uring_entry(
+                socket_entry,
+                lambda: self._ring.submit_socket(family, type, proto, flags | _DEFAULT_ACCEPT_FLAGS, socket_entry),
+            )
+            return operation
+
+        try:
+            sock = _sync_create_scheduler_socket(family, type, proto)
+        except OSError as exc:
+            operation._set_exception(exc)
+            return operation
+        self._bind_create_socket_cancel(operation, owned_sock, pending_send)
+        begin_connect(sock)
         return operation
 
     def _complete_uring_create_socket(
         self, entry: _UringEntry, completion: _UringCompletion
-    ) -> Operation[socket.socket]:
-        operation = cast(Operation[socket.socket], entry.operation)
+    ) -> Operation[CreateSocketResult]:
+        operation = cast(Operation[CreateSocketResult], entry.operation)
         res = completion.res
         if res < 0:
             operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
         sock = socket.socket(fileno=res)
         configure_scheduler_socket(sock)
-        operation._set_result(sock)
+        operation._set_result((sock, False, 0))
         return operation
 
     def connect(
@@ -2491,68 +2466,9 @@ class UringProactor(ProactorBase):
         send_operation._set_result(None)
         return parent
 
-    def create_connected_socket(
+    def _bind_create_socket_cancel(
         self,
-        address: Any,
-        *,
-        family: int = socket.AF_INET,
-        type: int = socket.SOCK_STREAM,
-        proto: int = 0,
-        initial: SocketSendBuffer | None = None,
-    ) -> Operation[CreateConnectedSocketResult]:
-        """Create a socket, connect it, and optionally send one initial chunk."""
-
-        operation = Operation[CreateConnectedSocketResult](kind="create_connected_socket", fileobj=address)
-        payload = memoryview(initial) if initial is not None else memoryview(b"")
-        pending_send: list[_UringEntry | None] = [None]
-        owned_sock: list[socket.socket | None] = [None]
-
-        def begin_connect(sock: socket.socket) -> None:
-            owned_sock[0] = sock
-            entry = self._uring_entry(
-                operation,
-                lambda entry, completion: self._complete_uring_create_connected_socket(
-                    entry,
-                    completion,
-                    sock,
-                    payload,
-                    pending_send,
-                ),
-            )
-            self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
-
-        pending_socket: list[_UringEntry | None] = [None]
-        if self._capabilities.get("IORING_OP_SOCKET", False) and hasattr(self._ring, "submit_socket"):
-            socket_operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
-            socket_entry = self._uring_entry(
-                socket_operation,
-                lambda entry, completion: self._complete_uring_create_connected_socket_socket(
-                    entry,
-                    completion,
-                    begin_connect,
-                    operation,
-                ),
-            )
-            pending_socket[0] = socket_entry
-            self._bind_create_connected_socket_cancel(operation, owned_sock, pending_send, pending_socket)
-            self._submit_uring_entry(
-                socket_entry,
-                lambda: self._ring.submit_socket(family, type, proto, _DEFAULT_ACCEPT_FLAGS, socket_entry),
-            )
-            return operation
-
-        try:
-            sock = _sync_create_scheduler_socket(family, type, proto)
-        except OSError as exc:
-            operation._set_exception(exc)
-            return operation
-        self._bind_create_connected_socket_cancel(operation, owned_sock, pending_send)
-        begin_connect(sock)
-        return operation
-
-    def _bind_create_connected_socket_cancel(
-        self,
-        operation: Operation[CreateConnectedSocketResult],
+        operation: Operation[CreateSocketResult],
         owned_sock: list[socket.socket | None],
         pending_send: list[_UringEntry | None],
         pending_socket: list[_UringEntry | None] | None = None,
@@ -2591,23 +2507,23 @@ class UringProactor(ProactorBase):
 
         operation.set_cancel(cancel)
 
-    def _fail_create_connected_socket(
+    def _fail_create_socket(
         self,
-        operation: Operation[CreateConnectedSocketResult],
+        operation: Operation[CreateSocketResult],
         sock: socket.socket,
         exc: BaseException,
-    ) -> Operation[CreateConnectedSocketResult]:
+    ) -> Operation[CreateSocketResult]:
         _close_owned_socket(sock)
         if not operation.done():
             operation._set_exception(exc)
         return operation
 
-    def _complete_uring_create_connected_socket_socket(
+    def _complete_uring_create_socket_leg(
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
         begin_connect: Callable[[socket.socket], None],
-        parent: Operation[CreateConnectedSocketResult],
+        parent: Operation[CreateSocketResult],
     ) -> Operation[socket.socket] | None:
         socket_operation = cast(Operation[socket.socket], entry.operation)
         res = completion.res
@@ -2631,18 +2547,18 @@ class UringProactor(ProactorBase):
         begin_connect(sock)
         return None
 
-    def _complete_uring_create_connected_socket(
+    def _complete_uring_create_socket_connect(
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
         sock: socket.socket,
         payload: memoryview,
         pending_send: list[_UringEntry | None],
-    ) -> Operation[CreateConnectedSocketResult] | None:
-        operation = cast(Operation[CreateConnectedSocketResult], entry.operation)
+    ) -> Operation[CreateSocketResult] | None:
+        operation = cast(Operation[CreateSocketResult], entry.operation)
         res = completion.res
         if res < 0:
-            return self._fail_create_connected_socket(
+            return self._fail_create_socket(
                 operation,
                 sock,
                 OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
@@ -2659,7 +2575,7 @@ class UringProactor(ProactorBase):
         send_operation = Operation[None](kind="send_on_connect", fileobj=sock)
         send_entry = self._uring_entry(
             send_operation,
-            lambda send_entry, send_completion: self._deliver_create_connected_socket_send(
+            lambda send_entry, send_completion: self._deliver_create_socket_send(
                 send_entry,
                 send_completion,
                 operation,
@@ -2670,20 +2586,20 @@ class UringProactor(ProactorBase):
         self._submit_uring_entry(send_entry, lambda: self._submit_send(sock.fileno(), payload, send_entry))
         return None
 
-    def _deliver_create_connected_socket_send(
+    def _deliver_create_socket_send(
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
-        parent: Operation[CreateConnectedSocketResult],
+        parent: Operation[CreateSocketResult],
         sock: socket.socket,
-    ) -> Operation[CreateConnectedSocketResult]:
+    ) -> Operation[CreateSocketResult]:
         send_operation = entry.operation
         res = completion.res
         if parent.done():
             send_operation._set_result(None)
             return parent
         if res < 0:
-            return self._fail_create_connected_socket(
+            return self._fail_create_socket(
                 parent,
                 sock,
                 OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),

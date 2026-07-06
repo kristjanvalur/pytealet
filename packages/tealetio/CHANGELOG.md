@@ -48,12 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `Proactor.create_socket()` and `scheduler.io.sock_create()` to create
-  scheduler-contract sockets through the proactor; `UringProactor` uses
-  ``IORING_OP_SOCKET`` when probed.
-- `Proactor.create_connected_socket()` and
-  `scheduler.io.sock_create_connected_socket()` to create a socket, connect,
-  and optionally send one initial chunk in a single submitted operation,
-  returning ``(socket, is_connected, bytes_sent)`` on success.
+  scheduler-contract sockets through the proactor, returning
+  ``(socket, is_connected, bytes_sent)``. Optional ``connect_to`` and
+  ``initial_data`` hints let `UringProactor` chain ``IORING_OP_SOCKET``,
+  connect, and one initial ``send`` when supported; other backends may ignore
+  the hints and `sock_create()` falls back to ``sock_connect()``.
   ``open_connection(..., initial_send=...)`` uses this path for TCP connects.
 - `IOFile` handle protocol for positioned binary file objects returned by
   `FileIO.open()`; `ProactorFile` is the proactor-backed implementation. Static

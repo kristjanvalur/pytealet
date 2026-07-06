@@ -51,13 +51,15 @@ class _MockProactor:
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> Operation[socket.socket]:
-        del flags
-        operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
+        connect_to: Any | None = None,
+        initial_data: Any | None = None,
+    ) -> Operation[tuple[socket.socket, bool, int]]:
+        del flags, connect_to, initial_data
+        operation = Operation[tuple[socket.socket, bool, int]](kind="create_socket", fileobj=(family, type, proto))
         sock = socket.socket(family, type, proto)
         sock.setblocking(False)
         os.set_inheritable(sock.fileno(), False)
-        operation._set_result(sock)
+        operation._set_result((sock, False, 0))
         return operation
 
     def poll_many(
@@ -161,10 +163,12 @@ class TestProactorIOManagerDirect:
     def test_sock_create_applies_scheduler_socket_contract(self):
         proactor = _MockProactor()
         io = ProactorIOManager(proactor)  # type: ignore[arg-type]
-        sock = io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+        sock, is_connected, nbytes = io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
         try:
             assert not sock.getblocking()
             assert not os.get_inheritable(sock.fileno())
+            assert is_connected is False
+            assert nbytes == 0
         finally:
             sock.close()
 

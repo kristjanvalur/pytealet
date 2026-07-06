@@ -114,7 +114,7 @@ class TestStreamsPoC:
     def test_start_server_closes_listener_socket_when_bind_fails(self):
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
-        blocker = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+        blocker, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
         blocker.bind(("127.0.0.1", 0))
         port = blocker.getsockname()[1]
         blocker.listen(1)
@@ -951,25 +951,34 @@ class TestStreamsPoC:
             client.close()
             scheduler.close()
 
-    def test_open_connection_passes_initial_send_to_sock_create_connected_socket(
+    def test_open_connection_passes_initial_send_to_sock_create(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         scheduler = SyncProactorScheduler()
         set_scheduler(scheduler)
         captured: list[bytes | None] = []
-        real_sock_create_connected_socket = scheduler.io.sock_create_connected_socket
+        real_sock_create = scheduler.io.sock_create
 
-        def capture_sock_create_connected_socket(address, *, family, type, proto=0, initial: bytes | None = None):
-            captured.append(initial)
-            return real_sock_create_connected_socket(
-                address,
-                family=family,
-                type=type,
-                proto=proto,
-                initial=initial,
+        def capture_sock_create(
+            family,
+            type,
+            proto=0,
+            *,
+            flags=0,
+            connect_to=None,
+            initial_data: bytes | None = None,
+        ):
+            captured.append(initial_data)
+            return real_sock_create(
+                family,
+                type,
+                proto,
+                flags=flags,
+                connect_to=connect_to,
+                initial_data=initial_data,
             )
 
-        monkeypatch.setattr(scheduler.io, "sock_create_connected_socket", capture_sock_create_connected_socket)
+        monkeypatch.setattr(scheduler.io, "sock_create", capture_sock_create)
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:

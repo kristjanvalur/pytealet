@@ -268,24 +268,26 @@ class ForwardingProactor:
 
         return self._future_from_operation(self._proactor.connect(sock, address, initial=initial))
 
-    def create_connected_socket(
+    def create_socket(
         self,
-        address: Any,
-        *,
-        family: int = socket.AF_INET,
-        type: int = socket.SOCK_STREAM,
+        family: int,
+        type: int,
         proto: int = 0,
-        initial: SocketSendBuffer | None = None,
+        *,
+        flags: int = 0,
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
     ) -> _asyncio.Future[tuple[socket.socket, bool, int]]:
-        """Create, connect, and optionally pre-send through the host proactor."""
+        """Create a socket through the host proactor."""
 
         return self._future_from_operation(
-            self._proactor.create_connected_socket(
-                address,
-                family=family,
-                type=type,
-                proto=proto,
-                initial=initial,
+            self._proactor.create_socket(
+                family,
+                type,
+                proto,
+                flags=flags,
+                connect_to=connect_to,
+                initial_data=initial_data,
             )
         )
 

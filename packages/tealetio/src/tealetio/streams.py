@@ -532,12 +532,12 @@ def _connect_tcp_streams(
     last_error: OSError | None = None
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
         try:
-            sock, _is_connected, _nbytes = io.sock_create_connected_socket(
-                sockaddr,
-                family=addr_family,
-                type=socktype,
-                proto=addr_proto,
-                initial=initial_send,
+            sock, _is_connected, _nbytes = io.sock_create(
+                addr_family,
+                socktype,
+                addr_proto,
+                connect_to=sockaddr,
+                initial_data=initial_send,
             )
             return _open_streams(
                 io,
@@ -663,7 +663,7 @@ def _connect_unix_streams(
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
     io = _require_proactor_io(scheduler)
-    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock, _, _ = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         io.sock_connect(sock, path)
     except OSError:
@@ -686,7 +686,7 @@ def _bind_tcp_socket(
     backlog: int,
 ) -> socket.socket:
     host, port = addr
-    sock = io.sock_create(family, socket.SOCK_STREAM)
+    sock, _, _ = io.sock_create(family, socket.SOCK_STREAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         bind_host = "" if host is None else host
@@ -707,7 +707,7 @@ def _bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket
     except FileNotFoundError:
         pass
 
-    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock, _, _ = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.bind(path)
         sock.listen(backlog)
