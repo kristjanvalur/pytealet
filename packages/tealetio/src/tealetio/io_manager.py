@@ -328,9 +328,9 @@ class ProactorIOManager:
             self.sock_connect(sock, connect_to, initial=initial_data)
             return sock, True, 0
         if initial_data is not None and is_connected:
-            remainder = memoryview(initial_data)[nbytes:]
-            if remainder.nbytes:
-                self.sock_sendall(sock, remainder)
+            payload = memoryview(initial_data)
+            if nbytes < payload.nbytes:
+                self.sock_sendall(sock, payload[nbytes:])
         return sock, is_connected, nbytes
 
     def poll(self, fd: int, mask: int) -> int:
