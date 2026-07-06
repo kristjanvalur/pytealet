@@ -102,10 +102,10 @@ operations that intentionally stay outside the basic Python surface:
   buffer-lifetime window. The fixed-buffer variant does not fit the current
   caller-owned buffer model.
 - `submit_sendmsg_zc()` exposes `io_uring_prep_sendmsg_zc()` with the same
-  operation-CQE plus notification-CQE lifetime split. `probe()` includes a
-  targeted `"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"` runtime capability
-  entry based on a UDP loopback `sendmsg_zc` send to a bound local receiver, so
-  the probe avoids TCP connection setup while still testing a real destination.
+  operation-CQE plus notification-CQE lifetime split. `probe()` reports
+  `"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"` via the documented kernel
+  6.0 floor; protocol-specific `-EOPNOTSUPP` (for example `AF_UNIX`) is handled
+  in higher layers rather than by a runtime zerocopy submission probe.
 - `submit_socket()` uses `IORING_OP_SOCKET`, which is a newer socket opcode even
   though the installed man page does not give a precise kernel version. `probe()`
   now includes a targeted `"IORING_OP_SOCKET"` runtime capability entry by

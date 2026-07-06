@@ -1,5 +1,5 @@
 /*
- * Runtime capability probes for the _uring_api extension.
+ * Availability and capability reporting for the _uring_api extension.
  */
 
 #include "uring_api_probe.h"

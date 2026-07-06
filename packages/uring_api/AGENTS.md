@@ -74,11 +74,12 @@ missing kernel support.
 
 - Use `uring_api.probe()` for availability and named capabilities.
 - Use `uring_api.is_available()` only when a boolean is enough.
-- Prefer **runtime operation probes** for behavioural optional features
-  (`IORING_RECV_MULTISHOT`, `IORING_OP_SEND_ZC`, etc.).
-- `probe()["IORING_OP_STATX"]` is a pilot **version-gated** capability: it uses
-  `uname(2)` against the `io_uring_enter(2)` floor (5.6) instead of a runtime
-  statx submission.
+- Prefer **runtime operation probes** for behavioural optional features such as
+  `IORING_RECV_MULTISHOT` when a real submission is the only reliable check.
+- **Version-gated** capabilities use `uname(2)` against documented
+  `io_uring_enter(2)` floors: `IORING_OP_STATX` (5.6), `IORING_OP_SEND_ZC` and
+  `IORING_OP_SENDMSG_ZC` (6.0). Protocol-specific zerocopy failures are handled
+  above `uring_api` (for example `AF_UNIX` uses copying sends in `tealetio`).
 - Production code must still handle `OSError` when creating real rings with
   larger `entries` or setup flags than the tiny probe ring.
 

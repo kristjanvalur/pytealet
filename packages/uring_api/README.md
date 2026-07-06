@@ -222,8 +222,8 @@ those results. If ring creation fails,
 it returns an empty dictionary. If it succeeds, the dictionary contains
 `"available": True` plus named optional capabilities such as
 `"IORING_ACCEPT_MULTISHOT"`, `"IORING_POLL_MULTISHOT"`, `"IORING_RECV_MULTISHOT"`, and
-`"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"`, and `"IORING_OP_STATX"`
-(version-gated via `uname(2)` against the `io_uring_enter(2)` 5.6 floor).
+`"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"` (version-gated at kernel
+6.0 per `io_uring_enter(2)`), and `"IORING_OP_STATX"` (version-gated at 5.6).
 Production code should
 still handle `OSError` when it creates the real ring because limits or sandbox
 policy may differ for larger settings.
@@ -255,13 +255,13 @@ binary extension. This is useful in CI because Linux distribution images can
 compile the same Python package against different liburing development packages
 while still running on the hosted runner's kernel.
 
-`submit_send_zc()` is best gated with `probe()["IORING_OP_SEND_ZC"]`. Unsupported
-systems may accept the submission and then report `ENOTSUP` or `EOPNOTSUPP` in
-the operation CQE, so checking a kernel version is less useful than submitting a
-small runtime probe. `probe()` reports both `"IORING_OP_SEND_ZC"` and
-`"IORING_OP_SENDMSG_ZC"` for caller convenience, and derives both from the
-simpler `sendmsg_zc` UDP loopback probe with a bound local receiver. If your CI
-image is expected to support these operations, make that expectation explicit:
+`submit_send_zc()` and `submit_sendmsg_zc()` are best gated with
+`probe()["IORING_OP_SEND_ZC"]` and `probe()["IORING_OP_SENDMSG_ZC"]`. Both
+entries use the documented kernel 6.0 floor via `uname(2)`. Zerocopy can still
+complete with `ENOTSUP` or `EOPNOTSUPP` for some protocols (for example
+`AF_UNIX` on WSL); higher layers should route those sockets through copying
+send paths. If your CI image is expected to support zerocopy on inet sockets,
+make that expectation explicit:
 
 ```bash
 uv run --active python - <<'PY'
