@@ -1826,6 +1826,8 @@ class UringProactor(ProactorBase):
         *,
         owned_sock: list[socket.socket | None] | None = None,
     ) -> _UringEntry:
+        if chain.root.operation.done():
+            return parent
         connect_entry = self._arm_chain_leg(
             chain,
             parent,
@@ -2620,10 +2622,6 @@ class UringProactor(ProactorBase):
         if connect_to is None:
             operation._set_result((sock, False, False))
             return operation
-        if operation.done():
-            _close_owned_socket(sock)
-            owned_sock[0] = None
-            return operation
         payload = memoryview(initial_data) if initial_data is not None else memoryview(b"")
         self._chained_sock_connect(chain, entry, sock, connect_to, payload, owned_sock=owned_sock)
         return None
@@ -3028,26 +3026,6 @@ class UringProactor(ProactorBase):
         # keep the hook while the operation is still live.
         if entry.operation.done():
             entry.operation.set_cancel(None)
-
-    def _drain_pending_uring_entries(
-        self,
-        pending: list[_UringEntry],
-        *,
-        submit_cancel: bool = True,
-        cancel_child_operations: bool = False,
-    ) -> None:
-        for entry in pending:
-            if submit_cancel:
-                completion = entry.completion
-                if completion is not None:
-                    self._submit_cancel(completion)
-            if entry.active:
-                self._deactivate_uring_entry(entry)
-            else:
-                entry.completion = None
-            if cancel_child_operations and not entry.operation.done():
-                entry.operation._set_cancelled()
-        pending.clear()
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
