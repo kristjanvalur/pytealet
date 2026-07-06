@@ -615,6 +615,7 @@ class TestRunner:
             def close(self) -> None:
                 nonlocal closed
                 closed = True
+                super().close()
 
         runner = Runner(scheduler_factory=ClosingScheduler)
         runner.get_scheduler()

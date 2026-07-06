@@ -6,6 +6,26 @@ import pytest
 
 os.environ.setdefault("PYTEALET_CHECK_STACK", "1")
 
+_created_proactor_schedulers: list[object] = []
+
+
+def _install_proactor_scheduler_tracking() -> None:
+    from tealetio.proactor import ProactorScheduler
+
+    original_init = ProactorScheduler.__init__
+    if getattr(original_init, "_tealetio_test_tracking", False):
+        return
+
+    def tracking_init(self, *args, **kwargs) -> None:
+        original_init(self, *args, **kwargs)
+        _created_proactor_schedulers.append(self)
+
+    tracking_init._tealetio_test_tracking = True
+    ProactorScheduler.__init__ = tracking_init  # type: ignore[method-assign]
+
+
+_install_proactor_scheduler_tracking()
+
 
 _NATIVE_URING_RECV_MULTISHOT: tuple[bool, str] | None = None
 
@@ -68,13 +88,20 @@ def _reset_scheduler_tls():
     from tealetio.proactor import ProactorScheduler
     from tealetio.scheduler import _current_scheduler, _scheduler
 
+    _created_proactor_schedulers.clear()
     _scheduler.instance = BasicScheduler()
     try:
         yield
     finally:
+        closed_ids: set[int] = set()
         current = _current_scheduler()
         if isinstance(current, ProactorScheduler):
             current.close()
+            closed_ids.add(id(current))
+        for scheduler in _created_proactor_schedulers:
+            if id(scheduler) not in closed_ids:
+                scheduler.close()
+                closed_ids.add(id(scheduler))
         _scheduler.instance = BasicScheduler()
 
 

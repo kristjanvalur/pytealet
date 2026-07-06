@@ -92,13 +92,16 @@ class _MockProactor:
 class TestProactorIOManager:
     def test_scheduler_exposes_io_facade(self):
         scheduler = SyncProactorScheduler()
-        io = scheduler.io
-        assert isinstance(io, ProactorIOManager)
-        assert isinstance(io, SocketIO)
-        assert isinstance(io, PollIO)
-        assert isinstance(io, FileIO)
-        _: ServerIO = io
-        assert io.proactor is scheduler.proactor
+        try:
+            io = scheduler.io
+            assert isinstance(io, ProactorIOManager)
+            assert isinstance(io, SocketIO)
+            assert isinstance(io, PollIO)
+            assert isinstance(io, FileIO)
+            _: ServerIO = io
+            assert io.proactor is scheduler.proactor
+        finally:
+            scheduler.close()
 
     def test_scheduler_io_forwards_sock_recv(self):
         scheduler = SyncProactorScheduler()
