@@ -631,7 +631,7 @@ def open_connection(
     default factory when ``stream_factory`` is omitted.
 
     ``initial_send`` opts into connect-time pre-send on backends that honour
-    the proactor hint; any unsent remainder is flushed with ``sendall`` before
+    the proactor hint; any unsent remainder is flushed with ``sock_sendall`` before
     streams are returned.
     """
 

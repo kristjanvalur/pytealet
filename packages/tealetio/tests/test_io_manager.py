@@ -18,7 +18,6 @@ class _MockProactor:
         self.recv_calls: list[tuple[socket.socket, int]] = []
         self.poll_calls: list[tuple[int, int]] = []
         self.send_calls: list[tuple[socket.socket, Any]] = []
-        self.sendall_calls: list[tuple[socket.socket, Any]] = []
         self.create_socket_calls: list[tuple[Any, ...]] = []
         self.last_create_socket: socket.socket | None = None
         self.openat_calls: list[tuple[str, int, int]] = []
@@ -35,15 +34,10 @@ class _MockProactor:
         operation._set_result(mask)
         return operation
 
-    def send(self, sock: socket.socket, data: Any) -> Operation[int]:
+    def send(self, sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
+        del progress
         self.send_calls.append((sock, data))
-        operation = Operation[int](kind="send", fileobj=sock.fileno())
-        operation._set_result(len(bytes(data)))
-        return operation
-
-    def sendall(self, sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
-        self.sendall_calls.append((sock, data))
-        operation = Operation[None](kind="sendall", fileobj=sock.fileno())
+        operation = Operation[None](kind="send", fileobj=sock.fileno())
         operation._set_result(None)
         return operation
 
@@ -164,12 +158,12 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
-    def test_sock_send_delegates_to_proactor(self):
+    def test_sock_sendall_delegates_to_proactor(self):
         proactor = _MockProactor()
         io = ProactorIOManager(proactor)  # type: ignore[arg-type]
         sock = socket.socketpair()[0]
         try:
-            assert io.sock_send(sock, b"hello") == 5
+            io.sock_sendall(sock, b"hello")
             assert proactor.send_calls == [(sock, b"hello")]
         finally:
             sock.close()
@@ -186,9 +180,9 @@ class TestProactorIOManagerDirect:
         sock = socket.socketpair()[0]
         try:
             io.sock_send_iter(sock, [b"ab", b"", memoryview(b"cd")])
-            assert len(proactor.sendall_calls) == 2
-            assert bytes(proactor.sendall_calls[0][1]) == b"ab"
-            assert bytes(proactor.sendall_calls[1][1]) == b"cd"
+            assert len(proactor.send_calls) == 2
+            assert bytes(proactor.send_calls[0][1]) == b"ab"
+            assert bytes(proactor.send_calls[1][1]) == b"cd"
         finally:
             sock.close()
 

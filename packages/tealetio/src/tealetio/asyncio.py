@@ -235,12 +235,12 @@ class ForwardingProactor:
     def send(self, sock: socket.socket, data: Any) -> _asyncio.Future[int]:
         """Send bytes through the host proactor.
 
-        asyncio transports and ``sock_sendall()`` complete only after the full
-        buffer is sent; stdlib proactors satisfy that contract internally.
+        Matches asyncio proactor semantics: the buffer is fully drained before
+        the future completes. The result is the number of bytes sent.
         """
 
         payload = bytes(data)
-        operation = self._proactor.sendall(sock, data)
+        operation = self._proactor.send(sock, data)
         loop = self._require_loop()
         future: _asyncio.Future[int] = loop.create_future()
 
@@ -464,15 +464,6 @@ class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI)
 
         loop = _asyncio.get_running_loop()
         return self.await_(compat.sock_recvfrom_into(loop, sock, buf, nbytes))
-
-    def sock_send(self, sock: socket.socket, data: Any) -> int:
-        """Send `data` using asyncio socket readiness."""
-
-        loop = _asyncio.get_running_loop()
-        sock_send = getattr(loop, "sock_send", None)
-        if sock_send is None:
-            raise NotImplementedError("event loop does not support sock_send")
-        return self.await_(sock_send(sock, data))
 
     def sock_sendall(self, sock: socket.socket, data: Any) -> None:
         """Send all `data` using asyncio socket readiness."""

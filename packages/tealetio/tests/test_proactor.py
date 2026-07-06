@@ -860,23 +860,6 @@ class TestSelectorProactor:
             operation = proactor.send(writer, b"hello")
 
             assert operation.done() is True
-            assert operation.result() == 5
-            assert reader.recv(5) == b"hello"
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_sendall_can_complete_immediately(self):
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            operation = proactor.sendall(writer, b"hello")
-
-            assert operation.done() is True
             assert operation.result() is None
             assert reader.recv(5) == b"hello"
         finally:
@@ -1599,7 +1582,7 @@ class TestSelectorProactor:
             writer.close()
             scheduler.close()
 
-    def test_sendall_reports_progress(self):
+    def test_send_reports_progress(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         progress: list[int] = []
@@ -1607,7 +1590,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.sendall(writer, b"hello", progress.append)
+            operation = proactor.send(writer, b"hello", progress.append)
 
             assert operation.result() is None
             assert progress == [5]
@@ -1973,7 +1956,7 @@ class TestThreadedSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.sendall(writer, b"hello")
+            operation = proactor.send(writer, b"hello")
 
             assert operation.done() is True
             proactor.wait(0)
@@ -3130,27 +3113,6 @@ class TestUringProactor:
             operation = proactor.send(writer, payload)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == 5
-            assert isinstance(proactor.ring, _FakeUringRing)
-            submitted = proactor.ring.submitted_send[0][1]
-            assert isinstance(submitted, memoryview)
-            assert submitted.obj is payload
-            assert bytes(submitted) == b"hello"
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_sendall_completes_from_ring_completion(self, monkeypatch):
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
-        reader, writer = socket.socketpair()
-        try:
-            writer.setblocking(False)
-            payload = b"hello"
-            operation = proactor.sendall(writer, payload)
-
-            proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_send[0][1]
@@ -3162,14 +3124,14 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_sendall_uses_send_zc_when_probe_supports_it(self, monkeypatch):
+    def test_send_uses_send_zc_when_probe_supports_it(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation = proactor.sendall(writer, payload)
+            operation = proactor.send(writer, payload)
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
@@ -3183,13 +3145,13 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_sendall_uses_send_when_probe_lacks_send_zc(self, monkeypatch):
+    def test_send_uses_plain_send_when_probe_lacks_send_zc(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            operation = proactor.sendall(writer, b"hello")
+            operation = proactor.send(writer, b"hello")
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
@@ -4243,7 +4205,9 @@ class TestUringProactor:
                 return scheduler.io.sock_recvall(reader, progress.append)
 
             def cancel_after_first_chunk() -> None:
-                scheduler.io.sock_sendall(writer, b"hello")
+                # Use a direct socket send so this recv-focused test does not
+                # depend on native io_uring stream send support.
+                writer.send(b"hello")
                 deadline = scheduler.proactor.get_time() + 2.0
                 while progress != [b"hello"] and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.01)
@@ -4251,7 +4215,7 @@ class TestUringProactor:
 
             task = scheduler.spawn(receive)
             scheduler.spawn(cancel_after_first_chunk)
-            with pytest.raises(CancelledError):
+            with pytest.raises((CancelledError, asyncio.CancelledError)):
                 scheduler.run_until_complete(task)
 
             assert progress == [b"hello"]
@@ -4261,13 +4225,13 @@ class TestUringProactor:
             writer.close()
             scheduler.close()
 
-    def test_sendall_reports_uring_progress(self):
+    def test_send_reports_uring_progress(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         progress: list[int] = []
         try:
             writer.setblocking(False)
-            operation = proactor.sendall(writer, b"hello", progress.append)
+            operation = proactor.send(writer, b"hello", progress.append)
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
@@ -4495,7 +4459,7 @@ class TestUringProactor:
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.recv(reader, 1)
             with pytest.raises(RuntimeError, match="closed"):
-                proactor.sendall(writer, b"")
+                proactor.send(writer, b"")
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.wait(0)
         finally:

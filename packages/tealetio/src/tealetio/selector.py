@@ -231,16 +231,6 @@ class SelectorMixin:
             except (BlockingIOError, InterruptedError):
                 self.wait_readable(sock)
 
-    def sock_send(self, sock: socket.socket, data: Any) -> int:
-        """Send `data` through a non-blocking socket."""
-
-        self._check_socket(sock)
-        while True:
-            try:
-                return sock.send(data)
-            except (BlockingIOError, InterruptedError):
-                self.wait_writable(sock)
-
     def sock_sendall(self, sock: socket.socket, data: Any) -> None:
         """Send all `data` through a non-blocking socket."""
 

@@ -33,22 +33,22 @@ def test_tealet_proactor_event_loop_runs_without_self_reading_hook(monkeypatch):
         scheduler.close()
 
 
-class _SendallTrackingProactor:
-    def sendall(
+class _SendTrackingProactor:
+    def send(
         self,
         sock: socket.socket,
         data: bytes | bytearray | memoryview,
         progress: object = None,
     ) -> Operation[None]:
         del sock, progress
-        self.last_sendall = bytes(data)
-        operation = Operation[None](kind="sendall", fileobj=None)
+        self.last_send = bytes(data)
+        operation = Operation[None](kind="send", fileobj=None)
         operation._set_result(None)
         return operation
 
 
-def test_forwarding_proactor_send_drains_via_sendall() -> None:
-    backend = _SendallTrackingProactor()
+def test_forwarding_proactor_send_drains_buffer() -> None:
+    backend = _SendTrackingProactor()
     forwarding = ForwardingProactor(backend)  # type: ignore[arg-type]
     loop = asyncio.new_event_loop()
     forwarding.set_loop(loop)
@@ -56,7 +56,7 @@ def test_forwarding_proactor_send_drains_via_sendall() -> None:
     try:
         future = forwarding.send(sock, b"hello")
         assert loop.run_until_complete(asyncio.wrap_future(future)) == 5
-        assert backend.last_sendall == b"hello"
+        assert backend.last_send == b"hello"
     finally:
         sock.close()
         loop.close()

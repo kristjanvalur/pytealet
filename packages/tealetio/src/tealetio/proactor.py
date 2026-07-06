@@ -302,9 +302,12 @@ class Proactor(Protocol):
 
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]: ...
 
-    def send(self, sock: socket.socket, data: Any) -> Operation[int]: ...
-
-    def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]: ...
+    def send(
+        self,
+        sock: socket.socket,
+        data: Any,
+        progress: _ProgressCallback | None = None,
+    ) -> Operation[None]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
@@ -902,32 +905,15 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def send(self, sock: socket.socket, data: Any) -> Operation[int]:
-        """Submit a socket send operation."""
+    def send(
+        self,
+        sock: socket.socket,
+        data: Any,
+        progress: _ProgressCallback | None = None,
+    ) -> Operation[None]:
+        """Submit a stream send that drains ``data`` before completing."""
 
-        operation = Operation[int](kind="send", fileobj=sock)
-
-        def attempt() -> int:
-            return sock.send(data)
-
-        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
-        return operation
-
-    def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
-        """Submit a datagram send operation."""
-
-        operation = Operation[int](kind="sendto", fileobj=sock)
-
-        def attempt() -> int:
-            return sock.sendto(data, address)
-
-        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
-        return operation
-
-    def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]:
-        """Submit a socket send-all operation."""
-
-        operation = Operation[None](kind="sendall", fileobj=sock)
+        operation = Operation[None](kind="send", fileobj=sock)
         view = memoryview(data)
         offset = 0
 
@@ -941,6 +927,17 @@ class SelectorProactor(ProactorBase):
                 if progress is not None:
                     progress(offset)
             return None
+
+        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+        return operation
+
+    def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
+        """Submit a datagram send operation."""
+
+        operation = Operation[int](kind="sendto", fileobj=sock)
+
+        def attempt() -> int:
+            return sock.sendto(data, address)
 
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
@@ -2143,31 +2140,15 @@ class UringProactor(ProactorBase):
         operation._set_result((completion.res, completion.result))
         return operation
 
-    def send(self, sock: socket.socket, data: Any) -> Operation[int]:
-        """Submit a socket send operation."""
+    def send(
+        self,
+        sock: socket.socket,
+        data: Any,
+        progress: _ProgressCallback | None = None,
+    ) -> Operation[None]:
+        """Submit a stream send that drains ``data`` before completing."""
 
-        operation = Operation[int](kind="send", fileobj=sock)
-        payload = memoryview(data)
-        if not payload:
-            self._check_open()
-            operation._set_result(0)
-            return operation
-        entry = self._uring_entry(
-            operation,
-            lambda entry, completion: self._complete_uring_send(entry, completion),
-        )
-        self._submit_uring_entry(entry, lambda: self._submit_send(sock.fileno(), payload, entry))
-        return operation
-
-    def _complete_uring_send(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
-        operation = cast(Operation[int], entry.operation)
-        operation._set_result(completion.res)
-        return operation
-
-    def sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> Operation[None]:
-        """Submit a socket send-all operation."""
-
-        operation = Operation[None](kind="sendall", fileobj=sock)
+        operation = Operation[None](kind="send", fileobj=sock)
         payload = memoryview(data)
         if not payload:
             self._check_open()

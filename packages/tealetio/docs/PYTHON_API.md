@@ -296,7 +296,9 @@ blocking `os.fstat()` / `os.stat()`. When `statx_fdsize` completes without a
 parsed size, the uring completion path falls back to a rare blocking `os.fstat()`
 on the completion thread before delivering the operation result.
 
-`sendall(sock, data, progress=None)` also accepts an optional progress callback.
+`send(sock, data, progress=None)` drains stream buffers before completing and
+accepts an optional progress callback. Use `sendto(sock, data, address)` for
+datagram sockets.
 Backends call `progress(total)` with the cumulative number of bytes sent as
 progress becomes observable. Some backends may only expose a single completion
 for the whole send, in which case they report one final total.
