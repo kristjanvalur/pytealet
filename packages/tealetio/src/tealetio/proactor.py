@@ -97,7 +97,7 @@ _RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = tuple[socket.socket, Any, bytes | None, BaseException | None]
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
 _MAX_ACCEPT_RECV_SIZE = 2**16
-CreateSocketResult: TypeAlias = tuple[socket.socket, bool, int]
+CreateSocketResult: TypeAlias = tuple[socket.socket, bool, bool]
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
@@ -334,10 +334,10 @@ class Proactor(Protocol):
         """Connect a socket.
 
         When ``initial`` is provided the operation completes with ``True`` when
-        the full buffer was sent after connect, or ``False`` when ``initial`` is
-        empty. Backends that do not support connect-time send ignore ``initial``
-        and complete like a plain connect. A send failure after a successful
-        connect fails the operation; the caller owns the socket.
+        connect-time send was performed (including an empty buffer). Backends
+        that ignore ``initial`` complete with a falsy result like a plain
+        connect. A send failure after a successful connect fails the operation;
+        the caller owns the socket.
         """
 
         ...
@@ -356,13 +356,15 @@ class Proactor(Protocol):
 
         Returns a non-blocking, close-on-exec ``socket.socket`` together with
         connect/send outcome flags. On success the operation completes with
-        ``(socket, is_connected, bytes_sent)``. ``connect_to`` and
-        ``initial_data`` are optional hints; backends may ignore them and return
-        ``(socket, False, 0)`` after creation only. ``UringProactor`` honours
-        the hints only when ``IORING_OP_SOCKET`` is probed, chaining socket
-        creation, connect, and one ``send`` attempt. Without that opcode it
-        falls back to stdlib creation and does not connect or send. Any failure
-        after creation closes the socket before the operation completes.
+        ``(socket, is_connected, initial_sent)``. ``initial_sent`` is ``True``
+        when connect-time send ran (including an empty ``initial_data`` buffer),
+        and falsy when the backend ignored connect/send hints.
+        ``connect_to`` and ``initial_data`` are optional hints; backends may
+        ignore them and return ``(socket, False, False)`` after creation only.
+        ``UringProactor`` honours the hints only when ``IORING_OP_SOCKET`` is
+        probed, chaining socket creation, connect, and ``sendall``. Without that
+        opcode it falls back to stdlib creation and does not connect or send. Any
+        failure after creation closes the socket before the operation completes.
         """
 
         ...
@@ -1006,7 +1008,7 @@ class SelectorProactor(ProactorBase):
         except OSError as exc:
             operation._set_exception(exc)
             return operation
-        operation._set_result((sock, False, 0))
+        operation._set_result((sock, False, False))
         return operation
 
     def connect(
@@ -2486,15 +2488,15 @@ class UringProactor(ProactorBase):
             chain = entry.chain
             assert chain is not None
 
-            def deliver_sent(sent: int) -> None:
+            def deliver_sent(_sent: int) -> None:
                 sock = chain.sock
                 assert sock is not None
-                operation._set_result((sock, True, sent))
+                operation._set_result((sock, True, True))
 
             def deliver_empty() -> None:
                 sock = chain.sock
                 assert sock is not None
-                operation._set_result((sock, True, 0))
+                operation._set_result((sock, True, True))
 
             def fail(exc: BaseException) -> None:
                 sock = chain.sock
@@ -2517,7 +2519,7 @@ class UringProactor(ProactorBase):
         except OSError as exc:
             operation._set_exception(exc)
             return operation
-        operation._set_result((sock, False, 0))
+        operation._set_result((sock, False, False))
         return operation
 
     def connect(
@@ -2544,7 +2546,7 @@ class UringProactor(ProactorBase):
             operation,
             self._fini_sock_connect_leg,
             deliver_sent=lambda _sent: operation._set_result(True),
-            deliver_empty=lambda: operation._set_result(False),
+            deliver_empty=lambda: operation._set_result(True),
             fail=operation._set_exception,
         )
         chain = entry.chain
@@ -2596,7 +2598,7 @@ class UringProactor(ProactorBase):
         chain.sock = sock
         chain.owned_sock = sock
         if connect_to is None:
-            operation._set_result((sock, False, 0))
+            operation._set_result((sock, False, False))
             return operation
         if operation.done():
             _close_owned_socket(sock)

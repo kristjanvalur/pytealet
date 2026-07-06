@@ -991,9 +991,9 @@ class TestSelectorProactor:
                 initial_data=b"ping",
             )
             assert operation.done()
-            sock, is_connected, nbytes = operation.result()
+            sock, is_connected, initial_sent = operation.result()
             assert is_connected is False
-            assert nbytes == 0
+            assert initial_sent is False
             sock.close()
         finally:
             proactor.close()
@@ -4212,7 +4212,7 @@ class TestUringProactor:
             sock.setblocking(False)
             operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"")
             proactor.wait(proactor.get_time() + 0.05)
-            assert operation.result() is False
+            assert operation.result() is True
             assert proactor.ring.submitted_send == []
         finally:
             sock.close()
@@ -4279,9 +4279,9 @@ class TestUringProactor:
                 connect_to=("127.0.0.1", 9),
             )
             _wait_for_uring(proactor, operation.done)
-            sock, is_connected, nbytes = operation.result()
+            sock, is_connected, initial_sent = operation.result()
             assert is_connected is True
-            assert nbytes == 0
+            assert initial_sent is True
             assert sock.getblocking() is False
             sock.close()
         finally:
@@ -4299,9 +4299,9 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send(2)
             _wait_for_uring(proactor, operation.done)
-            sock, is_connected, nbytes = operation.result()
+            sock, is_connected, initial_sent = operation.result()
             assert is_connected is True
-            assert nbytes == 2
+            assert initial_sent is True
             sock.close()
         finally:
             proactor.close()
@@ -4349,7 +4349,7 @@ class TestProactorScheduler:
     def test_sock_create_uses_proactor_create_socket(self):
         scheduler = SyncProactorScheduler()
         try:
-            sock, is_connected, nbytes = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            sock, is_connected, initial_sent = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 assert isinstance(sock, socket.socket)
                 assert sock.family == socket.AF_INET
@@ -4357,7 +4357,7 @@ class TestProactorScheduler:
                 assert sock.getblocking() is False
                 assert os.get_inheritable(sock.fileno()) is False
                 assert is_connected is False
-                assert nbytes == 0
+                assert initial_sent is False
             finally:
                 sock.close()
         finally:
@@ -4368,11 +4368,11 @@ class TestProactorScheduler:
         try:
             operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
             _wait_for_uring(proactor, operation.done)
-            sock, is_connected, nbytes = operation.result()
+            sock, is_connected, initial_sent = operation.result()
             try:
                 assert len(proactor.ring.submitted_socket) == 1
                 assert is_connected is False
-                assert nbytes == 0
+                assert initial_sent is False
                 assert sock.getblocking() is False
                 assert os.get_inheritable(sock.fileno()) is False
             finally:
@@ -4389,12 +4389,12 @@ class TestProactorScheduler:
                 connect_to=("127.0.0.1", 9),
             )
             _wait_for_uring(proactor, operation.done)
-            sock, is_connected, nbytes = operation.result()
+            sock, is_connected, initial_sent = operation.result()
             try:
                 assert len(proactor.ring.submitted_socket) == 1
                 assert len(proactor.ring.submitted_connect) == 1
                 assert is_connected is True
-                assert nbytes == 0
+                assert initial_sent is True
             finally:
                 sock.close()
         finally:
@@ -4413,12 +4413,12 @@ class TestProactorScheduler:
                 initial_data=b"hi",
             )
             assert operation.done()
-            sock, is_connected, nbytes = operation.result()
+            sock, is_connected, initial_sent = operation.result()
             try:
                 assert len(proactor.ring.submitted_socket) == 0
                 assert len(proactor.ring.submitted_connect) == 0
                 assert is_connected is False
-                assert nbytes == 0
+                assert initial_sent is False
             finally:
                 sock.close()
         finally:

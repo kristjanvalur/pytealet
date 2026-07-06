@@ -111,7 +111,7 @@ class SocketIO(Protocol):
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> tuple[socket.socket, bool, int]: ...
+    ) -> tuple[socket.socket, bool, bool]: ...
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: "RecvBufferPool | None" = None
@@ -298,9 +298,7 @@ class ProactorIOManager:
             self.wait_operation(self._proactor.connect(sock, address))
             return
         sent = self.wait_operation(self._proactor.connect(sock, address, initial=initial))
-        if sent is True:
-            return
-        if sent is False:
+        if sent:
             return
         self.sock_sendall(sock, initial)
 
@@ -313,8 +311,8 @@ class ProactorIOManager:
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> tuple[socket.socket, bool, int]:
-        sock, is_connected, nbytes = self.wait_operation(
+    ) -> tuple[socket.socket, bool, bool]:
+        sock, is_connected, initial_sent = self.wait_operation(
             self._proactor.create_socket(
                 family,
                 type,
@@ -326,12 +324,10 @@ class ProactorIOManager:
         )
         if connect_to is not None and not is_connected:
             self.sock_connect(sock, connect_to, initial=initial_data)
-            return sock, True, 0
-        if initial_data is not None and is_connected:
-            payload = memoryview(initial_data)
-            if nbytes < payload.nbytes:
-                self.sock_sendall(sock, payload[nbytes:])
-        return sock, is_connected, nbytes
+            return sock, True, True
+        if initial_data is not None and is_connected and not initial_sent:
+            self.sock_sendall(sock, initial_data)
+        return sock, is_connected, initial_sent
 
     def poll(self, fd: int, mask: int) -> int:
         return self.wait_operation(self._proactor.poll(fd, mask))

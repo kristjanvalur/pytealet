@@ -261,10 +261,10 @@ class ForwardingProactor:
     ) -> _asyncio.Future[None] | _asyncio.Future[bool]:
         """Connect a socket through the host proactor.
 
-        When ``initial`` is provided the future completes with ``True`` when the
-        full buffer was sent after connect, or ``False`` when ``initial`` is
-        empty. Backends that ignore connect-time send complete like a plain
-        connect (``None``); callers should flush ``initial`` themselves.
+        When ``initial`` is provided the future completes with ``True`` when
+        connect-time send ran (including an empty buffer). Backends that ignore
+        ``initial`` complete with a falsy result; callers should flush ``initial``
+        themselves.
         """
 
         return self._future_from_operation(self._proactor.connect(sock, address, initial=initial))
@@ -278,7 +278,7 @@ class ForwardingProactor:
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> _asyncio.Future[tuple[socket.socket, bool, int]]:
+    ) -> _asyncio.Future[tuple[socket.socket, bool, bool]]:
         """Create a socket through the host proactor."""
 
         return self._future_from_operation(
