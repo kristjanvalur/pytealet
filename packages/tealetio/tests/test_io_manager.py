@@ -11,6 +11,7 @@ from tealetio import set_scheduler
 from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, ServerIO, SocketIO
 from tealetio.operations import ContinuousOperation, Operation
 from tealetio.proactor import SyncProactorScheduler
+from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 
 
 class _StubScheduler:
@@ -98,42 +99,6 @@ class _MockProactor:
 
 
 class TestProactorIOManager:
-    def test_scheduler_exposes_io_facade(self):
-        scheduler = SyncProactorScheduler()
-        try:
-            io = scheduler.io
-            assert isinstance(io, ProactorIOManager)
-            assert isinstance(io, SocketIO)
-            assert isinstance(io, PollIO)
-            assert isinstance(io, FileIO)
-            _: ServerIO = io
-            assert io.proactor is scheduler.proactor
-        finally:
-            scheduler.close()
-
-    def test_scheduler_io_forwards_sock_recv(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        client, server = socket.socketpair()
-        try:
-            client.setblocking(False)
-            server.setblocking(False)
-            client.sendall(b"ping")
-
-            def exercise() -> bytes:
-                return scheduler.io.sock_recv(server, 4)
-
-            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"ping"
-
-            def read_zero() -> bytes:
-                return scheduler.io.sock_recv(server, 0)
-
-            assert scheduler.run_until_complete(scheduler.spawn(read_zero)) == b""
-        finally:
-            client.close()
-            server.close()
-            scheduler.close()
-
     def test_basic_scheduler_io_raises(self):
         from tealetio.scheduler import BasicScheduler
 
@@ -317,9 +282,46 @@ class TestProactorIOManagerDirect:
         operation = io.poll_many(5, 1, seen.append)
         assert isinstance(operation, ContinuousOperation)
 
-    def test_wait_operation_blocks_until_completion(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+class TestProactorIOManagerIntegration:
+    @pytest.fixture
+    def scheduler(self, scheduler_factory) -> SyncProactorScheduler:
+        sched = scheduler_factory()
+        set_scheduler(sched)
+        yield sched
+        sched.close()
+
+    def test_scheduler_exposes_io_facade(self, scheduler: SyncProactorScheduler) -> None:
+        io = scheduler.io
+        assert isinstance(io, ProactorIOManager)
+        assert isinstance(io, SocketIO)
+        assert isinstance(io, PollIO)
+        assert isinstance(io, FileIO)
+        _: ServerIO = io
+        assert io.proactor is scheduler.proactor
+
+    def test_scheduler_io_forwards_sock_recv(self, scheduler: SyncProactorScheduler) -> None:
+        client, server = socket.socketpair()
+        try:
+            client.setblocking(False)
+            server.setblocking(False)
+            client.sendall(b"ping")
+
+            def exercise() -> bytes:
+                return scheduler.io.sock_recv(server, 4)
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"ping"
+
+            def read_zero() -> bytes:
+                return scheduler.io.sock_recv(server, 0)
+
+            assert scheduler.run_until_complete(scheduler.spawn(read_zero)) == b""
+        finally:
+            client.close()
+            server.close()
+
+    def test_wait_operation_blocks_until_completion(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -333,4 +335,3 @@ class TestProactorIOManagerDirect:
         finally:
             reader.close()
             writer.close()
-            scheduler.close()

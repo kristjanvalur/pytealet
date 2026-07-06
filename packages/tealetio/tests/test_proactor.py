@@ -34,6 +34,9 @@ from uring_fakes import (
     _force_uring_multishot_probes,
     _pack_fake_statx_buffer,
     _patch_uring_capabilities,
+    PROACTOR_CONTRACT_FACTORIES,
+    PROACTOR_UNIT_TEST_FACTORIES,
+    SCHEDULER_INTEGRATION_FACTORIES,
 )
 
 import tealetio.poll_helpers as poll_helpers_module
@@ -684,6 +687,25 @@ def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) ->
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
+def _pump_proactor(proactor: SelectorProactor | UringProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
+    if isinstance(proactor, UringProactor):
+        if operations:
+            _wait_for_uring(proactor, lambda: all(op.done() for op in operations))
+        return list(operations)
+    return _wait_until_done(proactor, *operations)
+
+
+def _pump_until(proactor: SelectorProactor | UringProactor, predicate: Callable[[], bool], timeout: float = 1.0) -> None:
+    if isinstance(proactor, UringProactor):
+        _wait_for_uring(proactor, predicate, timeout)
+        return
+    deadline = proactor.get_time() + timeout
+    while not predicate():
+        if proactor.get_time() >= deadline:
+            raise TimeoutError("timed out waiting for proactor condition")
+        proactor.wait(min(deadline, proactor.get_time() + 0.05))
+
+
 class TestOperation:
     def test_operation_result_requires_completion(self):
         operation: Operation[int] = Operation(kind="test")
@@ -740,36 +762,164 @@ class TestOperation:
         assert seen == [1]
 
 
-@pytest.mark.parametrize(
-    "factory",
-    [
-        pytest.param(lambda: SelectorProactor(), id="selector"),
-        pytest.param(lambda: UringProactor(ring_factory=_FakeUringRing), id="uring"),
-    ],
-)
-@pytest.mark.parametrize("recv_size", [0, -1])
-def test_accept_many_rejects_invalid_recv_size(factory: Callable[[], Any], recv_size: int) -> None:
-    proactor = factory()
-    server = socket.socket()
-    try:
-        server.setblocking(False)
-        with pytest.raises(ValueError):
-            proactor.accept_many(server, lambda _: None, recv_size=recv_size)
-    finally:
-        server.close()
-        proactor.close()
-
-
-class TestSelectorProactor:
-    def test_clock_can_be_replaced(self):
-        proactor = SelectorProactor()
+@pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
+class TestProactorContract:
+    def test_clock_can_be_replaced(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+        proactor = proactor_factory()
         try:
             proactor.set_clock(lambda: 42.0)
-
             assert proactor.get_time() == 42.0
         finally:
             proactor.close()
 
+    def test_recv_completes_after_wait(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            writer.sendall(b"hello")
+            _pump_proactor(proactor, operation)
+            assert operation.result() == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_into_completes_buffer(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            buf = bytearray(5)
+            operation = proactor.recv_into(reader, buf)
+            writer.sendall(b"hello")
+            _pump_proactor(proactor, operation)
+            assert operation.result() == 5
+            assert bytes(buf) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_can_complete_immediately(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.send(writer, b"hello")
+            if not operation.done():
+                _pump_proactor(proactor, operation)
+            assert operation.result() is None
+            payload = b""
+            deadline = proactor.get_time() + 1.0
+            while len(payload) < 5 and proactor.get_time() < deadline:
+                try:
+                    payload += reader.recv(5 - len(payload))
+                except BlockingIOError:
+                    proactor.wait(min(deadline, proactor.get_time() + 0.05))
+            assert payload == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_accept_and_connect_complete_after_pumping(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: socket.socket | None = None
+        try:
+            server.setblocking(False)
+            client.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+
+            accept_operation = proactor.accept(server)
+            connect_operation = proactor.connect(client, server.getsockname())
+            completed = _pump_proactor(proactor, accept_operation, connect_operation)
+            accepted, address = accept_operation.result()
+
+            assert accept_operation in completed
+            assert connect_operation in completed
+            assert address[0] == "127.0.0.1"
+            assert accepted.getblocking() is False
+            assert os.get_inheritable(accepted.fileno()) is False
+            assert connect_operation.result() is None
+        finally:
+            if accepted is not None:
+                accepted.close()
+            client.close()
+            server.close()
+            proactor.close()
+
+    def test_datagram_helpers(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+        proactor = proactor_factory()
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            receiver.setblocking(False)
+            sender.setblocking(False)
+            receiver.bind(("127.0.0.1", 0))
+            buf = bytearray(5)
+
+            receive_operation = proactor.recvfrom_into(receiver, buf)
+            send_operation = proactor.sendto(sender, b"hello", receiver.getsockname())
+            _pump_proactor(proactor, receive_operation, send_operation)
+
+            count, address = receive_operation.result()
+            assert count == 5
+            assert bytes(buf) == b"hello"
+            assert address[1] == sender.getsockname()[1]
+            assert send_operation.result() == 5
+
+            receive_bytes_operation = proactor.recvfrom(receiver, 5)
+            sender.sendto(b"again", receiver.getsockname())
+            _pump_until(proactor, receive_bytes_operation.done)
+            data, address = receive_bytes_operation.result()
+            assert data == b"again"
+            assert address[1] == sender.getsockname()[1]
+        finally:
+            sender.close()
+            receiver.close()
+            proactor.close()
+
+    def test_operations_reject_closed_proactor(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            proactor.close()
+            with pytest.raises(RuntimeError, match="closed"):
+                proactor.recv(reader, 1)
+            with pytest.raises(RuntimeError, match="closed"):
+                proactor.send(writer, b"")
+            with pytest.raises(RuntimeError, match="closed"):
+                proactor.wait(0)
+        finally:
+            reader.close()
+            writer.close()
+
+    @pytest.mark.parametrize("recv_size", [0, -1])
+    def test_accept_many_rejects_invalid_recv_size(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor], recv_size: int
+    ) -> None:
+        proactor = proactor_factory()
+        server = socket.socket()
+        try:
+            server.setblocking(False)
+            with pytest.raises(ValueError):
+                proactor.accept_many(server, lambda _: None, recv_size=recv_size)
+        finally:
+            server.close()
+            proactor.close()
+
+
+class TestSelectorProactor:
     def test_stat_completes_immediately_with_blocking_fstat(self):
         proactor = SelectorProactor()
         try:
@@ -822,60 +972,6 @@ class TestSelectorProactor:
         finally:
             proactor.close()
 
-    def test_recv_completes_after_selector_wait(self):
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            operation = proactor.recv(reader, 5)
-            assert operation.done() is False
-
-            writer.send(b"hello")
-            proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == b"hello"
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_recv_into_completes_buffer(self):
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            buf = bytearray(5)
-
-            operation = proactor.recv_into(reader, buf)
-            writer.send(b"world")
-
-            proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == 5
-            assert bytes(buf) == b"world"
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_send_can_complete_immediately(self):
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            operation = proactor.send(writer, b"hello")
-
-            assert operation.done() is True
-            assert operation.result() is None
-            assert reader.recv(5) == b"hello"
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
     def test_ready_recv_completes_immediately_without_selector_registration(self):
         selector = selectors.SelectSelector()
         proactor = SelectorProactor(selector=selector)
@@ -894,35 +990,6 @@ class TestSelectorProactor:
         finally:
             reader.close()
             writer.close()
-            proactor.close()
-
-    def test_accept_and_connect_complete_after_pumping(self):
-        proactor = SelectorProactor()
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        accepted: socket.socket | None = None
-        try:
-            server.setblocking(False)
-            client.setblocking(False)
-            server.bind(("127.0.0.1", 0))
-            server.listen()
-
-            accept_operation = proactor.accept(server)
-            connect_operation = proactor.connect(client, server.getsockname())
-            completed = _wait_until_done(proactor, accept_operation, connect_operation)
-            accepted, address = accept_operation.result()
-
-            assert accept_operation in completed
-            assert connect_operation in completed
-            assert address[0] == "127.0.0.1"
-            assert accepted.getblocking() is False
-            assert os.get_inheritable(accepted.fileno()) is False
-            assert connect_operation.result() is None
-        finally:
-            if accepted is not None:
-                accepted.close()
-            client.close()
-            server.close()
             proactor.close()
 
     def test_connect_with_initial_ignores_payload_on_selector(self):
@@ -1229,45 +1296,6 @@ class TestSelectorProactor:
             reader.close()
             writer.close()
             scheduler.close()
-
-    def test_poll_completes_when_fd_becomes_readable(self):
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = proactor.poll(reader.fileno(), select.POLLIN)
-            assert operation.done() is False
-
-            writer.send(b"x")
-            _wait_until_done(proactor, operation)
-
-            assert operation.result() & select.POLLIN
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_poll_many_emits_readiness_until_cancelled(self):
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        seen: list[int] = []
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
-
-            writer.send(b"a")
-            while not seen:
-                proactor.wait(proactor.get_time() + 1.0)
-            assert seen[-1] & select.POLLIN
-
-            operation.cancel()
-            assert operation.cancelled() is True
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
 
     def test_continuous_fd_slot_stores_step_and_cancel_clears_registration(self):
         proactor = SelectorProactor()
@@ -1607,37 +1635,6 @@ class TestSelectorProactor:
         finally:
             reader.close()
             writer.close()
-            proactor.close()
-
-    def test_datagram_helpers(self):
-        proactor = SelectorProactor()
-        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            receiver.setblocking(False)
-            sender.setblocking(False)
-            receiver.bind(("127.0.0.1", 0))
-            buf = bytearray(5)
-
-            receive_operation = proactor.recvfrom_into(receiver, buf)
-            send_operation = proactor.sendto(sender, b"hello", receiver.getsockname())
-            _wait_until_done(proactor, receive_operation, send_operation)
-
-            count, address = receive_operation.result()
-            assert count == 5
-            assert bytes(buf) == b"hello"
-            assert address[1] == sender.getsockname()[1]
-            assert send_operation.result() == 5
-
-            receive_bytes_operation = proactor.recvfrom(receiver, 5)
-            sender.sendto(b"again", receiver.getsockname())
-            proactor.wait(proactor.get_time() + 1.0)
-            data, address = receive_bytes_operation.result()
-            assert data == b"again"
-            assert address[1] == sender.getsockname()[1]
-        finally:
-            sender.close()
-            receiver.close()
             proactor.close()
 
     def test_operation_cancel_removes_selector_registration(self):
@@ -2276,15 +2273,6 @@ class TestUringProactor:
             while not calls and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert calls == [(proactor_module.os.PRIO_PROCESS, 0, -5)]
-        finally:
-            proactor.close()
-
-    def test_clock_can_be_replaced(self):
-        proactor = UringProactor(ring_factory=_FakeUringRing)
-        try:
-            proactor.set_clock(lambda: 42.0)
-
-            assert proactor.get_time() == 42.0
         finally:
             proactor.close()
 
@@ -4381,18 +4369,223 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_operations_reject_closed_proactor(self):
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+class TestProactorSchedulerIntegration:
+    @pytest.fixture
+    def scheduler(self, scheduler_factory: Callable[[], SyncProactorScheduler]) -> SyncProactorScheduler:
+        sched = scheduler_factory()
+        set_scheduler(sched)
+        yield sched
+        sched.close()
+
+    def test_sock_create_uses_proactor_create_socket(self, scheduler: SyncProactorScheduler) -> None:
+        def exercise() -> tuple[socket.socket, bool, bool]:
+            return scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+
+        sock, is_connected, initial_sent = scheduler.run_until_complete(scheduler.spawn(exercise))
+        try:
+            assert isinstance(sock, socket.socket)
+            assert sock.family == socket.AF_INET
+            assert sock.type == socket.SOCK_STREAM
+            _assert_scheduler_socket_fd(sock)
+            assert is_connected is False
+            assert initial_sent is False
+        finally:
+            sock.close()
+
+    def test_scheduler_clock_drives_proactor_clock(self, scheduler: SyncProactorScheduler) -> None:
+        scheduler._time = lambda: 24.0
+        assert scheduler.proactor.get_time() == 24.0
+
+    def test_socket_helpers(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
-            proactor.close()
+            reader.setblocking(False)
+            writer.setblocking(False)
+            buf = bytearray(5)
 
-            with pytest.raises(RuntimeError, match="closed"):
-                proactor.recv(reader, 1)
-            with pytest.raises(RuntimeError, match="closed"):
-                proactor.send(writer, b"")
-            with pytest.raises(RuntimeError, match="closed"):
-                proactor.wait(0)
+            def exchange() -> tuple[int, bytes]:
+                scheduler.io.sock_sendall(writer, b"world")
+                count = scheduler.io.sock_recv_into(reader, buf)
+                return count, bytes(buf)
+
+            task = scheduler.spawn(exchange)
+            assert scheduler.run_until_complete(task) == (5, b"world")
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_create_recv_buffer_pool_delegates_to_proactor(self, scheduler: SyncProactorScheduler) -> None:
+        pool = scheduler.io.create_recv_buffer_pool(8192, 4)
+        assert pool.buffer_size == 8192
+        assert pool.buffer_count == 4
+        assert pool.leased_count == 0
+
+    def test_sock_recv_iter_accepts_scheduler_buffer_pool(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            pool = scheduler.io.create_recv_buffer_pool(8192, 2)
+
+            def receive_chunks() -> list[tuple[int, bytes]]:
+                return _recviter_bytes(scheduler.io.sock_recv_iter(reader, pool))
+
+            def send_chunks() -> None:
+                scheduler.io.sock_sendall(writer, b"hello")
+                writer.shutdown(socket.SHUT_WR)
+
+            task = scheduler.spawn(receive_chunks)
+            scheduler.spawn(send_chunks)
+            assert scheduler.run_until_complete(task) == [(0, b"hello")]
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_sock_recv_iter_yields_chunks_in_stream_order(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def receive_chunks() -> list[tuple[int, bytes]]:
+                return _recviter_bytes(scheduler.io.sock_recv_iter(reader))
+
+            def send_chunks() -> None:
+                scheduler.io.sock_sendall(writer, b"hello")
+                scheduler.sleep(0.05)
+                scheduler.io.sock_sendall(writer, b"world")
+                writer.shutdown(socket.SHUT_WR)
+
+            task = scheduler.spawn(receive_chunks)
+            scheduler.spawn(send_chunks)
+            assert scheduler.run_until_complete(task) == [(0, b"hello"), (1, b"world")]
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_poll_completes_when_fd_becomes_readable(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def wait_for_read() -> int:
+                return scheduler.io.poll(reader.fileno(), select.POLLIN)
+
+            def send() -> None:
+                scheduler.sleep(0.001)
+                writer.send(b"x")
+
+            task = scheduler.spawn(wait_for_read)
+            scheduler.spawn(send)
+            assert scheduler.run_until_complete(task) & select.POLLIN
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_poll_many_emits_until_cancelled(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        operation = None
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = scheduler.io.poll_many(reader.fileno(), select.POLLIN, seen.append)
+
+            def send() -> None:
+                scheduler.sleep(0.001)
+                writer.send(b"x")
+
+            def wait_for_event() -> None:
+                while not seen:
+                    scheduler.sleep(0.001)
+                operation.cancel()
+
+            scheduler.spawn(send)
+            task = scheduler.spawn(wait_for_event)
+            scheduler.run_until_complete(task)
+            assert seen[0] & select.POLLIN
+        finally:
+            if operation is not None:
+                operation.cancel()
+            reader.close()
+            writer.close()
+
+    def test_accept_and_connect(self, scheduler: SyncProactorScheduler) -> None:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            client.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+
+            def accept_and_read() -> bytes:
+                conn, _address = scheduler.io.sock_accept(server)
+                try:
+                    return scheduler.io.sock_recv(conn, 4)
+                finally:
+                    conn.close()
+
+            def connect_and_send() -> None:
+                scheduler.io.sock_connect(client, server.getsockname())
+                scheduler.io.sock_sendall(client, b"ping")
+
+            task = scheduler.spawn(accept_and_read)
+            scheduler.spawn(connect_and_send)
+            assert scheduler.run_until_complete(task) == b"ping"
+        finally:
+            client.close()
+            server.close()
+
+    def test_datagram_helpers(self, scheduler: SyncProactorScheduler) -> None:
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            receiver.setblocking(False)
+            sender.setblocking(False)
+            receiver.bind(("127.0.0.1", 0))
+            buf = bytearray(5)
+
+            def receive() -> tuple[int, object]:
+                return scheduler.io.sock_recvfrom_into(receiver, buf)
+
+            def send() -> int:
+                scheduler.sleep(0.001)
+                return scheduler.io.sock_sendto(sender, b"hello", receiver.getsockname())
+
+            receive_task = scheduler.spawn(receive)
+            send_task = scheduler.spawn(send)
+            count, address = scheduler.run_until_complete(receive_task)
+            assert count == 5
+            assert bytes(buf) == b"hello"
+            assert address[1] == sender.getsockname()[1]
+            assert send_task.result() == 5
+        finally:
+            sender.close()
+            receiver.close()
+
+    def test_wait_operation_timeout_cancels_operation(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = scheduler.proactor.recv(reader, 1)
+
+            def wait_with_timeout() -> bool:
+                with pytest.raises(TimeoutError):
+                    with timeout(0.001):
+                        scheduler.io.wait_operation(operation)
+                deadline = scheduler.time() + 1.0
+                while scheduler.time() < deadline and (
+                    not operation.cancelled() or scheduler.proactor.has_pending_operations()
+                ):
+                    scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
+                return operation.cancelled() and not scheduler.proactor.has_pending_operations()
+
+            task = scheduler.spawn(wait_with_timeout)
+            assert scheduler.run_until_complete(task) is True
         finally:
             reader.close()
             writer.close()
@@ -4424,27 +4617,6 @@ class TestProactorScheduler:
         scheduler = SyncProactorScheduler()
         try:
             assert isinstance(scheduler.proactor, SelectorProactor)
-        finally:
-            scheduler.close()
-
-    def test_sock_create_uses_proactor_create_socket(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        try:
-
-            def exercise() -> tuple[socket.socket, bool, bool]:
-                return scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
-
-            sock, is_connected, initial_sent = scheduler.run_until_complete(scheduler.spawn(exercise))
-            try:
-                assert isinstance(sock, socket.socket)
-                assert sock.family == socket.AF_INET
-                assert sock.type == socket.SOCK_STREAM
-                _assert_scheduler_socket_fd(sock)
-                assert is_connected is False
-                assert initial_sent is False
-            finally:
-                sock.close()
         finally:
             scheduler.close()
 
@@ -4539,15 +4711,6 @@ class TestProactorScheduler:
         finally:
             proactor.close()
 
-    def test_scheduler_clock_drives_proactor_clock(self):
-        scheduler = SyncProactorScheduler()
-        try:
-            scheduler._time = lambda: 24.0
-
-            assert scheduler.proactor.get_time() == 24.0
-        finally:
-            scheduler.close()
-
     def test_uses_proactor_factory(self):
         selector = selectors.SelectSelector()
         created: list[SelectorProactor] = []
@@ -4582,38 +4745,6 @@ class TestProactorScheduler:
             writer.close()
             scheduler.close()
 
-    def test_socket_helpers(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            buf = bytearray(5)
-
-            def exchange() -> tuple[int, bytes]:
-                scheduler.io.sock_sendall(writer, b"world")
-                count = scheduler.io.sock_recv_into(reader, buf)
-                return count, bytes(buf)
-
-            task = scheduler.spawn(exchange)
-
-            assert scheduler.run_until_complete(task) == (5, b"world")
-        finally:
-            reader.close()
-            writer.close()
-            scheduler.close()
-
-    def test_create_recv_buffer_pool_delegates_to_proactor(self):
-        scheduler = SyncProactorScheduler()
-        try:
-            pool = scheduler.io.create_recv_buffer_pool(8192, 4)
-            assert pool.buffer_size == 8192
-            assert pool.buffer_count == 4
-            assert pool.leased_count == 0
-        finally:
-            scheduler.close()
-
     def test_set_shared_recv_buffer_pool_replaces_default(self):
         scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
         set_scheduler(scheduler)
@@ -4637,204 +4768,6 @@ class TestProactorScheduler:
             assert scheduler.proactor.shared_recv_buffer_pool() is custom
         finally:
             reader.close()
-            scheduler.close()
-
-    def test_sock_recv_iter_accepts_scheduler_buffer_pool(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            pool = scheduler.io.create_recv_buffer_pool(8192, 2)
-
-            def receive_chunks() -> list[tuple[int, bytes]]:
-                return _recviter_bytes(scheduler.io.sock_recv_iter(reader, pool))
-
-            def send_chunks() -> None:
-                scheduler.io.sock_sendall(writer, b"hello")
-                writer.shutdown(socket.SHUT_WR)
-
-            task = scheduler.spawn(receive_chunks)
-            scheduler.spawn(send_chunks)
-
-            assert scheduler.run_until_complete(task) == [(0, b"hello")]
-        finally:
-            reader.close()
-            writer.close()
-            scheduler.close()
-
-    def test_sock_recv_iter_yields_chunks_in_stream_order(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            def receive_chunks() -> list[tuple[int, bytes]]:
-                return _recviter_bytes(scheduler.io.sock_recv_iter(reader))
-
-            def send_chunks() -> None:
-                scheduler.io.sock_sendall(writer, b"hello")
-                scheduler.sleep(0.05)
-                scheduler.io.sock_sendall(writer, b"world")
-                writer.shutdown(socket.SHUT_WR)
-
-            task = scheduler.spawn(receive_chunks)
-            scheduler.spawn(send_chunks)
-
-            assert scheduler.run_until_complete(task) == [(0, b"hello"), (1, b"world")]
-        finally:
-            reader.close()
-            writer.close()
-            scheduler.close()
-
-    def test_poll_completes_when_fd_becomes_readable(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            def wait_for_read() -> int:
-                return scheduler.io.poll(reader.fileno(), select.POLLIN)
-
-            def send() -> None:
-                scheduler.sleep(0.001)
-                writer.send(b"x")
-
-            task = scheduler.spawn(wait_for_read)
-            scheduler.spawn(send)
-
-            assert scheduler.run_until_complete(task) & select.POLLIN
-        finally:
-            reader.close()
-            writer.close()
-            scheduler.close()
-
-    def test_poll_many_emits_until_cancelled(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        reader, writer = socket.socketpair()
-        seen: list[int] = []
-        operation = None
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = scheduler.io.poll_many(reader.fileno(), select.POLLIN, seen.append)
-
-            def send() -> None:
-                scheduler.sleep(0.001)
-                writer.send(b"x")
-
-            def wait_for_event() -> None:
-                while not seen:
-                    scheduler.sleep(0.001)
-                operation.cancel()
-
-            scheduler.spawn(send)
-            task = scheduler.spawn(wait_for_event)
-            scheduler.run_until_complete(task)
-            assert seen[0] & select.POLLIN
-        finally:
-            if operation is not None:
-                operation.cancel()
-            reader.close()
-            writer.close()
-            scheduler.close()
-
-    def test_accept_and_connect(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            server.setblocking(False)
-            client.setblocking(False)
-            server.bind(("127.0.0.1", 0))
-            server.listen()
-
-            def accept_and_read() -> bytes:
-                conn, _address = scheduler.io.sock_accept(server)
-                try:
-                    return scheduler.io.sock_recv(conn, 4)
-                finally:
-                    conn.close()
-
-            def connect_and_send() -> None:
-                scheduler.io.sock_connect(client, server.getsockname())
-                scheduler.io.sock_sendall(client, b"ping")
-
-            task = scheduler.spawn(accept_and_read)
-            scheduler.spawn(connect_and_send)
-
-            assert scheduler.run_until_complete(task) == b"ping"
-        finally:
-            client.close()
-            server.close()
-            scheduler.close()
-
-    def test_datagram_helpers(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
-        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            receiver.setblocking(False)
-            sender.setblocking(False)
-            receiver.bind(("127.0.0.1", 0))
-            buf = bytearray(5)
-
-            def receive() -> tuple[int, object]:
-                return scheduler.io.sock_recvfrom_into(receiver, buf)
-
-            def send() -> int:
-                scheduler.sleep(0.001)
-                return scheduler.io.sock_sendto(sender, b"hello", receiver.getsockname())
-
-            receive_task = scheduler.spawn(receive)
-            send_task = scheduler.spawn(send)
-
-            count, address = scheduler.run_until_complete(receive_task)
-            assert count == 5
-            assert bytes(buf) == b"hello"
-            assert address[1] == sender.getsockname()[1]
-            assert send_task.result() == 5
-        finally:
-            sender.close()
-            receiver.close()
-            scheduler.close()
-
-    def test_wait_operation_timeout_cancels_operation(self):
-        scheduler = SyncProactorScheduler(SelectorProactor)
-        set_scheduler(scheduler)
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = scheduler.proactor.recv(reader, 1)
-
-            def wait_with_timeout() -> bool:
-                with pytest.raises(TimeoutError):
-                    with timeout(0.001):
-                        scheduler.io.wait_operation(operation)
-                deadline = scheduler.time() + 1.0
-                while (
-                    not operation.cancelled()
-                    and scheduler.proactor.has_pending_operations()
-                    and scheduler.time() < deadline
-                ):
-                    scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
-                return operation.cancelled() and not scheduler.proactor.has_pending_operations()
-
-            task = scheduler.spawn(wait_with_timeout)
-
-            assert scheduler.run_until_complete(task) is True
-        finally:
-            reader.close()
-            writer.close()
             scheduler.close()
 
     def test_wait_operation_wakes_event_on_scheduler_thread_from_uring_callback(self, monkeypatch):

@@ -72,6 +72,56 @@ def _force_uring_multishot_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_uring_capabilities(monkeypatch)
 
 
+def make_selector_proactor():
+    from tealetio.proactor import SelectorProactor
+
+    return SelectorProactor()
+
+
+def make_fake_uring_proactor():
+    from tealetio.proactor import UringProactor
+
+    return UringProactor(ring_factory=_FakeUringRing)
+
+
+PROACTOR_UNIT_TEST_FACTORIES = (
+    pytest.param(make_selector_proactor, id="selector"),
+    pytest.param(make_fake_uring_proactor, id="uring-fake"),
+)
+
+
+def make_native_uring_proactor():
+    from tealetio.proactor import UringProactor
+
+    return UringProactor()
+
+
+PROACTOR_CONTRACT_FACTORIES: list[Any] = [
+    pytest.param(make_selector_proactor, id="selector"),
+]
+if uring_api.is_available():
+    PROACTOR_CONTRACT_FACTORIES.append(pytest.param(make_native_uring_proactor, id="uring"))
+
+
+def make_selector_scheduler():
+    from tealetio.proactor import SelectorProactor, SyncProactorScheduler
+
+    return SyncProactorScheduler(SelectorProactor)
+
+
+def make_default_uring_scheduler():
+    from tealetio.proactor import SyncProactorScheduler
+
+    return SyncProactorScheduler()
+
+
+SCHEDULER_INTEGRATION_FACTORIES: list[Any] = [
+    pytest.param(make_selector_scheduler, id="selector"),
+]
+if uring_api.is_available():
+    SCHEDULER_INTEGRATION_FACTORIES.append(pytest.param(make_default_uring_scheduler, id="uring"))
+
+
 class _FakeBufGroup:
     def __init__(self, ring: "_FakeUringRing", buffer_size: int, buffer_count: int) -> None:
         self.ring = ring

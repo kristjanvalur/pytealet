@@ -24,7 +24,11 @@ from tealetio.streams import (
     run_coro,
     start_server,
 )
-from uring_fakes import _FakeUringRing, _patch_uring_capabilities
+from uring_fakes import (
+    SCHEDULER_INTEGRATION_FACTORIES,
+    _FakeUringRing,
+    _patch_uring_capabilities,
+)
 
 _HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
 
@@ -33,10 +37,17 @@ def _scheduler_with_fake_ring() -> SyncProactorScheduler:
     return SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
 
 
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 class TestStreamsPoC:
-    def test_async_stream_readexactly_with_selector_proactor(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    @pytest.fixture
+    def scheduler(self, scheduler_factory) -> SyncProactorScheduler:
+        sched = scheduler_factory()
+        set_scheduler(sched)
+        yield sched
+        sched.close()
+
+
+    def test_async_stream_readexactly(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -57,11 +68,8 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
-            scheduler.close()
 
-    def test_async_stream_write_drain_and_readline(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_async_stream_write_drain_and_readline(self, scheduler: SyncProactorScheduler) -> None:
         client, server = socket.socketpair()
         try:
             client.setblocking(False)
@@ -86,11 +94,8 @@ class TestStreamsPoC:
         finally:
             client.close()
             server.close()
-            scheduler.close()
 
-    def test_stream_readline_raises_limit_overrun_without_newline(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_readline_raises_limit_overrun_without_newline(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -110,11 +115,8 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
-            scheduler.close()
 
-    def test_start_server_closes_listener_socket_when_bind_fails(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_start_server_closes_listener_socket_when_bind_fails(self, scheduler: SyncProactorScheduler) -> None:
         blocker, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
         blocker.bind(("127.0.0.1", 0))
         port = blocker.getsockname()[1]
@@ -128,11 +130,8 @@ class TestStreamsPoC:
                 start_server(client_handler, addr=("127.0.0.1", port), scheduler=scheduler)
         finally:
             blocker.close()
-            scheduler.close()
 
-    def test_native_stream_read_and_write(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_native_stream_read_and_write(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -159,33 +158,8 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
-            scheduler.close()
 
-    def test_async_stream_readexactly_with_fake_uring_ring(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False, IORING_OP_SENDMSG_ZC=False)
-        scheduler = _scheduler_with_fake_ring()
-        set_scheduler(scheduler)
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-
-            async def handler() -> bytes:
-                stream_reader, _stream_writer = open_streams(reader, async_=True)
-                return await stream_reader.readexactly(5)
-
-            def exercise() -> bytes:
-                return run_coro(handler())
-
-            # _FakeUringRing completes recv_into synchronously with b"world".
-            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"world"
-        finally:
-            reader.close()
-            writer.close()
-            scheduler.close()
-
-    def test_open_streams_uses_custom_stream_factory(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_open_streams_uses_custom_stream_factory(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -209,11 +183,8 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
-            scheduler.close()
 
-    def test_open_async_streams_uses_custom_stream_factory(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_open_async_streams_uses_custom_stream_factory(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -238,11 +209,8 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
-            scheduler.close()
 
-    def test_open_connection_resolves_literal_ip_inside_scheduler(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_open_connection_resolves_literal_ip_inside_scheduler(self, scheduler: SyncProactorScheduler) -> None:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client_greeting = b"hello"
         try:
@@ -270,11 +238,8 @@ class TestStreamsPoC:
             assert scheduler.run_until_complete(connect_task) == b"HELLO"
         finally:
             server.close()
-            scheduler.close()
 
-    def test_open_connection_resolves_hostname_via_scheduler(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_open_connection_resolves_hostname_via_scheduler(self, scheduler: SyncProactorScheduler) -> None:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             server.setblocking(False)
@@ -300,11 +265,8 @@ class TestStreamsPoC:
             assert scheduler.run_until_complete(connect_task) == b"PONG"
         finally:
             server.close()
-            scheduler.close()
 
-    def test_open_connection_literal_ip_skips_executor(self, monkeypatch: pytest.MonkeyPatch):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_open_connection_literal_ip_skips_executor(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[object] = []
         real_run = scheduler.run_in_executor
 
@@ -334,11 +296,8 @@ class TestStreamsPoC:
             assert calls == []
         finally:
             server.close()
-            scheduler.close()
 
-    def test_open_connection_hostname_uses_executor(self, monkeypatch: pytest.MonkeyPatch):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_open_connection_hostname_uses_executor(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[object] = []
         real_run = scheduler.run_in_executor
 
@@ -368,11 +327,8 @@ class TestStreamsPoC:
             assert calls == [socket.getaddrinfo]
         finally:
             server.close()
-            scheduler.close()
 
-    def test_open_async_connection_resolves_literal_ip_inside_scheduler(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_open_async_connection_resolves_literal_ip_inside_scheduler(self, scheduler: SyncProactorScheduler) -> None:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             server.setblocking(False)
@@ -400,11 +356,8 @@ class TestStreamsPoC:
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"pong"
         finally:
             server.close()
-            scheduler.close()
 
-    def test_stream_readinto_fills_caller_buffer(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_readinto_fills_caller_buffer(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -429,11 +382,8 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
-            scheduler.close()
 
-    def test_stream_reads_use_recv_into_not_sock_recv(self, monkeypatch):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_reads_use_recv_into_not_sock_recv(self, scheduler: SyncProactorScheduler, monkeypatch) -> None:
         reader, writer = socket.socketpair()
         recv_calls: list[tuple[object, ...]] = []
         recv_into_calls: list[tuple[object, ...]] = []
@@ -472,24 +422,8 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
-            scheduler.close()
 
-    def test_run_coro_rejects_real_yields(self):
-        loop = asyncio.new_event_loop()
-        try:
-
-            async def waits_on_future() -> None:
-                await loop.create_future()
-
-            with pytest.raises(RuntimeError, match="yielded unexpectedly"):
-                run_coro(waits_on_future())
-        finally:
-            loop.close()
-
-    @pytest.mark.skipif(not _HAS_AF_UNIX, reason="AF_UNIX is not supported")
-    def test_open_connection_unix_path_round_trip(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_open_connection_unix_path_round_trip(self, scheduler: SyncProactorScheduler) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = str(Path(temp_dir) / "stream.sock")
             server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -517,11 +451,8 @@ class TestStreamsPoC:
                 assert scheduler.run_until_complete(connect_task) == b"HELLO"
             finally:
                 server.close()
-                scheduler.close()
 
-    def test_stream_server_context_manager_closes_listener(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_server_context_manager_closes_listener(self, scheduler: SyncProactorScheduler) -> None:
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
@@ -532,57 +463,44 @@ class TestStreamsPoC:
             assert listen_sock.fileno() != -1
             assert server.accept_operation.kind == "accept_many"
         assert listen_sock.fileno() == -1
-        scheduler.close()
 
-    def test_stream_server_serve_forever_unblocks_on_close(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_server_serve_forever_unblocks_on_close(self, scheduler: SyncProactorScheduler) -> None:
         finished = Event()
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
         server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-        try:
 
-            def exercise() -> None:
-                def run_server() -> None:
-                    server.serve_forever()
-                    finished.set()
+        def exercise() -> None:
+            def run_server() -> None:
+                server.serve_forever()
+                finished.set()
 
-                def shutdown() -> None:
-                    scheduler.yield_()
-                    server.close()
+            def shutdown() -> None:
+                scheduler.yield_()
+                server.close()
 
-                scheduler.spawn(run_server)
-                scheduler.spawn(shutdown)
-                finished.swait()
+            scheduler.spawn(run_server)
+            scheduler.spawn(shutdown)
+            finished.swait()
 
-            scheduler.run_until_complete(scheduler.spawn(exercise))
-        finally:
-            scheduler.close()
+        scheduler.run_until_complete(scheduler.spawn(exercise))
 
-    def test_stream_server_wait_closed_returns_after_close_with_no_handlers(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_server_wait_closed_returns_after_close_with_no_handlers(self, scheduler: SyncProactorScheduler) -> None:
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
         server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-        try:
-            server.close()
+        server.close()
 
-            def exercise() -> None:
-                server.wait_closed()
+        def exercise() -> None:
+            server.wait_closed()
 
-            scheduler.run_until_complete(scheduler.spawn(exercise))
-        finally:
-            scheduler.close()
+        scheduler.run_until_complete(scheduler.spawn(exercise))
 
-    def test_stream_server_wait_closed_waits_for_in_flight_handler(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_server_wait_closed_waits_for_in_flight_handler(self, scheduler: SyncProactorScheduler) -> None:
         handler_started = Event()
         release_handler = Event()
         wait_finished = Event()
@@ -593,37 +511,32 @@ class TestStreamsPoC:
             writer.close()
 
         server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
-        try:
-            _host, port = server.sockets[0].getsockname()
+        _host, port = server.sockets[0].getsockname()
 
-            def exercise() -> None:
-                def connect() -> None:
-                    _reader, writer = open_connection(addr=("127.0.0.1", port))
-                    writer.write(b"x")
-                    writer.drain()
-                    writer.close()
+        def exercise() -> None:
+            def connect() -> None:
+                _reader, writer = open_connection(addr=("127.0.0.1", port))
+                writer.write(b"x")
+                writer.drain()
+                writer.close()
 
-                def wait_for_closed() -> None:
-                    server.close()
-                    server.wait_closed()
-                    wait_finished.set()
+            def wait_for_closed() -> None:
+                server.close()
+                server.wait_closed()
+                wait_finished.set()
 
-                scheduler.spawn(connect)
-                handler_started.swait()
-                wait_task = scheduler.spawn(wait_for_closed)
-                scheduler.yield_()
-                assert not wait_finished.is_set()
-                release_handler.set()
-                wait_task.wait()
+            scheduler.spawn(connect)
+            handler_started.swait()
+            wait_task = scheduler.spawn(wait_for_closed)
+            scheduler.yield_()
+            assert not wait_finished.is_set()
+            release_handler.set()
+            wait_task.wait()
 
-            scheduler.run_until_complete(scheduler.spawn(exercise))
-            assert wait_finished.is_set()
-        finally:
-            scheduler.close()
+        scheduler.run_until_complete(scheduler.spawn(exercise))
+        assert wait_finished.is_set()
 
-    def test_stream_server_spawn_failure_restores_handler_count(self, monkeypatch: pytest.MonkeyPatch):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_server_spawn_failure_restores_handler_count(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
         real_spawn = scheduler.spawn
         serve_spawn_attempts = 0
         callback_errors: list[BaseException] = []
@@ -665,11 +578,8 @@ class TestStreamsPoC:
         finally:
             _client.close()
             server.close()
-            scheduler.close()
 
-    def test_stream_server_dispatch_client_on_closed_server_closes_connection(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_server_dispatch_client_on_closed_server_closes_connection(self, scheduler: SyncProactorScheduler) -> None:
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
@@ -695,11 +605,8 @@ class TestStreamsPoC:
         finally:
             _client.close()
             server.close()
-            scheduler.close()
 
-    def test_start_server_closes_accept_before_server_is_ready(self, monkeypatch: pytest.MonkeyPatch):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_start_server_closes_accept_before_server_is_ready(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
         real_accept_many = scheduler.proactor.accept_many
 
         def eager_accept_many(sock: socket.socket, callback, *, recv_size=None):
@@ -723,11 +630,8 @@ class TestStreamsPoC:
             assert server._active_handlers == 0
         finally:
             server.close()
-            scheduler.close()
 
-    def test_stream_reader_feed_initial_avoids_socket_recv(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_stream_reader_feed_initial_avoids_socket_recv(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -737,15 +641,12 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
-            scheduler.close()
 
-    def test_start_server_passes_recv_size_only_when_opted_in(self, monkeypatch: pytest.MonkeyPatch):
+    def test_start_server_passes_recv_size_only_when_opted_in(self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch) -> None:
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
         def run_with_recv_size(recv_size: int | None) -> int | None:
-            scheduler = SyncProactorScheduler()
-            set_scheduler(scheduler)
             captured: list[int | None] = []
             real_accept_many = scheduler.proactor.accept_many
 
@@ -764,65 +665,11 @@ class TestStreamsPoC:
                 return captured[-1]
             finally:
                 server.close()
-                scheduler.close()
 
         assert run_with_recv_size(None) is None
         assert run_with_recv_size(1024) == 1024
 
-    def test_start_server_closes_connection_on_recv_error(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
-        scheduler = _scheduler_with_fake_ring()
-        set_scheduler(scheduler)
-        handled = Event()
-
-        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
-            handled.set()
-            writer.close()
-
-        server = start_server(client_handler, addr=("127.0.0.1", 0), recv_size=64, scheduler=scheduler)
-        try:
-            proactor = scheduler.proactor
-            proactor.ring.complete_accept_multishot("peer-1")
-            proactor.wait(proactor.get_time() + 0.05)
-            proactor.ring.complete_accept_recv_error(-errno.EIO)
-            proactor.wait(proactor.get_time() + 0.05)
-            assert handled.is_set() is False
-            assert server._active_handlers == 0
-        finally:
-            server.close()
-            scheduler.close()
-
-    def test_start_server_prefills_reader_from_accept_preread(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
-        scheduler = _scheduler_with_fake_ring()
-        set_scheduler(scheduler)
-        handled = Event()
-        received: list[bytes] = []
-
-        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
-            received.append(reader.read(5))
-            writer.close()
-            handled.set()
-
-        server = start_server(client_handler, addr=("127.0.0.1", 0), recv_size=64, scheduler=scheduler)
-        try:
-            proactor = scheduler.proactor
-
-            def exercise() -> None:
-                proactor.ring.complete_accept_multishot("peer-1")
-                proactor.wait(proactor.get_time() + 0.05)
-                proactor.ring.complete_accept_recv(b"early")
-                handled.swait()
-
-            scheduler.run_until_complete(scheduler.spawn(exercise))
-            assert received == [b"early"]
-        finally:
-            server.close()
-            scheduler.close()
-
-    def test_start_server_uses_accept_many_and_dispatches_handler(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_start_server_uses_accept_many_and_dispatches_handler(self, scheduler: SyncProactorScheduler) -> None:
         handled = Event()
         received: list[bytes] = []
 
@@ -850,12 +697,8 @@ class TestStreamsPoC:
             assert received == [b"abc"]
         finally:
             server.close()
-            scheduler.close()
 
-    @pytest.mark.skipif(not _HAS_AF_UNIX, reason="AF_UNIX is not supported")
-    def test_start_server_unix_path_dispatches_async_handler(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_start_server_unix_path_dispatches_async_handler(self, scheduler: SyncProactorScheduler) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = str(Path(temp_dir) / "server.sock")
             server = None
@@ -889,11 +732,8 @@ class TestStreamsPoC:
             finally:
                 if server is not None:
                     server.close()
-                scheduler.close()
 
-    def test_start_async_server_echoes_over_tcp(self):
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
+    def test_start_async_server_echoes_over_tcp(self, scheduler: SyncProactorScheduler) -> None:
         server = None
         try:
 
@@ -926,13 +766,10 @@ class TestStreamsPoC:
         finally:
             if server is not None:
                 server.close()
-            scheduler.close()
 
     def test_sock_connect_initial_send_flushes_when_backend_ignores_hint(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
         io = scheduler.io
         client, _peer = socket.socketpair()
         sent: list[bytes] = []
@@ -952,13 +789,10 @@ class TestStreamsPoC:
             assert sent == [b"helloworld"]
         finally:
             client.close()
-            scheduler.close()
 
     def test_open_connection_passes_initial_send_to_sock_create(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
         captured: list[bytes | None] = []
         real_sock_create = scheduler.io.sock_create
 
@@ -1008,13 +842,10 @@ class TestStreamsPoC:
             assert captured == [b"early"]
         finally:
             server.close()
-            scheduler.close()
 
     def test_open_connection_tries_next_address_after_connect_failure(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
         connect_targets: list[Any] = []
         real_sock_create = scheduler.io.sock_create
 
@@ -1069,14 +900,10 @@ class TestStreamsPoC:
             assert connect_targets == [("127.0.0.1", 1), ("127.0.0.1", port)]
         finally:
             server.close()
-            scheduler.close()
 
-    @pytest.mark.skipif(not _HAS_AF_UNIX, reason="AF_UNIX is not supported")
     def test_open_connection_unix_passes_initial_send_to_sock_create(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        scheduler = SyncProactorScheduler()
-        set_scheduler(scheduler)
         captured: list[bytes | None] = []
         real_sock_create = scheduler.io.sock_create
 
@@ -1123,7 +950,96 @@ class TestStreamsPoC:
                 assert captured == [b"early"]
             finally:
                 server.close()
-                scheduler.close()
+
+
+
+class TestStreamsFakeUring:
+
+    def test_async_stream_readexactly_with_fake_uring_ring(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False, IORING_OP_SENDMSG_ZC=False)
+        scheduler = _scheduler_with_fake_ring()
+        set_scheduler(scheduler)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            async def handler() -> bytes:
+                stream_reader, _stream_writer = open_streams(reader, async_=True)
+                return await stream_reader.readexactly(5)
+
+            def exercise() -> bytes:
+                return run_coro(handler())
+
+            # _FakeUringRing completes recv_into synchronously with b"world".
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"world"
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_start_server_closes_connection_on_recv_error(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
+        scheduler = _scheduler_with_fake_ring()
+        set_scheduler(scheduler)
+        handled = Event()
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            handled.set()
+            writer.close()
+
+        server = start_server(client_handler, addr=("127.0.0.1", 0), recv_size=64, scheduler=scheduler)
+        try:
+            proactor = scheduler.proactor
+            proactor.ring.complete_accept_multishot("peer-1")
+            proactor.wait(proactor.get_time() + 0.05)
+            proactor.ring.complete_accept_recv_error(-errno.EIO)
+            proactor.wait(proactor.get_time() + 0.05)
+            assert handled.is_set() is False
+            assert server._active_handlers == 0
+        finally:
+            server.close()
+            scheduler.close()
+
+    def test_start_server_prefills_reader_from_accept_preread(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
+        scheduler = _scheduler_with_fake_ring()
+        set_scheduler(scheduler)
+        handled = Event()
+        received: list[bytes] = []
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            received.append(reader.read(5))
+            writer.close()
+            handled.set()
+
+        server = start_server(client_handler, addr=("127.0.0.1", 0), recv_size=64, scheduler=scheduler)
+        try:
+            proactor = scheduler.proactor
+
+            def exercise() -> None:
+                proactor.ring.complete_accept_multishot("peer-1")
+                proactor.wait(proactor.get_time() + 0.05)
+                proactor.ring.complete_accept_recv(b"early")
+                handled.swait()
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert received == [b"early"]
+        finally:
+            server.close()
+            scheduler.close()
+
+
+def test_run_coro_rejects_real_yields() -> None:
+    loop = asyncio.new_event_loop()
+    try:
+
+        async def waits_on_future() -> None:
+            await loop.create_future()
+
+        with pytest.raises(RuntimeError, match="yielded unexpectedly"):
+            run_coro(waits_on_future())
+    finally:
+        loop.close()
 
 
 class TestStreamsRequiresIO:
