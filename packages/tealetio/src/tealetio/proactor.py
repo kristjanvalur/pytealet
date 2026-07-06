@@ -1734,7 +1734,7 @@ class UringProactor(ProactorBase):
         chain.current = child
         return child
 
-    def _inner_send(
+    def _chained_send(
         self,
         chain: _ChainState,
         parent: _UringEntry,
@@ -1745,7 +1745,7 @@ class UringProactor(ProactorBase):
         self._submit_uring_entry(send_entry, lambda: self._submit_send(sock.fileno(), payload, send_entry))
         return send_entry
 
-    def _inner_connect(
+    def _chained_connect(
         self,
         chain: _ChainState,
         parent: _UringEntry,
@@ -1779,7 +1779,7 @@ class UringProactor(ProactorBase):
             chain.deliver(0)
             return operation
         assert chain.sock is not None
-        self._inner_send(chain, entry, chain.sock, chain.payload)
+        self._chained_send(chain, entry, chain.sock, chain.payload)
         return None
 
     def _fini_send_leg(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any]:
@@ -2572,7 +2572,7 @@ class UringProactor(ProactorBase):
             chain.sock = None
             return operation
         chain.payload = memoryview(initial_data) if initial_data is not None else memoryview(b"")
-        self._inner_connect(chain, entry, sock, connect_to)
+        self._chained_connect(chain, entry, sock, connect_to)
         return None
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
