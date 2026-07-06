@@ -165,7 +165,10 @@ class TestProactorIOManagerDirect:
         io = ProactorIOManager(proactor)  # type: ignore[arg-type]
         sock, is_connected, initial_sent = io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            assert not sock.getblocking()
+            import fcntl
+
+            flags = fcntl.fcntl(sock.fileno(), fcntl.F_GETFL)
+            assert flags & os.O_NONBLOCK
             assert not os.get_inheritable(sock.fileno())
             assert is_connected is False
             assert initial_sent is False

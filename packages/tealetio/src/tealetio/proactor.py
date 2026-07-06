@@ -2588,7 +2588,6 @@ class UringProactor(ProactorBase):
                 pass
             return operation
         sock = socket.socket(fileno=res)
-        configure_scheduler_socket(sock)
         chain.sock = sock
         chain.owned_sock = sock
         if connect_to is None:

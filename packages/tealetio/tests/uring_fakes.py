@@ -446,8 +446,10 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         sock = socket.socket(domain, type, protocol)
-        sock.setblocking(False)
-        os.set_inheritable(sock.fileno(), False)
+        if flags & getattr(socket, "SOCK_NONBLOCK", 0):
+            sock.setblocking(False)
+        if flags & getattr(socket, "SOCK_CLOEXEC", 0):
+            os.set_inheritable(sock.fileno(), False)
         fd = sock.detach()
         self.submitted_socket.append((domain, type, protocol, flags, user_data))
         completion = self._completion(

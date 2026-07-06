@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import fcntl
 import io
 import os
 import select
@@ -46,6 +47,14 @@ from tealetio.proactor import (
 
 
 _RecvManySeen = tuple[int, memoryview | Callable[[], None]]
+
+
+def _assert_scheduler_socket_fd(sock: socket.socket) -> None:
+    """IORING_OP_SOCKET sets O_NONBLOCK and CLOEXEC on the fd; Python fileno import may not sync getblocking()."""
+
+    flags = fcntl.fcntl(sock.fileno(), fcntl.F_GETFL)
+    assert flags & os.O_NONBLOCK
+    assert not os.get_inheritable(sock.fileno())
 
 
 def _recv_many_auto_resume_callback(seen: list[_RecvManySeen]) -> Callable[[_RecvManySeen], None]:
@@ -2150,10 +2159,12 @@ class _DeferredSocketUringRing(_FakeUringRing):
 
     def complete_socket(self) -> None:
         completion = self.pending_socket.pop(0)
-        domain, type, protocol, _flags, _user_data = self.submitted_socket[-1]
+        domain, type, protocol, flags, _user_data = self.submitted_socket[-1]
         sock = socket.socket(domain, type, protocol)
-        sock.setblocking(False)
-        os.set_inheritable(sock.fileno(), False)
+        if flags & getattr(socket, "SOCK_NONBLOCK", 0):
+            sock.setblocking(False)
+        if flags & getattr(socket, "SOCK_CLOEXEC", 0):
+            os.set_inheritable(sock.fileno(), False)
         fd = sock.detach()
         completion.res = fd
         completion.result = fd
@@ -4319,7 +4330,7 @@ class TestUringProactor:
             sock, is_connected, initial_sent = operation.result()
             assert is_connected is True
             assert initial_sent is True
-            assert sock.getblocking() is False
+            _assert_scheduler_socket_fd(sock)
             sock.close()
         finally:
             proactor.close()
@@ -4410,8 +4421,7 @@ class TestProactorScheduler:
                 assert isinstance(sock, socket.socket)
                 assert sock.family == socket.AF_INET
                 assert sock.type == socket.SOCK_STREAM
-                assert sock.getblocking() is False
-                assert os.get_inheritable(sock.fileno()) is False
+                _assert_scheduler_socket_fd(sock)
                 assert is_connected is False
                 assert initial_sent is False
             finally:
@@ -4427,10 +4437,13 @@ class TestProactorScheduler:
             sock, is_connected, initial_sent = operation.result()
             try:
                 assert len(proactor.ring.submitted_socket) == 1
+                _domain, _type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
+                assert submit_flags & (socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC) == (
+                    socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
+                )
                 assert is_connected is False
                 assert initial_sent is False
-                assert sock.getblocking() is False
-                assert os.get_inheritable(sock.fileno()) is False
+                _assert_scheduler_socket_fd(sock)
             finally:
                 sock.close()
         finally:
