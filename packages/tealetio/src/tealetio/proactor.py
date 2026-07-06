@@ -1058,18 +1058,6 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
-    def _bind_owned_socket_cancel(self, operation: Operation[Any], sock: socket.socket) -> None:
-        backend_cancel = operation._cancel
-
-        def cancel() -> None:
-            _close_owned_socket(sock)
-            if backend_cancel is not None:
-                backend_cancel()
-            elif not operation.done():
-                operation._set_cancelled()
-
-        operation.set_cancel(cancel)
-
     def recv_many(
         self,
         sock: socket.socket,

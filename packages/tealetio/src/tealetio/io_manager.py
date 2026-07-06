@@ -327,12 +327,16 @@ class ProactorIOManager:
                 initial_data=initial_data,
             )
         )
-        if connect_to is not None and not is_connected:
-            self.sock_connect(sock, connect_to, initial=initial_data)
-            return sock, True, True
-        if initial_data is not None and is_connected and not initial_sent:
-            self.sock_sendall(sock, initial_data)
-        return sock, is_connected, initial_sent
+        try:
+            if connect_to is not None and not is_connected:
+                self.sock_connect(sock, connect_to, initial=initial_data)
+                return sock, True, True
+            if initial_data is not None and is_connected and not initial_sent:
+                self.sock_sendall(sock, initial_data)
+            return sock, is_connected, initial_sent
+        except BaseException:
+            sock.close()
+            raise
 
     def poll(self, fd: int, mask: int) -> int:
         return self.wait_operation(self._proactor.poll(fd, mask))

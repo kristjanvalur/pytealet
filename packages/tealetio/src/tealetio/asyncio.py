@@ -263,11 +263,14 @@ class ForwardingProactor:
 
         When ``initial`` is provided the future completes with ``True`` when
         connect-time send ran (including an empty buffer). Backends that ignore
-        ``initial`` complete with a falsy result; callers should flush ``initial``
-        themselves.
+        ``initial`` flush the payload with ``sendall`` before completing, matching
+        ``ProactorIOManager.sock_connect()``.
         """
 
-        return self._future_from_operation(self._proactor.connect(sock, address, initial=initial))
+        operation = self._proactor.connect(sock, address, initial=initial)
+        if initial is None:
+            return self._future_from_operation(operation)
+        return self._future_from_connect_with_initial(sock, operation, initial)
 
     def create_socket(
         self,
@@ -301,6 +304,72 @@ class ForwardingProactor:
 
     def _stop_serving(self, sock: socket.socket) -> None:
         pass
+
+    def _future_from_connect_with_initial(
+        self,
+        sock: socket.socket,
+        connect_operation: Operation[None] | Operation[bool],
+        initial: SocketSendBuffer,
+    ) -> _asyncio.Future[bool]:
+        loop = self._require_loop()
+        future: _asyncio.Future[bool] = loop.create_future()
+
+        def finish_connect(_operation: Operation[Any]) -> None:
+            if future.cancelled():
+                return
+            if connect_operation.cancelled():
+                future.cancel()
+                return
+            try:
+                initial_sent = connect_operation.result()
+            except BaseException as exc:
+                try:
+                    loop.call_soon_threadsafe(future.set_exception, exc)
+                except RuntimeError:
+                    pass
+                return
+            if initial_sent:
+                try:
+                    loop.call_soon_threadsafe(future.set_result, True)
+                except RuntimeError:
+                    pass
+                return
+            sendall_operation = self._proactor.sendall(sock, initial)
+
+            def finish_sendall(_sendall_operation: Operation[Any]) -> None:
+                if future.cancelled():
+                    return
+                if sendall_operation.cancelled():
+                    future.cancel()
+                    return
+                try:
+                    sendall_operation.result()
+                except BaseException as exc:
+                    try:
+                        loop.call_soon_threadsafe(future.set_exception, exc)
+                    except RuntimeError:
+                        pass
+                    return
+                try:
+                    loop.call_soon_threadsafe(future.set_result, True)
+                except RuntimeError:
+                    pass
+
+            if sendall_operation.done():
+                finish_sendall(sendall_operation)
+            else:
+                sendall_operation.add_done_callback(finish_sendall)
+
+        def cancel_future(asyncio_future: _asyncio.Future[bool]) -> None:
+            if asyncio_future.cancelled():
+                connect_operation.cancel()
+
+        if connect_operation.done():
+            finish_connect(connect_operation)
+        else:
+            connect_operation.add_done_callback(finish_connect)
+            future.add_done_callback(cancel_future)
+        return future
 
     def _future_from_operation(self, operation: Operation[T]) -> _asyncio.Future[T]:
         loop = self._require_loop()

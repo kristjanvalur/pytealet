@@ -2189,6 +2189,24 @@ class _DeferredSocketUringRing(_FakeUringRing):
         self._deliver(completion)
 
 
+class _DeferredCreateSocketUringRing(_DeferredSocketUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.pending_connect: list[SimpleNamespace] = []
+
+    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_connect.append((fd, address, user_data))
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CONNECT, res=0, result=None)
+        self.pending_connect.append(completion)
+        return completion
+
+    def complete_connect(self) -> None:
+        completion = self.pending_connect.pop(0)
+        self._deliver(completion)
+
+
 class _DeferredUringRing(_FakeUringRing):
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
@@ -4423,6 +4441,48 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 0.05)
             assert operation.cancelled() is True
             assert proactor.ring.submitted_connect == []
+        finally:
+            proactor.close()
+
+    def test_create_socket_cancel_during_pending_connect(self) -> None:
+        proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+            )
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
+            proactor.ring.complete_socket()
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_connect()
+            proactor.wait(proactor.get_time() + 0.05)
+            assert operation.cancelled() is True
+            assert proactor.ring.pending_connect_send == []
+        finally:
+            proactor.close()
+
+    def test_create_socket_cancel_during_pending_send(self) -> None:
+        proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hello",
+            )
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
+            proactor.ring.complete_socket()
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            proactor.ring.complete_connect()
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            operation.cancel()
+            assert operation.cancelled() is True
+            proactor.ring.complete_connect_send()
+            proactor.wait(proactor.get_time() + 0.05)
+            assert operation.cancelled() is True
         finally:
             proactor.close()
 

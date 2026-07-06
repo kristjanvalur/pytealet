@@ -531,6 +531,7 @@ def _connect_tcp_streams(
 
     last_error: OSError | None = None
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
+        sock: socket.socket | None = None
         try:
             sock, _is_connected, _nbytes = io.sock_create(
                 addr_family,
@@ -547,6 +548,8 @@ def _connect_tcp_streams(
                 async_=async_,
             )
         except OSError as exc:
+            if sock is not None:
+                sock.close()
             last_error = exc
     if last_error is not None:
         raise last_error
@@ -585,6 +588,7 @@ def open_connection(
     path: str,
     limit: int = _DEFAULT_LIMIT,
     stream_factory: StreamFactory | None = None,
+    initial_send: SocketSendBuffer | None = None,
     async_: Literal[False] = False,
 ) -> tuple[StreamReader, StreamWriter]: ...
 
@@ -595,6 +599,7 @@ def open_connection(
     path: str,
     limit: int = _DEFAULT_LIMIT,
     stream_factory: AsyncStreamFactory | None = None,
+    initial_send: SocketSendBuffer | None = None,
     async_: Literal[True],
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
@@ -636,6 +641,7 @@ def open_connection(
             limit=limit,
             stream_factory=stream_factory,
             async_=async_,
+            initial_send=initial_send,
         )
     if addr is None:
         raise TypeError("open_connection() requires addr= or path=")
@@ -658,24 +664,29 @@ def _connect_unix_streams(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
+    initial_send: SocketSendBuffer | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
     io = _require_proactor_io(scheduler)
-    sock, _, _ = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock, _, _ = io.sock_create(
+        socket.AF_UNIX,
+        socket.SOCK_STREAM,
+        connect_to=path,
+        initial_data=initial_send,
+    )
     try:
-        io.sock_connect(sock, path)
+        return _open_streams(
+            io,
+            sock,
+            limit=limit,
+            stream_factory=stream_factory,
+            async_=async_,
+        )
     except OSError:
         sock.close()
         raise
-    return _open_streams(
-        io,
-        sock,
-        limit=limit,
-        stream_factory=stream_factory,
-        async_=async_,
-    )
 
 
 def _bind_tcp_socket(
