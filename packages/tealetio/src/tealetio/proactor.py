@@ -111,6 +111,21 @@ def _close_owned_socket(sock: socket.socket) -> None:
         pass
 
 
+def _validate_create_socket_hints(
+    connect_to: Any | None,
+    initial_data: SocketSendBuffer | None,
+) -> None:
+    if initial_data is not None and connect_to is None:
+        raise ValueError("initial_data requires connect_to")
+
+
+def _close_raw_fd(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def _handoff_accept_many(
     parent: ContinuousOperation[AcceptManyResult],
     conn: socket.socket,
@@ -1005,6 +1020,7 @@ class SelectorProactor(ProactorBase):
     ) -> Operation[CreateSocketResult]:
         """Create a scheduler-contract socket."""
 
+        _validate_create_socket_hints(connect_to, initial_data)
         del flags, connect_to, initial_data
         operation = Operation[CreateSocketResult](kind="create_socket", fileobj=(family, type, proto))
         try:
@@ -2494,6 +2510,7 @@ class UringProactor(ProactorBase):
     ) -> Operation[CreateSocketResult]:
         """Create a scheduler-contract socket."""
 
+        _validate_create_socket_hints(connect_to, initial_data)
         operation = Operation[CreateSocketResult](kind="create_socket", fileobj=(family, type, proto))
 
         if self._capabilities.get("IORING_OP_SOCKET", False):
@@ -2603,10 +2620,7 @@ class UringProactor(ProactorBase):
                 operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
         if operation.done():
-            try:
-                os.close(res)
-            except OSError:
-                pass
+            _close_raw_fd(res)
             return operation
         sock = socket_from_uring_fd(res)
         owned_sock[0] = sock
@@ -3187,6 +3201,13 @@ class UringProactor(ProactorBase):
         if entry.operation.done():
             if entry.active:
                 self._deactivate_uring_entry(entry)
+            if (
+                entry.operation.kind == "create_socket"
+                and entry.parent is None
+                and completion.kind == uring_api.COMPLETION_KIND_SOCKET
+                and res >= 0
+            ):
+                _close_raw_fd(res)
             return None
         assert entry.active
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)

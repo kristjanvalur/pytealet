@@ -2137,6 +2137,7 @@ class _DeferredSocketUringRing(_FakeUringRing):
     def __init__(self, entries: int = 8, flags: int = 0) -> None:
         super().__init__(entries, flags)
         self.pending_socket: list[SimpleNamespace] = []
+        self.last_socket_fd: int | None = None
 
     def submit_socket(
         self,
@@ -2167,6 +2168,7 @@ class _DeferredSocketUringRing(_FakeUringRing):
         if flags & getattr(socket, "SOCK_CLOEXEC", 0):
             os.set_inheritable(sock.fileno(), False)
         fd = sock.detach()
+        self.last_socket_fd = fd
         completion.res = fd
         completion.result = fd
         self._deliver(completion)
@@ -4455,6 +4457,18 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 0.05)
             assert operation.cancelled() is True
             assert proactor.ring.submitted_connect == []
+            leaked_fd = proactor.ring.last_socket_fd
+            assert leaked_fd is not None
+            with pytest.raises(OSError):
+                os.fstat(leaked_fd)
+        finally:
+            proactor.close()
+
+    def test_create_socket_rejects_initial_data_without_connect_to(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            with pytest.raises(ValueError, match="initial_data requires connect_to"):
+                proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM, initial_data=b"hello")
         finally:
             proactor.close()
 

@@ -29,143 +29,6 @@ static int default_availability = 0;
 
 static PyObject *build_capability_dict(void);
 
-static int await_probe_cqe(struct io_uring *ring, int *res_out, unsigned *flags_out) {
-    struct io_uring_cqe *cqe;
-    int ret;
-
-    Py_BEGIN_ALLOW_THREADS;
-    ret = io_uring_submit(ring);
-    if (ret >= 0) {
-        ret = io_uring_wait_cqe(ring, &cqe);
-        if (ret >= 0) {
-            *res_out = cqe->res;
-            *flags_out = cqe->flags;
-            io_uring_cqe_seen(ring, cqe);
-        }
-    }
-    Py_END_ALLOW_THREADS;
-    return ret < 0 ? -1 : 0;
-}
-
-static void drain_probe_notification(struct io_uring *ring, unsigned flags) {
-    if (flags & IORING_CQE_F_MORE) {
-        struct io_uring_cqe *cqe;
-        int ret;
-
-        Py_BEGIN_ALLOW_THREADS;
-        ret = io_uring_wait_cqe(ring, &cqe);
-        Py_END_ALLOW_THREADS;
-        if (ret == 0) {
-            io_uring_cqe_seen(ring, cqe);
-        }
-    }
-}
-
-/*
- * Runtime zerocopy probe: UDP loopback sendmsg_zc to a bound local receiver.
- * io_uring_enter(2) documents IORING_OP_SEND_ZC since 6.0, but completion can
- * still return -EOPNOTSUPP when the stack does not support zerocopy for the
- * protocol. Version gating alone is insufficient; README derives both SEND_ZC
- * and SENDMSG_ZC from this probe.
- */
-static int probe_sendmsg_zc_runtime(void) {
-    struct io_uring ring;
-    struct sockaddr_in recv_addr;
-    struct sockaddr_in send_addr;
-    struct msghdr msg;
-    struct iovec iov;
-    socklen_t recv_addrlen;
-    int receiver;
-    int sender;
-    int ring_ready;
-    int res;
-    unsigned flags;
-    struct io_uring_sqe *sqe;
-    char buf[1];
-    int supported;
-
-    if (!uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_SEND_ZC_MAJOR,
-                                           URING_API_KERNEL_VERSION_SEND_ZC_MINOR,
-                                           URING_API_KERNEL_VERSION_SEND_ZC_PATCH)) {
-        return 0;
-    }
-
-    receiver = -1;
-    sender = -1;
-    ring_ready = 0;
-    supported = 0;
-    buf[0] = 'x';
-
-    receiver = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (receiver < 0) {
-        return 0;
-    }
-    sender = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (sender < 0) {
-        close(receiver);
-        return 0;
-    }
-
-    memset(&recv_addr, 0, sizeof(recv_addr));
-    recv_addr.sin_family = AF_INET;
-    recv_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(receiver, (struct sockaddr *)&recv_addr, sizeof(recv_addr)) < 0) {
-        goto cleanup;
-    }
-
-    recv_addrlen = sizeof(recv_addr);
-    if (getsockname(receiver, (struct sockaddr *)&recv_addr, &recv_addrlen) < 0) {
-        goto cleanup;
-    }
-
-    memset(&send_addr, 0, sizeof(send_addr));
-    send_addr.sin_family = AF_INET;
-    send_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(sender, (struct sockaddr *)&send_addr, sizeof(send_addr)) < 0) {
-        goto cleanup;
-    }
-
-    if (io_uring_queue_init(2, &ring, 0) < 0) {
-        goto cleanup;
-    }
-    ring_ready = 1;
-
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_name = &recv_addr;
-    msg.msg_namelen = recv_addrlen;
-    iov.iov_base = buf;
-    iov.iov_len = 1;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-
-    sqe = io_uring_get_sqe(&ring);
-    if (!sqe) {
-        goto cleanup;
-    }
-    io_uring_prep_sendmsg_zc(sqe, sender, &msg, 0);
-    sqe->user_data = 0;
-
-    if (await_probe_cqe(&ring, &res, &flags) < 0) {
-        goto cleanup;
-    }
-    drain_probe_notification(&ring, flags);
-    if (res > 0) {
-        supported = 1;
-    }
-
-cleanup:
-    if (ring_ready) {
-        io_uring_queue_exit(&ring);
-    }
-    if (sender >= 0) {
-        close(sender);
-    }
-    if (receiver >= 0) {
-        close(receiver);
-    }
-    return supported;
-}
-
 static PyObject *build_probe_result(bool available) {
     PyObject *result;
 
@@ -250,8 +113,12 @@ static int ensure_capability_cache(void) {
     capability_recv_multishot = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_RECV_MULTISHOT_MAJOR,
                                                                   URING_API_KERNEL_VERSION_RECV_MULTISHOT_MINOR,
                                                                   URING_API_KERNEL_VERSION_RECV_MULTISHOT_PATCH);
-    capability_sendmsg_zc = probe_sendmsg_zc_runtime();
-    capability_send_zc = capability_sendmsg_zc;
+    capability_send_zc = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_SEND_ZC_MAJOR,
+                                                           URING_API_KERNEL_VERSION_SEND_ZC_MINOR,
+                                                           URING_API_KERNEL_VERSION_SEND_ZC_PATCH);
+    capability_sendmsg_zc = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_SENDMSG_ZC_MAJOR,
+                                                              URING_API_KERNEL_VERSION_SENDMSG_ZC_MINOR,
+                                                              URING_API_KERNEL_VERSION_SENDMSG_ZC_PATCH);
     capability_statx = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_STATX_MAJOR,
                                                          URING_API_KERNEL_VERSION_STATX_MINOR,
                                                          URING_API_KERNEL_VERSION_STATX_PATCH);
