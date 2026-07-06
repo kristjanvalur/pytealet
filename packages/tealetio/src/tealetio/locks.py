@@ -131,10 +131,7 @@ class Event:
     def _link(self, t: tealet.tealet) -> None:
         assert t.link is None
         assert t not in self._waiters
-        try:
-            t.link = self
-        except AttributeError:
-            pass  # main tealet may not have a ``link`` attribute
+        t.link = self
         self._waiters.append(t)
 
     def _query_waiting(self) -> bool:
@@ -146,10 +143,7 @@ class Event:
     def _unlink(self, t: tealet.tealet) -> None:
         try:
             self._waiters.remove(t)
-            try:
-                t.link = None
-            except AttributeError:
-                pass  # main tealet may not have a ``link`` attribute
+            t.link = None
         except ValueError:
             pass
 
@@ -223,10 +217,7 @@ class ThreadsafeEvent:
     def _link(self, t: tealet.tealet) -> None:
         assert t.link is None
         assert t not in self._waiters
-        try:
-            t.link = self
-        except AttributeError:
-            pass  # main tealet may not have a ``link`` attribute
+        t.link = self
         self._waiters.append(t)
 
     def _query_waiting(self) -> bool:
@@ -238,10 +229,7 @@ class ThreadsafeEvent:
     def _unlink(self, t: tealet.tealet) -> None:
         try:
             self._waiters.remove(t)
-            try:
-                t.link = None
-            except AttributeError:
-                pass  # main tealet may not have a ``link`` attribute
+            t.link = None
         except ValueError:
             pass
 
