@@ -233,6 +233,16 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
+    def test_sock_create_rejects_initial_data_without_connect_to(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="initial_data requires connect_to"):
+            io.sock_create(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                initial_data=b"hi",
+            )
+
     def test_sock_create_closes_socket_when_connect_fallback_fails(self):
         proactor = _MockProactor()
         io = ProactorIOManager(proactor)  # type: ignore[arg-type]

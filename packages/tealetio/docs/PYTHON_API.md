@@ -88,15 +88,18 @@ sockets.
 `create_socket(family, type, proto=0, *, flags=0, connect_to=None,
 initial_data=None)` creates a scheduler-contract socket (non-blocking,
 close-on-exec). On success it completes with ``(socket, is_connected,
-bytes_sent)``. ``connect_to`` and ``initial_data`` are optional hints; backends
-may ignore them and return ``(socket, False, 0)`` after creation only.
+initial_sent)``. ``initial_sent`` is a bool: ``True`` when ``initial_data``
+was provided and the connect/send chain flushed it (including an empty buffer),
+``False`` when ``initial_data`` was omitted or the backend ignored connect/send
+hints. ``connect_to`` and ``initial_data`` are optional hints; backends may
+ignore them and return ``(socket, False, False)`` after creation only.
 ``UringProactor`` honours the hints when practical, using
 ``uring_api.Ring.submit_socket()`` when ``IORING_OP_SOCKET`` is probed and
-chaining connect plus one ``send`` attempt. ``scheduler.io.sock_create()``
-blocks on the operation and, when hints were not honoured, falls back to
-``sock_connect()`` so callers still get a connected socket. TCP
-``open_connection(..., initial_send=...)`` passes ``connect_to`` and
-``initial_data`` through this path.
+chaining connect plus sendall-style chunking for ``initial_data``.
+``scheduler.io.sock_create()`` blocks on the operation and, when hints were not
+honoured, falls back to ``sock_connect()`` so callers still get a connected
+socket. ``open_connection(..., initial_send=...)`` passes ``connect_to`` and
+``initial_data`` through this path for TCP and Unix ``path=`` connects.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
@@ -593,7 +596,7 @@ metadata, and selector-backed backends share one handle type.
 
 `scheduler.io.sock_create(family, type, proto=0, *, flags=0, connect_to=None,
 initial_data=None)` is the socket creation entry point for proactor-backed
-blocking IO. It returns ``(socket, is_connected, bytes_sent)``. The socket is
+blocking IO. It returns ``(socket, is_connected, initial_sent)``. The socket is
 always non-blocking and close-on-exec. `ProactorIOManager.sock_create()` blocks
 on `Proactor.create_socket()`; when connect hints were not honoured it calls
 `sock_connect()` before returning. `UringProactor` uses

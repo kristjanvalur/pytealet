@@ -317,6 +317,8 @@ class ProactorIOManager:
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
     ) -> tuple[socket.socket, bool, bool]:
+        if initial_data is not None and connect_to is None:
+            raise ValueError("initial_data requires connect_to")
         sock, is_connected, initial_sent = self.wait_operation(
             self._proactor.create_socket(
                 family,

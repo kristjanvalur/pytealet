@@ -233,9 +233,46 @@ class ForwardingProactor:
         return self._future_from_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
 
     def send(self, sock: socket.socket, data: Any) -> _asyncio.Future[int]:
-        """Send bytes through the host proactor."""
+        """Send bytes through the host proactor.
 
-        return self._future_from_operation(self._proactor.send(sock, data))
+        asyncio transports and ``sock_sendall()`` complete only after the full
+        buffer is sent; stdlib proactors satisfy that contract internally.
+        """
+
+        payload = bytes(data)
+        operation = self._proactor.sendall(sock, data)
+        loop = self._require_loop()
+        future: _asyncio.Future[int] = loop.create_future()
+
+        def complete_future() -> None:
+            if future.cancelled():
+                return
+            if operation.cancelled():
+                future.cancel()
+                return
+            try:
+                operation.result()
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(len(payload))
+
+        def complete_operation(_operation: Operation[Any]) -> None:
+            try:
+                loop.call_soon_threadsafe(complete_future)
+            except RuntimeError:
+                pass
+
+        def cancel_operation(asyncio_future: _asyncio.Future[int]) -> None:
+            if asyncio_future.cancelled():
+                operation.cancel()
+
+        if operation.done():
+            complete_future()
+        else:
+            operation.add_done_callback(complete_operation)
+            future.add_done_callback(cancel_operation)
+        return future
 
     def sendto(self, sock: socket.socket, data: Any, flags: int, address: Any) -> _asyncio.Future[int]:
         """Send datagram bytes through the host proactor."""

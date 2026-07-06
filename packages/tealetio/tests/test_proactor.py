@@ -946,7 +946,7 @@ class TestSelectorProactor:
             operation = proactor.connect(client, server.getsockname(), initial=b"hello")
             _wait_until_done(proactor, operation)
             accepted, _address = server.accept()
-            assert operation.result() is None
+            assert operation.result() is False
         finally:
             if accepted is not None:
                 accepted.close()
@@ -4386,7 +4386,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, operation.done)
             sock, is_connected, initial_sent = operation.result()
             assert is_connected is True
-            assert initial_sent is True
+            assert initial_sent is False
             _assert_scheduler_socket_fd(sock)
             sock.close()
         finally:
@@ -4562,7 +4562,7 @@ class TestProactorScheduler:
                 assert len(proactor.ring.submitted_socket) == 1
                 assert len(proactor.ring.submitted_connect) == 1
                 assert is_connected is True
-                assert initial_sent is True
+                assert initial_sent is False
             finally:
                 sock.close()
         finally:

@@ -533,20 +533,24 @@ def _connect_tcp_streams(
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
         sock: socket.socket | None = None
         try:
-            sock, _is_connected, _nbytes = io.sock_create(
+            sock, _is_connected, _initial_sent = io.sock_create(
                 addr_family,
                 socktype,
                 addr_proto,
                 connect_to=sockaddr,
                 initial_data=initial_send,
             )
-            return _open_streams(
-                io,
-                sock,
-                limit=limit,
-                stream_factory=stream_factory,
-                async_=async_,
-            )
+            try:
+                return _open_streams(
+                    io,
+                    sock,
+                    limit=limit,
+                    stream_factory=stream_factory,
+                    async_=async_,
+                )
+            except BaseException:
+                sock.close()
+                raise
         except OSError as exc:
             if sock is not None:
                 sock.close()

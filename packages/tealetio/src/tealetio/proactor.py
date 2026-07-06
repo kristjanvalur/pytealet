@@ -359,8 +359,9 @@ class Proactor(Protocol):
         Returns a non-blocking, close-on-exec ``socket.socket`` together with
         connect/send outcome flags. On success the operation completes with
         ``(socket, is_connected, initial_sent)``. ``initial_sent`` is ``True``
-        when connect-time send ran (including an empty ``initial_data`` buffer),
-        and falsy when the backend ignored connect/send hints.
+        when ``initial_data`` was provided and the connect/send chain flushed it
+        (including an empty buffer). It is ``False`` when ``initial_data`` was
+        omitted or the backend ignored connect/send hints.
         ``connect_to`` and ``initial_data`` are optional hints; backends may
         ignore them and return ``(socket, False, False)`` after creation only.
         ``UringProactor`` honours the hints only when ``IORING_OP_SOCKET`` is
@@ -1049,13 +1050,22 @@ class SelectorProactor(ProactorBase):
                 raise BlockingIOError(err, errno.errorcode.get(err, "connect in progress"))
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
-        del initial
-        operation = Operation[None](kind="connect", fileobj=sock)
+        if initial is None:
+            operation = Operation[None](kind="connect", fileobj=sock)
 
-        def attempt() -> None:
+            def attempt() -> None:
+                finish_connect()
+
+            self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+            return operation
+
+        operation = Operation[bool](kind="connect", fileobj=sock)
+
+        def attempt_with_initial() -> bool:
             finish_connect()
+            return False
 
-        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt_with_initial)
         return operation
 
     def recv_many(
@@ -1837,8 +1847,8 @@ class UringProactor(ProactorBase):
             if owned_sock is not None and owned_sock[0] is not None:
                 _close_owned_socket(owned_sock[0])
                 owned_sock[0] = None
-            if operation._set_cancelled():
-                self.break_wait()
+            # Deferred cancel already marked the operation cancelled.
+            self.break_wait()
             return
 
         entry = chain.current
@@ -2500,7 +2510,7 @@ class UringProactor(ProactorBase):
             def deliver(_result: _ChainDeliver | None) -> None:
                 sock = owned_sock[0]
                 assert sock is not None
-                operation._set_result((sock, True, True))
+                operation._set_result((sock, True, initial_data is not None))
 
             def fail(exc: BaseException) -> None:
                 sock = owned_sock[0]
