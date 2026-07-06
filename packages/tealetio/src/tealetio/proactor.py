@@ -2280,7 +2280,7 @@ class UringProactor(ProactorBase):
         pending_connect: list[_UringEntry | None] = [None]
         pending_send: list[_UringEntry | None] = [None]
 
-        if self._capabilities.get("IORING_OP_SOCKET", False) and hasattr(self._ring, "submit_socket"):
+        if self._capabilities.get("IORING_OP_SOCKET", False):
             socket_flags = flags | _DEFAULT_ACCEPT_FLAGS
             entry = self._uring_entry(
                 operation,
