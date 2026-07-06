@@ -906,7 +906,7 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
-    def test_connect_with_initial_returns_zero_on_selector(self):
+    def test_connect_with_initial_ignores_payload_on_selector(self):
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -919,7 +919,7 @@ class TestSelectorProactor:
             operation = proactor.connect(client, server.getsockname(), initial=b"hello")
             _wait_until_done(proactor, operation)
             accepted, _address = server.accept()
-            assert operation.result() == 0
+            assert operation.result() is None
         finally:
             if accepted is not None:
                 accepted.close()

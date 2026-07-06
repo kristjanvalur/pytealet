@@ -297,11 +297,11 @@ class ProactorIOManager:
         if initial is None:
             self.wait_operation(self._proactor.connect(sock, address))
             return
-        nbytes = cast(
-            int,
-            self.wait_operation(self._proactor.connect(sock, address, initial=initial)),
-        )
-        remainder = memoryview(initial)[nbytes:]
+        nbytes = self.wait_operation(self._proactor.connect(sock, address, initial=initial))
+        if isinstance(nbytes, int):
+            remainder = memoryview(initial)[nbytes:]
+        else:
+            remainder = memoryview(initial)
         if remainder.nbytes:
             self.sock_sendall(sock, remainder)
 

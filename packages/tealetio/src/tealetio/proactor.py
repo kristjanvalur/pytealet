@@ -1017,22 +1017,13 @@ class SelectorProactor(ProactorBase):
                 raise BlockingIOError(err, errno.errorcode.get(err, "connect in progress"))
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
-        if initial is None:
-            operation = Operation[None](kind="connect", fileobj=sock)
+        del initial
+        operation = Operation[None](kind="connect", fileobj=sock)
 
-            def attempt() -> None:
-                finish_connect()
-
-            self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
-            return operation
-
-        operation = Operation[int](kind="connect", fileobj=sock)
-
-        def attempt_with_initial() -> int:
+        def attempt() -> None:
             finish_connect()
-            return 0
 
-        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt_with_initial)
+        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
     def _bind_owned_socket_cancel(self, operation: Operation[Any], sock: socket.socket) -> None:
@@ -1678,6 +1669,15 @@ class UringProactor(ProactorBase):
         if deferred_count > self._deferred_queue_peak:
             self._deferred_queue_peak = deferred_count
 
+    def _uring_chain_entry(
+        self,
+        operation: Operation[Any],
+        complete: _UringEntryComplete,
+    ) -> _UringEntry:
+        """Create a chained uring entry without rebinding operation cancel."""
+
+        return _UringEntry(operation=operation, complete=complete)
+
     def _uring_entry(
         self,
         operation: Operation[Any],
@@ -2275,62 +2275,38 @@ class UringProactor(ProactorBase):
         """Create a scheduler-contract socket."""
 
         operation = Operation[CreateSocketResult](kind="create_socket", fileobj=(family, type, proto))
-        if connect_to is None:
-            socket_flags = flags | _DEFAULT_ACCEPT_FLAGS
-            if not self._capabilities.get("IORING_OP_SOCKET", False) or not hasattr(self._ring, "submit_socket"):
-                try:
-                    sock = _sync_create_scheduler_socket(family, type, proto)
-                except OSError as exc:
-                    operation._set_exception(exc)
-                    return operation
-                operation._set_result((sock, False, 0))
-                return operation
-
-            entry = self._uring_entry(
-                operation,
-                lambda entry, completion: self._complete_uring_create_socket(entry, completion),
-            )
-            self._submit_uring_entry(
-                entry,
-                lambda: self._ring.submit_socket(family, type, proto, socket_flags, entry),
-            )
-            return operation
-
-        payload = memoryview(initial_data) if initial_data is not None else memoryview(b"")
-        pending_send: list[_UringEntry | None] = [None]
         owned_sock: list[socket.socket | None] = [None]
+        pending_socket: list[_UringEntry | None] = [None]
+        pending_connect: list[_UringEntry | None] = [None]
+        pending_send: list[_UringEntry | None] = [None]
 
-        def begin_connect(sock: socket.socket) -> None:
-            owned_sock[0] = sock
+        if self._capabilities.get("IORING_OP_SOCKET", False) and hasattr(self._ring, "submit_socket"):
+            socket_flags = flags | _DEFAULT_ACCEPT_FLAGS
             entry = self._uring_entry(
                 operation,
-                lambda entry, completion: self._complete_uring_create_socket_connect(
+                lambda entry, completion: self._fini_create_socket(
                     entry,
                     completion,
-                    sock,
-                    payload,
+                    operation,
+                    connect_to,
+                    initial_data,
+                    owned_sock,
+                    pending_connect,
                     pending_send,
                 ),
             )
-            self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), connect_to, entry))
-
-        pending_socket: list[_UringEntry | None] = [None]
-        if self._capabilities.get("IORING_OP_SOCKET", False) and hasattr(self._ring, "submit_socket"):
-            socket_operation = Operation[socket.socket](kind="create_socket_leg", fileobj=(family, type, proto))
-            socket_entry = self._uring_entry(
-                socket_operation,
-                lambda entry, completion: self._complete_uring_create_socket_leg(
-                    entry,
-                    completion,
-                    begin_connect,
+            pending_socket[0] = entry
+            if connect_to is not None:
+                self._bind_create_socket_cancel(
                     operation,
-                ),
-            )
-            pending_socket[0] = socket_entry
-            self._bind_create_socket_cancel(operation, owned_sock, pending_send, pending_socket)
+                    owned_sock,
+                    pending_send,
+                    pending_socket,
+                    pending_connect,
+                )
             self._submit_uring_entry(
-                socket_entry,
-                lambda: self._ring.submit_socket(family, type, proto, flags | _DEFAULT_ACCEPT_FLAGS, socket_entry),
+                entry,
+                lambda: self._ring.submit_socket(family, type, proto, socket_flags, entry),
             )
             return operation
 
@@ -2339,21 +2315,22 @@ class UringProactor(ProactorBase):
         except OSError as exc:
             operation._set_exception(exc)
             return operation
-        self._bind_create_socket_cancel(operation, owned_sock, pending_send)
-        begin_connect(sock)
-        return operation
-
-    def _complete_uring_create_socket(
-        self, entry: _UringEntry, completion: _UringCompletion
-    ) -> Operation[CreateSocketResult]:
-        operation = cast(Operation[CreateSocketResult], entry.operation)
-        res = completion.res
-        if res < 0:
-            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
-            return operation
-        sock = socket.socket(fileno=res)
-        configure_scheduler_socket(sock)
-        operation._set_result((sock, False, 0))
+        if connect_to is not None:
+            self._bind_create_socket_cancel(
+                operation,
+                owned_sock,
+                pending_send,
+                pending_connect=pending_connect,
+            )
+        self._fini_create_socket_dispatch(
+            sock,
+            operation,
+            connect_to,
+            initial_data,
+            owned_sock,
+            pending_connect,
+            pending_send,
+        )
         return operation
 
     def connect(
@@ -2472,6 +2449,7 @@ class UringProactor(ProactorBase):
         owned_sock: list[socket.socket | None],
         pending_send: list[_UringEntry | None],
         pending_socket: list[_UringEntry | None] | None = None,
+        pending_connect: list[_UringEntry | None] | None = None,
     ) -> None:
         backend_cancel = operation._cancel
         if backend_cancel is None:
@@ -2490,6 +2468,17 @@ class UringProactor(ProactorBase):
                 if not send_entry.operation.done():
                     send_entry.operation._set_cancelled()
                 pending_send[0] = None
+            if pending_connect is not None:
+                connect_entry = pending_connect[0]
+                if connect_entry is not None:
+                    completion = connect_entry.completion
+                    if completion is not None:
+                        self._submit_cancel(completion)
+                    if connect_entry.active:
+                        self._deactivate_uring_entry(connect_entry)
+                    else:
+                        connect_entry.completion = None
+                    pending_connect[0] = None
             sock = owned_sock[0]
             if sock is not None:
                 _close_owned_socket(sock)
@@ -2500,8 +2489,6 @@ class UringProactor(ProactorBase):
                         self._deactivate_uring_entry(socket_entry)
                     else:
                         socket_entry.completion = None
-                    if not socket_entry.operation.done():
-                        socket_entry.operation._set_cancelled()
                     pending_socket[0] = None
             backend_cancel()
 
@@ -2518,44 +2505,85 @@ class UringProactor(ProactorBase):
             operation._set_exception(exc)
         return operation
 
-    def _complete_uring_create_socket_leg(
+    def _fini_create_socket(
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
-        begin_connect: Callable[[socket.socket], None],
-        parent: Operation[CreateSocketResult],
-    ) -> Operation[socket.socket] | None:
-        socket_operation = cast(Operation[socket.socket], entry.operation)
+        operation: Operation[CreateSocketResult],
+        connect_to: Any | None,
+        initial_data: SocketSendBuffer | None,
+        owned_sock: list[socket.socket | None],
+        pending_connect: list[_UringEntry | None],
+        pending_send: list[_UringEntry | None],
+    ) -> Operation[CreateSocketResult] | None:
         res = completion.res
         if res < 0:
-            exc = OSError(-res, errno.errorcode.get(-res, "io_uring operation failed"))
-            socket_operation._set_exception(exc)
-            if not parent.done():
-                parent._set_exception(exc)
-            return socket_operation
-        if parent.done():
+            if not operation.done():
+                operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            return operation
+        if operation.done():
             try:
                 os.close(res)
             except OSError:
                 pass
-            if not socket_operation.done():
-                socket_operation._set_cancelled()
-            return socket_operation
+            return operation
         sock = socket.socket(fileno=res)
         configure_scheduler_socket(sock)
-        socket_operation._set_result(sock)
-        begin_connect(sock)
+        return self._fini_create_socket_dispatch(
+            sock,
+            operation,
+            connect_to,
+            initial_data,
+            owned_sock,
+            pending_connect,
+            pending_send,
+        )
+
+    def _fini_create_socket_dispatch(
+        self,
+        sock: socket.socket,
+        operation: Operation[CreateSocketResult],
+        connect_to: Any | None,
+        initial_data: SocketSendBuffer | None,
+        owned_sock: list[socket.socket | None],
+        pending_connect: list[_UringEntry | None],
+        pending_send: list[_UringEntry | None],
+    ) -> Operation[CreateSocketResult] | None:
+        owned_sock[0] = sock
+        if connect_to is None:
+            operation._set_result((sock, False, 0))
+            return operation
+        if operation.done():
+            _close_owned_socket(sock)
+            return operation
+        payload = memoryview(initial_data) if initial_data is not None else memoryview(b"")
+        connect_entry = self._uring_chain_entry(
+            operation,
+            lambda entry, completion: self._fini_create_socket_connect(
+                entry,
+                completion,
+                operation,
+                sock,
+                payload,
+                pending_send,
+            ),
+        )
+        pending_connect[0] = connect_entry
+        self._submit_uring_entry(
+            connect_entry,
+            lambda: self._ring.submit_connect(sock.fileno(), connect_to, connect_entry),
+        )
         return None
 
-    def _complete_uring_create_socket_connect(
+    def _fini_create_socket_connect(
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
+        operation: Operation[CreateSocketResult],
         sock: socket.socket,
         payload: memoryview,
         pending_send: list[_UringEntry | None],
     ) -> Operation[CreateSocketResult] | None:
-        operation = cast(Operation[CreateSocketResult], entry.operation)
         res = completion.res
         if res < 0:
             return self._fail_create_socket(
@@ -2569,13 +2597,10 @@ class UringProactor(ProactorBase):
         if not payload.nbytes:
             operation._set_result((sock, True, 0))
             return operation
-        if operation.done():
-            _close_owned_socket(sock)
-            return operation
         send_operation = Operation[None](kind="send_on_connect", fileobj=sock)
-        send_entry = self._uring_entry(
+        send_entry = self._uring_chain_entry(
             send_operation,
-            lambda send_entry, send_completion: self._deliver_create_socket_send(
+            lambda send_entry, send_completion: self._fini_create_socket_connect_send(
                 send_entry,
                 send_completion,
                 operation,
@@ -2586,27 +2611,27 @@ class UringProactor(ProactorBase):
         self._submit_uring_entry(send_entry, lambda: self._submit_send(sock.fileno(), payload, send_entry))
         return None
 
-    def _deliver_create_socket_send(
+    def _fini_create_socket_connect_send(
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
-        parent: Operation[CreateSocketResult],
+        operation: Operation[CreateSocketResult],
         sock: socket.socket,
     ) -> Operation[CreateSocketResult]:
         send_operation = entry.operation
         res = completion.res
-        if parent.done():
+        if operation.done():
             send_operation._set_result(None)
-            return parent
+            return operation
         if res < 0:
             return self._fail_create_socket(
-                parent,
+                operation,
                 sock,
                 OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
             )
-        parent._set_result((sock, True, res))
+        operation._set_result((sock, True, res))
         send_operation._set_result(None)
-        return parent
+        return operation
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
         """Submit an io_uring openat operation and return the opened fd on success."""
