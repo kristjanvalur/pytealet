@@ -4395,6 +4395,30 @@ class TestProactorScheduler:
         finally:
             proactor.close()
 
+    def test_create_socket_without_uring_socket_opcode_ignores_connect_hints(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SOCKET=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            assert operation.done()
+            sock, is_connected, nbytes = operation.result()
+            try:
+                assert len(proactor.ring.submitted_socket) == 0
+                assert len(proactor.ring.submitted_connect) == 0
+                assert is_connected is False
+                assert nbytes == 0
+            finally:
+                sock.close()
+        finally:
+            proactor.close()
+
     def test_scheduler_clock_drives_proactor_clock(self):
         scheduler = SyncProactorScheduler()
         try:

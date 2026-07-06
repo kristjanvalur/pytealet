@@ -359,9 +359,10 @@ class Proactor(Protocol):
         ``(socket, is_connected, bytes_sent)``. ``connect_to`` and
         ``initial_data`` are optional hints; backends may ignore them and return
         ``(socket, False, 0)`` after creation only. ``UringProactor`` honours
-        the hints when practical, chaining ``IORING_OP_SOCKET``, connect, and
-        one ``send`` attempt. Any failure after creation closes the socket
-        before the operation completes.
+        the hints only when ``IORING_OP_SOCKET`` is probed, chaining socket
+        creation, connect, and one ``send`` attempt. Without that opcode it
+        falls back to stdlib creation and does not connect or send. Any failure
+        after creation closes the socket before the operation completes.
         """
 
         ...
@@ -2310,27 +2311,13 @@ class UringProactor(ProactorBase):
             )
             return operation
 
+        del connect_to, initial_data, owned_sock, pending_socket, pending_connect, pending_send
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
         except OSError as exc:
             operation._set_exception(exc)
             return operation
-        if connect_to is not None:
-            self._bind_create_socket_cancel(
-                operation,
-                owned_sock,
-                pending_send,
-                pending_connect=pending_connect,
-            )
-        self._fini_create_socket_dispatch(
-            sock,
-            operation,
-            connect_to,
-            initial_data,
-            owned_sock,
-            pending_connect,
-            pending_send,
-        )
+        operation._set_result((sock, False, 0))
         return operation
 
     def connect(
