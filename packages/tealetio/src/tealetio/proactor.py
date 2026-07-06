@@ -1026,7 +1026,13 @@ class SelectorProactor(ProactorBase):
         *,
         initial: SocketSendBuffer | None = None,
     ) -> Operation[None] | Operation[bool]:
-        """Submit a non-blocking socket connect operation."""
+        """Submit a non-blocking socket connect operation.
+
+        When ``initial`` is provided, ``UringProactor`` may chain connect-time
+        send. ``SelectorProactor`` connects only and completes with ``False``;
+        use ``ProactorIOManager.sock_connect()`` or ``sock_create()`` when you
+        need connect-time data on any backend.
+        """
 
         started = False
 

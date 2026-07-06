@@ -101,6 +101,13 @@ honoured, falls back to ``sock_connect()`` so callers still get a connected
 socket. ``open_connection(..., initial_send=...)`` passes ``connect_to`` and
 ``initial_data`` through this path for TCP and Unix ``path=`` connects.
 
+`connect(sock, address, *, initial=None)` may chain connect-time send on
+``UringProactor``. ``SelectorProactor`` connects only: when ``initial`` is
+provided the operation completes with ``False`` and does not perform a kernel
+send. Prefer ``scheduler.io.sock_connect()`` or ``sock_create()`` when you need
+connect-time data on any backend; those helpers flush via ``sock_sendall`` when
+the proactor returns a falsy connect-time result.
+
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
 maps `POLLIN`, `POLLPRI`, `POLLOUT`, `POLLERR`, `POLLHUP`, and `POLLRDHUP`

@@ -688,7 +688,7 @@ def _connect_unix_streams(
             stream_factory=stream_factory,
             async_=async_,
         )
-    except OSError:
+    except BaseException:
         sock.close()
         raise
 

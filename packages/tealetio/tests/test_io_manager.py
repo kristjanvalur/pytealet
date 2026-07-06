@@ -207,6 +207,29 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
+    def test_sock_create_fallback_without_initial_data_reports_initial_sent_false(self):
+        proactor = _MockProactor()
+        io = ProactorIOManager(proactor)  # type: ignore[arg-type]
+        connect_calls: list[tuple[socket.socket, Any, Any | None]] = []
+
+        def fake_sock_connect(sock: socket.socket, address: Any, *, initial: Any | None = None) -> None:
+            connect_calls.append((sock, address, initial))
+
+        io.sock_connect = fake_sock_connect  # type: ignore[method-assign]
+        address = ("127.0.0.1", 9)
+        sock, is_connected, initial_sent = io.sock_create(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=address,
+        )
+        try:
+            assert len(connect_calls) == 1
+            assert connect_calls[0][2] is None
+            assert is_connected is True
+            assert initial_sent is False
+        finally:
+            sock.close()
+
     def test_sock_create_falls_back_to_sock_connect_when_hints_ignored(self):
         proactor = _MockProactor()
         io = ProactorIOManager(proactor)  # type: ignore[arg-type]

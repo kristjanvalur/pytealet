@@ -332,9 +332,10 @@ class ProactorIOManager:
         try:
             if connect_to is not None and not is_connected:
                 self.sock_connect(sock, connect_to, initial=initial_data)
-                return sock, True, True
+                return sock, True, initial_data is not None
             if initial_data is not None and is_connected and not initial_sent:
                 self.sock_sendall(sock, initial_data)
+                return sock, is_connected, True
             return sock, is_connected, initial_sent
         except BaseException:
             sock.close()
