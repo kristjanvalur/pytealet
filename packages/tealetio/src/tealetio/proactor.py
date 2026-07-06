@@ -367,7 +367,7 @@ class Proactor(Protocol):
 
         ...
 
-    def openat(self, path: str, flags: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]: ...
+    def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]: ...
 
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]: ...
 
@@ -3194,6 +3194,10 @@ class UringProactor(ProactorBase):
         raise NotImplementedError(f"UringProactor does not yet support {operation} operations")
 
 
+def _default_proactor_factory() -> Proactor:
+    return SelectorProactor()
+
+
 class ProactorScheduler(BaseScheduler):
     """Shared proactor-backed cooperative scheduling mechanics."""
 
@@ -3204,9 +3208,8 @@ class ProactorScheduler(BaseScheduler):
         runnable_queue_factory: RunnableQueueFactory | None = None,
     ) -> None:
         super().__init__(runnable_queue_factory=runnable_queue_factory)
-        if proactor_factory is None:
-            proactor_factory = SelectorProactor
-        self._proactor = proactor_factory()
+        factory = proactor_factory if proactor_factory is not None else _default_proactor_factory
+        self._proactor = factory()
         self._proactor.set_clock(self.time)
         self._io = ProactorIOManager(self._proactor)
 
