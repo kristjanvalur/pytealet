@@ -3050,6 +3050,8 @@ class UringProactor(ProactorBase):
             # discarded them).
             self._deactivate_uring_entry(entry)
             self._retry_deferred_submissions()
+            if not self.has_pending_operations():
+                self.break_wait()
             return
         completed_operation: Operation[Any] | None = None
         for pending in to_process:
@@ -3059,6 +3061,8 @@ class UringProactor(ProactorBase):
         self._retry_deferred_submissions()
         if completed_operation is not None:
             self._notify_completed()
+        elif not self.has_pending_operations():
+            self.break_wait()
 
     def _queue_entry_resubmit(self, entry: _UringEntry, submit: _UringEntrySubmit) -> None:
         self._enqueue_deferred_submission(_UringSubmission(entry=entry, submit=submit))
