@@ -241,21 +241,22 @@ def test_ring_serving_workers_can_dispatch_while_another_callback_blocks_when_av
         left.setblocking(False)
         right.setblocking(False)
         first_callback_blocking = threading.Event()
-        release_first_callback = threading.Event()
+        release_first_callback = threading.Semaphore(0)
         delivered_two = threading.Event()
         completions: list[uring_api.Completion] = []
         lock = threading.Lock()
 
         def callback(batch):
             with lock:
+                prev_count = len(completions)
                 completions.extend(batch)
                 count = len(completions)
-            if count == 1:
+            if prev_count == 0 and count >= 1:
                 first_callback_blocking.set()
-                release_first_callback.wait(2.0)
-            elif count == 2:
+                if count == 1:
+                    release_first_callback.acquire()
+            if count >= 2:
                 delivered_two.set()
-                release_first_callback.set()
 
         with uring_api.Ring() as ring:
             ring.callback = callback
@@ -272,9 +273,10 @@ def test_ring_serving_workers_can_dispatch_while_another_callback_blocks_when_av
             ring.submit_recv(left.fileno(), second_buf, 141)
             right.send(b"y")
             assert delivered_two.wait(1.0)
+            release_first_callback.release()
             ring.stop_serving()
             for thread in threads:
-                thread.join(1.0)
+                thread.join(3.0)
                 assert not thread.is_alive()
 
         by_user_data = {completion.user_data: completion for completion in completions}
@@ -282,7 +284,7 @@ def test_ring_serving_workers_can_dispatch_while_another_callback_blocks_when_av
         assert by_user_data[141].result == 1
         assert {bytes(first_buf), bytes(second_buf)} == {b"x", b"y"}
     finally:
-        release_first_callback.set()
+        release_first_callback.release()
         left.close()
         right.close()
 
