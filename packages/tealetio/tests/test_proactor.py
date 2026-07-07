@@ -4604,6 +4604,7 @@ class TestProactorScheduler:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(uring_api, "is_available", lambda: True)
+        monkeypatch.setattr(proactor_module, "_default_uring_ring_factory", _FakeUringRing)
         scheduler = SyncProactorScheduler()
         try:
             assert isinstance(scheduler.proactor, UringProactor)
