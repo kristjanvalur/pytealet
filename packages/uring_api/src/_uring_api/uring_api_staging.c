@@ -5,6 +5,7 @@
 #include "uring_api_staging.h"
 #include "uring_api_core.h"
 
+#include <assert.h>
 #include <liburing.h>
 #include <stdlib.h>
 
@@ -48,10 +49,7 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
         }
     }
     completion = cqe_get_completion(self, cqe);
-    if (!completion) {
-        PyErr_SetString(PyExc_SystemError, "io_uring CQE is missing its completion object");
-        return -1;
-    }
+    assert(completion != NULL);
     index = buf->count;
     staged = &buf->entries[index];
     staged->res = cqe->res;
