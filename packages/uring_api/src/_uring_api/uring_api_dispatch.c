@@ -255,34 +255,37 @@ static void cqe_drain_lock_release(UringApiRing *self) { PyThread_release_lock(s
 static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
                                           struct __kernel_timespec *timeout) {
     struct io_uring_cqe *cqe = NULL;
-    unsigned int cq_capacity;
     int reap_ret;
     int peek_ret;
     int errnum;
+    int record_failed = 0;
 
     staging_buffer_reset(staging);
-    cq_capacity = ring_cq_entries(self);
-    if (cq_capacity == 0) {
-        cq_capacity = 8;
-    }
-    if (staging_buffer_ensure_capacity(staging, (size_t)cq_capacity - 1) < 0) {
-        return NULL;
-    }
 
     Py_BEGIN_ALLOW_THREADS;
     reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
     if (reap_ret == 0 && cqe) {
-        staging_buffer_record_cqe(self, staging, cqe);
-        for (;;) {
-            peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
-            if (peek_ret != 0 || !cqe) {
-                break;
+        if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
+            record_failed = 1;
+        } else {
+            for (;;) {
+                peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
+                if (peek_ret != 0 || !cqe) {
+                    break;
+                }
+                if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
+                    record_failed = 1;
+                    break;
+                }
             }
-            staging_buffer_record_cqe(self, staging, cqe);
         }
     }
     Py_END_ALLOW_THREADS;
 
+    if (record_failed) {
+        PyErr_NoMemory();
+        return NULL;
+    }
     if (reap_ret < 0) {
         errnum = normalize_ret_errno(reap_ret);
         if (errnum == EAGAIN || errnum == ETIME || errnum == ETIMEDOUT) {

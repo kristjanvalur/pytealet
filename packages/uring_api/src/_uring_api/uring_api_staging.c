@@ -7,35 +7,30 @@
 
 #include <assert.h>
 #include <liburing.h>
+#include <stdlib.h>
 
-int staging_buffer_ensure_capacity(UringApiStagingBuffer *buf, size_t index) {
-    size_t needed;
+#define STAGING_BUFFER_INITIAL_CAPACITY 4
+
+static int staging_buffer_grow(UringApiStagingBuffer *buf) {
+    size_t new_capacity;
     UringApiStagedCQE *entries;
 
-    needed = index + 1;
-    if (needed <= buf->capacity) {
-        return 0;
-    }
     if (buf->capacity == 0) {
-        needed = 8;
+        new_capacity = STAGING_BUFFER_INITIAL_CAPACITY;
     } else {
-        needed = buf->capacity;
-        while (needed < index + 1) {
-            needed *= 2;
-        }
+        new_capacity = buf->capacity * 2;
     }
-    entries = PyMem_Realloc(buf->entries, needed * sizeof(UringApiStagedCQE));
+    entries = realloc(buf->entries, new_capacity * sizeof(UringApiStagedCQE));
     if (!entries) {
-        PyErr_NoMemory();
         return -1;
     }
     buf->entries = entries;
-    buf->capacity = needed;
+    buf->capacity = new_capacity;
     return 0;
 }
 
 void staging_buffer_clear(UringApiStagingBuffer *buf) {
-    PyMem_Free(buf->entries);
+    free(buf->entries);
     buf->entries = NULL;
     buf->capacity = 0;
     buf->count = 0;
@@ -43,12 +38,16 @@ void staging_buffer_clear(UringApiStagingBuffer *buf) {
 
 void staging_buffer_reset(UringApiStagingBuffer *buf) { buf->count = 0; }
 
-void staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
+int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
     UringApiCompletion *completion;
     UringApiStagedCQE *staged;
     size_t index;
 
-    assert(buf->count < buf->capacity);
+    if (buf->count >= buf->capacity) {
+        if (staging_buffer_grow(buf) < 0) {
+            return -1;
+        }
+    }
     completion = cqe_get_completion(self, cqe);
     assert(completion != NULL);
     index = buf->count;
@@ -59,6 +58,7 @@ void staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, s
     staged->leg_index = 0;
     io_uring_cqe_seen(&self->ring, cqe);
     buf->count++;
+    return 0;
 }
 
 int staging_buffer_assign_multishot_indices(UringApiRing *self, UringApiStagingBuffer *buf) {

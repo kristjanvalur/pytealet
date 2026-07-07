@@ -9,8 +9,7 @@ struct io_uring_cqe;
 
 void staging_buffer_clear(UringApiStagingBuffer *buf);
 void staging_buffer_reset(UringApiStagingBuffer *buf);
-int staging_buffer_ensure_capacity(UringApiStagingBuffer *buf, size_t index);
-void staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe);
+int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe);
 int staging_buffer_assign_multishot_indices(UringApiRing *self, UringApiStagingBuffer *buf);
 
 #endif
