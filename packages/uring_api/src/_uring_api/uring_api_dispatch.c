@@ -11,13 +11,17 @@ static bool delivery_should_stop(UringApiRing *self);
 
 static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                         struct io_uring_cqe **cqe_out) {
-    if (timeout_kind == 0) {
+    if (timeout_kind == URING_API_WAIT_BLOCKING) {
         return io_uring_wait_cqe(&self->ring, cqe_out);
     }
-    if (timeout->tv_sec == 0 && timeout->tv_nsec == 0) {
+    if (timeout_kind == URING_API_WAIT_TIMEOUT) {
+        return io_uring_wait_cqe_timeout(&self->ring, cqe_out, timeout);
+    }
+    if (timeout_kind == URING_API_WAIT_PEEK) {
         return io_uring_peek_cqe(&self->ring, cqe_out);
     }
-    return io_uring_wait_cqe_timeout(&self->ring, cqe_out, timeout);
+    errno = EINVAL;
+    return -EINVAL;
 }
 
 static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion *completion, int res,
@@ -143,15 +147,26 @@ PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *Py_UNUSED(ign
 static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeout) {
     double seconds;
     if (timeout_obj == NULL || timeout_obj == Py_None) {
-        return 0;
+        return URING_API_WAIT_BLOCKING;
     }
-    seconds = PyFloat_AsDouble(timeout_obj);
-    if (PyErr_Occurred()) {
-        return -1;
+    if (PyLong_Check(timeout_obj)) {
+        long value = PyLong_AsLong(timeout_obj);
+        if (value == -1 && PyErr_Occurred()) {
+            return -1;
+        }
+        seconds = (double)value;
+    } else {
+        seconds = PyFloat_AsDouble(timeout_obj);
+        if (PyErr_Occurred()) {
+            return -1;
+        }
     }
     if (seconds < 0.0) {
         PyErr_SetString(PyExc_ValueError, "timeout must be non-negative or None");
         return -1;
+    }
+    if (seconds == 0.0) {
+        return URING_API_WAIT_PEEK;
     }
     timeout->tv_sec = (long long)seconds;
     timeout->tv_nsec = (long long)((seconds - (double)timeout->tv_sec) * 1000000000.0);
@@ -161,7 +176,7 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     if (timeout->tv_nsec > 999999999) {
         timeout->tv_nsec = 999999999;
     }
-    return 1;
+    return URING_API_WAIT_TIMEOUT;
 }
 
 static PyObject *build_completion_result_impl(UringApiCompletion *completion, int res, unsigned int flags,
@@ -230,37 +245,49 @@ static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion 
 }
 
 static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
-                                          struct __kernel_timespec *timeout) {
+                                          struct __kernel_timespec *timeout, bool from_delivery_thread) {
     struct io_uring_cqe *cqe = NULL;
-    int reap_ret;
+    int reap_ret = 0;
     int peek_ret;
     int errnum;
     int record_failed = 0;
+    bool stop_after_lock = false;
 
     Py_BEGIN_ALLOW_THREADS;
     /* only one thread can drain at the time. */
     PyThread_acquire_lock(self->cqe_drain_lock, WAIT_LOCK);
 
-    staging_buffer_reset(staging);
-    reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
-    if (reap_ret == 0 && cqe) {
-        if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
-            record_failed = 1;
-        } else {
-            for (;;) {
-                peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
-                if (peek_ret != 0 || !cqe) {
-                    break;
-                }
-                if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
-                    record_failed = 1;
-                    break;
+    /* only one delivery worker can be in the kernel wait at once; any others are
+     * queued on the drain lock and should bail out once stop is requested. */
+    if (from_delivery_thread && self->delivery_stop_requested) {
+        stop_after_lock = true;
+        PyThread_release_lock(self->cqe_drain_lock);
+    } else {
+        staging_buffer_reset(staging);
+        reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+        if (reap_ret == 0 && cqe) {
+            if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
+                record_failed = 1;
+            } else {
+                for (;;) {
+                    peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
+                    if (peek_ret != 0 || !cqe) {
+                        break;
+                    }
+                    if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
+                        record_failed = 1;
+                        break;
+                    }
                 }
             }
         }
+        PyThread_release_lock(self->cqe_drain_lock);
     }
-    PyThread_release_lock(self->cqe_drain_lock);
     Py_END_ALLOW_THREADS;
+
+    if (stop_after_lock) {
+        return PyList_New(0);
+    }
 
     if (record_failed) {
         PyErr_NoMemory();
@@ -302,7 +329,7 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
         return PyList_New(0);
     }
 
-    ready = drain_ready_completions(self, staging, timeout_kind, timeout);
+    ready = drain_ready_completions(self, staging, timeout_kind, timeout, from_delivery_thread);
     if (!ready) {
         receive_wait_end(self, from_delivery_thread);
         return NULL;
@@ -431,7 +458,7 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
     }
 
     while (!delivery_should_stop(self)) {
-        PyObject *ready = UringApiRing_wait_impl(self, 0, NULL, true, &worker_staging);
+        PyObject *ready = UringApiRing_wait_impl(self, URING_API_WAIT_BLOCKING, NULL, true, &worker_staging);
 
         if (!ready) {
             delivery_request_stop(self);
