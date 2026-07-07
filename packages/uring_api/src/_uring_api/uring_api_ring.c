@@ -115,9 +115,9 @@ void UringApiRing_dealloc(UringApiRing *self) {
     staging_buffer_clear(&self->wait_staging);
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
-    if (self->delivery_wait_lock) {
-        PyThread_free_lock(self->delivery_wait_lock);
-        self->delivery_wait_lock = NULL;
+    if (self->cqe_drain_lock) {
+        PyThread_free_lock(self->cqe_drain_lock);
+        self->cqe_drain_lock = NULL;
     }
 #ifdef URING_API_USE_PYTHREAD_MUTEX
     if (self->completion_mutex) {

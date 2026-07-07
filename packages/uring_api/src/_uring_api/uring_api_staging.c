@@ -46,33 +46,28 @@ int staging_buffer_stage_cqe(UringApiRing *self, UringApiStagingBuffer *buf, str
     UringApiCompletion *completion;
     UringApiStagedCQE *staged;
     size_t index;
-    int failed = 0;
 
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     completion = cqe_get_completion(self, cqe);
     if (!completion) {
         PyErr_SetString(PyExc_SystemError, "io_uring CQE is missing its completion object");
-        failed = 1;
-    } else {
-        index = buf->count;
-        if (staging_buffer_ensure_capacity(buf, index) < 0) {
-            failed = 1;
-        } else {
-            staged = &buf->entries[index];
-            staged->res = cqe->res;
-            staged->flags = cqe->flags;
-            staged->completion = completion;
-            staged->leg_index = 0;
-            if (completion->multishot) {
-                Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->completion_mutex);
-                staged->leg_index = completion->sequence;
-                completion->sequence++;
-                Py_END_CRITICAL_SECTION_MUTEX();
-            }
-            io_uring_cqe_seen(&self->ring, cqe);
-            buf->count++;
-        }
+        return -1;
     }
-    Py_END_CRITICAL_SECTION_MUTEX();
-    return failed ? -1 : 0;
+    index = buf->count;
+    if (staging_buffer_ensure_capacity(buf, index) < 0) {
+        return -1;
+    }
+    staged = &buf->entries[index];
+    staged->res = cqe->res;
+    staged->flags = cqe->flags;
+    staged->completion = completion;
+    staged->leg_index = 0;
+    if (completion->multishot) {
+        Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->completion_mutex);
+        staged->leg_index = completion->sequence;
+        completion->sequence++;
+        Py_END_CRITICAL_SECTION_MUTEX();
+    }
+    io_uring_cqe_seen(&self->ring, cqe);
+    buf->count++;
+    return 0;
 }

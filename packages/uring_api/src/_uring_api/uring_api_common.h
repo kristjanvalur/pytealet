@@ -142,7 +142,7 @@ struct UringApiRing {
 #endif
     UringApiMutex receive_mutex;
     UringApiMutex completion_mutex;
-    PyThread_type_lock delivery_wait_lock;
+    PyThread_type_lock cqe_drain_lock;
     unsigned int delivery_active_workers;
     unsigned int receive_state;
     unsigned short next_buf_group;

@@ -229,16 +229,28 @@ static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion 
     return delivered;
 }
 
-static void receive_wait_lock(UringApiRing *self) {
-    if (PyThread_acquire_lock(self->delivery_wait_lock, NOWAIT_LOCK)) {
+static int ensure_cqe_drain_lock(UringApiRing *self) {
+    if (self->cqe_drain_lock) {
+        return 0;
+    }
+    self->cqe_drain_lock = PyThread_allocate_lock();
+    if (!self->cqe_drain_lock) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    return 0;
+}
+
+static void cqe_drain_lock_acquire(UringApiRing *self) {
+    if (PyThread_acquire_lock(self->cqe_drain_lock, NOWAIT_LOCK)) {
         return;
     }
     Py_BEGIN_ALLOW_THREADS;
-    PyThread_acquire_lock(self->delivery_wait_lock, WAIT_LOCK);
+    PyThread_acquire_lock(self->cqe_drain_lock, WAIT_LOCK);
     Py_END_ALLOW_THREADS;
 }
 
-static void receive_wait_unlock(UringApiRing *self) { PyThread_release_lock(self->delivery_wait_lock); }
+static void cqe_drain_lock_release(UringApiRing *self) { PyThread_release_lock(self->cqe_drain_lock); }
 
 static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
                                           struct __kernel_timespec *timeout) {
@@ -298,29 +310,25 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
     if (receive_wait_begin(self, from_delivery_thread) < 0) {
         return NULL;
     }
-    if (from_delivery_thread) {
-        receive_wait_lock(self);
-        if (delivery_should_stop(self)) {
-            receive_wait_unlock(self);
-            receive_wait_end(self, from_delivery_thread);
-            return PyList_New(0);
-        }
+    if (ensure_cqe_drain_lock(self) < 0) {
+        receive_wait_end(self, from_delivery_thread);
+        return NULL;
+    }
+    cqe_drain_lock_acquire(self);
+    if (from_delivery_thread && delivery_should_stop(self)) {
+        cqe_drain_lock_release(self);
+        receive_wait_end(self, from_delivery_thread);
+        return PyList_New(0);
     }
 
     ready = drain_ready_completions(self, staging, timeout_kind, timeout);
+    cqe_drain_lock_release(self);
     if (!ready) {
-        if (from_delivery_thread) {
-            receive_wait_unlock(self);
-        }
         receive_wait_end(self, from_delivery_thread);
         return NULL;
     }
 
-    if (from_delivery_thread) {
-        receive_wait_unlock(self);
-    } else {
-        receive_wait_end(self, from_delivery_thread);
-    }
+    receive_wait_end(self, from_delivery_thread);
     return ready;
 }
 
@@ -433,16 +441,8 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
         PyErr_SetString(PyExc_RuntimeError, "another wait is already active");
         failed = true;
     } else {
-        if (!self->delivery_wait_lock) {
-            self->delivery_wait_lock = PyThread_allocate_lock();
-        }
-        if (!self->delivery_wait_lock) {
-            PyErr_NoMemory();
-            failed = true;
-        } else {
-            self->receive_state = URING_API_RECEIVE_DELIVERING;
-            self->delivery_active_workers++;
-        }
+        self->receive_state = URING_API_RECEIVE_DELIVERING;
+        self->delivery_active_workers++;
     }
     Py_END_CRITICAL_SECTION_MUTEX();
 
