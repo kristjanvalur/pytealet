@@ -595,18 +595,11 @@ PyObject *UringApiRing_submit_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buf
 
 PyObject *UringApiRing_submit_accept_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data) {
     struct io_uring_sqe *sqe;
-    UringApiCompletionSockaddrState *sockaddr_state;
     PyObject *completion = NULL;
     int failed = 0;
 
-    completion = UringApiCompletion_new_pending_accept(user_data);
+    completion = UringApiCompletion_new_pending(URING_API_PENDING_ACCEPT, user_data);
     if (!completion) {
-        return NULL;
-    }
-    sockaddr_state = UringApiCompletion_get_sockaddr_state((UringApiCompletion *)completion);
-    if (!sockaddr_state) {
-        Py_DECREF(completion);
-        PyErr_SetString(PyExc_RuntimeError, "accept completion is missing sockaddr state");
         return NULL;
     }
 
@@ -618,7 +611,7 @@ PyObject *UringApiRing_submit_accept_impl(UringApiRing *self, int fd, unsigned i
         if (!sqe) {
             failed = 1;
         } else {
-            io_uring_prep_accept(sqe, fd, (struct sockaddr *)&sockaddr_state->addr, &sockaddr_state->addrlen, flags);
+            io_uring_prep_accept(sqe, fd, NULL, NULL, flags);
             sqe_set_completion(self, sqe, completion);
             if (submit_one(self) < 0) {
                 failed = 1;

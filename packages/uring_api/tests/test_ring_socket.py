@@ -191,13 +191,13 @@ def test_ring_accept_completion_when_available():
             completion = ring.wait(1.0)
 
         assert completion is not None
-        accepted_fd, address = completion.result
+        accepted_fd = completion.result
+        assert accepted_fd == completion.res
         assert_fd_nonblocking_cloexec(accepted_fd)
         accepted = socket.socket(fileno=accepted_fd)
         assert completion.user_data is token
-        assert completion.res == accepted_fd
         assert completion.flags == 0
-        assert address == client.getsockname()
+        assert accepted.getpeername() == client.getsockname()
     finally:
         if accepted is not None:
             accepted.close()

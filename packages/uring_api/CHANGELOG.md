@@ -8,10 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- `submit_accept_multishot()` no longer passes a peer sockaddr buffer to the
-  kernel. Delivered completions expose the accepted fd only; resolve peer
-  addresses with `getpeername()` when needed. One-shot `submit_accept()` is
-  unchanged.
+- `submit_accept()` and `submit_accept_multishot()` no longer pass a peer
+  sockaddr buffer to the kernel. Delivered completions expose the accepted fd
+  only; resolve peer addresses with `getpeername()` when needed.
 
 ## [0.1.0rc2] - 2026-07-03
 

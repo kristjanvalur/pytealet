@@ -456,11 +456,12 @@ class _FakeUringRing:
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
         self.submitted_accept.append((fd, user_data, flags))
+        accepted_fd = conn.detach()
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_ACCEPT,
-            res=conn.fileno(),
-            result=(conn.detach(), "peer"),
+            res=accepted_fd,
+            result=accepted_fd,
         )
         operation = getattr(user_data, "operation", None)
         if getattr(operation, "kind", None) == "accept_many":

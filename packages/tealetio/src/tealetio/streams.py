@@ -16,7 +16,6 @@ from .io_manager import (
     SELECTOR_IO_UNSUPPORTED_ERROR,
     ProactorIOManager,
     ServerIO,
-    SocketAddress,
     SocketIO,
     SocketSendBuffer,
     SupportsProactorIO,
@@ -388,7 +387,7 @@ _StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
 _NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
 _AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 _ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
-_AcceptedConnection: TypeAlias = tuple[socket.socket, SocketAddress, bytes | None, BaseException | None]
+_AcceptedConnection: TypeAlias = tuple[socket.socket, bytes | None, BaseException | None]
 
 
 def default_stream_factory(
@@ -944,7 +943,7 @@ def _start_stream_server(
     server: StreamServer | None = None
 
     def on_accept(accepted: _AcceptedConnection) -> None:
-        conn, _address, initial_data, recv_error = accepted
+        conn, initial_data, recv_error = accepted
         if recv_error is not None:
             conn.close()
             return

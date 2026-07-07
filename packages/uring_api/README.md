@@ -80,10 +80,9 @@ internally and releases the retained buffer.
 `submit_accept()` and `submit_accept_multishot()` accept optional accept flags;
 pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
 be ready for proactor ownership without a follow-up `fcntl()` call.
-One-shot `submit_accept()` delivers `(fd, address)` in `completion.result`.
-Multishot accept delivers the accepted fd only (`completion.res` /
-`completion.result`); call `getpeername()` on the fd when you need the peer
-address.
+`submit_accept()` and `submit_accept_multishot()` deliver the accepted fd in
+`completion.res` and `completion.result`. Call `getpeername()` on the fd when
+you need the peer address.
 `submit_close()` is lower-level: pass only a raw fd whose ownership has already
 been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the

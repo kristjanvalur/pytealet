@@ -728,26 +728,10 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
         msg_state->addrlen = msg_state->msg.msg_namelen;
         payload = sockaddr_to_object(&msg_state->addr, msg_state->addrlen);
     } else if (self->kind == URING_API_PENDING_ACCEPT) {
-        if (self->multishot) {
-            if (res >= 0) {
-                payload = PyLong_FromLong(res);
-            } else {
-                payload = Py_NewRef(Py_None);
-            }
+        if (res >= 0) {
+            payload = PyLong_FromLong(res);
         } else {
-            sockaddr_state = UringApiCompletion_get_sockaddr_state(self);
-            if (res >= 0) {
-                if (!sockaddr_state) {
-                    PyErr_SetString(PyExc_RuntimeError, "accept completion is missing sockaddr state");
-                    return -1;
-                }
-                payload = sockaddr_to_object(&sockaddr_state->addr, sockaddr_state->addrlen);
-                if (payload) {
-                    payload = Py_BuildValue("iN", res, payload);
-                }
-            } else {
-                payload = Py_NewRef(Py_None);
-            }
+            payload = Py_NewRef(Py_None);
         }
     } else if (res >= 0 && self->kind == URING_API_PENDING_CONNECT) {
         payload = Py_NewRef(Py_None);

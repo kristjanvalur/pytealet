@@ -408,14 +408,14 @@ def test_c_api_accept_operation_when_available():
 
         assert completion is not None
         user_data, kind, res, flags, result = client_api.completion_summary(completion)
-        accepted_fd, address = result
+        accepted_fd = result
+        assert accepted_fd == res
         assert_fd_nonblocking_cloexec(accepted_fd)
         accepted = socket.socket(fileno=accepted_fd)
         assert user_data == 240
         assert kind == uring_api.COMPLETION_KIND_ACCEPT
-        assert res == accepted_fd
         assert flags == 0
-        assert address == client.getsockname()
+        assert accepted.getpeername() == client.getsockname()
     finally:
         if accepted is not None:
             accepted.close()

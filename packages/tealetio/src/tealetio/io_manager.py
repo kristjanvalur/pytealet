@@ -93,7 +93,7 @@ class SocketIO(Protocol):
 
     def sock_sendto(self, sock: socket.socket, data: SocketSendBuffer, address: Any) -> int: ...
 
-    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, SocketAddress]: ...
+    def sock_accept(self, sock: socket.socket) -> socket.socket: ...
 
     def sock_connect(
         self,
@@ -302,7 +302,7 @@ class ProactorIOManager:
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
         return self.wait_operation(self._proactor.sendto(sock, data, address))
 
-    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+    def sock_accept(self, sock: socket.socket) -> socket.socket:
         return self.wait_operation(self._proactor.accept(sock))
 
     def sock_connect(

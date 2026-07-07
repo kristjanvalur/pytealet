@@ -283,7 +283,7 @@ class ForwardingProactor:
             return future
         return self._future_from_operation(self._proactor.sendto(sock, data, address))
 
-    def accept(self, sock: socket.socket) -> _asyncio.Future[tuple[socket.socket, Any]]:
+    def accept(self, sock: socket.socket) -> _asyncio.Future[socket.socket]:
         """Accept a socket through the host proactor."""
 
         return self._future_from_operation(self._proactor.accept(sock))
@@ -486,11 +486,12 @@ class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI)
         loop = _asyncio.get_running_loop()
         return self.await_(compat.sock_sendto(loop, sock, data, address))
 
-    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+    def sock_accept(self, sock: socket.socket) -> socket.socket:
         """Accept one connection using asyncio socket readiness."""
 
         loop = _asyncio.get_running_loop()
-        return self.await_(loop.sock_accept(sock))
+        conn, _address = self.await_(loop.sock_accept(sock))
+        return conn
 
     def sock_connect(self, sock: socket.socket, address: Any) -> None:
         """Connect a socket using asyncio socket readiness."""

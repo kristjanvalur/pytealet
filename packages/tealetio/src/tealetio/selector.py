@@ -257,15 +257,15 @@ class SelectorMixin:
             except (BlockingIOError, InterruptedError):
                 self.wait_writable(sock)
 
-    def sock_accept(self, sock: socket.socket) -> tuple[socket.socket, Any]:
+    def sock_accept(self, sock: socket.socket) -> socket.socket:
         """Accept one connection from a non-blocking listening socket."""
 
         self._check_socket(sock)
         while True:
             try:
-                conn, address = sock.accept()
+                conn, _address = sock.accept()
                 conn.setblocking(False)
-                return conn, address
+                return conn
             except (BlockingIOError, InterruptedError):
                 self.wait_readable(sock)
 
