@@ -307,6 +307,9 @@ static bool delivery_should_stop(UringApiRing *self) {
     return stop;
 }
 
+/* delivery reads callbacks without receive_mutex: set_callback/set_c_callback
+ * reject changes while receive_state is DELIVERING, so pointers are fixed for
+ * the lifetime of an active serve_completions session. */
 static PyObject *delivery_get_callback(UringApiRing *self) {
     PyObject *callback = Py_XNewRef(self->delivery_callback);
 

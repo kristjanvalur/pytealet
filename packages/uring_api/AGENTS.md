@@ -213,6 +213,11 @@ constants and types live in `src/uring_api/__init__.py`.
 Preserve refcount and buffer-lifetime invariants when touching completion
 delivery or pending-operation state.
 
+Delivery callbacks (`Ring.callback`, `ring_set_c_callback`) must not change while
+`serve_completions` is active; setters enforce this under `receive_mutex`.
+Delivery threads may read callback pointers without that lock once the service
+is running.
+
 ## What Not to Add Here
 
 Keep this package narrow:
