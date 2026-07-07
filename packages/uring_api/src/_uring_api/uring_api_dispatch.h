@@ -5,6 +5,12 @@
 
 #include "uring_api_common.h"
 
+enum {
+    URING_API_WAIT_BLOCKING = 0,
+    URING_API_WAIT_TIMEOUT = 1,
+    URING_API_WAIT_PEEK = 2,
+};
+
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
 int UringApiRing_stop_delivery(UringApiRing *self);
 PyObject *UringApiRing_stop_serving(UringApiRing *self, PyObject *ignored);
