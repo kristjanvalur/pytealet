@@ -230,6 +230,9 @@ static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion 
 }
 
 static void receive_wait_lock(UringApiRing *self) {
+    if (PyThread_acquire_lock(self->delivery_wait_lock, NOWAIT_LOCK)) {
+        return;
+    }
     Py_BEGIN_ALLOW_THREADS;
     PyThread_acquire_lock(self->delivery_wait_lock, WAIT_LOCK);
     Py_END_ALLOW_THREADS;
