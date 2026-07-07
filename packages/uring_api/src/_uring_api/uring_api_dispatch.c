@@ -308,11 +308,8 @@ static bool delivery_should_stop(UringApiRing *self) {
 }
 
 static PyObject *delivery_get_callback(UringApiRing *self) {
-    PyObject *callback;
+    PyObject *callback = Py_XNewRef(self->delivery_callback);
 
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
-    callback = Py_XNewRef(self->delivery_callback);
-    Py_END_CRITICAL_SECTION_MUTEX();
     if (!callback) {
         PyErr_SetString(PyExc_RuntimeError, "delivery callback is not set");
     }
@@ -320,21 +317,12 @@ static PyObject *delivery_get_callback(UringApiRing *self) {
 }
 
 static int delivery_get_c_callback(UringApiRing *self, UringApiCompletionCallback *callback, void **user_data) {
-    int found;
-
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     *callback = self->c_delivery_callback;
     *user_data = self->c_delivery_callback_user_data;
-    found = *callback != NULL;
-    Py_END_CRITICAL_SECTION_MUTEX();
-    return found;
+    return *callback != NULL;
 }
 
-static void delivery_request_stop(UringApiRing *self) {
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
-    self->delivery_stop_requested = true;
-    Py_END_CRITICAL_SECTION_MUTEX();
-}
+static void delivery_request_stop(UringApiRing *self) { self->delivery_stop_requested = true; }
 
 static void delivery_request_stop_and_wake(UringApiRing *self) {
     PyObject *wakeup;

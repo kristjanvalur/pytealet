@@ -167,10 +167,17 @@ int UringApiCapi_RingClosed(PyObject *ring) {
 }
 
 int UringApiCapi_RingRunning(PyObject *ring) {
+    UringApiRing *self;
+    bool running;
+
     if (!ring_type_check(ring)) {
         return -1;
     }
-    return ((UringApiRing *)ring)->receive_state == URING_API_RECEIVE_DELIVERING;
+    self = (UringApiRing *)ring;
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    running = delivery_is_running_locked(self);
+    Py_END_CRITICAL_SECTION_MUTEX();
+    return running;
 }
 
 int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {

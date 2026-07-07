@@ -195,7 +195,13 @@ static PyObject *UringApiRing_get_closed(UringApiRing *self, void *closure) {
 }
 
 static PyObject *UringApiRing_get_running(UringApiRing *self, void *closure) {
-    if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
+    bool running;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    running = delivery_is_running_locked(self);
+    Py_END_CRITICAL_SECTION_MUTEX();
+    if (running) {
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
@@ -205,9 +211,7 @@ static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
     PyObject *callback;
 
     (void)closure;
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     callback = Py_XNewRef(self->delivery_callback);
-    Py_END_CRITICAL_SECTION_MUTEX();
     if (!callback) {
         Py_RETURN_NONE;
     }
