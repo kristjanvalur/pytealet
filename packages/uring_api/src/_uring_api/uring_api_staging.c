@@ -60,9 +60,9 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
         staged->leg_index = completion->sequence;
         completion->sequence++;
     }
-    /* consume the kernel CQE while draining. if later Python packaging fails (OOM,
-     * buffer conversion, etc.) those completions are lost to the caller — there is
-     * no realistic recovery once the ring slot is seen. */
+    /* consume the kernel CQE while draining. packaging or delivery failure later
+     * (OOM, conversion error, callback error, etc.) is just failure — same as any
+     * other unrecoverable error path; the ring slot cannot be un-seen. */
     io_uring_cqe_seen(&self->ring, cqe);
     buf->count++;
     return 0;
