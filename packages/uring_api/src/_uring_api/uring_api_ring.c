@@ -27,24 +27,8 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 #endif
-#ifdef URING_API_USE_PYTHREAD_MUTEX
-    self->completion_mutex = PyThread_allocate_lock();
-    if (!self->completion_mutex) {
-#ifdef URING_API_USE_PYTHREAD_RING_LOCK
-        PyThread_free_lock(self->ring_lock);
-        self->ring_lock = NULL;
-#endif
-        PyErr_NoMemory();
-        PyObject_GC_Del(self);
-        return NULL;
-    }
-#endif
     self->cqe_drain_lock = PyThread_allocate_lock();
     if (!self->cqe_drain_lock) {
-#ifdef URING_API_USE_PYTHREAD_MUTEX
-        PyThread_free_lock(self->completion_mutex);
-        self->completion_mutex = NULL;
-#endif
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
         PyThread_free_lock(self->ring_lock);
         self->ring_lock = NULL;
@@ -121,12 +105,6 @@ void UringApiRing_dealloc(UringApiRing *self) {
         PyThread_free_lock(self->cqe_drain_lock);
         self->cqe_drain_lock = NULL;
     }
-#ifdef URING_API_USE_PYTHREAD_MUTEX
-    if (self->completion_mutex) {
-        PyThread_free_lock(self->completion_mutex);
-        self->completion_mutex = NULL;
-    }
-#endif
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
     if (self->ring_lock) {
         PyThread_free_lock(self->ring_lock);

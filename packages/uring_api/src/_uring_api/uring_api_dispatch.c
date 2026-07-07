@@ -7,6 +7,8 @@
 #include "uring_api_core.h"
 #include "uring_api_staging.h"
 
+#include <assert.h>
+
 static bool delivery_should_stop(UringApiRing *self);
 
 static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
@@ -24,12 +26,12 @@ static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_ti
     return -EINVAL;
 }
 
-static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion *completion, int res,
-                                         unsigned int flags, unsigned long long leg_index);
+static PyObject *build_completion_result(UringApiCompletion *completion, int res, unsigned int flags,
+                                         unsigned long long leg_index);
 
-static int append_ready_completion(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags,
+static int append_ready_completion(UringApiCompletion *completion, int res, unsigned int flags,
                                    unsigned long long leg_index, PyObject *ready) {
-    PyObject *result = build_completion_result(self, completion, res, flags, leg_index);
+    PyObject *result = build_completion_result(completion, res, flags, leg_index);
     if (!result) {
         return -1;
     }
@@ -45,7 +47,7 @@ static int append_ready_completion(UringApiRing *self, UringApiCompletion *compl
     return 0;
 }
 
-static PyObject *staging_build_ready_list(UringApiRing *self, UringApiStagingBuffer *staging) {
+static PyObject *staging_build_ready_list(UringApiStagingBuffer *staging) {
     PyObject *ready;
     size_t index;
 
@@ -55,7 +57,7 @@ static PyObject *staging_build_ready_list(UringApiRing *self, UringApiStagingBuf
     }
     for (index = 0; index < staging->count; index++) {
         UringApiStagedCQE *staged = &staging->entries[index];
-        if (append_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, ready) <
+        if (append_ready_completion(staged->completion, staged->res, staged->flags, staged->leg_index, ready) <
             0) {
             Py_DECREF(ready);
             return NULL;
@@ -179,8 +181,8 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     return URING_API_WAIT_TIMEOUT;
 }
 
-static PyObject *build_completion_result_impl(UringApiCompletion *completion, int res, unsigned int flags,
-                                              unsigned long long leg_index) {
+static PyObject *build_completion_result(UringApiCompletion *completion, int res, unsigned int flags,
+                                         unsigned long long leg_index) {
     PyObject *delivered;
     int completion_result;
 
@@ -190,19 +192,33 @@ static PyObject *build_completion_result_impl(UringApiCompletion *completion, in
         Py_DECREF(completion);
         Py_RETURN_NONE;
     }
+    /* multishot CQEs with MORE are intermediate results: complete a fresh shell so the armed
+     * pending handle is left untouched for the next kernel leg. */
+    if (completion->multishot && (flags & IORING_CQE_F_MORE)) {
+        delivered = UringApiCompletion_new_multishot_delivered_shell(completion, leg_index);
+        if (!delivered) {
+            return NULL;
+        }
+        completion_result = UringApiCompletion_complete((UringApiCompletion *)delivered, res, flags);
+        if (completion_result < 0) {
+            Py_DECREF(delivered);
+            return NULL;
+        }
+        if (completion_result > 0) {
+            Py_DECREF(delivered);
+            Py_RETURN_NONE;
+        }
+        return delivered;
+    }
     completion_result = UringApiCompletion_complete(completion, res, flags);
     /* negative means we failed while converting the CQE into Python-visible completion state. */
     if (completion_result < 0) {
-        if (!(flags & IORING_CQE_F_MORE)) {
-            Py_DECREF(completion);
-        }
+        Py_DECREF(completion);
         return NULL;
     }
     /* positive means the CQE was handled internally, such as a wake completion for break_wait(). */
     if (completion_result > 0) {
-        if (!(flags & IORING_CQE_F_MORE)) {
-            Py_DECREF(completion);
-        }
+        Py_DECREF(completion);
         Py_RETURN_NONE;
     }
     /* the zc operation CQE is the real result. Successful sends keep the internal ref until the NOTIF CQE. */
@@ -212,36 +228,10 @@ static PyObject *build_completion_result_impl(UringApiCompletion *completion, in
         }
         return (PyObject *)completion;
     }
-    /* multishot CQEs with MORE are intermediate results, so return copies while the original remains armed. */
-    if (flags & IORING_CQE_F_MORE) {
-        if (completion->multishot) {
-            delivered = UringApiCompletion_new_delivered_copy_staged(completion, leg_index);
-        } else {
-            delivered = UringApiCompletion_new_delivered_copy(completion);
-        }
-        if (!delivered) {
-            return NULL;
-        }
-        return delivered;
-    }
     if (completion->multishot) {
         completion->sequence = leg_index;
     }
     return (PyObject *)completion;
-}
-
-static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion *completion, int res,
-                                         unsigned int flags, unsigned long long leg_index) {
-    PyObject *delivered;
-
-    if (!completion->multishot) {
-        return build_completion_result_impl(completion, res, flags, 0);
-    }
-
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->completion_mutex);
-    delivered = build_completion_result_impl(completion, res, flags, leg_index);
-    Py_END_CRITICAL_SECTION_MUTEX();
-    return delivered;
 }
 
 static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
@@ -305,7 +295,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     if (staging->count == 0) {
         return PyList_New(0);
     }
-    return staging_build_ready_list(self, staging);
+    return staging_build_ready_list(staging);
 }
 
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,

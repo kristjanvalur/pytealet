@@ -75,8 +75,7 @@ UringApiCompletionStatxFdsizeState *UringApiCompletion_get_statx_fdsize_state(Ur
 PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 bool is_zero_copy_send_kind(UringApiPendingKind kind);
-PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source);
-PyObject *UringApiCompletion_new_delivered_copy_staged(UringApiCompletion *source, unsigned long long leg_index);
+PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index);
 void UringApiCompletion_clear_pending_state(UringApiCompletion *self);
 int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags);
 UringApiCompletionSockaddrState *UringApiCompletion_get_sockaddr_state(UringApiCompletion *self);
