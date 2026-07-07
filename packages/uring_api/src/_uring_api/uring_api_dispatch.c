@@ -260,9 +260,8 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     int errnum;
     int record_failed = 0;
 
-    staging_buffer_reset(staging);
-
     Py_BEGIN_ALLOW_THREADS;
+    staging_buffer_reset(staging);
     reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
     if (reap_ret == 0 && cqe) {
         if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
