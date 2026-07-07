@@ -297,9 +297,6 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     if (staging->count == 0) {
         return PyList_New(0);
     }
-    if (staging_buffer_assign_multishot_indices(self, staging) < 0) {
-        return NULL;
-    }
     return staging_build_ready_list(self, staging);
 }
 
