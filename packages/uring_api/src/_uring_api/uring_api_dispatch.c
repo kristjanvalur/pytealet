@@ -244,7 +244,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     int peek_ret;
     int errnum;
     int record_failed = 0;
-    bool stop_after_lock = from_delivery_thread && self->delivery_stop_requested;
+    bool stop_after_lock = false;
 
     Py_BEGIN_ALLOW_THREADS;
     /* only one thread can drain at the time. */
@@ -252,7 +252,8 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
 
     /* only one delivery worker can be in the kernel wait at once; any others are
      * queued on the drain lock and should bail out once stop is requested. */
-    if (stop_after_lock) {
+    if (from_delivery_thread && self->delivery_stop_requested) {
+        stop_after_lock = true;
         PyThread_release_lock(self->cqe_drain_lock);
     } else {
         staging_buffer_reset(staging);
