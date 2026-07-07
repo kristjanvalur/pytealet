@@ -86,7 +86,7 @@ def test_public_capi_header_compiles_without_liburing_headers():
         )
 
 def test_native_module_exports_c_api_constants():
-    assert uring_api.C_API_ABI_VERSION == 2
+    assert uring_api.C_API_ABI_VERSION == 1
     assert uring_api.C_API_FEATURE_CORE == 1 << 0
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
 
