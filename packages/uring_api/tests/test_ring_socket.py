@@ -222,12 +222,7 @@ def test_ring_accept_multishot_batch_peer_addresses_when_available():
             ring.submit_accept_multishot(server.fileno(), 170, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             clients.append(connect_to_listener(server))
             clients.append(connect_to_listener(server))
-            batch = []
-            deadline = time.monotonic() + 1.0
-            while len(batch) < 2 and time.monotonic() < deadline:
-                completion = ring.wait(0.1)
-                if completion is not None:
-                    batch.append(completion)
+            batch = collect_completions(ring, 1.0, 2)
 
         assert len(batch) == 2
         expected_peers = {client.getsockname() for client in clients}

@@ -123,6 +123,8 @@ typedef struct UringApiStagedCQE {
     int res;
     unsigned int flags;
     UringApiCompletion *completion;
+    unsigned long long leg_index;
+    bool has_leg_index;
 } UringApiStagedCQE;
 
 typedef struct UringApiStagingBuffer {
@@ -140,6 +142,7 @@ struct UringApiRing {
     PyThread_type_lock ring_lock;
 #endif
     UringApiMutex receive_mutex;
+    UringApiMutex completion_mutex;
     PyThread_type_lock delivery_wait_lock;
     unsigned int delivery_active_workers;
     unsigned int receive_state;

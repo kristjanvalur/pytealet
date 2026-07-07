@@ -21,11 +21,11 @@ static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_ti
 }
 
 static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion *completion, int res,
-                                         unsigned int flags);
+                                         unsigned int flags, bool has_leg_index, unsigned long long leg_index);
 
 static int append_ready_completion(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags,
-                                   PyObject *ready) {
-    PyObject *result = build_completion_result(self, completion, res, flags);
+                                   bool has_leg_index, unsigned long long leg_index, PyObject *ready) {
+    PyObject *result = build_completion_result(self, completion, res, flags, has_leg_index, leg_index);
     if (!result) {
         return -1;
     }
@@ -51,7 +51,8 @@ static PyObject *staging_build_ready_list(UringApiRing *self, UringApiStagingBuf
     }
     for (index = 0; index < staging->count; index++) {
         UringApiStagedCQE *staged = &staging->entries[index];
-        if (append_ready_completion(self, staged->completion, staged->res, staged->flags, ready) < 0) {
+        if (append_ready_completion(self, staged->completion, staged->res, staged->flags, staged->has_leg_index,
+                                    staged->leg_index, ready) < 0) {
             Py_DECREF(ready);
             return NULL;
         }
@@ -163,10 +164,11 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     return 1;
 }
 
-static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion *completion, int res,
-                                         unsigned int flags) {
+static PyObject *build_completion_result_impl(UringApiCompletion *completion, int res, unsigned int flags,
+                                              bool has_leg_index, unsigned long long leg_index) {
     PyObject *delivered;
     int completion_result;
+
     /* the zc notification is not a user-visible result; it only releases resources retained for the send. */
     if (is_zero_copy_send_kind(completion->kind) && (flags & IORING_CQE_F_NOTIF)) {
         UringApiCompletion_clear_pending_state(completion);
@@ -197,13 +199,34 @@ static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion 
     }
     /* multishot CQEs with MORE are intermediate results, so return copies while the original remains armed. */
     if (flags & IORING_CQE_F_MORE) {
-        delivered = UringApiCompletion_new_delivered_copy(completion);
+        if (has_leg_index) {
+            delivered = UringApiCompletion_new_delivered_copy_staged(completion, leg_index);
+        } else {
+            delivered = UringApiCompletion_new_delivered_copy(completion);
+        }
         if (!delivered) {
             return NULL;
         }
         return delivered;
     }
+    if (has_leg_index) {
+        completion->sequence = leg_index;
+    }
     return (PyObject *)completion;
+}
+
+static PyObject *build_completion_result(UringApiRing *self, UringApiCompletion *completion, int res,
+                                         unsigned int flags, bool has_leg_index, unsigned long long leg_index) {
+    PyObject *delivered;
+
+    if (!has_leg_index) {
+        return build_completion_result_impl(completion, res, flags, false, 0);
+    }
+
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->completion_mutex);
+    delivered = build_completion_result_impl(completion, res, flags, true, leg_index);
+    Py_END_CRITICAL_SECTION_MUTEX();
+    return delivered;
 }
 
 static void receive_wait_lock(UringApiRing *self) {

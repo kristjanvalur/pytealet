@@ -544,6 +544,22 @@ PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source) {
     return (PyObject *)completion;
 }
 
+PyObject *UringApiCompletion_new_delivered_copy_staged(UringApiCompletion *source, unsigned long long leg_index) {
+    UringApiCompletion *completion;
+
+    completion = UringApiCompletion_alloc(source->kind, source->user_data);
+    if (!completion) {
+        return NULL;
+    }
+    completion->res = source->res;
+    completion->flags = source->flags;
+    completion->result = source->result;
+    source->result = NULL;
+    completion->sequence = leg_index;
+    completion->multishot = source->multishot;
+    return (PyObject *)completion;
+}
+
 void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
     UringApiCompletionBufGroupState *buf_group_state;
     UringApiCompletionViewState *view_state;

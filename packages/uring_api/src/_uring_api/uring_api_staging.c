@@ -44,6 +44,7 @@ void staging_buffer_reset(UringApiStagingBuffer *buf) { buf->count = 0; }
 
 int staging_buffer_stage_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
     UringApiCompletion *completion;
+    UringApiStagedCQE *staged;
     size_t index;
     int failed = 0;
 
@@ -57,9 +58,19 @@ int staging_buffer_stage_cqe(UringApiRing *self, UringApiStagingBuffer *buf, str
         if (staging_buffer_ensure_capacity(buf, index) < 0) {
             failed = 1;
         } else {
-            buf->entries[index].res = cqe->res;
-            buf->entries[index].flags = cqe->flags;
-            buf->entries[index].completion = completion;
+            staged = &buf->entries[index];
+            staged->res = cqe->res;
+            staged->flags = cqe->flags;
+            staged->completion = completion;
+            staged->has_leg_index = false;
+            staged->leg_index = 0;
+            if (completion->multishot) {
+                Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->completion_mutex);
+                staged->leg_index = completion->sequence;
+                completion->sequence++;
+                staged->has_leg_index = true;
+                Py_END_CRITICAL_SECTION_MUTEX();
+            }
             io_uring_cqe_seen(&self->ring, cqe);
             buf->count++;
         }
