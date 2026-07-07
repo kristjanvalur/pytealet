@@ -57,10 +57,8 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
     staged->completion = completion;
     staged->leg_index = 0;
     if (completion->multishot) {
-        Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->completion_mutex);
         staged->leg_index = completion->sequence;
         completion->sequence++;
-        Py_END_CRITICAL_SECTION_MUTEX();
     }
     io_uring_cqe_seen(&self->ring, cqe);
     buf->count++;

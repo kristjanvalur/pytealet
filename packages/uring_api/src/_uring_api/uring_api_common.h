@@ -140,7 +140,6 @@ struct UringApiRing {
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
     PyThread_type_lock ring_lock;
 #endif
-    UringApiMutex receive_mutex;
     UringApiMutex completion_mutex;
     PyThread_type_lock cqe_drain_lock;
     unsigned int delivery_active_workers;

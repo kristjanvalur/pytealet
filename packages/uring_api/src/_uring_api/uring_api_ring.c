@@ -28,20 +28,8 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     }
 #endif
 #ifdef URING_API_USE_PYTHREAD_MUTEX
-    self->receive_mutex = PyThread_allocate_lock();
-    if (!self->receive_mutex) {
-#ifdef URING_API_USE_PYTHREAD_RING_LOCK
-        PyThread_free_lock(self->ring_lock);
-        self->ring_lock = NULL;
-#endif
-        PyErr_NoMemory();
-        PyObject_GC_Del(self);
-        return NULL;
-    }
     self->completion_mutex = PyThread_allocate_lock();
     if (!self->completion_mutex) {
-        PyThread_free_lock(self->receive_mutex);
-        self->receive_mutex = NULL;
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
         PyThread_free_lock(self->ring_lock);
         self->ring_lock = NULL;
@@ -51,6 +39,20 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 #endif
+    self->cqe_drain_lock = PyThread_allocate_lock();
+    if (!self->cqe_drain_lock) {
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+        PyThread_free_lock(self->completion_mutex);
+        self->completion_mutex = NULL;
+#endif
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+        PyThread_free_lock(self->ring_lock);
+        self->ring_lock = NULL;
+#endif
+        PyErr_NoMemory();
+        PyObject_GC_Del(self);
+        return NULL;
+    }
     return (PyObject *)self;
 }
 
@@ -123,10 +125,6 @@ void UringApiRing_dealloc(UringApiRing *self) {
     if (self->completion_mutex) {
         PyThread_free_lock(self->completion_mutex);
         self->completion_mutex = NULL;
-    }
-    if (self->receive_mutex) {
-        PyThread_free_lock(self->receive_mutex);
-        self->receive_mutex = NULL;
     }
 #endif
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
@@ -221,9 +219,9 @@ static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
     PyObject *callback;
 
     (void)closure;
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    Py_BEGIN_CRITICAL_SECTION(self);
     callback = Py_XNewRef(self->delivery_callback);
-    Py_END_CRITICAL_SECTION_MUTEX();
+    Py_END_CRITICAL_SECTION();
     if (!callback) {
         Py_RETURN_NONE;
     }
@@ -245,7 +243,7 @@ int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *closure
     }
 
     callback = value == Py_None ? NULL : Py_NewRef(value);
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    Py_BEGIN_CRITICAL_SECTION(self);
     if (delivery_is_running_locked(self)) {
         PyErr_SetString(PyExc_RuntimeError, "cannot change callback while completion service is active");
         ret = -1;
@@ -254,7 +252,7 @@ int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *closure
         self->delivery_callback = callback;
         callback = NULL;
     }
-    Py_END_CRITICAL_SECTION_MUTEX();
+    Py_END_CRITICAL_SECTION();
     Py_XDECREF(callback);
     Py_XDECREF(old_callback);
     return ret;

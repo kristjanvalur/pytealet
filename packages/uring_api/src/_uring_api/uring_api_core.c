@@ -344,7 +344,7 @@ int submit_one(UringApiRing *self) {
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     int ret = 0;
 
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    Py_BEGIN_CRITICAL_SECTION(self);
     if (from_delivery_thread) {
         if (self->receive_state != URING_API_RECEIVE_DELIVERING) {
             PyErr_SetString(PyExc_RuntimeError, "completion service is not active");
@@ -359,7 +359,7 @@ int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     } else {
         self->receive_state = URING_API_RECEIVE_WAITING;
     }
-    Py_END_CRITICAL_SECTION_MUTEX();
+    Py_END_CRITICAL_SECTION();
     return ret;
 }
 
@@ -368,9 +368,9 @@ void receive_wait_end(UringApiRing *self, bool from_delivery_thread) {
         return;
     }
 
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    Py_BEGIN_CRITICAL_SECTION(self);
     self->receive_state = URING_API_RECEIVE_IDLE;
-    Py_END_CRITICAL_SECTION_MUTEX();
+    Py_END_CRITICAL_SECTION();
 }
 
 bool delivery_is_running_locked(UringApiRing *self) { return self->receive_state == URING_API_RECEIVE_DELIVERING; }
@@ -378,24 +378,24 @@ bool delivery_is_running_locked(UringApiRing *self) { return self->receive_state
 int delivery_check_not_running(UringApiRing *self) {
     int ret = 0;
 
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    Py_BEGIN_CRITICAL_SECTION(self);
     if (delivery_is_running_locked(self)) {
         PyErr_SetString(PyExc_RuntimeError, "completion service is active");
         ret = -1;
     }
-    Py_END_CRITICAL_SECTION_MUTEX();
+    Py_END_CRITICAL_SECTION();
     return ret;
 }
 
 void delivery_mark_exited(UringApiRing *self) {
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    Py_BEGIN_CRITICAL_SECTION(self);
     if (self->delivery_active_workers > 0) {
         self->delivery_active_workers--;
     }
     if (self->delivery_active_workers == 0 && self->receive_state == URING_API_RECEIVE_DELIVERING) {
         self->receive_state = URING_API_RECEIVE_IDLE;
     }
-    Py_END_CRITICAL_SECTION_MUTEX();
+    Py_END_CRITICAL_SECTION();
 }
 
 struct io_uring_sqe *get_sqe(UringApiRing *self) {
