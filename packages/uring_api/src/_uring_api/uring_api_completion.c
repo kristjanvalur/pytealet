@@ -527,26 +527,6 @@ bool is_zero_copy_send_kind(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_SEND_ZC || kind == URING_API_PENDING_SENDMSG_ZC;
 }
 
-PyObject *UringApiCompletion_new_pending_accept(PyObject *user_data) {
-    UringApiCompletion *completion;
-    UringApiCompletionSockaddrState *sockaddr_state;
-
-    completion = UringApiCompletion_alloc(URING_API_PENDING_ACCEPT, user_data);
-    if (!completion) {
-        return NULL;
-    }
-    sockaddr_state = PyMem_Malloc(sizeof(UringApiCompletionSockaddrState));
-    if (!sockaddr_state) {
-        Py_DECREF(completion);
-        return PyErr_NoMemory();
-    }
-    memset(sockaddr_state, 0, sizeof(*sockaddr_state));
-    sockaddr_state->tag = URING_API_COMPLETION_STATE_SOCKADDR;
-    sockaddr_state->addrlen = sizeof(sockaddr_state->addr);
-    completion->state = sockaddr_state;
-    return (PyObject *)completion;
-}
-
 PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source) {
     UringApiCompletion *completion;
 
