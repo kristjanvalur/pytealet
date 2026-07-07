@@ -124,7 +124,6 @@ typedef struct UringApiStagedCQE {
     unsigned int flags;
     UringApiCompletion *completion;
     unsigned long long leg_index;
-    bool has_leg_index;
 } UringApiStagedCQE;
 
 typedef struct UringApiStagingBuffer {
