@@ -255,15 +255,43 @@ static void cqe_drain_lock_release(UringApiRing *self) { PyThread_release_lock(s
 static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
                                           struct __kernel_timespec *timeout) {
     struct io_uring_cqe *cqe = NULL;
-    int ret;
+    unsigned int cq_capacity;
+    int reap_ret;
+    int peek_ret;
+    int errnum;
+    int record_failed = 0;
 
     staging_buffer_reset(staging);
+    cq_capacity = ring_cq_entries(self);
+    if (cq_capacity == 0) {
+        cq_capacity = 8;
+    }
+    if (staging_buffer_ensure_capacity(staging, (size_t)cq_capacity - 1) < 0) {
+        return NULL;
+    }
 
     Py_BEGIN_ALLOW_THREADS;
-    ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+    reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+    if (reap_ret == 0 && cqe) {
+        if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
+            record_failed = 1;
+        } else {
+            for (;;) {
+                peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
+                if (peek_ret != 0 || !cqe) {
+                    break;
+                }
+                if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
+                    record_failed = 1;
+                    break;
+                }
+            }
+        }
+    }
     Py_END_ALLOW_THREADS;
-    if (ret < 0) {
-        int errnum = normalize_ret_errno(ret);
+
+    if (reap_ret < 0) {
+        errnum = normalize_ret_errno(reap_ret);
         if (errnum == EAGAIN || errnum == ETIME || errnum == ETIMEDOUT) {
             return PyList_New(0);
         }
@@ -271,26 +299,16 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
         PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
-    if (!cqe) {
+    if (staging->count == 0) {
         return PyList_New(0);
     }
-
-    if (staging_buffer_stage_cqe(self, staging, cqe) < 0) {
+    if (record_failed) {
+        PyErr_SetString(PyExc_SystemError, "io_uring CQE is missing its completion object");
         return NULL;
     }
-
-    for (;;) {
-        Py_BEGIN_ALLOW_THREADS;
-        ret = io_uring_peek_cqe(&self->ring, &cqe);
-        Py_END_ALLOW_THREADS;
-        if (ret != 0 || !cqe) {
-            break;
-        }
-        if (staging_buffer_stage_cqe(self, staging, cqe) < 0) {
-            return NULL;
-        }
+    if (staging_buffer_assign_multishot_indices(self, staging) < 0) {
+        return NULL;
     }
-
     return staging_build_ready_list(self, staging);
 }
 

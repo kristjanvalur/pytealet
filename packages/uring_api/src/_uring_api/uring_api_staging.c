@@ -7,7 +7,7 @@
 
 #include <liburing.h>
 
-static int staging_buffer_ensure_capacity(UringApiStagingBuffer *buf, size_t index) {
+int staging_buffer_ensure_capacity(UringApiStagingBuffer *buf, size_t index) {
     size_t needed;
     UringApiStagedCQE *entries;
 
@@ -42,32 +42,44 @@ void staging_buffer_clear(UringApiStagingBuffer *buf) {
 
 void staging_buffer_reset(UringApiStagingBuffer *buf) { buf->count = 0; }
 
-int staging_buffer_stage_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
+int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
     UringApiCompletion *completion;
     UringApiStagedCQE *staged;
     size_t index;
 
+    if (buf->count >= buf->capacity) {
+        return -1;
+    }
     completion = cqe_get_completion(self, cqe);
     if (!completion) {
-        PyErr_SetString(PyExc_SystemError, "io_uring CQE is missing its completion object");
         return -1;
     }
     index = buf->count;
-    if (staging_buffer_ensure_capacity(buf, index) < 0) {
-        return -1;
-    }
     staged = &buf->entries[index];
     staged->res = cqe->res;
     staged->flags = cqe->flags;
     staged->completion = completion;
     staged->leg_index = 0;
-    if (completion->multishot) {
-        Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->completion_mutex);
-        staged->leg_index = completion->sequence;
-        completion->sequence++;
-        Py_END_CRITICAL_SECTION_MUTEX();
-    }
     io_uring_cqe_seen(&self->ring, cqe);
     buf->count++;
+    return 0;
+}
+
+int staging_buffer_assign_multishot_indices(UringApiRing *self, UringApiStagingBuffer *buf) {
+    size_t index;
+
+    for (index = 0; index < buf->count; index++) {
+        UringApiStagedCQE *staged = &buf->entries[index];
+        if (!staged->completion) {
+            PyErr_SetString(PyExc_SystemError, "io_uring CQE is missing its completion object");
+            return -1;
+        }
+        if (staged->completion->multishot) {
+            Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->completion_mutex);
+            staged->leg_index = staged->completion->sequence;
+            staged->completion->sequence++;
+            Py_END_CRITICAL_SECTION_MUTEX();
+        }
+    }
     return 0;
 }
