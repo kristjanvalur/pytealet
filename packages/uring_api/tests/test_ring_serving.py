@@ -114,6 +114,40 @@ def test_ring_rejects_concurrent_wait_when_available():
     assert errors == []
     assert results == [[]]
 
+def test_ring_serve_completions_delivers_single_batched_callback_when_available():
+    require_uring()
+
+    left, right = socket.socketpair()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        batches: list[list[uring_api.Completion]] = []
+        delivered = threading.Event()
+
+        def callback(batch):
+            batches.append(list(batch))
+            if any(len(entry) == 2 for entry in batches):
+                delivered.set()
+
+        with uring_api.Ring() as ring:
+            ring.callback = callback
+            thread = threading.Thread(target=ring.serve_completions)
+            thread.start()
+            wait_until_running(ring)
+            ring.submit_recv(left.fileno(), bytearray(1), 160)
+            ring.submit_recv(left.fileno(), bytearray(1), 161)
+            right.send(b"ab")
+            assert delivered.wait(1.0)
+            ring.stop_serving()
+            thread.join(1.0)
+            assert not thread.is_alive()
+
+        assert any(len(batch) == 2 for batch in batches)
+    finally:
+        left.close()
+        right.close()
+
+
 def test_ring_serve_completions_invokes_callback_when_available():
     require_uring()
 

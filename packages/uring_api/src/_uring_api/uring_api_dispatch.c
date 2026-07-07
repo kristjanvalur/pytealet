@@ -246,13 +246,19 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     int record_failed = 0;
     bool stop_after_lock = false;
 
+    if (from_delivery_thread) {
+        Py_BEGIN_CRITICAL_SECTION(self);
+        stop_after_lock = self->delivery_stop_requested;
+        Py_END_CRITICAL_SECTION();
+    }
+
     Py_BEGIN_ALLOW_THREADS;
     /* only one thread can drain at the time. */
     PyThread_acquire_lock(self->cqe_drain_lock, WAIT_LOCK);
 
     /* only one delivery worker can be in the kernel wait at once; any others are
      * queued on the drain lock and should bail out once stop is requested. */
-    if (from_delivery_thread && self->delivery_stop_requested) {
+    if (from_delivery_thread && stop_after_lock) {
         stop_after_lock = true;
         PyThread_release_lock(self->cqe_drain_lock);
     } else {

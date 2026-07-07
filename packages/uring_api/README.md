@@ -57,9 +57,10 @@ try:
         ring.submit_recv(reader.fileno(), buf, token)
         writer.send(b"hello")
 
-        completion = ring.wait(1.0)
+        batch = ring.wait(1.0)
 
-    assert completion is not None
+    assert len(batch) == 1
+    completion = batch[0]
     assert completion.user_data is token
     assert bytes(buf) == b"hello"
     print(completion.res, completion.result)
@@ -107,7 +108,7 @@ open fd whose size you already own:
 
 ```python
 handle = ring.submit_statx_fdsize(fd)
-completion = ring.wait()
+[completion] = ring.wait()
 if completion.res == 0:
     size = completion.result
 ```
@@ -135,7 +136,7 @@ payload with `memoryview(view)` and drop the export (or call
 ```python
 buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)
 pending = ring.submit_recv_buf(reader.fileno(), buf_group, token)
-completion = ring.wait(1.0)
+[completion] = ring.wait(1.0)
 
 view = memoryview(completion.result)
 try:
@@ -153,7 +154,7 @@ continue ordinal indexing from the terminal completion's `sequence`.
 
 ```python
 handle = ring.submit_recv_multishot(reader.fileno(), buf_group, token)
-completion = ring.wait(1.0)
+[completion] = ring.wait(1.0)
 view = memoryview(completion.result)
 try:
     process(view)
@@ -382,7 +383,7 @@ model. Submit, `wait()`, `serve_completions()`, and `break_wait()` must all run
 on the owning thread established by the first gated call.
 
 `break_wait()` prepares and submits an internal NOP. When the reaper consumes that
-completion, `wait()` returns `None` rather than a user completion.
+completion, `wait()` returns an empty list rather than a user completion.
 
 Serving workers use the same receive side as `wait()`, so public `wait()` calls
 raise `RuntimeError` while they are running. Each worker calls
@@ -407,8 +408,9 @@ import uring_api
 import threading
 
 
-def delivered(completion):
-    print(completion.user_data, completion.res, completion.result)
+def delivered(batch):
+    for completion in batch:
+        print(completion.user_data, completion.res, completion.result)
 
 
 with uring_api.Ring() as ring:
@@ -468,10 +470,11 @@ Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual
 operations. Use `probe()` to check whether this process can create a ring and to
 read runtime support for optional operation helpers from the returned flat
-dictionary. A C completion callback receives the ring object, the completion
-object, and the supplied `user_data`. Return `0` for success; return a negative
-value with a Python exception set to report an unraisable error and stop the
-serving worker group.
+dictionary. A C completion callback receives the ring object, a list of
+completions for one kernel drain batch, and the supplied `user_data`. Return
+`0` for success; return a negative value with a Python exception set to report
+an unraisable error and stop the serving worker group. Callback pointers must
+not be changed while `serve_completions()` workers are active.
 
 ## Choosing Ring Sizes
 

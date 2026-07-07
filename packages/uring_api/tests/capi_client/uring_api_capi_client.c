@@ -25,6 +25,10 @@ static int client_c_callback(PyObject *ring, PyObject *completions, void *user_d
     Py_ssize_t count;
 
     (void)ring;
+    if (!sink) {
+        PyErr_SetString(PyExc_RuntimeError, "C callback sink is not set");
+        return -1;
+    }
     count = PyList_GET_SIZE(completions);
     for (index = 0; index < count; index++) {
         PyObject *completion = PyList_GET_ITEM(completions, index);

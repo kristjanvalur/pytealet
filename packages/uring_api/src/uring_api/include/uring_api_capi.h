@@ -19,6 +19,15 @@
 /* Feature flags published in UringApi_CAPI.feature_flags. */
 #define URING_API_CAPI_FEATURE_CORE (1ull << 0)
 
+/*
+ * Completion delivery callback invoked from serve_completions() worker threads.
+ * completions is a list of Completion objects for one kernel drain batch.
+ * user_data is the pointer supplied to ring_set_c_callback(). Return 0 on
+ * success; set a Python exception and return -1 to stop the serving worker group.
+ *
+ * ring_set_callback() and ring_set_c_callback() must not be called while
+ * serve_completions() workers are active.
+ */
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
 
 typedef struct UringApi_CAPI {
