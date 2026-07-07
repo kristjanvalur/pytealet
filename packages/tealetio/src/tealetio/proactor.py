@@ -3082,13 +3082,7 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         completed_operation: Operation[Any] | None = None
-        cleanup_kinds = (
-            uring_api.COMPLETION_KIND_POLL_REMOVE,
-            uring_api.COMPLETION_KIND_CANCEL,
-        )
-        ordered = [c for c in completions if c.kind not in cleanup_kinds]
-        ordered.extend(c for c in completions if c.kind in cleanup_kinds)
-        for completion in ordered:
+        for completion in completions:
             if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
                 target = cast(_UringCompletion, completion.user_data)
                 self._deactivate_uring_entry(cast(_UringEntry, target.user_data))
