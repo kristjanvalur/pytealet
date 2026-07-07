@@ -503,7 +503,7 @@ class _FakeUringRing:
 
     def complete_accept_multishot(
         self,
-        address: object = "peer",
+        _address: object = "peer",
         *,
         more: bool = True,
         sequence: int | None = None,
@@ -514,12 +514,13 @@ class _FakeUringRing:
             self.accept_multishot_sequence = sequence + 1
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
+        accepted_fd = conn.detach()
         completion = self._completion(
             pending.user_data,
             kind=uring_api.COMPLETION_KIND_ACCEPT,
-            res=conn.fileno(),
+            res=accepted_fd,
             flags=uring_api.IORING_CQE_F_MORE if more else 0,
-            result=(conn.detach(), address),
+            result=accepted_fd,
             sequence=sequence,
             multishot=True,
         )

@@ -126,6 +126,19 @@ def _close_raw_fd(fd: int) -> None:
         pass
 
 
+def _peer_address_for_accepted_socket(conn: socket.socket) -> Any:
+    """Return the peer address for an accepted socket.
+
+    Multishot accept does not capture peer sockaddr in the completion; resolve it
+    on demand via ``getpeername()`` once the fd is wrapped.
+    """
+
+    try:
+        return conn.getpeername()
+    except OSError:
+        return None
+
+
 def _handoff_accept_many(
     parent: ContinuousOperation[AcceptManyResult],
     conn: socket.socket,
@@ -2427,8 +2440,8 @@ class UringProactor(ProactorBase):
                 OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
             )
             return operation
-        fd, address = cast(tuple[int, Any], completion.result)
-        conn = socket_from_uring_fd(fd)
+        conn = socket_from_uring_fd(completion.res)
+        address = _peer_address_for_accepted_socket(conn)
         if operation.done():
             conn.close()
         elif recv_size is None:

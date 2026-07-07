@@ -205,6 +205,50 @@ def test_ring_accept_completion_when_available():
             client.close()
         server.close()
 
+def test_ring_accept_multishot_batch_peer_addresses_when_available():
+    require_uring()
+    if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
+        pytest.skip("IORING_ACCEPT_MULTISHOT is not available")
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    clients = []
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        with uring_api.Ring() as ring:
+            ring.submit_accept_multishot(server.fileno(), 170, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            clients.append(connect_to_listener(server))
+            clients.append(connect_to_listener(server))
+            batch = []
+            deadline = time.monotonic() + 1.0
+            while len(batch) < 2 and time.monotonic() < deadline:
+                completion = ring.wait(0.1)
+                if completion is not None:
+                    batch.append(completion)
+
+        assert len(batch) == 2
+        expected_peers = {client.getsockname() for client in clients}
+        seen_peers = set()
+        for completion in batch:
+            if completion.res < 0:
+                errno_value = -completion.res
+                if errno_value in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
+                    pytest.skip(f"IORING_ACCEPT_MULTISHOT is not supported: errno {errno_value}")
+            accepted_sock = socket.socket(fileno=completion.result)
+            try:
+                peer = accepted_sock.getpeername()
+            finally:
+                accepted_sock.close()
+            assert peer in expected_peers
+            seen_peers.add(peer)
+        assert seen_peers == expected_peers
+    finally:
+        for client in clients:
+            client.close()
+        server.close()
+
+
 def test_ring_accept_multishot_completion_when_available():
     require_uring()
     if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
@@ -241,11 +285,12 @@ def test_ring_accept_multishot_completion_when_available():
                 assert completion.user_data is token
                 assert completion.sequence == sequence
                 assert completion.flags & uring_api.IORING_CQE_F_MORE
-                accepted_fd, address = completion.result
+                accepted_fd = completion.result
+                assert accepted_fd == completion.res
                 assert_fd_nonblocking_cloexec(accepted_fd)
-                accepted.append(socket.socket(fileno=accepted_fd))
-                assert completion.res == accepted_fd
-                assert address == client.getsockname()
+                accepted_sock = socket.socket(fileno=accepted_fd)
+                accepted.append(accepted_sock)
+                assert accepted_sock.getpeername() == client.getsockname()
 
             ring.submit_cancel(handle)
             cancelled = False

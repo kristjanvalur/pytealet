@@ -235,6 +235,14 @@ server-performance enhancer. One accept request can produce accepted sockets as
 connections arrive, again using `IORING_CQE_F_MORE` to indicate whether the
 request remains active.
 
+The kernel documents that a shared `addr`/`addrlen` buffer is unsafe across
+multiple multishot legs: a later accept can overwrite the peer sockaddr before
+earlier CQEs are processed. `submit_accept_multishot()` therefore passes
+`NULL, NULL` (the liburing-recommended shape). Delivered completions expose the
+accepted fd in `completion.res` and `completion.result`; callers that need the
+peer address should call `getpeername()` on that fd. One-shot `submit_accept()`
+still returns `(fd, address)` from the kernel-filled sockaddr buffer.
+
 The low-level API is implemented and uses `submit_cancel()` for explicit
 teardown:
 

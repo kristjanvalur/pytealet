@@ -3377,7 +3377,7 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 1.0)
 
             assert operation.done() is False
-            assert accepted[0][1] == "peer-1"
+            assert accepted[0][1] == accepted[0][0].getpeername()
             assert accepted[0][2] is None
             assert accepted[0][3] is None
             assert accepted[0][0].getblocking() is False
@@ -3416,7 +3416,7 @@ class TestUringProactor:
             assert len(proactor.ring.pending_accept_recv) == 1
             proactor.ring.complete_accept_recv(b"hello")
             _wait_for_uring(proactor, lambda: len(accepted) == 1)
-            assert accepted[0][1] == "peer-1"
+            assert accepted[0][1] == accepted[0][0].getpeername()
             assert accepted[0][2] == b"hello"
             assert accepted[0][3] is None
             assert operation.done() is False
@@ -3457,7 +3457,7 @@ class TestUringProactor:
             proactor.ring.complete_accept_recv_error(-errno.EIO)
             _wait_for_uring(proactor, lambda: len(accepted) == 1)
             conn, address, initial_data, recv_error = accepted[0]
-            assert address == "peer-1"
+            assert address == conn.getpeername()
             assert initial_data is None
             assert isinstance(recv_error, OSError)
             assert recv_error.errno == errno.EIO
