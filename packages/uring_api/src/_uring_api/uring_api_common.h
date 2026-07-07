@@ -119,18 +119,6 @@ typedef struct UringApiCompletion {
     void *state;
 } UringApiCompletion;
 
-typedef struct UringApiStagedCQE {
-    int res;
-    unsigned int flags;
-    UringApiCompletion *completion;
-} UringApiStagedCQE;
-
-typedef struct UringApiStagingBuffer {
-    UringApiStagedCQE *entries;
-    size_t capacity;
-    size_t count;
-} UringApiStagingBuffer;
-
 struct UringApiRing {
     PyObject_HEAD struct io_uring ring;
     PyObject *delivery_callback;
@@ -151,7 +139,6 @@ struct UringApiRing {
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
-    UringApiStagingBuffer wait_staging;
 };
 
 extern PyTypeObject UringApiRing_Type;

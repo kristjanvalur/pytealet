@@ -408,7 +408,7 @@ PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
         return NULL;
     }
     if (timeout < 0.0) {
-        return UringApiRing_wait_impl((UringApiRing *)ring, 0, NULL, false, NULL);
+        return UringApiRing_wait_impl((UringApiRing *)ring, 0, NULL, false);
     }
     timeout_value.tv_sec = (long long)timeout;
     timeout_value.tv_nsec = (long long)((timeout - (double)timeout_value.tv_sec) * 1000000000.0);
@@ -419,7 +419,7 @@ PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
         timeout_value.tv_nsec = 999999999;
     }
     timeout_kind = timeout == 0.0 ? 2 : 1;
-    return UringApiRing_wait_impl((UringApiRing *)ring, timeout_kind, &timeout_value, false, NULL);
+    return UringApiRing_wait_impl((UringApiRing *)ring, timeout_kind, &timeout_value, false);
 }
 
 int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback) {

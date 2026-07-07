@@ -5,7 +5,6 @@
 #include "uring_api_dispatch.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
-#include "uring_api_staging.h"
 
 static bool delivery_should_stop(UringApiRing *self);
 
@@ -41,22 +40,22 @@ static int append_ready_completion(UringApiRing *self, UringApiCompletion *compl
     return 0;
 }
 
-static PyObject *staging_build_ready_list(UringApiRing *self, UringApiStagingBuffer *staging) {
-    PyObject *ready;
-    size_t index;
+static int drain_append_cqe(UringApiRing *self, struct io_uring_cqe *cqe, PyObject *ready) {
+    UringApiCompletion *completion;
+    int failed = 0;
 
-    ready = PyList_New(0);
-    if (!ready) {
-        return NULL;
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    completion = cqe_get_completion(self, cqe);
+    if (!completion) {
+        PyErr_SetString(PyExc_SystemError, "io_uring CQE is missing its completion object");
+        failed = 1;
+    } else if (append_ready_completion(self, completion, cqe->res, cqe->flags, ready) < 0) {
+        failed = 1;
+    } else {
+        io_uring_cqe_seen(&self->ring, cqe);
     }
-    for (index = 0; index < staging->count; index++) {
-        UringApiStagedCQE *staged = &staging->entries[index];
-        if (append_ready_completion(self, staged->completion, staged->res, staged->flags, ready) < 0) {
-            Py_DECREF(ready);
-            return NULL;
-        }
-    }
-    return ready;
+    Py_END_CRITICAL_SECTION_MUTEX();
+    return failed ? -1 : 0;
 }
 
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
@@ -214,12 +213,10 @@ static void receive_wait_lock(UringApiRing *self) {
 
 static void receive_wait_unlock(UringApiRing *self) { PyThread_release_lock(self->delivery_wait_lock); }
 
-static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
-                                          struct __kernel_timespec *timeout) {
+static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout) {
     struct io_uring_cqe *cqe = NULL;
+    PyObject *ready;
     int ret;
-
-    staging_buffer_reset(staging);
 
     Py_BEGIN_ALLOW_THREADS;
     ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
@@ -237,7 +234,12 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
         return PyList_New(0);
     }
 
-    if (staging_buffer_stage_cqe(self, staging, cqe) < 0) {
+    ready = PyList_New(0);
+    if (!ready) {
+        return NULL;
+    }
+    if (drain_append_cqe(self, cqe, ready) < 0) {
+        Py_DECREF(ready);
         return NULL;
     }
 
@@ -248,21 +250,19 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
         if (ret != 0 || !cqe) {
             break;
         }
-        if (staging_buffer_stage_cqe(self, staging, cqe) < 0) {
+        if (drain_append_cqe(self, cqe, ready) < 0) {
+            Py_DECREF(ready);
             return NULL;
         }
     }
 
-    return staging_build_ready_list(self, staging);
+    return ready;
 }
 
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
-                                 bool from_delivery_thread, UringApiStagingBuffer *staging) {
+                                 bool from_delivery_thread) {
     PyObject *ready;
 
-    if (!staging) {
-        staging = &self->wait_staging;
-    }
     if (ring_check_open(self) < 0) {
         return NULL;
     }
@@ -281,7 +281,7 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
         }
     }
 
-    ready = drain_ready_completions(self, staging, timeout_kind, timeout);
+    ready = drain_ready_completions(self, timeout_kind, timeout);
     if (!ready) {
         if (from_delivery_thread) {
             receive_wait_unlock(self);
@@ -325,7 +325,11 @@ static int delivery_get_c_callback(UringApiRing *self, UringApiCompletionCallbac
     return *callback != NULL;
 }
 
-static void delivery_request_stop(UringApiRing *self) { self->delivery_stop_requested = true; }
+static void delivery_request_stop(UringApiRing *self) {
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    self->delivery_stop_requested = true;
+    Py_END_CRITICAL_SECTION_MUTEX();
+}
 
 static void delivery_request_stop_and_wake(UringApiRing *self) {
     PyObject *wakeup;
@@ -376,7 +380,6 @@ static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
 }
 
 PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
-    UringApiStagingBuffer worker_staging = {NULL, 0, 0};
     bool failed = false;
     bool wait_failed = false;
 
@@ -416,7 +419,7 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
     }
 
     while (!delivery_should_stop(self)) {
-        PyObject *ready = UringApiRing_wait_impl(self, 0, NULL, true, &worker_staging);
+        PyObject *ready = UringApiRing_wait_impl(self, 0, NULL, true);
 
         if (!ready) {
             delivery_request_stop(self);
@@ -431,7 +434,6 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
         Py_DECREF(ready);
     }
 
-    staging_buffer_clear(&worker_staging);
     delivery_mark_exited(self);
     if (wait_failed) {
         return NULL;
@@ -468,5 +470,5 @@ PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs
         return NULL;
     }
 
-    return UringApiRing_wait_impl(self, timeout_kind, &timeout, false, NULL);
+    return UringApiRing_wait_impl(self, timeout_kind, &timeout, false);
 }

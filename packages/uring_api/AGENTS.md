@@ -218,6 +218,11 @@ Delivery callbacks (`Ring.callback`, `ring_set_c_callback`) must not change whil
 Delivery threads may read callback pointers without that lock once the service
 is running.
 
+`drain_ready_completions()` converts each CQE under `receive_mutex` and calls
+`io_uring_cqe_seen()` only after that CQE is built successfully. Batched
+`wait()` still returns one Python list, but conversion is per-CQE so multishot
+completion state stays serialized across delivery workers.
+
 ## What Not to Add Here
 
 Keep this package narrow:
