@@ -1460,7 +1460,7 @@ class TestSchedulerAccessors:
             server.listen()
 
             def accept_and_read() -> bytes:
-                conn, _address = s.sock_accept(server)
+                conn = s.sock_accept(server)
                 try:
                     return s.sock_recv(conn, 4)
                 finally:
@@ -2261,7 +2261,7 @@ class TestSchedulerAccessors:
                 server.listen()
 
                 def accept_and_read() -> bytes:
-                    conn, _address = s.sock_accept(server)
+                    conn = s.sock_accept(server)
                     try:
                         return s.sock_recv(conn, 4)
                     finally:

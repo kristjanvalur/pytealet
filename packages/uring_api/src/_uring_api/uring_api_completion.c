@@ -527,26 +527,6 @@ bool is_zero_copy_send_kind(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_SEND_ZC || kind == URING_API_PENDING_SENDMSG_ZC;
 }
 
-PyObject *UringApiCompletion_new_pending_accept(PyObject *user_data) {
-    UringApiCompletion *completion;
-    UringApiCompletionSockaddrState *sockaddr_state;
-
-    completion = UringApiCompletion_alloc(URING_API_PENDING_ACCEPT, user_data);
-    if (!completion) {
-        return NULL;
-    }
-    sockaddr_state = PyMem_Malloc(sizeof(UringApiCompletionSockaddrState));
-    if (!sockaddr_state) {
-        Py_DECREF(completion);
-        return PyErr_NoMemory();
-    }
-    memset(sockaddr_state, 0, sizeof(*sockaddr_state));
-    sockaddr_state->tag = URING_API_COMPLETION_STATE_SOCKADDR;
-    sockaddr_state->addrlen = sizeof(sockaddr_state->addr);
-    completion->state = sockaddr_state;
-    return (PyObject *)completion;
-}
-
 PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source) {
     UringApiCompletion *completion;
 
@@ -728,21 +708,10 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
         msg_state->addrlen = msg_state->msg.msg_namelen;
         payload = sockaddr_to_object(&msg_state->addr, msg_state->addrlen);
     } else if (self->kind == URING_API_PENDING_ACCEPT) {
-        sockaddr_state = UringApiCompletion_get_sockaddr_state(self);
         if (res >= 0) {
-            if (!sockaddr_state) {
-                PyErr_SetString(PyExc_RuntimeError, "accept completion is missing sockaddr state");
-                return -1;
-            }
-            payload = sockaddr_to_object(&sockaddr_state->addr, sockaddr_state->addrlen);
-            if (payload) {
-                payload = Py_BuildValue("iN", res, payload);
-            }
+            payload = PyLong_FromLong(res);
         } else {
             payload = Py_NewRef(Py_None);
-        }
-        if ((flags & IORING_CQE_F_MORE) && sockaddr_state) {
-            sockaddr_state->addrlen = sizeof(sockaddr_state->addr);
         }
     } else if (res >= 0 && self->kind == URING_API_PENDING_CONNECT) {
         payload = Py_NewRef(Py_None);

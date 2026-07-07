@@ -8,10 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
-- `accept_many` result callbacks now receive
-  ``(socket, address, initial_data, recv_error)`` instead of ``(socket, address)``.
-  Close the socket when ``recv_error`` is set unless a higher-level helper (for
-  example ``start_server``) handles teardown.
+- `accept()` / ``sock_accept()`` and ``accept_many`` callbacks no longer return
+  peer addresses. Accepted sockets are returned alone (``accept_many`` still
+  delivers ``(socket, initial_data, recv_error)``). Call
+  ``socket.getpeername()`` when the peer address is needed. Close the socket
+  when ``recv_error`` is set unless a higher-level helper (for example
+  ``start_server``) handles teardown.
 - Removed private `Operation` backend fields `_proactor`, `_attempt`, and
   `_cancel_target`. Use `operation.cancel()` (backend hooks via `set_cancel()`)
   and proactor-side structures (`_FdSlot` for selector fd drivers,
