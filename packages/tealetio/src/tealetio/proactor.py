@@ -168,6 +168,13 @@ def _try_arm_accept_recv_sink(
     conn: socket.socket,
     recv_sink_factory: _AcceptRecvSinkFactory | None,
 ) -> tuple[Any | None, ContinuousOperation[_RecvManyResult] | None]:
+    """Create a receive sink and arm ``recv_many`` on the delivery worker thread.
+
+    Runs synchronously in the accept completion handler before the accept
+    callback is delivered, so buffer setup and the initial ``recv_many`` submit
+    happen off the client tealet.
+    """
+
     if recv_sink_factory is None:
         return None, None
     pool = proactor.shared_recv_buffer_pool()
@@ -211,6 +218,15 @@ def _cancel_pending_accept_recv_many(pending_recv_many: list[ContinuousOperation
         stream = pending_recv_many.pop()
         if not stream.done():
             stream.cancel()
+
+
+_PendingAcceptRecvSinkHandoff: TypeAlias = tuple[
+    ContinuousOperation[AcceptManyResult],
+    socket.socket,
+    Any | None,
+    ContinuousOperation[_RecvManyResult] | None,
+    list[ContinuousOperation[_RecvManyResult]],
+]
 
 
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
@@ -1725,6 +1741,7 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
+        self._pending_accept_recv_sink_handoffs: list[_PendingAcceptRecvSinkHandoff] = []
         self._retrying_deferred_submissions = False
         self._submit_attempts = 0
         self._submit_queue_full = 0
@@ -2080,6 +2097,7 @@ class UringProactor(ProactorBase):
             thread.join()
         self._pending_tokens.clear()
         self._deferred_submissions.clear()
+        self._drop_pending_accept_recv_sink_handoffs()
         self.break_wait()
         self._ring.callback = None
         self._ring.close()
@@ -2413,6 +2431,46 @@ class UringProactor(ProactorBase):
         self._submit_uring_entry(entry, submit_accept)
         return operation
 
+    def _schedule_accept_recv_sink_handoff(
+        self,
+        parent: ContinuousOperation[AcceptManyResult],
+        conn: socket.socket,
+        recv_sink: Any | None,
+        stream: ContinuousOperation[_RecvManyResult] | None,
+        pending_recv_many: list[ContinuousOperation[_RecvManyResult]],
+    ) -> None:
+        """Queue or emit one accept after arming ``recv_many`` on the worker thread."""
+
+        if stream is None:
+            _handoff_accept_many_recv_sink(parent, conn, recv_sink, stream, pending_recv_many)
+            return
+        self._pending_accept_recv_sink_handoffs.append(
+            (parent, conn, recv_sink, stream, pending_recv_many),
+        )
+
+    def _flush_pending_accept_recv_sink_handoffs(self) -> None:
+        pending = self._pending_accept_recv_sink_handoffs
+        if not pending:
+            return
+        self._pending_accept_recv_sink_handoffs = []
+        for parent, conn, recv_sink, stream, pending_recv_many in pending:
+            _handoff_accept_many_recv_sink(parent, conn, recv_sink, stream, pending_recv_many)
+
+    def _drop_pending_accept_recv_sink_handoffs(
+        self,
+        parent: ContinuousOperation[AcceptManyResult] | None = None,
+    ) -> None:
+        remaining: list[_PendingAcceptRecvSinkHandoff] = []
+        for item in self._pending_accept_recv_sink_handoffs:
+            item_parent, conn, _recv_sink, stream, _pending_recv_many = item
+            if parent is None or item_parent is parent:
+                if stream is not None and not stream.done():
+                    stream.cancel()
+                conn.close()
+            else:
+                remaining.append(item)
+        self._pending_accept_recv_sink_handoffs = remaining
+
     def _bind_accept_many_cancel(
         self,
         operation: ContinuousOperation[AcceptManyResult],
@@ -2427,6 +2485,7 @@ class UringProactor(ProactorBase):
             backend_cancel()
             self._cancel_pending_receive_on_accept(pending_recv)
             _cancel_pending_accept_recv_many(pending_recv_many)
+            self._drop_pending_accept_recv_sink_handoffs(operation)
 
         operation.set_cancel(cancel)
 
@@ -2463,6 +2522,7 @@ class UringProactor(ProactorBase):
     ) -> None:
         self._cancel_pending_receive_on_accept(pending_recv)
         _cancel_pending_accept_recv_many(pending_recv_many)
+        self._drop_pending_accept_recv_sink_handoffs(operation)
         accept_entry = accept_entry_ref[0]
         if accept_entry is not None:
             if accept_entry.active:
@@ -2494,7 +2554,7 @@ class UringProactor(ProactorBase):
             conn.close()
         else:
             recv_sink, stream = _try_arm_accept_recv_sink(self, conn, recv_sink_factory)
-            _handoff_accept_many_recv_sink(operation, conn, recv_sink, stream, pending_recv_many)
+            self._schedule_accept_recv_sink_handoff(operation, conn, recv_sink, stream, pending_recv_many)
         if operation.done():
             return operation
         self._queue_entry_resubmit(entry, submit_box[0])
@@ -2552,7 +2612,7 @@ class UringProactor(ProactorBase):
                 self._submit_uring_entry(recv_entry, lambda: self._ring.submit_recv(conn.fileno(), buffer, recv_entry))
         else:
             recv_sink, stream = _try_arm_accept_recv_sink(self, conn, recv_sink_factory)
-            _handoff_accept_many_recv_sink(operation, conn, recv_sink, stream, pending_recv_many)
+            self._schedule_accept_recv_sink_handoff(operation, conn, recv_sink, stream, pending_recv_many)
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             self._deactivate_uring_entry(entry)
             accept_entry_ref[0] = None
@@ -3202,6 +3262,7 @@ class UringProactor(ProactorBase):
                 if result is not None:
                     completed_operation = result
         self._retry_deferred_submissions()
+        self._flush_pending_accept_recv_sink_handoffs()
         if completed_operation is not None:
             self._notify_completed()
         elif not self.has_pending_operations():

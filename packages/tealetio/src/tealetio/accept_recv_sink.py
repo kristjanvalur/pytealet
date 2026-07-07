@@ -30,7 +30,13 @@ class AcceptRecvSinkAttachable(AcceptRecvSink, Protocol):
 
 
 AcceptRecvSinkFactory: TypeAlias = Callable[[Any, "RecvBufferPool"], AcceptRecvSink | None]
-"""``(accepted_socket, buf_group) -> sink`` or ``None`` when the backend cannot arm ``recv_many``."""
+"""``(accepted_socket, buf_group) -> sink`` or ``None`` when the backend cannot arm ``recv_many``.
+
+Invoked on the proactor delivery worker thread (uring completion service or
+selector worker) for each accepted connection, before the accept callback runs.
+The proactor then arms ``recv_many`` using ``recv_many_callback()`` and only
+delivers the sink to the client afterwards.
+"""
 
 
 def recv_iter_buffer_factory(
