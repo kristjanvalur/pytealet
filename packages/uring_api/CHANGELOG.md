@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- C API: `UringApi_CCompletionCallback` now receives a `list` of completions per
+  kernel drain batch (was a single completion). `ring_wait()` returns a list
+  (empty on timeout or `break_wait()`). Callback pointers must not be changed
+  while `serve_completions()` workers are active. `URING_API_CAPI_ABI_VERSION`
+  remains **1** while the package is pre-release; clients must check
+  `struct_size` and null-check vtable pointers they rely on.
+- `Ring.wait()` returns `list[Completion]` and drains additional ready CQEs into
+  the same batch before returning.
 - `submit_accept()` and `submit_accept_multishot()` no longer pass a peer
   sockaddr buffer to the kernel. Delivered completions expose the accepted fd
   only; resolve peer addresses with `getpeername()` when needed.

@@ -24,6 +24,7 @@ import _uring_api
 import uring_api
 
 from helpers import (
+    wait_one,
     assert_fd_nonblocking_cloexec,
     build_c_api_client,
     collect_until_stable,
@@ -46,7 +47,7 @@ def test_ring_poll_completion_when_available():
         with uring_api.Ring() as ring:
             handle = ring.submit_poll(reader.fileno(), select.POLLIN, token)
             writer.send(b"x")
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
             assert completion is not None
             assert completion is handle
             assert completion.kind == uring_api.COMPLETION_KIND_POLL
@@ -67,9 +68,9 @@ def test_ring_poll_multishot_completion_when_available():
         with uring_api.Ring() as ring:
             handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, token)
             writer.send(b"a")
-            first = ring.wait(1.0)
+            first = wait_one(ring, 1.0)
             writer.send(b"b")
-            second = ring.wait(1.0)
+            second = wait_one(ring, 1.0)
 
             assert first is not None
             assert second is not None
@@ -110,7 +111,7 @@ def test_ring_poll_remove_rejects_delivered_poll_copy_when_available():
         with uring_api.Ring() as ring:
             handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, {"operation": "poll-remove-invalid"})
             writer.send(b"a")
-            delivered = ring.wait(1.0)
+            delivered = wait_one(ring, 1.0)
             assert delivered is not None
             assert delivered is not handle
             assert delivered.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
@@ -130,7 +131,7 @@ def test_ring_poll_remove_stops_multishot_poll_when_available():
         with uring_api.Ring() as ring:
             handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, token)
             writer.send(b"a")
-            first = ring.wait(1.0)
+            first = wait_one(ring, 1.0)
             assert first is not None
             assert first is not handle
             assert first.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
@@ -140,11 +141,11 @@ def test_ring_poll_remove_stops_multishot_poll_when_available():
             removed = False
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
-                completion = ring.wait(0.0)
-                if completion is None:
-                    continue
-                if completion is remove_handle:
-                    removed = True
+                for completion in ring.wait(0.0):
+                    if completion is remove_handle:
+                        removed = True
+                        break
+                if removed:
                     break
             assert removed
     finally:

@@ -19,7 +19,16 @@
 /* Feature flags published in UringApi_CAPI.feature_flags. */
 #define URING_API_CAPI_FEATURE_CORE (1ull << 0)
 
-typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completion, void *user_data);
+/*
+ * Completion delivery callback invoked from serve_completions() worker threads.
+ * completions is a list of Completion objects for one kernel drain batch.
+ * user_data is the pointer supplied to ring_set_c_callback(). Return 0 on
+ * success; set a Python exception and return -1 to stop the serving worker group.
+ *
+ * ring_set_callback() and ring_set_c_callback() must not be called while
+ * serve_completions() workers are active.
+ */
+typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
 
 typedef struct UringApi_CAPI {
     uint32_t abi_version;
@@ -80,7 +89,9 @@ typedef struct UringApi_CAPI {
                               PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     /*
-     * Wait for one completion and return a new reference, or Py_None on timeout/no completion.
+     * Wait for ready completions and return a new list reference.
+     * The first wait uses the requested timeout; once one completion is ready,
+     * additional CQEs are drained with zero wait before the list is returned.
      * timeout < 0 blocks indefinitely, timeout == 0 performs a non-blocking peek,
      * and timeout > 0 waits for at most that many seconds.
      */

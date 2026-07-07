@@ -24,6 +24,8 @@ import _uring_api
 import uring_api
 
 from helpers import (
+    collect_completions,
+    wait_one,
     assert_fd_nonblocking_cloexec,
     build_c_api_client,
     collect_until_stable,
@@ -56,7 +58,7 @@ def test_ring_recv_completion_when_available():
             assert pending.flags == 0
             assert pending.result is None
 
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is not None
         assert completion is pending
@@ -82,10 +84,10 @@ def test_ring_cancel_unknown_completion_reports_cancel_completion_when_available
         with uring_api.Ring() as ring:
             target = ring.submit_recv(reader.fileno(), buf, "target")
             writer.send(b"hello")
-            assert ring.wait(1.0) is target
+            assert wait_one(ring, 1.0) is target
 
             cancel = ring.submit_cancel(target)
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is cancel
         assert cancel.user_data is target
@@ -107,7 +109,7 @@ def test_ring_send_completion_when_available():
             token = {"operation": "send"}
             ring.submit_send(writer.fileno(), b"hello", token)
 
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is not None
         assert completion.user_data is token
@@ -127,8 +129,8 @@ def test_ring_send_zc_completion_when_available():
             token = {"operation": "send_zc"}
             pending = ring.submit_send_zc(writer.fileno(), b"hello", token)
 
-            completion = ring.wait(1.0)
-            notification = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
+            notification = wait_one(ring, 1.0)
 
         assert completion is pending
         assert completion.user_data is token
@@ -156,8 +158,8 @@ def test_ring_sendmsg_zc_completion_when_available():
             token = {"operation": "sendmsg_zc"}
             pending = ring.submit_sendmsg_zc(sender.fileno(), b"hello", receiver.getsockname(), token)
 
-            completion = ring.wait(1.0)
-            notification = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
+            notification = wait_one(ring, 1.0)
 
         assert completion is pending
         assert completion.user_data is token
@@ -188,7 +190,7 @@ def test_ring_accept_completion_when_available():
             ring.submit_accept(server.fileno(), token, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             client = connect_to_listener(server)
 
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is not None
         accepted_fd = completion.result
@@ -220,12 +222,7 @@ def test_ring_accept_multishot_batch_peer_addresses_when_available():
             ring.submit_accept_multishot(server.fileno(), 170, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             clients.append(connect_to_listener(server))
             clients.append(connect_to_listener(server))
-            batch = []
-            deadline = time.monotonic() + 1.0
-            while len(batch) < 2 and time.monotonic() < deadline:
-                completion = ring.wait(0.1)
-                if completion is not None:
-                    batch.append(completion)
+            batch = collect_completions(ring, 1.0, 2)
 
         assert len(batch) == 2
         expected_peers = {client.getsockname() for client in clients}
@@ -267,9 +264,9 @@ def test_ring_accept_multishot_completion_when_available():
                 server.fileno(), token, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
             )
             clients.append(connect_to_listener(server))
-            first = ring.wait(1.0)
+            first = wait_one(ring, 1.0)
             clients.append(connect_to_listener(server))
-            second = ring.wait(1.0)
+            second = wait_one(ring, 1.0)
 
             assert first is not None
             assert second is not None
@@ -296,11 +293,11 @@ def test_ring_accept_multishot_completion_when_available():
             cancelled = False
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
-                completion = ring.wait(0.0)
-                if completion is None:
-                    continue
-                if completion is handle:
-                    cancelled = True
+                for completion in ring.wait(0.0):
+                    if completion is handle:
+                        cancelled = True
+                        break
+                if cancelled:
                     break
             assert cancelled
     finally:
@@ -325,7 +322,7 @@ def test_ring_connect_completion_when_available():
         with uring_api.Ring() as ring:
             ring.submit_connect(client.fileno(), server.getsockname(), token)
 
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is not None
         assert completion.user_data is token
@@ -349,7 +346,7 @@ def test_ring_shutdown_completion_when_available():
         token = {"operation": "shutdown"}
         with uring_api.Ring() as ring:
             pending = ring.submit_shutdown(writer.fileno(), socket.SHUT_WR, token)
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is pending
         assert completion.user_data is token
@@ -370,7 +367,7 @@ def test_ring_close_completion_when_available():
     token = {"operation": "close"}
     with uring_api.Ring() as ring:
         pending = ring.submit_close(fd, token)
-        completion = ring.wait(1.0)
+        completion = wait_one(ring, 1.0)
 
     assert completion is pending
     assert completion.user_data is token
@@ -395,7 +392,7 @@ def test_ring_sendto_completion_when_available():
         with uring_api.Ring() as ring:
             ring.submit_sendto(sender.fileno(), b"hello", receiver.getsockname(), token)
 
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is not None
         assert completion.user_data is token
@@ -423,7 +420,7 @@ def test_ring_recvmsg_completion_when_available():
             ring.submit_recvmsg(receiver.fileno(), buf, token)
             sender.sendto(b"world", receiver.getsockname())
 
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is not None
         assert completion.user_data is token
@@ -447,7 +444,7 @@ def test_ring_sendmsg_completion_when_available():
         with uring_api.Ring() as ring:
             pending = ring.submit_sendmsg(sender.fileno(), b"hello", receiver.getsockname(), token)
 
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is pending
         assert completion.user_data is token
@@ -469,7 +466,7 @@ def test_ring_socket_completion_when_available():
     with uring_api.Ring() as ring:
         pending = ring.submit_socket(socket.AF_INET, socket.SOCK_STREAM, user_data=token)
 
-        completion = ring.wait(1.0)
+        completion = wait_one(ring, 1.0)
 
     assert completion is pending
     assert completion.user_data is token
@@ -505,7 +502,7 @@ def test_ring_socket_nonblock_cloexec_flags_when_available():
             socket.SOCK_STREAM | socket_flags,
             user_data={"operation": "socket_flags"},
         )
-        completion = ring.wait(1.0)
+        completion = wait_one(ring, 1.0)
 
     assert completion is pending
     assert completion.kind == uring_api.COMPLETION_KIND_SOCKET
@@ -538,7 +535,7 @@ def test_ring_socket_unix_when_available():
             socket.SOCK_STREAM | socket_flags,
             user_data={"operation": "socket_unix"},
         )
-        completion = ring.wait(1.0)
+        completion = wait_one(ring, 1.0)
 
     assert completion is pending
     assert completion.kind == uring_api.COMPLETION_KIND_SOCKET
@@ -571,11 +568,7 @@ def test_ring_socketpair_round_trip_when_available():
             ring.submit_recv(left.fileno(), recv_buf, 130)
             ring.submit_send(right.fileno(), b"ping", 131)
 
-            completions = []
-            while len(completions) < 2:
-                completion = ring.wait(1.0)
-                assert completion is not None
-                completions.append(completion)
+            completions = collect_completions(ring, 1.0, 2)
 
         by_user_data = {completion.user_data: completion for completion in completions}
         assert by_user_data[130].res == 4

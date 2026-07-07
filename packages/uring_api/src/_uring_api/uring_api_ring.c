@@ -7,6 +7,7 @@
 #include "uring_api_bufview.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
+#include "uring_api_staging.h"
 #include "uring_api_submit.h"
 
 PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
@@ -26,9 +27,8 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 #endif
-#ifdef URING_API_USE_PYTHREAD_MUTEX
-    self->receive_mutex = PyThread_allocate_lock();
-    if (!self->receive_mutex) {
+    self->cqe_drain_lock = PyThread_allocate_lock();
+    if (!self->cqe_drain_lock) {
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
         PyThread_free_lock(self->ring_lock);
         self->ring_lock = NULL;
@@ -37,7 +37,6 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         PyObject_GC_Del(self);
         return NULL;
     }
-#endif
     return (PyObject *)self;
 }
 
@@ -99,18 +98,13 @@ void UringApiRing_dealloc(UringApiRing *self) {
     }
     (void)UringApiRing_clear(self);
     UringApiRing_clear_free_buf_group_ids(self);
+    staging_buffer_clear(&self->wait_staging);
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
-    if (self->delivery_wait_lock) {
-        PyThread_free_lock(self->delivery_wait_lock);
-        self->delivery_wait_lock = NULL;
+    if (self->cqe_drain_lock) {
+        PyThread_free_lock(self->cqe_drain_lock);
+        self->cqe_drain_lock = NULL;
     }
-#ifdef URING_API_USE_PYTHREAD_MUTEX
-    if (self->receive_mutex) {
-        PyThread_free_lock(self->receive_mutex);
-        self->receive_mutex = NULL;
-    }
-#endif
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
     if (self->ring_lock) {
         PyThread_free_lock(self->ring_lock);
@@ -202,9 +196,10 @@ static PyObject *UringApiRing_get_running(UringApiRing *self, void *closure) {
 static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
     PyObject *callback;
 
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
     callback = Py_XNewRef(self->delivery_callback);
-    Py_END_CRITICAL_SECTION_MUTEX();
+    Py_END_CRITICAL_SECTION();
     if (!callback) {
         Py_RETURN_NONE;
     }
@@ -226,7 +221,7 @@ int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *closure
     }
 
     callback = value == Py_None ? NULL : Py_NewRef(value);
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
+    Py_BEGIN_CRITICAL_SECTION(self);
     if (delivery_is_running_locked(self)) {
         PyErr_SetString(PyExc_RuntimeError, "cannot change callback while completion service is active");
         ret = -1;
@@ -235,7 +230,7 @@ int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *closure
         self->delivery_callback = callback;
         callback = NULL;
     }
-    Py_END_CRITICAL_SECTION_MUTEX();
+    Py_END_CRITICAL_SECTION();
     Py_XDECREF(callback);
     Py_XDECREF(old_callback);
     return ret;
@@ -302,7 +297,7 @@ static PyMethodDef UringApiRing_methods[] = {
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Interrupt a thread blocked in wait without producing a user completion."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
-     "Wait for one completion and return its result."},
+     "Wait for ready completions and return a list. Drains additional ready CQEs into the same batch. Returns [] on timeout or break_wait."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};

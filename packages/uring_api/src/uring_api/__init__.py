@@ -170,11 +170,11 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         @property
-        def callback(self) -> Callable[[Completion], object] | None:
+        def callback(self) -> Callable[[list[Completion]], object] | None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         @callback.setter
-        def callback(self, value: Callable[[Completion], object] | None) -> None:
+        def callback(self, value: Callable[[list[Completion]], object] | None) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def close(self) -> None:
@@ -286,7 +286,7 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def wait(self, timeout: float | None = None) -> Completion | None:
+        def wait(self, timeout: float | None = None) -> list[Completion]:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def __enter__(self) -> Ring:

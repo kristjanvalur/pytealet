@@ -213,6 +213,13 @@ constants and types live in `src/uring_api/__init__.py`.
 Preserve refcount and buffer-lifetime invariants when touching completion
 delivery or pending-operation state.
 
+### Internal C invariants
+
+Every submitted SQE stores a `Completion` pointer retrievable from its CQE. A
+NULL `cqe_get_completion()` result means our drain/submit bookkeeping is broken,
+not a user or kernel error. Document that contract with `assert` — do not raise
+`SystemError` or add release-build guards that imply the caller can recover.
+
 ## What Not to Add Here
 
 Keep this package narrow:

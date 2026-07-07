@@ -527,20 +527,28 @@ bool is_zero_copy_send_kind(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_SEND_ZC || kind == URING_API_PENDING_SENDMSG_ZC;
 }
 
-PyObject *UringApiCompletion_new_delivered_copy(UringApiCompletion *source) {
+PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index) {
     UringApiCompletion *completion;
+    UringApiCompletionBufGroupState *source_buf_group_state;
+    UringApiCompletionBufGroupState *buf_group_state;
 
     completion = UringApiCompletion_alloc(source->kind, source->user_data);
     if (!completion) {
         return NULL;
     }
-    completion->res = source->res;
-    completion->flags = source->flags;
-    completion->result = source->result;
-    source->result = NULL;
-    completion->sequence = source->sequence;
-    source->sequence++;
     completion->multishot = source->multishot;
+    completion->sequence = leg_index;
+    if (UringApiCompletion_state_tag(source) == URING_API_COMPLETION_STATE_BUF_GROUP) {
+        source_buf_group_state = (UringApiCompletionBufGroupState *)source->state;
+        buf_group_state = PyMem_Malloc(sizeof(UringApiCompletionBufGroupState));
+        if (!buf_group_state) {
+            Py_DECREF(completion);
+            return PyErr_NoMemory();
+        }
+        buf_group_state->tag = URING_API_COMPLETION_STATE_BUF_GROUP;
+        buf_group_state->buf_group = Py_NewRef(source_buf_group_state->buf_group);
+        completion->state = buf_group_state;
+    }
     return (PyObject *)completion;
 }
 

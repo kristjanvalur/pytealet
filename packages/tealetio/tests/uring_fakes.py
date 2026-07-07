@@ -720,14 +720,14 @@ class _FakeUringRing:
         self._deliver(completion)
         return completion
 
-    def wait(self, timeout: float | None = None) -> SimpleNamespace | None:
+    def wait(self, timeout: float | None = None) -> list[SimpleNamespace]:
         if not self.completions:
-            return None
-        return self.completions.pop(0)
+            return []
+        return [self.completions.pop(0)]
 
     def _deliver(self, completion: SimpleNamespace) -> None:
         if self.running and self.callback is not None:
-            self.callback(completion)
+            self.callback([completion])
         else:
             self.completions.append(completion)
 

@@ -234,7 +234,7 @@ for those cases.
 - Broad `try`/`except` wrappers whose main purpose is to re-raise a tidier
   message for logic bugs
 
-Let internal contract violations surface as ordinary logic failures —
+In Python, let internal contract violations surface as ordinary logic failures —
 `AttributeError`, `TypeError`, `KeyError`, and similar — so bugs stay loud and
 locate the broken assumption quickly. Tests may still use `isinstance`,
 `assert`, or explicit guard checks to document API contracts.
@@ -242,8 +242,17 @@ locate the broken assumption quickly. Tests may still use `isinstance`,
 Use `isinstance` when polymorphism is genuinely expected — for example,
 branching across several concrete types that callers may pass in.
 
-Debug-only `assert` statements are fine when they document invariants rather
-than acting as user-facing validation.
+**Do not paper over internal bugs with user-facing exceptions.** Paths that
+cannot fail unless our own code broke an invariant (for example a CQE missing
+the `Completion` pointer we stored at submit time) are not caller errors. Do not
+convert them into `SystemError`, `RuntimeError`, or similar — that suggests
+recovery or external misuse when the real problem is an internal logic bug.
+
+**`assert` is the right contract check in C extension code** for those
+impossible-unless-we-messed-up cases. It documents the invariant, fails loudly
+in debug builds, and keeps production paths free of defensive noise. Do not
+replace such asserts with `PyErr_SetString` guards just to survive release
+builds with a tidier Python exception.
 
 ### Python boolean style
 
@@ -283,6 +292,9 @@ Reserve explicit `bool()` for APIs that require a `bool` return value (for examp
 - Keep changes narrow and localised.
 - Add tests for behaviour changes when practical.
 - Use C89-style comments in C code.
+- Use `assert` for internal invariants that cannot fail unless our own submit,
+  drain, or refcount logic is wrong. Reserve `PyErr_SetString` for argument,
+  feature, and resource errors callers can actually trigger.
 
 ### Vendored libtealet policy
 

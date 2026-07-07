@@ -101,6 +101,7 @@ setup(
                 _uring_api_source("uring_api_probe.c"),
                 _uring_api_source("uring_api_ring.c"),
                 _uring_api_source("uring_api_statx.c"),
+                _uring_api_source("uring_api_staging.c"),
                 _uring_api_source("uring_api_submit.c"),
             ],
             depends=[
@@ -116,6 +117,7 @@ setup(
                 _uring_api_source("uring_api_probe.h"),
                 _uring_api_source("uring_api_ring.h"),
                 _uring_api_source("uring_api_statx.h"),
+                _uring_api_source("uring_api_staging.h"),
                 _uring_api_source("uring_api_submit.h"),
             ],
             include_dirs=["src/uring_api/include"],

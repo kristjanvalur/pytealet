@@ -3080,31 +3080,27 @@ class UringProactor(ProactorBase):
             self.break_wait()
             self._notify_completed()
 
-    def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
-        if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
-            target = cast(_UringCompletion, completion.user_data)
-            self._deactivate_uring_entry(cast(_UringEntry, target.user_data))
-            self._retry_deferred_submissions()
-            return
-        if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
-            self._retry_deferred_submissions()
-            return
-        entry = cast(_UringEntry, completion.user_data)
-        to_process = entry.completions_to_process(completion)
-        if not to_process and entry.operation.done():
-            # Late multishot CQEs after cancel/terminal finish: drop the leg
-            # without re-entering delivery (completions_to_process already
-            # discarded them).
-            self._deactivate_uring_entry(entry)
-            self._retry_deferred_submissions()
-            if not self.has_pending_operations():
-                self.break_wait()
-            return
+    def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         completed_operation: Operation[Any] | None = None
-        for pending in to_process:
-            result = self._complete_uring_operation(pending)
-            if result is not None:
-                completed_operation = result
+        for completion in completions:
+            if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
+                target = cast(_UringCompletion, completion.user_data)
+                self._deactivate_uring_entry(cast(_UringEntry, target.user_data))
+                continue
+            if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
+                continue
+            entry = cast(_UringEntry, completion.user_data)
+            to_process = entry.completions_to_process(completion)
+            if not to_process and entry.operation.done():
+                # Late multishot CQEs after cancel/terminal finish: drop the leg
+                # without re-entering delivery (completions_to_process already
+                # discarded them).
+                self._deactivate_uring_entry(entry)
+                continue
+            for pending in to_process:
+                result = self._complete_uring_operation(pending)
+                if result is not None:
+                    completed_operation = result
         self._retry_deferred_submissions()
         if completed_operation is not None:
             self._notify_completed()

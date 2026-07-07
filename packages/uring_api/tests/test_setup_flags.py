@@ -24,6 +24,7 @@ import _uring_api
 import uring_api
 
 from helpers import (
+    wait_one,
     assert_fd_nonblocking_cloexec,
     build_c_api_client,
     collect_until_stable,
@@ -44,7 +45,7 @@ def test_single_issuer_allows_submit_and_wait_from_one_thread():
             recv_buf = bytearray(8)
             ring.submit_recv(reader.fileno(), recv_buf)
             writer.send(b"x")
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
             assert completion is not None
             assert completion.res == 1
             assert bytes(recv_buf[:1]) == b"x"
@@ -85,7 +86,7 @@ def test_defer_taskrun_allows_wait_from_one_thread():
             recv_buf = bytearray(8)
             ring.submit_recv(reader.fileno(), recv_buf)
             writer.send(b"x")
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
             assert completion is not None
             assert completion.res == 1
             assert bytes(recv_buf[:1]) == b"x"
@@ -100,7 +101,7 @@ def test_defer_taskrun_rejects_cross_thread_wait():
     try:
         with uring_api.Ring(entries=4, flags=flags) as ring:
             ring.submit_recv(reader.fileno(), bytearray(8))
-            assert ring.wait(0) is None
+            assert ring.wait(0) == []
             errors: list[RuntimeError] = []
 
             def wait_from_other_thread():
@@ -161,9 +162,9 @@ def test_single_issuer_allows_cross_thread_wait():
             thread.join(1.0)
             assert thread.is_alive() is False
             assert len(results) == 1
-            completion = results[0]
-            assert completion is not None
-            assert completion.res == 1
+            batch = results[0]
+            assert len(batch) == 1
+            assert batch[0].res == 1
     finally:
         reader.close()
         writer.close()
@@ -183,7 +184,7 @@ def test_single_issuer_allows_break_wait_from_owner_thread():
                 ring.break_wait()
                 thread.join(1.0)
             assert thread.is_alive() is False
-            assert results == [None]
+            assert results == [[]]
     finally:
         reader.close()
         writer.close()
@@ -218,7 +219,7 @@ def test_defer_taskrun_rejects_cross_thread_serve_completions():
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring(entries=4, flags=flags) as ring:
-            ring.callback = lambda completion: None
+            ring.callback = lambda batch: None
             ring.submit_recv(reader.fileno(), bytearray(8))
             errors: list[RuntimeError] = []
 

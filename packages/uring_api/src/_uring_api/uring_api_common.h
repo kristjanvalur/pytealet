@@ -27,7 +27,7 @@
 #endif
 
 typedef struct UringApiRing UringApiRing;
-typedef int (*UringApiCompletionCallback)(PyObject *ring, PyObject *completion, void *user_data);
+typedef int (*UringApiCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
 
 #ifndef Py_BEGIN_CRITICAL_SECTION
 #define URING_API_USE_PYTHREAD_RING_LOCK 1
@@ -62,28 +62,6 @@ typedef PyMutex UringApiMutex;
 #ifndef _PyCFunction_CAST
 #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
 #endif
-
-struct UringApiRing {
-    PyObject_HEAD struct io_uring ring;
-    PyObject *delivery_callback;
-    UringApiCompletionCallback c_delivery_callback;
-    void *c_delivery_callback_user_data;
-#ifdef URING_API_USE_PYTHREAD_RING_LOCK
-    PyThread_type_lock ring_lock;
-#endif
-    UringApiMutex receive_mutex;
-    PyThread_type_lock delivery_wait_lock;
-    unsigned int delivery_active_workers;
-    unsigned int receive_state;
-    unsigned short next_buf_group;
-    unsigned short *free_buf_group_ids;
-    unsigned int free_buf_group_id_count;
-    unsigned int free_buf_group_id_capacity;
-    unsigned int setup_flags;
-    unsigned long long owner_thread_id;
-    bool delivery_stop_requested;
-    bool initialized;
-};
 
 typedef enum {
     URING_API_RECEIVE_IDLE = 0,
@@ -130,7 +108,7 @@ typedef enum {
     URING_API_COMPLETION_STATE_STATX_FDSIZE,
 } UringApiCompletionStateKind;
 
-typedef struct {
+typedef struct UringApiCompletion {
     PyObject_HEAD UringApiPendingKind kind;
     PyObject *user_data;
     int res;
@@ -140,6 +118,41 @@ typedef struct {
     bool multishot;
     void *state;
 } UringApiCompletion;
+
+typedef struct UringApiStagedCQE {
+    int res;
+    unsigned int flags;
+    UringApiCompletion *completion;
+    unsigned long long leg_index;
+} UringApiStagedCQE;
+
+typedef struct UringApiStagingBuffer {
+    UringApiStagedCQE *entries;
+    size_t capacity;
+    size_t count;
+} UringApiStagingBuffer;
+
+struct UringApiRing {
+    PyObject_HEAD struct io_uring ring;
+    PyObject *delivery_callback;
+    UringApiCompletionCallback c_delivery_callback;
+    void *c_delivery_callback_user_data;
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+    PyThread_type_lock ring_lock;
+#endif
+    PyThread_type_lock cqe_drain_lock;
+    unsigned int delivery_active_workers;
+    unsigned int receive_state;
+    unsigned short next_buf_group;
+    unsigned short *free_buf_group_ids;
+    unsigned int free_buf_group_id_count;
+    unsigned int free_buf_group_id_capacity;
+    unsigned int setup_flags;
+    unsigned long long owner_thread_id;
+    bool delivery_stop_requested;
+    bool initialized;
+    UringApiStagingBuffer wait_staging;
+};
 
 extern PyTypeObject UringApiRing_Type;
 extern PyTypeObject UringApiCompletion_Type;

@@ -24,6 +24,7 @@ import _uring_api
 import uring_api
 
 from helpers import (
+    wait_one,
     assert_fd_nonblocking_cloexec,
     build_c_api_client,
     collect_until_stable,
@@ -52,7 +53,7 @@ def test_completion_user_data_cycles_are_collectable():
             completion = ring.submit_recv(reader.fileno(), bytearray(8), user_data=user_data)
             user_data.append(completion)
             writer.send(b"x")
-            assert ring.wait(timeout=1.0).res == 1
+            assert wait_one(ring, 1.0).res == 1
         finally:
             ring.close()
     finally:
