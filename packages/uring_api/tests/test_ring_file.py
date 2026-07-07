@@ -24,6 +24,7 @@ import _uring_api
 import uring_api
 
 from helpers import (
+    wait_one,
     assert_fd_nonblocking_cloexec,
     build_c_api_client,
     collect_until_stable,
@@ -83,7 +84,7 @@ def test_ring_file_read_write_completion_when_available():
         try:
             with uring_api.Ring() as ring:
                 write_handle = ring.submit_write(fd, b"hello", 0, token)
-                write_completion = ring.wait(1.0)
+                write_completion = wait_one(ring, 1.0)
                 assert write_completion is write_handle
                 assert write_completion.kind == uring_api.COMPLETION_KIND_WRITE
                 assert write_completion.user_data is token
@@ -92,7 +93,7 @@ def test_ring_file_read_write_completion_when_available():
 
                 buf = bytearray(5)
                 read_handle = ring.submit_read(fd, buf, 0, token)
-                read_completion = ring.wait(1.0)
+                read_completion = wait_one(ring, 1.0)
                 assert read_completion is read_handle
                 assert read_completion.kind == uring_api.COMPLETION_KIND_READ
                 assert read_completion.user_data is token
@@ -123,7 +124,7 @@ def test_ring_statx_path_returns_size_in_buffer_when_available():
         buf = bytearray(uring_api.STATX_BUFFER_SIZE)
         with uring_api.Ring() as ring:
             statx_handle = ring.submit_statx(uring_api.AT_FDCWD, path, 0, uring_api.STATX_SIZE, buf, token)
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
             assert completion is statx_handle
             assert completion.kind == uring_api.COMPLETION_KIND_STATX
             assert completion.user_data is token
@@ -151,7 +152,7 @@ def test_ring_statx_fd_submit_returns_size_in_buffer_when_available():
                     uring_api.STATX_SIZE,
                     buf,
                 )
-                completion = ring.wait(1.0)
+                completion = wait_one(ring, 1.0)
                 assert completion is handle
                 assert completion.kind == uring_api.COMPLETION_KIND_STATX
                 assert completion.res == 0
@@ -174,7 +175,7 @@ def test_ring_statx_without_size_mask_returns_none_result_when_available():
         buf = bytearray(uring_api.STATX_BUFFER_SIZE)
         with uring_api.Ring() as ring:
             handle = ring.submit_statx(uring_api.AT_FDCWD, path, 0, statx_nlink, buf)
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
             assert completion is handle
             assert completion.kind == uring_api.COMPLETION_KIND_STATX
             assert completion.res == 0
@@ -194,7 +195,7 @@ def test_ring_statx_fdsize_returns_size_in_completion_result_when_available():
             assert os.write(fd, b"hello") == 5
             with uring_api.Ring() as ring:
                 handle = ring.submit_statx_fdsize(fd, token)
-                completion = ring.wait(1.0)
+                completion = wait_one(ring, 1.0)
                 assert completion is handle
                 assert completion.kind == uring_api.COMPLETION_KIND_STATX_FDSIZE
                 assert completion.user_data is token
@@ -210,7 +211,7 @@ def test_ring_statx_fdsize_fails_for_invalid_fd():
 
     with uring_api.Ring() as ring:
         handle = ring.submit_statx_fdsize(-1)
-        completion = ring.wait(1.0)
+        completion = wait_one(ring, 1.0)
         assert completion is handle
         assert completion.kind == uring_api.COMPLETION_KIND_STATX_FDSIZE
         assert completion.res < 0
@@ -228,7 +229,7 @@ def test_ring_statx_fails_for_nonexistent_path():
             uring_api.STATX_SIZE,
             buf,
         )
-        completion = ring.wait(1.0)
+        completion = wait_one(ring, 1.0)
         assert completion is handle
         assert completion.kind == uring_api.COMPLETION_KIND_STATX
         assert completion.res < 0
@@ -241,7 +242,7 @@ def test_ring_openat_read_write_round_trip_when_available():
         path = os.path.join(tmp, "openat-test.txt")
         with uring_api.Ring() as ring:
             open_handle = ring.submit_openat(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644, token)
-            open_completion = ring.wait(1.0)
+            open_completion = wait_one(ring, 1.0)
             assert open_completion is open_handle
             assert open_completion.kind == uring_api.COMPLETION_KIND_OPENAT
             assert open_completion.user_data is token
@@ -250,19 +251,19 @@ def test_ring_openat_read_write_round_trip_when_available():
             fd = open_completion.res
 
             write_handle = ring.submit_write(fd, b"hello", 0, token)
-            write_completion = ring.wait(1.0)
+            write_completion = wait_one(ring, 1.0)
             assert write_completion is write_handle
             assert write_completion.res == 5
 
             buf = bytearray(5)
             read_handle = ring.submit_read(fd, buf, 0, token)
-            read_completion = ring.wait(1.0)
+            read_completion = wait_one(ring, 1.0)
             assert read_completion is read_handle
             assert read_completion.res == 5
             assert bytes(buf) == b"hello"
 
             close_handle = ring.submit_close(fd, token)
-            close_completion = ring.wait(1.0)
+            close_completion = wait_one(ring, 1.0)
             assert close_completion is close_handle
             assert close_completion.res == 0
 

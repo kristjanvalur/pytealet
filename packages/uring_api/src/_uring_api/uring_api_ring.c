@@ -7,6 +7,7 @@
 #include "uring_api_bufview.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
+#include "uring_api_staging.h"
 #include "uring_api_submit.h"
 
 PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
@@ -99,6 +100,7 @@ void UringApiRing_dealloc(UringApiRing *self) {
     }
     (void)UringApiRing_clear(self);
     UringApiRing_clear_free_buf_group_ids(self);
+    staging_buffer_clear(&self->wait_staging);
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
     if (self->delivery_wait_lock) {
@@ -202,6 +204,7 @@ static PyObject *UringApiRing_get_running(UringApiRing *self, void *closure) {
 static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
     PyObject *callback;
 
+    (void)closure;
     Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->receive_mutex);
     callback = Py_XNewRef(self->delivery_callback);
     Py_END_CRITICAL_SECTION_MUTEX();

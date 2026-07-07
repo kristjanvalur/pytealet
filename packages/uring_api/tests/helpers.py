@@ -36,6 +36,40 @@ def collect_until_stable() -> None:
     while gc.collect():
         pass
 
+def wait_one(ring: uring_api.Ring, timeout: float | None = None) -> uring_api.Completion | None:
+    batch = ring.wait(timeout)
+    if not batch:
+        return None
+    assert len(batch) == 1
+    return batch[0]
+
+
+def collect_completions(
+    ring: uring_api.Ring, timeout: float, count: int
+) -> list[uring_api.Completion]:
+    collected: list[uring_api.Completion] = []
+    deadline = time.monotonic() + timeout
+    while len(collected) < count:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        collected.extend(ring.wait(remaining))
+    assert len(collected) == count
+    return collected
+
+
+def wait_one_data(ring: uring_api.Ring, timeout: float | None = None) -> uring_api.Completion | None:
+    deadline = time.monotonic() + (timeout if timeout is not None else 30.0)
+    while time.monotonic() < deadline:
+        batch = ring.wait(max(0.0, deadline - time.monotonic()))
+        if not batch:
+            return None
+        for completion in batch:
+            if completion.res > 0:
+                return completion
+    return None
+
+
 def wait_until_running(ring: uring_api.Ring) -> None:
     deadline = time.monotonic() + 1.0
     while not ring.running and time.monotonic() < deadline:

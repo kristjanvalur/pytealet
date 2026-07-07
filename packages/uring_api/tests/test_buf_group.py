@@ -24,6 +24,9 @@ import _uring_api
 import uring_api
 
 from helpers import (
+    collect_completions,
+    wait_one,
+    wait_one_data,
     assert_fd_nonblocking_cloexec,
     build_c_api_client,
     collect_until_stable,
@@ -79,7 +82,7 @@ def test_ring_recv_buf_completion_when_available():
                 raise
 
             writer.send(b"hello")
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
             assert completion is not None
             if completion.res < 0:
@@ -120,7 +123,7 @@ def test_ring_recv_buf_eof_returns_empty_bytes_when_available():
                 raise
 
             writer.close()
-            completion = ring.wait(1.0)
+            completion = wait_one(ring, 1.0)
 
         assert completion is not None
         if completion.res < 0:
@@ -279,7 +282,7 @@ def test_buf_view_buf_result_exposes_buf_group():
                 raise
 
             writer.send(b"x")
-            completion = ring.wait(1.0)
+            completion = wait_one_data(ring, 1.0)
 
         assert completion is not None
         if completion.res < 0:
@@ -393,9 +396,9 @@ def test_ring_recv_multishot_completion_when_available():
                 raise
 
             writer.send(b"hello")
-            first = ring.wait(1.0)
+            first = wait_one_data(ring, 1.0)
             writer.send(b"world")
-            second = ring.wait(1.0)
+            second = wait_one_data(ring, 1.0)
 
             assert first is not None
             assert second is not None
@@ -423,9 +426,12 @@ def test_ring_recv_multishot_completion_when_available():
             ring.submit_cancel(handle)
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
-                completion = ring.wait(0.0)
-                if completion is handle:
-                    break
+                for completion in ring.wait(0.0):
+                    if completion is handle:
+                        break
+                else:
+                    continue
+                break
     finally:
         reader.close()
         writer.close()
@@ -448,9 +454,9 @@ def test_ring_recv_multishot_eof_returns_empty_bufview_when_available():
                 raise
 
             writer.send(b"hello")
-            first = ring.wait(1.0)
+            first = wait_one_data(ring, 1.0)
             writer.close()
-            final = ring.wait(1.0)
+            final = wait_one(ring, 1.0)
 
         assert first is not None
         if first.res < 0:

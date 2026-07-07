@@ -19,15 +19,20 @@ extern int uring_api_statx_try_read_st_size(const void *buf, Py_ssize_t buflen, 
 static const UringApi_CAPI *api = NULL;
 static PyObject *callback_sink = NULL;
 
-static int client_c_callback(PyObject *ring, PyObject *completion, void *user_data) {
+static int client_c_callback(PyObject *ring, PyObject *completions, void *user_data) {
     PyObject *sink = (PyObject *)user_data;
+    Py_ssize_t index;
+    Py_ssize_t count;
 
     (void)ring;
-    if (!sink) {
-        PyErr_SetString(PyExc_RuntimeError, "C callback sink is not set");
-        return -1;
+    count = PyList_GET_SIZE(completions);
+    for (index = 0; index < count; index++) {
+        PyObject *completion = PyList_GET_ITEM(completions, index);
+        if (PyList_Append(sink, completion) < 0) {
+            return -1;
+        }
     }
-    return PyList_Append(sink, completion);
+    return 0;
 }
 
 static PyObject *client_metadata(PyObject *module, PyObject *Py_UNUSED(ignored)) {
