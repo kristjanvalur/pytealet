@@ -51,6 +51,8 @@ static PyObject *staging_build_ready_list(UringApiStagingBuffer *staging) {
     PyObject *ready;
     size_t index;
 
+    /* packaging errors are fatal: a mid-batch failure may leave earlier rows
+     * with cqe_seen set and complete() applied while returning NULL here. */
     ready = PyList_New(0);
     if (!ready) {
         return NULL;
