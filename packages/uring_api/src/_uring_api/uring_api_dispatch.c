@@ -259,7 +259,6 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     int reap_ret;
     int peek_ret;
     int errnum;
-    int record_failed = 0;
 
     staging_buffer_reset(staging);
     cq_capacity = ring_cq_entries(self);
@@ -273,19 +272,13 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     Py_BEGIN_ALLOW_THREADS;
     reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
     if (reap_ret == 0 && cqe) {
-        if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
-            record_failed = 1;
-        } else {
-            for (;;) {
-                peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
-                if (peek_ret != 0 || !cqe) {
-                    break;
-                }
-                if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
-                    record_failed = 1;
-                    break;
-                }
+        staging_buffer_record_cqe(self, staging, cqe);
+        for (;;) {
+            peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
+            if (peek_ret != 0 || !cqe) {
+                break;
             }
+            staging_buffer_record_cqe(self, staging, cqe);
         }
     }
     Py_END_ALLOW_THREADS;
@@ -301,10 +294,6 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     }
     if (staging->count == 0) {
         return PyList_New(0);
-    }
-    if (record_failed) {
-        PyErr_SetString(PyExc_SystemError, "io_uring CQE is missing its completion object");
-        return NULL;
     }
     if (staging_buffer_assign_multishot_indices(self, staging) < 0) {
         return NULL;

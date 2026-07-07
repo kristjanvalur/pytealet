@@ -5,6 +5,7 @@
 #include "uring_api_staging.h"
 #include "uring_api_core.h"
 
+#include <assert.h>
 #include <liburing.h>
 
 int staging_buffer_ensure_capacity(UringApiStagingBuffer *buf, size_t index) {
@@ -42,18 +43,14 @@ void staging_buffer_clear(UringApiStagingBuffer *buf) {
 
 void staging_buffer_reset(UringApiStagingBuffer *buf) { buf->count = 0; }
 
-int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
+void staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
     UringApiCompletion *completion;
     UringApiStagedCQE *staged;
     size_t index;
 
-    if (buf->count >= buf->capacity) {
-        return -1;
-    }
+    assert(buf->count < buf->capacity);
     completion = cqe_get_completion(self, cqe);
-    if (!completion) {
-        return -1;
-    }
+    assert(completion != NULL);
     index = buf->count;
     staged = &buf->entries[index];
     staged->res = cqe->res;
@@ -62,7 +59,6 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
     staged->leg_index = 0;
     io_uring_cqe_seen(&self->ring, cqe);
     buf->count++;
-    return 0;
 }
 
 int staging_buffer_assign_multishot_indices(UringApiRing *self, UringApiStagingBuffer *buf) {
@@ -70,10 +66,6 @@ int staging_buffer_assign_multishot_indices(UringApiRing *self, UringApiStagingB
 
     for (index = 0; index < buf->count; index++) {
         UringApiStagedCQE *staged = &buf->entries[index];
-        if (!staged->completion) {
-            PyErr_SetString(PyExc_SystemError, "io_uring CQE is missing its completion object");
-            return -1;
-        }
         if (staged->completion->multishot) {
             Py_BEGIN_CRITICAL_SECTION_MUTEX(&self->completion_mutex);
             staged->leg_index = staged->completion->sequence;
