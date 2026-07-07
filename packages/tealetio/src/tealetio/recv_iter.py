@@ -92,7 +92,9 @@ class RecvIterBuffer:
         self._buf_group = buf_group
         self._resume: _RecvManyResume | None = None
         self._lock = threading.Lock()
-        self._event = ThreadsafeEvent()
+        self._event_init_lock = threading.Lock()
+        self._event: ThreadsafeEvent | None = None
+        self._pending_notify = False
         self._reorder = _OrderedIngestBuffer[memoryview]()
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False
@@ -114,7 +116,30 @@ class RecvIterBuffer:
                 if exception is not None:
                     self._stream_error = exception
             self._stream_done = True
-        self._event.set()
+        self._notify_waiters()
+
+    def recv_many_callback(self) -> Callable[[_RecvManyResult], object]:
+        return self.on_result
+
+    def attach_recv_many(self, stream: ContinuousOperation[_RecvManyResult]) -> None:
+        self.attach_stream(stream)
+
+    def _ensure_event(self) -> ThreadsafeEvent:
+        with self._event_init_lock:
+            if self._event is None:
+                self._event = ThreadsafeEvent()
+                if self._pending_notify:
+                    self._event.set()
+                    self._pending_notify = False
+            return self._event
+
+    def _notify_waiters(self) -> None:
+        with self._event_init_lock:
+            if self._event is None:
+                self._pending_notify = True
+                return
+            event = self._event
+        event.set()
 
     def on_result(self, result: _RecvManyResult) -> None:
         index, data = result
@@ -136,7 +161,7 @@ class RecvIterBuffer:
                     self._ready.append(ready)
                 notify = bool(self._ready) or len(self._reorder)
         if notify:
-            self._event.set()
+            self._notify_waiters()
 
     def _should_resume(self) -> _RecvManyResume | None:
         # pressure/resume only applies while multishot recv is still active; EOF
@@ -164,6 +189,7 @@ class RecvIterBuffer:
             resume_fn()
 
     def take_next(self) -> _RecvIterYield | None:
+        event = self._ensure_event()
         while True:
             try:
                 with self._lock:
@@ -187,13 +213,13 @@ class RecvIterBuffer:
                         if self._stream_error is not None:
                             raise self._stream_error
                         return None
-                    self._event.clear()
+                    event.clear()
             finally:
                 with self._lock:
                     pending_resume = self._should_resume()
                 if pending_resume is not None:
                     pending_resume()
-            self._event.swait()
+            event.swait()
 
     def close(self) -> None:
         stream: ContinuousOperation[_RecvManyResult] | None

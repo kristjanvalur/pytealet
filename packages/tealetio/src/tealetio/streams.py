@@ -21,6 +21,7 @@ from .io_manager import (
     SupportsProactorIO,
 )
 from .locks import Condition
+from .accept_recv_sink import AcceptRecvSinkFactory
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
 
@@ -387,7 +388,7 @@ _StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
 _NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
 _AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 _ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
-_AcceptedConnection: TypeAlias = tuple[socket.socket, bytes | None, BaseException | None]
+_AcceptedConnection: TypeAlias = tuple[socket.socket, bytes | None, BaseException | None, Any | None]
 
 
 def default_stream_factory(
@@ -928,6 +929,7 @@ def _start_stream_server(
     *,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_sink_factory: AcceptRecvSinkFactory | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
@@ -937,13 +939,18 @@ def _start_stream_server(
     ``recv_size`` opts into accept-time pre-read on backends that honour the
     hint (multishot io_uring accept). Use only for client-speaks-first
     protocols such as HTTP; server-speaks-first clients will not reach the
-    handler until they send data or close.
+    handler until they send data or close. ``recv_sink_factory`` (experimental)
+    arms ``recv_many`` per accept; the sink is delivered as the fourth callback
+    element but is not yet wired into ``StreamReader`` here.
     """
+
+    if recv_size is not None and recv_sink_factory is not None:
+        raise ValueError("start_server() accepts recv_size or recv_sink_factory, not both")
 
     server: StreamServer | None = None
 
     def on_accept(accepted: _AcceptedConnection) -> None:
-        conn, initial_data, recv_error = accepted
+        conn, initial_data, recv_error, _recv_sink = accepted
         if recv_error is not None:
             conn.close()
             return
@@ -962,7 +969,12 @@ def _start_stream_server(
         )
 
     io = cast(ServerIO, _require_proactor_io(scheduler))
-    accept_operation = io.proactor.accept_many(sock, on_accept, recv_size=recv_size)
+    accept_operation = io.proactor.accept_many(
+        sock,
+        on_accept,
+        recv_size=recv_size,
+        recv_sink_factory=recv_sink_factory,
+    )
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
 
@@ -980,6 +992,7 @@ def _start_server(
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_sink_factory: AcceptRecvSinkFactory | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
@@ -1009,6 +1022,7 @@ def _start_server(
         client_handler,
         limit=limit,
         recv_size=recv_size,
+        recv_sink_factory=recv_sink_factory,
         stream_factory=stream_factory,
         async_=async_,
     )
@@ -1025,6 +1039,7 @@ def start_server(
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_sink_factory: AcceptRecvSinkFactory | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1041,6 +1056,7 @@ def start_server(
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_sink_factory: AcceptRecvSinkFactory | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1054,6 +1070,7 @@ def start_server(
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_sink_factory: AcceptRecvSinkFactory | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1067,6 +1084,7 @@ def start_server(
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_sink_factory: AcceptRecvSinkFactory | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1080,6 +1098,7 @@ def start_server(
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_sink_factory: AcceptRecvSinkFactory | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1110,6 +1129,7 @@ def start_server(
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_sink_factory: AcceptRecvSinkFactory | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
@@ -1154,6 +1174,7 @@ def start_server(
         reuse_port=reuse_port,
         limit=limit,
         recv_size=recv_size,
+        recv_sink_factory=recv_sink_factory,
         stream_factory=stream_factory,
         async_=async_,
     )
