@@ -665,9 +665,7 @@ def run_asyncio_in_tealet(
                 # internal self-pipe and loop.sock_* helpers; host tealet IO stays
                 # on scheduler.proactor (often UringProactor).
                 loop_proactor: Proactor = (
-                    SelectorProactor()
-                    if isinstance(scheduler.proactor, UringProactor)
-                    else scheduler.proactor
+                    SelectorProactor() if isinstance(scheduler.proactor, UringProactor) else scheduler.proactor
                 )
                 loop = TealetProactorEventLoop(loop_proactor)
                 if loop_proactor is not scheduler.proactor:
