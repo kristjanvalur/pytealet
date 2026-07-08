@@ -199,13 +199,16 @@ delivery callbacks as completions arrive.
 
 ### Succeed or raise
 
-Blocking IO helpers (`sock_create`, `sock_connect`, `sock_recv`, …) and their
-chained create→connect→send paths follow a simple contract: they return the
-requested value on success or raise on failure. There is no partial-success
-tuple, hint-honour flag, or “try again another way” fallback inside
-`ProactorIOManager` — if connect or initial send was requested and the chain
-completes, the caller gets a connected socket (and any initial data was flushed);
-otherwise an exception propagates from `wait_operation()`.
+Blocking IO helpers (`sock_create`, `sock_connect`, `sock_recv`, …) either
+return the requested value or raise. There is no partial-success tuple,
+hint-honour flag, or internal fallback inside `ProactorIOManager`.
+
+In the create→connect→send chain, only the root ``create_socket`` operation
+has a non-``None`` success result: the ``socket.socket``. Connect and send legs
+complete with ``None``; their work is done when the chain advances without
+error. ``sock_create(connect_to=…)`` blocks on that root and returns the
+socket (already connected, initial data flushed when requested).
+``sock_connect()`` returns ``None``.
 
 ### `proactor.connect` and `AF_UNIX`
 

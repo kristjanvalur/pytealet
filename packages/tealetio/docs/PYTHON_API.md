@@ -92,10 +92,10 @@ sockets.
 
 `create_socket(family, type, proto=0, *, flags=0, connect_to=None,
 initial_data=None)` creates a scheduler-contract socket (non-blocking,
-close-on-exec). On success it completes with the socket. Optional
-``connect_to`` and ``initial_data`` are handled by ``ProactorIOManager`` via
-operation chaining (create → connect → send), not as proactor hints backends
-may ignore. ``UringProactor`` uses ``uring_api.Ring.submit_socket()`` when
+close-on-exec). On success it completes with the socket — the only non-``None``
+result in a create→connect→send chain; connect and send legs complete with
+``None``. Optional ``connect_to`` and ``initial_data`` are handled by
+``ProactorIOManager`` via operation chaining (create → connect → send). ``UringProactor`` uses ``uring_api.Ring.submit_socket()`` when
 ``IORING_OP_SOCKET`` is available. Extra ``flags`` are ORed with non-blocking
 and close-on-exec on the uring socket path. ``SelectorProactor`` ignores
 ``flags`` beyond the scheduler defaults from ``configure_scheduler_socket()``

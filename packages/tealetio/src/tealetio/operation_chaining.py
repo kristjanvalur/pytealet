@@ -257,7 +257,11 @@ def create_socket_chain_factory(
     *,
     on_socket: Callable[[socket.socket], None] | None = None,
 ) -> OperationFactory:
-    """Build create → connect → send for ``ProactorIOManager.sock_create``."""
+    """Build create → connect → send for ``ProactorIOManager.sock_create``.
+
+    Only the root ``create_socket`` operation returns the socket; connect and
+    send legs complete with ``None``.
+    """
 
     def next_operation(
         parent: Operation[socket.socket],
