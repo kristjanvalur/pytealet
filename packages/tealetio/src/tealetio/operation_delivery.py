@@ -35,17 +35,16 @@ def double_recv_delivery(size: int) -> DeliveryHandler:
 
         def second_delivery(
             _proactor: _RecvSubmitProactor,
-            second_operation: Operation[bytes],
+            _second_operation: Operation[bytes],
             second_result: object,
             second_exception: BaseException | None,
         ) -> None:
+            # Inner recv legs need not call complete(); backends release the fd
+            # or uring entry before deliver() runs on the worker thread.
             if second_exception is not None:
-                second_operation.complete_error(second_exception)
                 operation.complete_error(second_exception)
                 return
-            second_bytes = cast(bytes, second_result)
-            second_operation.complete(second_bytes)
-            operation.complete(first + second_bytes)
+            operation.complete(first + cast(bytes, second_result))
 
         proactor.recv(sock, size, delivery=second_delivery)
 
