@@ -43,13 +43,6 @@ class _MockProactor:
         operation._finish(result=mask)
         return operation
 
-    def send(self, sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
-        del progress
-        self.send_calls.append((sock, data))
-        operation = Operation[None](kind="send", fileobj=sock.fileno())
-        operation._finish(result=None)
-        return operation
-
     def openat(self, path: str, flags: int, mode: int) -> Operation[int]:
         self.openat_calls.append((path, flags, mode))
         operation = Operation[int](kind="openat", fileobj=-1)
@@ -102,10 +95,12 @@ class _MockProactor:
         self,
         sock: socket.socket,
         data: Any,
+        progress: Any = None,
         *,
         operation_factory: Any | None = None,
     ) -> Operation[None]:
-        del data
+        del progress
+        self.send_calls.append((sock, data))
         if operation_factory is None:
             operation = Operation[None](kind="send", fileobj=sock)
             operation._finish(result=None)

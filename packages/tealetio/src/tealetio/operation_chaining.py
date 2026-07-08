@@ -46,10 +46,13 @@ def _chain_next_operation(
     *,
     link_result: Any | None = None,
 ) -> None:
-    if next_operation is not None:
-        next_operation(parent, link_result)
-        return
-    parent.advance()
+    try:
+        if next_operation is not None:
+            next_operation(parent, link_result)
+            return
+        parent.advance(result=link_result)
+    except BaseException as exc:
+        parent.advance(exception=exc)
 
 
 def _close_socket(sock: socket.socket) -> None:
@@ -74,18 +77,18 @@ def chained_fdclose_link(
     the root success result via ``shape_success`` before ``advance_continue()``.
     """
 
-    sock_ref: list[socket.socket | None] = [None]
+    sock: socket.socket | None = None
 
     def advance(
         advance_operation: Operation[Any],
         advance_result: object,
         advance_exception: BaseException | None,
     ) -> None:
-        sock = sock_ref[0]
+        nonlocal sock
         if advance_exception is not None:
             if sock is not None:
                 _close_socket(sock)
-                sock_ref[0] = None
+                sock = None
             advance_operation.advance_continue(exception=advance_exception)
             return
         if shape_success is not None:
@@ -100,24 +103,22 @@ def chained_fdclose_link(
         result: object,
         exception: BaseException | None,
     ) -> None:
+        nonlocal sock
         if exception is not None:
             operation.advance(exception=exception)
             return
-        sock = cast(socket.socket, result)
+        delivered = cast(socket.socket, result)
         if operation.done():
-            _close_socket(sock)
+            _close_socket(delivered)
             return
         if on_socket is not None:
-            on_socket(sock)
-        sock_ref[0] = sock
-        try:
-            _chain_next_operation(
-                operation,
-                next_operation,
-                link_result=sock,
-            )
-        except BaseException as exc:
-            operation.advance(exception=exc)
+            on_socket(delivered)
+        sock = delivered
+        _chain_next_operation(
+            operation,
+            next_operation,
+            link_result=delivered,
+        )
 
     return operation_factory(delivery=delivery, advance_hook=advance)
 
@@ -137,7 +138,7 @@ def chained_connect_link(
         if exception is not None:
             operation.advance(exception=exception)
             return
-        _chain_next_operation(operation, next_operation)
+        _chain_next_operation(operation, next_operation, link_result=result)
 
     return delivery
 
@@ -153,7 +154,7 @@ def chained_send_link(
     def start_send_link(parent: Operation[Any]) -> Operation[None] | None:
         payload = memoryview(data) if data is not None else None
         if payload is None or not payload:
-            _chain_next_operation(parent, next_operation)
+            _chain_next_operation(parent, next_operation, link_result=None)
             return None
 
         sock = cast(socket.socket, parent.fileobj)
@@ -168,9 +169,9 @@ def chained_send_link(
                 send_operation.advance(exception=send_exception)
                 return
             if next_operation is not None:
-                _chain_next_operation(parent, next_operation)
+                _chain_next_operation(parent, next_operation, link_result=_result)
                 return
-            send_operation.advance()
+            send_operation.advance(result=_result)
 
         return proactor.send(
             sock,

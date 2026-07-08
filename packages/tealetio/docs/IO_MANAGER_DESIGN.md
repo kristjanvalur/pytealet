@@ -158,6 +158,49 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 `StreamServer` lifecycle stays in `streams`; it needs `scheduler.io` (for
 `accept_many`), `spawn`, and `call_soon_threadsafe`.
 
+## Operation chaining
+
+Multi-leg socket work (create → connect → send, connect → send) is built in
+`operation_chaining.py`, not inside the proactor. The proactor only accepts an
+optional `operation_factory` on `create_socket` and `connect`; chaining policy
+lives on `ProactorIOManager`.
+
+```text
+ProactorIOManager.sock_create(connect_to=…)
+        │
+        ▼
+create_socket_chain_factory(proactor, …)   ← chained_fdclose_link root
+        │
+        └─ connect_send_chain_factory(proactor, initial, parent=root)
+               └─ chained_send_link tail
+```
+
+Delivery handlers run on the worker thread when a backend completion arrives.
+They start the next leg (`proactor.connect`, `proactor.send`) and propagate
+backend failures via `operation.advance(exception=…)`.
+
+Child successes and errors bubble through `Operation.advance()`, which walks the
+parent chain until it finds an advance hook. Hooks own link-local work: close a
+created socket on error, shape the root result on success, then call
+`advance_continue()`.
+
+Chain factories take `proactor` as their first argument and close over it in
+handlers. The proactor is not threaded through `advance()`.
+
+Production chains today:
+
+| Entry point | Root factory | Connect → send leg |
+|-------------|--------------|-------------------|
+| `sock_connect(…, initial=…)` | `connect_send_chain_factory` | same factory |
+| `sock_create(…, connect_to=…)` | `create_socket_chain_factory` + `chained_fdclose_link` | `connect_send_chain_factory` as child |
+
+`chained_connect_link` is a composable building block used in tests; production
+paths use `connect_send_chain_factory` directly.
+
+Intermediate legs are not awaited by the scheduler task. Only the root
+`Operation` is passed to `wait_operation`; child submissions happen from
+delivery callbacks as completions arrive.
+
 ## Capability gate
 
 | Concern | asyncio | tealetio (proactor) |
@@ -208,6 +251,7 @@ static typing after `ProactorScheduler` narrowing.
 ## References
 
 - `packages/tealetio/src/tealetio/io_manager.py` — `ProactorIOManager`
+- `packages/tealetio/src/tealetio/operation_chaining.py` — chain factories and link handlers
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `OperationWaiter`
 - `packages/tealetio/src/tealetio/streams.py` — streams API

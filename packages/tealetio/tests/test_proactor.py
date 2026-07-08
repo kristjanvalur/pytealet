@@ -4759,47 +4759,27 @@ class TestUringProactor:
             proactor.close()
 
     def test_sock_create_cancel_during_pending_connect(self) -> None:
+        from tealetio.operation_chaining import create_socket_chain_factory
+
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         try:
-            operation_ref: list[Operation[Any]] = []
-
-            def exercise() -> tuple[socket.socket, bool, bool]:
-                scheduler = SyncProactorScheduler(lambda: proactor)
-                set_scheduler(scheduler)
-                try:
-                    return scheduler.run_until_complete(
-                        scheduler.spawn(
-                            lambda: scheduler.io.sock_create(
-                                socket.AF_INET,
-                                socket.SOCK_STREAM,
-                                connect_to=("127.0.0.1", 9),
-                            )
-                        )
-                    )
-                finally:
-                    scheduler.close()
-
-            task = threading.Thread(target=exercise)
-            task.start()
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                operation_factory=create_socket_chain_factory(
+                    proactor,
+                    ("127.0.0.1", 9),
+                    None,
+                ),
+            )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
             proactor.ring.complete_socket()
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
-            root = operation_ref[0] if operation_ref else None
-            for _ in range(50):
-                proactor.wait(proactor.get_time() + 0.01)
-                pending = [
-                    op
-                    for op in (
-                        proactor._entries.values()  # type: ignore[attr-defined]
-                        if hasattr(proactor, "_entries")
-                        else []
-                    )
-                ]
-                del pending
-            task.join(timeout=0.1)
+            operation.cancel()
+            assert operation.cancelled() is True
             proactor.ring.complete_connect()
             proactor.wait(proactor.get_time() + 0.05)
-            task.join(timeout=2.0)
+            assert operation.cancelled() is True
         finally:
             proactor.close()
 
