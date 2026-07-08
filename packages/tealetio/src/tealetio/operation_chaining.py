@@ -101,11 +101,7 @@ def chained_fdclose_link(
             advance_operation.advance_continue(exception=advance_exception)
             return
         if shape_success is not None:
-            if sock is None:
-                advance_operation.advance_continue(
-                    exception=RuntimeError("chained fd-close missing socket on success path"),
-                )
-                return
+            assert sock is not None
             advance_operation.advance_continue(result=shape_success(sock))
             return
         advance_operation.advance_continue(result=advance_result)
