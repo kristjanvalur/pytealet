@@ -796,26 +796,36 @@ class TestStreamsPoC:
             if server is not None:
                 server.close()
 
-    def test_sock_connect_initial_send_flushes_when_backend_ignores_hint(
+    def test_sock_connect_passes_connect_send_factory_when_initial_provided(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from tealetio.operation_delivery import connect_initial_send_factory
+
         io = scheduler.io
         client, _peer = socket.socketpair()
-        sent: list[bytes] = []
+        captured: list[object | None] = []
 
-        def fake_connect(sock: socket.socket, address, *, initial=None):
-            del sock, address, initial
+        def fake_connect(sock: socket.socket, address, *, operation_factory=None):
+            del sock, address
+            captured.append(operation_factory)
             operation = Operation[None](kind="connect", fileobj=client)
             operation._finish(result=None)
             return operation
 
         monkeypatch.setattr(scheduler.proactor, "connect", fake_connect)
-        monkeypatch.setattr(io, "sock_sendall", lambda _sock, data: sent.append(bytes(data)))
 
         try:
             client.setblocking(False)
             io.sock_connect(client, ("127.0.0.1", 0), initial=b"helloworld")
-            assert sent == [b"helloworld"]
+            assert len(captured) == 1
+            factory = captured[0]
+            assert factory is not None
+            chained = factory("connect", client)
+            expected = connect_initial_send_factory(b"helloworld")("connect", client)
+            assert chained._delivery is not None
+            assert chained._advance_hook is not None
+            assert expected._delivery is not None
+            assert expected._advance_hook is not None
         finally:
             client.close()
 

@@ -35,7 +35,7 @@ from .recv_iter import (
     _RecvManyResume,
 )
 from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
-from .operation_delivery import connect_initial_send_factory, create_socket_delivery, operation_factory
+from .operation_delivery import create_socket_delivery, operation_factory
 from .operations import ContinuousOperation, ContinuousStepResult, Operation, OperationFactory
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
@@ -411,16 +411,13 @@ class Proactor(Protocol):
         sock: socket.socket,
         address: Any,
         *,
-        initial: SocketSendBuffer | None = None,
         operation_factory: OperationFactory | None = None,
-    ) -> Operation[None] | Operation[bool]:
+    ) -> Operation[None]:
         """Connect a socket.
 
-        When ``initial`` is provided the operation completes with ``True`` when
-        connect-time send was performed (including an empty buffer). Backends
-        that ignore ``initial`` complete with a falsy result like a plain
-        connect. A send failure after a successful connect fails the operation;
-        the caller owns the socket.
+        ``operation_factory`` may install delivery and advance hooks for
+        chained follow-on work (for example connect-time send via
+        ``ProactorIOManager.sock_connect(..., initial=...)``).
         """
 
         ...
@@ -1097,15 +1094,9 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         address: Any,
         *,
-        initial: SocketSendBuffer | None = None,
-    ) -> Operation[None] | Operation[bool]:
-        """Submit a non-blocking socket connect operation.
-
-        When ``initial`` is provided, ``UringProactor`` may chain connect-time
-        send. ``SelectorProactor`` connects only and completes with ``False``;
-        use ``ProactorIOManager.sock_connect()`` or ``sock_create()`` when you
-        need connect-time data on any backend.
-        """
+        operation_factory: OperationFactory | None = None,
+    ) -> Operation[None]:
+        """Submit a non-blocking socket connect operation."""
 
         started = False
 
@@ -1129,22 +1120,15 @@ class SelectorProactor(ProactorBase):
                 raise BlockingIOError(err, errno.errorcode.get(err, "connect in progress"))
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
-        if initial is None:
-            operation = Operation[None](kind="connect", fileobj=sock)
+        operation = cast(
+            Operation[None],
+            _spawn_operation("connect", sock, operation_factory=operation_factory),
+        )
 
-            def attempt() -> None:
-                finish_connect()
-
-            self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
-            return operation
-
-        operation = Operation[bool](kind="connect", fileobj=sock)
-
-        def attempt_with_initial() -> bool:
+        def attempt() -> None:
             finish_connect()
-            return False
 
-        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt_with_initial)
+        self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
     def recv_many(
@@ -2460,8 +2444,8 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         address: Any,
         *,
-        initial: SocketSendBuffer | None = None,
-    ) -> Operation[None] | Operation[bool]:
+        operation_factory: OperationFactory | None = None,
+    ) -> Operation[None]:
         def finish_connect() -> None:
             sock.setblocking(True)
             try:
@@ -2469,21 +2453,15 @@ class UringProactor(ProactorBase):
             finally:
                 sock.setblocking(False)
 
-        if initial is None:
-            operation = Operation[None](kind="connect", fileobj=sock)
-            try:
-                finish_connect()
-                operation._finish(result=None)
-            except OSError as exc:
-                operation._finish(exception=exc)
-            return operation
-
-        operation = Operation[bool](kind="connect", fileobj=sock)
+        operation = cast(
+            Operation[None],
+            _spawn_operation("connect", sock, operation_factory=operation_factory),
+        )
         try:
             finish_connect()
-            operation._finish(result=False)
+            operation.deliver(self, result=None)
         except OSError as exc:
-            operation._finish(exception=exc)
+            operation.deliver(self, exception=exc)
         return operation
 
     def connect(
@@ -2491,22 +2469,15 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         address: Any,
         *,
-        initial: SocketSendBuffer | None = None,
         operation_factory: OperationFactory | None = None,
-    ) -> Operation[None] | Operation[bool]:
+    ) -> Operation[None]:
         """Submit a non-blocking socket connect operation."""
 
-        if initial is not None and operation_factory is not None:
-            raise ValueError("cannot pass both initial and operation_factory")
-
         if sock.family == socket.AF_UNIX:
-            return self._sync_unix_connect(sock, address, initial=initial)
-
-        if operation_factory is None and initial is not None:
-            operation_factory = connect_initial_send_factory(initial)
+            return self._sync_unix_connect(sock, address, operation_factory=operation_factory)
 
         operation = cast(
-            Operation[None] | Operation[bool],
+            Operation[None],
             _spawn_operation("connect", sock, operation_factory=operation_factory),
         )
         entry = self._uring_entry(

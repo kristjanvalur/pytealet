@@ -80,9 +80,9 @@ class _MockProactor:
         sock: socket.socket,
         address: Any,
         *,
-        initial: Any | None = None,
+        operation_factory: Any | None = None,
     ) -> Operation[None]:
-        del sock, address, initial
+        del sock, address, operation_factory
         operation = Operation[None](kind="connect", fileobj=None)
         operation._finish(result=None)
         return operation

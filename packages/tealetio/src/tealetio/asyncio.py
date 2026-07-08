@@ -291,7 +291,7 @@ class ForwardingProactor:
     def connect(self, sock: socket.socket, address: Any) -> _asyncio.Future[None]:
         """Connect a socket through the host proactor."""
 
-        # Plain connect never passes ``initial``; the bool result variant is tealetio-only.
+        # Plain connect never passes an operation factory; connect-time send is IOManager-only.
         operation = cast(Operation[None], self._proactor.connect(sock, address))
         return self._future_from_operation(operation)
 

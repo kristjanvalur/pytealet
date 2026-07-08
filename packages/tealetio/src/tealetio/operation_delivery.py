@@ -90,41 +90,6 @@ def _close_socket(sock: socket.socket) -> None:
         pass
 
 
-def _start_send_link(
-    proactor: _SendSubmitProactor,
-    parent: Operation[Any],
-    data: SocketSendBuffer | None,
-    *,
-    next_operation: NextOperation | None = None,
-) -> Operation[None] | None:
-    payload = memoryview(data) if data is not None else None
-    if payload is None or not payload:
-        _chain_next_operation(proactor, parent, next_operation)
-        return None
-
-    sock = cast(socket.socket, parent.fileobj)
-
-    def send_delivery(
-        _proactor: _SendSubmitProactor,
-        send_operation: Operation[None],
-        _result: object,
-        send_exception: BaseException | None,
-    ) -> None:
-        if send_exception is not None:
-            send_operation.advance(proactor, exception=send_exception)
-            return
-        if next_operation is not None:
-            _chain_next_operation(proactor, parent, next_operation)
-            return
-        send_operation.advance(proactor)
-
-    return proactor.send(
-        sock,
-        payload,
-        operation_factory=operation_factory(parent=parent, delivery=send_delivery),
-    )
-
-
 def chained_fdclose_link(
     *,
     fail: _DeliveryFail,
@@ -230,6 +195,37 @@ def chained_send_link(
 ) -> DeliveryHandler:
     """Append a sendall leg after a parent socket operation succeeds."""
 
+    def start_send_link(
+        proactor: _SendSubmitProactor,
+        parent: Operation[Any],
+    ) -> Operation[None] | None:
+        payload = memoryview(data) if data is not None else None
+        if payload is None or not payload:
+            _chain_next_operation(proactor, parent, next_operation)
+            return None
+
+        sock = cast(socket.socket, parent.fileobj)
+
+        def send_delivery(
+            _proactor: _SendSubmitProactor,
+            send_operation: Operation[None],
+            _result: object,
+            send_exception: BaseException | None,
+        ) -> None:
+            if send_exception is not None:
+                send_operation.advance(proactor, exception=send_exception)
+                return
+            if next_operation is not None:
+                _chain_next_operation(proactor, parent, next_operation)
+                return
+            send_operation.advance(proactor)
+
+        return proactor.send(
+            sock,
+            payload,
+            operation_factory=operation_factory(parent=parent, delivery=send_delivery),
+        )
+
     def delivery(
         proactor: _SendSubmitProactor,
         operation: Operation[Any],
@@ -239,18 +235,13 @@ def chained_send_link(
         if exception is not None:
             operation.advance(proactor, exception=exception)
             return
-        _start_send_link(
-            proactor,
-            operation,
-            data,
-            next_operation=next_operation,
-        )
+        start_send_link(proactor, operation)
 
     return delivery
 
 
 def connect_initial_send_factory(initial: SocketSendBuffer) -> OperationFactory:
-    """Factory for ``connect(..., initial=...)`` on backends that support it."""
+    """Factory for ``ProactorIOManager.sock_connect(..., initial=...)``."""
 
     def advance(
         advance_proactor: object,

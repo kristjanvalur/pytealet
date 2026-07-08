@@ -955,7 +955,7 @@ def test_operation_advance_hook_uses_advance_continue() -> None:
 
 
 def test_chained_send_link_next_operation_composes() -> None:
-    from tealetio.operation_delivery import _start_send_link, chained_send_link
+    from tealetio.operation_delivery import chained_send_link
 
     sent: list[bytes] = []
 
@@ -982,11 +982,12 @@ def test_chained_send_link_next_operation_composes() -> None:
     try:
 
         def second_send(
-            _proactor: _SendProactor,
+            proactor: _SendProactor,
             parent: Operation[None],
             _link_result: object | None = None,
         ) -> Operation[None] | None:
-            return _start_send_link(_proactor, parent, b"second")
+            chained_send_link(b"second")(proactor, parent, None, None)
+            return None
 
         delivery = chained_send_link(b"first", next_operation=second_send)
         delivery(_SendProactor(), operation, None, None)
@@ -997,7 +998,7 @@ def test_chained_send_link_next_operation_composes() -> None:
 
 
 def test_chained_connect_link_next_operation_composes_with_send() -> None:
-    from tealetio.operation_delivery import _start_send_link, chained_connect_link
+    from tealetio.operation_delivery import chained_connect_link, chained_send_link
 
     sent: list[bytes] = []
 
@@ -1041,7 +1042,8 @@ def test_chained_connect_link_next_operation_composes_with_send() -> None:
             parent: Operation[bool],
             _link_result: object | None = None,
         ) -> Operation[None] | None:
-            return _start_send_link(proactor, parent, b"hello")
+            chained_send_link(b"hello")(proactor, parent, None, None)
+            return None
 
         delivery = chained_connect_link(next_operation=send_next)
         delivery(_SendProactor(), operation, None, None)
@@ -1477,20 +1479,29 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_connect_with_initial_ignores_payload_on_selector(self):
+    def test_connect_with_send_factory_chains_on_selector(self):
+        from tealetio.operation_delivery import connect_initial_send_factory
+
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         accepted: socket.socket | None = None
+        received = bytearray()
         try:
             server.setblocking(False)
             client.setblocking(False)
             server.bind(("127.0.0.1", 0))
             server.listen()
-            operation = proactor.connect(client, server.getsockname(), initial=b"hello")
+            operation = proactor.connect(
+                client,
+                server.getsockname(),
+                operation_factory=connect_initial_send_factory(b"hello"),
+            )
             _wait_until_done(proactor, operation)
             accepted, _address = server.accept()
-            assert operation.result() is False
+            received += accepted.recv(16)
+            assert operation.result() is True
+            assert bytes(received) == b"hello"
         finally:
             if accepted is not None:
                 accepted.close()
@@ -4674,11 +4685,17 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_initial_send_completes_on_uring(self) -> None:
+        from tealetio.operation_delivery import connect_initial_send_factory
+
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
         try:
             sock.setblocking(False)
-            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"hello")
+            operation = proactor.connect(
+                sock,
+                ("127.0.0.1", 9),
+                operation_factory=connect_initial_send_factory(b"hello"),
+            )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
@@ -4689,11 +4706,17 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_empty_initial_returns_zero_without_send(self) -> None:
+        from tealetio.operation_delivery import connect_initial_send_factory
+
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
         try:
             sock.setblocking(False)
-            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"")
+            operation = proactor.connect(
+                sock,
+                ("127.0.0.1", 9),
+                operation_factory=connect_initial_send_factory(b""),
+            )
             proactor.wait(proactor.get_time() + 0.05)
             assert operation.result() is True
             assert proactor.ring.submitted_stream_sends() == []
@@ -4702,11 +4725,17 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_initial_sendall_drains_partial_chunks(self) -> None:
+        from tealetio.operation_delivery import connect_initial_send_factory
+
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
         try:
             sock.setblocking(False)
-            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"helloworld")
+            operation = proactor.connect(
+                sock,
+                ("127.0.0.1", 9),
+                operation_factory=connect_initial_send_factory(b"helloworld"),
+            )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send(4)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
@@ -4722,11 +4751,17 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_initial_cancel_before_send_arms(self) -> None:
+        from tealetio.operation_delivery import connect_initial_send_factory
+
         proactor = UringProactor(ring_factory=_DeferredConnectUringRing)
         sock = socket.socket()
         try:
             sock.setblocking(False)
-            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"hello")
+            operation = proactor.connect(
+                sock,
+                ("127.0.0.1", 9),
+                operation_factory=connect_initial_send_factory(b"hello"),
+            )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
             operation.cancel()
             assert operation.cancelled() is True
@@ -4739,11 +4774,17 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_initial_cancel_during_pending_send(self) -> None:
+        from tealetio.operation_delivery import connect_initial_send_factory
+
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
         try:
             sock.setblocking(False)
-            operation = proactor.connect(sock, ("127.0.0.1", 9), initial=b"hello")
+            operation = proactor.connect(
+                sock,
+                ("127.0.0.1", 9),
+                operation_factory=connect_initial_send_factory(b"hello"),
+            )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             operation.cancel()
             assert operation.cancelled() is True

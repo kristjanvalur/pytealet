@@ -315,10 +315,15 @@ class ProactorIOManager:
         if initial is None:
             self.wait_operation(self._proactor.connect(sock, address))
             return
-        sent = self.wait_operation(self._proactor.connect(sock, address, initial=initial))
-        if sent:
-            return
-        self.sock_sendall(sock, initial)
+        from .operation_delivery import connect_initial_send_factory
+
+        self.wait_operation(
+            self._proactor.connect(
+                sock,
+                address,
+                operation_factory=connect_initial_send_factory(initial),
+            )
+        )
 
     def sock_create(
         self,
