@@ -39,16 +39,6 @@ def operation_factory(
     return factory
 
 
-class _RecvSubmitProactor(Protocol):
-    def recv(
-        self,
-        sock: socket.socket,
-        n: int,
-        *,
-        operation_factory: OperationFactory | None = None,
-    ) -> Operation[bytes]: ...
-
-
 class _SendSubmitProactor(Protocol):
     def send(
         self,
@@ -247,50 +237,3 @@ def connect_initial_send_factory(initial: SocketSendBuffer) -> OperationFactory:
         delivery=chained_send_link(initial),
         advance_hook=advance,
     )
-
-
-def double_recv_delivery(size: int) -> DeliveryHandler:
-    """Chain two consecutive ``recv`` operations into one ``bytes`` result."""
-
-    def delivery(
-        proactor: _RecvSubmitProactor,
-        operation: Operation[bytes],
-        result: object,
-        exception: BaseException | None,
-    ) -> None:
-        if exception is not None:
-            if not operation.done():
-                operation.complete_error(exception)
-            return
-        first = cast(bytes, result)
-        sock = cast(socket.socket, operation.fileobj)
-
-        def second_delivery(
-            _proactor: _RecvSubmitProactor,
-            _second_operation: Operation[bytes],
-            second_result: object,
-            second_exception: BaseException | None,
-        ) -> None:
-            if operation.done():
-                return
-            if second_exception is not None:
-                operation.complete_error(second_exception)
-                return
-            operation.complete(first + cast(bytes, second_result))
-
-        proactor.recv(
-            sock,
-            size,
-            operation_factory=operation_factory(
-                parent=operation,
-                delivery=second_delivery,
-            ),
-        )
-
-    return delivery
-
-
-def double_recv_factory(size: int) -> OperationFactory:
-    """Factory for the root leg of a double ``recv`` chain."""
-
-    return operation_factory(delivery=double_recv_delivery(size))
