@@ -32,15 +32,21 @@ def double_recv_delivery(size: int) -> DeliveryHandler:
             return
         first = cast(bytes, result)
         sock = cast(socket.socket, operation.fileobj)
-        second = proactor.recv(sock, size)
 
-        def on_second(second_operation: Operation[bytes]) -> None:
-            second_exc = second_operation.exception()
-            if second_exc is not None:
-                operation.complete_error(second_exc)
-            else:
-                operation.complete(first + second_operation.result())
+        def second_delivery(
+            _proactor: _RecvSubmitProactor,
+            second_operation: Operation[bytes],
+            second_result: object,
+            second_exception: BaseException | None,
+        ) -> None:
+            if second_exception is not None:
+                second_operation.complete_error(second_exception)
+                operation.complete_error(second_exception)
+                return
+            second_bytes = cast(bytes, second_result)
+            second_operation.complete(second_bytes)
+            operation.complete(first + second_bytes)
 
-        second.add_done_callback(on_second)
+        proactor.recv(sock, size, delivery=second_delivery)
 
     return delivery
