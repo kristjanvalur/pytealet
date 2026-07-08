@@ -226,15 +226,23 @@ class Operation(Generic[T]):
 
         op: Operation[Any] | None = self
         while op is not None:
-            if op._done:
-                return
-            handler = op._advance_hook
+            handler: AdvanceHook | None = None
+            parent: Operation[Any] | None = None
+            finish_here = False
+            with op._lock:
+                if op._done:
+                    return
+                handler = op._advance_hook
+                if handler is not None:
+                    op._advance_hook = None
+                elif op._chain_parent is None:
+                    finish_here = True
+                else:
+                    parent = op._chain_parent
             if handler is not None:
-                op._advance_hook = None
                 handler(op, result, exception)
                 return
-            parent = op._chain_parent
-            if parent is None:
+            if finish_here:
                 if exception is not None:
                     op._finish(
                         exception=exception,
