@@ -100,14 +100,16 @@ may ignore. ``UringProactor`` uses ``uring_api.Ring.submit_socket()`` when
 and close-on-exec on the uring socket path. ``SelectorProactor`` ignores
 ``flags`` beyond the scheduler defaults from ``configure_scheduler_socket()``
 (non-blocking, close-on-exec). ``initial_data`` without ``connect_to`` raises
-``ValueError``. ``scheduler.io.sock_create()`` blocks on the chained operation
-and returns a connected socket when ``connect_to`` is set. ``open_connection(…,
+``ValueError``. ``scheduler.io.sock_create()`` blocks on the chained operation and either
+returns the socket or raises. When ``connect_to`` is set the returned socket is
+already connected (and any ``initial_data`` was flushed). ``open_connection(…,
 initial_send=…)`` passes ``connect_to`` and ``initial_data`` through this path
 for TCP and Unix ``path=`` connects.
 
-`connect(sock, address)` completes with ``None``. Connect-time send is wired
-through ``ProactorIOManager.sock_connect(..., initial=...)`` and
-``operation_factory`` chaining, not a separate proactor ``initial`` parameter.
+`connect(sock, address)` completes with ``None`` on success or raises on
+failure. Connect-time send is wired through
+``ProactorIOManager.sock_connect(..., initial=...)`` and ``operation_factory``
+chaining, not a separate proactor ``initial`` parameter.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It

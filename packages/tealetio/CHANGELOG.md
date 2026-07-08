@@ -120,9 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SelectorProactor` otherwise.
 - `UringProactor.create_socket()` submits ``IORING_OP_SOCKET`` for inet and
   ``AF_UNIX`` when probed, ORing ``SOCK_NONBLOCK | SOCK_CLOEXEC`` into the
-  socket ``type`` (matching ``socket(2)``). Unix ``connect_to`` / ``initial_data``
-  hints still defer to ``io_manager.sock_connect()`` because uring
-  ``submit_connect()`` is inet-only today.
+  socket ``type`` (matching ``socket(2)``). Unix connect legs use
+  ``ProactorBase._sync_unix_connect()`` because uring ``submit_connect()`` is
+  inet-only today.
 - `ProactorIOManager` holds a direct scheduler reference; ``wait_operation()``
   always parks the current tealet through ``ThreadsafeEvent`` and is torn down
   from ``ProactorScheduler.close()``.

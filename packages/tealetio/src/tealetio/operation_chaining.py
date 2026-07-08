@@ -219,7 +219,7 @@ def connect_send_chain_factory(
 
     Delivery starts the send leg on connect success and propagates backend
     failures via ``advance()``. As a chain root (``parent`` omitted), installs
-    an advance hook that completes with ``True``. As a child, omits the hook
+    an advance hook that completes with ``None``. As a child, omits the hook
     so successes and errors bubble to the parent link via ``advance()``.
     """
 

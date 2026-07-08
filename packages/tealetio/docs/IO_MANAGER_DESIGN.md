@@ -197,6 +197,16 @@ Intermediate legs are not awaited by the scheduler task. Only the root
 `Operation` is passed to `wait_operation`; child submissions happen from
 delivery callbacks as completions arrive.
 
+### Succeed or raise
+
+Blocking IO helpers (`sock_create`, `sock_connect`, `sock_recv`, …) and their
+chained create→connect→send paths follow a simple contract: they return the
+requested value on success or raise on failure. There is no partial-success
+tuple, hint-honour flag, or “try again another way” fallback inside
+`ProactorIOManager` — if connect or initial send was requested and the chain
+completes, the caller gets a connected socket (and any initial data was flushed);
+otherwise an exception propagates from `wait_operation()`.
+
 ### `proactor.connect` and `AF_UNIX`
 
 `ProactorIOManager` always chains through `proactor.connect` (including the
