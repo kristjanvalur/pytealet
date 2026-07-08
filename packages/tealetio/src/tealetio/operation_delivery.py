@@ -12,6 +12,8 @@ from .operations import DeliveryHandler, Operation
 CreateSocketResult = tuple[socket.socket, bool, bool]
 _DeliverySucceed = Callable[[], None]
 _DeliveryFail = Callable[[BaseException], None]
+# Factories must call ``child.set_chain_parent(parent)`` (or pass ``chain_parent``
+# through the proactor submit helper) before the child operation can complete.
 NextOperation = Callable[[Any, Operation[Any], Any | None], Operation[Any] | None]
 
 
@@ -57,7 +59,6 @@ def _chain_next_operation(
     if next_operation is not None:
         child = next_operation(proactor, parent, link_result)
         if child is not None:
-            child.set_chain_parent(parent)
             parent.set_cancel_forward(child)
         return
     if succeed is not None:
