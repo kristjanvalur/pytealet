@@ -1425,7 +1425,7 @@ class TestSelectorProactor:
                 assert entry.reader.step is not None
             operation.cancel()
             assert operation.cancelled() is True
-            assert operation._cancel is None
+            assert operation._cancel_hook is None
             with proactor._lock:
                 assert fd not in proactor._fd_operations
         finally:
@@ -2870,7 +2870,7 @@ class TestUringProactor:
 
             assert operation.result() == b"hello"
             assert entry.completion is None
-            assert operation._cancel is None
+            assert operation._cancel_hook is None
         finally:
             reader.close()
             writer.close()
@@ -2890,7 +2890,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: operation.done())
 
             assert entry.completion is None
-            assert operation._cancel is None
+            assert operation._cancel_hook is None
         finally:
             reader.close()
             writer.close()

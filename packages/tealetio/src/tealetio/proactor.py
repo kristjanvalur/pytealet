@@ -2350,7 +2350,7 @@ class UringProactor(ProactorBase):
         operation: ContinuousOperation[AcceptManyResult],
         pending_recv: list[_UringEntry],
     ) -> None:
-        backend_cancel = operation._cancel
+        backend_cancel = operation._cancel_hook
         if backend_cancel is None:
             return
 
@@ -3086,7 +3086,7 @@ class UringProactor(ProactorBase):
             entry.active = False
             self._pending_tokens.pop()
         entry.completion = None
-        # Break operation._cancel -> entry closure cycles once the operation is
+        # Break operation._cancel_hook -> entry closure cycles once the operation is
         # finished. Mid-stream legs (ENOBUFS resume, sendall chunking) rebind or
         # keep the hook while the operation is still live.
         if entry.operation.done():

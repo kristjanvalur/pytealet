@@ -47,7 +47,7 @@ class Operation(Generic[T]):
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] | None = []
-        self._cancel: _CancelHook | None = None
+        self._cancel_hook: _CancelHook | None = None
         self._cancel_forward: Operation[Any] | None = None
 
     def done(self) -> bool:
@@ -63,7 +63,7 @@ class Operation(Generic[T]):
     def set_cancel(self, cancel: _CancelHook | None) -> None:
         """Install or clear the backend cancel hook for this operation."""
 
-        self._cancel = cancel
+        self._cancel_hook = cancel
 
     def set_cancel_forward(self, operation: "Operation[Any] | None") -> None:
         """Forward ``cancel()`` to a chained child operation."""
@@ -76,11 +76,11 @@ class Operation(Generic[T]):
         if self._done:
             return
         forward = self._cancel_forward
-        if forward is not None and not forward.done():
+        if forward is not None:
             forward.cancel()
-        cancel = self._cancel
-        if cancel is not None:
-            cancel()
+        cancel_hook = self._cancel_hook
+        if cancel_hook is not None:
+            cancel_hook()
         if not self._done:
             self._set_cancelled()
 
@@ -190,7 +190,7 @@ class Operation(Generic[T]):
             self._exception = exception
             self._cancelled = cancelled
             self._done = True
-            self._cancel = None
+            self._cancel_hook = None
             self._cancel_forward = None
             callbacks = self._callbacks
             self._callbacks = None
