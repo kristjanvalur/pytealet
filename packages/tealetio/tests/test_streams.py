@@ -799,7 +799,7 @@ class TestStreamsPoC:
     def test_sock_connect_passes_connect_send_factory_when_initial_provided(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
+        from tealetio.operation_chaining import connect_initial_send_factory
 
         io = scheduler.io
         client, _peer = socket.socketpair()
@@ -821,7 +821,10 @@ class TestStreamsPoC:
             factory = captured[0]
             assert factory is not None
             chained = factory("connect", client)
-            expected = connect_initial_send_factory(b"helloworld")("connect", client)
+            expected = connect_initial_send_factory(scheduler.proactor, b"helloworld")(
+                "connect",
+                client,
+            )
             assert chained._delivery is not None
             assert chained._advance_hook is not None
             assert expected._delivery is not None

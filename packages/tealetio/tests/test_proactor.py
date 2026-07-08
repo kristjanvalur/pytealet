@@ -799,7 +799,7 @@ def test_operation_deliver_completes_without_handler() -> None:
 
 def test_operation_cancel_forwards_to_chained_child() -> None:
     child_cancelled: list[bool] = []
-    from tealetio.operation_delivery import operation_factory
+    from tealetio.operation_chaining import operation_factory
 
     parent = Operation[None](kind="parent")
     child = cast(
@@ -819,7 +819,7 @@ def test_operation_cancel_forwards_to_chained_child() -> None:
 
 
 def test_operation_finish_clears_own_chain_links() -> None:
-    from tealetio.operation_delivery import operation_factory
+    from tealetio.operation_chaining import operation_factory
 
     root = cast(Operation[int], operation_factory()("root", None))
     middle = cast(Operation[None], operation_factory(parent=root)("middle", None))
@@ -835,7 +835,7 @@ def test_operation_cancel_forward_is_weakref() -> None:
     import gc
     import weakref as weakref_mod
 
-    from tealetio.operation_delivery import operation_factory
+    from tealetio.operation_chaining import operation_factory
 
     parent = Operation[None](kind="parent")
     child = cast(Operation[None], operation_factory(parent=parent)("child", None))
@@ -851,7 +851,7 @@ def test_operation_cancel_forward_is_weakref() -> None:
 
 
 def test_operation_finish_clears_chain_parent_on_child() -> None:
-    from tealetio.operation_delivery import operation_factory
+    from tealetio.operation_chaining import operation_factory
 
     root = Operation[int](kind="root")
     child = cast(Operation[None], operation_factory(parent=root)("child", None))
@@ -868,7 +868,7 @@ def test_operation_deliver_routes_to_handler() -> None:
         seen.append((result, exception))
         op.complete(cast(int, result))
 
-    from tealetio.operation_delivery import operation_factory
+    from tealetio.operation_chaining import operation_factory
 
     operation = cast(Operation[int], operation_factory(delivery=handler)("test", None))
     operation.deliver(object(), result=3)
@@ -879,24 +879,24 @@ def test_operation_deliver_routes_to_handler() -> None:
 def test_operation_advance_routes_to_chain_handler() -> None:
     seen: list[tuple[object, BaseException | None]] = []
 
-    def advance(_proactor: object, op: Operation[int], result: object, exception: BaseException | None) -> None:
+    def advance(op: Operation[int], result: object, exception: BaseException | None) -> None:
         seen.append((result, exception))
         if exception is not None:
             op.complete_error(exception)
         else:
             op.complete(cast(int, result))
 
-    from tealetio.operation_delivery import operation_factory
+    from tealetio.operation_chaining import operation_factory
 
     operation = cast(Operation[int], operation_factory(advance_hook=advance)("test", None))
-    operation.advance(object(), result=7)
+    operation.advance(result=7)
     assert seen == [(7, None)]
     assert operation.result() == 7
 
 
 def test_operation_advance_completes_without_chain_handler() -> None:
     operation = Operation[str](kind="test")
-    operation.advance(object(), result="done")
+    operation.advance(result="done")
     assert operation.result() == "done"
 
 
@@ -904,7 +904,7 @@ def test_operation_advance_passthrough_to_chain_parent() -> None:
     root = Operation[int](kind="root")
     child = Operation[None](kind="child")
     child.set_chain_parent(root)
-    child.advance(object(), result=9)
+    child.advance(result=9)
     assert root.result() == 9
 
 
@@ -914,13 +914,13 @@ def test_operation_advance_passthrough_through_multiple_links() -> None:
     child = Operation[None](kind="child")
     middle.set_chain_parent(root)
     child.set_chain_parent(middle)
-    child.advance(object(), result=9)
+    child.advance(result=9)
     assert root.result() == 9
 
 
 def test_operation_advance_continue_completes_at_root() -> None:
     operation = Operation[str](kind="root")
-    operation.advance_continue(object(), result="done")
+    operation.advance_continue(result="done")
     assert operation.result() == "done"
 
 
@@ -928,7 +928,7 @@ def test_operation_advance_continue_delegates_to_parent() -> None:
     root = Operation[int](kind="root")
     child = Operation[None](kind="child")
     child.set_chain_parent(root)
-    child.advance_continue(object(), result=4)
+    child.advance_continue(result=4)
     assert root.result() == 4
 
 
@@ -936,7 +936,6 @@ def test_operation_advance_continue_skips_own_hook() -> None:
     seen: list[str] = []
 
     def child_hook(
-        _proactor: object,
         _op: Operation[None],
         _result: object,
         _exception: BaseException | None,
@@ -944,7 +943,6 @@ def test_operation_advance_continue_skips_own_hook() -> None:
         seen.append("child")
 
     def root_hook(
-        _proactor: object,
         op: Operation[int],
         result: object,
         exception: BaseException | None,
@@ -955,36 +953,35 @@ def test_operation_advance_continue_skips_own_hook() -> None:
         else:
             op.complete(cast(int, result))
 
-    from tealetio.operation_delivery import operation_factory
+    from tealetio.operation_chaining import operation_factory
 
     root = cast(Operation[int], operation_factory(advance_hook=root_hook)("root", None))
     child = cast(
         Operation[None],
         operation_factory(parent=root, advance_hook=child_hook)("child", None),
     )
-    child.advance_continue(object(), result=5)
+    child.advance_continue(result=5)
     assert seen == ["root"]
     assert root.result() == 5
 
 
 def test_operation_advance_hook_uses_advance_continue() -> None:
     def hook(
-        proactor: object,
         op: Operation[str],
         result: object,
         exception: BaseException | None,
     ) -> None:
-        op.advance_continue(proactor, result=result, exception=exception)
+        op.advance_continue(result=result, exception=exception)
 
-    from tealetio.operation_delivery import operation_factory
+    from tealetio.operation_chaining import operation_factory
 
     operation = cast(Operation[str], operation_factory(advance_hook=hook)("root", None))
-    operation.advance(object(), result="done")
+    operation.advance(result="done")
     assert operation.result() == "done"
 
 
 def test_chained_send_link_next_operation_composes() -> None:
-    from tealetio.operation_delivery import chained_send_link
+    from tealetio.operation_chaining import chained_send_link
 
     sent: list[bytes] = []
 
@@ -1009,17 +1006,17 @@ def test_chained_send_link_next_operation_composes() -> None:
     sock = socket.socket()
     operation = Operation[None](kind="connect", fileobj=sock)
     try:
+        send_proactor = cast(Any, _SendProactor())
 
         def second_send(
-            proactor: _SendProactor,
             parent: Operation[None],
             _link_result: object | None = None,
         ) -> Operation[None] | None:
-            chained_send_link(b"second")(proactor, parent, None, None)
+            chained_send_link(send_proactor, b"second")(send_proactor, parent, None, None)
             return None
 
-        delivery = chained_send_link(b"first", next_operation=second_send)
-        delivery(_SendProactor(), operation, None, None)
+        delivery = chained_send_link(send_proactor, b"first", next_operation=second_send)
+        delivery(send_proactor, operation, None, None)
         assert sent == [b"first", b"second"]
         assert operation.result() is None
     finally:
@@ -1027,7 +1024,7 @@ def test_chained_send_link_next_operation_composes() -> None:
 
 
 def test_chained_connect_link_next_operation_composes_with_send() -> None:
-    from tealetio.operation_delivery import chained_connect_link, chained_send_link
+    from tealetio.operation_chaining import chained_connect_link, chained_send_link
 
     sent: list[bytes] = []
 
@@ -1053,29 +1050,28 @@ def test_chained_connect_link_next_operation_composes_with_send() -> None:
     operation = Operation[bool](kind="connect", fileobj=sock)
 
     def advance(
-        advance_proactor: object,
         advance_operation: Operation[bool],
         _advance_result: object,
         advance_exception: BaseException | None,
     ) -> None:
         if advance_exception is not None:
-            advance_operation.advance_continue(advance_proactor, exception=advance_exception)
+            advance_operation.advance_continue(exception=advance_exception)
             return
-        advance_operation.advance_continue(advance_proactor, result=True)
+        advance_operation.advance_continue(result=True)
 
     operation.set_advance_hook(advance)
     try:
+        send_proactor = cast(Any, _SendProactor())
 
         def send_next(
-            proactor: _SendProactor,
             parent: Operation[bool],
             _link_result: object | None = None,
         ) -> Operation[None] | None:
-            chained_send_link(b"hello")(proactor, parent, None, None)
+            chained_send_link(send_proactor, b"hello")(send_proactor, parent, None, None)
             return None
 
         delivery = chained_connect_link(next_operation=send_next)
-        delivery(_SendProactor(), operation, None, None)
+        delivery(send_proactor, operation, None, None)
         assert sent == [b"hello"]
         assert operation.result() is True
     finally:
@@ -1083,7 +1079,7 @@ def test_chained_connect_link_next_operation_composes_with_send() -> None:
 
 
 def test_chained_fdclose_link_closes_socket_when_parent_done() -> None:
-    from tealetio.operation_delivery import chained_fdclose_link
+    from tealetio.operation_chaining import chained_fdclose_link
 
     closed: list[bool] = []
 
@@ -1092,7 +1088,7 @@ def test_chained_fdclose_link_closes_socket_when_parent_done() -> None:
             closed.append(True)
 
     factory = chained_fdclose_link(
-        next_operation=lambda _proactor, _parent, _link_result=None: (_ for _ in ()).throw(
+        next_operation=lambda _parent, _link_result=None: (_ for _ in ()).throw(
             AssertionError("next_operation should not run")
         ),
     )
@@ -1105,7 +1101,7 @@ def test_chained_fdclose_link_closes_socket_when_parent_done() -> None:
 
 
 def test_chained_fdclose_link_closes_socket_when_next_operation_raises() -> None:
-    from tealetio.operation_delivery import chained_fdclose_link
+    from tealetio.operation_chaining import chained_fdclose_link
 
     closed: list[bool] = []
 
@@ -1114,7 +1110,6 @@ def test_chained_fdclose_link_closes_socket_when_next_operation_raises() -> None
             closed.append(True)
 
     def next_operation(
-        _proactor: object,
         _parent: Operation[None],
         _link_result: object | None = None,
     ) -> Operation[None] | None:
@@ -1131,7 +1126,7 @@ def test_chained_fdclose_link_closes_socket_when_next_operation_raises() -> None
 
 
 def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None:
-    from tealetio.operation_delivery import chained_connect_link, chained_fdclose_link
+    from tealetio.operation_chaining import chained_connect_link, chained_fdclose_link
 
     closed: list[bool] = []
 
@@ -1156,21 +1151,22 @@ def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None
                 cast(Any, delivery)(self, connect_operation, None, OSError("connect failed"))
             return connect_operation
 
+    connect_proactor = _ConnectProactor()
+
     def next_operation(
-        proactor: _ConnectProactor,
         parent: Operation[None],
         link_result: object | None,
     ) -> Operation[None] | None:
-        from tealetio.operation_delivery import operation_factory
+        from tealetio.operation_chaining import operation_factory
 
         sock = cast(socket.socket, link_result)
-        return proactor.connect(
+        return connect_proactor.connect(
             sock,
             ("127.0.0.1", 9),
             operation_factory=operation_factory(
                 parent=parent,
                 delivery=chained_connect_link(
-                    next_operation=lambda _proactor, _parent, _link_result=None: None,
+                    next_operation=lambda _parent, _link_result=None: None,
                 ),
             ),
         )
@@ -1179,7 +1175,7 @@ def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None
     operation = factory("create_socket", None)
     delivery = operation._delivery
     assert delivery is not None
-    delivery(_ConnectProactor(), operation, cast(socket.socket, _RecordingSocket()), None)
+    delivery(connect_proactor, operation, cast(socket.socket, _RecordingSocket()), None)
     assert closed == [True]
     assert operation.done()
     assert str(operation.exception()) == "connect failed"
@@ -1416,7 +1412,7 @@ class TestSelectorProactor:
             proactor.close()
 
     def test_connect_with_send_factory_chains_on_selector(self):
-        from tealetio.operation_delivery import connect_initial_send_factory
+        from tealetio.operation_chaining import connect_initial_send_factory
 
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1431,7 +1427,7 @@ class TestSelectorProactor:
             operation = proactor.connect(
                 client,
                 server.getsockname(),
-                operation_factory=connect_initial_send_factory(b"hello"),
+                operation_factory=connect_initial_send_factory(proactor, b"hello"),
             )
             _wait_until_done(proactor, operation)
             accepted, _address = server.accept()
@@ -4570,7 +4566,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_initial_send_completes_on_uring(self) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
+        from tealetio.operation_chaining import connect_initial_send_factory
 
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
@@ -4579,7 +4575,7 @@ class TestUringProactor:
             operation = proactor.connect(
                 sock,
                 ("127.0.0.1", 9),
-                operation_factory=connect_initial_send_factory(b"hello"),
+                operation_factory=connect_initial_send_factory(proactor, b"hello"),
             )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()
@@ -4591,7 +4587,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_empty_initial_returns_zero_without_send(self) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
+        from tealetio.operation_chaining import connect_initial_send_factory
 
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
@@ -4600,7 +4596,7 @@ class TestUringProactor:
             operation = proactor.connect(
                 sock,
                 ("127.0.0.1", 9),
-                operation_factory=connect_initial_send_factory(b""),
+                operation_factory=connect_initial_send_factory(proactor, b""),
             )
             proactor.wait(proactor.get_time() + 0.05)
             assert operation.result() is True
@@ -4610,7 +4606,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_initial_sendall_drains_partial_chunks(self) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
+        from tealetio.operation_chaining import connect_initial_send_factory
 
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
@@ -4619,7 +4615,7 @@ class TestUringProactor:
             operation = proactor.connect(
                 sock,
                 ("127.0.0.1", 9),
-                operation_factory=connect_initial_send_factory(b"helloworld"),
+                operation_factory=connect_initial_send_factory(proactor, b"helloworld"),
             )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send(4)
@@ -4636,7 +4632,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_initial_cancel_before_send_arms(self) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
+        from tealetio.operation_chaining import connect_initial_send_factory
 
         proactor = UringProactor(ring_factory=_DeferredConnectUringRing)
         sock = socket.socket()
@@ -4645,7 +4641,7 @@ class TestUringProactor:
             operation = proactor.connect(
                 sock,
                 ("127.0.0.1", 9),
-                operation_factory=connect_initial_send_factory(b"hello"),
+                operation_factory=connect_initial_send_factory(proactor, b"hello"),
             )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
             operation.cancel()
@@ -4659,7 +4655,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_connect_with_initial_cancel_during_pending_send(self) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
+        from tealetio.operation_chaining import connect_initial_send_factory
 
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket()
@@ -4668,7 +4664,7 @@ class TestUringProactor:
             operation = proactor.connect(
                 sock,
                 ("127.0.0.1", 9),
-                operation_factory=connect_initial_send_factory(b"hello"),
+                operation_factory=connect_initial_send_factory(proactor, b"hello"),
             )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             operation.cancel()
@@ -4697,7 +4693,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_sock_create_connects_with_initial_on_uring(self) -> None:
-        from tealetio.operation_delivery import create_socket_chain_factory
+        from tealetio.operation_chaining import create_socket_chain_factory
 
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
@@ -4705,6 +4701,7 @@ class TestUringProactor:
                 socket.AF_INET,
                 socket.SOCK_STREAM,
                 operation_factory=create_socket_chain_factory(
+                    proactor,
                     ("127.0.0.1", 9),
                     b"helloworld",
                 ),
@@ -4807,7 +4804,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_sock_create_cancel_during_pending_send(self) -> None:
-        from tealetio.operation_delivery import create_socket_chain_factory
+        from tealetio.operation_chaining import create_socket_chain_factory
 
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         try:
@@ -4815,6 +4812,7 @@ class TestUringProactor:
                 socket.AF_INET,
                 socket.SOCK_STREAM,
                 operation_factory=create_socket_chain_factory(
+                    proactor,
                     ("127.0.0.1", 9),
                     b"hello",
                 ),
@@ -5149,7 +5147,7 @@ class TestProactorScheduler:
     def test_sock_create_without_uring_socket_opcode_still_connects(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
+        from tealetio.operation_chaining import connect_initial_send_factory
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SOCKET=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -5161,7 +5159,7 @@ class TestProactorScheduler:
             connect_operation = proactor.connect(
                 sock,
                 ("127.0.0.1", 9),
-                operation_factory=connect_initial_send_factory(b"hi"),
+                operation_factory=connect_initial_send_factory(proactor, b"hi"),
             )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()

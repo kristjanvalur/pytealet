@@ -35,7 +35,6 @@ from .recv_iter import (
     _RecvManyResume,
 )
 from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
-from .operation_delivery import operation_factory
 from .operations import ContinuousOperation, ContinuousStepResult, Operation, OperationFactory
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now

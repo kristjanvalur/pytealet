@@ -315,13 +315,13 @@ class ProactorIOManager:
         if initial is None:
             self.wait_operation(self._proactor.connect(sock, address))
             return
-        from .operation_delivery import connect_initial_send_factory
+        from .operation_chaining import connect_initial_send_factory
 
         self.wait_operation(
             self._proactor.connect(
                 sock,
                 address,
-                operation_factory=connect_initial_send_factory(initial),
+                operation_factory=connect_initial_send_factory(self._proactor, initial),
             )
         )
 
@@ -348,7 +348,7 @@ class ProactorIOManager:
             )
             return sock, False, False
 
-        from .operation_delivery import create_socket_chain_factory
+        from .operation_chaining import create_socket_chain_factory
 
         return self.wait_operation(
             self._proactor.create_socket(
@@ -357,6 +357,7 @@ class ProactorIOManager:
                 proto,
                 flags=flags,
                 operation_factory=create_socket_chain_factory(
+                    self._proactor,
                     connect_to,
                     initial_data,
                 ),

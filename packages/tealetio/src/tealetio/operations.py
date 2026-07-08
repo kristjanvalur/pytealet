@@ -21,7 +21,7 @@ _CancelHook = Callable[[], None]
 _ProactorRef = Any
 # ``result`` and ``exception`` are mutually exclusive; one is always ``None``.
 DeliveryHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
-AdvanceHook = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
+AdvanceHook = Callable[["Operation[Any]", Any, BaseException | None], None]
 OperationFactory = Callable[[str, object | None], "Operation[Any]"]
 _CancelForwardRef = weakref.ReferenceType["Operation[Any]"]
 
@@ -177,7 +177,6 @@ class Operation(Generic[T]):
 
     def advance(
         self,
-        proactor: _ProactorRef,
         *,
         result: Any = None,
         exception: BaseException | None = None,
@@ -198,7 +197,7 @@ class Operation(Generic[T]):
                 return
             handler = op._advance_hook
             if handler is not None:
-                handler(proactor, op, result, exception)
+                handler(op, result, exception)
                 return
             parent = op._chain_parent
             if parent is None:
@@ -211,7 +210,6 @@ class Operation(Generic[T]):
 
     def advance_continue(
         self,
-        proactor: _ProactorRef,
         *,
         result: Any = None,
         exception: BaseException | None = None,
@@ -225,7 +223,7 @@ class Operation(Generic[T]):
         saved = self._advance_hook
         self._advance_hook = None
         try:
-            self.advance(proactor, result=result, exception=exception)
+            self.advance(result=result, exception=exception)
         finally:
             self._advance_hook = saved
 
