@@ -4858,6 +4858,29 @@ class TestUringProactor:
         finally:
             proactor.close()
 
+    def test_sock_create_empty_initial_reports_initial_sent_without_send(self) -> None:
+        from tealetio.operation_chaining import create_socket_chain_factory
+
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                operation_factory=create_socket_chain_factory(
+                    proactor,
+                    ("127.0.0.1", 9),
+                    b"",
+                ),
+            )
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, initial_sent = operation.result()
+            assert is_connected is True
+            assert initial_sent is True
+            assert proactor.ring.submitted_stream_sends() == []
+            sock.close()
+        finally:
+            proactor.close()
+
     def test_sock_create_connect_failure_does_not_leak_socket(self) -> None:
         proactor = UringProactor(ring_factory=_FailingConnectUringRing)
         try:
@@ -5279,6 +5302,78 @@ class TestProactorScheduler:
                         server.accept()
                     finally:
                         sock.close()
+                finally:
+                    server.close()
+        finally:
+            proactor.close()
+
+    @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
+    def test_sock_create_unix_cancel_before_socket_completes(self) -> None:
+        from tealetio.operation_chaining import create_socket_chain_factory
+
+        proactor = UringProactor(ring_factory=_DeferredSocketUringRing)
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = f"{temp_dir}/sock"
+                server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    server.bind(path)
+                    server.listen()
+                    operation = proactor.create_socket(
+                        socket.AF_UNIX,
+                        socket.SOCK_STREAM,
+                        operation_factory=create_socket_chain_factory(proactor, path, None),
+                    )
+                    _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
+                    operation.cancel()
+                    assert operation.cancelled() is True
+                    proactor.ring.complete_socket()
+                    proactor.wait(proactor.get_time() + 0.05)
+                    assert operation.cancelled() is True
+                    assert proactor.ring.submitted_connect == []
+                    leaked_fd = proactor.ring.last_socket_fd
+                    assert leaked_fd is not None
+                    with pytest.raises(OSError):
+                        os.fstat(leaked_fd)
+                finally:
+                    server.close()
+        finally:
+            proactor.close()
+
+    @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
+    def test_sock_create_unix_cancel_during_pending_send(self) -> None:
+        from tealetio.operation_chaining import create_socket_chain_factory
+
+        proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = f"{temp_dir}/sock"
+                server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    server.bind(path)
+                    server.listen()
+                    operation = proactor.create_socket(
+                        socket.AF_UNIX,
+                        socket.SOCK_STREAM,
+                        operation_factory=create_socket_chain_factory(
+                            proactor,
+                            path,
+                            b"hello",
+                        ),
+                    )
+                    _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
+                    proactor.ring.complete_socket()
+                    _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+                    operation.cancel()
+                    assert operation.cancelled() is True
+                    proactor.ring.complete_connect_send()
+                    proactor.wait(proactor.get_time() + 0.05)
+                    assert operation.cancelled() is True
+                    assert proactor.ring.pending_connect_send == []
+                    leaked_fd = proactor.ring.last_socket_fd
+                    assert leaked_fd is not None
+                    with pytest.raises(OSError):
+                        os.fstat(leaked_fd)
                 finally:
                     server.close()
         finally:

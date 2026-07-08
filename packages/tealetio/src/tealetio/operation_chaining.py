@@ -165,12 +165,21 @@ def chained_send_link(
     data: SocketSendBuffer | None,
     *,
     next_operation: NextOperation | None = None,
+    on_initial_sent: Callable[[], None] | None = None,
 ) -> DeliveryHandler:
     """Append a sendall leg after a parent socket operation succeeds."""
 
+    def mark_initial_sent() -> None:
+        if on_initial_sent is not None:
+            on_initial_sent()
+
     def start_send_link(parent: Operation[Any]) -> Operation[None] | None:
         payload = memoryview(data) if data is not None else None
-        if payload is None or not payload:
+        if payload is None:
+            _chain_next_operation(parent, next_operation, link_result=None)
+            return None
+        if not payload:
+            mark_initial_sent()
             _chain_next_operation(parent, next_operation, link_result=None)
             return None
 
@@ -185,6 +194,7 @@ def chained_send_link(
             if send_exception is not None:
                 send_operation.advance(exception=send_exception)
                 return
+            mark_initial_sent()
             if next_operation is not None:
                 _chain_next_operation(parent, next_operation, link_result=_result)
                 return
@@ -219,6 +229,7 @@ def connect_send_chain_factory(
     *,
     parent: Operation[Any] | None = None,
     advance_hook: AdvanceHook | None = None,
+    on_initial_sent: Callable[[], None] | None = None,
 ) -> OperationFactory:
     """Factory for connect → send chaining.
 
@@ -244,7 +255,12 @@ def connect_send_chain_factory(
 
     return operation_factory(
         parent=parent,
-        delivery=chained_send_link(proactor, initial, next_operation=None),
+        delivery=chained_send_link(
+            proactor,
+            initial,
+            next_operation=None,
+            on_initial_sent=on_initial_sent,
+        ),
         advance_hook=advance_hook,
     )
 
@@ -264,8 +280,13 @@ def create_socket_chain_factory(
 ) -> OperationFactory:
     """Build create → connect → send for ``ProactorIOManager.sock_create``."""
 
+    initial_sent_ref = [False]
+
+    def mark_initial_sent() -> None:
+        initial_sent_ref[0] = True
+
     def shape_success(sock: socket.socket) -> CreateSocketResult:
-        return (sock, True, initial_data is not None)
+        return (sock, True, initial_sent_ref[0])
 
     def next_operation(
         parent: Operation[CreateSocketResult],
@@ -279,6 +300,7 @@ def create_socket_chain_factory(
                 proactor,
                 initial_data,
                 parent=parent,
+                on_initial_sent=mark_initial_sent if initial_data is not None else None,
             ),
         )
 
