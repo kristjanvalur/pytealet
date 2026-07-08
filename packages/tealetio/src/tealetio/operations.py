@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import weakref
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ _ProactorRef = Any
 DeliveryHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
 AdvanceHook = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
 OperationFactory = Callable[[str, object | None], "Operation[Any]"]
+_CancelForwardRef = weakref.ReferenceType["Operation[Any]"]
 
 
 @dataclass
@@ -49,7 +51,7 @@ class Operation(Generic[T]):
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] | None = []
         self._cancel_hook: _CancelHook | None = None
-        self._cancel_forward: Operation[Any] | None = None
+        self._cancel_forward: _CancelForwardRef | None = None
         self._chain_parent: Operation[Any] | None = None
         self._advance_hook: AdvanceHook | None = None
 
@@ -71,7 +73,7 @@ class Operation(Generic[T]):
     def set_cancel_forward(self, operation: "Operation[Any] | None") -> None:
         """Forward ``cancel()`` to a chained child operation."""
 
-        self._cancel_forward = operation
+        self._cancel_forward = None if operation is None else weakref.ref(operation)
 
     def set_chain_parent(self, parent: "Operation[Any] | None") -> None:
         """Record the parent operation that receives bubbled chain completions."""
@@ -93,7 +95,7 @@ class Operation(Generic[T]):
 
         if self._done:
             return
-        forward = self._cancel_forward
+        forward = self._cancel_forward_target()
         if forward is not None:
             forward.cancel()
         cancel_hook = self._cancel_hook
@@ -240,6 +242,12 @@ class Operation(Generic[T]):
     def _set_cancelled(self) -> bool:
         return self._finish(exception=CancelledError(), cancelled=True)
 
+    def _cancel_forward_target(self) -> Operation[Any] | None:
+        ref = self._cancel_forward
+        if ref is None:
+            return None
+        return ref()
+
     def _finish(
         self,
         *,
@@ -257,6 +265,13 @@ class Operation(Generic[T]):
             self._cancelled = cancelled
             self._done = True
             self._cancel_hook = None
+            self._advance_hook = None
+            parent = self._chain_parent
+            self._chain_parent = None
+            if parent is not None:
+                forward_ref = parent._cancel_forward
+                if forward_ref is not None and forward_ref() is self:
+                    parent._cancel_forward = None
             self._cancel_forward = None
             callbacks = self._callbacks
             self._callbacks = None

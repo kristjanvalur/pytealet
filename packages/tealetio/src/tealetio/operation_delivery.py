@@ -22,13 +22,15 @@ def operation_factory(
 ) -> OperationFactory:
     """Build an ``Operation`` with optional chain parent, delivery, and hook.
 
-    Omit ``parent`` for a chain root.
+    Omit ``parent`` for a chain root. When ``parent`` is set the parent also
+    forwards ``cancel()`` to the new child.
     """
 
     def factory(kind: str, fileobj: object | None) -> Operation[Any]:
         child = Operation(kind=kind, fileobj=fileobj)
         if parent is not None:
             child.set_chain_parent(parent)
+            parent.set_cancel_forward(child)
         if delivery is not None:
             child.set_delivery(delivery)
         if advance_hook is not None:
@@ -77,9 +79,7 @@ def _chain_next_operation(
     terminal_result: Any = None,
 ) -> None:
     if next_operation is not None:
-        child = next_operation(proactor, parent, link_result)
-        if child is not None:
-            parent.set_cancel_forward(child)
+        next_operation(proactor, parent, link_result)
         return
     parent.advance(proactor, result=terminal_result)
 
@@ -245,15 +245,13 @@ def chained_send_link(
         if exception is not None:
             operation.advance(proactor, exception=exception)
             return
-        child = _start_send_link(
+        _start_send_link(
             proactor,
             operation,
             data,
             next_operation=next_operation,
             terminal_result=terminal_result,
         )
-        if child is not None:
-            operation.set_cancel_forward(child)
 
     return delivery
 
@@ -362,12 +360,14 @@ def double_recv_delivery(size: int) -> DeliveryHandler:
                 return
             operation.complete(first + cast(bytes, second_result))
 
-        second = proactor.recv(
+        proactor.recv(
             sock,
             size,
-            operation_factory=operation_factory(delivery=second_delivery),
+            operation_factory=operation_factory(
+                parent=operation,
+                delivery=second_delivery,
+            ),
         )
-        operation.set_cancel_forward(second)
 
     return delivery
 

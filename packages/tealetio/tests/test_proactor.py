@@ -769,20 +769,67 @@ def test_operation_deliver_completes_without_handler() -> None:
 
 
 def test_operation_cancel_forwards_to_chained_child() -> None:
-    child = Operation[None](kind="child")
     child_cancelled: list[bool] = []
+    from tealetio.operation_delivery import operation_factory
+
+    parent = Operation[None](kind="parent")
+    child = cast(
+        Operation[None],
+        operation_factory(parent=parent)("child", None),
+    )
 
     def cancel_child() -> None:
         child_cancelled.append(True)
         child._set_cancelled()
 
     child.set_cancel(cancel_child)
-    parent = Operation[None](kind="parent")
-    parent.set_cancel_forward(child)
     parent.cancel()
     assert child_cancelled == [True]
     assert child.cancelled()
     assert parent.cancelled()
+
+
+def test_operation_finish_clears_own_chain_links() -> None:
+    from tealetio.operation_delivery import operation_factory
+
+    root = cast(Operation[int], operation_factory()("root", None))
+    middle = cast(Operation[None], operation_factory(parent=root)("middle", None))
+    leaf = cast(Operation[None], operation_factory(parent=middle)("leaf", None))
+    root._finish(result=9)
+    assert root._cancel_forward is None
+    assert root._chain_parent is None
+    assert middle._chain_parent is root
+    assert leaf._chain_parent is middle
+
+
+def test_operation_cancel_forward_is_weakref() -> None:
+    import gc
+    import weakref as weakref_mod
+
+    from tealetio.operation_delivery import operation_factory
+
+    parent = Operation[None](kind="parent")
+    child = cast(Operation[None], operation_factory(parent=parent)("child", None))
+    forward_ref = parent._cancel_forward
+    assert forward_ref is not None
+    assert isinstance(forward_ref, weakref_mod.ReferenceType)
+    assert forward_ref() is child
+    del child
+    gc.collect()
+    assert forward_ref() is None
+    parent.cancel()
+    assert parent.cancelled()
+
+
+def test_operation_finish_clears_chain_parent_on_child() -> None:
+    from tealetio.operation_delivery import operation_factory
+
+    root = Operation[int](kind="root")
+    child = cast(Operation[None], operation_factory(parent=root)("child", None))
+    child._finish(result=None)
+    assert child._chain_parent is None
+    assert child._cancel_forward is None
+    assert root._cancel_forward is None
 
 
 def test_operation_deliver_routes_to_handler() -> None:
