@@ -63,16 +63,16 @@ class _MockProactor:
         proto: int = 0,
         *,
         flags: int = 0,
-        connect_to: Any | None = None,
-        initial_data: Any | None = None,
-    ) -> Operation[tuple[socket.socket, bool, bool]]:
-        self.create_socket_calls.append((family, type, proto, flags, connect_to, initial_data))
-        operation = Operation[tuple[socket.socket, bool, bool]](kind="create_socket", fileobj=(family, type, proto))
+        operation_factory: Any | None = None,
+    ) -> Operation[socket.socket]:
+        del operation_factory
+        self.create_socket_calls.append((family, type, proto, flags))
+        operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
         sock = socket.socket(family, type, proto)
         sock.setblocking(False)
         os.set_inheritable(sock.fileno(), False)
         self.last_create_socket = sock
-        operation._finish(result=(sock, False, False))
+        operation._finish(result=sock)
         return operation
 
     def connect(

@@ -337,24 +337,19 @@ class ProactorIOManager:
     ) -> tuple[socket.socket, bool, bool]:
         if initial_data is not None and connect_to is None:
             raise ValueError("initial_data requires connect_to")
-        sock, is_connected, initial_sent = self.wait_operation(
+        sock = self.wait_operation(
             self._proactor.create_socket(
                 family,
                 type,
                 proto,
                 flags=flags,
-                connect_to=connect_to,
-                initial_data=initial_data,
             )
         )
+        if connect_to is None:
+            return sock, False, False
         try:
-            if connect_to is not None and not is_connected:
-                self.sock_connect(sock, connect_to, initial=initial_data)
-                return sock, True, initial_data is not None
-            if initial_data is not None and is_connected and not initial_sent:
-                self.sock_sendall(sock, initial_data)
-                return sock, is_connected, True
-            return sock, is_connected, initial_sent
+            self.sock_connect(sock, connect_to, initial=initial_data)
+            return sock, True, initial_data is not None
         except BaseException:
             sock.close()
             raise

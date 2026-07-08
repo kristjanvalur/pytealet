@@ -35,7 +35,7 @@ from .recv_iter import (
     _RecvManyResume,
 )
 from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
-from .operation_delivery import create_socket_delivery, operation_factory
+from .operation_delivery import operation_factory
 from .operations import ContinuousOperation, ContinuousStepResult, Operation, OperationFactory
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
@@ -112,14 +112,6 @@ def _close_owned_socket(sock: socket.socket) -> None:
         pass
 
 
-def _validate_create_socket_hints(
-    connect_to: Any | None,
-    initial_data: SocketSendBuffer | None,
-) -> None:
-    if initial_data is not None and connect_to is None:
-        raise ValueError("initial_data requires connect_to")
-
-
 def _spawn_operation(
     kind: str,
     fileobj: object | None = None,
@@ -129,50 +121,6 @@ def _spawn_operation(
     if operation_factory is not None:
         return operation_factory(kind, fileobj)
     return Operation(kind=kind, fileobj=fileobj)
-
-
-def _create_socket_factory(
-    operation_ref: list[Operation[CreateSocketResult]],
-    connect_to: Any | None,
-    initial_data: SocketSendBuffer | None,
-    *,
-    on_socket: Callable[[socket.socket], None] | None = None,
-) -> OperationFactory:
-    def fail(exc: BaseException) -> None:
-        if not operation_ref[0].done():
-            operation_ref[0].complete_error(exc)
-
-    return create_socket_delivery(
-        connect_to,
-        initial_data,
-        fail=fail,
-        on_socket=on_socket,
-    )
-
-
-def _create_socket_operation(
-    operation_ref: list[Operation[CreateSocketResult]],
-    fileobj: tuple[int, int, int],
-    *,
-    connect_to: Any | None,
-    initial_data: SocketSendBuffer | None,
-    on_socket: Callable[[socket.socket], None] | None = None,
-) -> Operation[CreateSocketResult]:
-    operation = cast(
-        Operation[CreateSocketResult],
-        _spawn_operation(
-            "create_socket",
-            fileobj,
-            operation_factory=_create_socket_factory(
-                operation_ref,
-                connect_to,
-                initial_data,
-                on_socket=on_socket,
-            ),
-        ),
-    )
-    operation_ref.append(operation)
-    return operation
 
 
 def _close_raw_fd(fd: int) -> None:
@@ -429,26 +377,13 @@ class Proactor(Protocol):
         proto: int = 0,
         *,
         flags: int = 0,
-        connect_to: Any | None = None,
-        initial_data: SocketSendBuffer | None = None,
-    ) -> Operation[CreateSocketResult]:
+        operation_factory: OperationFactory | None = None,
+    ) -> Operation[socket.socket]:
         """Create a scheduler-contract socket.
 
-        Returns a non-blocking, close-on-exec ``socket.socket`` together with
-        connect/send outcome flags. On success the operation completes with
-        ``(socket, is_connected, initial_sent)``. ``initial_sent`` is ``True``
-        when ``initial_data`` was provided and the connect/send chain flushed it
-        (including an empty buffer). It is ``False`` when ``initial_data`` was
-        omitted or the backend ignored connect/send hints.
-        ``connect_to`` and ``initial_data`` are optional hints; backends may
-        ignore them and return ``(socket, False, False)`` after creation only.
-        ``UringProactor`` honours the hints when ``IORING_OP_SOCKET`` is probed,
-        chaining socket creation, connect, and ``sendall``. Without the socket
-        opcode it falls back to stdlib creation and does not connect or send.
-        Any failure after creation
-        closes the socket before the operation completes.
-        ``SelectorProactor`` ignores ``flags`` beyond the scheduler socket defaults
-        applied by ``configure_scheduler_socket()`` (non-blocking, close-on-exec).
+        ``operation_factory`` may install delivery and advance hooks for
+        chained follow-on work. ``ProactorIOManager.sock_create()`` handles
+        connect-time chaining for all socket families.
         """
 
         ...
@@ -1067,19 +1002,18 @@ class SelectorProactor(ProactorBase):
         proto: int = 0,
         *,
         flags: int = 0,
-        connect_to: Any | None = None,
-        initial_data: SocketSendBuffer | None = None,
-    ) -> Operation[CreateSocketResult]:
+        operation_factory: OperationFactory | None = None,
+    ) -> Operation[socket.socket]:
         """Create a scheduler-contract socket."""
 
-        _validate_create_socket_hints(connect_to, initial_data)
-        del flags, connect_to, initial_data
-        operation_ref: list[Operation[CreateSocketResult]] = []
-        operation = _create_socket_operation(
-            operation_ref,
-            (family, type, proto),
-            connect_to=None,
-            initial_data=None,
+        del flags
+        operation = cast(
+            Operation[socket.socket],
+            _spawn_operation(
+                "create_socket",
+                (family, type, proto),
+                operation_factory=operation_factory,
+            ),
         )
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
@@ -2385,51 +2319,37 @@ class UringProactor(ProactorBase):
         proto: int = 0,
         *,
         flags: int = 0,
-        connect_to: Any | None = None,
-        initial_data: SocketSendBuffer | None = None,
-    ) -> Operation[CreateSocketResult]:
+        operation_factory: OperationFactory | None = None,
+    ) -> Operation[socket.socket]:
         """Create a scheduler-contract socket."""
-
-        _validate_create_socket_hints(connect_to, initial_data)
 
         if self._capabilities.get("IORING_OP_SOCKET", False):
             socket_type = type | flags | _DEFAULT_ACCEPT_FLAGS
-            adopted_sock: list[socket.socket | None] = [None]
-            operation_ref: list[Operation[CreateSocketResult]] = []
-            operation = _create_socket_operation(
-                operation_ref,
-                (family, type, proto),
-                connect_to=connect_to,
-                initial_data=initial_data,
-                on_socket=lambda sock: adopted_sock.__setitem__(0, sock),
+            operation = cast(
+                Operation[socket.socket],
+                _spawn_operation(
+                    "create_socket",
+                    (family, type, proto),
+                    operation_factory=operation_factory,
+                ),
             )
             entry = self._uring_entry(
                 operation,
                 lambda entry, completion: self._complete_uring_create_socket(entry, completion),
             )
-            base_cancel = operation._cancel_hook
-
-            def cancel() -> None:
-                sock = adopted_sock[0]
-                if sock is not None:
-                    _close_owned_socket(sock)
-                    adopted_sock[0] = None
-                if base_cancel is not None:
-                    base_cancel()
-
-            operation.set_cancel(cancel)
             self._submit_uring_entry(
                 entry,
                 lambda: self._ring.submit_socket(family, socket_type, proto, 0, entry),
             )
             return operation
 
-        operation_ref: list[Operation[CreateSocketResult]] = []
-        operation = _create_socket_operation(
-            operation_ref,
-            (family, type, proto),
-            connect_to=None,
-            initial_data=None,
+        operation = cast(
+            Operation[socket.socket],
+            _spawn_operation(
+                "create_socket",
+                (family, type, proto),
+                operation_factory=operation_factory,
+            ),
         )
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
@@ -2496,8 +2416,8 @@ class UringProactor(ProactorBase):
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
-    ) -> Operation[CreateSocketResult]:
-        operation = cast(Operation[CreateSocketResult], entry.operation)
+    ) -> Operation[socket.socket]:
+        operation = cast(Operation[socket.socket], entry.operation)
         operation.deliver(self, result=socket_from_uring_fd(completion.res))
         return operation
 

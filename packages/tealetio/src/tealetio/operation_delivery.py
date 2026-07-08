@@ -9,7 +9,6 @@ from typing import Any, Protocol, cast
 from .io_manager import SocketSendBuffer
 from .operations import AdvanceHook, DeliveryHandler, Operation, OperationFactory
 
-CreateSocketResult = tuple[socket.socket, bool, bool]
 _DeliveryFail = Callable[[BaseException], None]
 NextOperation = Callable[[Any, Operation[Any], Any | None], Operation[Any] | None]
 
@@ -60,16 +59,6 @@ class _SendSubmitProactor(Protocol):
     ) -> Operation[None]: ...
 
 
-class _ConnectSubmitProactor(_SendSubmitProactor, Protocol):
-    def connect(
-        self,
-        sock: socket.socket,
-        address: Any,
-        *,
-        operation_factory: OperationFactory | None = None,
-    ) -> Operation[None] | Operation[bool]: ...
-
-
 def _chain_next_operation(
     proactor: Any,
     parent: Operation[Any],
@@ -99,7 +88,7 @@ def chained_fdclose_link(
 ) -> OperationFactory:
     """Forward a delivered socket into the next chained operation.
 
-    Top-level link for ``create_socket``-style completions. The proactor must
+    Top-level decorator for socket-delivery completions. The proactor must
     ``deliver()`` a ``socket.socket`` in ``result``. The socket is captured when
     delivery runs and shared with the advance hook. Child successes bubble
     through ``advance()``; the hook shapes the root result via ``shape_success``
@@ -257,48 +246,6 @@ def connect_initial_send_factory(initial: SocketSendBuffer) -> OperationFactory:
     return operation_factory(
         delivery=chained_send_link(initial),
         advance_hook=advance,
-    )
-
-
-def create_socket_delivery(
-    connect_to: Any | None,
-    initial_data: SocketSendBuffer | None,
-    *,
-    fail: _DeliveryFail,
-    on_socket: Callable[[socket.socket], None] | None = None,
-) -> OperationFactory:
-    """Assemble create → connect → send for ``create_socket``."""
-
-    def shape_success(sock: socket.socket) -> CreateSocketResult:
-        if connect_to is None or sock.family == socket.AF_UNIX:
-            return (sock, False, False)
-        return (sock, True, initial_data is not None)
-
-    def next_operation(
-        proactor: _ConnectSubmitProactor,
-        parent: Operation[CreateSocketResult],
-        link_result: Any | None,
-    ) -> Operation[Any] | None:
-        sock = cast(socket.socket, link_result)
-
-        if connect_to is None or sock.family == socket.AF_UNIX:
-            parent.advance(proactor)
-            return None
-
-        return proactor.connect(
-            sock,
-            connect_to,
-            operation_factory=operation_factory(
-                parent=parent,
-                delivery=chained_send_link(initial_data),
-            ),
-        )
-
-    return chained_fdclose_link(
-        fail=fail,
-        next_operation=next_operation,
-        on_socket=on_socket,
-        shape_success=shape_success,
     )
 
 
