@@ -5254,6 +5254,36 @@ class TestProactorScheduler:
         finally:
             proactor.close()
 
+    @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
+    def test_sock_create_unix_connect_to_uses_sync_connect_not_uring(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = f"{temp_dir}/sock"
+                server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    server.bind(path)
+                    server.listen()
+                    sock, is_connected, initial_sent = _io_sock_create(
+                        proactor,
+                        socket.AF_UNIX,
+                        socket.SOCK_STREAM,
+                        connect_to=path,
+                    )
+                    try:
+                        assert len(proactor.ring.submitted_socket) == 1
+                        assert proactor.ring.submitted_connect == []
+                        assert is_connected is True
+                        assert initial_sent is False
+                        assert sock.family == socket.AF_UNIX
+                        server.accept()
+                    finally:
+                        sock.close()
+                finally:
+                    server.close()
+        finally:
+            proactor.close()
+
     def test_sock_create_connect_uses_uring_socket_submit(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:

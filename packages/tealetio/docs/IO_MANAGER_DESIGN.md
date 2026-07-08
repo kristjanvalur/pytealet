@@ -197,6 +197,17 @@ Intermediate legs are not awaited by the scheduler task. Only the root
 `Operation` is passed to `wait_operation`; child submissions happen from
 delivery callbacks as completions arrive.
 
+### `proactor.connect` and `AF_UNIX`
+
+`ProactorIOManager` always chains through `proactor.connect` (including the
+connect leg of `sock_create(..., connect_to=…)`). Both proactor backends route
+``AF_UNIX`` sockets through ``ProactorBase._sync_unix_connect()``: a brief
+blocking ``sock.connect()`` followed by ``deliver()``. io_uring
+``submit_connect`` does not accept UNIX sockaddr paths today, so this is not a
+special-case deferral at the io_manager layer — the chained ``Operation`` may
+simply complete synchronously before ``wait_operation`` returns. Inet sockets
+still use the backend async connect path.
+
 ### Chain spine: cancel down, advance up
 
 Each link carries two pointers in opposite directions:

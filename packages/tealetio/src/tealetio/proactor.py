@@ -361,6 +361,10 @@ class Proactor(Protocol):
     ) -> Operation[None]:
         """Connect a socket.
 
+        For ``AF_UNIX``, the connect completes synchronously via a brief
+        blocking ``sock.connect()`` and ``deliver()``, including when chained
+        from ``sock_create``. Inet sockets use the backend's async path.
+
         ``operation_factory`` may install delivery and advance hooks for
         chained follow-on work (for example connect-time send via
         ``ProactorIOManager.sock_connect(..., initial=...)``).
@@ -562,6 +566,41 @@ class ProactorBase:
         callback: Callable[[int], object],
     ) -> ContinuousOperation[int]:
         raise NotImplementedError
+
+    def _sync_unix_connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        operation_factory: OperationFactory | None = None,
+    ) -> Operation[None]:
+        """Complete a UNIX-domain connect synchronously and deliver the result.
+
+        io_uring ``submit_connect`` does not accept UNIX sockaddr paths today.
+        Both proactor backends use this path so chained ``connect`` legs from
+        ``sock_create`` / ``sock_connect`` behave uniformly at the io_manager
+        layer even when the operation finishes before ``wait_operation`` returns.
+        """
+
+        def finish_connect() -> None:
+            sock.setblocking(True)
+            try:
+                sock.connect(address)
+            finally:
+                sock.setblocking(False)
+
+        operation = cast(
+            Operation[None],
+            _spawn_operation("connect", sock, operation_factory=operation_factory),
+        )
+        if operation.done():
+            return operation
+        try:
+            finish_connect()
+            operation.deliver(self, result=None)
+        except OSError as exc:
+            operation.deliver(self, exception=exc)
+        return operation
 
 
 @dataclass
@@ -1030,8 +1069,20 @@ class SelectorProactor(ProactorBase):
         *,
         operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
-        """Submit a non-blocking socket connect operation."""
+        """Submit a socket connect operation."""
 
+        if sock.family == socket.AF_UNIX:
+            return self._sync_unix_connect(sock, address, operation_factory=operation_factory)
+
+        return self._submit_selector_connect(sock, address, operation_factory=operation_factory)
+
+    def _submit_selector_connect(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        operation_factory: OperationFactory | None = None,
+    ) -> Operation[None]:
         started = False
 
         def finish_connect() -> None:
@@ -2363,33 +2414,6 @@ class UringProactor(ProactorBase):
         operation.deliver(self, result=sock)
         return operation
 
-    def _sync_unix_connect(
-        self,
-        sock: socket.socket,
-        address: Any,
-        *,
-        operation_factory: OperationFactory | None = None,
-    ) -> Operation[None]:
-        def finish_connect() -> None:
-            sock.setblocking(True)
-            try:
-                sock.connect(address)
-            finally:
-                sock.setblocking(False)
-
-        operation = cast(
-            Operation[None],
-            _spawn_operation("connect", sock, operation_factory=operation_factory),
-        )
-        if operation.done():
-            return operation
-        try:
-            finish_connect()
-            operation.deliver(self, result=None)
-        except OSError as exc:
-            operation.deliver(self, exception=exc)
-        return operation
-
     def connect(
         self,
         sock: socket.socket,
@@ -2397,7 +2421,7 @@ class UringProactor(ProactorBase):
         *,
         operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
-        """Submit a non-blocking socket connect operation."""
+        """Submit a socket connect operation."""
 
         if sock.family == socket.AF_UNIX:
             return self._sync_unix_connect(sock, address, operation_factory=operation_factory)
