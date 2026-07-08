@@ -825,6 +825,43 @@ def test_operation_may_extend_chain_false_when_done() -> None:
     assert operation.may_extend_chain() is False
 
 
+def test_operation_cancel_on_chain_leaf_bubbles_cancelled_error() -> None:
+    from tealetio.operation_chaining import chained_fdclose_link, operation_factory
+
+    closed: list[bool] = []
+    linked_children: list[Operation[None]] = []
+
+    class _RecordingSocket:
+        def close(self) -> None:
+            closed.append(True)
+
+    def next_operation(
+        parent: Operation[None],
+        link_result: object | None,
+    ) -> Operation[None]:
+        child = cast(
+            Operation[None],
+            operation_factory(parent=parent)("connect", link_result),
+        )
+        # cancel_forward is a weakref; keep the leg alive like a proactor entry would.
+        linked_children.append(child)
+        return child
+
+    root = cast(
+        Operation[None],
+        chained_fdclose_link(next_operation=next_operation)("create_socket", None),
+    )
+    delivery = root._delivery
+    assert delivery is not None
+    delivered = _RecordingSocket()
+    delivery(object(), root, delivered, None)
+    child = root._cancel_forward_target()
+    assert child is not None
+    child.cancel()
+    assert closed == [True]
+    assert root.cancelled() is True
+
+
 def test_operation_cancel_forwards_to_chained_child() -> None:
     child_cancelled: list[bool] = []
     from tealetio.operation_chaining import operation_factory
@@ -4833,6 +4870,10 @@ class TestUringProactor:
             assert proactor.ring.pending_connect == []
             assert proactor.ring.pending_connect_send == []
             assert proactor.ring.submitted_stream_sends() == []
+            leaked_fd = proactor.ring.last_socket_fd
+            assert leaked_fd is not None
+            with pytest.raises(OSError):
+                os.fstat(leaked_fd)
         finally:
             proactor.close()
 

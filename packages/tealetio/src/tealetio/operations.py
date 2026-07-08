@@ -117,8 +117,16 @@ class Operation(Generic[T]):
             if self._done:
                 return
             forward = self._cancel_forward_target()
+            is_leaf = forward is None
         if forward is not None:
             forward.cancel()
+        if is_leaf:
+            with self._lock:
+                bubble_cancelled = self._chain_parent is not None and not self._done
+            if bubble_cancelled:
+                # Bubble before this leg is terminalised so chain_parent links
+                # remain intact and advance hooks (for example fd-close) run.
+                self.advance(exception=CancelledError())
         cancel_hook = self._cancel_hook
         if cancel_hook is not None:
             cancel_hook()
@@ -227,7 +235,10 @@ class Operation(Generic[T]):
             parent = op._chain_parent
             if parent is None:
                 if exception is not None:
-                    op._finish(exception=exception)
+                    op._finish(
+                        exception=exception,
+                        cancelled=isinstance(exception, CancelledError),
+                    )
                 else:
                     op._finish(result=result)
                 return
