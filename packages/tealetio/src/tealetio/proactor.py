@@ -25,7 +25,6 @@ from .io_manager import (
     ProactorSocketIO,
     ServerIO,
     SocketIO,
-    SocketSendBuffer,
     SupportsProactorIO,
 )
 from .recv_iter import (
