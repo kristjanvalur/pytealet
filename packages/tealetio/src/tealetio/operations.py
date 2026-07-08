@@ -21,6 +21,7 @@ _ProactorRef = Any
 # ``result`` and ``exception`` are mutually exclusive; one is always ``None``.
 DeliveryHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
 ChainAdvanceHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
+OperationFactory = Callable[[str, object | None], "Operation[Any]"]
 
 
 @dataclass
@@ -37,11 +38,10 @@ class Operation(Generic[T]):
         *,
         kind: str,
         fileobj: object | None = None,
-        delivery: DeliveryHandler | None = None,
     ) -> None:
         self.kind = kind
         self.fileobj = fileobj
-        self._delivery = delivery
+        self._delivery: DeliveryHandler | None = None
         self._lock = threading.Lock()
         self._done = False
         self._cancelled = False
@@ -82,6 +82,11 @@ class Operation(Generic[T]):
         """Install the handler that receives bubbled child-chain completions."""
 
         self._chain_advance = handler
+
+    def set_delivery(self, handler: DeliveryHandler | None) -> None:
+        """Install the proactor completion handler for this operation."""
+
+        self._delivery = handler
 
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
@@ -153,8 +158,8 @@ class Operation(Generic[T]):
     ) -> None:
         """Accept one backend completion on a worker thread.
 
-        When ``delivery`` was provided at construction, it runs instead of
-        finishing the operation. Otherwise this completes immediately.
+        When a delivery handler was installed, it runs instead of finishing
+        the operation. Otherwise this completes immediately.
         """
 
         if self._done:

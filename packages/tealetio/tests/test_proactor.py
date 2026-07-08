@@ -792,7 +792,8 @@ def test_operation_deliver_routes_to_handler() -> None:
         seen.append((result, exception))
         op.complete(cast(int, result))
 
-    operation = Operation[int](kind="test", delivery=handler)
+    operation = Operation[int](kind="test")
+    operation.set_delivery(handler)
     operation.deliver(object(), result=3)
     assert seen == [(3, None)]
     assert operation.result() == 3
@@ -855,13 +856,14 @@ def test_chained_send_link_next_operation_composes() -> None:
             sock: socket.socket,
             data: bytes,
             *,
-            delivery: object | None = None,
-            chain_parent: Operation[Any] | None = None,
+            operation_factory: object | None = None,
         ) -> Operation[None]:
             sent.append(bytes(data))
-            send_operation = Operation[None](kind="send", fileobj=sock, delivery=delivery)
-            if chain_parent is not None:
-                send_operation.set_chain_parent(chain_parent)
+            if operation_factory is not None:
+                send_operation = cast(Any, operation_factory)("send", sock)
+            else:
+                send_operation = Operation[None](kind="send", fileobj=sock)
+            delivery = send_operation._delivery
             if delivery is not None:
                 cast(Any, delivery)(self, send_operation, None, None)
             return send_operation
@@ -915,13 +917,14 @@ def test_chained_connect_link_next_operation_composes_with_send() -> None:
             sock: socket.socket,
             data: bytes,
             *,
-            delivery: object | None = None,
-            chain_parent: Operation[Any] | None = None,
+            operation_factory: object | None = None,
         ) -> Operation[None]:
             sent.append(bytes(data))
-            send_operation = Operation[None](kind="send", fileobj=sock, delivery=delivery)
-            if chain_parent is not None:
-                send_operation.set_chain_parent(chain_parent)
+            if operation_factory is not None:
+                send_operation = cast(Any, operation_factory)("send", sock)
+            else:
+                send_operation = Operation[None](kind="send", fileobj=sock)
+            delivery = send_operation._delivery
             if delivery is not None:
                 cast(Any, delivery)(self, send_operation, None, None)
             return send_operation
@@ -1027,12 +1030,13 @@ def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None
             sock: socket.socket,
             address: object,
             *,
-            delivery: object | None = None,
-            chain_parent: Operation[Any] | None = None,
+            operation_factory: object | None = None,
         ) -> Operation[None]:
-            connect_operation = Operation[None](kind="connect", fileobj=sock, delivery=delivery)
-            if chain_parent is not None:
-                connect_operation.set_chain_parent(chain_parent)
+            if operation_factory is not None:
+                connect_operation = cast(Any, operation_factory)("connect", sock)
+            else:
+                connect_operation = Operation[None](kind="connect", fileobj=sock)
+            delivery = connect_operation._delivery
             if delivery is not None:
                 cast(Any, delivery)(self, connect_operation, None, OSError("connect failed"))
             return connect_operation
@@ -1042,14 +1046,18 @@ def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None
         parent: Operation[None],
         link_result: object | None,
     ) -> Operation[None] | None:
+        from tealetio.operation_delivery import operation_factory
+
         sock = cast(socket.socket, link_result)
         return proactor.connect(
             sock,
             ("127.0.0.1", 9),
-            delivery=chained_connect_link(
-                next_operation=lambda _proactor, _parent, _link_result=None: None,
+            operation_factory=operation_factory(
+                parent=parent,
+                delivery=chained_connect_link(
+                    next_operation=lambda _proactor, _parent, _link_result=None: None,
+                ),
             ),
-            chain_parent=parent,
         )
 
     operation = Operation[None](kind="create_socket")
@@ -1091,14 +1099,14 @@ class TestProactorContract:
     def test_recv_double_delivery_chains_two_reads(
         self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
     ) -> None:
-        from tealetio.operation_delivery import double_recv_delivery
+        from tealetio.operation_delivery import double_recv_factory
 
         proactor = proactor_factory()
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            operation = proactor.recv(reader, 3, operation_factory=double_recv_factory(3))
             writer.sendall(b"abcdef")
             _pump_proactor(proactor, operation)
             assert operation.result() == b"abcdef"
@@ -1313,7 +1321,7 @@ class TestSelectorProactor:
             proactor.close()
 
     def test_recv_double_delivery_second_recv_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from tealetio.operation_delivery import double_recv_delivery
+        from tealetio.operation_delivery import double_recv_factory
 
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -1332,7 +1340,7 @@ class TestSelectorProactor:
                 return real_recv(self, n)
 
             monkeypatch.setattr(socket.socket, "recv", recv_fail_on_second)
-            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            operation = proactor.recv(reader, 3, operation_factory=double_recv_factory(3))
             writer.sendall(b"abc")
             _pump_proactor(proactor, operation)
             assert operation.done()
@@ -1345,14 +1353,14 @@ class TestSelectorProactor:
             proactor.close()
 
     def test_recv_double_delivery_cancel_during_second_leg(self) -> None:
-        from tealetio.operation_delivery import double_recv_delivery
+        from tealetio.operation_delivery import double_recv_factory
 
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            operation = proactor.recv(reader, 3, operation_factory=double_recv_factory(3))
             writer.sendall(b"abc")
             deadline = proactor.get_time() + 1.0
             while proactor.get_time() < deadline:
@@ -3062,13 +3070,13 @@ class TestUringProactor:
             proactor.close()
 
     def test_recv_double_delivery_second_recv_error(self) -> None:
-        from tealetio.operation_delivery import double_recv_delivery
+        from tealetio.operation_delivery import double_recv_factory
 
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            operation = proactor.recv(reader, 3, operation_factory=double_recv_factory(3))
             ring = proactor.ring
             assert isinstance(ring, _DeferredUringRing)
             ring.complete_recv(b"abc")
@@ -3084,13 +3092,13 @@ class TestUringProactor:
             proactor.close()
 
     def test_recv_double_delivery_cancel_during_second_leg(self) -> None:
-        from tealetio.operation_delivery import double_recv_delivery
+        from tealetio.operation_delivery import double_recv_factory
 
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            operation = proactor.recv(reader, 3, operation_factory=double_recv_factory(3))
             ring = proactor.ring
             assert isinstance(ring, _DeferredUringRing)
             ring.complete_recv(b"abc")

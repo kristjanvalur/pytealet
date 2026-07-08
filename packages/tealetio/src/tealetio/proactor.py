@@ -35,8 +35,8 @@ from .recv_iter import (
     _RecvManyResume,
 )
 from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
-from .operation_delivery import connect_initial_send_delivery, create_socket_delivery
-from .operations import ContinuousOperation, ContinuousStepResult, DeliveryHandler, Operation
+from .operation_delivery import connect_initial_send_factory, create_socket_delivery
+from .operations import ContinuousOperation, ContinuousStepResult, Operation, OperationFactory
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -118,6 +118,17 @@ def _validate_create_socket_hints(
 ) -> None:
     if initial_data is not None and connect_to is None:
         raise ValueError("initial_data requires connect_to")
+
+
+def _spawn_operation(
+    kind: str,
+    fileobj: object | None = None,
+    *,
+    operation_factory: OperationFactory | None = None,
+) -> Operation[Any]:
+    if operation_factory is not None:
+        return operation_factory(kind, fileobj)
+    return Operation(kind=kind, fileobj=fileobj)
 
 
 def _create_socket_delivery_handlers(
@@ -335,7 +346,7 @@ class Proactor(Protocol):
         sock: socket.socket,
         n: int,
         *,
-        delivery: DeliveryHandler | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[bytes]: ...
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]: ...
@@ -350,7 +361,7 @@ class Proactor(Protocol):
         data: Any,
         progress: _ProgressCallback | None = None,
         *,
-        delivery: DeliveryHandler | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
@@ -380,7 +391,7 @@ class Proactor(Protocol):
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-        delivery: DeliveryHandler | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[None] | Operation[bool]:
         """Connect a socket.
 
@@ -886,11 +897,14 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         n: int,
         *,
-        delivery: DeliveryHandler | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        operation = Operation[bytes](kind="recv", fileobj=sock, delivery=delivery)
+        operation = cast(
+            Operation[bytes],
+            _spawn_operation("recv", sock, operation_factory=operation_factory),
+        )
 
         def attempt() -> bytes:
             return sock.recv(n)
@@ -939,11 +953,14 @@ class SelectorProactor(ProactorBase):
         data: Any,
         progress: _ProgressCallback | None = None,
         *,
-        delivery: DeliveryHandler | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
         """Submit a stream send that drains ``data`` before completing."""
 
-        operation = Operation[None](kind="send", fileobj=sock, delivery=delivery)
+        operation = cast(
+            Operation[None],
+            _spawn_operation("send", sock, operation_factory=operation_factory),
+        )
         view = memoryview(data)
         offset = 0
 
@@ -1043,8 +1060,8 @@ class SelectorProactor(ProactorBase):
         operation = Operation[CreateSocketResult](
             kind="create_socket",
             fileobj=(family, type, proto),
-            delivery=_create_socket_delivery_handlers(operation_ref, None, None),
         )
+        operation.set_delivery(_create_socket_delivery_handlers(operation_ref, None, None))
         operation_ref.append(operation)
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
@@ -1925,11 +1942,14 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         n: int,
         *,
-        delivery: DeliveryHandler | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        operation = Operation[bytes](kind="recv", fileobj=sock, delivery=delivery)
+        operation = cast(
+            Operation[bytes],
+            _spawn_operation("recv", sock, operation_factory=operation_factory),
+        )
         if n == 0:
             operation.deliver(self, result=b"")
             return operation
@@ -2018,14 +2038,14 @@ class UringProactor(ProactorBase):
         data: Any,
         progress: _ProgressCallback | None = None,
         *,
-        delivery: DeliveryHandler | None = None,
-        chain_parent: Operation[Any] | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
         """Submit a stream send that drains ``data`` before completing."""
 
-        operation = Operation[None](kind="send", fileobj=sock, delivery=delivery)
-        if chain_parent is not None:
-            operation.set_chain_parent(chain_parent)
+        operation = cast(
+            Operation[None],
+            _spawn_operation("send", sock, operation_factory=operation_factory),
+        )
         payload = memoryview(data)
         if not payload:
             self._check_open()
@@ -2374,12 +2394,14 @@ class UringProactor(ProactorBase):
             operation = Operation[CreateSocketResult](
                 kind="create_socket",
                 fileobj=(family, type, proto),
-                delivery=_create_socket_delivery_handlers(
+            )
+            operation.set_delivery(
+                _create_socket_delivery_handlers(
                     operation_ref,
                     connect_to,
                     initial_data,
                     on_socket=lambda sock: adopted_sock.__setitem__(0, sock),
-                ),
+                )
             )
             operation_ref.append(operation)
             entry = self._uring_entry(
@@ -2407,8 +2429,8 @@ class UringProactor(ProactorBase):
         operation = Operation[CreateSocketResult](
             kind="create_socket",
             fileobj=(family, type, proto),
-            delivery=_create_socket_delivery_handlers(operation_ref, None, None),
         )
+        operation.set_delivery(_create_socket_delivery_handlers(operation_ref, None, None))
         operation_ref.append(operation)
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
@@ -2455,26 +2477,23 @@ class UringProactor(ProactorBase):
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-        delivery: DeliveryHandler | None = None,
-        chain_parent: Operation[Any] | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[None] | Operation[bool]:
         """Submit a non-blocking socket connect operation."""
 
-        if initial is not None and delivery is not None:
-            raise ValueError("cannot pass both initial and delivery")
+        if initial is not None and operation_factory is not None:
+            raise ValueError("cannot pass both initial and operation_factory")
 
         if sock.family == socket.AF_UNIX:
             return self._sync_unix_connect(sock, address, initial=initial)
 
-        if delivery is None and initial is not None:
-            delivery = connect_initial_send_delivery(initial)
+        if operation_factory is None and initial is not None:
+            operation_factory = connect_initial_send_factory(initial)
 
-        if delivery is not None:
-            operation = Operation[bool](kind="connect", fileobj=sock, delivery=delivery)
-        else:
-            operation = Operation[None](kind="connect", fileobj=sock)
-        if chain_parent is not None:
-            operation.set_chain_parent(chain_parent)
+        operation = cast(
+            Operation[None] | Operation[bool],
+            _spawn_operation("connect", sock, operation_factory=operation_factory),
+        )
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_connect(entry, completion),

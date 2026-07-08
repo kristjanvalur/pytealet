@@ -7,14 +7,30 @@ from collections.abc import Callable
 from typing import Any, Protocol, cast
 
 from .io_manager import SocketSendBuffer
-from .operations import DeliveryHandler, Operation
+from .operations import DeliveryHandler, Operation, OperationFactory
 
 CreateSocketResult = tuple[socket.socket, bool, bool]
 _DeliverySucceed = Callable[[], None]
 _DeliveryFail = Callable[[BaseException], None]
-# Factories must call ``child.set_chain_parent(parent)`` (or pass ``chain_parent``
-# through the proactor submit helper) before the child operation can complete.
 NextOperation = Callable[[Any, Operation[Any], Any | None], Operation[Any] | None]
+
+
+def operation_factory(
+    *,
+    parent: Operation[Any] | None = None,
+    delivery: DeliveryHandler | None = None,
+) -> OperationFactory:
+    """Build a chained child ``Operation`` with parent and delivery wired."""
+
+    def factory(kind: str, fileobj: object | None) -> Operation[Any]:
+        child = Operation(kind=kind, fileobj=fileobj)
+        if parent is not None:
+            child.set_chain_parent(parent)
+        if delivery is not None:
+            child.set_delivery(delivery)
+        return child
+
+    return factory
 
 
 class _RecvSubmitProactor(Protocol):
@@ -23,7 +39,7 @@ class _RecvSubmitProactor(Protocol):
         sock: socket.socket,
         n: int,
         *,
-        delivery: DeliveryHandler | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[bytes]: ...
 
 
@@ -33,7 +49,7 @@ class _SendSubmitProactor(Protocol):
         sock: socket.socket,
         data: SocketSendBuffer,
         *,
-        delivery: DeliveryHandler | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]: ...
 
 
@@ -43,7 +59,7 @@ class _ConnectSubmitProactor(_SendSubmitProactor, Protocol):
         sock: socket.socket,
         address: Any,
         *,
-        delivery: DeliveryHandler | None = None,
+        operation_factory: OperationFactory | None = None,
     ) -> Operation[None] | Operation[bool]: ...
 
 
@@ -122,7 +138,11 @@ def _start_send_link(
             return
         send_operation.advance_up(proactor, result=terminal_result)
 
-    return proactor.send(sock, payload, delivery=send_delivery, chain_parent=parent)
+    return proactor.send(
+        sock,
+        payload,
+        operation_factory=operation_factory(parent=parent, delivery=send_delivery),
+    )
 
 
 def chained_fdclose_link(
@@ -265,6 +285,12 @@ def chained_send_link(
     return delivery
 
 
+def connect_initial_send_factory(initial: SocketSendBuffer) -> OperationFactory:
+    """Factory for ``connect(..., initial=...)`` on backends that support it."""
+
+    return operation_factory(delivery=connect_initial_send_delivery(initial))
+
+
 def connect_initial_send_delivery(initial: SocketSendBuffer) -> DeliveryHandler:
     """Delivery handler for ``connect(..., initial=...)``."""
 
@@ -280,17 +306,7 @@ def connect_initial_send_delivery(initial: SocketSendBuffer) -> DeliveryHandler:
             terminal_result=True,
         )
 
-    def delivery(
-        proactor: _SendSubmitProactor,
-        operation: Operation[bool],
-        result: object,
-        exception: BaseException | None,
-    ) -> None:
-        chained_connect_link(
-            next_operation=next_operation,
-        )(proactor, operation, result, exception)
-
-    return delivery
+    return chained_connect_link(next_operation=next_operation)
 
 
 def create_socket_delivery(
@@ -332,10 +348,10 @@ def create_socket_delivery(
         return proactor.connect(
             sock,
             connect_to,
-            delivery=chained_connect_link(
-                next_operation=send_next,
+            operation_factory=operation_factory(
+                parent=parent,
+                delivery=chained_connect_link(next_operation=send_next),
             ),
-            chain_parent=parent,
         )
 
     return chained_fdclose_link(
@@ -374,7 +390,17 @@ def double_recv_delivery(size: int) -> DeliveryHandler:
                 return
             operation.complete(first + cast(bytes, second_result))
 
-        second = proactor.recv(sock, size, delivery=second_delivery)
+        second = proactor.recv(
+            sock,
+            size,
+            operation_factory=operation_factory(delivery=second_delivery),
+        )
         operation.set_cancel_forward(second)
 
     return delivery
+
+
+def double_recv_factory(size: int) -> OperationFactory:
+    """Factory for the root leg of a double ``recv`` chain."""
+
+    return operation_factory(delivery=double_recv_delivery(size))
