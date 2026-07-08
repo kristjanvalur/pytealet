@@ -932,6 +932,27 @@ def test_operation_advance_continue_delegates_to_parent() -> None:
     assert root.result() == 4
 
 
+def test_operation_advance_hook_runs_once_per_leg() -> None:
+    from tealetio.operation_chaining import operation_factory
+
+    seen: list[str] = []
+
+    def hook(
+        op: Operation[str],
+        result: object,
+        exception: BaseException | None,
+    ) -> None:
+        seen.append("hook")
+        op.advance_continue(result=result, exception=exception)
+
+    operation = cast(Operation[str], operation_factory(advance_hook=hook)("root", None))
+    operation.advance(result="done")
+    operation.advance(result="again")
+    assert operation.result() == "done"
+    assert seen == ["hook"]
+    assert operation._advance_hook is None
+
+
 def test_operation_advance_continue_skips_own_hook() -> None:
     seen: list[str] = []
 
@@ -4672,6 +4693,7 @@ class TestUringProactor:
             proactor.ring.complete_connect_send()
             proactor.wait(proactor.get_time() + 0.05)
             assert operation.cancelled() is True
+            assert proactor.ring.pending_connect_send == []
         finally:
             sock.close()
             proactor.close()
@@ -4780,6 +4802,9 @@ class TestUringProactor:
             proactor.ring.complete_connect()
             proactor.wait(proactor.get_time() + 0.05)
             assert operation.cancelled() is True
+            assert proactor.ring.pending_connect == []
+            assert proactor.ring.pending_connect_send == []
+            assert proactor.ring.submitted_stream_sends() == []
         finally:
             proactor.close()
 
@@ -4807,6 +4832,8 @@ class TestUringProactor:
             proactor.ring.complete_connect_send()
             proactor.wait(proactor.get_time() + 0.05)
             assert operation.cancelled() is True
+            assert proactor.ring.pending_connect == []
+            assert proactor.ring.pending_connect_send == []
         finally:
             proactor.close()
 

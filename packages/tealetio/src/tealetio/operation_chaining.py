@@ -6,7 +6,7 @@ import socket
 from collections.abc import Callable
 from typing import Any, cast
 
-from .io_manager import SocketSendBuffer
+from .types import SocketSendBuffer
 from .operations import AdvanceHook, DeliveryHandler, Operation, OperationFactory
 from .proactor import Proactor
 

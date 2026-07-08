@@ -2822,7 +2822,11 @@ class UringProactor(ProactorBase):
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
-        if entry.operation._finish(exception=exc):
+        operation = entry.operation
+        if operation.done():
+            return
+        operation.deliver(self, exception=exc)
+        if operation.done():
             self.break_wait()
             self._notify_completed()
 

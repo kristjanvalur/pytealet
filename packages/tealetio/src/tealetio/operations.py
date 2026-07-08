@@ -185,7 +185,8 @@ class Operation(Generic[T]):
 
         Unlike ``deliver()``, this does not re-enter the proactor delivery
         handler. Walks the parent chain from this link, invoking the first
-        ``_advance_hook`` found. When no hook is installed on a link the walk
+        ``_advance_hook`` found (each hook runs at most once per leg and is
+        cleared before it runs). When no hook is installed on a link the walk
         continues to its parent. At the chain root with no hook the operation
         completes. Hooks should finish propagation by calling
         ``advance_continue()`` on the link that owns the hook.
@@ -197,6 +198,7 @@ class Operation(Generic[T]):
                 return
             handler = op._advance_hook
             if handler is not None:
+                op._advance_hook = None
                 handler(op, result, exception)
                 return
             parent = op._chain_parent
@@ -216,16 +218,14 @@ class Operation(Generic[T]):
     ) -> None:
         """Resume propagation after local advance-hook work on this link.
 
-        Clears this link's hook and delegates to ``advance()``. Intended for
-        use from advance-hook handlers only.
+        Delegates to ``advance()`` without re-entering this link's hook. The
+        hook is already cleared when ``advance()`` dispatched it; this call is
+        a no-op clear plus bubble to the parent chain. Intended for use from
+        advance-hook handlers only.
         """
 
-        saved = self._advance_hook
         self._advance_hook = None
-        try:
-            self.advance(result=result, exception=exception)
-        finally:
-            self._advance_hook = saved
+        self.advance(result=result, exception=exception)
 
     def complete(self, result: T) -> None:
         """Finish the operation from a delivery handler."""

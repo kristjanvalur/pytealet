@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from tealetio import Event, set_scheduler
-from tealetio.operations import Operation
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.streams import (
     AsyncStreamReader,
@@ -802,21 +801,31 @@ class TestStreamsPoC:
         from tealetio.operation_chaining import connect_initial_send_factory
 
         io = scheduler.io
-        client, _peer = socket.socketpair()
         captured: list[object | None] = []
+        real_connect = scheduler.proactor.connect
 
-        def fake_connect(sock: socket.socket, address, *, operation_factory=None):
-            del sock, address
+        def capture_connect(sock: socket.socket, address, *, operation_factory=None):
             captured.append(operation_factory)
-            operation = Operation[None](kind="connect", fileobj=client)
-            operation._finish(result=None)
-            return operation
+            return real_connect(sock, address, operation_factory=operation_factory)
 
-        monkeypatch.setattr(scheduler.proactor, "connect", fake_connect)
+        monkeypatch.setattr(scheduler.proactor, "connect", capture_connect)
 
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: socket.socket | None = None
         try:
+            server.setblocking(False)
             client.setblocking(False)
-            io.sock_connect(client, ("127.0.0.1", 0), initial=b"helloworld")
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            address = server.getsockname()
+
+            def exercise() -> None:
+                io.sock_connect(client, address, initial=b"helloworld")
+
+            run_scheduler_task(scheduler, exercise)
+
+            accepted, _peer = server.accept()
             assert len(captured) == 1
             factory = captured[0]
             assert factory is not None
@@ -829,8 +838,12 @@ class TestStreamsPoC:
             assert chained._advance_hook is not None
             assert expected._delivery is not None
             assert expected._advance_hook is not None
+            assert accepted.recv(1024) == b"helloworld"
         finally:
+            if accepted is not None:
+                accepted.close()
             client.close()
+            server.close()
 
     def test_open_connection_passes_initial_send_to_sock_create(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch

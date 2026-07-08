@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, Operation
+from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
@@ -20,8 +21,7 @@ _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
 
 # sockaddr shapes vary by family; tighten when accept/connect types are unified.
-SocketAddress: TypeAlias = Any
-SocketSendBuffer: TypeAlias = bytes | bytearray | memoryview
+SocketAddress = Any
 
 IO_UNSUPPORTED_ERROR = "operation requires a scheduler with IO support"
 SELECTOR_IO_UNSUPPORTED_ERROR = (
