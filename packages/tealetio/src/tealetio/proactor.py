@@ -35,7 +35,7 @@ from .recv_iter import (
     _RecvManyResume,
 )
 from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
-from .operations import ContinuousOperation, ContinuousStepResult, Operation
+from .operations import ContinuousOperation, ContinuousStepResult, DeliveryHandler, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -306,7 +306,13 @@ class Proactor(Protocol):
 
     async def wait_async(self, deadline: float | None = None) -> None: ...
 
-    def recv(self, sock: socket.socket, n: int) -> Operation[bytes]: ...
+    def recv(
+        self,
+        sock: socket.socket,
+        n: int,
+        *,
+        delivery: DeliveryHandler | None = None,
+    ) -> Operation[bytes]: ...
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]: ...
 
@@ -875,10 +881,16 @@ class SelectorProactor(ProactorBase):
         assert loop is not None
         await loop.run_in_executor(None, self.wait, deadline)
 
-    def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+    def recv(
+        self,
+        sock: socket.socket,
+        n: int,
+        *,
+        delivery: DeliveryHandler | None = None,
+    ) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        operation = Operation[bytes](kind="recv", fileobj=sock)
+        operation = Operation[bytes](kind="recv", fileobj=sock, delivery=delivery)
 
         def attempt() -> bytes:
             return sock.recv(n)
@@ -1339,9 +1351,9 @@ class SelectorProactor(ProactorBase):
         except (BlockingIOError, InterruptedError):
             return False
         except BaseException as exc:
-            operation._set_exception(exc)
+            operation.deliver(self, exception=exc)
         else:
-            operation._set_result(result)
+            operation.deliver(self, result=result)
         return True
 
     def _check_fd_operation_available(self, fd: int, event: int) -> None:
@@ -1439,10 +1451,10 @@ class SelectorProactor(ProactorBase):
             return
         except BaseException as exc:
             self._remove_operation(operation)
-            operation._set_exception(exc)
+            operation.deliver(self, exception=exc)
         else:
             self._remove_operation(operation)
-            operation._set_result(result)
+            operation.deliver(self, result=result)
         completed.append(operation)
 
     def _step_continuous_fd_operation(
@@ -2082,12 +2094,18 @@ class UringProactor(ProactorBase):
         if self._wait_ready.wait(timeout):
             self._wait_ready.clear()
 
-    def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+    def recv(
+        self,
+        sock: socket.socket,
+        n: int,
+        *,
+        delivery: DeliveryHandler | None = None,
+    ) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        operation = Operation[bytes](kind="recv", fileobj=sock)
+        operation = Operation[bytes](kind="recv", fileobj=sock, delivery=delivery)
         if n == 0:
-            operation._set_result(b"")
+            operation.deliver(self, result=b"")
             return operation
         data = memoryview(bytearray(n))
         entry = self._uring_entry(
@@ -2101,7 +2119,7 @@ class UringProactor(ProactorBase):
         self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
     ) -> Operation[bytes]:
         operation = cast(Operation[bytes], entry.operation)
-        operation._set_result(data[: completion.res].tobytes())
+        operation.deliver(self, result=data[: completion.res].tobytes())
         return operation
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:

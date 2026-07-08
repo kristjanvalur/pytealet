@@ -17,6 +17,9 @@ class InvalidStateError(Exception):
 _DoneCallback = Callable[["Operation[Any]"], object]
 _ResultCallback = Callable[[T_co], object]
 _CancelHook = Callable[[], None]
+_ProactorRef = Any
+# ``result`` and ``exception`` are mutually exclusive; one is always ``None``.
+DeliveryHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
 
 
 @dataclass
@@ -33,9 +36,11 @@ class Operation(Generic[T]):
         *,
         kind: str,
         fileobj: object | None = None,
+        delivery: DeliveryHandler | None = None,
     ) -> None:
         self.kind = kind
         self.fileobj = fileobj
+        self._delivery = delivery
         self._lock = threading.Lock()
         self._done = False
         self._cancelled = False
@@ -116,6 +121,40 @@ class Operation(Generic[T]):
                     kept.append(stored_callback)
             self._callbacks = kept
             return removed
+
+    def deliver(
+        self,
+        proactor: _ProactorRef,
+        *,
+        result: Any = None,
+        exception: BaseException | None = None,
+    ) -> None:
+        """Accept one backend completion on a worker thread.
+
+        When ``delivery`` was provided at construction, it runs instead of
+        finishing the operation. Otherwise this completes immediately.
+        """
+
+        if self._done:
+            return
+        delivery = self._delivery
+        if delivery is not None:
+            delivery(proactor, self, result, exception)
+            return
+        if exception is not None:
+            self._set_exception(exception)
+        else:
+            self._set_result(cast(T, result))
+
+    def complete(self, result: T) -> None:
+        """Finish the operation from a delivery handler."""
+
+        self._set_result(result)
+
+    def complete_error(self, exc: BaseException) -> None:
+        """Fail the operation from a delivery handler."""
+
+        self._set_exception(exc)
 
     def _set_result(self, result: T) -> None:
         self._finish(result=result)

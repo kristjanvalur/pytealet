@@ -762,6 +762,25 @@ class TestOperation:
         assert seen == [1]
 
 
+def test_operation_deliver_completes_without_handler() -> None:
+    operation = Operation[int](kind="test")
+    operation.deliver(object(), result=7)
+    assert operation.result() == 7
+
+
+def test_operation_deliver_routes_to_handler() -> None:
+    seen: list[tuple[object, BaseException | None]] = []
+
+    def handler(_proactor: object, op: Operation[int], result: object, exception: BaseException | None) -> None:
+        seen.append((result, exception))
+        op.complete(cast(int, result))
+
+    operation = Operation[int](kind="test", delivery=handler)
+    operation.deliver(object(), result=3)
+    assert seen == [(3, None)]
+    assert operation.result() == 3
+
+
 @pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
 class TestProactorContract:
     def test_clock_can_be_replaced(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
@@ -782,6 +801,25 @@ class TestProactorContract:
             writer.sendall(b"hello")
             _pump_proactor(proactor, operation)
             assert operation.result() == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_double_delivery_chains_two_reads(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        from tealetio.operation_delivery import double_recv_delivery
+
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            writer.sendall(b"abcdef")
+            _pump_proactor(proactor, operation)
+            assert operation.result() == b"abcdef"
         finally:
             reader.close()
             writer.close()
