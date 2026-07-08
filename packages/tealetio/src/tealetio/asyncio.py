@@ -292,7 +292,7 @@ class ForwardingProactor:
         """Connect a socket through the host proactor."""
 
         # Plain connect never passes an operation factory; connect-time send is IOManager-only.
-        operation = cast(Operation[None], self._proactor.connect(sock, address))
+        operation = self._proactor.connect(sock, address)
         return self._future_from_operation(operation)
 
     def sendfile(self, sock: socket.socket, file: Any, offset: int, blocksize: int) -> _asyncio.Future[int]:

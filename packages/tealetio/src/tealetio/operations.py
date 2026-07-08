@@ -204,7 +204,7 @@ class Operation(Generic[T]):
                 if exception is not None:
                     op._finish(exception=exception)
                 else:
-                    op._finish(result=cast(Any, result))
+                    op._finish(result=result)
                 return
             op = parent
 
