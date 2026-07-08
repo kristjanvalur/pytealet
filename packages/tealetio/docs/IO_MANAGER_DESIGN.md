@@ -197,6 +197,79 @@ Intermediate legs are not awaited by the scheduler task. Only the root
 `Operation` is passed to `wait_operation`; child submissions happen from
 delivery callbacks as completions arrive.
 
+### Chain spine: cancel down, advance up
+
+Each link carries two pointers in opposite directions:
+
+```text
+cancel:  root ──cancel_forward──► connect ──cancel_forward──► send (active leaf)
+advance: root ◄──chain_parent──── connect ◄──chain_parent──── send
+```
+
+`cancel_forward` is a weak reference to the **active** child leg. The proactor
+entry for that leg holds the strong reference while IO is live.
+
+### Advance hooks (one shot per leg)
+
+When a child leg completes, `Operation.advance()` walks **up** `chain_parent`
+and dispatches the first `_advance_hook` it finds. Each hook runs **at most once**
+per leg: the hook is cleared before it is invoked. The handler finishes local
+work (for example closing a captured socket on error, shaping the root success
+result) and calls `advance_continue()` to bubble further toward the root.
+
+Intermediate legs often stay `_done=False` on the success path; only the root
+future is awaited by the caller. `_done` on a child means that leg's own
+`Operation` completed (cancel, explicit `complete()`, or a non-chain delivery
+path), not merely that its backend work finished.
+
+### Cancel vs dynamic chain extension
+
+Worker threads extend the chain from delivery handlers (`proactor.connect`,
+`proactor.send`) while the scheduler thread may call `cancel()` on the root at
+the same time. Without synchronisation, cancel can miss a child that was not yet
+linked on `cancel_forward`, leaving live proactor IO unreachable from
+`cancel()`.
+
+**Linking** — `Operation.attach_child()` installs `chain_parent` and
+`cancel_forward` under the **parent** lock only when `not parent._done`.
+`operation_factory` uses this path; a failed attach marks the orphan child
+cancelled so the proactor skips submit. Delivery handlers and
+`_chain_next_operation` call `may_extend_chain()` (same lock, same check) before
+starting the next leg.
+
+**Cancel snapshot** — `cancel()` reads `_done` and `cancel_forward` under the
+node lock, recurses into the child **without** holding the parent lock across
+the descent, then runs this node's `cancel_hook` and `_set_cancelled()` on the
+unwind.
+
+Invariant: once `parent._done`, no new leg may be linked; once a leg is
+published on `cancel_forward`, cancel from the root must reach it (or a
+descendant on the same spine).
+
+### Cancel traversal and fd cleanup
+
+`cancel()` walks **down** the active spine depth-first: `forward.cancel()` on
+the child before local teardown on the parent. That stops outstanding IO at the
+leaf before retiring links above it.
+
+On the **leaf** unwind only (no `cancel_forward` at cancel entry), when the
+node still has a `chain_parent`, call `advance(exception=CancelledError())`
+**before** `cancel_hook` and `_set_cancelled()`. That bubbles up to advance
+hooks such as `chained_fdclose_link`, which close captured sockets on error
+paths. One leaf bubble is sufficient: `advance()` walks the full parent chain.
+The root finishes with `cancelled=True`.
+
+Order on each node during unwind:
+
+1. `forward.cancel()` — recurse to the active child (already completed on the
+   return path for non-leaf nodes).
+2. At leaf only: `advance(CancelledError)` when chained.
+3. `cancel_hook` — backend teardown (uring cancel, selector deregistration).
+4. `_set_cancelled()` — terminal fallback when the hook did not finish the leg.
+
+Intermediate nodes do **not** call `advance()`; the leaf bubble already
+reached the root hook.
+
 ## Capability gate
 
 | Concern | asyncio | tealetio (proactor) |
