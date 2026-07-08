@@ -1267,6 +1267,44 @@ def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None
     assert str(operation.exception()) == "connect failed"
 
 
+def test_chained_connect_link_bubbles_cancel_when_extension_refused() -> None:
+    from tealetio.operation_chaining import chained_connect_link, operation_factory
+
+    root = Operation[None](kind="root")
+    connect = cast(
+        Operation[None],
+        operation_factory(parent=root, delivery=chained_connect_link())("connect", None),
+    )
+    connect.may_extend_chain = lambda: False  # type: ignore[method-assign]
+    delivery = connect._delivery
+    assert delivery is not None
+    delivery(object(), connect, None, None)
+    assert root.cancelled() is True
+
+
+def test_chained_fdclose_link_bubbles_cancel_when_extension_refused() -> None:
+    from tealetio.operation_chaining import chained_fdclose_link
+
+    closed: list[bool] = []
+
+    class _RecordingSocket:
+        def close(self) -> None:
+            closed.append(True)
+
+    root = cast(
+        Operation[None],
+        chained_fdclose_link(
+            next_operation=lambda _parent, _link_result=None: None,
+        )("create_socket", None),
+    )
+    root.may_extend_chain = lambda: False  # type: ignore[method-assign]
+    delivery = root._delivery
+    assert delivery is not None
+    delivery(object(), root, _RecordingSocket(), None)
+    assert closed == [True]
+    assert root.cancelled() is True
+
+
 @pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
 class TestProactorContract:
     def test_clock_can_be_replaced(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:

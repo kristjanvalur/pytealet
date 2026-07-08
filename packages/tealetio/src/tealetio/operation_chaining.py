@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable
+from concurrent.futures import CancelledError
 from typing import Any, cast
 
 from .types import SocketSendBuffer
@@ -39,6 +40,12 @@ def operation_factory(
     return factory
 
 
+def _abort_chain_extension(operation: Operation[Any]) -> None:
+    """Bubble cancellation upward when a success path cannot extend the chain."""
+
+    operation.advance(exception=CancelledError())
+
+
 def _chain_next_operation(
     parent: Operation[Any],
     next_operation: NextOperation | None,
@@ -46,6 +53,7 @@ def _chain_next_operation(
     link_result: Any | None = None,
 ) -> None:
     if not parent.may_extend_chain():
+        _abort_chain_extension(parent)
         return
     try:
         if next_operation is not None:
@@ -111,6 +119,7 @@ def chained_fdclose_link(
         delivered = cast(socket.socket, result)
         if not operation.may_extend_chain():
             _close_socket(delivered)
+            _abort_chain_extension(operation)
             return
         if on_socket is not None:
             on_socket(delivered)
@@ -140,6 +149,7 @@ def chained_connect_link(
             operation.advance(exception=exception)
             return
         if not operation.may_extend_chain():
+            _abort_chain_extension(operation)
             return
         _chain_next_operation(operation, next_operation, link_result=result)
 
@@ -192,6 +202,7 @@ def chained_send_link(
             operation.advance(exception=exception)
             return
         if not operation.may_extend_chain():
+            _abort_chain_extension(operation)
             return
         start_send_link(operation)
 
