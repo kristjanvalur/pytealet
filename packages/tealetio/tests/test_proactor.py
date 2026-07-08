@@ -849,7 +849,6 @@ def test_chained_send_link_next_operation_composes() -> None:
     from tealetio.operation_delivery import _start_send_link, chained_send_link
 
     sent: list[bytes] = []
-    steps: list[str] = []
 
     class _SendProactor:
         def send(
@@ -878,22 +877,11 @@ def test_chained_send_link_next_operation_composes() -> None:
             parent: Operation[None],
             _link_result: object | None = None,
         ) -> Operation[None] | None:
-            return _start_send_link(
-                _proactor,
-                parent,
-                b"second",
-                succeed=lambda: (steps.append("finish"), operation.complete(None)),
-                fail=operation.complete_error,
-            )
+            return _start_send_link(_proactor, parent, b"second", terminal_result=None)
 
-        delivery = chained_send_link(
-            b"first",
-            fail=operation.complete_error,
-            next_operation=second_send,
-        )
+        delivery = chained_send_link(b"first", next_operation=second_send)
         delivery(_SendProactor(), operation, None, None)
         assert sent == [b"first", b"second"]
-        assert steps == ["finish"]
         assert operation.result() is None
     finally:
         sock.close()
@@ -902,15 +890,14 @@ def test_chained_send_link_next_operation_composes() -> None:
 def test_chained_send_link_requires_terminal_or_next_operation() -> None:
     from tealetio.operation_delivery import chained_send_link
 
-    with pytest.raises(ValueError, match="requires succeed, next_operation, or terminal_result"):
-        chained_send_link(b"hello", fail=lambda _exc: None)
+    with pytest.raises(ValueError, match="requires next_operation or terminal_result"):
+        chained_send_link(b"hello")
 
 
 def test_chained_connect_link_next_operation_composes_with_send() -> None:
     from tealetio.operation_delivery import _start_send_link, chained_connect_link
 
     sent: list[bytes] = []
-    steps: list[str] = []
 
     class _SendProactor:
         def send(
@@ -939,21 +926,11 @@ def test_chained_connect_link_next_operation_composes_with_send() -> None:
             parent: Operation[bool],
             _link_result: object | None = None,
         ) -> Operation[None] | None:
-            return _start_send_link(
-                proactor,
-                parent,
-                b"hello",
-                succeed=lambda: (steps.append("finish"), operation.complete(True)),
-                fail=operation.complete_error,
-            )
+            return _start_send_link(proactor, parent, b"hello", terminal_result=True)
 
-        delivery = chained_connect_link(
-            fail=operation.complete_error,
-            next_operation=send_next,
-        )
+        delivery = chained_connect_link(next_operation=send_next)
         delivery(_SendProactor(), operation, None, None)
         assert sent == [b"hello"]
-        assert steps == ["finish"]
         assert operation.result() is True
     finally:
         sock.close()
@@ -962,8 +939,8 @@ def test_chained_connect_link_next_operation_composes_with_send() -> None:
 def test_chained_connect_link_requires_terminal_or_next_operation() -> None:
     from tealetio.operation_delivery import chained_connect_link
 
-    with pytest.raises(ValueError, match="requires succeed, next_operation, or terminal_result"):
-        chained_connect_link(fail=lambda _exc: None)
+    with pytest.raises(ValueError, match="requires next_operation or terminal_result"):
+        chained_connect_link()
 
 
 def test_chained_fdclose_link_closes_socket_when_parent_done() -> None:

@@ -138,9 +138,6 @@ def _create_socket_delivery_handlers(
     *,
     on_socket: Callable[[socket.socket], None] | None = None,
 ) -> DeliveryHandler:
-    def succeed(sock: socket.socket, is_connected: bool, initial_sent: bool) -> None:
-        operation_ref[0].complete((sock, is_connected, initial_sent))
-
     def fail(exc: BaseException) -> None:
         if not operation_ref[0].done():
             operation_ref[0].complete_error(exc)
@@ -148,7 +145,6 @@ def _create_socket_delivery_handlers(
     return create_socket_delivery(
         connect_to,
         initial_data,
-        succeed=succeed,
         fail=fail,
         on_socket=on_socket,
     )

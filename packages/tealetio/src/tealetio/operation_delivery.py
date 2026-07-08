@@ -10,7 +10,6 @@ from .io_manager import SocketSendBuffer
 from .operations import DeliveryHandler, Operation, OperationFactory
 
 CreateSocketResult = tuple[socket.socket, bool, bool]
-_DeliverySucceed = Callable[[], None]
 _DeliveryFail = Callable[[BaseException], None]
 NextOperation = Callable[[Any, Operation[Any], Any | None], Operation[Any] | None]
 
@@ -73,16 +72,12 @@ def _chain_next_operation(
     next_operation: NextOperation | None,
     *,
     link_result: Any | None = None,
-    succeed: _DeliverySucceed | None = None,
     terminal_result: Any = None,
 ) -> None:
     if next_operation is not None:
         child = next_operation(proactor, parent, link_result)
         if child is not None:
             parent.set_cancel_forward(child)
-        return
-    if succeed is not None:
-        succeed()
         return
     parent.advance_up(proactor, result=terminal_result)
 
@@ -99,8 +94,6 @@ def _start_send_link(
     parent: Operation[Any],
     data: SocketSendBuffer | None,
     *,
-    succeed: _DeliverySucceed | None = None,
-    fail: _DeliveryFail | None = None,
     next_operation: NextOperation | None = None,
     terminal_result: Any = None,
 ) -> Operation[None] | None:
@@ -110,7 +103,6 @@ def _start_send_link(
             proactor,
             parent,
             next_operation,
-            succeed=succeed,
             terminal_result=terminal_result,
         )
         return None
@@ -124,21 +116,10 @@ def _start_send_link(
         send_exception: BaseException | None,
     ) -> None:
         if send_exception is not None:
-            if fail is not None:
-                fail(send_exception)
-            else:
-                send_operation.advance_up(proactor, exception=send_exception)
+            send_operation.advance_up(proactor, exception=send_exception)
             return
         if next_operation is not None:
-            _chain_next_operation(
-                proactor,
-                parent,
-                next_operation,
-                succeed=succeed,
-            )
-            return
-        if succeed is not None:
-            succeed()
+            _chain_next_operation(proactor, parent, next_operation)
             return
         send_operation.advance_up(proactor, result=terminal_result)
 
@@ -152,8 +133,7 @@ def _start_send_link(
 def chained_fdclose_link(
     *,
     fail: _DeliveryFail,
-    next_operation: NextOperation | None = None,
-    succeed: _DeliverySucceed | None = None,
+    next_operation: NextOperation,
     on_socket: Callable[[socket.socket], None] | None = None,
 ) -> DeliveryHandler:
     """Forward a delivered socket into the next chained operation.
@@ -162,11 +142,9 @@ def chained_fdclose_link(
     ``deliver()`` a ``socket.socket`` in ``result``. The socket is captured in
     this link's ``advance`` closure. Child failures bubble through
     ``advance()``; this link closes the created socket before calling
-    ``advance_up()``. One of ``next_operation`` or ``succeed`` is required.
+    ``advance_up()``. ``fail`` handles proactor failures before the chain
+    starts.
     """
-
-    if next_operation is None and succeed is None:
-        raise ValueError("chained_fdclose_link requires next_operation or succeed")
 
     def delivery(
         proactor: object,
@@ -205,7 +183,6 @@ def chained_fdclose_link(
                 operation,
                 next_operation,
                 link_result=sock,
-                succeed=succeed,
             )
         except BaseException as exc:
             _close_socket(sock)
@@ -216,15 +193,13 @@ def chained_fdclose_link(
 
 def chained_connect_link(
     *,
-    succeed: _DeliverySucceed | None = None,
-    fail: _DeliveryFail | None = None,
     next_operation: NextOperation | None = None,
     terminal_result: Any = None,
 ) -> DeliveryHandler:
     """Advance a connect ``Operation`` after the backend connect succeeds."""
 
-    if succeed is None and next_operation is None and terminal_result is None:
-        raise ValueError("chained_connect_link requires succeed, next_operation, or terminal_result")
+    if next_operation is None and terminal_result is None:
+        raise ValueError("chained_connect_link requires next_operation or terminal_result")
 
     def delivery(
         proactor: object,
@@ -233,16 +208,12 @@ def chained_connect_link(
         exception: BaseException | None,
     ) -> None:
         if exception is not None:
-            if fail is not None:
-                fail(exception)
-            else:
-                operation.advance_up(proactor, exception=exception)
+            operation.advance_up(proactor, exception=exception)
             return
         _chain_next_operation(
             proactor,
             operation,
             next_operation,
-            succeed=succeed,
             terminal_result=terminal_result,
         )
 
@@ -252,15 +223,13 @@ def chained_connect_link(
 def chained_send_link(
     data: SocketSendBuffer | None,
     *,
-    succeed: _DeliverySucceed | None = None,
-    fail: _DeliveryFail | None = None,
     next_operation: NextOperation | None = None,
     terminal_result: Any = None,
 ) -> DeliveryHandler:
     """Append a sendall leg after a parent socket operation succeeds."""
 
-    if succeed is None and next_operation is None and terminal_result is None:
-        raise ValueError("chained_send_link requires succeed, next_operation, or terminal_result")
+    if next_operation is None and terminal_result is None:
+        raise ValueError("chained_send_link requires next_operation or terminal_result")
 
     def delivery(
         proactor: _SendSubmitProactor,
@@ -269,17 +238,12 @@ def chained_send_link(
         exception: BaseException | None,
     ) -> None:
         if exception is not None:
-            if fail is not None:
-                fail(exception)
-            else:
-                operation.advance_up(proactor, exception=exception)
+            operation.advance_up(proactor, exception=exception)
             return
         child = _start_send_link(
             proactor,
             operation,
             data,
-            succeed=succeed,
-            fail=fail,
             next_operation=next_operation,
             terminal_result=terminal_result,
         )
@@ -317,7 +281,6 @@ def create_socket_delivery(
     connect_to: Any | None,
     initial_data: SocketSendBuffer | None,
     *,
-    succeed: Callable[[socket.socket, bool, bool], None],
     fail: _DeliveryFail,
     on_socket: Callable[[socket.socket], None] | None = None,
 ) -> DeliveryHandler:
