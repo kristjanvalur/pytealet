@@ -2019,10 +2019,13 @@ class UringProactor(ProactorBase):
         progress: _ProgressCallback | None = None,
         *,
         delivery: DeliveryHandler | None = None,
+        chain_parent: Operation[Any] | None = None,
     ) -> Operation[None]:
         """Submit a stream send that drains ``data`` before completing."""
 
         operation = Operation[None](kind="send", fileobj=sock, delivery=delivery)
+        if chain_parent is not None:
+            operation.set_chain_parent(chain_parent)
         payload = memoryview(data)
         if not payload:
             self._check_open()
@@ -2453,6 +2456,7 @@ class UringProactor(ProactorBase):
         *,
         initial: SocketSendBuffer | None = None,
         delivery: DeliveryHandler | None = None,
+        chain_parent: Operation[Any] | None = None,
     ) -> Operation[None] | Operation[bool]:
         """Submit a non-blocking socket connect operation."""
 
@@ -2469,6 +2473,8 @@ class UringProactor(ProactorBase):
             operation = Operation[bool](kind="connect", fileobj=sock, delivery=delivery)
         else:
             operation = Operation[None](kind="connect", fileobj=sock)
+        if chain_parent is not None:
+            operation.set_chain_parent(chain_parent)
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_connect(entry, completion),

@@ -20,6 +20,7 @@ _CancelHook = Callable[[], None]
 _ProactorRef = Any
 # ``result`` and ``exception`` are mutually exclusive; one is always ``None``.
 DeliveryHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
+ChainAdvanceHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
 
 
 @dataclass
@@ -49,6 +50,8 @@ class Operation(Generic[T]):
         self._callbacks: list[_DoneCallback] | None = []
         self._cancel_hook: _CancelHook | None = None
         self._cancel_forward: Operation[Any] | None = None
+        self._chain_parent: Operation[Any] | None = None
+        self._chain_advance: ChainAdvanceHandler | None = None
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -69,6 +72,16 @@ class Operation(Generic[T]):
         """Forward ``cancel()`` to a chained child operation."""
 
         self._cancel_forward = operation
+
+    def set_chain_parent(self, parent: "Operation[Any] | None") -> None:
+        """Record the parent operation that receives bubbled chain completions."""
+
+        self._chain_parent = parent
+
+    def set_chain_advance(self, handler: ChainAdvanceHandler | None) -> None:
+        """Install the handler that receives bubbled child-chain completions."""
+
+        self._chain_advance = handler
 
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
@@ -149,6 +162,50 @@ class Operation(Generic[T]):
         delivery = self._delivery
         if delivery is not None:
             delivery(proactor, self, result, exception)
+            return
+        if exception is not None:
+            self._set_exception(exception)
+        else:
+            self._set_result(cast(T, result))
+
+    def advance(
+        self,
+        proactor: _ProactorRef,
+        *,
+        result: Any = None,
+        exception: BaseException | None = None,
+    ) -> None:
+        """Accept a bubbled completion from a chained child operation.
+
+        Unlike ``deliver()``, this does not re-enter the proactor delivery
+        handler. When ``_chain_advance`` is installed the handler runs local
+        link logic and should finish by calling ``advance_up()`` on this
+        operation. With no handler installed, ``advance_up()`` runs
+        immediately.
+        """
+
+        if self._done:
+            return
+        handler = self._chain_advance
+        if handler is not None:
+            handler(proactor, self, result, exception)
+            return
+        self.advance_up(proactor, result=result, exception=exception)
+
+    def advance_up(
+        self,
+        proactor: _ProactorRef,
+        *,
+        result: Any = None,
+        exception: BaseException | None = None,
+    ) -> None:
+        """Pass a chain completion to the parent, or finish at the chain root."""
+
+        if self._done:
+            return
+        parent = self._chain_parent
+        if parent is not None:
+            parent.advance(proactor, result=result, exception=exception)
             return
         if exception is not None:
             self._set_exception(exception)

@@ -798,8 +798,53 @@ def test_operation_deliver_routes_to_handler() -> None:
     assert operation.result() == 3
 
 
-def test_chained_send_link_next_link_composes() -> None:
-    from tealetio.operation_delivery import chained_send_link
+def test_operation_advance_routes_to_chain_handler() -> None:
+    seen: list[tuple[object, BaseException | None]] = []
+
+    def advance(_proactor: object, op: Operation[int], result: object, exception: BaseException | None) -> None:
+        seen.append((result, exception))
+        if exception is not None:
+            op.complete_error(exception)
+        else:
+            op.complete(cast(int, result))
+
+    operation = Operation[int](kind="test")
+    operation.set_chain_advance(advance)
+    operation.advance(object(), result=7)
+    assert seen == [(7, None)]
+    assert operation.result() == 7
+
+
+def test_operation_advance_completes_without_chain_handler() -> None:
+    operation = Operation[str](kind="test")
+    operation.advance(object(), result="done")
+    assert operation.result() == "done"
+
+
+def test_operation_advance_passthrough_to_chain_parent() -> None:
+    root = Operation[int](kind="root")
+    child = Operation[None](kind="child")
+    child.set_chain_parent(root)
+    child.advance(object(), result=9)
+    assert root.result() == 9
+
+
+def test_operation_advance_up_completes_at_root() -> None:
+    operation = Operation[str](kind="root")
+    operation.advance_up(object(), result="done")
+    assert operation.result() == "done"
+
+
+def test_operation_advance_up_delegates_to_parent() -> None:
+    root = Operation[int](kind="root")
+    child = Operation[None](kind="child")
+    child.set_chain_parent(root)
+    child.advance_up(object(), result=4)
+    assert root.result() == 4
+
+
+def test_chained_send_link_next_operation_composes() -> None:
+    from tealetio.operation_delivery import _start_send_link, chained_send_link
 
     sent: list[bytes] = []
     steps: list[str] = []
@@ -811,9 +856,12 @@ def test_chained_send_link_next_link_composes() -> None:
             data: bytes,
             *,
             delivery: object | None = None,
+            chain_parent: Operation[Any] | None = None,
         ) -> Operation[None]:
             sent.append(bytes(data))
             send_operation = Operation[None](kind="send", fileobj=sock, delivery=delivery)
+            if chain_parent is not None:
+                send_operation.set_chain_parent(chain_parent)
             if delivery is not None:
                 cast(Any, delivery)(self, send_operation, None, None)
             return send_operation
@@ -821,15 +869,24 @@ def test_chained_send_link_next_link_composes() -> None:
     sock = socket.socket()
     operation = Operation[None](kind="connect", fileobj=sock)
     try:
-        terminal = chained_send_link(
-            b"second",
-            succeed=lambda: (steps.append("finish"), operation.complete(None)),
-            fail=operation.complete_error,
-        )
+
+        def second_send(
+            _proactor: _SendProactor,
+            parent: Operation[None],
+            _link_result: object | None = None,
+        ) -> Operation[None] | None:
+            return _start_send_link(
+                _proactor,
+                parent,
+                b"second",
+                succeed=lambda: (steps.append("finish"), operation.complete(None)),
+                fail=operation.complete_error,
+            )
+
         delivery = chained_send_link(
             b"first",
             fail=operation.complete_error,
-            next_link=terminal,
+            next_operation=second_send,
         )
         delivery(_SendProactor(), operation, None, None)
         assert sent == [b"first", b"second"]
@@ -839,15 +896,15 @@ def test_chained_send_link_next_link_composes() -> None:
         sock.close()
 
 
-def test_chained_send_link_requires_terminal_or_next_link() -> None:
+def test_chained_send_link_requires_terminal_or_next_operation() -> None:
     from tealetio.operation_delivery import chained_send_link
 
-    with pytest.raises(ValueError, match="requires succeed or next_link"):
+    with pytest.raises(ValueError, match="requires succeed, next_operation, or terminal_result"):
         chained_send_link(b"hello", fail=lambda _exc: None)
 
 
-def test_chained_connect_link_next_link_composes_with_send() -> None:
-    from tealetio.operation_delivery import chained_connect_link, chained_send_link
+def test_chained_connect_link_next_operation_composes_with_send() -> None:
+    from tealetio.operation_delivery import _start_send_link, chained_connect_link
 
     sent: list[bytes] = []
     steps: list[str] = []
@@ -859,9 +916,12 @@ def test_chained_connect_link_next_link_composes_with_send() -> None:
             data: bytes,
             *,
             delivery: object | None = None,
+            chain_parent: Operation[Any] | None = None,
         ) -> Operation[None]:
             sent.append(bytes(data))
             send_operation = Operation[None](kind="send", fileobj=sock, delivery=delivery)
+            if chain_parent is not None:
+                send_operation.set_chain_parent(chain_parent)
             if delivery is not None:
                 cast(Any, delivery)(self, send_operation, None, None)
             return send_operation
@@ -869,13 +929,23 @@ def test_chained_connect_link_next_link_composes_with_send() -> None:
     sock = socket.socket()
     operation = Operation[bool](kind="connect", fileobj=sock)
     try:
-        delivery = chained_connect_link(
-            fail=operation.complete_error,
-            next_link=chained_send_link(
+
+        def send_next(
+            proactor: _SendProactor,
+            parent: Operation[bool],
+            _link_result: object | None = None,
+        ) -> Operation[None] | None:
+            return _start_send_link(
+                proactor,
+                parent,
                 b"hello",
                 succeed=lambda: (steps.append("finish"), operation.complete(True)),
                 fail=operation.complete_error,
-            ),
+            )
+
+        delivery = chained_connect_link(
+            fail=operation.complete_error,
+            next_operation=send_next,
         )
         delivery(_SendProactor(), operation, None, None)
         assert sent == [b"hello"]
@@ -885,10 +955,10 @@ def test_chained_connect_link_next_link_composes_with_send() -> None:
         sock.close()
 
 
-def test_chained_connect_link_requires_terminal_or_next_link() -> None:
+def test_chained_connect_link_requires_terminal_or_next_operation() -> None:
     from tealetio.operation_delivery import chained_connect_link
 
-    with pytest.raises(ValueError, match="requires succeed or next_link"):
+    with pytest.raises(ValueError, match="requires succeed, next_operation, or terminal_result"):
         chained_connect_link(fail=lambda _exc: None)
 
 
@@ -905,13 +975,15 @@ def test_chained_fdclose_link_closes_socket_when_parent_done() -> None:
     operation._set_cancelled()
     delivery = chained_fdclose_link(
         fail=lambda _exc: None,
-        next_link=lambda *_args: (_ for _ in ()).throw(AssertionError("next_link should not run")),
+        next_operation=lambda _proactor, _parent: (_ for _ in ()).throw(
+            AssertionError("next_operation should not run")
+        ),
     )
     delivery(object(), operation, cast(socket.socket, _RecordingSocket()), None)
     assert closed == [True]
 
 
-def test_chained_fdclose_link_closes_socket_when_next_link_raises() -> None:
+def test_chained_fdclose_link_closes_socket_when_next_operation_raises() -> None:
     from tealetio.operation_delivery import chained_fdclose_link
 
     closed: list[bool] = []
@@ -921,15 +993,74 @@ def test_chained_fdclose_link_closes_socket_when_next_link_raises() -> None:
             closed.append(True)
 
     errors: list[BaseException] = []
+
+    def next_operation(
+        _proactor: object,
+        _parent: Operation[None],
+        _link_result: object | None = None,
+    ) -> Operation[None] | None:
+        raise OSError("boom")
+
     delivery = chained_fdclose_link(
         fail=errors.append,
-        next_link=lambda *_args: (_ for _ in ()).throw(OSError("boom")),
+        next_operation=next_operation,
     )
     operation = Operation[None](kind="create_socket")
     delivery(object(), operation, cast(socket.socket, _RecordingSocket()), None)
     assert closed == [True]
     assert len(errors) == 1
     assert str(errors[0]) == "boom"
+
+
+def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None:
+    from tealetio.operation_delivery import chained_connect_link, chained_fdclose_link
+
+    closed: list[bool] = []
+
+    class _RecordingSocket:
+        def close(self) -> None:
+            closed.append(True)
+
+    class _ConnectProactor:
+        def connect(
+            self,
+            sock: socket.socket,
+            address: object,
+            *,
+            delivery: object | None = None,
+            chain_parent: Operation[Any] | None = None,
+        ) -> Operation[None]:
+            connect_operation = Operation[None](kind="connect", fileobj=sock, delivery=delivery)
+            if chain_parent is not None:
+                connect_operation.set_chain_parent(chain_parent)
+            if delivery is not None:
+                cast(Any, delivery)(self, connect_operation, None, OSError("connect failed"))
+            return connect_operation
+
+    def next_operation(
+        proactor: _ConnectProactor,
+        parent: Operation[None],
+        link_result: object | None,
+    ) -> Operation[None] | None:
+        sock = cast(socket.socket, link_result)
+        return proactor.connect(
+            sock,
+            ("127.0.0.1", 9),
+            delivery=chained_connect_link(
+                next_operation=lambda _proactor, _parent, _link_result=None: None,
+            ),
+            chain_parent=parent,
+        )
+
+    operation = Operation[None](kind="create_socket")
+    delivery = chained_fdclose_link(
+        fail=operation.complete_error,
+        next_operation=next_operation,
+    )
+    delivery(_ConnectProactor(), operation, cast(socket.socket, _RecordingSocket()), None)
+    assert closed == [True]
+    assert operation.done()
+    assert str(operation.exception()) == "connect failed"
 
 
 @pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
