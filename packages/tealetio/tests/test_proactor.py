@@ -1030,6 +1030,38 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_recv_double_delivery_second_recv_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from tealetio.operation_delivery import double_recv_delivery
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            reader_fd = reader.fileno()
+            calls = 0
+            real_recv = socket.socket.recv
+
+            def recv_fail_on_second(self: socket.socket, n: int) -> bytes:
+                nonlocal calls
+                if self.fileno() == reader_fd:
+                    calls += 1
+                    if calls > 1:
+                        raise ConnectionResetError("simulated reset on second recv")
+                return real_recv(self, n)
+
+            monkeypatch.setattr(socket.socket, "recv", recv_fail_on_second)
+            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            writer.sendall(b"abc")
+            _pump_proactor(proactor, operation)
+            assert operation.done()
+            exc = operation.exception()
+            assert isinstance(exc, ConnectionResetError)
+            assert str(exc) == "simulated reset on second recv"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_connect_with_initial_ignores_payload_on_selector(self):
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2716,6 +2748,28 @@ class TestUringProactor:
             assert entry.active is False
             assert proactor.has_pending_operations() is False
             assert ring.submitted_recv == []
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_double_delivery_second_recv_error(self) -> None:
+        from tealetio.operation_delivery import double_recv_delivery
+
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            ring = proactor.ring
+            assert isinstance(ring, _DeferredUringRing)
+            ring.complete_recv(b"abc")
+            _wait_for_uring(proactor, lambda: len(ring.submitted_recv) == 2)
+            ring.complete_recv_error(-errno.EIO)
+            _wait_for_uring(proactor, lambda: operation.done())
+            exc = operation.exception()
+            assert isinstance(exc, OSError)
+            assert exc.errno == errno.EIO
         finally:
             reader.close()
             writer.close()

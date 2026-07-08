@@ -3277,7 +3277,10 @@ class UringProactor(ProactorBase):
         if entry.operation.done():
             return entry.operation
         if res < 0 and entry.parent is None and entry.operation.kind != "receive_on_accept":
-            entry.operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            entry.operation.deliver(
+                self,
+                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
             return entry.operation
         return entry.complete(entry, completion)
 

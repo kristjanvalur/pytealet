@@ -838,6 +838,13 @@ class _DeferredUringRing(_FakeUringRing):
         completion.result = len(data)
         self._deliver(completion)
 
+    def complete_recv_error(self, err: int) -> None:
+        completion = self.pending_recv.pop(-1)
+        completion.res = err
+        completion.result = err
+        completion.flags = 0
+        self._deliver(completion)
+
 
 class _FailingSubmitUringRing(_DeferredUringRing):
     def __init__(self, entries: int = 8, flags: int = 0) -> None:
