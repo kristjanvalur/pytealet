@@ -211,12 +211,10 @@ still use the backend async connect path.
 ### ``initial_sent`` on ``sock_create``
 
 The root ``chained_fdclose_link`` advance hook shapes
-``(socket, is_connected, initial_sent)``. ``initial_sent`` is set only when the
-connect→send chain marks the initial buffer as flushed: an empty ``initial_data``
-buffer skips the kernel send but still counts as flushed; omitted
-``initial_data`` leaves the flag ``False``. The flag is not inferred from the
-hint alone — it is recorded when the send leg completes or takes the documented
-empty-buffer skip path.
+``(socket, is_connected, initial_sent)`` on the success path only. Reaching that
+hook means the create→connect→send chain finished without error; when
+``initial_data`` was provided (including an empty buffer that skips the kernel
+send), ``initial_sent`` is ``True``. Omitted ``initial_data`` yields ``False``.
 
 ### Chain spine: cancel down, advance up
 
