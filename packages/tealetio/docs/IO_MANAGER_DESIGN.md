@@ -175,17 +175,13 @@ create_socket_chain_factory(proactor, …)   ← chained_fdclose_link root
                └─ chained_send_link tail
 ```
 
-Delivery handlers run on the worker thread when a backend completion arrives.
-They start the next leg (`proactor.connect`, `proactor.send`) and propagate
-backend failures via `operation.advance(exception=…)`.
-
-Child successes and errors bubble through `Operation.advance()`, which walks the
-parent chain until it finds an advance hook. Hooks own link-local work: close a
-created socket on error, shape the root result on success, then call
-`advance_continue()`.
-
-Chain factories take `proactor` as their first argument and close over it in
-handlers. The proactor is not threaded through `advance()`.
+Chain factories take `proactor` as their first argument. Delivery handlers,
+advance hooks, and `next_operation` callbacks are nested closures built at
+chain creation time — they bind the proactor, addresses, initial send buffers,
+parent operations, cleanup policy, and result shaping before any `Operation` is
+submitted. When a backend completion arrives on the worker thread, those
+handlers start the next leg (`proactor.connect`, `proactor.send`) without the
+scheduler blocking on intermediate results.
 
 Production chains today:
 
