@@ -44,7 +44,7 @@ class Operation(Generic[T]):
         self.kind = kind
         self.fileobj = fileobj
         self._delivery: DeliveryHandler | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._done = False
         self._cancelled = False
         self._result: T | None = None
@@ -195,9 +195,10 @@ class Operation(Generic[T]):
         the operation. Otherwise this completes immediately.
         """
 
-        if self._done:
-            return
-        delivery = self._delivery
+        with self._lock:
+            if self._done:
+                return
+            delivery = self._delivery
         if delivery is not None:
             delivery(proactor, self, result, exception)
             return

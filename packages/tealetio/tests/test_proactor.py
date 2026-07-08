@@ -926,6 +926,21 @@ def test_operation_finish_clears_chain_parent_on_child() -> None:
     assert root._cancel_forward is None
 
 
+def test_operation_deliver_skips_handler_when_done() -> None:
+    seen: list[bool] = []
+
+    def handler(_proactor: object, op: Operation[None], _result: object, _exception: BaseException | None) -> None:
+        seen.append(True)
+        op.complete(None)
+
+    from tealetio.operation_chaining import operation_factory
+
+    operation = cast(Operation[None], operation_factory(delivery=handler)("test", None))
+    operation._set_cancelled()
+    operation.deliver(object(), result=None)
+    assert seen == []
+
+
 def test_operation_deliver_routes_to_handler() -> None:
     seen: list[tuple[object, BaseException | None]] = []
 
