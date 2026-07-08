@@ -792,8 +792,9 @@ def test_operation_deliver_routes_to_handler() -> None:
         seen.append((result, exception))
         op.complete(cast(int, result))
 
-    operation = Operation[int](kind="test")
-    operation.set_delivery(handler)
+    from tealetio.operation_delivery import operation_factory
+
+    operation = cast(Operation[int], operation_factory(delivery=handler)("test", None))
     operation.deliver(object(), result=3)
     assert seen == [(3, None)]
     assert operation.result() == 3

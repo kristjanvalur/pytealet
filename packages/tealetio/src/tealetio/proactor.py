@@ -35,7 +35,7 @@ from .recv_iter import (
     _RecvManyResume,
 )
 from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
-from .operation_delivery import connect_initial_send_factory, create_socket_delivery
+from .operation_delivery import connect_initial_send_factory, create_socket_delivery, operation_factory
 from .operations import ContinuousOperation, ContinuousStepResult, Operation, OperationFactory
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
@@ -152,6 +152,33 @@ def _create_socket_delivery_handlers(
         fail=fail,
         on_socket=on_socket,
     )
+
+
+def _create_socket_operation(
+    operation_ref: list[Operation[CreateSocketResult]],
+    fileobj: tuple[int, int, int],
+    *,
+    connect_to: Any | None,
+    initial_data: SocketSendBuffer | None,
+    on_socket: Callable[[socket.socket], None] | None = None,
+) -> Operation[CreateSocketResult]:
+    operation = cast(
+        Operation[CreateSocketResult],
+        _spawn_operation(
+            "create_socket",
+            fileobj,
+            operation_factory=operation_factory(
+                delivery=_create_socket_delivery_handlers(
+                    operation_ref,
+                    connect_to,
+                    initial_data,
+                    on_socket=on_socket,
+                ),
+            ),
+        ),
+    )
+    operation_ref.append(operation)
+    return operation
 
 
 def _close_raw_fd(fd: int) -> None:
@@ -1057,12 +1084,12 @@ class SelectorProactor(ProactorBase):
         _validate_create_socket_hints(connect_to, initial_data)
         del flags, connect_to, initial_data
         operation_ref: list[Operation[CreateSocketResult]] = []
-        operation = Operation[CreateSocketResult](
-            kind="create_socket",
-            fileobj=(family, type, proto),
+        operation = _create_socket_operation(
+            operation_ref,
+            (family, type, proto),
+            connect_to=None,
+            initial_data=None,
         )
-        operation.set_delivery(_create_socket_delivery_handlers(operation_ref, None, None))
-        operation_ref.append(operation)
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
         except OSError as exc:
@@ -2391,19 +2418,13 @@ class UringProactor(ProactorBase):
             socket_type = type | flags | _DEFAULT_ACCEPT_FLAGS
             adopted_sock: list[socket.socket | None] = [None]
             operation_ref: list[Operation[CreateSocketResult]] = []
-            operation = Operation[CreateSocketResult](
-                kind="create_socket",
-                fileobj=(family, type, proto),
+            operation = _create_socket_operation(
+                operation_ref,
+                (family, type, proto),
+                connect_to=connect_to,
+                initial_data=initial_data,
+                on_socket=lambda sock: adopted_sock.__setitem__(0, sock),
             )
-            operation.set_delivery(
-                _create_socket_delivery_handlers(
-                    operation_ref,
-                    connect_to,
-                    initial_data,
-                    on_socket=lambda sock: adopted_sock.__setitem__(0, sock),
-                )
-            )
-            operation_ref.append(operation)
             entry = self._uring_entry(
                 operation,
                 lambda entry, completion: self._complete_uring_create_socket(entry, completion),
@@ -2426,12 +2447,12 @@ class UringProactor(ProactorBase):
             return operation
 
         operation_ref: list[Operation[CreateSocketResult]] = []
-        operation = Operation[CreateSocketResult](
-            kind="create_socket",
-            fileobj=(family, type, proto),
+        operation = _create_socket_operation(
+            operation_ref,
+            (family, type, proto),
+            connect_to=None,
+            initial_data=None,
         )
-        operation.set_delivery(_create_socket_delivery_handlers(operation_ref, None, None))
-        operation_ref.append(operation)
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
         except OSError as exc:

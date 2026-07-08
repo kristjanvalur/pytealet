@@ -20,7 +20,11 @@ def operation_factory(
     parent: Operation[Any] | None = None,
     delivery: DeliveryHandler | None = None,
 ) -> OperationFactory:
-    """Build a chained child ``Operation`` with parent and delivery wired."""
+    """Build an ``Operation`` with optional chain parent and delivery handler.
+
+    Omit ``parent`` for a chain root; the factory only wires delivery in
+    that case.
+    """
 
     def factory(kind: str, fileobj: object | None) -> Operation[Any]:
         child = Operation(kind=kind, fileobj=fileobj)
