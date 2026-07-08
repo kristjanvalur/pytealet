@@ -64,15 +64,20 @@ class _MockProactor:
         *,
         flags: int = 0,
         operation_factory: Any | None = None,
-    ) -> Operation[socket.socket]:
-        del operation_factory
-        self.create_socket_calls.append((family, type, proto, flags))
-        operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
+    ) -> Operation[Any]:
+        self.create_socket_calls.append((family, type, proto, flags, operation_factory is not None))
         sock = socket.socket(family, type, proto)
         sock.setblocking(False)
         os.set_inheritable(sock.fileno(), False)
         self.last_create_socket = sock
-        operation._finish(result=sock)
+        if operation_factory is None:
+            operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
+            operation._finish(result=sock)
+            return operation
+        operation = operation_factory("create_socket", (family, type, proto))
+        delivery = operation._delivery
+        if delivery is not None:
+            delivery(self, operation, sock, None)
         return operation
 
     def connect(
@@ -82,9 +87,33 @@ class _MockProactor:
         *,
         operation_factory: Any | None = None,
     ) -> Operation[None]:
-        del sock, address, operation_factory
-        operation = Operation[None](kind="connect", fileobj=None)
-        operation._finish(result=None)
+        del address
+        if operation_factory is None:
+            operation = Operation[None](kind="connect", fileobj=sock)
+            operation._finish(result=None)
+            return operation
+        operation = operation_factory("connect", sock)
+        delivery = operation._delivery
+        if delivery is not None:
+            delivery(self, operation, None, None)
+        return operation
+
+    def send(
+        self,
+        sock: socket.socket,
+        data: Any,
+        *,
+        operation_factory: Any | None = None,
+    ) -> Operation[None]:
+        del data
+        if operation_factory is None:
+            operation = Operation[None](kind="send", fileobj=sock)
+            operation._finish(result=None)
+            return operation
+        operation = operation_factory("send", sock)
+        delivery = operation._delivery
+        if delivery is not None:
+            delivery(self, operation, None, None)
         return operation
 
     def poll_many(
@@ -181,15 +210,9 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
-    def test_sock_create_fallback_without_initial_data_reports_initial_sent_false(self):
+    def test_sock_create_uses_chain_factory_when_connect_to_set(self):
         proactor = _MockProactor()
         io = _manager(proactor)
-        connect_calls: list[tuple[socket.socket, Any, Any | None]] = []
-
-        def fake_sock_connect(sock: socket.socket, address: Any, *, initial: Any | None = None) -> None:
-            connect_calls.append((sock, address, initial))
-
-        io.sock_connect = fake_sock_connect  # type: ignore[method-assign]
         address = ("127.0.0.1", 9)
         sock, is_connected, initial_sent = io.sock_create(
             socket.AF_INET,
@@ -197,22 +220,15 @@ class TestProactorIOManagerDirect:
             connect_to=address,
         )
         try:
-            assert len(connect_calls) == 1
-            assert connect_calls[0][2] is None
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
             assert is_connected is True
             assert initial_sent is False
         finally:
             sock.close()
 
-    def test_sock_create_falls_back_to_sock_connect_when_hints_ignored(self):
+    def test_sock_create_chain_factory_reports_initial_sent(self):
         proactor = _MockProactor()
         io = _manager(proactor)
-        connect_calls: list[tuple[socket.socket, Any, Any | None]] = []
-
-        def fake_sock_connect(sock: socket.socket, address: Any, *, initial: Any | None = None) -> None:
-            connect_calls.append((sock, address, initial))
-
-        io.sock_connect = fake_sock_connect  # type: ignore[method-assign]
         address = ("127.0.0.1", 9)
         sock, is_connected, initial_sent = io.sock_create(
             socket.AF_INET,
@@ -221,10 +237,7 @@ class TestProactorIOManagerDirect:
             initial_data=b"hi",
         )
         try:
-            assert len(connect_calls) == 1
-            assert connect_calls[0][0] is sock
-            assert connect_calls[0][1] == address
-            assert connect_calls[0][2] == b"hi"
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
             assert is_connected is True
             assert initial_sent is True
         finally:
@@ -240,15 +253,20 @@ class TestProactorIOManagerDirect:
                 initial_data=b"hi",
             )
 
-    def test_sock_create_closes_socket_when_connect_fallback_fails(self):
+    def test_sock_create_closes_socket_when_connect_chain_fails(self):
         proactor = _MockProactor()
         io = _manager(proactor)
 
-        def failing_sock_connect(sock: socket.socket, address: Any, *, initial: Any | None = None) -> None:
-            del sock, address, initial
+        def failing_connect(
+            sock: socket.socket,
+            address: Any,
+            *,
+            operation_factory: Any | None = None,
+        ) -> Operation[None]:
+            del sock, address, operation_factory
             raise OSError("connect failed")
 
-        io.sock_connect = failing_sock_connect  # type: ignore[method-assign]
+        proactor.connect = failing_connect  # type: ignore[method-assign]
         with pytest.raises(OSError, match="connect failed"):
             io.sock_create(
                 socket.AF_INET,

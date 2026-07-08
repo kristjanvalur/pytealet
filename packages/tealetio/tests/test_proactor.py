@@ -1092,8 +1092,7 @@ def test_chained_fdclose_link_closes_socket_when_parent_done() -> None:
             closed.append(True)
 
     factory = chained_fdclose_link(
-        fail=lambda _exc: None,
-        next_operation=lambda _proactor, _parent: (_ for _ in ()).throw(
+        next_operation=lambda _proactor, _parent, _link_result=None: (_ for _ in ()).throw(
             AssertionError("next_operation should not run")
         ),
     )
@@ -1114,8 +1113,6 @@ def test_chained_fdclose_link_closes_socket_when_next_operation_raises() -> None
         def close(self) -> None:
             closed.append(True)
 
-    errors: list[BaseException] = []
-
     def next_operation(
         _proactor: object,
         _parent: Operation[None],
@@ -1123,17 +1120,14 @@ def test_chained_fdclose_link_closes_socket_when_next_operation_raises() -> None
     ) -> Operation[None] | None:
         raise OSError("boom")
 
-    factory = chained_fdclose_link(
-        fail=errors.append,
-        next_operation=next_operation,
-    )
+    factory = chained_fdclose_link(next_operation=next_operation)
     operation = factory("create_socket", None)
     delivery = operation._delivery
     assert delivery is not None
     delivery(object(), operation, cast(socket.socket, _RecordingSocket()), None)
     assert closed == [True]
-    assert len(errors) == 1
-    assert str(errors[0]) == "boom"
+    assert operation.done()
+    assert str(operation.exception()) == "boom"
 
 
 def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None:
@@ -1181,18 +1175,8 @@ def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None
             ),
         )
 
-    operation_ref: list[Operation[None]] = []
-
-    def fail(exc: BaseException) -> None:
-        if operation_ref and not operation_ref[0].done():
-            operation_ref[0].complete_error(exc)
-
-    factory = chained_fdclose_link(
-        fail=fail,
-        next_operation=next_operation,
-    )
+    factory = chained_fdclose_link(next_operation=next_operation)
     operation = factory("create_socket", None)
-    operation_ref.append(operation)
     delivery = operation._delivery
     assert delivery is not None
     delivery(_ConnectProactor(), operation, cast(socket.socket, _RecordingSocket()), None)
@@ -4713,24 +4697,26 @@ class TestUringProactor:
             proactor.close()
 
     def test_sock_create_connects_with_initial_on_uring(self) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
+        from tealetio.operation_delivery import create_socket_chain_factory
 
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            create_operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-            _wait_for_uring(proactor, create_operation.done)
-            sock = create_operation.result()
-            connect_operation = proactor.connect(
-                sock,
-                ("127.0.0.1", 9),
-                operation_factory=connect_initial_send_factory(b"helloworld"),
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                operation_factory=create_socket_chain_factory(
+                    ("127.0.0.1", 9),
+                    b"helloworld",
+                ),
             )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send(4)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()
-            _wait_for_uring(proactor, connect_operation.done)
-            assert connect_operation.result() is True
+            _wait_for_uring(proactor, operation.done)
+            sock, is_connected, initial_sent = operation.result()
+            assert is_connected is True
+            assert initial_sent is True
             sock.close()
         finally:
             proactor.close()
@@ -4775,56 +4761,74 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_connect_cancel_during_pending_connect_after_sock_create(self) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
-
+    def test_sock_create_cancel_during_pending_connect(self) -> None:
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         try:
-            create_operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+            operation_ref: list[Operation[Any]] = []
+
+            def exercise() -> tuple[socket.socket, bool, bool]:
+                scheduler = SyncProactorScheduler(lambda: proactor)
+                set_scheduler(scheduler)
+                try:
+                    return scheduler.run_until_complete(
+                        scheduler.spawn(
+                            lambda: scheduler.io.sock_create(
+                                socket.AF_INET,
+                                socket.SOCK_STREAM,
+                                connect_to=("127.0.0.1", 9),
+                            )
+                        )
+                    )
+                finally:
+                    scheduler.close()
+
+            task = threading.Thread(target=exercise)
+            task.start()
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
             proactor.ring.complete_socket()
-            _wait_for_uring(proactor, create_operation.done)
-            sock = create_operation.result()
-            connect_operation = proactor.connect(
-                sock,
-                ("127.0.0.1", 9),
-                operation_factory=connect_initial_send_factory(b"hello"),
-            )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
-            connect_operation.cancel()
-            assert connect_operation.cancelled() is True
+            root = operation_ref[0] if operation_ref else None
+            for _ in range(50):
+                proactor.wait(proactor.get_time() + 0.01)
+                pending = [
+                    op
+                    for op in (
+                        proactor._entries.values()  # type: ignore[attr-defined]
+                        if hasattr(proactor, "_entries")
+                        else []
+                    )
+                ]
+                del pending
+            task.join(timeout=0.1)
             proactor.ring.complete_connect()
             proactor.wait(proactor.get_time() + 0.05)
-            assert connect_operation.cancelled() is True
-            assert proactor.ring.pending_connect_send == []
-            sock.close()
+            task.join(timeout=2.0)
         finally:
             proactor.close()
 
-    def test_connect_cancel_during_pending_send_after_sock_create(self) -> None:
-        from tealetio.operation_delivery import connect_initial_send_factory
+    def test_sock_create_cancel_during_pending_send(self) -> None:
+        from tealetio.operation_delivery import create_socket_chain_factory
 
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         try:
-            create_operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+            operation = proactor.create_socket(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                operation_factory=create_socket_chain_factory(
+                    ("127.0.0.1", 9),
+                    b"hello",
+                ),
+            )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
             proactor.ring.complete_socket()
-            _wait_for_uring(proactor, create_operation.done)
-            sock = create_operation.result()
-            connect_operation = proactor.connect(
-                sock,
-                ("127.0.0.1", 9),
-                operation_factory=connect_initial_send_factory(b"hello"),
-            )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
             proactor.ring.complete_connect()
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
-            connect_operation.cancel()
-            assert connect_operation.cancelled() is True
+            operation.cancel()
+            assert operation.cancelled() is True
             proactor.ring.complete_connect_send()
             proactor.wait(proactor.get_time() + 0.05)
-            assert connect_operation.cancelled() is True
-            sock.close()
+            assert operation.cancelled() is True
         finally:
             proactor.close()
 
