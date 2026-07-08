@@ -76,12 +76,11 @@ def _chain_next_operation(
     next_operation: NextOperation | None,
     *,
     link_result: Any | None = None,
-    terminal_result: Any = None,
 ) -> None:
     if next_operation is not None:
         next_operation(proactor, parent, link_result)
         return
-    parent.advance(proactor, result=terminal_result)
+    parent.advance(proactor)
 
 
 def _close_socket(sock: socket.socket) -> None:
@@ -97,16 +96,10 @@ def _start_send_link(
     data: SocketSendBuffer | None,
     *,
     next_operation: NextOperation | None = None,
-    terminal_result: Any = None,
 ) -> Operation[None] | None:
     payload = memoryview(data) if data is not None else None
     if payload is None or not payload:
-        _chain_next_operation(
-            proactor,
-            parent,
-            next_operation,
-            terminal_result=terminal_result,
-        )
+        _chain_next_operation(proactor, parent, next_operation)
         return None
 
     sock = cast(socket.socket, parent.fileobj)
@@ -123,7 +116,7 @@ def _start_send_link(
         if next_operation is not None:
             _chain_next_operation(proactor, parent, next_operation)
             return
-        send_operation.advance(proactor, result=terminal_result)
+        send_operation.advance(proactor)
 
     return proactor.send(
         sock,
@@ -137,15 +130,17 @@ def chained_fdclose_link(
     fail: _DeliveryFail,
     next_operation: NextOperation,
     on_socket: Callable[[socket.socket], None] | None = None,
+    shape_success: Callable[[socket.socket], Any] | None = None,
 ) -> OperationFactory:
     """Forward a delivered socket into the next chained operation.
 
     Top-level link for ``create_socket``-style completions. The proactor must
     ``deliver()`` a ``socket.socket`` in ``result``. The socket is captured when
-    delivery runs and shared with the advance hook. Child failures bubble
-    through ``advance()``; the hook closes the created socket before calling
-    ``advance_continue()``. ``fail`` handles proactor failures before the chain
-    starts.
+    delivery runs and shared with the advance hook. Child successes bubble
+    through ``advance()``; the hook shapes the root result via ``shape_success``
+    and calls ``advance_continue()``. Child failures close the created socket
+    before ``advance_continue()``. ``fail`` handles proactor failures before the
+    chain starts.
     """
 
     sock_ref: list[socket.socket | None] = [None]
@@ -157,12 +152,24 @@ def chained_fdclose_link(
         advance_exception: BaseException | None,
     ) -> None:
         sock = sock_ref[0]
-        if advance_exception is not None and sock is not None:
-            _close_socket(sock)
+        if advance_exception is not None:
+            if sock is not None:
+                _close_socket(sock)
+            advance_operation.advance_continue(
+                advance_proactor,
+                exception=advance_exception,
+            )
+            return
+        if shape_success is not None:
+            assert sock is not None
+            advance_operation.advance_continue(
+                advance_proactor,
+                result=shape_success(sock),
+            )
+            return
         advance_operation.advance_continue(
             advance_proactor,
             result=advance_result,
-            exception=advance_exception,
         )
 
     def delivery(
@@ -199,12 +206,8 @@ def chained_fdclose_link(
 def chained_connect_link(
     *,
     next_operation: NextOperation | None = None,
-    terminal_result: Any = None,
 ) -> DeliveryHandler:
-    """Advance a connect ``Operation`` after the backend connect succeeds."""
-
-    if next_operation is None and terminal_result is None:
-        raise ValueError("chained_connect_link requires next_operation or terminal_result")
+    """Spawn the next chained leg after a backend connect succeeds."""
 
     def delivery(
         proactor: object,
@@ -215,12 +218,7 @@ def chained_connect_link(
         if exception is not None:
             operation.advance(proactor, exception=exception)
             return
-        _chain_next_operation(
-            proactor,
-            operation,
-            next_operation,
-            terminal_result=terminal_result,
-        )
+        _chain_next_operation(proactor, operation, next_operation)
 
     return delivery
 
@@ -229,12 +227,8 @@ def chained_send_link(
     data: SocketSendBuffer | None,
     *,
     next_operation: NextOperation | None = None,
-    terminal_result: Any = None,
 ) -> DeliveryHandler:
     """Append a sendall leg after a parent socket operation succeeds."""
-
-    if next_operation is None and terminal_result is None:
-        raise ValueError("chained_send_link requires next_operation or terminal_result")
 
     def delivery(
         proactor: _SendSubmitProactor,
@@ -250,7 +244,6 @@ def chained_send_link(
             operation,
             data,
             next_operation=next_operation,
-            terminal_result=terminal_result,
         )
 
     return delivery
@@ -259,25 +252,21 @@ def chained_send_link(
 def connect_initial_send_factory(initial: SocketSendBuffer) -> OperationFactory:
     """Factory for ``connect(..., initial=...)`` on backends that support it."""
 
-    return operation_factory(delivery=connect_initial_send_delivery(initial))
+    def advance(
+        advance_proactor: object,
+        advance_operation: Operation[Any],
+        _advance_result: object,
+        advance_exception: BaseException | None,
+    ) -> None:
+        if advance_exception is not None:
+            advance_operation.advance_continue(advance_proactor, exception=advance_exception)
+            return
+        advance_operation.advance_continue(advance_proactor, result=True)
 
-
-def connect_initial_send_delivery(initial: SocketSendBuffer) -> DeliveryHandler:
-    """Delivery handler for ``connect(..., initial=...)``."""
-
-    def next_operation(
-        proactor: _SendSubmitProactor,
-        parent: Operation[bool],
-        _link_result: Any | None,
-    ) -> Operation[None] | None:
-        return _start_send_link(
-            proactor,
-            parent,
-            initial,
-            terminal_result=True,
-        )
-
-    return chained_connect_link(next_operation=next_operation)
+    return operation_factory(
+        delivery=chained_send_link(initial),
+        advance_hook=advance,
+    )
 
 
 def create_socket_delivery(
@@ -289,7 +278,9 @@ def create_socket_delivery(
 ) -> OperationFactory:
     """Assemble create → connect → send for ``create_socket``."""
 
-    def terminal_result(sock: socket.socket) -> CreateSocketResult:
+    def shape_success(sock: socket.socket) -> CreateSocketResult:
+        if connect_to is None or sock.family == socket.AF_UNIX:
+            return (sock, False, False)
         return (sock, True, initial_data is not None)
 
     def next_operation(
@@ -300,27 +291,15 @@ def create_socket_delivery(
         sock = cast(socket.socket, link_result)
 
         if connect_to is None or sock.family == socket.AF_UNIX:
-            parent.advance(proactor, result=(sock, False, False))
+            parent.advance(proactor)
             return None
-
-        def send_next(
-            connect_proactor: _ConnectSubmitProactor,
-            connect_parent: Operation[Any],
-            _link_result: Any | None,
-        ) -> Operation[None] | None:
-            return _start_send_link(
-                connect_proactor,
-                connect_parent,
-                initial_data,
-                terminal_result=terminal_result(sock),
-            )
 
         return proactor.connect(
             sock,
             connect_to,
             operation_factory=operation_factory(
                 parent=parent,
-                delivery=chained_connect_link(next_operation=send_next),
+                delivery=chained_send_link(initial_data),
             ),
         )
 
@@ -328,6 +307,7 @@ def create_socket_delivery(
         fail=fail,
         next_operation=next_operation,
         on_socket=on_socket,
+        shape_success=shape_success,
     )
 
 

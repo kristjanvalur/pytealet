@@ -986,7 +986,7 @@ def test_chained_send_link_next_operation_composes() -> None:
             parent: Operation[None],
             _link_result: object | None = None,
         ) -> Operation[None] | None:
-            return _start_send_link(_proactor, parent, b"second", terminal_result=None)
+            return _start_send_link(_proactor, parent, b"second")
 
         delivery = chained_send_link(b"first", next_operation=second_send)
         delivery(_SendProactor(), operation, None, None)
@@ -994,13 +994,6 @@ def test_chained_send_link_next_operation_composes() -> None:
         assert operation.result() is None
     finally:
         sock.close()
-
-
-def test_chained_send_link_requires_terminal_or_next_operation() -> None:
-    from tealetio.operation_delivery import chained_send_link
-
-    with pytest.raises(ValueError, match="requires next_operation or terminal_result"):
-        chained_send_link(b"hello")
 
 
 def test_chained_connect_link_next_operation_composes_with_send() -> None:
@@ -1028,6 +1021,19 @@ def test_chained_connect_link_next_operation_composes_with_send() -> None:
 
     sock = socket.socket()
     operation = Operation[bool](kind="connect", fileobj=sock)
+
+    def advance(
+        advance_proactor: object,
+        advance_operation: Operation[bool],
+        _advance_result: object,
+        advance_exception: BaseException | None,
+    ) -> None:
+        if advance_exception is not None:
+            advance_operation.advance_continue(advance_proactor, exception=advance_exception)
+            return
+        advance_operation.advance_continue(advance_proactor, result=True)
+
+    operation.set_advance_hook(advance)
     try:
 
         def send_next(
@@ -1035,7 +1041,7 @@ def test_chained_connect_link_next_operation_composes_with_send() -> None:
             parent: Operation[bool],
             _link_result: object | None = None,
         ) -> Operation[None] | None:
-            return _start_send_link(proactor, parent, b"hello", terminal_result=True)
+            return _start_send_link(proactor, parent, b"hello")
 
         delivery = chained_connect_link(next_operation=send_next)
         delivery(_SendProactor(), operation, None, None)
@@ -1043,13 +1049,6 @@ def test_chained_connect_link_next_operation_composes_with_send() -> None:
         assert operation.result() is True
     finally:
         sock.close()
-
-
-def test_chained_connect_link_requires_terminal_or_next_operation() -> None:
-    from tealetio.operation_delivery import chained_connect_link
-
-    with pytest.raises(ValueError, match="requires next_operation or terminal_result"):
-        chained_connect_link()
 
 
 def test_chained_fdclose_link_closes_socket_when_parent_done() -> None:
