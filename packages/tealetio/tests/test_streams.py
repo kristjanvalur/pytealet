@@ -806,7 +806,7 @@ class TestStreamsPoC:
         def fake_connect(sock: socket.socket, address, *, initial=None):
             del sock, address, initial
             operation = Operation[None](kind="connect", fileobj=client)
-            operation._set_result(None)
+            operation._finish(result=None)
             return operation
 
         monkeypatch.setattr(scheduler.proactor, "connect", fake_connect)

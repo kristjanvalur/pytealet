@@ -720,7 +720,7 @@ class TestOperation:
         seen: list[int] = []
 
         operation.add_done_callback(lambda op: seen.append(op.result()))
-        operation._set_result(42)
+        operation._finish(result=42)
         operation.add_done_callback(lambda op: seen.append(op.result() + 1))
 
         assert seen == [42, 43]
@@ -743,7 +743,7 @@ class TestOperation:
         operation.add_result_callback(seen.append)
         operation._emit_result(1)
         operation._emit_result(2)
-        operation._set_result(None)
+        operation._finish(result=None)
 
         assert seen == [1, 2]
         assert operation.done() is True
@@ -810,8 +810,9 @@ def test_operation_advance_routes_to_chain_handler() -> None:
         else:
             op.complete(cast(int, result))
 
-    operation = Operation[int](kind="test")
-    operation.set_chain_advance(advance)
+    from tealetio.operation_delivery import operation_factory
+
+    operation = cast(Operation[int], operation_factory(advance_hook=advance)("test", None))
     operation.advance(object(), result=7)
     assert seen == [(7, None)]
     assert operation.result() == 7
@@ -831,18 +832,79 @@ def test_operation_advance_passthrough_to_chain_parent() -> None:
     assert root.result() == 9
 
 
-def test_operation_advance_up_completes_at_root() -> None:
+def test_operation_advance_passthrough_through_multiple_links() -> None:
+    root = Operation[int](kind="root")
+    middle = Operation[None](kind="middle")
+    child = Operation[None](kind="child")
+    middle.set_chain_parent(root)
+    child.set_chain_parent(middle)
+    child.advance(object(), result=9)
+    assert root.result() == 9
+
+
+def test_operation_advance_continue_completes_at_root() -> None:
     operation = Operation[str](kind="root")
-    operation.advance_up(object(), result="done")
+    operation.advance_continue(object(), result="done")
     assert operation.result() == "done"
 
 
-def test_operation_advance_up_delegates_to_parent() -> None:
+def test_operation_advance_continue_delegates_to_parent() -> None:
     root = Operation[int](kind="root")
     child = Operation[None](kind="child")
     child.set_chain_parent(root)
-    child.advance_up(object(), result=4)
+    child.advance_continue(object(), result=4)
     assert root.result() == 4
+
+
+def test_operation_advance_continue_skips_own_hook() -> None:
+    seen: list[str] = []
+
+    def child_hook(
+        _proactor: object,
+        _op: Operation[None],
+        _result: object,
+        _exception: BaseException | None,
+    ) -> None:
+        seen.append("child")
+
+    def root_hook(
+        _proactor: object,
+        op: Operation[int],
+        result: object,
+        exception: BaseException | None,
+    ) -> None:
+        seen.append("root")
+        if exception is not None:
+            op.complete_error(exception)
+        else:
+            op.complete(cast(int, result))
+
+    from tealetio.operation_delivery import operation_factory
+
+    root = cast(Operation[int], operation_factory(advance_hook=root_hook)("root", None))
+    child = cast(
+        Operation[None],
+        operation_factory(parent=root, advance_hook=child_hook)("child", None),
+    )
+    child.advance_continue(object(), result=5)
+    assert seen == ["root"]
+    assert root.result() == 5
+
+
+def test_operation_advance_hook_uses_advance_continue() -> None:
+    def hook(
+        proactor: object,
+        op: Operation[str],
+        result: object,
+        exception: BaseException | None,
+    ) -> None:
+        op.advance_continue(proactor, result=result, exception=exception)
+
+    from tealetio.operation_delivery import operation_factory
+
+    operation = cast(Operation[str], operation_factory(advance_hook=hook)("root", None))
+    operation.advance(object(), result="done")
+    assert operation.result() == "done"
 
 
 def test_chained_send_link_next_operation_composes() -> None:
@@ -952,14 +1014,16 @@ def test_chained_fdclose_link_closes_socket_when_parent_done() -> None:
         def close(self) -> None:
             closed.append(True)
 
-    operation = Operation[None](kind="create_socket")
-    operation._set_cancelled()
-    delivery = chained_fdclose_link(
+    factory = chained_fdclose_link(
         fail=lambda _exc: None,
         next_operation=lambda _proactor, _parent: (_ for _ in ()).throw(
             AssertionError("next_operation should not run")
         ),
     )
+    operation = factory("create_socket", None)
+    operation._set_cancelled()
+    delivery = operation._delivery
+    assert delivery is not None
     delivery(object(), operation, cast(socket.socket, _RecordingSocket()), None)
     assert closed == [True]
 
@@ -982,11 +1046,13 @@ def test_chained_fdclose_link_closes_socket_when_next_operation_raises() -> None
     ) -> Operation[None] | None:
         raise OSError("boom")
 
-    delivery = chained_fdclose_link(
+    factory = chained_fdclose_link(
         fail=errors.append,
         next_operation=next_operation,
     )
-    operation = Operation[None](kind="create_socket")
+    operation = factory("create_socket", None)
+    delivery = operation._delivery
+    assert delivery is not None
     delivery(object(), operation, cast(socket.socket, _RecordingSocket()), None)
     assert closed == [True]
     assert len(errors) == 1
@@ -1038,11 +1104,20 @@ def test_chained_fdclose_link_closes_socket_when_child_bubbles_failure() -> None
             ),
         )
 
-    operation = Operation[None](kind="create_socket")
-    delivery = chained_fdclose_link(
-        fail=operation.complete_error,
+    operation_ref: list[Operation[None]] = []
+
+    def fail(exc: BaseException) -> None:
+        if operation_ref and not operation_ref[0].done():
+            operation_ref[0].complete_error(exc)
+
+    factory = chained_fdclose_link(
+        fail=fail,
         next_operation=next_operation,
     )
+    operation = factory("create_socket", None)
+    operation_ref.append(operation)
+    delivery = operation._delivery
+    assert delivery is not None
     delivery(_ConnectProactor(), operation, cast(socket.socket, _RecordingSocket()), None)
     assert closed == [True]
     assert operation.done()
@@ -5500,7 +5575,7 @@ class TestProactorScheduler:
 
         def failing_stat_fdsize(self: UringProactor, fd: int) -> Operation[int]:
             operation = Operation[int](kind="stat_fdsize", fileobj=fd)
-            operation._set_exception(OSError(errno.EIO, "stat failed"))
+            operation._finish(exception=OSError(errno.EIO, "stat failed"))
             return operation
 
         monkeypatch.setattr(UringProactor, "stat_fdsize", failing_stat_fdsize)

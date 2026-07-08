@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Any, Protocol, cast
 
 from .io_manager import SocketSendBuffer
-from .operations import DeliveryHandler, Operation, OperationFactory
+from .operations import AdvanceHook, DeliveryHandler, Operation, OperationFactory
 
 CreateSocketResult = tuple[socket.socket, bool, bool]
 _DeliveryFail = Callable[[BaseException], None]
@@ -18,11 +18,11 @@ def operation_factory(
     *,
     parent: Operation[Any] | None = None,
     delivery: DeliveryHandler | None = None,
+    advance_hook: AdvanceHook | None = None,
 ) -> OperationFactory:
-    """Build an ``Operation`` with optional chain parent and delivery handler.
+    """Build an ``Operation`` with optional chain parent, delivery, and hook.
 
-    Omit ``parent`` for a chain root; the factory only wires delivery in
-    that case.
+    Omit ``parent`` for a chain root.
     """
 
     def factory(kind: str, fileobj: object | None) -> Operation[Any]:
@@ -31,6 +31,8 @@ def operation_factory(
             child.set_chain_parent(parent)
         if delivery is not None:
             child.set_delivery(delivery)
+        if advance_hook is not None:
+            child.set_advance_hook(advance_hook)
         return child
 
     return factory
@@ -79,7 +81,7 @@ def _chain_next_operation(
         if child is not None:
             parent.set_cancel_forward(child)
         return
-    parent.advance_up(proactor, result=terminal_result)
+    parent.advance(proactor, result=terminal_result)
 
 
 def _close_socket(sock: socket.socket) -> None:
@@ -116,12 +118,12 @@ def _start_send_link(
         send_exception: BaseException | None,
     ) -> None:
         if send_exception is not None:
-            send_operation.advance_up(proactor, exception=send_exception)
+            send_operation.advance(proactor, exception=send_exception)
             return
         if next_operation is not None:
             _chain_next_operation(proactor, parent, next_operation)
             return
-        send_operation.advance_up(proactor, result=terminal_result)
+        send_operation.advance(proactor, result=terminal_result)
 
     return proactor.send(
         sock,
@@ -135,16 +137,33 @@ def chained_fdclose_link(
     fail: _DeliveryFail,
     next_operation: NextOperation,
     on_socket: Callable[[socket.socket], None] | None = None,
-) -> DeliveryHandler:
+) -> OperationFactory:
     """Forward a delivered socket into the next chained operation.
 
     Top-level link for ``create_socket``-style completions. The proactor must
-    ``deliver()`` a ``socket.socket`` in ``result``. The socket is captured in
-    this link's ``advance`` closure. Child failures bubble through
-    ``advance()``; this link closes the created socket before calling
-    ``advance_up()``. ``fail`` handles proactor failures before the chain
+    ``deliver()`` a ``socket.socket`` in ``result``. The socket is captured when
+    delivery runs and shared with the advance hook. Child failures bubble
+    through ``advance()``; the hook closes the created socket before calling
+    ``advance_continue()``. ``fail`` handles proactor failures before the chain
     starts.
     """
+
+    sock_ref: list[socket.socket | None] = [None]
+
+    def advance(
+        advance_proactor: object,
+        advance_operation: Operation[Any],
+        advance_result: object,
+        advance_exception: BaseException | None,
+    ) -> None:
+        sock = sock_ref[0]
+        if advance_exception is not None and sock is not None:
+            _close_socket(sock)
+        advance_operation.advance_continue(
+            advance_proactor,
+            result=advance_result,
+            exception=advance_exception,
+        )
 
     def delivery(
         proactor: object,
@@ -161,22 +180,7 @@ def chained_fdclose_link(
             return
         if on_socket is not None:
             on_socket(sock)
-
-        def advance(
-            advance_proactor: object,
-            advance_operation: Operation[Any],
-            advance_result: object,
-            advance_exception: BaseException | None,
-        ) -> None:
-            if advance_exception is not None:
-                _close_socket(sock)
-            advance_operation.advance_up(
-                advance_proactor,
-                result=advance_result,
-                exception=advance_exception,
-            )
-
-        operation.set_chain_advance(advance)
+        sock_ref[0] = sock
         try:
             _chain_next_operation(
                 proactor,
@@ -186,9 +190,10 @@ def chained_fdclose_link(
             )
         except BaseException as exc:
             _close_socket(sock)
+            sock_ref[0] = None
             fail(exc)
 
-    return delivery
+    return operation_factory(delivery=delivery, advance_hook=advance)
 
 
 def chained_connect_link(
@@ -208,7 +213,7 @@ def chained_connect_link(
         exception: BaseException | None,
     ) -> None:
         if exception is not None:
-            operation.advance_up(proactor, exception=exception)
+            operation.advance(proactor, exception=exception)
             return
         _chain_next_operation(
             proactor,
@@ -238,7 +243,7 @@ def chained_send_link(
         exception: BaseException | None,
     ) -> None:
         if exception is not None:
-            operation.advance_up(proactor, exception=exception)
+            operation.advance(proactor, exception=exception)
             return
         child = _start_send_link(
             proactor,
@@ -283,7 +288,7 @@ def create_socket_delivery(
     *,
     fail: _DeliveryFail,
     on_socket: Callable[[socket.socket], None] | None = None,
-) -> DeliveryHandler:
+) -> OperationFactory:
     """Assemble create → connect → send for ``create_socket``."""
 
     def terminal_result(sock: socket.socket) -> CreateSocketResult:
@@ -297,7 +302,7 @@ def create_socket_delivery(
         sock = cast(socket.socket, link_result)
 
         if connect_to is None or sock.family == socket.AF_UNIX:
-            parent.advance_up(proactor, result=(sock, False, False))
+            parent.advance(proactor, result=(sock, False, False))
             return None
 
         def send_next(

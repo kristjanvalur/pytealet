@@ -131,13 +131,13 @@ def _spawn_operation(
     return Operation(kind=kind, fileobj=fileobj)
 
 
-def _create_socket_delivery_handlers(
+def _create_socket_factory(
     operation_ref: list[Operation[CreateSocketResult]],
     connect_to: Any | None,
     initial_data: SocketSendBuffer | None,
     *,
     on_socket: Callable[[socket.socket], None] | None = None,
-) -> DeliveryHandler:
+) -> OperationFactory:
     def fail(exc: BaseException) -> None:
         if not operation_ref[0].done():
             operation_ref[0].complete_error(exc)
@@ -163,13 +163,11 @@ def _create_socket_operation(
         _spawn_operation(
             "create_socket",
             fileobj,
-            operation_factory=operation_factory(
-                delivery=_create_socket_delivery_handlers(
-                    operation_ref,
-                    connect_to,
-                    initial_data,
-                    on_socket=on_socket,
-                ),
+            operation_factory=_create_socket_factory(
+                operation_ref,
+                connect_to,
+                initial_data,
+                on_socket=on_socket,
             ),
         ),
     )
@@ -604,11 +602,11 @@ class ProactorBase:
         )
         try:
             if fd >= 0:
-                operation._set_result(os.fstat(fd))
+                operation._finish(result=os.fstat(fd))
             else:
-                operation._set_result(os.stat(path))
+                operation._finish(result=os.stat(path))
         except OSError as exc:
-            operation._set_exception(exc)
+            operation._finish(exception=exc)
         return operation
 
     def stat_fdsize(self, fd: int) -> Operation[int]:
@@ -619,9 +617,9 @@ class ProactorBase:
             raise ValueError("stat_fdsize() requires fd >= 0")
         operation = Operation[int](kind="stat_fdsize", fileobj=fd)
         try:
-            operation._set_result(os.fstat(fd).st_size)
+            operation._finish(result=os.fstat(fd).st_size)
         except OSError as exc:
-            operation._set_exception(exc)
+            operation._finish(exception=exc)
         return operation
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -1332,11 +1330,11 @@ class SelectorProactor(ProactorBase):
             return False
         except BaseException as exc:
             self._remove_operation(operation)
-            operation._set_exception(exc)
+            operation._finish(exception=exc)
             return True
         if step_result.done:
             self._remove_operation(operation)
-            operation._set_result(None)
+            operation._finish(result=None)
             return True
         if step_result.progressed:
             self._update_selector_registration(fd)
@@ -1520,12 +1518,12 @@ class SelectorProactor(ProactorBase):
             return
         except BaseException as exc:
             self._remove_operation(operation)
-            operation._set_exception(exc)
+            operation._finish(exception=exc)
             completed.append(operation)
             return
         if step_result.done:
             self._remove_operation(operation)
-            operation._set_result(None)
+            operation._finish(result=None)
         else:
             self._update_selector_registration(fd)
         if step_result.progressed or step_result.done:
@@ -2004,7 +2002,7 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_recv_into(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
         operation = cast(Operation[int], entry.operation)
-        operation._set_result(completion.res)
+        operation._finish(result=completion.res)
         return operation
 
     def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
@@ -2024,7 +2022,7 @@ class UringProactor(ProactorBase):
         self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
     ) -> Operation[tuple[bytes, Any]]:
         operation = cast(Operation[tuple[bytes, Any]], entry.operation)
-        operation._set_result((data[: completion.res].tobytes(), completion.result))
+        operation._finish(result=(data[: completion.res].tobytes(), completion.result))
         return operation
 
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
@@ -2052,7 +2050,7 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[tuple[int, Any]]:
         operation = cast(Operation[tuple[int, Any]], entry.operation)
-        operation._set_result((completion.res, completion.result))
+        operation._finish(result=(completion.res, completion.result))
         return operation
 
     def send(
@@ -2125,7 +2123,7 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_sendto(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
         operation = cast(Operation[int], entry.operation)
-        operation._set_result(completion.res)
+        operation._finish(result=completion.res)
         return operation
 
     def accept(self, sock: socket.socket) -> Operation[socket.socket]:
@@ -2142,7 +2140,7 @@ class UringProactor(ProactorBase):
     def _complete_uring_accept(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[socket.socket]:
         conn = socket_from_uring_fd(completion.res)
         operation = cast(Operation[socket.socket], entry.operation)
-        operation._set_result(conn)
+        operation._finish(result=conn)
         return operation
 
     def accept_many(
@@ -2255,7 +2253,7 @@ class UringProactor(ProactorBase):
         accept_finished: list[bool],
     ) -> None:
         if accept_finished[0] and not pending_recv and not operation.done():
-            operation._set_result(None)
+            operation._finish(result=None)
 
     def _fail_accept_many_operation(
         self,
@@ -2274,7 +2272,7 @@ class UringProactor(ProactorBase):
                 accept_entry.active = False
             accept_entry_ref[0] = None
         if not operation.done():
-            operation._set_exception(exc)
+            operation._finish(exception=exc)
 
     def _deliver_uring_accept_many_oneshot(
         self,
@@ -2287,7 +2285,7 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
         conn = socket_from_uring_fd(completion.res)
         _handoff_accept_many(operation, conn, None, None)
@@ -2351,7 +2349,7 @@ class UringProactor(ProactorBase):
             if pending_recv:
                 accept_finished[0] = True
             else:
-                operation._set_result(None)
+                operation._finish(result=None)
         return operation
 
     def _deliver_receive_on_accept(
@@ -2373,7 +2371,7 @@ class UringProactor(ProactorBase):
             pass
         if parent.done():
             conn.close()
-            recv_operation._set_result(None)
+            recv_operation._finish(result=None)
             self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
             return recv_operation
         if res < 0:
@@ -2383,16 +2381,16 @@ class UringProactor(ProactorBase):
                 None,
                 OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
             )
-            recv_operation._set_result(None)
+            recv_operation._finish(result=None)
             self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
             return recv_operation
         if res == 0:
             conn.close()
-            recv_operation._set_result(None)
+            recv_operation._finish(result=None)
             self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
             return recv_operation
         _handoff_accept_many(parent, conn, data[:res].tobytes(), None)
-        recv_operation._set_result(None)
+        recv_operation._finish(result=None)
         self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
         return recv_operation
 
@@ -2475,17 +2473,17 @@ class UringProactor(ProactorBase):
             operation = Operation[None](kind="connect", fileobj=sock)
             try:
                 finish_connect()
-                operation._set_result(None)
+                operation._finish(result=None)
             except OSError as exc:
-                operation._set_exception(exc)
+                operation._finish(exception=exc)
             return operation
 
         operation = Operation[bool](kind="connect", fileobj=sock)
         try:
             finish_connect()
-            operation._set_result(False)
+            operation._finish(result=False)
         except OSError as exc:
-            operation._set_exception(exc)
+            operation._finish(exception=exc)
         return operation
 
     def connect(
@@ -2545,7 +2543,7 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_openat(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
         operation = cast(Operation[int], entry.operation)
-        operation._set_result(completion.res)
+        operation._finish(result=completion.res)
         return operation
 
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
@@ -2564,7 +2562,7 @@ class UringProactor(ProactorBase):
         self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
     ) -> Operation[bytes]:
         operation = cast(Operation[bytes], entry.operation)
-        operation._set_result(data[: completion.res].tobytes())
+        operation._finish(result=data[: completion.res].tobytes())
         return operation
 
     def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
@@ -2580,7 +2578,7 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_read_into(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
         operation = cast(Operation[int], entry.operation)
-        operation._set_result(completion.res)
+        operation._finish(result=completion.res)
         return operation
 
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
@@ -2597,7 +2595,7 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_write(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
         operation = cast(Operation[int], entry.operation)
-        operation._set_result(completion.res)
+        operation._finish(result=completion.res)
         return operation
 
     def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
@@ -2645,9 +2643,9 @@ class UringProactor(ProactorBase):
     ) -> Operation[os.stat_result]:
         operation = cast(Operation[os.stat_result], entry.operation)
         try:
-            operation._set_result(_stat_result_from_statx(data))
+            operation._finish(result=_stat_result_from_statx(data))
         except ValueError as exc:
-            operation._set_exception(exc)
+            operation._finish(exception=exc)
         return operation
 
     def stat_fdsize(self, fd: int) -> Operation[int]:
@@ -2679,11 +2677,11 @@ class UringProactor(ProactorBase):
         size = completion.result
         if size is None:
             try:
-                operation._set_result(os.fstat(cast(int, operation.fileobj)).st_size)
+                operation._finish(result=os.fstat(cast(int, operation.fileobj)).st_size)
             except OSError as exc:
-                operation._set_exception(exc)
+                operation._finish(exception=exc)
             return operation
-        operation._set_result(cast(int, size))
+        operation._finish(result=cast(int, size))
         return operation
 
     def recv_many(
@@ -2775,12 +2773,12 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
         index = stream_sequence[0]
         if res == 0:
             operation._emit_result((index, memoryview(b"")))
-            operation._set_result(None)
+            operation._finish(result=None)
             self._deactivate_uring_entry(entry)
             return operation
         chunk = bytes(data[:res])
@@ -2806,7 +2804,7 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_poll(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
         operation = cast(Operation[int], entry.operation)
-        operation._set_result(completion.res)
+        operation._finish(result=completion.res)
         return operation
 
     def poll_many(
@@ -2864,7 +2862,7 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
         operation._emit_result(res)
         if operation.done():
@@ -2877,11 +2875,11 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
         operation._emit_result(res)
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
-            operation._set_result(None)
+            operation._finish(result=None)
             self._deactivate_uring_entry(entry)
         return operation
 
@@ -2906,7 +2904,7 @@ class UringProactor(ProactorBase):
                     multishot_leg.pending_final = None
                 operation._emit_result((RECV_MANY_BUFFER_PRESSURE, self._recv_many_resume_callable(entry, submit_box)))
                 return None
-            operation._set_exception(OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
 
         if res == 0:
@@ -2915,7 +2913,7 @@ class UringProactor(ProactorBase):
             operation._emit_result((index, memoryview(cast(Any, completion.result))))
 
         if not bool(completion.flags & uring_api.IORING_CQE_F_MORE):
-            operation._set_result(None)
+            operation._finish(result=None)
             self._deactivate_uring_entry(entry)
         return operation
 
@@ -2935,7 +2933,7 @@ class UringProactor(ProactorBase):
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
-        if entry.operation._set_exception(exc):
+        if entry.operation._finish(exception=exc):
             self.break_wait()
             self._notify_completed()
 

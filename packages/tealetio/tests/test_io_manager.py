@@ -34,26 +34,26 @@ class _MockProactor:
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         self.recv_calls.append((sock, n))
         operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
-        operation._set_result(b"mock")
+        operation._finish(result=b"mock")
         return operation
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
         self.poll_calls.append((fd, mask))
         operation = Operation[int](kind="poll", fileobj=fd)
-        operation._set_result(mask)
+        operation._finish(result=mask)
         return operation
 
     def send(self, sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
         del progress
         self.send_calls.append((sock, data))
         operation = Operation[None](kind="send", fileobj=sock.fileno())
-        operation._set_result(None)
+        operation._finish(result=None)
         return operation
 
     def openat(self, path: str, flags: int, mode: int) -> Operation[int]:
         self.openat_calls.append((path, flags, mode))
         operation = Operation[int](kind="openat", fileobj=-1)
-        operation._set_result(901)
+        operation._finish(result=901)
         return operation
 
     def create_socket(
@@ -72,7 +72,7 @@ class _MockProactor:
         sock.setblocking(False)
         os.set_inheritable(sock.fileno(), False)
         self.last_create_socket = sock
-        operation._set_result((sock, False, False))
+        operation._finish(result=(sock, False, False))
         return operation
 
     def connect(
@@ -84,7 +84,7 @@ class _MockProactor:
     ) -> Operation[None]:
         del sock, address, initial
         operation = Operation[None](kind="connect", fileobj=None)
-        operation._set_result(None)
+        operation._finish(result=None)
         return operation
 
     def poll_many(
@@ -94,7 +94,7 @@ class _MockProactor:
         callback: Any,
     ) -> ContinuousOperation[int]:
         operation = ContinuousOperation[int](kind="poll_many", fileobj=fd)
-        operation._set_result(mask)
+        operation._finish(result=mask)
         return operation
 
 

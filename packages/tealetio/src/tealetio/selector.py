@@ -345,7 +345,7 @@ class SelectorMixin:
 
         def fail(exc: BaseException) -> None:
             disarm()
-            operation._set_exception(exc)
+            operation._finish(exception=exc)
 
         def on_ready() -> None:
             if operation.done():
