@@ -797,6 +797,34 @@ def test_operation_deliver_completes_without_handler() -> None:
     assert operation.result() == 7
 
 
+def test_operation_attach_child_fails_when_parent_done() -> None:
+    parent = Operation[None](kind="parent")
+    child = Operation[None](kind="child")
+    parent._set_cancelled()
+    assert parent.attach_child(child) is False
+    assert child._chain_parent is None
+    assert parent._cancel_forward is None
+
+
+def test_operation_factory_cancels_child_when_parent_done() -> None:
+    from tealetio.operation_chaining import operation_factory
+
+    parent = Operation[None](kind="parent")
+    parent._set_cancelled()
+    child = cast(
+        Operation[None],
+        operation_factory(parent=parent)("child", None),
+    )
+    assert child.cancelled() is True
+    assert parent._cancel_forward is None
+
+
+def test_operation_may_extend_chain_false_when_done() -> None:
+    operation = Operation[None](kind="test")
+    operation._set_cancelled()
+    assert operation.may_extend_chain() is False
+
+
 def test_operation_cancel_forwards_to_chained_child() -> None:
     child_cancelled: list[bool] = []
     from tealetio.operation_chaining import operation_factory

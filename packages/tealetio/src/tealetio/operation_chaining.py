@@ -28,9 +28,8 @@ def operation_factory(
 
     def factory(kind: str, fileobj: object | None) -> Operation[Any]:
         child = Operation(kind=kind, fileobj=fileobj)
-        if parent is not None:
-            child.set_chain_parent(parent)
-            parent.set_cancel_forward(child)
+        if parent is not None and not parent.attach_child(child):
+            child._set_cancelled()
         if delivery is not None:
             child.set_delivery(delivery)
         if advance_hook is not None:
@@ -46,6 +45,8 @@ def _chain_next_operation(
     *,
     link_result: Any | None = None,
 ) -> None:
+    if not parent.may_extend_chain():
+        return
     try:
         if next_operation is not None:
             next_operation(parent, link_result)
@@ -108,7 +109,7 @@ def chained_fdclose_link(
             operation.advance(exception=exception)
             return
         delivered = cast(socket.socket, result)
-        if operation.done():
+        if not operation.may_extend_chain():
             _close_socket(delivered)
             return
         if on_socket is not None:
@@ -137,6 +138,8 @@ def chained_connect_link(
     ) -> None:
         if exception is not None:
             operation.advance(exception=exception)
+            return
+        if not operation.may_extend_chain():
             return
         _chain_next_operation(operation, next_operation, link_result=result)
 
@@ -187,6 +190,8 @@ def chained_send_link(
     ) -> None:
         if exception is not None:
             operation.advance(exception=exception)
+            return
+        if not operation.may_extend_chain():
             return
         start_send_link(operation)
 

@@ -912,6 +912,8 @@ class SelectorProactor(ProactorBase):
             Operation[None],
             _spawn_operation("send", sock, operation_factory=operation_factory),
         )
+        if operation.done():
+            return operation
         view = memoryview(data)
         offset = 0
 
@@ -1056,6 +1058,8 @@ class SelectorProactor(ProactorBase):
             Operation[None],
             _spawn_operation("connect", sock, operation_factory=operation_factory),
         )
+        if operation.done():
+            return operation
 
         def attempt() -> None:
             finish_connect()
@@ -1983,6 +1987,8 @@ class UringProactor(ProactorBase):
             Operation[None],
             _spawn_operation("send", sock, operation_factory=operation_factory),
         )
+        if operation.done():
+            return operation
         payload = memoryview(data)
         if not payload:
             self._check_open()
@@ -2375,6 +2381,8 @@ class UringProactor(ProactorBase):
             Operation[None],
             _spawn_operation("connect", sock, operation_factory=operation_factory),
         )
+        if operation.done():
+            return operation
         try:
             finish_connect()
             operation.deliver(self, result=None)
@@ -2398,6 +2406,8 @@ class UringProactor(ProactorBase):
             Operation[None],
             _spawn_operation("connect", sock, operation_factory=operation_factory),
         )
+        if operation.done():
+            return operation
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_connect(entry, completion),

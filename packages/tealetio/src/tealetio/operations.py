@@ -75,6 +75,26 @@ class Operation(Generic[T]):
 
         self._cancel_forward = None if operation is None else weakref.ref(operation)
 
+    def attach_child(self, child: "Operation[Any]") -> bool:
+        """Publish ``child`` on the cancel/advance spine.
+
+        Returns ``False`` when this operation is already done, for example
+        because ``cancel()`` won before the downlink was installed.
+        """
+
+        with self._lock:
+            if self._done:
+                return False
+            child.set_chain_parent(self)
+            self._cancel_forward = weakref.ref(child)
+            return True
+
+    def may_extend_chain(self) -> bool:
+        """Return whether a new chained leg may be started on this link."""
+
+        with self._lock:
+            return not self._done
+
     def set_chain_parent(self, parent: "Operation[Any] | None") -> None:
         """Record the parent operation that receives bubbled chain completions."""
 
@@ -93,16 +113,19 @@ class Operation(Generic[T]):
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
 
-        if self._done:
-            return
-        forward = self._cancel_forward_target()
+        with self._lock:
+            if self._done:
+                return
+            forward = self._cancel_forward_target()
         if forward is not None:
             forward.cancel()
         cancel_hook = self._cancel_hook
         if cancel_hook is not None:
             cancel_hook()
-        if not self._done:
-            self._set_cancelled()
+        with self._lock:
+            if self._done:
+                return
+        self._set_cancelled()
 
     def result(self) -> T:
         """Return the operation result, or raise its completion exception."""
