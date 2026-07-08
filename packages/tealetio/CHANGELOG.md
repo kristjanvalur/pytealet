@@ -50,21 +50,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Proactor.sendall()` is removed. Use `Proactor.send()` for stream sends that
   drain the full buffer before completing (`Operation[None]`). Datagram sends
   remain `Proactor.sendto()`.
-- `Proactor.connect(..., initial=...)` now completes with `Operation[bool]`
-  (`True` when connect-time send ran, including an empty buffer) instead of
-  `Operation[int]` bytes sent. `SelectorProactor` still returns a falsy result
-  for connect-time send; use `scheduler.io.sock_connect()` / `sock_create()`
-  when you need initial data on any backend.
+- `scheduler.io.sock_create()` now returns a ``socket.socket`` only. The former
+  ``(socket, is_connected, initial_sent)`` tuple is removed. Connect and
+  connect-time send are always chained by ``ProactorIOManager`` when
+  ``connect_to`` / ``initial_data`` are set; callers no longer inspect hint
+  honour flags.
+- Chained ``connect`` operations (``sock_connect(..., initial=...)``,
+  ``sock_create(..., connect_to=...)``) complete with ``None``, not ``True``.
 
 ### Added
 - `Proactor.create_socket()` and `scheduler.io.sock_create()` to create
-  scheduler-contract sockets through the proactor, returning
-  ``(socket, is_connected, initial_sent)``. Optional ``connect_to`` and
-  ``initial_data`` hints let `UringProactor` chain ``IORING_OP_SOCKET``,
-  connect, and sendall-style flushing of ``initial_data`` when supported; other
-  backends may ignore the hints and `sock_create()` falls back to
-  ``sock_connect()``. ``open_connection(..., initial_send=...)`` uses this path
-  for TCP and Unix ``path=`` connects.
+  scheduler-contract sockets through the proactor. Optional ``connect_to`` and
+  ``initial_data`` are chained by ``ProactorIOManager`` (create → connect →
+  send). ``open_connection(..., initial_send=...)`` uses this path for TCP and
+  Unix ``path=`` connects.
 - `IOFile` handle protocol for positioned binary file objects returned by
   `FileIO.open()`; `ProactorFile` is the proactor-backed implementation. Static
   typing only (not ``@runtime_checkable`` on Python 3.10–3.11); import from

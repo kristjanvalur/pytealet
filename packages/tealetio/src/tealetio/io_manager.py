@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
@@ -112,7 +112,7 @@ class SocketIO(Protocol):
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> tuple[socket.socket, bool, bool]: ...
+    ) -> socket.socket: ...
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: "RecvBufferPool | None" = None
@@ -334,11 +334,11 @@ class ProactorIOManager:
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> tuple[socket.socket, bool, bool]:
+    ) -> socket.socket:
         if initial_data is not None and connect_to is None:
             raise ValueError("initial_data requires connect_to")
         if connect_to is None:
-            sock = self.wait_operation(
+            return self.wait_operation(
                 self._proactor.create_socket(
                     family,
                     type,
@@ -346,22 +346,18 @@ class ProactorIOManager:
                     flags=flags,
                 )
             )
-            return sock, False, False
 
         from .operation_chaining import create_socket_chain_factory
 
-        operation = cast(
-            Operation[tuple[socket.socket, bool, bool]],
-            self._proactor.create_socket(
-                family,
-                type,
-                proto,
-                flags=flags,
-                operation_factory=create_socket_chain_factory(
-                    self._proactor,
-                    connect_to,
-                    initial_data,
-                ),
+        operation = self._proactor.create_socket(
+            family,
+            type,
+            proto,
+            flags=flags,
+            operation_factory=create_socket_chain_factory(
+                self._proactor,
+                connect_to,
+                initial_data,
             ),
         )
         return self.wait_operation(operation)

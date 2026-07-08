@@ -121,7 +121,7 @@ class TestStreamsPoC:
             writer.close()
 
         def exercise() -> None:
-            blocker, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            blocker = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
             blocker.bind(("127.0.0.1", 0))
             port = blocker.getsockname()[1]
             blocker.listen(1)
@@ -1117,7 +1117,7 @@ class TestStartServerListenOptions:
             writer.close()
 
         def exercise() -> None:
-            listen_sock, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
             listen_sock.bind(("127.0.0.1", 0))
             try:
                 with pytest.raises(ValueError, match="addr/path and sock cannot be specified"):
@@ -1137,7 +1137,7 @@ class TestStartServerListenOptions:
             writer.close()
 
         def exercise() -> None:
-            listen_sock, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
             listen_sock.bind(("127.0.0.1", 0))
             port = listen_sock.getsockname()[1]
             server = start_server(client_handler, sock=listen_sock, scheduler=scheduler)

@@ -11,7 +11,6 @@ from .types import SocketSendBuffer
 from .operations import AdvanceHook, DeliveryHandler, Operation, OperationFactory
 from .proactor import Proactor
 
-CreateSocketResult = tuple[socket.socket, bool, bool]
 NextOperation = Callable[[Operation[Any], Any | None], Operation[Any] | None]
 
 
@@ -234,7 +233,7 @@ def connect_send_chain_factory(
             if advance_exception is not None:
                 advance_operation.advance_continue(exception=advance_exception)
                 return
-            advance_operation.advance_continue(result=True)
+            advance_operation.advance_continue(result=None)
 
         advance_hook = advance
 
@@ -260,11 +259,8 @@ def create_socket_chain_factory(
 ) -> OperationFactory:
     """Build create → connect → send for ``ProactorIOManager.sock_create``."""
 
-    def shape_success(sock: socket.socket) -> CreateSocketResult:
-        return (sock, True, initial_data is not None)
-
     def next_operation(
-        parent: Operation[CreateSocketResult],
+        parent: Operation[socket.socket],
         link_result: Any | None,
     ) -> Operation[Any] | None:
         sock = cast(socket.socket, link_result)
@@ -281,5 +277,5 @@ def create_socket_chain_factory(
     return chained_fdclose_link(
         next_operation=next_operation,
         on_socket=on_socket,
-        shape_success=shape_success,
+        shape_success=lambda sock: sock,
     )

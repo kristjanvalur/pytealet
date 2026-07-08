@@ -193,15 +193,13 @@ class TestProactorIOManagerDirect:
     def test_sock_create_applies_scheduler_socket_contract(self):
         proactor = _MockProactor()
         io = _manager(proactor)
-        sock, is_connected, initial_sent = io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+        sock = io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
         try:
             import fcntl
 
             flags = fcntl.fcntl(sock.fileno(), fcntl.F_GETFL)
             assert flags & os.O_NONBLOCK
             assert not os.get_inheritable(sock.fileno())
-            assert is_connected is False
-            assert initial_sent is False
         finally:
             sock.close()
 
@@ -209,23 +207,21 @@ class TestProactorIOManagerDirect:
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
-        sock, is_connected, initial_sent = io.sock_create(
+        sock = io.sock_create(
             socket.AF_INET,
             socket.SOCK_STREAM,
             connect_to=address,
         )
         try:
             assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
-            assert is_connected is True
-            assert initial_sent is False
         finally:
             sock.close()
 
-    def test_sock_create_chain_factory_reports_initial_sent(self):
+    def test_sock_create_connect_chain_with_initial_data(self):
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
-        sock, is_connected, initial_sent = io.sock_create(
+        sock = io.sock_create(
             socket.AF_INET,
             socket.SOCK_STREAM,
             connect_to=address,
@@ -233,8 +229,7 @@ class TestProactorIOManagerDirect:
         )
         try:
             assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
-            assert is_connected is True
-            assert initial_sent is True
+            assert len(proactor.send_calls) == 1
         finally:
             sock.close()
 

@@ -79,7 +79,7 @@ def _io_sock_create(
     flags: int = 0,
     connect_to: Any | None = None,
     initial_data: Any | None = None,
-) -> tuple[socket.socket, bool, bool]:
+) -> socket.socket:
     scheduler = SyncProactorScheduler(lambda: proactor)
     set_scheduler(scheduler)
     try:
@@ -1571,7 +1571,7 @@ class TestSelectorProactor:
             _wait_until_done(proactor, operation)
             accepted, _address = server.accept()
             received += accepted.recv(16)
-            assert operation.result() is True
+            assert operation.result() is None
             assert bytes(received) == b"hello"
         finally:
             if accepted is not None:
@@ -4719,7 +4719,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
-            assert operation.result() is True
+            assert operation.result() is None
             assert bytes(proactor.ring.submitted_stream_sends()[0][1]) == b"hello"
         finally:
             sock.close()
@@ -4738,7 +4738,7 @@ class TestUringProactor:
                 operation_factory=connect_initial_send_factory(proactor, b""),
             )
             proactor.wait(proactor.get_time() + 0.05)
-            assert operation.result() is True
+            assert operation.result() is None
             assert proactor.ring.submitted_stream_sends() == []
         finally:
             sock.close()
@@ -4761,7 +4761,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
-            assert operation.result() is True
+            assert operation.result() is None
             stream_sends = proactor.ring.submitted_stream_sends()
             assert len(stream_sends) == 2
             assert bytes(stream_sends[0][1]) == b"helloworld"
@@ -4819,14 +4819,12 @@ class TestUringProactor:
     def test_sock_create_connects_without_initial_on_uring(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            sock, is_connected, initial_sent = _io_sock_create(
+            sock = _io_sock_create(
                 proactor,
                 socket.AF_INET,
                 socket.SOCK_STREAM,
                 connect_to=("127.0.0.1", 9),
             )
-            assert is_connected is True
-            assert initial_sent is False
             _assert_scheduler_socket_fd(sock)
             sock.close()
         finally:
@@ -4851,14 +4849,12 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, operation.done)
-            sock, is_connected, initial_sent = operation.result()
-            assert is_connected is True
-            assert initial_sent is True
+            sock = operation.result()
             sock.close()
         finally:
             proactor.close()
 
-    def test_sock_create_empty_initial_reports_initial_sent_without_send(self) -> None:
+    def test_sock_create_empty_initial_completes_without_send(self) -> None:
         from tealetio.operation_chaining import create_socket_chain_factory
 
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -4873,9 +4869,7 @@ class TestUringProactor:
                 ),
             )
             _wait_for_uring(proactor, operation.done)
-            sock, is_connected, initial_sent = operation.result()
-            assert is_connected is True
-            assert initial_sent is True
+            sock = operation.result()
             assert proactor.ring.submitted_stream_sends() == []
             sock.close()
         finally:
@@ -4992,17 +4986,15 @@ class TestProactorSchedulerIntegration:
         sched.close()
 
     def test_sock_create_uses_proactor_create_socket(self, scheduler: SyncProactorScheduler) -> None:
-        def exercise() -> tuple[socket.socket, bool, bool]:
+        def exercise() -> socket.socket:
             return scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
 
-        sock, is_connected, initial_sent = scheduler.run_until_complete(scheduler.spawn(exercise))
+        sock = scheduler.run_until_complete(scheduler.spawn(exercise))
         try:
             assert isinstance(sock, socket.socket)
             assert sock.family == socket.AF_INET
             assert sock.type == socket.SOCK_STREAM
             _assert_scheduler_socket_fd(sock)
-            assert is_connected is False
-            assert initial_sent is False
         finally:
             sock.close()
 
@@ -5287,7 +5279,7 @@ class TestProactorScheduler:
                 try:
                     server.bind(path)
                     server.listen()
-                    sock, is_connected, initial_sent = _io_sock_create(
+                    sock = _io_sock_create(
                         proactor,
                         socket.AF_UNIX,
                         socket.SOCK_STREAM,
@@ -5296,8 +5288,6 @@ class TestProactorScheduler:
                     try:
                         assert len(proactor.ring.submitted_socket) == 1
                         assert proactor.ring.submitted_connect == []
-                        assert is_connected is True
-                        assert initial_sent is False
                         assert sock.family == socket.AF_UNIX
                         server.accept()
                     finally:
@@ -5382,7 +5372,7 @@ class TestProactorScheduler:
     def test_sock_create_connect_uses_uring_socket_submit(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            sock, is_connected, initial_sent = _io_sock_create(
+            sock = _io_sock_create(
                 proactor,
                 socket.AF_INET,
                 socket.SOCK_STREAM,
@@ -5391,8 +5381,6 @@ class TestProactorScheduler:
             try:
                 assert len(proactor.ring.submitted_socket) == 1
                 assert len(proactor.ring.submitted_connect) == 1
-                assert is_connected is True
-                assert initial_sent is False
             finally:
                 sock.close()
         finally:
@@ -5418,7 +5406,7 @@ class TestProactorScheduler:
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             proactor.ring.complete_connect_send()
             _wait_for_uring(proactor, connect_operation.done)
-            assert connect_operation.result() is True
+            assert connect_operation.result() is None
             assert len(proactor.ring.submitted_connect) == 1
             sock.close()
         finally:

@@ -208,14 +208,6 @@ special-case deferral at the io_manager layer — the chained ``Operation`` may
 simply complete synchronously before ``wait_operation`` returns. Inet sockets
 still use the backend async connect path.
 
-### ``initial_sent`` on ``sock_create``
-
-The root ``chained_fdclose_link`` advance hook shapes
-``(socket, is_connected, initial_sent)`` on the success path only. Reaching that
-hook means the create→connect→send chain finished without error; when
-``initial_data`` was provided (including an empty buffer that skips the kernel
-send), ``initial_sent`` is ``True``. Omitted ``initial_data`` yields ``False``.
-
 ### Chain spine: cancel down, advance up
 
 Each link carries two pointers in opposite directions:

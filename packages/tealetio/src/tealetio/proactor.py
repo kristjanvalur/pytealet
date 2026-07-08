@@ -66,7 +66,6 @@ __all__ = [
     "SocketIO",
     "SupportsProactorIO",
     "SelectorProactor",
-    "CreateSocketResult",
     "SyncProactorScheduler",
     "ThreadedSelectorProactor",
     "UringProactor",
@@ -96,7 +95,6 @@ _RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = tuple[socket.socket, bytes | None, BaseException | None]
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
 _MAX_ACCEPT_RECV_SIZE = 2**16
-CreateSocketResult: TypeAlias = tuple[socket.socket, bool, bool]
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
