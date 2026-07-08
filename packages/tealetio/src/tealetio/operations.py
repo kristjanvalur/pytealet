@@ -48,6 +48,7 @@ class Operation(Generic[T]):
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] | None = []
         self._cancel: _CancelHook | None = None
+        self._cancel_forward: Operation[Any] | None = None
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -64,16 +65,24 @@ class Operation(Generic[T]):
 
         self._cancel = cancel
 
+    def set_cancel_forward(self, operation: "Operation[Any] | None") -> None:
+        """Forward ``cancel()`` to a chained child operation."""
+
+        self._cancel_forward = operation
+
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
 
         if self._done:
             return
+        forward = self._cancel_forward
+        if forward is not None and not forward.done():
+            forward.cancel()
         cancel = self._cancel
         if cancel is not None:
             cancel()
-            return
-        self._set_cancelled()
+        if not self._done:
+            self._set_cancelled()
 
     def result(self) -> T:
         """Return the operation result, or raise its completion exception."""
@@ -182,6 +191,7 @@ class Operation(Generic[T]):
             self._cancelled = cancelled
             self._done = True
             self._cancel = None
+            self._cancel_forward = None
             callbacks = self._callbacks
             self._callbacks = None
         assert callbacks is not None

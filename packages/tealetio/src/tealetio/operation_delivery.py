@@ -28,7 +28,8 @@ def double_recv_delivery(size: int) -> DeliveryHandler:
         exception: BaseException | None,
     ) -> None:
         if exception is not None:
-            operation.complete_error(exception)
+            if not operation.done():
+                operation.complete_error(exception)
             return
         first = cast(bytes, result)
         sock = cast(socket.socket, operation.fileobj)
@@ -41,11 +42,14 @@ def double_recv_delivery(size: int) -> DeliveryHandler:
         ) -> None:
             # Inner recv legs need not call complete(); backends release the fd
             # or uring entry before deliver() runs on the worker thread.
+            if operation.done():
+                return
             if second_exception is not None:
                 operation.complete_error(second_exception)
                 return
             operation.complete(first + cast(bytes, second_result))
 
-        proactor.recv(sock, size, delivery=second_delivery)
+        second = proactor.recv(sock, size, delivery=second_delivery)
+        operation.set_cancel_forward(second)
 
     return delivery

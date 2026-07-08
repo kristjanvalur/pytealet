@@ -768,6 +768,23 @@ def test_operation_deliver_completes_without_handler() -> None:
     assert operation.result() == 7
 
 
+def test_operation_cancel_forwards_to_chained_child() -> None:
+    child = Operation[None](kind="child")
+    child_cancelled: list[bool] = []
+
+    def cancel_child() -> None:
+        child_cancelled.append(True)
+        child._set_cancelled()
+
+    child.set_cancel(cancel_child)
+    parent = Operation[None](kind="parent")
+    parent.set_cancel_forward(child)
+    parent.cancel()
+    assert child_cancelled == [True]
+    assert child.cancelled()
+    assert parent.cancelled()
+
+
 def test_operation_deliver_routes_to_handler() -> None:
     seen: list[tuple[object, BaseException | None]] = []
 
@@ -1057,6 +1074,32 @@ class TestSelectorProactor:
             exc = operation.exception()
             assert isinstance(exc, ConnectionResetError)
             assert str(exc) == "simulated reset on second recv"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_double_delivery_cancel_during_second_leg(self) -> None:
+        from tealetio.operation_delivery import double_recv_delivery
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            writer.sendall(b"abc")
+            deadline = proactor.get_time() + 1.0
+            while proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+                if reader.fileno() in proactor._fd_operations:
+                    break
+            assert operation.done() is False
+            operation.cancel()
+            assert operation.cancelled() is True
+            writer.sendall(b"def")
+            proactor.wait(proactor.get_time() + 0.1)
+            assert operation.cancelled() is True
         finally:
             reader.close()
             writer.close()
@@ -2770,6 +2813,29 @@ class TestUringProactor:
             exc = operation.exception()
             assert isinstance(exc, OSError)
             assert exc.errno == errno.EIO
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_double_delivery_cancel_during_second_leg(self) -> None:
+        from tealetio.operation_delivery import double_recv_delivery
+
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 3, delivery=double_recv_delivery(3))
+            ring = proactor.ring
+            assert isinstance(ring, _DeferredUringRing)
+            ring.complete_recv(b"abc")
+            _wait_for_uring(proactor, lambda: len(ring.submitted_recv) == 2)
+            operation.cancel()
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert operation.cancelled() is True
+            ring.complete_recv(b"def")
+            proactor.wait(proactor.get_time() + 0.1)
+            assert operation.cancelled() is True
         finally:
             reader.close()
             writer.close()
