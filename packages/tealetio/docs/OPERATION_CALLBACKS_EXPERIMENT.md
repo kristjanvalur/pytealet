@@ -1,6 +1,6 @@
 # Unified operation callback composition
 
-Status: **Implemented** on branch `experiment/unified-operation-callbacks`.
+Status: **Implemented** (PR #52 → `main`).
 
 ## Summary
 

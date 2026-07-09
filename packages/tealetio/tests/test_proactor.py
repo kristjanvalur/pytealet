@@ -989,7 +989,7 @@ def test_connect_initial_send_delivery_leaves_parent_to_cancel_when_cancelling()
         delivery = connect_initial_send_delivery(cast(Any, object()), b"hi")
         delivery(object(), operation, None, None)
         assert not operation.done()
-        operation._set_cancelled()
+        operation.cancel()
         assert operation.cancelled()
     finally:
         sock.close()
@@ -1006,11 +1006,26 @@ def test_create_connect_delivery_closes_socket_when_parent_cancelling() -> None:
         delivery(object(), operation, sock, None)
         assert sock.fileno() == -1
         assert not operation.done()
-        operation._set_cancelled()
+        operation.cancel()
         assert operation.cancelled()
     finally:
         if sock.fileno() != -1:
             sock.close()
+
+
+def test_chain_suboperation_on_complete_failure_finishes_parent() -> None:
+    from tealetio.operation_callbacks import chain_suboperation
+
+    parent = Operation[None](kind="parent")
+    child = Operation[None](kind="child")
+
+    def on_complete(_op: Operation[None]) -> None:
+        raise OSError("boom")
+
+    chain_suboperation(parent, lambda: child, on_complete)
+    child._finish(result=None)
+    assert parent.done()
+    assert isinstance(parent.exception(), OSError)
 
 
 def test_operation_complete_ignores_race_with_cancel() -> None:

@@ -383,12 +383,11 @@ class _FakeUringRing:
     def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
         """Test-only: hold stream send CQEs so tests can drive them manually.
 
-        Defers when the entry has a chain parent, the operation has a delivery
-        handler, or a connect was already submitted on the same fd (connect-then-
-        send composition under test).
+        Defers when the submitted operation has a delivery handler (composed
+        connect/send under test) or a connect was already submitted on the same
+        fd. Heuristic is intentionally narrow to connect+send scenarios; reset
+        fake ring state between tests if fd reuse causes unexpected deferral.
         """
-        if getattr(user_data, "parent", None) is not None:
-            return True
         operation = getattr(user_data, "operation", None)
         if getattr(operation, "_delivery", None) is not None:
             return True

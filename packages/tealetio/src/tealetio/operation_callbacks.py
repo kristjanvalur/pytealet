@@ -40,6 +40,8 @@ def _register_suboperation(
     def complete(op: Operation[T]) -> None:
         try:
             on_complete(op)
+        except BaseException as exc:
+            parent.complete_error(exc)
         finally:
             parent.detach_suboperation(op)
 
@@ -55,8 +57,17 @@ def chain_suboperation(
     """Spawn a child under ``parent._lock`` and run ``on_complete`` on completion.
 
     Serialises against ``parent.cancel()`` so an in-flight backend submit
-    cannot outrun ``attach_suboperation()``. Returns ``False`` when the parent
-    is already done or cancelling (the suboperation is cancelled when spawned).
+    cannot outrun ``attach_suboperation()``. ``spawn()`` runs while holding
+    ``parent._lock``, which can defer another thread's ``cancel()`` until a
+    synchronous backend path (for example ``AF_UNIX`` connect) returns from
+    ``spawn()``; the lock is an ``RLock`` so same-thread spawn does not
+    self-deadlock.
+
+    Returns ``False`` only when the parent is already ``_done`` or
+    ``_cancelling`` (attach uses the same check under the lock). Callers need
+    not finish the parent on ``False`` — ``cancel()`` terminalises the root when
+    ``_cancelling`` is set. If the child was spawned, a failed attach cancels it.
+
     If the child is already done when registered, ``add_done_callback`` runs
     ``on_complete`` immediately.
     """
@@ -101,11 +112,13 @@ def connect_initial_send_delivery(
             operation.complete(None)
 
         try:
-            chain_suboperation(
+            if not chain_suboperation(
                 operation,
                 lambda: proactor.send(sock, payload),
                 on_send_complete,
-            )
+            ):
+                # Parent is _done or _cancelling; cancel() finishes the root.
+                pass
         except BaseException as exc:
             operation.complete_error(exc)
 
@@ -163,6 +176,7 @@ def create_connect_delivery(
                     lambda: proactor.send(sock, payload),
                     on_send_complete,
                 ):
+                    # Parent is _done or _cancelling; close fd, cancel() finishes root.
                     _close_socket(sock)
             except BaseException as exc:
                 _close_socket(sock)
@@ -174,6 +188,7 @@ def create_connect_delivery(
                 lambda: proactor.connect(sock, connect_to),
                 on_connect_complete,
             ):
+                # Parent is _done or _cancelling; close fd, cancel() finishes root.
                 _close_socket(sock)
         except BaseException as exc:
             _close_socket(sock)
