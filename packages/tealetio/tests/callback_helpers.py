@@ -6,7 +6,7 @@ import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from tealetio.continuous_callbacks import chain_suboperation
+from tealetio.operation_callbacks import chain_suboperation
 from tealetio.operations import ContinuousOperation, Operation
 from tealetio.recv_iter import RECV_MANY_BUFFER_PRESSURE, _RecvManyResult
 

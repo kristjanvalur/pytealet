@@ -198,7 +198,10 @@ class Operation(Generic[T]):
         with self._lock:
             if self._done or self._cancelling:
                 return
-        self._finish(result=result)
+        try:
+            self._finish(result=result)
+        except InvalidStateError:
+            return
 
     def complete_error(self, exc: BaseException) -> None:
         """Fail the operation from a delivery handler."""
@@ -206,7 +209,10 @@ class Operation(Generic[T]):
         with self._lock:
             if self._done or self._cancelling:
                 return
-        self._finish(exception=exc)
+        try:
+            self._finish(exception=exc)
+        except InvalidStateError:
+            return
 
     def _set_cancelled(self) -> bool:
         return self._finish(exception=CancelledError(), cancelled=True)

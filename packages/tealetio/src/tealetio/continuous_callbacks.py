@@ -7,7 +7,7 @@ from collections.abc import Callable
 from .tasks import CancelledError
 from typing import TYPE_CHECKING, TypeVar
 
-from .operation_callbacks import chain_suboperation
+from .operation_callbacks import chain_suboperation  # re-exported for continuous call sites
 from .operations import ContinuousOperation, Operation
 
 AcceptManyDelivery = tuple[socket.socket, bytes | None, BaseException | None]

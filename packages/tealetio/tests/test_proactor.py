@@ -961,6 +961,70 @@ def test_operation_cancel_forwards_to_suboperation() -> None:
     assert parent.cancelled()
 
 
+def test_connect_initial_send_delivery_fails_when_send_chain_refused() -> None:
+    from tealetio.operation_callbacks import connect_initial_send_delivery
+
+    class _SendProactor:
+        def send(self, sock: socket.socket, data: memoryview) -> Operation[None]:
+            raise OSError("send failed")
+
+    sock = socket.socket()
+    operation = Operation[None](kind="connect", fileobj=sock)
+    try:
+        delivery = connect_initial_send_delivery(cast(Any, _SendProactor()), b"hi")
+        delivery(object(), operation, None, None)
+        assert operation.done()
+        assert isinstance(operation.exception(), OSError)
+    finally:
+        sock.close()
+
+
+def test_connect_initial_send_delivery_cancels_when_send_chain_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tealetio.operation_callbacks as operation_callbacks_module
+    from tealetio.operation_callbacks import connect_initial_send_delivery
+
+    monkeypatch.setattr(operation_callbacks_module, "chain_suboperation", lambda *_a, **_k: False)
+
+    sock = socket.socket()
+    operation = Operation[None](kind="connect", fileobj=sock)
+    try:
+        delivery = connect_initial_send_delivery(cast(Any, object()), b"hi")
+        delivery(object(), operation, None, None)
+        assert operation.cancelled()
+    finally:
+        sock.close()
+
+
+def test_create_connect_delivery_cancels_when_connect_chain_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tealetio.operation_callbacks as operation_callbacks_module
+    from tealetio.operation_callbacks import create_connect_delivery
+
+    monkeypatch.setattr(operation_callbacks_module, "chain_suboperation", lambda *_a, **_k: False)
+
+    sock = socket.socket()
+    operation = Operation[socket.socket](kind="create_socket")
+    try:
+        delivery = create_connect_delivery(cast(Any, object()), ("127.0.0.1", 9))
+        delivery(object(), operation, sock, None)
+        assert operation.cancelled()
+        assert sock.fileno() == -1
+    finally:
+        if sock.fileno() != -1:
+            sock.close()
+
+
+def test_operation_complete_ignores_race_with_cancel() -> None:
+    operation = Operation[None](kind="test")
+    operation._cancelling = True
+    operation._set_cancelled()
+    operation.complete(None)
+    assert operation.cancelled()
+
+
 def test_operation_deliver_skips_handler_when_done() -> None:
     seen: list[bool] = []
 
@@ -1439,19 +1503,19 @@ class TestSelectorProactor:
     def test_recv_many_echo_delivery_chains_send_completion_before_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import callback_helpers
         from callback_helpers import recv_many_echo_delivery
-        from tealetio.continuous_callbacks import chain_suboperation
+        from tealetio.operation_callbacks import chain_suboperation
 
         order: list[str] = []
         original_chain = chain_suboperation
 
-        def spy_chain(parent, suboperation, on_complete):
+        def spy_chain(parent, spawn, on_complete):
             order.append("chain")
 
             def on_complete_wrapped(op: Operation[Any]) -> None:
                 order.append("complete")
                 on_complete(op)
 
-            original_chain(parent, suboperation, on_complete_wrapped)
+            original_chain(parent, spawn, on_complete_wrapped)
 
         monkeypatch.setattr(callback_helpers, "chain_suboperation", spy_chain)
 
@@ -1493,20 +1557,20 @@ class TestSelectorProactor:
     ) -> None:
         import callback_helpers
         from callback_helpers import recv_many_echo_delivery
-        from tealetio.continuous_callbacks import chain_suboperation
+        from tealetio.operation_callbacks import chain_suboperation
 
         order: list[str] = []
         original_chain = chain_suboperation
         pending_send = Operation[None](kind="send")
 
-        def spy_chain(parent, suboperation, on_complete):
+        def spy_chain(parent, spawn, on_complete):
             order.append("chain")
 
             def on_complete_wrapped(op: Operation[Any]) -> None:
                 order.append("complete")
                 on_complete(op)
 
-            original_chain(parent, suboperation, on_complete_wrapped)
+            original_chain(parent, spawn, on_complete_wrapped)
 
         monkeypatch.setattr(callback_helpers, "chain_suboperation", spy_chain)
 
