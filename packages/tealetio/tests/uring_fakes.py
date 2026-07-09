@@ -384,7 +384,14 @@ class _FakeUringRing:
         if getattr(user_data, "parent", None) is not None:
             return True
         operation = getattr(user_data, "operation", None)
-        return getattr(operation, "_delivery", None) is not None
+        if getattr(operation, "_delivery", None) is not None:
+            return True
+        parent_ref = getattr(operation, "_suboperation_parent", None)
+        if parent_ref is not None:
+            parent = parent_ref()
+            if parent is not None and not parent.done():
+                return True
+        return False
 
     def complete_connect_send(self, nbytes: int | None = None) -> None:
         completion = self.pending_connect_send.pop(0)

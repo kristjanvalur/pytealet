@@ -245,9 +245,11 @@ def connect_send_chain_factory(
 
 
 def connect_initial_send_factory(proactor: Proactor, initial: SocketSendBuffer) -> OperationFactory:
-    """Factory for ``ProactorIOManager.sock_connect(..., initial=...)``."""
+    """Factory for connect + initial send (delegates to ``operation_callbacks``)."""
 
-    return connect_send_chain_factory(proactor, initial)
+    from .operation_callbacks import connect_initial_send_operation_factory
+
+    return connect_initial_send_operation_factory(proactor, initial)
 
 
 def create_socket_chain_factory(

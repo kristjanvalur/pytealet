@@ -5,8 +5,9 @@ from __future__ import annotations
 import socket
 from collections.abc import Callable
 from .tasks import CancelledError
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
+from .operation_callbacks import chain_suboperation
 from .operations import ContinuousOperation, Operation
 
 AcceptManyDelivery = tuple[socket.socket, bytes | None, BaseException | None]
@@ -50,31 +51,6 @@ def marshal_to_scheduler(
         scheduler.call_soon_threadsafe(callback, result)
 
     return deliver
-
-
-def chain_suboperation(
-    parent: ContinuousOperation[Any],
-    suboperation: Operation[T],
-    on_complete: Callable[[Operation[T]], object],
-) -> bool:
-    """Track ``suboperation`` and run ``on_complete`` from its done callback.
-
-    Returns ``False`` when the parent is already done (the suboperation is
-    cancelled and no completion handler is registered).
-    """
-
-    if not parent.attach_suboperation(suboperation):
-        suboperation.cancel()
-        return False
-
-    def complete(op: Operation[T]) -> None:
-        try:
-            on_complete(op)
-        finally:
-            parent.detach_suboperation(op)
-
-    suboperation.add_done_callback(complete)
-    return True
 
 
 def accept_read_delivery(

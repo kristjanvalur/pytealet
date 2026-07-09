@@ -801,11 +801,29 @@ class TestOperation:
         assert child_cancelled
         assert child.cancelled()
 
+    def test_operation_cancel_rejects_late_suboperation_attach(self) -> None:
+        parent = Operation(kind="test")
+        parent._cancelling = True
+        child = Operation[None](kind="child")
+        assert parent.attach_suboperation(child) is False
+
     def test_continuous_operation_cancel_rejects_late_suboperation_attach(self) -> None:
         parent = ContinuousOperation(kind="test")
         parent._cancelling = True
         child = Operation[None](kind="child")
         assert parent.attach_suboperation(child) is False
+
+    def test_operation_deliver_ignored_while_cancelling(self) -> None:
+        seen: list[object] = []
+        operation = Operation(kind="test")
+
+        def delivery(_proactor, _operation, _result, _exception) -> None:
+            seen.append("ran")
+
+        operation.set_delivery(delivery)
+        operation._cancelling = True
+        operation.deliver(object(), result=None)
+        assert seen == []
 
     def test_continuous_operation_emit_result_false_while_cancelling(self) -> None:
         seen: list[int] = []
@@ -815,7 +833,7 @@ class TestOperation:
         assert seen == []
 
     def test_chain_suboperation_runs_on_complete_after_child_finishes(self):
-        from tealetio.continuous_callbacks import chain_suboperation
+        from tealetio.operation_callbacks import chain_suboperation
 
         parent = ContinuousOperation(kind="test")
         child = Operation[None](kind="child")
@@ -824,11 +842,30 @@ class TestOperation:
         child._finish(result=None)
         assert seen == [None]
 
-    def test_chain_suboperation_cancel_cancels_active_child(self):
-        from tealetio.continuous_callbacks import chain_suboperation
+    def test_chain_suboperation_cancel_cancels_active_child_on_continuous_parent(self):
+        from tealetio.operation_callbacks import chain_suboperation
 
         parent = ContinuousOperation(kind="test")
         child = Operation[None](kind="child")
+        child_cancelled = False
+
+        def cancel_child() -> None:
+            nonlocal child_cancelled
+            child_cancelled = True
+            child._set_cancelled()
+
+        child.set_cancel(cancel_child)
+        chain_suboperation(parent, child, lambda _op: None)
+        parent.cancel()
+        assert parent.cancelled()
+        assert child_cancelled
+        assert child.cancelled()
+
+    def test_chain_suboperation_cancel_cancels_active_child_on_operation_parent(self):
+        from tealetio.operation_callbacks import chain_suboperation
+
+        parent = Operation(kind="connect")
+        child = Operation[None](kind="send")
         child_cancelled = False
 
         def cancel_child() -> None:

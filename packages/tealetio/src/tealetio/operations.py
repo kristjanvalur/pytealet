@@ -55,6 +55,9 @@ class Operation(Generic[T]):
         self._cancel_forward: _CancelForwardRef | None = None
         self._chain_parent: Operation[Any] | None = None
         self._advance_hook: AdvanceHook | None = None
+        self._active_suboperations: set[Operation[Any]] = set()
+        self._suboperation_parent: _CancelForwardRef | None = None
+        self._cancelling = False
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -111,8 +114,45 @@ class Operation(Generic[T]):
 
         self._delivery = handler
 
+    def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
+        """Register a child for ``cancel()`` propagation.
+
+        Returns ``False`` when the parent is done or ``cancel()`` is in progress.
+        """
+
+        with self._lock:
+            if self._done or self._cancelling:
+                return False
+            self._active_suboperations.add(suboperation)
+            return True
+
+    def detach_suboperation(self, suboperation: Operation[Any]) -> None:
+        with self._lock:
+            self._active_suboperations.discard(suboperation)
+
+    @contextmanager
+    def track_suboperation(self, suboperation: Operation[Any]) -> Iterator[Operation[Any]]:
+        """Register ``suboperation`` until the context exits or ``cancel()`` runs."""
+
+        if not self.attach_suboperation(suboperation):
+            suboperation.cancel()
+            yield suboperation
+            return
+        try:
+            yield suboperation
+        finally:
+            self.detach_suboperation(suboperation)
+
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
+
+        with self._lock:
+            if self._done:
+                return
+            self._cancelling = True
+            suboperations = set(self._active_suboperations)
+        for suboperation in suboperations:
+            suboperation.cancel()
 
         with self._lock:
             if self._done:
@@ -197,7 +237,7 @@ class Operation(Generic[T]):
         """
 
         with self._lock:
-            if self._done:
+            if self._done or self._cancelling:
                 return
             delivery = self._delivery
         if delivery is not None:
@@ -275,11 +315,17 @@ class Operation(Generic[T]):
     def complete(self, result: T) -> None:
         """Finish the operation from a delivery handler."""
 
+        with self._lock:
+            if self._done or self._cancelling:
+                return
         self._finish(result=result)
 
     def complete_error(self, exc: BaseException) -> None:
         """Fail the operation from a delivery handler."""
 
+        with self._lock:
+            if self._done or self._cancelling:
+                return
         self._finish(exception=exc)
 
     def _set_cancelled(self) -> bool:
@@ -333,10 +379,8 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
 
     Callbacks that submit nested ``Operation`` objects must not block waiting on
     them. Register each child with ``attach_suboperation()`` (or
-    ``chain_suboperation()`` in ``continuous_callbacks``) so ``cancel()`` can
-    reach in-flight child work. Finish and error finish do not cancel children;
-    each child removes itself from ``_active_suboperations`` when its completion
-    handler runs ``detach_suboperation()``.
+    ``chain_suboperation()`` in ``operation_callbacks`` / ``continuous_callbacks``)
+    so ``cancel()`` can reach in-flight child work.
     """
 
     def __init__(
@@ -348,8 +392,6 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj)
         self._result_callback = result_callback
-        self._active_suboperations: set[Operation[Any]] = set()
-        self._cancelling = False
 
     def set_result_callback(self, callback: _ResultCallback[T_co] | None) -> None:
         """Install or replace the result callback before the operation finishes."""
@@ -358,45 +400,6 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             if self._done:
                 raise InvalidStateError("continuous operation is already done")
             self._result_callback = callback
-
-    def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
-        """Register a child for ``cancel()`` propagation.
-
-        Returns ``False`` when the parent is done or ``cancel()`` is in progress.
-        """
-
-        with self._lock:
-            if self._done or self._cancelling:
-                return False
-            self._active_suboperations.add(suboperation)
-            return True
-
-    def detach_suboperation(self, suboperation: Operation[Any]) -> None:
-        with self._lock:
-            self._active_suboperations.discard(suboperation)
-
-    @contextmanager
-    def track_suboperation(self, suboperation: Operation[Any]) -> Iterator[Operation[Any]]:
-        """Register ``suboperation`` until the context exits or ``cancel()`` runs."""
-
-        if not self.attach_suboperation(suboperation):
-            suboperation.cancel()
-            yield suboperation
-            return
-        try:
-            yield suboperation
-        finally:
-            self.detach_suboperation(suboperation)
-
-    def cancel(self) -> None:
-        with self._lock:
-            if self._done:
-                return
-            self._cancelling = True
-            suboperations = set(self._active_suboperations)
-        for suboperation in suboperations:
-            suboperation.cancel()
-        super().cancel()
 
     def _emit_result(self, result: T_co) -> bool:
         """Deliver one result when the operation is still active.
