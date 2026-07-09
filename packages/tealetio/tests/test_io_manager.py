@@ -259,7 +259,6 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
-    @pytest.mark.skip(reason="phase 2b: create+connect+initial send not migrated yet")
     def test_sock_create_connect_chain_with_initial_data(self):
         proactor = _MockProactor()
         io = _manager(proactor)

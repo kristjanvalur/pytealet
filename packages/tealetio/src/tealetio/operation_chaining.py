@@ -252,12 +252,16 @@ def connect_initial_send_factory(proactor: Proactor, initial: SocketSendBuffer) 
     return connect_initial_send_operation_factory(proactor, initial)
 
 
-def create_connect_factory(proactor: Proactor, connect_to: Any) -> OperationFactory:
-    """Factory for create_socket + connect (delegates to ``operation_callbacks``)."""
+def create_connect_factory(
+    proactor: Proactor,
+    connect_to: Any,
+    initial: SocketSendBuffer | None = None,
+) -> OperationFactory:
+    """Factory for create_socket + connect (+ optional send)."""
 
     from .operation_callbacks import create_connect_operation_factory
 
-    return create_connect_operation_factory(proactor, connect_to)
+    return create_connect_operation_factory(proactor, connect_to, initial)
 
 
 def create_socket_chain_factory(
@@ -267,29 +271,7 @@ def create_socket_chain_factory(
     *,
     on_socket: Callable[[socket.socket], None] | None = None,
 ) -> OperationFactory:
-    """Build create → connect → send for ``ProactorIOManager.sock_create``.
+    """Deprecated: use ``create_connect_factory`` (delegates to ``operation_callbacks``)."""
 
-    Only the root ``create_socket`` operation returns the socket; connect and
-    send legs complete with ``None``.
-    """
-
-    def next_operation(
-        parent: Operation[socket.socket],
-        link_result: Any | None,
-    ) -> Operation[Any] | None:
-        sock = cast(socket.socket, link_result)
-        return proactor.connect(
-            sock,
-            connect_to,
-            operation_factory=connect_send_chain_factory(
-                proactor,
-                initial_data,
-                parent=parent,
-            ),
-        )
-
-    return chained_fdclose_link(
-        next_operation=next_operation,
-        on_socket=on_socket,
-        shape_success=lambda sock: sock,
-    )
+    del on_socket
+    return create_connect_factory(proactor, connect_to, initial_data)

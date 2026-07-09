@@ -381,6 +381,12 @@ class _FakeUringRing:
         return completion
 
     def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
+        """Test-only: hold stream send CQEs so tests can drive them manually.
+
+        Defers when the entry has a chain parent, the operation has a delivery
+        handler, or a connect was already submitted on the same fd (connect-then-
+        send composition under test).
+        """
         if getattr(user_data, "parent", None) is not None:
             return True
         operation = getattr(user_data, "operation", None)
@@ -390,6 +396,10 @@ class _FakeUringRing:
             for connect_fd, _, _ in self.submitted_connect:
                 if connect_fd == fd:
                     return True
+            # AF_UNIX connect is synchronous; create→connect→send still defers here.
+            last_fd = getattr(self, "last_socket_fd", None)
+            if last_fd is not None and last_fd == fd and self.submitted_socket:
+                return True
         return False
 
     def complete_connect_send(self, nbytes: int | None = None) -> None:

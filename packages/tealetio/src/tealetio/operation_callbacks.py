@@ -108,8 +108,11 @@ def _close_socket(sock: socket.socket) -> None:
 def create_connect_delivery(
     proactor: Proactor,
     connect_to: Any,
+    initial: SocketSendBuffer | None = None,
 ) -> DeliveryHandler:
-    """After create_socket succeeds, connect then complete with the socket."""
+    """After create_socket succeeds, connect and optionally send ``initial`` bytes."""
+
+    payload = memoryview(initial) if initial is not None else None
 
     def delivery(
         _proactor: object,
@@ -128,7 +131,24 @@ def create_connect_delivery(
                 _close_socket(sock)
                 operation.complete_error(connect_exc)
                 return
-            operation.complete(sock)
+            if payload is None or not payload:
+                operation.complete(sock)
+                return
+
+            def on_send_complete(send_op: Operation[Any]) -> None:
+                send_exc = send_op.exception()
+                if send_exc is not None:
+                    _close_socket(sock)
+                    operation.complete_error(send_exc)
+                    return
+                operation.complete(sock)
+
+            if not chain_suboperation(
+                operation,
+                lambda: proactor.send(sock, payload),
+                on_send_complete,
+            ):
+                _close_socket(sock)
 
         try:
             if not chain_suboperation(
@@ -147,10 +167,11 @@ def create_connect_delivery(
 def create_connect_operation_factory(
     proactor: Proactor,
     connect_to: Any,
+    initial: SocketSendBuffer | None = None,
 ) -> OperationFactory:
     """Factory for ``proactor.create_socket`` when ``connect_to`` is set."""
 
-    handler = create_connect_delivery(proactor, connect_to)
+    handler = create_connect_delivery(proactor, connect_to, initial)
 
     def factory(kind: str, fileobj: object | None) -> Operation[Any]:
         operation = Operation(kind=kind, fileobj=fileobj)

@@ -5202,16 +5202,15 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    @pytest.mark.skip(reason="phase 2b: create+connect+initial send not migrated yet")
     def test_sock_create_connects_with_initial_on_uring(self) -> None:
-        from tealetio.operation_chaining import create_socket_chain_factory
+        from tealetio.operation_callbacks import create_connect_operation_factory
 
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             operation = proactor.create_socket(
                 socket.AF_INET,
                 socket.SOCK_STREAM,
-                operation_factory=create_socket_chain_factory(
+                operation_factory=create_connect_operation_factory(
                     proactor,
                     ("127.0.0.1", 9),
                     b"helloworld",
@@ -5318,16 +5317,15 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    @pytest.mark.skip(reason="phase 2b: create+connect+initial send not migrated yet")
     def test_sock_create_cancel_during_pending_send(self) -> None:
-        from tealetio.operation_chaining import create_socket_chain_factory
+        from tealetio.operation_callbacks import create_connect_operation_factory
 
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         try:
             operation = proactor.create_socket(
                 socket.AF_INET,
                 socket.SOCK_STREAM,
-                operation_factory=create_socket_chain_factory(
+                operation_factory=create_connect_operation_factory(
                     proactor,
                     ("127.0.0.1", 9),
                     b"hello",
@@ -5703,9 +5701,8 @@ class TestProactorScheduler:
             proactor.close()
 
     @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
-    @pytest.mark.skip(reason="phase 2b: create+connect+initial send not migrated yet")
     def test_sock_create_unix_cancel_during_pending_send(self) -> None:
-        from tealetio.operation_chaining import create_socket_chain_factory
+        from tealetio.operation_callbacks import create_connect_operation_factory
 
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         try:
@@ -5718,7 +5715,7 @@ class TestProactorScheduler:
                     operation = proactor.create_socket(
                         socket.AF_UNIX,
                         socket.SOCK_STREAM,
-                        operation_factory=create_socket_chain_factory(
+                        operation_factory=create_connect_operation_factory(
                             proactor,
                             path,
                             b"hello",
