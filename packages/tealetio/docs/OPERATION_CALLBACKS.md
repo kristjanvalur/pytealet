@@ -31,12 +31,12 @@ raise without expecting `complete_error` from the suboperation wrapper.
   `_active_suboperations`
 - Runs `on_complete` when the child finishes; failures in `on_complete` call
   `parent.complete_error(exc)`
-- Returns `False` only when the parent is already `_done` or `_cancelling` (the
-  attach path re-checks the same condition under the lock)
+- Returns `False` only when the parent is already `_done` (the attach path
+  re-checks the same condition under the lock)
 
-Callers need not finish the parent on `False` — `cancel()` terminalises the root
-when `_cancelling` is set. Local cleanup (for example closing a created socket
-that will not be returned) is the caller's responsibility.
+Callers need not finish the parent on `False`. Local cleanup (for example
+closing a created socket that will not be returned) is the caller's
+responsibility when composition cannot start.
 
 `spawn()` runs while holding `parent._lock`, which serialises attach against
 `cancel()` but can defer another thread's `cancel()` until a synchronous backend
@@ -108,8 +108,25 @@ Named factories (thin `operation_factory(delivery=…)` wrappers):
 |-------|-----------------|-------------------|
 | Parent `complete()` / normal `_finish` | Children keep running | Same |
 | Parent error finish | Children keep running | Same |
-| Parent `cancel()` | Snapshot set, cancel children, `_cancelling` blocks late attach | Same |
+| Parent `cancel()` | `_finish(cancelled=True)`: backend hook, terminal state, children, callbacks | Same |
 | Child completion | `on_complete` may call `parent.complete(…)` | Handlers may run after `parent.done()` when handed off while active |
+
+### Cancel vs in-flight completion
+
+`Operation.cancel()` always races backend worker threads. Proactor completions
+arrive asynchronously; the scheduler or a waiter may call `cancel()` on the
+same operation while a CQE is already in flight.
+
+`cancel_hook` is **best-effort IO teardown** only (drop deferred resubmits,
+submit async cancel, deregister selector interest, `break_wait()`, and similar).
+It does not own terminal state. Hooks do not call `_finish()`; `cancel()` routes
+through `_finish(cancelled=True)`, which runs the hook and then terminalises
+unless `_done` is already set.
+
+A late `deliver()` / `complete()` may therefore still succeed after
+`cancel_hook` runs. That is expected: whichever path reaches `_finish` first
+wins. Callers waiting on `wait_operation` observe either a normal result or
+`CancelledError`, not an ambiguous in-between state.
 
 Only the root one-shot `Operation` is passed to `wait_operation`. Child
 operations complete independently; the parent finishes when the final

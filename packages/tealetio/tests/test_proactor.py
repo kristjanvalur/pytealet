@@ -780,7 +780,7 @@ class TestOperation:
         seen: list[int] = []
         operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
         assert operation._emit_result(1) is True
-        operation._set_cancelled()
+        operation.cancel()
         assert operation._emit_result(2) is False
         assert seen == [1]
 
@@ -792,7 +792,7 @@ class TestOperation:
         def cancel_child() -> None:
             nonlocal child_cancelled
             child_cancelled = True
-            child._set_cancelled()
+            child.cancel()
 
         child.set_cancel(cancel_child)
         with parent.track_suboperation(child):
@@ -803,17 +803,17 @@ class TestOperation:
 
     def test_operation_cancel_rejects_late_suboperation_attach(self) -> None:
         parent = Operation(kind="test")
-        parent._cancelling = True
+        parent.cancel()
         child = Operation[None](kind="child")
         assert parent.attach_suboperation(child) is False
 
     def test_continuous_operation_cancel_rejects_late_suboperation_attach(self) -> None:
         parent = ContinuousOperation(kind="test")
-        parent._cancelling = True
+        parent.cancel()
         child = Operation[None](kind="child")
         assert parent.attach_suboperation(child) is False
 
-    def test_operation_deliver_ignored_while_cancelling(self) -> None:
+    def test_operation_deliver_ignored_after_cancel(self) -> None:
         seen: list[object] = []
         operation = Operation(kind="test")
 
@@ -821,14 +821,14 @@ class TestOperation:
             seen.append("ran")
 
         operation.set_delivery(delivery)
-        operation._cancelling = True
+        operation.cancel()
         operation.deliver(object(), result=None)
         assert seen == []
 
-    def test_continuous_operation_emit_result_false_while_cancelling(self) -> None:
+    def test_continuous_operation_emit_result_false_after_cancel(self) -> None:
         seen: list[int] = []
         parent = ContinuousOperation(kind="test", result_callback=seen.append)
-        parent._cancelling = True
+        parent.cancel()
         assert parent._emit_result(1) is False
         assert seen == []
 
@@ -852,7 +852,7 @@ class TestOperation:
         def cancel_child() -> None:
             nonlocal child_cancelled
             child_cancelled = True
-            child._set_cancelled()
+            child.cancel()
 
         child.set_cancel(cancel_child)
         chain_suboperation(parent, lambda: child, lambda _op: None)
@@ -871,7 +871,7 @@ class TestOperation:
         def cancel_child() -> None:
             nonlocal child_cancelled
             child_cancelled = True
-            child._set_cancelled()
+            child.cancel()
 
         child.set_cancel(cancel_child)
         chain_suboperation(parent, lambda: child, lambda _op: None)
@@ -923,7 +923,7 @@ def test_recv_skips_io_when_factory_returns_done_operation(
 ) -> None:
     def factory(kind: str, fileobj: object | None) -> Operation[Any]:
         operation = Operation(kind=kind, fileobj=fileobj)
-        operation._set_cancelled()
+        operation.cancel()
         return operation
 
     proactor = proactor_factory()
@@ -952,7 +952,7 @@ def test_operation_cancel_forwards_to_suboperation() -> None:
     def cancel_child() -> None:
         nonlocal child_cancelled
         child_cancelled = True
-        child._set_cancelled()
+        child.cancel()
 
     child.set_cancel(cancel_child)
     parent.cancel()
@@ -979,35 +979,49 @@ def test_connect_initial_send_delivery_fails_when_send_raises() -> None:
         sock.close()
 
 
-def test_connect_initial_send_delivery_leaves_parent_to_cancel_when_cancelling() -> None:
+def test_connect_initial_send_delivery_ignored_after_cancel() -> None:
     from tealetio.operation_callbacks import connect_initial_send_delivery
+
+    sent = False
+
+    class _SendProactor:
+        def send(self, sock: socket.socket, data: memoryview) -> Operation[None]:
+            nonlocal sent
+            sent = True
+            return Operation[None](kind="send", fileobj=sock)
 
     sock = socket.socket()
     operation = Operation[None](kind="connect", fileobj=sock)
-    operation._cancelling = True
+    operation.cancel()
     try:
-        delivery = connect_initial_send_delivery(cast(Any, object()), b"hi")
+        delivery = connect_initial_send_delivery(cast(Any, _SendProactor()), b"hi")
         delivery(object(), operation, None, None)
-        assert not operation.done()
-        operation.cancel()
         assert operation.cancelled()
+        assert sent is False
     finally:
         sock.close()
 
 
-def test_create_connect_delivery_closes_socket_when_parent_cancelling() -> None:
+def test_create_connect_delivery_ignored_after_cancel() -> None:
     from tealetio.operation_callbacks import create_connect_delivery
+
+    connected = False
+
+    class _ConnectProactor:
+        def connect(self, sock: socket.socket, address: object) -> Operation[None]:
+            nonlocal connected
+            connected = True
+            return Operation[None](kind="connect", fileobj=sock)
 
     sock = socket.socket()
     operation = Operation[socket.socket](kind="create_socket")
-    operation._cancelling = True
+    operation.cancel()
     try:
-        delivery = create_connect_delivery(cast(Any, object()), ("127.0.0.1", 9))
+        delivery = create_connect_delivery(cast(Any, _ConnectProactor()), ("127.0.0.1", 9))
         delivery(object(), operation, sock, None)
-        assert sock.fileno() == -1
-        assert not operation.done()
-        operation.cancel()
         assert operation.cancelled()
+        assert connected is False
+        assert sock.fileno() == -1
     finally:
         if sock.fileno() != -1:
             sock.close()
@@ -1030,8 +1044,7 @@ def test_chain_suboperation_on_complete_failure_finishes_parent() -> None:
 
 def test_operation_complete_ignores_race_with_cancel() -> None:
     operation = Operation[None](kind="test")
-    operation._cancelling = True
-    operation._set_cancelled()
+    operation.cancel()
     operation.complete(None)
     assert operation.cancelled()
 
@@ -1046,7 +1059,7 @@ def test_operation_deliver_skips_handler_when_done() -> None:
     from tealetio.operation_callbacks import operation_factory
 
     operation = cast(Operation[None], operation_factory(delivery=handler)("test", None))
-    operation._set_cancelled()
+    operation.cancel()
     operation.deliver(object(), result=None)
     assert seen == []
 
@@ -4070,7 +4083,7 @@ class TestUringProactor:
 
     def test_handoff_accept_many_closes_socket_when_parent_done(self) -> None:
         parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=object())
-        parent._set_cancelled()
+        parent.cancel()
         client, server = socket.socketpair()
         try:
             assert proactor_module._handoff_accept_many(parent, client) is False

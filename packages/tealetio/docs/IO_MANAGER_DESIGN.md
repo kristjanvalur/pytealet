@@ -247,10 +247,14 @@ backend routing.
 ### Cancel propagation and error cleanup
 
 `chain_suboperation()` spawns each child under the parent ``_lock`` and registers
-it in ``_active_suboperations``. Parent ``cancel()`` snapshots that set,
-``cancel()``s each child, then runs the local ``cancel_hook`` and
-``_set_cancelled()``. The ``_cancelling`` flag blocks late attach and delivery
-while the cancel wave runs.
+it in ``_active_suboperations``. Parent ``cancel()`` calls
+``_finish(cancelled=True)``: best-effort ``cancel_hook`` IO teardown, then
+terminal state (``_done`` / ``_cancelled`` / ``CancelledError``) unless a
+worker-thread completion won the race, then child ``cancel()`` and parent
+callbacks. Late attach and delivery are rejected once ``_done`` is set.
+
+Cancellation always races in-flight backend completions; see
+``OPERATION_CALLBACKS.md`` (cancel vs in-flight completion).
 
 Worker threads spawn children from delivery handlers while the scheduler thread
 may call ``cancel()`` on the root at the same time. Holding the parent lock
@@ -282,7 +286,7 @@ children submitted from result callbacks. It is **not** a drain barrier.
 |--------------|-------------------|
 | Normal finish (EOF, final multishot CQE, …) | Keep running; completion handlers may still run |
 | Error finish (`_finish(exception=…)`) | Keep running — e.g. `ECONNRESET` on the parent socket must not cancel accepts/recvs already started from earlier callbacks |
-| `cancel()` | Set `_cancelling`, snapshot the set, and `cancel()` each child (blocks late attach and result delivery during the cancel wave) |
+| `cancel()` | `_finish(cancelled=True)` on each child once the parent is `_done` |
 
 `_finish()` does not clear or cancel `_active_suboperations`. Each child removes
 itself with `detach_suboperation()` from its done handler (typically via
