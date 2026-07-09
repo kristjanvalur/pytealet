@@ -20,11 +20,7 @@ from .io_manager import (
     SocketSendBuffer,
     SupportsProactorIO,
 )
-from .continuous_callbacks import (
-    AcceptManyDelivery,
-    AcceptStreamsDelivery as _AcceptedStreams,
-    AcceptStreamsManyDelivery as _AcceptedDelivery,
-)
+from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -933,13 +929,7 @@ def _start_stream_server(
     server: StreamServer | None = None
     io = cast(ServerIO, _require_proactor_io(scheduler))
 
-    def on_accept(delivery: _AcceptedDelivery) -> None:
-        if isinstance(delivery[0], socket.socket):
-            conn, _initial_data, recv_error = cast(AcceptManyDelivery, delivery)
-            if recv_error is not None:
-                conn.close()
-            return
-        streams = cast(_AcceptedStreams, delivery)
+    def on_accept(streams: _AcceptedStreams) -> None:
         if server is None:
             reader, writer = streams
             writer.close()

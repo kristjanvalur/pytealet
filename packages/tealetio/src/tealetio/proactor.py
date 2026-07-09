@@ -33,7 +33,7 @@ from .recv_iter import (
     _RecvManyResult,
     _RecvManyResume,
 )
-from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
+from .socket_helpers import abortive_close, configure_scheduler_socket, socket_from_uring_fd
 from .operations import ContinuousOperation, ContinuousStepResult, Operation, OperationFactory
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
@@ -177,7 +177,7 @@ def _handoff_accept_many(
 
     if parent._emit_result(conn):
         return True
-    conn.close()
+    abortive_close(conn)
     return False
 
 
@@ -2236,7 +2236,7 @@ class UringProactor(ProactorBase):
             return operation
         conn = socket_from_uring_fd(completion.res)
         if operation.done():
-            conn.close()
+            abortive_close(conn)
         else:
             _handoff_accept_many(operation, conn)
         if not completion.flags & uring_api.IORING_CQE_F_MORE:

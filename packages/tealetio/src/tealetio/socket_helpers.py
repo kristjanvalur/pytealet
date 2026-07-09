@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 import socket
+import struct
 
-__all__ = ["configure_scheduler_socket", "socket_from_uring_fd"]
+__all__ = ["abortive_close", "configure_scheduler_socket", "socket_from_uring_fd"]
+
+_LINGER_ABORT = struct.pack("ii", 1, 0)
 
 
 def socket_from_uring_fd(fd: int) -> socket.socket:
@@ -29,3 +32,21 @@ def configure_scheduler_socket(sock: socket.socket) -> socket.socket:
     sock.setblocking(False)
     os.set_inheritable(sock.fileno(), False)
     return sock
+
+
+def abortive_close(sock: socket.socket) -> None:
+    """Abortively close an accepted connection we are dropping.
+
+    Uses ``SO_LINGER`` with zero timeout so ``close()`` does not wait on unsent
+    data. Safe to call on an already-closed socket.
+    """
+
+    try:
+        if sock.fileno() != -1:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, _LINGER_ABORT)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass

@@ -9,13 +9,16 @@ from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .continuous_callbacks import (
     AcceptManyDelivery,
+    AcceptReadResult,
+    AcceptRecvErrorCallback,
     AcceptStreamsDelivery,
-    AcceptStreamsManyDelivery,
     accept_read_delivery,
+    finalize_accept_recv_error,
     normalize_accept_recv_size,
     wrap_accept_delivery,
 )
 from .operations import ContinuousOperation, Operation
+from .socket_helpers import abortive_close
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -176,17 +179,19 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         callback: Callable[[AcceptManyDelivery], object],
         *,
         recv_size: int | None = None,
+        on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> ContinuousOperation[socket.socket]: ...
 
     def accept_many_streams(
         self,
         sock: socket.socket,
-        callback: Callable[[AcceptStreamsManyDelivery], object],
+        callback: Callable[[AcceptStreamsDelivery], object],
         *,
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
         recv_size: int | None = None,
+        on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> ContinuousOperation[socket.socket]: ...
 
     def sock_create_streams(
@@ -425,22 +430,29 @@ class ProactorIOManager:
         callback: Callable[[AcceptManyDelivery], object],
         *,
         recv_size: int | None = None,
+        on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> ContinuousOperation[socket.socket]:
         """Start ``proactor.accept_many`` with optional accept-time pre-read.
 
         Deliveries are marshalled onto the scheduler thread before ``callback``
-        runs.
+        runs. Recv failures invoke ``on_recv_error(conn, exc)`` when provided;
+        the socket is always closed afterwards. With no ``on_recv_error``, recv
+        failures close the socket silently.
         """
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
 
-        def deliver_wrapped(result: AcceptManyDelivery) -> None:
+        def deliver_wrapped(result: AcceptReadResult) -> None:
+            conn, initial_data, recv_error = result
+
             def run() -> None:
+                if recv_error is not None:
+                    finalize_accept_recv_error(conn, recv_error, on_recv_error)
+                    return
                 try:
-                    callback(result)
+                    callback((conn, initial_data))
                 except BaseException:
-                    conn = result[0]
-                    conn.close()
+                    abortive_close(conn)
 
             self._marshal_accept_callback(run)
 
@@ -460,33 +472,33 @@ class ProactorIOManager:
     def accept_many_streams(
         self,
         sock: socket.socket,
-        callback: Callable[[AcceptStreamsManyDelivery], object],
+        callback: Callable[[AcceptStreamsDelivery], object],
         *,
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
         recv_size: int | None = None,
+        on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> ContinuousOperation[socket.socket]:
         """Start ``proactor.accept_many`` and deliver a stream pair per accept.
 
         When ``recv_size`` is set, the accept-time read pre-fills the reader
-        buffer via ``feed_initial``. Recv failures are delivered as
-        ``(conn, None, recv_error)`` tuples so callers can log or close.
+        buffer via ``feed_initial``. Recv failures invoke ``on_recv_error(conn,
+        exc)`` when provided (for logging ``getpeername()`` and similar); the
+        socket is always closed afterwards. With no ``on_recv_error``, recv
+        failures close the socket silently.
         """
 
         from .streams import _open_streams
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
 
-        def deliver_accept(accepted: AcceptManyDelivery) -> None:
+        def deliver_accept(accepted: AcceptReadResult) -> None:
             conn, initial_data, recv_error = accepted
 
             def run() -> None:
                 if recv_error is not None:
-                    try:
-                        callback(accepted)
-                    except BaseException:
-                        conn.close()
+                    finalize_accept_recv_error(conn, recv_error, on_recv_error)
                     return
 
                 writer: Any = None
@@ -504,7 +516,7 @@ class ProactorIOManager:
                     if writer is not None:
                         writer.close()
                     else:
-                        conn.close()
+                        abortive_close(conn)
 
             self._marshal_accept_callback(run)
 
