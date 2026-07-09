@@ -77,8 +77,6 @@ def accept_read_delivery(
     assert normalized_recv_size is not None
 
     def on_conn(conn: socket.socket) -> None:
-        recv_op = proactor.recv(conn, normalized_recv_size)
-
         def on_recv_complete(op: Operation[bytes]) -> None:
             exc = op.exception()
             if exc is not None:
@@ -93,7 +91,11 @@ def accept_read_delivery(
                 return
             deliver((conn, data, None))
 
-        if not chain_suboperation(parent, recv_op, on_recv_complete):
+        if not chain_suboperation(
+            parent,
+            lambda: proactor.recv(conn, normalized_recv_size),
+            on_recv_complete,
+        ):
             conn.close()
 
     return on_conn

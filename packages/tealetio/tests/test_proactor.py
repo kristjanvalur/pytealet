@@ -838,7 +838,7 @@ class TestOperation:
         parent = ContinuousOperation(kind="test")
         child = Operation[None](kind="child")
         seen: list[object] = []
-        chain_suboperation(parent, child, lambda op: seen.append(op.result()))
+        chain_suboperation(parent, lambda: child, lambda op: seen.append(op.result()))
         child._finish(result=None)
         assert seen == [None]
 
@@ -855,7 +855,7 @@ class TestOperation:
             child._set_cancelled()
 
         child.set_cancel(cancel_child)
-        chain_suboperation(parent, child, lambda _op: None)
+        chain_suboperation(parent, lambda: child, lambda _op: None)
         parent.cancel()
         assert parent.cancelled()
         assert child_cancelled
@@ -874,7 +874,7 @@ class TestOperation:
             child._set_cancelled()
 
         child.set_cancel(cancel_child)
-        chain_suboperation(parent, child, lambda _op: None)
+        chain_suboperation(parent, lambda: child, lambda _op: None)
         parent.cancel()
         assert parent.cancelled()
         assert child_cancelled

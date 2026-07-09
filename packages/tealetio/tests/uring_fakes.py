@@ -374,23 +374,22 @@ class _FakeUringRing:
         completion = self._completion(
             user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
         )
-        if self._defer_stream_send_completion(user_data):
+        if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return completion
         self._deliver(completion)
         return completion
 
-    def _defer_stream_send_completion(self, user_data: object) -> bool:
+    def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
         if getattr(user_data, "parent", None) is not None:
             return True
         operation = getattr(user_data, "operation", None)
         if getattr(operation, "_delivery", None) is not None:
             return True
-        parent_ref = getattr(operation, "_suboperation_parent", None)
-        if parent_ref is not None:
-            parent = parent_ref()
-            if parent is not None and not parent.done():
-                return True
+        if getattr(operation, "kind", None) == "send":
+            for connect_fd, _, _ in self.submitted_connect:
+                if connect_fd == fd:
+                    return True
         return False
 
     def complete_connect_send(self, nbytes: int | None = None) -> None:
@@ -437,7 +436,7 @@ class _FakeUringRing:
         completion = self._completion(
             user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=len(payload), result=len(payload)
         )
-        if self._defer_stream_send_completion(user_data):
+        if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return completion
         self._deliver(completion)

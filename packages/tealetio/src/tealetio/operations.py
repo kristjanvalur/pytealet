@@ -56,7 +56,6 @@ class Operation(Generic[T]):
         self._chain_parent: Operation[Any] | None = None
         self._advance_hook: AdvanceHook | None = None
         self._active_suboperations: set[Operation[Any]] = set()
-        self._suboperation_parent: _CancelForwardRef | None = None
         self._cancelling = False
 
     def done(self) -> bool:
@@ -379,8 +378,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
 
     Callbacks that submit nested ``Operation`` objects must not block waiting on
     them. Register each child with ``attach_suboperation()`` (or
-    ``chain_suboperation()`` / ``chain_spawned_suboperation()`` in
-    ``operation_callbacks`` / ``continuous_callbacks``)
+    ``chain_suboperation()`` in ``operation_callbacks`` / ``continuous_callbacks``)
     so ``cancel()`` can reach in-flight child work.
     """
 
