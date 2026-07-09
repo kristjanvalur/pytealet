@@ -7,7 +7,10 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from .operations import ContinuousOperation, Operation
+from .proactor import _normalize_accept_recv_size
 from .recv_iter import RECV_MANY_BUFFER_PRESSURE, _RecvManyResult
+
+AcceptManyResult = tuple[socket.socket, bytes | None, BaseException | None]
 
 if TYPE_CHECKING:
     from .proactor import Proactor
@@ -102,3 +105,46 @@ def recv_many_echo_delivery(
         deliver(result)
 
     return on_result
+
+
+def accept_read_delivery(
+    proactor: Proactor,
+    parent: ContinuousOperation[AcceptManyResult],
+    deliver: Callable[[AcceptManyResult], object],
+    *,
+    recv_size: int,
+) -> Callable[[AcceptManyResult], None]:
+    """Read initial bytes on each accepted socket before ``deliver`` runs.
+
+    Alternative to built-in ``accept_many(..., recv_size=...)``: the proactor
+    emits ``(conn, None, None)`` on accept, this handler submits a nested
+    ``recv``, and ``deliver`` runs from the recv completion callback. Empty reads
+    close the connection without delivery. Recv failures are delivered as
+    ``(conn, None, recv_error)``.
+    """
+
+    normalized_recv_size = _normalize_accept_recv_size(recv_size)
+    assert normalized_recv_size is not None
+
+    def on_accept(result: AcceptManyResult) -> None:
+        conn, initial_data, recv_error = result
+        if recv_error is not None or initial_data is not None:
+            deliver(result)
+            return
+
+        recv_op = proactor.recv(conn, normalized_recv_size)
+
+        def on_recv_complete(op: Operation[bytes]) -> None:
+            exc = op.exception()
+            if exc is not None:
+                deliver((conn, None, exc))
+                return
+            data = op.result()
+            if not data:
+                conn.close()
+                return
+            deliver((conn, data, None))
+
+        chain_suboperation(parent, recv_op, on_recv_complete)
+
+    return on_accept

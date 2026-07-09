@@ -1730,6 +1730,80 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
+    def test_accept_many_callback_factory_read_defers_until_data(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
+
+        proactor = SelectorProactor()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            client.setblocking(False)
+
+            operation = proactor.accept_many(
+                server,
+                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
+            )
+            client.setblocking(True)
+            client.connect(server.getsockname())
+            for _ in range(5):
+                proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+
+            client.sendall(b"hello")
+            deadline = proactor.get_time() + 2.0
+            while len(accepted) < 1 and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert accepted[0][1] == b"hello"
+            assert accepted[0][2] is None
+            assert operation.done() is False
+        finally:
+            for conn, _data, _recv_error in accepted:
+                conn.close()
+            client.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_callback_factory_read_closes_idle_peer_without_delivery(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
+
+        proactor = SelectorProactor()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            client.setblocking(False)
+
+            proactor.accept_many(
+                server,
+                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
+            )
+            try:
+                client.connect(server.getsockname())
+            except (BlockingIOError, InterruptedError):
+                pass
+            deadline = proactor.get_time() + 2.0
+            while proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+                if accepted:
+                    break
+            client.shutdown(socket.SHUT_WR)
+            while proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert accepted == []
+        finally:
+            client.close()
+            server.close()
+            proactor.close()
+
     def test_accept_many_caps_oversized_recv_size(self) -> None:
         proactor = SelectorProactor()
         server = socket.socket()

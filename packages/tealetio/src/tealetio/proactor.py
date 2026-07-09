@@ -95,6 +95,7 @@ _RecvManyCallbackFactory = Callable[[ContinuousOperation[_RecvManyResult]], _Rec
 _RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = tuple[socket.socket, bytes | None, BaseException | None]
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
+_AcceptManyCallbackFactory = Callable[[ContinuousOperation[AcceptManyResult]], _AcceptManyCallback]
 _MAX_ACCEPT_RECV_SIZE = 2**16
 
 
@@ -118,6 +119,27 @@ def _spawn_recv_many_operation(
         raise TypeError("recv_many requires callback or callback_factory")
     return ContinuousOperation[_RecvManyResult](
         kind="recv_many",
+        fileobj=sock,
+        result_callback=callback,
+    )
+
+
+def _spawn_accept_many_operation(
+    sock: socket.socket,
+    callback: _AcceptManyCallback | None,
+    *,
+    callback_factory: _AcceptManyCallbackFactory | None = None,
+) -> ContinuousOperation[AcceptManyResult]:
+    if callback_factory is not None:
+        if callback is not None:
+            raise TypeError("accept_many accepts callback or callback_factory, not both")
+        operation = ContinuousOperation[AcceptManyResult](kind="accept_many", fileobj=sock)
+        operation.set_result_callback(callback_factory(operation))
+        return operation
+    if callback is None:
+        raise TypeError("accept_many requires callback or callback_factory")
+    return ContinuousOperation[AcceptManyResult](
+        kind="accept_many",
         fileobj=sock,
         result_callback=callback,
     )
@@ -358,9 +380,10 @@ class Proactor(Protocol):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: _AcceptManyCallback,
+        callback: _AcceptManyCallback | None = None,
         *,
         recv_size: int | None = None,
+        callback_factory: _AcceptManyCallbackFactory | None = None,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections until cancelled or failed.
 
@@ -1021,9 +1044,10 @@ class SelectorProactor(ProactorBase):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: _AcceptManyCallback,
+        callback: _AcceptManyCallback | None = None,
         *,
         recv_size: int | None = None,
+        callback_factory: _AcceptManyCallbackFactory | None = None,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Start accepting connections until the operation is cancelled or fails.
 
@@ -1034,15 +1058,14 @@ class SelectorProactor(ProactorBase):
         socket. ``recv_size`` is an optional hint; this backend does
         not capture initial bytes and always delivers ``initial_data`` as
         ``None``.
+
+        Pass ``callback_factory`` instead of ``callback`` when the handler needs
+        a reference to the returned ``ContinuousOperation``.
         """
 
         recv_size = _normalize_accept_recv_size(recv_size)
 
-        operation = ContinuousOperation[AcceptManyResult](
-            kind="accept_many",
-            fileobj=sock,
-            result_callback=callback,
-        )
+        operation = _spawn_accept_many_operation(sock, callback, callback_factory=callback_factory)
 
         def step() -> ContinuousStepResult:
             progressed = False
@@ -2146,9 +2169,10 @@ class UringProactor(ProactorBase):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: _AcceptManyCallback,
+        callback: _AcceptManyCallback | None = None,
         *,
         recv_size: int | None = None,
+        callback_factory: _AcceptManyCallbackFactory | None = None,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Start a continuous accept operation.
 
@@ -2168,15 +2192,14 @@ class UringProactor(ProactorBase):
         sending, in which case the connection is dropped). When the hint cannot
         be honoured, connections are delivered with ``initial_data`` set to
         ``None``.
+
+        Pass ``callback_factory`` instead of ``callback`` when the handler needs
+        a reference to the returned ``ContinuousOperation``.
         """
 
         recv_size = _normalize_accept_recv_size(recv_size)
 
-        operation = ContinuousOperation[AcceptManyResult](
-            kind="accept_many",
-            fileobj=sock,
-            result_callback=callback,
-        )
+        operation = _spawn_accept_many_operation(sock, callback, callback_factory=callback_factory)
         pending_recv: list[_UringEntry] = []
         accept_finished: list[bool] = [False]
         accept_entry_ref: list[_UringEntry | None] = [None]
