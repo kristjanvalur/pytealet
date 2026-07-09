@@ -103,13 +103,6 @@ class Operation(Generic[T]):
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
 
-        if self._done:
-            return
-        cancel_hook = self._cancel_hook
-        if cancel_hook is not None:
-            cancel_hook()
-        if self._done:
-            return
         self._set_cancelled()
 
     def result(self) -> T:
@@ -216,6 +209,17 @@ class Operation(Generic[T]):
         exception: BaseException | None = None,
         cancelled: bool = False,
     ) -> bool:
+        if cancelled:
+            if self._done:
+                return False
+            with self._lock:
+                cancel_hook = self._cancel_hook
+                self._cancel_hook = None
+            if cancel_hook is not None:
+                cancel_hook()
+            if self._done:
+                return False
+
         with self._lock:
             if self._done:
                 if cancelled:

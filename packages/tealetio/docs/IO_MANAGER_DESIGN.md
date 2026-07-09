@@ -248,9 +248,9 @@ backend routing.
 
 `chain_suboperation()` spawns each child under the parent ``_lock`` and registers
 it in ``_active_suboperations``. Parent ``cancel()`` snapshots that set,
-``cancel()`` runs the backend ``cancel_hook`` (outside the lock; idempotent),
-then ``_set_cancelled()`` terminalises the root (``_done`` / ``_cancelled`` /
-``CancelledError``) and cancels attached children. Late attach and delivery are
+``_finish(cancelled=True)`` (via ``cancel()`` / ``_set_cancelled()``) runs the
+backend ``cancel_hook``, terminalises the root (``_done`` / ``_cancelled`` /
+``CancelledError``), and cancels attached children. Late attach and delivery are
 rejected once ``_done`` is set.
 
 Worker threads spawn children from delivery handlers while the scheduler thread
