@@ -334,7 +334,9 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     Callbacks that submit nested ``Operation`` objects must not block waiting on
     them. Register each child with ``attach_suboperation()`` (or
     ``chain_suboperation()`` in ``continuous_callbacks``) so ``cancel()`` can
-    cancel in-flight child work and completion handlers can continue the stream.
+    reach in-flight child work. Finish and error finish do not cancel children;
+    each child removes itself from ``_active_suboperations`` when its completion
+    handler runs ``detach_suboperation()``.
     """
 
     def __init__(
@@ -357,7 +359,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             self._result_callback = callback
 
     def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
-        """Register in-flight child work. Returns False when the parent is done."""
+        """Register a child for ``cancel()`` propagation. Returns False when the parent is done."""
 
         with self._lock:
             if self._done:
@@ -415,6 +417,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         exception: BaseException | None = None,
         cancelled: bool = False,
     ) -> bool:
-        with self._lock:
-            self._active_suboperations.clear()
+        # do not touch _active_suboperations here: children started from result
+        # callbacks keep running after finish or error finish; only cancel()
+        # walks the set. each child drops itself via detach_suboperation().
         return super()._finish(result=result, exception=exception, cancelled=cancelled)
