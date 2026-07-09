@@ -103,15 +103,14 @@ class Operation(Generic[T]):
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
 
+        if self._done:
+            return
         with self._lock:
-            if self._done:
-                return
             cancel_hook = self._cancel_hook
         if cancel_hook is not None:
             cancel_hook()
-        with self._lock:
-            if self._done:
-                return
+        if self._done:
+            return
         self._set_cancelled()
 
     def result(self) -> T:
