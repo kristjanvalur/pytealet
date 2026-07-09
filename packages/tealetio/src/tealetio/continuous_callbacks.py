@@ -5,19 +5,20 @@ from __future__ import annotations
 import socket
 from collections.abc import Callable
 from .tasks import CancelledError
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 from .operation_callbacks import chain_suboperation  # re-exported for continuous call sites
 from .operations import ContinuousOperation, Operation
 
+T = TypeVar("T")
+
 AcceptManyDelivery = tuple[socket.socket, bytes | None, BaseException | None]
+AcceptStreamsDelivery: TypeAlias = tuple[Any, Any]
 _MAX_ACCEPT_RECV_SIZE = 2**16
 
 if TYPE_CHECKING:
     from .proactor import Proactor
     from .scheduler import BaseScheduler
-
-T = TypeVar("T")
 
 
 def normalize_accept_recv_size(recv_size: int | None) -> int | None:
@@ -56,16 +57,21 @@ def marshal_to_scheduler(
 def accept_read_delivery(
     proactor: Proactor,
     parent: ContinuousOperation[socket.socket],
-    deliver: Callable[[AcceptManyDelivery], object],
+    deliver: Callable[[Any], object],
     *,
     recv_size: int,
+    deliver_conn_data: bool = False,
 ) -> Callable[[socket.socket], None]:
     """Read initial bytes on each accepted socket before ``deliver`` runs.
 
     The proactor emits the accepted ``socket``; this handler submits a nested
-    ``recv`` and delivers ``(conn, initial_data, recv_error)`` tuples. Empty reads
-    close the connection without delivery. Recv failures are delivered as
-    ``(conn, None, recv_error)``.
+    ``recv``. By default ``deliver`` receives ``(conn, initial_data,
+    recv_error)`` tuples. With ``deliver_conn_data=True``, a successful read
+    calls ``deliver(conn, initial_data)`` so callers can marshal and map the
+    socket on the scheduler thread. Recv failures close the socket when
+    ``deliver_conn_data`` is set.
+
+    Empty reads close the connection without delivery.
 
     ``deliver`` may run after the parent ``ContinuousOperation`` has finished
     (for example terminal multishot accept) when the connection was handed off
@@ -83,11 +89,20 @@ def accept_read_delivery(
                 if isinstance(exc, CancelledError):
                     conn.close()
                     return
-                deliver((conn, None, exc))
+                if deliver_conn_data:
+                    conn.close()
+                else:
+                    deliver((conn, None, exc))
                 return
             data = op.result()
             if not data:
                 conn.close()
+                return
+            if deliver_conn_data:
+                try:
+                    deliver(conn, data)
+                except BaseException:
+                    conn.close()
                 return
             deliver((conn, data, None))
 

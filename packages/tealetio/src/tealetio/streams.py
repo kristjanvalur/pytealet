@@ -20,7 +20,11 @@ from .io_manager import (
     SocketSendBuffer,
     SupportsProactorIO,
 )
-from .continuous_callbacks import AcceptManyDelivery as _AcceptedConnection, marshal_to_scheduler
+from .continuous_callbacks import (
+    AcceptManyDelivery as _AcceptedConnection,
+    AcceptStreamsDelivery as _AcceptedStreams,
+    marshal_to_scheduler,
+)
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -531,30 +535,20 @@ def _connect_tcp_streams(
         raise OSError("getaddrinfo() returned empty list")
 
     last_error: OSError | None = None
+    server_io = cast(ServerIO, io)
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
-        sock: socket.socket | None = None
         try:
-            sock = io.sock_create(
+            return server_io.sock_create_streams(
                 addr_family,
                 socktype,
                 addr_proto,
                 connect_to=sockaddr,
                 initial_data=initial_send,
+                limit=limit,
+                stream_factory=stream_factory,
+                async_=async_,
             )
-            try:
-                return _open_streams(
-                    io,
-                    sock,
-                    limit=limit,
-                    stream_factory=stream_factory,
-                    async_=async_,
-                )
-            except BaseException:
-                sock.close()
-                raise
         except OSError as exc:
-            if sock is not None:
-                sock.close()
             last_error = exc
     if last_error is not None:
         raise last_error
@@ -673,24 +667,16 @@ def _connect_unix_streams(
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
-    io = _require_proactor_io(scheduler)
-    sock = io.sock_create(
+    io = cast(ServerIO, _require_proactor_io(scheduler))
+    return io.sock_create_streams(
         socket.AF_UNIX,
         socket.SOCK_STREAM,
         connect_to=path,
         initial_data=initial_send,
+        limit=limit,
+        stream_factory=stream_factory,
+        async_=async_,
     )
-    try:
-        return _open_streams(
-            io,
-            sock,
-            limit=limit,
-            stream_factory=stream_factory,
-            async_=async_,
-        )
-    except BaseException:
-        sock.close()
-        raise
 
 
 def _default_reuse_address() -> bool:
@@ -866,21 +852,30 @@ class StreamServer:
             conn.close()
             return
 
+        reader, writer = _open_streams(
+            self._io,
+            conn,
+            limit=limit,
+            stream_factory=stream_factory,
+            async_=async_,
+            initial=initial_data,
+        )
+        self._dispatch_streams(reader, writer, client_handler=client_handler, async_=async_)
+
+    def _dispatch_streams(
+        self,
+        reader: StreamReader | AsyncStreamReader,
+        writer: StreamWriter | AsyncStreamWriter,
+        *,
+        client_handler: _ClientHandler,
+        async_: bool,
+    ) -> None:
         def dispatch() -> None:
             def serve() -> None:
-                writer: StreamWriter | AsyncStreamWriter | None = None
                 try:
                     with self._shutdown:
                         if self._closed:
                             return
-                    reader, writer = _open_streams(
-                        self._io,
-                        conn,
-                        limit=limit,
-                        stream_factory=stream_factory,
-                        async_=async_,
-                        initial=initial_data,
-                    )
                     if async_:
                         run_coro(
                             cast(_AsyncClientHandler, client_handler)(
@@ -894,17 +889,14 @@ class StreamServer:
                             cast(StreamWriter, writer),
                         )
                 finally:
-                    if writer is not None:
-                        writer.close()
-                    else:
-                        conn.close()
+                    writer.close()
                     with self._shutdown:
                         self._active_handlers -= 1
                         self._shutdown.notify_all()
 
             with self._shutdown:
                 if self._closed:
-                    conn.close()
+                    writer.close()
                     return
                 self._active_handlers += 1
 
@@ -914,7 +906,7 @@ class StreamServer:
                 with self._shutdown:
                     self._active_handlers -= 1
                     self._shutdown.notify_all()
-                conn.close()
+                writer.close()
                 raise
 
         self._scheduler.call_soon(dispatch)
@@ -930,36 +922,39 @@ def _start_stream_server(
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
-    """Start ``accept_many`` on a listening socket and return a ``StreamServer``.
+    """Start accept handling on a listening socket and return a ``StreamServer``.
 
     Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
-    ``recv_size`` opts into accept-time pre-read via ``io.accept_many``. Use only
-    for client-speaks-first
-    protocols such as HTTP; server-speaks-first clients will not reach the
-    handler until they send data or close.
+    Accepts deliver stream pairs via ``accept_many_streams``. When ``recv_size``
+    is set, an accept-time read pre-fills the reader buffer; otherwise callers
+    arm eager receive later (for example via ``recv_many``).
     """
 
     server: StreamServer | None = None
+    io = cast(ServerIO, _require_proactor_io(scheduler))
 
-    def on_accept(accepted: _AcceptedConnection) -> None:
-        conn, initial_data, recv_error = accepted
-        if recv_error is not None:
-            conn.close()
-            return
+    def on_accept_streams(streams: _AcceptedStreams) -> None:
         if server is None:
-            conn.close()
+            reader, writer = streams
+            writer.close()
             return
-        server._dispatch_client(
-            conn,
-            initial_data=initial_data,
-            limit=limit,
-            stream_factory=stream_factory,
+        reader, writer = streams
+        server._dispatch_streams(
+            reader,
+            writer,
             client_handler=client_handler,
             async_=async_,
         )
 
-    io = cast(ServerIO, _require_proactor_io(scheduler))
-    accept_operation = io.accept_many(sock, marshal_to_scheduler(scheduler, on_accept), recv_size=recv_size)
+    accept_operation = io.accept_many_streams(
+        sock,
+        on_accept_streams,
+        limit=limit,
+        stream_factory=stream_factory,
+        async_=async_,
+        recv_size=recv_size,
+    )
+
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
 
@@ -1133,9 +1128,9 @@ def start_server(
     runtime probe allows it.
     ``recv_size`` opts into accept-time pre-read and reader prefill for
     client-speaks-first protocols (for example HTTP); leave it ``None`` when
-    the server may speak first. Accept callbacks are marshalled onto the
-    scheduler thread (``continuous_callbacks.marshal_to_scheduler``) before
-    handler tealets are spawned. Handler exceptions propagate
+    the server may speak first or when the reader will arm eager receive later.
+    Accept callbacks are marshalled onto the scheduler thread before handler
+    tealets are spawned. Handler exceptions propagate
     in the handler tealet and do not stop the listener. ``spawn()`` failures
     during dispatch are reported through the scheduler exception handler.
     """

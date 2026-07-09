@@ -182,6 +182,80 @@ class TestProactorIOManagerAcceptMany:
 
         assert normalize_accept_recv_size(2**16 + 1) == 2**16
 
+    def test_accept_many_streams_uses_bare_socket_callback(self) -> None:
+        class _CaptureProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                self.last_callback = callback
+                self.last_callback_factory = callback_factory
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            io.accept_many_streams(server, lambda _: None)
+            assert proactor.last_callback is not None
+            assert proactor.last_callback_factory is None
+        finally:
+            server.close()
+
+    def test_accept_many_streams_uses_read_delivery_when_recv_size_set(self) -> None:
+        class _CaptureProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                self.last_callback = callback
+                self.last_callback_factory = callback_factory
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            io.accept_many_streams(server, lambda _: None, recv_size=64)
+            assert proactor.last_callback_factory is not None
+        finally:
+            server.close()
+
+
+class TestProactorIOManagerSockCreateStreams:
+    def test_sock_create_streams_without_connect_to(self) -> None:
+        from tealetio.streams import StreamReader, StreamWriter
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        reader, writer = io.sock_create_streams(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            assert isinstance(reader, StreamReader)
+            assert isinstance(writer, StreamWriter)
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
+        finally:
+            writer.close()
+
+    def test_sock_create_streams_uses_connect_streams_factory(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        address = ("127.0.0.1", 9)
+        reader, writer = io.sock_create_streams(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=address,
+            initial_data=b"hi",
+        )
+        try:
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
+            assert len(proactor.send_calls) == 1
+        finally:
+            writer.close()
+
+    def test_sock_create_streams_rejects_initial_data_without_connect_to(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        with pytest.raises(ValueError, match="initial_data requires connect_to"):
+            io.sock_create_streams(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                initial_data=b"hi",
+            )
+
 
 class TestProactorIOManagerDirect:
     def test_wait_operation_returns_immediate_result(self):

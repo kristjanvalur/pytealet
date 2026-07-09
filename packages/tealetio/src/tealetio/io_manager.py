@@ -9,6 +9,7 @@ from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .continuous_callbacks import (
     AcceptManyDelivery,
+    AcceptStreamsDelivery,
     accept_read_delivery,
     normalize_accept_recv_size,
     wrap_accept_delivery,
@@ -175,6 +176,31 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         *,
         recv_size: int | None = None,
     ) -> ContinuousOperation[socket.socket]: ...
+
+    def accept_many_streams(
+        self,
+        sock: socket.socket,
+        callback: Callable[[AcceptStreamsDelivery], object],
+        *,
+        limit: int = 2**16,
+        stream_factory: Any | None = None,
+        async_: bool = False,
+        recv_size: int | None = None,
+    ) -> ContinuousOperation[socket.socket]: ...
+
+    def sock_create_streams(
+        self,
+        family: int,
+        type: int,
+        proto: int = 0,
+        *,
+        flags: int = 0,
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
+        limit: int = 2**16,
+        stream_factory: Any | None = None,
+        async_: bool = False,
+    ) -> AcceptStreamsDelivery: ...
 
 
 ProactorSocketIO = ServerIO
@@ -387,6 +413,9 @@ class ProactorIOManager:
     ) -> ContinuousOperation[int]:
         return self._proactor.poll_many(fd, mask, callback)
 
+    def _marshal_accept_callback(self, thunk: Callable[[], object]) -> None:
+        self._scheduler.call_soon_threadsafe(thunk)
+
     def accept_many(
         self,
         sock: socket.socket,
@@ -394,20 +423,151 @@ class ProactorIOManager:
         *,
         recv_size: int | None = None,
     ) -> ContinuousOperation[socket.socket]:
-        """Start ``proactor.accept_many`` with optional accept-time pre-read."""
+        """Start ``proactor.accept_many`` with optional accept-time pre-read.
+
+        Deliveries are marshalled onto the scheduler thread before ``callback``
+        runs.
+        """
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
-        if normalized_recv_size is None:
-            return self._proactor.accept_many(sock, wrap_accept_delivery(callback))
-        return self._proactor.accept_many(
-            sock,
-            callback_factory=lambda op: accept_read_delivery(
+
+        def deliver_wrapped(result: AcceptManyDelivery) -> None:
+            def run() -> None:
+                try:
+                    callback(result)
+                except BaseException:
+                    conn = result[0]
+                    conn.close()
+
+            self._marshal_accept_callback(run)
+
+        if normalized_recv_size is not None:
+            return self._proactor.accept_many(
+                sock,
+                callback_factory=lambda op: accept_read_delivery(
+                    self._proactor,
+                    op,
+                    deliver_wrapped,
+                    recv_size=normalized_recv_size,
+                ),
+            )
+
+        return self._proactor.accept_many(sock, wrap_accept_delivery(deliver_wrapped))
+
+    def accept_many_streams(
+        self,
+        sock: socket.socket,
+        callback: Callable[[AcceptStreamsDelivery], object],
+        *,
+        limit: int = 2**16,
+        stream_factory: Any | None = None,
+        async_: bool = False,
+        recv_size: int | None = None,
+    ) -> ContinuousOperation[socket.socket]:
+        """Start ``proactor.accept_many`` and deliver a stream pair per accept.
+
+        When ``recv_size`` is set, the accept-time read pre-fills the reader
+        buffer via ``feed_initial``.
+        """
+
+        from .streams import _open_streams
+
+        normalized_recv_size = normalize_accept_recv_size(recv_size)
+
+        def deliver_streams(conn: socket.socket, received: bytes | None = None) -> None:
+            def run() -> None:
+                try:
+                    callback(
+                        _open_streams(
+                            self,
+                            conn,
+                            limit=limit,
+                            stream_factory=stream_factory,
+                            async_=async_,
+                            initial=received,
+                        )
+                    )
+                except BaseException:
+                    conn.close()
+
+            self._marshal_accept_callback(run)
+
+        if normalized_recv_size is not None:
+            return self._proactor.accept_many(
+                sock,
+                callback_factory=lambda op: accept_read_delivery(
+                    self._proactor,
+                    op,
+                    deliver_streams,
+                    recv_size=normalized_recv_size,
+                    deliver_conn_data=True,
+                ),
+            )
+
+        def on_conn(conn: socket.socket) -> None:
+            deliver_streams(conn)
+
+        return self._proactor.accept_many(sock, on_conn)
+
+    def sock_create_streams(
+        self,
+        family: int,
+        type: int,
+        proto: int = 0,
+        *,
+        flags: int = 0,
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
+        limit: int = 2**16,
+        stream_factory: Any | None = None,
+        async_: bool = False,
+    ) -> AcceptStreamsDelivery:
+        """Create a socket and return stream endpoints.
+
+        When ``connect_to`` is set, the connect chain runs first and
+        ``initial_data`` is sent on the wire before streams are returned.
+        """
+
+        from .streams import _open_streams
+
+        if initial_data is not None and connect_to is None:
+            raise ValueError("initial_data requires connect_to")
+
+        def open_streams(sock: socket.socket) -> AcceptStreamsDelivery:
+            return _open_streams(
+                self,
+                sock,
+                limit=limit,
+                stream_factory=stream_factory,
+                async_=async_,
+            )
+
+        if connect_to is None:
+            sock = self.wait_operation(
+                self._proactor.create_socket(
+                    family,
+                    type,
+                    proto,
+                    flags=flags,
+                )
+            )
+            return open_streams(sock)
+
+        from .operation_callbacks import create_connect_operation_factory
+
+        operation = self._proactor.create_socket(
+            family,
+            type,
+            proto,
+            flags=flags,
+            operation_factory=create_connect_operation_factory(
                 self._proactor,
-                op,
-                callback,
-                recv_size=normalized_recv_size,
+                connect_to,
+                initial_data,
+                open_streams,
             ),
         )
+        return self.wait_operation(operation)
 
     def open(self, path: str, mode: str = "rb") -> IOFile:
         flags, file_mode = parse_open_mode(mode)

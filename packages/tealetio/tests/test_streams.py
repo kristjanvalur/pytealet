@@ -627,20 +627,28 @@ class TestStreamsPoC:
     def test_start_server_marshalled_accept_sees_ready_server(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        real_io_accept_many = scheduler.io.accept_many
+        from tealetio.streams import _open_streams
 
-        def eager_accept_many(sock: socket.socket, callback, *, recv_size=None):
-            operation = real_io_accept_many(sock, callback, recv_size=recv_size)
+        real_io_accept_many_streams = scheduler.io.accept_many_streams
+
+        def eager_accept_many_streams(sock: socket.socket, callback, **kwargs):
+            operation = real_io_accept_many_streams(sock, callback, **kwargs)
             _client, accepted = socket.socketpair()
             accepted.setblocking(False)
             try:
-                callback((accepted, None, None))
+                stream_kwargs = {
+                    key: kwargs[key]
+                    for key in ("limit", "stream_factory", "async_")
+                    if key in kwargs
+                }
+                streams = _open_streams(scheduler.io, accepted, **stream_kwargs)
+                scheduler.call_soon_threadsafe(callback, streams)
                 assert accepted.fileno() != -1
             finally:
                 _client.close()
             return operation
 
-        monkeypatch.setattr(scheduler.io, "accept_many", eager_accept_many)
+        monkeypatch.setattr(scheduler.io, "accept_many_streams", eager_accept_many_streams)
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
@@ -675,13 +683,13 @@ class TestStreamsPoC:
 
         def run_with_recv_size(recv_size: int | None) -> None:
             captured: list[int | None] = []
-            real_accept_many = scheduler.io.accept_many
+            real_accept_many_streams = scheduler.io.accept_many_streams
 
-            def capture_accept_many(sock: socket.socket, callback, *, recv_size=None):
-                captured.append(recv_size)
-                return real_accept_many(sock, callback, recv_size=recv_size)
+            def capture_accept_many_streams(sock: socket.socket, callback, **kwargs):
+                captured.append(kwargs.get("recv_size"))
+                return real_accept_many_streams(sock, callback, **kwargs)
 
-            monkeypatch.setattr(scheduler.io, "accept_many", capture_accept_many)
+            monkeypatch.setattr(scheduler.io, "accept_many_streams", capture_accept_many_streams)
 
             def exercise() -> None:
                 server = start_server(
@@ -852,9 +860,9 @@ class TestStreamsPoC:
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         captured: list[bytes | None] = []
-        real_sock_create = scheduler.io.sock_create
+        real_sock_create_streams = scheduler.io.sock_create_streams
 
-        def capture_sock_create(
+        def capture_sock_create_streams(
             family,
             type,
             proto=0,
@@ -862,18 +870,20 @@ class TestStreamsPoC:
             flags=0,
             connect_to=None,
             initial_data: bytes | None = None,
+            **kwargs,
         ):
             captured.append(initial_data)
-            return real_sock_create(
+            return real_sock_create_streams(
                 family,
                 type,
                 proto,
                 flags=flags,
                 connect_to=connect_to,
                 initial_data=initial_data,
+                **kwargs,
             )
 
-        monkeypatch.setattr(scheduler.io, "sock_create", capture_sock_create)
+        monkeypatch.setattr(scheduler.io, "sock_create_streams", capture_sock_create_streams)
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -905,9 +915,9 @@ class TestStreamsPoC:
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         connect_targets: list[Any] = []
-        real_sock_create = scheduler.io.sock_create
+        real_sock_create_streams = scheduler.io.sock_create_streams
 
-        def track_sock_create(
+        def track_sock_create_streams(
             family,
             type,
             proto=0,
@@ -915,18 +925,20 @@ class TestStreamsPoC:
             flags=0,
             connect_to=None,
             initial_data: bytes | None = None,
+            **kwargs,
         ):
             connect_targets.append(connect_to)
-            return real_sock_create(
+            return real_sock_create_streams(
                 family,
                 type,
                 proto,
                 flags=flags,
                 connect_to=connect_to,
                 initial_data=initial_data,
+                **kwargs,
             )
 
-        monkeypatch.setattr(scheduler.io, "sock_create", track_sock_create)
+        monkeypatch.setattr(scheduler.io, "sock_create_streams", track_sock_create_streams)
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -963,9 +975,9 @@ class TestStreamsPoC:
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         captured: list[bytes | None] = []
-        real_sock_create = scheduler.io.sock_create
+        real_sock_create_streams = scheduler.io.sock_create_streams
 
-        def capture_sock_create(
+        def capture_sock_create_streams(
             family,
             type,
             proto=0,
@@ -973,18 +985,20 @@ class TestStreamsPoC:
             flags=0,
             connect_to=None,
             initial_data: bytes | None = None,
+            **kwargs,
         ):
             captured.append(initial_data)
-            return real_sock_create(
+            return real_sock_create_streams(
                 family,
                 type,
                 proto,
                 flags=flags,
                 connect_to=connect_to,
                 initial_data=initial_data,
+                **kwargs,
             )
 
-        monkeypatch.setattr(scheduler.io, "sock_create", capture_sock_create)
+        monkeypatch.setattr(scheduler.io, "sock_create_streams", capture_sock_create_streams)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = str(Path(temp_dir) / "stream.sock")

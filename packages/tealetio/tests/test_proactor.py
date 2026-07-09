@@ -1027,6 +1027,32 @@ def test_create_connect_delivery_ignored_after_cancel() -> None:
             sock.close()
 
 
+def test_create_connect_delivery_result_wrapper_completes_with_streams() -> None:
+    from tealetio.operation_callbacks import create_connect_delivery
+    from tealetio.streams import StreamReader, StreamWriter, default_stream_factory
+
+    from test_io_manager import _MockProactor, _manager
+
+    proactor = _MockProactor()
+    io = _manager(proactor)
+    operation = Operation[tuple[StreamReader, StreamWriter]](kind="create_socket")
+    sock = socket.socket()
+    try:
+        delivery = create_connect_delivery(
+            proactor,
+            ("127.0.0.1", 9),
+            result_wrapper=lambda conn: default_stream_factory(io, conn),
+        )
+        delivery(proactor, operation, sock, None)
+        assert operation.done()
+        reader, writer = operation.result()
+        assert isinstance(reader, StreamReader)
+        assert isinstance(writer, StreamWriter)
+    finally:
+        if sock.fileno() != -1:
+            sock.close()
+
+
 def test_chain_suboperation_on_complete_failure_finishes_parent() -> None:
     from tealetio.operation_callbacks import chain_suboperation
 
