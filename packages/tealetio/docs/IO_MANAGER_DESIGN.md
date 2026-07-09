@@ -218,8 +218,11 @@ connect leg of `sock_create(..., connect_to=…)`). Both proactor backends route
 blocking ``sock.connect()`` followed by ``deliver()``. io_uring
 ``submit_connect`` does not accept UNIX sockaddr paths today, so this is not a
 special-case deferral at the io_manager layer — the chained ``Operation`` may
-simply complete synchronously before ``wait_operation`` returns. Inet sockets
-still use the backend async connect path.
+simply complete synchronously before ``wait_operation`` returns. That is
+acceptable in practice: Unix-domain connects are near-instant on the local
+machine, so a brief blocking ``connect()`` on the completion thread does not
+carry the same latency risk as a remote TCP handshake. Inet sockets still use
+the backend async connect path.
 
 ### Chain spine: cancel down, advance up
 
