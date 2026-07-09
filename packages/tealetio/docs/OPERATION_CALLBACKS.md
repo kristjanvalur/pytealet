@@ -31,12 +31,12 @@ raise without expecting `complete_error` from the suboperation wrapper.
   `_active_suboperations`
 - Runs `on_complete` when the child finishes; failures in `on_complete` call
   `parent.complete_error(exc)`
-- Returns `False` only when the parent is already `_done` or `_cancelling` (the
-  attach path re-checks the same condition under the lock)
+- Returns `False` only when the parent is already `_done` (the attach path
+  re-checks the same condition under the lock)
 
-Callers need not finish the parent on `False` — `cancel()` terminalises the root
-when `_cancelling` is set. Local cleanup (for example closing a created socket
-that will not be returned) is the caller's responsibility.
+Callers need not finish the parent on `False`. Local cleanup (for example
+closing a created socket that will not be returned) is the caller's
+responsibility when composition cannot start.
 
 `spawn()` runs while holding `parent._lock`, which serialises attach against
 `cancel()` but can defer another thread's `cancel()` until a synchronous backend
@@ -108,7 +108,7 @@ Named factories (thin `operation_factory(delivery=…)` wrappers):
 |-------|-----------------|-------------------|
 | Parent `complete()` / normal `_finish` | Children keep running | Same |
 | Parent error finish | Children keep running | Same |
-| Parent `cancel()` | Snapshot set, cancel children, `_cancelling` blocks late attach | Same |
+| Parent `cancel()` | `_set_cancelled()` finishes the root, then cancels children, then backend hook | Same |
 | Child completion | `on_complete` may call `parent.complete(…)` | Handlers may run after `parent.done()` when handed off while active |
 
 Only the root one-shot `Operation` is passed to `wait_operation`. Child

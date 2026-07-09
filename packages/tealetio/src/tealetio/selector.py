@@ -329,7 +329,6 @@ class SelectorMixin:
 
         def cancel() -> None:
             disarm()
-            operation._set_cancelled()
 
         operation.set_cancel(cancel)
 

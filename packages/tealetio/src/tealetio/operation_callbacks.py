@@ -63,17 +63,16 @@ def chain_suboperation(
     ``spawn()``; the lock is an ``RLock`` so same-thread spawn does not
     self-deadlock.
 
-    Returns ``False`` only when the parent is already ``_done`` or
-    ``_cancelling`` (attach uses the same check under the lock). Callers need
-    not finish the parent on ``False`` — ``cancel()`` terminalises the root when
-    ``_cancelling`` is set. If the child was spawned, a failed attach cancels it.
+    Returns ``False`` only when the parent is already ``_done`` (attach uses the
+    same check under the lock). Callers need not finish the parent on ``False``.
+    If the child was spawned, a failed attach cancels it.
 
     If the child is already done when registered, ``add_done_callback`` runs
     ``on_complete`` immediately.
     """
 
     with parent._lock:
-        if parent._done or parent._cancelling:
+        if parent._done:
             return False
         child = spawn()
         if not _register_suboperation(parent, child, on_complete):
@@ -112,7 +111,7 @@ def connect_initial_send_delivery(
             operation.complete(None)
 
         try:
-            # False means parent is _done or _cancelling; no cleanup needed here.
+            # False means parent is already _done; no cleanup needed here.
             chain_suboperation(
                 operation,
                 lambda: proactor.send(sock, payload),
@@ -175,7 +174,7 @@ def create_connect_delivery(
                     lambda: proactor.send(sock, payload),
                     on_send_complete,
                 ):
-                    # Parent is _done or _cancelling; close fd, cancel() finishes root.
+                    # Parent is already _done; close fd only.
                     _close_socket(sock)
             except BaseException as exc:
                 _close_socket(sock)
@@ -187,7 +186,7 @@ def create_connect_delivery(
                 lambda: proactor.connect(sock, connect_to),
                 on_connect_complete,
             ):
-                # Parent is _done or _cancelling; close fd, cancel() finishes root.
+                # Parent is already _done; close fd only.
                 _close_socket(sock)
         except BaseException as exc:
             _close_socket(sock)

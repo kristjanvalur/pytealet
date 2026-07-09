@@ -1429,9 +1429,7 @@ class SelectorProactor(ProactorBase):
         def cancel() -> None:
             with self._lock:
                 removed = self._remove_operation(operation)
-            if not removed:
-                return
-            if operation._set_cancelled():
+            if removed:
                 self._after_selector_registration_changed()
 
         operation.set_cancel(cancel)
@@ -1784,8 +1782,6 @@ class UringProactor(ProactorBase):
                 cancelled = True
             else:
                 index += 1
-        if cancelled:
-            operation._set_cancelled()
         return cancelled
 
     def _uring_entry(
@@ -1808,8 +1804,7 @@ class UringProactor(ProactorBase):
             completion = entry.completion
             if completion is not None:
                 teardown(completion)
-            if operation._set_cancelled():
-                self.break_wait()
+            self.break_wait()
 
         operation.set_cancel(cancel)
         return entry
@@ -2872,7 +2867,6 @@ class UringProactor(ProactorBase):
                 del self._deferred_submissions[index]
                 entry.active = False
                 entry.completion = None
-                operation._set_cancelled()
                 return True
         return False
 

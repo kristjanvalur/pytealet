@@ -50,7 +50,6 @@ class Operation(Generic[T]):
         self._callbacks: list[_DoneCallback] | None = []
         self._cancel_hook: _CancelHook | None = None
         self._active_suboperations: set[Operation[Any]] = set()
-        self._cancelling = False
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -75,11 +74,11 @@ class Operation(Generic[T]):
     def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
         """Register a child for ``cancel()`` propagation.
 
-        Returns ``False`` when the parent is done or ``cancel()`` is in progress.
+        Returns ``False`` when the parent is already done.
         """
 
         with self._lock:
-            if self._done or self._cancelling:
+            if self._done:
                 return False
             self._active_suboperations.add(suboperation)
             return True
@@ -104,20 +103,6 @@ class Operation(Generic[T]):
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
 
-        with self._lock:
-            if self._done:
-                return
-            self._cancelling = True
-            suboperations = set(self._active_suboperations)
-        for suboperation in suboperations:
-            suboperation.cancel()
-
-        cancel_hook = self._cancel_hook
-        if cancel_hook is not None:
-            cancel_hook()
-        with self._lock:
-            if self._done:
-                return
         self._set_cancelled()
 
     def result(self) -> T:
@@ -181,7 +166,7 @@ class Operation(Generic[T]):
         """
 
         with self._lock:
-            if self._done or self._cancelling:
+            if self._done:
                 return
             delivery = self._delivery
         if delivery is not None:
@@ -196,7 +181,7 @@ class Operation(Generic[T]):
         """Finish the operation from a delivery handler."""
 
         with self._lock:
-            if self._done or self._cancelling:
+            if self._done:
                 return
         try:
             self._finish(result=result)
@@ -207,7 +192,7 @@ class Operation(Generic[T]):
         """Fail the operation from a delivery handler."""
 
         with self._lock:
-            if self._done or self._cancelling:
+            if self._done:
                 return
         try:
             self._finish(exception=exc)
@@ -215,7 +200,29 @@ class Operation(Generic[T]):
             return
 
     def _set_cancelled(self) -> bool:
-        return self._finish(exception=CancelledError(), cancelled=True)
+        with self._lock:
+            if self._done:
+                return False
+            self._result = None
+            self._exception = CancelledError()
+            self._cancelled = True
+            self._done = True
+            cancel_hook = self._cancel_hook
+            self._cancel_hook = None
+            callbacks = self._callbacks
+            self._callbacks = None
+            suboperations = tuple(self._active_suboperations)
+
+        for suboperation in suboperations:
+            suboperation.cancel()
+
+        if cancel_hook is not None:
+            cancel_hook()
+
+        assert callbacks is not None
+        for callback in callbacks:
+            callback(self)
+        return True
 
     def _finish(
         self,
@@ -282,13 +289,13 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         """
 
         with self._lock:
-            if self._done or self._cancelling:
+            if self._done:
                 return False
             callback = self._result_callback
         if callback is not None:
             callback(result)
         with self._lock:
-            return not self._done and not self._cancelling
+            return not self._done
 
     def _finish(
         self,
