@@ -260,7 +260,10 @@ class Operation(Generic[T]):
         """Resume propagation after local advance-hook work on this link.
 
         Clears this link's advance hook and delegates to ``advance()`` without
-        re-entering it. Intended for use from advance-hook handlers only.
+        re-entering it. Intended for use from advance-hook handlers only. On a
+        linear chain each leg calls this once; DAG-shaped links may invoke the
+        hook multiple times until the final arrival issues the single
+        ``advance_continue()`` that clears and bubbles.
         """
 
         with self._lock:

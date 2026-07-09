@@ -242,10 +242,15 @@ entry for that leg holds the strong reference while IO is live.
 ### Advance hooks (one shot per leg)
 
 When a child leg completes, `Operation.advance()` walks **up** `chain_parent`
-and dispatches the first `_advance_hook` it finds. Each hook runs **at most once**
-per leg: the hook is cleared before it is invoked. The handler finishes local
-work (for example closing a captured socket on error, shaping the root success
-result) and calls `advance_continue()` to bubble further toward the root.
+and dispatches the first `_advance_hook` it finds. The hook stays installed
+while the handler runs; `advance_continue()` asserts it is still present, clears
+it under the link lock, and bubbles toward the root. That single clear point is
+the contract boundary for the link.
+
+Today each leg has at most one hook invocation before one `advance_continue()`.
+If links later gain DAG shape (multiple upstream arrivals per link), a hook may
+run more than once on the same leg until the final arrival; only the last
+`advance_continue()` clears the hook and propagates upward.
 
 Intermediate legs often stay `_done=False` on the success path; only the root
 future is awaited by the caller. `_done` on a child means that leg's own
