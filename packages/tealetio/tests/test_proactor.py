@@ -801,6 +801,35 @@ class TestOperation:
         assert child_cancelled
         assert child.cancelled()
 
+    def test_chain_suboperation_runs_on_complete_after_child_finishes(self):
+        from tealetio.continuous_callbacks import chain_suboperation
+
+        parent = ContinuousOperation(kind="test")
+        child = Operation[None](kind="child")
+        seen: list[object] = []
+        chain_suboperation(parent, child, lambda op: seen.append(op.result()))
+        child._finish(result=None)
+        assert seen == [None]
+
+    def test_chain_suboperation_cancel_cancels_active_child(self):
+        from tealetio.continuous_callbacks import chain_suboperation
+
+        parent = ContinuousOperation(kind="test")
+        child = Operation[None](kind="child")
+        child_cancelled = False
+
+        def cancel_child() -> None:
+            nonlocal child_cancelled
+            child_cancelled = True
+            child._set_cancelled()
+
+        child.set_cancel(cancel_child)
+        chain_suboperation(parent, child, lambda _op: None)
+        parent.cancel()
+        assert parent.cancelled()
+        assert child_cancelled
+        assert child.cancelled()
+
     def test_before_delivery_runs_handler_before_deliver(self):
         from tealetio.continuous_callbacks import before_delivery
 
@@ -1752,7 +1781,7 @@ class TestSelectorProactor:
             proactor.close()
 
     def test_recv_many_echo_handler_runs_before_client_delivery(self):
-        from tealetio.continuous_callbacks import before_delivery, recv_many_echo_handler
+        from tealetio.continuous_callbacks import recv_many_echo_delivery
 
         def _drain_peer(sock: socket.socket, proactor: SelectorProactor) -> bytes:
             chunks: list[bytes] = []
@@ -1775,10 +1804,7 @@ class TestSelectorProactor:
             writer.setblocking(False)
             operation = proactor.recv_many(
                 reader,
-                callback_factory=lambda op: before_delivery(
-                    recv_many_echo_handler(proactor, op, reader),
-                    seen.append,
-                ),
+                callback_factory=lambda op: recv_many_echo_delivery(proactor, op, reader, seen.append),
                 buf_group=proactor.shared_recv_buffer_pool(),
             )
 
@@ -1805,21 +1831,68 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_recv_many_echo_handler_tracks_send_suboperation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from contextlib import contextmanager
+    def test_recv_many_echo_delivery_chains_send_completion_before_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tealetio.continuous_callbacks as continuous_callbacks_module
+        from tealetio.continuous_callbacks import chain_suboperation, recv_many_echo_delivery
 
-        from tealetio.continuous_callbacks import before_delivery, recv_many_echo_handler
+        order: list[str] = []
+        original_chain = chain_suboperation
 
-        tracked: list[Operation[Any]] = []
-        original_track = ContinuousOperation.track_suboperation
+        def spy_chain(parent, suboperation, on_complete):
+            order.append("chain")
 
-        @contextmanager
-        def spy_track(self, suboperation: Operation[Any]):
-            tracked.append(suboperation)
-            with original_track(self, suboperation):
-                yield suboperation
+            def on_complete_wrapped(op: Operation[Any]) -> None:
+                order.append("complete")
+                on_complete(op)
 
-        monkeypatch.setattr(ContinuousOperation, "track_suboperation", spy_track)
+            original_chain(parent, suboperation, on_complete_wrapped)
+
+        monkeypatch.setattr(continuous_callbacks_module, "chain_suboperation", spy_chain)
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        delivered: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def track_delivery(result: _RecvManySeen) -> None:
+                order.append("deliver")
+                delivered.append(result)
+
+            operation = proactor.recv_many(
+                reader,
+                callback_factory=lambda op: recv_many_echo_delivery(proactor, op, reader, track_delivery),
+                buf_group=proactor.shared_recv_buffer_pool(),
+            )
+
+            writer.send(b"x")
+            deadline = proactor.get_time() + 1.0
+            while len(delivered) < 1 and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert order == ["chain", "complete", "deliver"]
+            assert _recv_many_bytes(delivered) == [(0, b"x")]
+
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done() and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_echo_delivery_registers_send_suboperation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from tealetio.continuous_callbacks import recv_many_echo_delivery
+
+        attached: list[Operation[Any]] = []
+        original_attach = ContinuousOperation.attach_suboperation
+
+        def spy_attach(self, suboperation: Operation[Any]) -> bool:
+            attached.append(suboperation)
+            return original_attach(self, suboperation)
+
+        monkeypatch.setattr(ContinuousOperation, "attach_suboperation", spy_attach)
 
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -1829,22 +1902,19 @@ class TestSelectorProactor:
 
             operation = proactor.recv_many(
                 reader,
-                callback_factory=lambda op: before_delivery(
-                    recv_many_echo_handler(proactor, op, reader),
-                    lambda _result: None,
-                ),
+                callback_factory=lambda op: recv_many_echo_delivery(proactor, op, reader, lambda _result: None),
                 buf_group=proactor.shared_recv_buffer_pool(),
             )
 
             writer.send(b"x")
             deadline = proactor.get_time() + 1.0
-            while not tracked and proactor.get_time() < deadline:
+            while not attached and proactor.get_time() < deadline:
                 proactor.wait(proactor.get_time() + 0.05)
             writer.shutdown(socket.SHUT_WR)
             while not operation.done() and proactor.get_time() < deadline:
                 proactor.wait(proactor.get_time() + 0.05)
 
-            assert [entry.kind for entry in tracked] == ["send"]
+            assert [entry.kind for entry in attached] == ["send"]
         finally:
             reader.close()
             writer.close()

@@ -331,8 +331,10 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     thread affinity must marshal from the callback into the desired thread or
     event loop themselves.
 
-    Callbacks that submit nested ``Operation`` objects should register them with
-    ``track_suboperation()`` so ``cancel()`` cancels in-flight child work too.
+    Callbacks that submit nested ``Operation`` objects must not block waiting on
+    them. Register each child with ``attach_suboperation()`` (or
+    ``chain_suboperation()`` in ``continuous_callbacks``) so ``cancel()`` can
+    cancel in-flight child work and completion handlers can continue the stream.
     """
 
     def __init__(
@@ -354,21 +356,31 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
                 raise InvalidStateError("continuous operation is already done")
             self._result_callback = callback
 
+    def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
+        """Register in-flight child work. Returns False when the parent is done."""
+
+        with self._lock:
+            if self._done:
+                return False
+            self._active_suboperations.add(suboperation)
+            return True
+
+    def detach_suboperation(self, suboperation: Operation[Any]) -> None:
+        with self._lock:
+            self._active_suboperations.discard(suboperation)
+
     @contextmanager
     def track_suboperation(self, suboperation: Operation[Any]) -> Iterator[Operation[Any]]:
         """Register ``suboperation`` until the context exits or ``cancel()`` runs."""
 
-        with self._lock:
-            if self._done:
-                suboperation.cancel()
-                yield suboperation
-                return
-            self._active_suboperations.add(suboperation)
+        if not self.attach_suboperation(suboperation):
+            suboperation.cancel()
+            yield suboperation
+            return
         try:
             yield suboperation
         finally:
-            with self._lock:
-                self._active_suboperations.discard(suboperation)
+            self.detach_suboperation(suboperation)
 
     def cancel(self) -> None:
         with self._lock:

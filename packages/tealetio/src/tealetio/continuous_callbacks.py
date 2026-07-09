@@ -40,32 +40,48 @@ def marshal_to_scheduler(
     return deliver
 
 
-def wait_suboperation(
-    proactor: Proactor,
+def chain_suboperation(
     parent: ContinuousOperation[Any],
     suboperation: Operation[T],
-) -> T:
-    """Drive ``suboperation`` to completion while it is tracked on ``parent``."""
+    on_complete: Callable[[Operation[T]], object],
+) -> None:
+    """Track ``suboperation`` and run ``on_complete`` from its done callback."""
 
-    with parent.track_suboperation(suboperation):
-        while not suboperation.done():
-            proactor.wait(proactor.get_time() + 1.0)
-        return suboperation.result()
+    if not parent.attach_suboperation(suboperation):
+        suboperation.cancel()
+        return
+
+    def complete(op: Operation[T]) -> None:
+        try:
+            on_complete(op)
+        finally:
+            parent.detach_suboperation(op)
+
+    suboperation.add_done_callback(complete)
 
 
-def recv_many_echo_handler(
+def recv_many_echo_delivery(
     proactor: Proactor,
     parent: ContinuousOperation[_RecvManyResult],
     sock: socket.socket,
-) -> Callable[[_RecvManyResult], _RecvManyResult]:
-    """Echo each received data chunk back on ``sock`` before downstream delivery."""
+    deliver: Callable[[_RecvManyResult], object],
+) -> Callable[[_RecvManyResult], None]:
+    """Echo each data chunk via a nested send before ``deliver`` runs."""
 
-    def handler(result: _RecvManyResult) -> _RecvManyResult:
+    def on_result(result: _RecvManyResult) -> None:
         index, payload = result
         if index == RECV_MANY_BUFFER_PRESSURE:
-            return result
+            deliver(result)
+            return
         if isinstance(payload, memoryview) and payload:
-            wait_suboperation(proactor, parent, proactor.send(sock, payload.tobytes()))
-        return result
+            send_op = proactor.send(sock, payload.tobytes())
 
-    return handler
+            def on_send_complete(op: Operation[Any]) -> None:
+                op.result()
+                deliver(result)
+
+            chain_suboperation(parent, send_op, on_send_complete)
+            return
+        deliver(result)
+
+    return on_result
