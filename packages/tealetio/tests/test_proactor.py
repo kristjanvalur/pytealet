@@ -1882,6 +1882,66 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_recv_many_echo_fire_and_forget_delivers_before_send_completes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.continuous_callbacks as continuous_callbacks_module
+        from tealetio.continuous_callbacks import chain_suboperation, recv_many_echo_delivery
+
+        order: list[str] = []
+        original_chain = chain_suboperation
+        pending_send = Operation[None](kind="send")
+
+        def spy_chain(parent, suboperation, on_complete):
+            order.append("chain")
+
+            def on_complete_wrapped(op: Operation[Any]) -> None:
+                order.append("complete")
+                on_complete(op)
+
+            original_chain(parent, suboperation, on_complete_wrapped)
+
+        monkeypatch.setattr(continuous_callbacks_module, "chain_suboperation", spy_chain)
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        delivered: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            monkeypatch.setattr(proactor, "send", lambda _sock, _data: pending_send)
+
+            def track_delivery(result: _RecvManySeen) -> None:
+                order.append("deliver")
+                delivered.append(result)
+
+            operation = proactor.recv_many(
+                reader,
+                callback_factory=lambda op: recv_many_echo_delivery(
+                    proactor, op, reader, track_delivery, fire_and_forget=True
+                ),
+                buf_group=proactor.shared_recv_buffer_pool(),
+            )
+
+            writer.send(b"x")
+            deadline = proactor.get_time() + 1.0
+            while len(delivered) < 1 and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert order == ["chain", "deliver"]
+            assert _recv_many_bytes(delivered) == [(0, b"x")]
+
+            pending_send._finish(result=None)
+            assert order == ["chain", "deliver", "complete"]
+
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done() and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_recv_many_echo_delivery_registers_send_suboperation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from tealetio.continuous_callbacks import recv_many_echo_delivery
 

@@ -65,11 +65,15 @@ def recv_many_echo_delivery(
     parent: ContinuousOperation[_RecvManyResult],
     sock: socket.socket,
     deliver: Callable[[_RecvManyResult], object],
+    *,
+    fire_and_forget: bool = False,
 ) -> Callable[[_RecvManyResult], None]:
-    """Echo each data chunk via a nested send before ``deliver`` runs.
+    """Echo each data chunk via a nested send operation.
 
-    When the nested send fails, the recv result is dropped and ``deliver`` is
-    not called; ``recv_many`` keeps running.
+    By default ``deliver`` runs only after the nested send succeeds. When
+    ``fire_and_forget`` is true, the send is submitted and tracked for
+    cancellation, but ``deliver`` runs immediately without waiting for echo
+    completion. Send failures are always swallowed; ``recv_many`` keeps running.
     """
 
     def on_result(result: _RecvManyResult) -> None:
@@ -79,6 +83,14 @@ def recv_many_echo_delivery(
             return
         if isinstance(payload, memoryview) and payload:
             send_op = proactor.send(sock, payload.tobytes())
+            if fire_and_forget:
+
+                def on_send_complete(_op: Operation[Any]) -> None:
+                    return
+
+                chain_suboperation(parent, send_op, on_send_complete)
+                deliver(result)
+                return
 
             def on_send_complete(op: Operation[Any]) -> None:
                 if op.exception() is not None:
