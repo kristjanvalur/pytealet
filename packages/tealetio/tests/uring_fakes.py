@@ -184,6 +184,8 @@ class _FakeUringRing:
         self.submitted_socket: list[tuple[int, int, int, int, object]] = []
         self.pending_connect_send: list[SimpleNamespace] = []
         self.submitted_cancel: list[object] = []
+        self.submitted_shutdown: list[tuple[int, int, object]] = []
+        self.submitted_close: list[tuple[int, object]] = []
         self.submitted_poll: list[tuple[int, int, object]] = []
         self.submitted_poll_multishot: list[tuple[int, int, object]] = []
         self.submitted_poll_remove: list[object] = []
@@ -581,6 +583,43 @@ class _FakeUringRing:
         cancel_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
         self._deliver(cancel_completion)
         return cancel_completion
+
+    def submit_shutdown(self, fd: int, how: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_shutdown.append((fd, how, user_data))
+        wrapper = socket.socket(fileno=fd)
+        try:
+            wrapper.shutdown(how)
+        except OSError:
+            pass
+        finally:
+            wrapper.detach()
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SHUTDOWN,
+            res=0,
+            result=None,
+        )
+        self._deliver(completion)
+        return completion
+
+    def submit_close(self, fd: int, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_close.append((fd, user_data))
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_CLOSE,
+            res=0,
+            result=None,
+        )
+        self._deliver(completion)
+        return completion
 
     def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:

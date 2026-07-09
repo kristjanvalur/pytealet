@@ -3,7 +3,6 @@ from __future__ import annotations
 import errno
 import os
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -25,6 +24,7 @@ class _MemoryProactor:
         self.read_calls: list[tuple[int, int, int]] = []
         self.write_calls: list[tuple[int, bytes, int]] = []
         self.read_into_calls: list[tuple[int, int]] = []
+        self.close_fd_calls: list[int] = []
 
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
         self.read_calls.append((fd, n, offset))
@@ -61,6 +61,13 @@ class _MemoryProactor:
         operation._finish(result=len(self._store.get(fd, b"")))
         return operation
 
+    def close_fd(self, fd: int) -> Operation[None]:
+        self.close_fd_calls.append(fd)
+        self._store.pop(fd, None)
+        operation = Operation[None](kind="close_fd", fileobj=fd)
+        operation._finish(result=None)
+        return operation
+
 
 def _make_file(
     *,
@@ -80,12 +87,6 @@ def _make_file(
         append=append,
     )
     return handle, proactor, store
-
-
-@pytest.fixture(autouse=True)
-def _noop_os_close():
-    with patch("tealetio.files.os.close"):
-        yield
 
 
 def test_proactor_file_exposes_iofile_surface() -> None:
@@ -133,10 +134,21 @@ def test_read_all_chunks_until_eof(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_close_is_idempotent() -> None:
-    handle, _proactor, _store = _make_file()
+    handle, proactor, _store = _make_file()
     handle.close()
     handle.close()
     assert handle.closed
+    assert proactor.close_fd_calls == [_TEST_FD]
+
+
+def test_close_delegates_to_proactor_close_fd() -> None:
+    handle, proactor, store = _make_file(data=b"hi")
+    try:
+        handle.close()
+        assert proactor.close_fd_calls == [_TEST_FD]
+        assert _TEST_FD not in store
+    finally:
+        handle.close()
 
 
 def test_append_readinto_empty_buffer_preserves_eof_flag() -> None:

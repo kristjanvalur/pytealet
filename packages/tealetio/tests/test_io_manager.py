@@ -54,6 +54,7 @@ class _MockProactor:
         self.create_socket_calls: list[tuple[Any, ...]] = []
         self.last_create_socket: socket.socket | None = None
         self.openat_calls: list[tuple[str, int, int]] = []
+        self.close_fd_calls: list[int] = []
 
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         self.recv_calls.append((sock, n))
@@ -147,6 +148,30 @@ class _MockProactor:
     ) -> ContinuousOperation[int]:
         operation = ContinuousOperation[int](kind="poll_many", fileobj=fd)
         operation._finish(result=mask)
+        return operation
+
+    def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
+        operation = Operation[None](kind="shutdown", fileobj=sock)
+        try:
+            sock.shutdown(how)
+            operation._finish(result=None)
+        except OSError as exc:
+            operation._finish(exception=exc)
+        return operation
+
+    def close_socket(self, sock: socket.socket) -> Operation[None]:
+        operation = Operation[None](kind="close_socket", fileobj=sock)
+        try:
+            sock.close()
+            operation._finish(result=None)
+        except OSError as exc:
+            operation._finish(exception=exc)
+        return operation
+
+    def close_fd(self, fd: int) -> Operation[None]:
+        self.close_fd_calls.append(fd)
+        operation = Operation[None](kind="close_fd", fileobj=fd)
+        operation._finish(result=None)
         return operation
 
 
@@ -561,6 +586,21 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
+    def test_sock_shutdown_and_close_delegate_to_proactor(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        conn, peer = socket.socketpair()
+        peer.close()
+        try:
+            io.wait_operation(io.sock_shutdown(conn, socket.SHUT_WR))
+            close_operation = io.sock_close(conn)
+            assert close_operation.kind == "close_socket"
+            io.wait_operation(close_operation)
+            assert conn.fileno() == -1
+        finally:
+            if conn.fileno() != -1:
+                conn.close()
+
     def test_sock_recv_delegates_to_proactor(self):
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -678,18 +718,18 @@ class TestProactorIOManagerDirect:
     def test_open_returns_proactor_file(self):
         proactor = _MockProactor()
         io = _manager(proactor)
-        with patch("tealetio.io_manager.os.close"), patch("tealetio.files.os.close"):
-            handle = io.open("/tmp/example.txt", "rb")
-            try:
-                from tealetio.files import ProactorFile
+        handle = io.open("/tmp/example.txt", "rb")
+        try:
+            from tealetio.files import ProactorFile
 
-                assert isinstance(handle, ProactorFile)
-                assert hasattr(handle, "read")
-                assert hasattr(handle, "seek")
-                assert handle.name == "/tmp/example.txt"
-                assert proactor.openat_calls == [("/tmp/example.txt", os.O_RDONLY | os.O_CLOEXEC, 0o666)]
-            finally:
-                handle.close()
+            assert isinstance(handle, ProactorFile)
+            assert hasattr(handle, "read")
+            assert hasattr(handle, "seek")
+            assert handle.name == "/tmp/example.txt"
+            assert proactor.openat_calls == [("/tmp/example.txt", os.O_RDONLY | os.O_CLOEXEC, 0o666)]
+        finally:
+            handle.close()
+        assert proactor.close_fd_calls == [901]
 
     def test_poll_many_returns_continuous_operation(self):
         proactor = _MockProactor()

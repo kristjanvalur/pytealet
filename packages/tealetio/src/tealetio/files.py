@@ -249,7 +249,7 @@ class ProactorFile(io.RawIOBase):
         if fd < 0:
             return
         try:
-            os.close(fd)
+            self._io.wait_operation(self._proactor.close_fd(fd))
         except OSError as exc:
             if exc.errno != errno.EBADF:
                 raise

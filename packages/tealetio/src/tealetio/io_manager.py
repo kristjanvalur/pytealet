@@ -137,6 +137,12 @@ class SocketIO(Protocol):
         buffer_pool: "RecvBufferPool | None" = None,
     ) -> bytes: ...
 
+    def sock_shutdown(self, sock: socket.socket, how: int) -> Operation[None]: ...
+
+    def sock_close(self, sock: socket.socket) -> Operation[None]: ...
+
+    def wait_operation(self, operation: Operation[T]) -> T: ...
+
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> "RecvBufferPool": ...
 
     def shared_recv_buffer_pool(self) -> "RecvBufferPool": ...
@@ -347,6 +353,12 @@ class ProactorIOManager:
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
         return self.wait_operation(self._proactor.sendto(sock, data, address))
+
+    def sock_shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
+        return self._proactor.shutdown(sock, how)
+
+    def sock_close(self, sock: socket.socket) -> Operation[None]:
+        return self._proactor.close_socket(sock)
 
     def sock_accept(self, sock: socket.socket) -> socket.socket:
         return self.wait_operation(self._proactor.accept(sock))
@@ -612,7 +624,7 @@ class ProactorIOManager:
             )
         except BaseException:
             try:
-                os.close(fd)
+                self.wait_operation(self._proactor.close_fd(fd))
             except OSError:
                 pass
             raise

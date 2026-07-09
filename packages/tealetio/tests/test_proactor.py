@@ -1330,6 +1330,29 @@ class TestSelectorProactor:
         finally:
             proactor.close()
 
+    def test_close_fd_completes_immediately_with_blocking_os_close(self):
+        proactor = SelectorProactor()
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                path = tmp.name
+            try:
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    operation = proactor.close_fd(fd)
+                    assert operation.done()
+                    assert operation.result() is None
+                    with pytest.raises(OSError):
+                        os.fstat(fd)
+                finally:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            finally:
+                os.unlink(path)
+        finally:
+            proactor.close()
+
     def test_ready_recv_completes_immediately_without_selector_registration(self):
         selector = selectors.SelectSelector()
         proactor = SelectorProactor(selector=selector)
@@ -3110,6 +3133,11 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: read_into_operation.done())
             assert read_into_operation.result() == 5
             assert bytes(buf) == b"hello"
+
+            close_operation = proactor.close_fd(fd)
+            _wait_for_uring(proactor, lambda: close_operation.done())
+            assert close_operation.result() is None
+            assert proactor.ring.submitted_close[-1][0] == fd
         finally:
             proactor.close()
 
