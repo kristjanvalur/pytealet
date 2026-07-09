@@ -840,9 +840,7 @@ class TestStreamsPoC:
                 client,
             )
             assert chained._delivery is not None
-            assert chained._advance_hook is None
             assert expected._delivery is not None
-            assert expected._advance_hook is None
             assert accepted.recv(1024) == b"helloworld"
         finally:
             if accepted is not None:
