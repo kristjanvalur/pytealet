@@ -362,3 +362,4 @@ static typing after `ProactorScheduler` narrowing.
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `OperationWaiter`
 - `packages/tealetio/src/tealetio/streams.py` — streams API
 - `packages/tealetio/docs/PYTHON_API.md` — user-facing API
+- `packages/tealetio/docs/OPERATION_CALLBACKS.md` — callback module layout and composition contracts
