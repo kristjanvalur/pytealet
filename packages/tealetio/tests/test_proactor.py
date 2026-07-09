@@ -968,7 +968,7 @@ def test_operation_deliver_skips_handler_when_done() -> None:
         seen.append(True)
         op.complete(None)
 
-    from tealetio.operations import operation_factory
+    from tealetio.operation_callbacks import operation_factory
 
     operation = cast(Operation[None], operation_factory(delivery=handler)("test", None))
     operation._set_cancelled()
@@ -983,7 +983,7 @@ def test_operation_deliver_routes_to_handler() -> None:
         seen.append((result, exception))
         op.complete(cast(int, result))
 
-    from tealetio.operations import operation_factory
+    from tealetio.operation_callbacks import operation_factory
 
     operation = cast(Operation[int], operation_factory(delivery=handler)("test", None))
     operation.deliver(object(), result=3)

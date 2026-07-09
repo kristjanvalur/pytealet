@@ -24,18 +24,6 @@ DeliveryHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException |
 OperationFactory = Callable[[str, object | None], "Operation[Any]"]
 
 
-def operation_factory(*, delivery: DeliveryHandler | None = None) -> OperationFactory:
-    """Build an ``Operation`` with an optional delivery handler."""
-
-    def factory(kind: str, fileobj: object | None) -> Operation[Any]:
-        operation = Operation(kind=kind, fileobj=fileobj)
-        if delivery is not None:
-            operation.set_delivery(delivery)
-        return operation
-
-    return factory
-
-
 @dataclass
 class ContinuousStepResult:
     progressed: bool = False

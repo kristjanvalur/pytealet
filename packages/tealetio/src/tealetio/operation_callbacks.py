@@ -15,6 +15,18 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+def operation_factory(*, delivery: DeliveryHandler | None = None) -> OperationFactory:
+    """Build an ``Operation`` with an optional delivery handler for proactor hooks."""
+
+    def factory(kind: str, fileobj: object | None) -> Operation[Any]:
+        operation = Operation(kind=kind, fileobj=fileobj)
+        if delivery is not None:
+            operation.set_delivery(delivery)
+        return operation
+
+    return factory
+
+
 def _register_suboperation(
     parent: Operation[Any],
     suboperation: Operation[T],
@@ -171,14 +183,7 @@ def create_connect_operation_factory(
 ) -> OperationFactory:
     """Factory for ``proactor.create_socket`` when ``connect_to`` is set."""
 
-    handler = create_connect_delivery(proactor, connect_to, initial)
-
-    def factory(kind: str, fileobj: object | None) -> Operation[Any]:
-        operation = Operation(kind=kind, fileobj=fileobj)
-        operation.set_delivery(handler)
-        return operation
-
-    return factory
+    return operation_factory(delivery=create_connect_delivery(proactor, connect_to, initial))
 
 
 def connect_initial_send_operation_factory(
@@ -187,11 +192,4 @@ def connect_initial_send_operation_factory(
 ) -> OperationFactory:
     """Factory for ``proactor.connect`` when ``initial`` send composition is needed."""
 
-    handler = connect_initial_send_delivery(proactor, initial)
-
-    def factory(kind: str, fileobj: object | None) -> Operation[Any]:
-        operation = Operation(kind=kind, fileobj=fileobj)
-        operation.set_delivery(handler)
-        return operation
-
-    return factory
+    return operation_factory(delivery=connect_initial_send_delivery(proactor, initial))
