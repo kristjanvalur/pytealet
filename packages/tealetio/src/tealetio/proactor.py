@@ -893,6 +893,8 @@ class SelectorProactor(ProactorBase):
             Operation[bytes],
             _spawn_operation("recv", sock, operation_factory=operation_factory),
         )
+        if operation.done():
+            return operation
 
         def attempt() -> bytes:
             return sock.recv(n)
@@ -1940,6 +1942,8 @@ class UringProactor(ProactorBase):
             Operation[bytes],
             _spawn_operation("recv", sock, operation_factory=operation_factory),
         )
+        if operation.done():
+            return operation
         if n == 0:
             operation.deliver(self, result=b"")
             return operation

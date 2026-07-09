@@ -15,7 +15,7 @@ import time
 from concurrent.futures import CancelledError
 from types import SimpleNamespace
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import pytest
 import uring_api
@@ -817,6 +817,35 @@ def test_operation_factory_cancels_child_when_parent_done() -> None:
     )
     assert child.cancelled() is True
     assert parent._cancel_forward is None
+
+
+@pytest.mark.parametrize("proactor_factory", PROACTOR_UNIT_TEST_FACTORIES)
+def test_recv_skips_io_when_factory_returns_done_operation(
+    proactor_factory: Callable[[], SelectorProactor | UringProactor],
+) -> None:
+    from tealetio.operation_chaining import operation_factory
+
+    parent = Operation[bytes](kind="parent")
+    parent._set_cancelled()
+
+    def factory(kind: str, fileobj: object | None) -> Operation[Any]:
+        return operation_factory(parent=parent)(kind, fileobj)
+
+    proactor = proactor_factory()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        operation = proactor.recv(reader, 5, operation_factory=factory)
+        assert operation.cancelled() is True
+        if isinstance(proactor, UringProactor):
+            assert proactor.ring.submitted_recv == []
+        else:
+            with pytest.raises(KeyError):
+                proactor._selector.get_key(reader.fileno())
+    finally:
+        reader.close()
+        writer.close()
+        proactor.close()
 
 
 def test_operation_may_extend_chain_false_when_done() -> None:
