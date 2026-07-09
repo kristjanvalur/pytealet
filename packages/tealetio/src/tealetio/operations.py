@@ -218,10 +218,10 @@ class Operation(Generic[T]):
         Unlike ``deliver()``, this does not re-enter the proactor delivery
         handler. Walks the parent chain from this link, invoking the first
         ``_advance_hook`` found (each hook runs at most once per leg and is
-        cleared before it runs). When no hook is installed on a link the walk
-        continues to its parent. At the chain root with no hook the operation
-        completes. Hooks should finish propagation by calling
-        ``advance_continue()`` on the link that owns the hook.
+        cleared in ``advance_continue()`` after local work). When no hook is
+        installed on a link the walk continues to its parent. At the chain root
+        with no hook the operation completes. Hooks must finish propagation by
+        calling ``advance_continue()`` on the link that owns the hook.
         """
 
         op: Operation[Any] | None = self
@@ -233,9 +233,7 @@ class Operation(Generic[T]):
                 if op._done:
                     return
                 handler = op._advance_hook
-                if handler is not None:
-                    op._advance_hook = None
-                elif op._chain_parent is None:
+                if handler is None and op._chain_parent is None:
                     finish_here = True
                 else:
                     parent = op._chain_parent
@@ -261,13 +259,12 @@ class Operation(Generic[T]):
     ) -> None:
         """Resume propagation after local advance-hook work on this link.
 
-        Delegates to ``advance()`` without re-entering this link's hook. The
-        hook is already cleared when ``advance()`` dispatched it; this call is
-        a no-op clear plus bubble to the parent chain. Intended for use from
-        advance-hook handlers only.
+        Clears this link's advance hook and delegates to ``advance()`` without
+        re-entering it. Intended for use from advance-hook handlers only.
         """
 
         with self._lock:
+            assert self._advance_hook is not None
             self._advance_hook = None
         self.advance(result=result, exception=exception)
 

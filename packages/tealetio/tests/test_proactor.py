@@ -1027,17 +1027,17 @@ def test_operation_advance_passthrough_through_multiple_links() -> None:
     assert root.result() == 9
 
 
-def test_operation_advance_continue_completes_at_root() -> None:
+def test_operation_advance_completes_at_root_without_hook() -> None:
     operation = Operation[str](kind="root")
-    operation.advance_continue(result="done")
+    operation.advance(result="done")
     assert operation.result() == "done"
 
 
-def test_operation_advance_continue_delegates_to_parent() -> None:
+def test_operation_advance_delegates_to_parent_without_hook() -> None:
     root = Operation[int](kind="root")
     child = Operation[None](kind="child")
     child.set_chain_parent(root)
-    child.advance_continue(result=4)
+    child.advance(result=4)
     assert root.result() == 4
 
 
