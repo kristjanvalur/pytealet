@@ -112,13 +112,12 @@ def connect_initial_send_delivery(
             operation.complete(None)
 
         try:
-            if not chain_suboperation(
+            # False means parent is _done or _cancelling; no cleanup needed here.
+            chain_suboperation(
                 operation,
                 lambda: proactor.send(sock, payload),
                 on_send_complete,
-            ):
-                # Parent is _done or _cancelling; cancel() finishes the root.
-                pass
+            )
         except BaseException as exc:
             operation.complete_error(exc)
 
