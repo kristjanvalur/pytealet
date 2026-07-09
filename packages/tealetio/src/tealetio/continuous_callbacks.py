@@ -66,7 +66,11 @@ def recv_many_echo_delivery(
     sock: socket.socket,
     deliver: Callable[[_RecvManyResult], object],
 ) -> Callable[[_RecvManyResult], None]:
-    """Echo each data chunk via a nested send before ``deliver`` runs."""
+    """Echo each data chunk via a nested send before ``deliver`` runs.
+
+    When the nested send fails, the recv result is dropped and ``deliver`` is
+    not called; ``recv_many`` keeps running.
+    """
 
     def on_result(result: _RecvManyResult) -> None:
         index, payload = result
@@ -77,7 +81,8 @@ def recv_many_echo_delivery(
             send_op = proactor.send(sock, payload.tobytes())
 
             def on_send_complete(op: Operation[Any]) -> None:
-                op.result()
+                if op.exception() is not None:
+                    return
                 deliver(result)
 
             chain_suboperation(parent, send_op, on_send_complete)
