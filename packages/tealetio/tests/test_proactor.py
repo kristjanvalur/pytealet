@@ -961,7 +961,7 @@ def test_operation_cancel_forwards_to_suboperation() -> None:
     assert parent.cancelled()
 
 
-def test_connect_initial_send_delivery_fails_when_send_chain_refused() -> None:
+def test_connect_initial_send_delivery_fails_when_send_raises() -> None:
     from tealetio.operation_callbacks import connect_initial_send_delivery
 
     class _SendProactor:
@@ -979,39 +979,35 @@ def test_connect_initial_send_delivery_fails_when_send_chain_refused() -> None:
         sock.close()
 
 
-def test_connect_initial_send_delivery_cancels_when_send_chain_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import tealetio.operation_callbacks as operation_callbacks_module
+def test_connect_initial_send_delivery_leaves_parent_to_cancel_when_cancelling() -> None:
     from tealetio.operation_callbacks import connect_initial_send_delivery
-
-    monkeypatch.setattr(operation_callbacks_module, "chain_suboperation", lambda *_a, **_k: False)
 
     sock = socket.socket()
     operation = Operation[None](kind="connect", fileobj=sock)
+    operation._cancelling = True
     try:
         delivery = connect_initial_send_delivery(cast(Any, object()), b"hi")
         delivery(object(), operation, None, None)
+        assert not operation.done()
+        operation._set_cancelled()
         assert operation.cancelled()
     finally:
         sock.close()
 
 
-def test_create_connect_delivery_cancels_when_connect_chain_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import tealetio.operation_callbacks as operation_callbacks_module
+def test_create_connect_delivery_closes_socket_when_parent_cancelling() -> None:
     from tealetio.operation_callbacks import create_connect_delivery
-
-    monkeypatch.setattr(operation_callbacks_module, "chain_suboperation", lambda *_a, **_k: False)
 
     sock = socket.socket()
     operation = Operation[socket.socket](kind="create_socket")
+    operation._cancelling = True
     try:
         delivery = create_connect_delivery(cast(Any, object()), ("127.0.0.1", 9))
         delivery(object(), operation, sock, None)
-        assert operation.cancelled()
         assert sock.fileno() == -1
+        assert not operation.done()
+        operation._set_cancelled()
+        assert operation.cancelled()
     finally:
         if sock.fileno() != -1:
             sock.close()

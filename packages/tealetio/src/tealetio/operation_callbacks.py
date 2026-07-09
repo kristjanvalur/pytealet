@@ -6,7 +6,7 @@ import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from .operations import DeliveryHandler, InvalidStateError, Operation, OperationFactory
+from .operations import DeliveryHandler, Operation, OperationFactory
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -101,12 +101,11 @@ def connect_initial_send_delivery(
             operation.complete(None)
 
         try:
-            if not chain_suboperation(
+            chain_suboperation(
                 operation,
                 lambda: proactor.send(sock, payload),
                 on_send_complete,
-            ):
-                _abort_suboperation_chain(operation)
+            )
         except BaseException as exc:
             operation.complete_error(exc)
 
@@ -118,24 +117,6 @@ def _close_socket(sock: socket.socket) -> None:
         sock.close()
     except OSError:
         pass
-
-
-def _abort_suboperation_chain(
-    operation: Operation[Any],
-    *,
-    sock: socket.socket | None = None,
-) -> None:
-    """Fail the parent when a child leg cannot be started or attached."""
-
-    if sock is not None:
-        _close_socket(sock)
-    with operation._lock:
-        if operation._done or operation._cancelling:
-            return
-    try:
-        operation._set_cancelled()
-    except InvalidStateError:
-        return
 
 
 def create_connect_delivery(
@@ -182,7 +163,7 @@ def create_connect_delivery(
                     lambda: proactor.send(sock, payload),
                     on_send_complete,
                 ):
-                    _abort_suboperation_chain(operation, sock=sock)
+                    _close_socket(sock)
             except BaseException as exc:
                 _close_socket(sock)
                 operation.complete_error(exc)
@@ -193,7 +174,7 @@ def create_connect_delivery(
                 lambda: proactor.connect(sock, connect_to),
                 on_connect_complete,
             ):
-                _abort_suboperation_chain(operation, sock=sock)
+                _close_socket(sock)
         except BaseException as exc:
             _close_socket(sock)
             operation.complete_error(exc)
