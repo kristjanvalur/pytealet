@@ -105,8 +105,7 @@ class Operation(Generic[T]):
 
         if self._done:
             return
-        with self._lock:
-            cancel_hook = self._cancel_hook
+        cancel_hook = self._cancel_hook
         if cancel_hook is not None:
             cancel_hook()
         if self._done:
