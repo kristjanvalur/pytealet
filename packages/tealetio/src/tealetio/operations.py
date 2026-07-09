@@ -207,25 +207,7 @@ class Operation(Generic[T]):
             return
 
     def _set_cancelled(self) -> bool:
-        with self._lock:
-            if self._done:
-                return False
-            self._result = None
-            self._exception = CancelledError()
-            self._cancelled = True
-            self._done = True
-            self._cancel_hook = None
-            callbacks = self._callbacks
-            self._callbacks = None
-            suboperations = tuple(self._active_suboperations)
-
-        for suboperation in suboperations:
-            suboperation.cancel()
-
-        assert callbacks is not None
-        for callback in callbacks:
-            callback(self)
-        return True
+        return self._finish(exception=CancelledError(), cancelled=True)
 
     def _finish(
         self,
@@ -246,6 +228,11 @@ class Operation(Generic[T]):
             self._cancel_hook = None
             callbacks = self._callbacks
             self._callbacks = None
+            suboperations = tuple(self._active_suboperations) if cancelled else ()
+
+        for suboperation in suboperations:
+            suboperation.cancel()
+
         assert callbacks is not None
         for callback in callbacks:
             callback(self)
@@ -307,7 +294,6 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         exception: BaseException | None = None,
         cancelled: bool = False,
     ) -> bool:
-        # do not touch _active_suboperations here: children started from result
-        # callbacks keep running after finish or error finish; only cancel()
-        # walks the set. each child drops itself via detach_suboperation().
+        # non-cancel finish leaves _active_suboperations alone: children started
+        # from result callbacks keep running after finish or error finish.
         return super()._finish(result=result, exception=exception, cancelled=cancelled)
