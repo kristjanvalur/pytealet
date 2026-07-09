@@ -267,7 +267,8 @@ class Operation(Generic[T]):
         advance-hook handlers only.
         """
 
-        self._advance_hook = None
+        with self._lock:
+            self._advance_hook = None
         self.advance(result=result, exception=exception)
 
     def complete(self, result: T) -> None:
