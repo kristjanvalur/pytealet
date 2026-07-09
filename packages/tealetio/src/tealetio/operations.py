@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import threading
 import weakref
-from collections.abc import Callable
-from concurrent.futures import CancelledError
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from .tasks import CancelledError
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, cast
 
@@ -329,6 +330,13 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     Result callbacks may run on any backend worker thread. Callers that need
     thread affinity must marshal from the callback into the desired thread or
     event loop themselves.
+
+    Callbacks that submit nested ``Operation`` objects must not block waiting on
+    them. Register each child with ``attach_suboperation()`` (or
+    ``chain_suboperation()`` in ``continuous_callbacks``) so ``cancel()`` can
+    reach in-flight child work. Finish and error finish do not cancel children;
+    each child removes itself from ``_active_suboperations`` when its completion
+    handler runs ``detach_suboperation()``.
     """
 
     def __init__(
@@ -339,29 +347,82 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         result_callback: _ResultCallback[T_co] | None = None,
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj)
-        self._result_callbacks: list[_ResultCallback[T_co]] = []
-        if result_callback is not None:
-            self._result_callbacks.append(result_callback)
+        self._result_callback = result_callback
+        self._active_suboperations: set[Operation[Any]] = set()
+        self._cancelling = False
 
-    def add_result_callback(self, callback: _ResultCallback[T_co]) -> None:
-        """Register `callback` for each result produced by the operation."""
+    def set_result_callback(self, callback: _ResultCallback[T_co] | None) -> None:
+        """Install or replace the result callback before the operation finishes."""
 
         with self._lock:
             if self._done:
                 raise InvalidStateError("continuous operation is already done")
-            self._result_callbacks.append(callback)
+            self._result_callback = callback
+
+    def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
+        """Register a child for ``cancel()`` propagation.
+
+        Returns ``False`` when the parent is done or ``cancel()`` is in progress.
+        """
+
+        with self._lock:
+            if self._done or self._cancelling:
+                return False
+            self._active_suboperations.add(suboperation)
+            return True
+
+    def detach_suboperation(self, suboperation: Operation[Any]) -> None:
+        with self._lock:
+            self._active_suboperations.discard(suboperation)
+
+    @contextmanager
+    def track_suboperation(self, suboperation: Operation[Any]) -> Iterator[Operation[Any]]:
+        """Register ``suboperation`` until the context exits or ``cancel()`` runs."""
+
+        if not self.attach_suboperation(suboperation):
+            suboperation.cancel()
+            yield suboperation
+            return
+        try:
+            yield suboperation
+        finally:
+            self.detach_suboperation(suboperation)
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._done:
+                return
+            self._cancelling = True
+            suboperations = set(self._active_suboperations)
+        for suboperation in suboperations:
+            suboperation.cancel()
+        super().cancel()
 
     def _emit_result(self, result: T_co) -> bool:
         """Deliver one result when the operation is still active.
 
-        Returns ``True`` when callbacks ran, ``False`` when the operation was
-        already done (including cancelled).
+        Returns ``True`` when delivery was accepted and the operation is still
+        active afterwards, ``False`` when the operation was already done or became
+        done during the callback (including cancellation).
         """
 
         with self._lock:
-            if self._done:
+            if self._done or self._cancelling:
                 return False
-            callbacks = list(self._result_callbacks)
-        for callback in callbacks:
+            callback = self._result_callback
+        if callback is not None:
             callback(result)
-        return True
+        with self._lock:
+            return not self._done and not self._cancelling
+
+    def _finish(
+        self,
+        *,
+        result: Any = None,
+        exception: BaseException | None = None,
+        cancelled: bool = False,
+    ) -> bool:
+        # do not touch _active_suboperations here: children started from result
+        # callbacks keep running after finish or error finish; only cancel()
+        # walks the set. each child drops itself via detach_suboperation().
+        return super()._finish(result=result, exception=exception, cancelled=cancelled)

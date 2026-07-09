@@ -305,6 +305,48 @@ Order on each node during unwind:
 Intermediate nodes do **not** call `advance()`; the leaf bubble already
 reached the root hook.
 
+## Continuous callback composition
+
+Long-lived proactor operations (`accept_many`, `recv_many`, `poll_many`, …)
+emit results through a single result callback (or `callback_factory(parent)` when
+composition needs the parent `ContinuousOperation`). Nested work started from
+that callback — accept-time pre-read, echo sends in tests, and similar — is
+**not** chained like `operation_chaining`; helpers live in
+`continuous_callbacks.py`.
+
+### Sub-operations: cancel propagation only
+
+`ContinuousOperation._active_suboperations` exists so `cancel()` can reach
+children submitted from result callbacks. It is **not** a drain barrier.
+
+| Parent event | Attached children |
+|--------------|-------------------|
+| Normal finish (EOF, final multishot CQE, …) | Keep running; completion handlers may still run |
+| Error finish (`_finish(exception=…)`) | Keep running — e.g. `ECONNRESET` on the parent socket must not cancel accepts/recvs already started from earlier callbacks |
+| `cancel()` | Set `_cancelling`, snapshot the set, and `cancel()` each child (blocks late attach and result delivery during the cancel wave) |
+
+`_finish()` does not clear or cancel `_active_suboperations`. Each child removes
+itself with `detach_suboperation()` from its done handler (typically via
+`chain_suboperation()`). Once the parent is done, `attach_suboperation()` returns
+false so new children are not linked; in-flight children drain independently.
+
+Fire-and-forget nested work that should not participate in parent cancel should
+not call `attach_suboperation()` (or should detach after submit).
+
+### Accept-time pre-read
+
+Built-in uring `receive_on_accept` was removed from the proactor. Accept-time
+pre-read is composed with `accept_read_delivery()` and wired from
+`ProactorIOManager.accept_many(..., recv_size=…)` / `start_server(...,
+recv_size=…)`. The proactor emits bare `socket` connections; tuple delivery
+`(conn, initial_data, recv_error)` is the callback/io_manager layer.
+
+When multishot accept ends (`IORING_CQE_F_MORE` clears), the parent may finish
+while a nested recv from the last accept is still in flight. That is expected:
+the accept stream has ended, not that all per-connection work has completed.
+User delivery for connections handed off while the parent was still active is
+normal drain behaviour.
+
 ## Capability gate
 
 | Concern | asyncio | tealetio (proactor) |
@@ -356,6 +398,7 @@ static typing after `ProactorScheduler` narrowing.
 
 - `packages/tealetio/src/tealetio/io_manager.py` — `ProactorIOManager`
 - `packages/tealetio/src/tealetio/operation_chaining.py` — chain factories and link handlers
+- `packages/tealetio/src/tealetio/continuous_callbacks.py` — continuous result-callback composition
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `OperationWaiter`
 - `packages/tealetio/src/tealetio/streams.py` — streams API

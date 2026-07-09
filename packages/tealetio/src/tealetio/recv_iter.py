@@ -4,7 +4,7 @@ import heapq
 import threading
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import CancelledError
+from .tasks import CancelledError
 from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
 from .locks import ThreadsafeEvent

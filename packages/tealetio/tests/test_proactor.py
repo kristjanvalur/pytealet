@@ -12,7 +12,7 @@ import socket
 import tempfile
 import threading
 import time
-from concurrent.futures import CancelledError
+from tealetio.tasks import CancelledError
 from types import SimpleNamespace
 from collections.abc import Callable
 from typing import Any, Callable, cast
@@ -766,10 +766,8 @@ class TestOperation:
             operation.result()
 
     def test_continuous_operation_emits_results_before_completion(self):
-        operation: ContinuousOperation[int] = ContinuousOperation(kind="test")
         seen: list[int] = []
-
-        operation.add_result_callback(seen.append)
+        operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
         operation._emit_result(1)
         operation._emit_result(2)
         operation._finish(result=None)
@@ -777,18 +775,103 @@ class TestOperation:
         assert seen == [1, 2]
         assert operation.done() is True
         assert operation.result() is None
-        with pytest.raises(InvalidStateError, match="already done"):
-            operation.add_result_callback(seen.append)
 
     def test_continuous_operation_emit_result_skips_when_done(self):
-        operation: ContinuousOperation[int] = ContinuousOperation(kind="test")
         seen: list[int] = []
-
-        operation.add_result_callback(seen.append)
+        operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
         assert operation._emit_result(1) is True
         operation._set_cancelled()
         assert operation._emit_result(2) is False
         assert seen == [1]
+
+    def test_continuous_operation_cancel_cancels_tracked_suboperation(self):
+        parent = ContinuousOperation(kind="test")
+        child = Operation[None](kind="child")
+        child_cancelled = False
+
+        def cancel_child() -> None:
+            nonlocal child_cancelled
+            child_cancelled = True
+            child._set_cancelled()
+
+        child.set_cancel(cancel_child)
+        with parent.track_suboperation(child):
+            parent.cancel()
+        assert parent.cancelled()
+        assert child_cancelled
+        assert child.cancelled()
+
+    def test_continuous_operation_cancel_rejects_late_suboperation_attach(self) -> None:
+        parent = ContinuousOperation(kind="test")
+        parent._cancelling = True
+        child = Operation[None](kind="child")
+        assert parent.attach_suboperation(child) is False
+
+    def test_continuous_operation_emit_result_false_while_cancelling(self) -> None:
+        seen: list[int] = []
+        parent = ContinuousOperation(kind="test", result_callback=seen.append)
+        parent._cancelling = True
+        assert parent._emit_result(1) is False
+        assert seen == []
+
+    def test_chain_suboperation_runs_on_complete_after_child_finishes(self):
+        from tealetio.continuous_callbacks import chain_suboperation
+
+        parent = ContinuousOperation(kind="test")
+        child = Operation[None](kind="child")
+        seen: list[object] = []
+        chain_suboperation(parent, child, lambda op: seen.append(op.result()))
+        child._finish(result=None)
+        assert seen == [None]
+
+    def test_chain_suboperation_cancel_cancels_active_child(self):
+        from tealetio.continuous_callbacks import chain_suboperation
+
+        parent = ContinuousOperation(kind="test")
+        child = Operation[None](kind="child")
+        child_cancelled = False
+
+        def cancel_child() -> None:
+            nonlocal child_cancelled
+            child_cancelled = True
+            child._set_cancelled()
+
+        child.set_cancel(cancel_child)
+        chain_suboperation(parent, child, lambda _op: None)
+        parent.cancel()
+        assert parent.cancelled()
+        assert child_cancelled
+        assert child.cancelled()
+
+    def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
+        from tealetio.continuous_callbacks import marshal_to_scheduler
+
+        scheduler = SyncProactorScheduler()
+        delivery_threads: list[int] = []
+
+        def exercise() -> None:
+            owner = threading.get_ident()
+            marshalled = marshal_to_scheduler(
+                scheduler,
+                lambda _result: delivery_threads.append(threading.get_ident()),
+            )
+
+            def invoke_from_worker() -> None:
+                marshalled(7)
+
+            worker = threading.Thread(target=invoke_from_worker)
+            worker.start()
+            worker.join()
+            deadline = scheduler.time() + 1.0
+            while len(delivery_threads) < 1 and scheduler.time() < deadline:
+                scheduler.sleep(0)
+            assert delivery_threads == [owner]
+
+        set_scheduler(scheduler)
+        try:
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.close()
 
 
 def test_operation_deliver_completes_without_handler() -> None:
@@ -1491,21 +1574,6 @@ class TestProactorContract:
             reader.close()
             writer.close()
 
-    @pytest.mark.parametrize("recv_size", [0, -1])
-    def test_accept_many_rejects_invalid_recv_size(
-        self, proactor_factory: Callable[[], SelectorProactor | UringProactor], recv_size: int
-    ) -> None:
-        proactor = proactor_factory()
-        server = socket.socket()
-        try:
-            server.setblocking(False)
-            with pytest.raises(ValueError):
-                proactor.accept_many(server, lambda _: None, recv_size=recv_size)
-        finally:
-            server.close()
-            proactor.close()
-
-
 class TestSelectorProactor:
     def test_stat_completes_immediately_with_blocking_fstat(self):
         proactor = SelectorProactor()
@@ -1613,7 +1681,7 @@ class TestSelectorProactor:
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         clients: list[socket.socket] = []
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        accepted: list[socket.socket] = []
         try:
             server.setblocking(False)
             server.bind(("127.0.0.1", 0))
@@ -1633,33 +1701,90 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
 
             assert operation.done() is False
-            assert [conn.getpeername()[0] for conn, _data, _recv_error in accepted] == ["127.0.0.1", "127.0.0.1"]
-            assert [data for _conn, data, _recv_error in accepted] == [None, None]
-            assert [recv_error for _conn, _data, recv_error in accepted] == [None, None]
-            assert [conn.getblocking() for conn, _data, _recv_error in accepted] == [False, False]
-            assert [os.get_inheritable(conn.fileno()) for conn, _data, _recv_error in accepted] == [
-                False,
-                False,
-            ]
+            assert [conn.getpeername()[0] for conn in accepted] == ["127.0.0.1", "127.0.0.1"]
+            assert [conn.getblocking() for conn in accepted] == [False, False]
+            assert [os.get_inheritable(conn.fileno()) for conn in accepted] == [False, False]
             operation.cancel()
             assert operation.cancelled() is True
         finally:
-            for conn, _data, _recv_error in accepted:
+            for conn in accepted:
                 conn.close()
             for client in clients:
                 client.close()
             server.close()
             proactor.close()
 
-    def test_accept_many_caps_oversized_recv_size(self) -> None:
+    def test_accept_many_callback_factory_read_defers_until_data(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
+
         proactor = SelectorProactor()
-        server = socket.socket()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
         try:
             server.setblocking(False)
             server.bind(("127.0.0.1", 0))
             server.listen()
-            proactor.accept_many(server, lambda _: None, recv_size=2**16 + 1)
+            client.setblocking(False)
+
+            operation = proactor.accept_many(
+                server,
+                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
+            )
+            client.setblocking(True)
+            client.connect(server.getsockname())
+            for _ in range(5):
+                proactor.wait(proactor.get_time() + 0.05)
+            assert accepted == []
+
+            client.sendall(b"hello")
+            deadline = proactor.get_time() + 2.0
+            while len(accepted) < 1 and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert accepted[0][1] == b"hello"
+            assert accepted[0][2] is None
+            assert operation.done() is False
         finally:
+            for conn, _data, _recv_error in accepted:
+                conn.close()
+            client.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_callback_factory_read_closes_idle_peer_without_delivery(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
+
+        proactor = SelectorProactor()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            client.setblocking(False)
+
+            proactor.accept_many(
+                server,
+                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
+            )
+            try:
+                client.connect(server.getsockname())
+            except (BlockingIOError, InterruptedError):
+                pass
+            deadline = proactor.get_time() + 2.0
+            while proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+                if accepted:
+                    break
+            client.shutdown(socket.SHUT_WR)
+            while proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert accepted == []
+        finally:
+            client.close()
             server.close()
             proactor.close()
 
@@ -1696,6 +1821,208 @@ class TestSelectorProactor:
             assert all(isinstance(data, memoryview) for _, data in seen)
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_echo_handler_runs_before_client_delivery(self):
+        from callback_helpers import recv_many_echo_delivery
+
+        def _drain_peer(sock: socket.socket, proactor: SelectorProactor) -> bytes:
+            chunks: list[bytes] = []
+            deadline = proactor.get_time() + 1.0
+            while proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+                try:
+                    chunk = sock.recv(1024, socket.MSG_DONTWAIT)
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    chunks.append(chunk)
+            return b"".join(chunks)
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv_many(
+                reader,
+                callback_factory=lambda op: recv_many_echo_delivery(proactor, op, seen.append),
+                buf_group=proactor.shared_recv_buffer_pool(),
+            )
+
+            writer.send(b"hello")
+            while len(seen) < 1:
+                proactor.wait(proactor.get_time() + 1.0)
+            first_echo = _drain_peer(writer, proactor)
+
+            writer.send(b"world")
+            while len(seen) < 2:
+                proactor.wait(proactor.get_time() + 1.0)
+            second_echo = _drain_peer(writer, proactor)
+
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done():
+                proactor.wait(proactor.get_time() + 1.0)
+
+            assert first_echo == b"hello"
+            assert second_echo == b"world"
+            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
+            assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_echo_delivery_chains_send_completion_before_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import callback_helpers
+        from callback_helpers import recv_many_echo_delivery
+        from tealetio.continuous_callbacks import chain_suboperation
+
+        order: list[str] = []
+        original_chain = chain_suboperation
+
+        def spy_chain(parent, suboperation, on_complete):
+            order.append("chain")
+
+            def on_complete_wrapped(op: Operation[Any]) -> None:
+                order.append("complete")
+                on_complete(op)
+
+            original_chain(parent, suboperation, on_complete_wrapped)
+
+        monkeypatch.setattr(callback_helpers, "chain_suboperation", spy_chain)
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        delivered: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def track_delivery(result: _RecvManySeen) -> None:
+                order.append("deliver")
+                delivered.append(result)
+
+            operation = proactor.recv_many(
+                reader,
+                callback_factory=lambda op: recv_many_echo_delivery(proactor, op, track_delivery),
+                buf_group=proactor.shared_recv_buffer_pool(),
+            )
+
+            writer.send(b"x")
+            deadline = proactor.get_time() + 1.0
+            while len(delivered) < 1 and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert order == ["chain", "complete", "deliver"]
+            assert _recv_many_bytes(delivered) == [(0, b"x")]
+
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done() and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_echo_fire_and_forget_delivers_before_send_completes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import callback_helpers
+        from callback_helpers import recv_many_echo_delivery
+        from tealetio.continuous_callbacks import chain_suboperation
+
+        order: list[str] = []
+        original_chain = chain_suboperation
+        pending_send = Operation[None](kind="send")
+
+        def spy_chain(parent, suboperation, on_complete):
+            order.append("chain")
+
+            def on_complete_wrapped(op: Operation[Any]) -> None:
+                order.append("complete")
+                on_complete(op)
+
+            original_chain(parent, suboperation, on_complete_wrapped)
+
+        monkeypatch.setattr(callback_helpers, "chain_suboperation", spy_chain)
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        delivered: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            monkeypatch.setattr(proactor, "send", lambda _sock, _data: pending_send)
+
+            def track_delivery(result: _RecvManySeen) -> None:
+                order.append("deliver")
+                delivered.append(result)
+
+            operation = proactor.recv_many(
+                reader,
+                callback_factory=lambda op: recv_many_echo_delivery(
+                    proactor, op, track_delivery, fire_and_forget=True
+                ),
+                buf_group=proactor.shared_recv_buffer_pool(),
+            )
+
+            writer.send(b"x")
+            deadline = proactor.get_time() + 1.0
+            while len(delivered) < 1 and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert order == ["chain", "deliver"]
+            assert _recv_many_bytes(delivered) == [(0, b"x")]
+
+            pending_send._finish(result=None)
+            assert order == ["chain", "deliver", "complete"]
+
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done() and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_echo_delivery_registers_send_suboperation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from callback_helpers import recv_many_echo_delivery
+
+        attached: list[Operation[Any]] = []
+        original_attach = ContinuousOperation.attach_suboperation
+
+        def spy_attach(self, suboperation: Operation[Any]) -> bool:
+            attached.append(suboperation)
+            return original_attach(self, suboperation)
+
+        monkeypatch.setattr(ContinuousOperation, "attach_suboperation", spy_attach)
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            operation = proactor.recv_many(
+                reader,
+                callback_factory=lambda op: recv_many_echo_delivery(proactor, op, lambda _result: None),
+                buf_group=proactor.shared_recv_buffer_pool(),
+            )
+
+            writer.send(b"x")
+            deadline = proactor.get_time() + 1.0
+            while not attached and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done() and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert [entry.kind for entry in attached] == ["send"]
         finally:
             reader.close()
             writer.close()
@@ -3932,7 +4259,7 @@ class TestUringProactor:
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        accepted: list[socket.socket] = []
         try:
             server.setblocking(False)
             operation = proactor.accept_many(server, accepted.append)
@@ -3945,7 +4272,7 @@ class TestUringProactor:
             operation.cancel()
             assert operation.cancelled() is True
         finally:
-            for conn, _data, _recv_error in accepted:
+            for conn in accepted:
                 conn.close()
             server.close()
             proactor.close()
@@ -3953,7 +4280,7 @@ class TestUringProactor:
     def test_accept_many_uses_multishot_accept(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        accepted: list[socket.socket] = []
         try:
             server.setblocking(False)
             operation = proactor.accept_many(server, accepted.append)
@@ -3967,46 +4294,34 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 1.0)
 
             assert operation.done() is False
-            
-            assert accepted[0][1] is None
-            assert accepted[0][2] is None
-            assert accepted[0][0].getblocking() is False
-            assert os.get_inheritable(accepted[0][0].fileno()) is False
+
+            assert accepted[0].getblocking() is False
+            assert os.get_inheritable(accepted[0].fileno()) is False
         finally:
-            for conn, _data, _recv_error in accepted:
+            for conn in accepted:
                 conn.close()
             server.close()
             proactor.close()
 
-    def test_accept_many_caps_oversized_recv_size(self) -> None:
-        proactor = UringProactor(ring_factory=_FakeUringRing)
-        server = socket.socket()
-        try:
-            server.setblocking(False)
-            proactor.accept_many(server, lambda _: None, recv_size=2**16 + 1)
-            proactor.ring.complete_accept_multishot("peer-1")
-            proactor.wait(proactor.get_time() + 0.05)
-            assert len(proactor.ring.submitted_recv) == 1
-            _fd, buf, _entry = proactor.ring.submitted_recv[0]
-            assert len(buf) == 2**16
-        finally:
-            server.close()
-            proactor.close()
+    def test_accept_many_callback_factory_read_defers_until_data(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
 
-    def test_accept_many_recv_size_defers_until_data(self) -> None:
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
         server = socket.socket()
         accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
         try:
             server.setblocking(False)
-            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            operation = proactor.accept_many(
+                server,
+                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
+            )
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
             assert accepted == []
-            assert len(proactor.ring.pending_accept_recv) == 1
-            proactor.ring.complete_accept_recv(b"hello")
+            assert len(proactor.ring.pending_recv) == 1
+            proactor.ring.complete_recv(b"hello")
             _wait_for_uring(proactor, lambda: len(accepted) == 1)
-            
+
             assert accepted[0][1] == b"hello"
             assert accepted[0][2] is None
             assert operation.done() is False
@@ -4016,66 +4331,98 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_accept_many_recv_size_hint_falls_back_without_multishot(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
-        server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        try:
-            server.setblocking(False)
-            operation = proactor.accept_many(server, accepted.append, recv_size=64)
-            proactor.ring.complete_accept_oneshot()
-            _wait_for_uring(proactor, lambda: len(accepted) == 1)
-            assert accepted[0][1] is None
-            assert accepted[0][2] is None
-            assert operation.done() is False
-        finally:
-            for conn, _data, _recv_error in accepted:
-                conn.close()
-            server.close()
-            proactor.close()
+    def test_accept_many_callback_factory_read_delivers_recv_error(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
 
-    def test_accept_many_recv_size_delivers_recv_error_to_callback(self) -> None:
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
         server = socket.socket()
         accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
         try:
             server.setblocking(False)
-            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            operation = proactor.accept_many(
+                server,
+                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
+            )
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
-            proactor.ring.complete_accept_recv_error(-errno.EIO)
+            proactor.ring.complete_recv_error(-errno.EIO)
             _wait_for_uring(proactor, lambda: len(accepted) == 1)
             conn, initial_data, recv_error = accepted[0]
-            
+
             assert initial_data is None
             assert isinstance(recv_error, OSError)
             assert recv_error.errno == errno.EIO
             assert conn.fileno() != -1
             assert operation.done() is False
-            proactor.ring.complete_accept_multishot("peer-2")
-            proactor.wait(proactor.get_time() + 0.05)
-            proactor.ring.complete_accept_recv(b"ok")
-            _wait_for_uring(proactor, lambda: len(accepted) == 2)
-            assert accepted[1][1] == b"ok"
-            assert accepted[1][2] is None
         finally:
             for conn, _data, _recv_error in accepted:
                 conn.close()
             server.close()
             proactor.close()
 
-    def test_accept_many_recv_size_cancel_closes_pending_recv(self) -> None:
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+    def test_accept_many_callback_factory_read_finishes_while_recv_pending_drains(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
+
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
         server = socket.socket()
         accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
         try:
             server.setblocking(False)
-            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            operation = proactor.accept_many(
+                server,
+                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
+            )
+            proactor.ring.complete_accept_multishot("peer-1", more=False)
+            proactor.wait(proactor.get_time() + 0.05)
+            assert operation.done() is True
+            assert accepted == []
+            assert len(proactor.ring.pending_recv) == 1
+            proactor.ring.complete_recv(b"hello")
+            _wait_for_uring(proactor, lambda: len(accepted) == 1)
+
+            assert accepted[0][1] == b"hello"
+            assert accepted[0][2] is None
+            assert operation.done() is True
+        finally:
+            for conn, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_read_delivery_closes_conn_when_attach_fails(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
+
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=socket.socket())
+        parent._finish(result=None)
+        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        conn, peer = socket.socketpair()
+        try:
+            on_conn = accept_read_delivery(proactor, parent, accepted.append, recv_size=64)
+            on_conn(conn)
+            assert accepted == []
+            with pytest.raises(OSError):
+                conn.getsockname()
+        finally:
+            peer.close()
+            proactor.close()
+
+    def test_accept_many_callback_factory_read_cancel_drops_pending_recv(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
+
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(
+                server,
+                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
+            )
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
             assert accepted == []
-            assert len(proactor.ring.pending_accept_recv) == 1
+            assert len(proactor.ring.pending_recv) == 1
             operation.cancel()
             assert operation.cancelled() is True
             assert accepted == []
@@ -4092,7 +4439,7 @@ class TestUringProactor:
         parent._set_cancelled()
         client, server = socket.socketpair()
         try:
-            assert proactor_module._handoff_accept_many(parent, client, None, None) is False
+            assert proactor_module._handoff_accept_many(parent, client) is False
             with pytest.raises(OSError):
                 client.getsockname()
         finally:
@@ -4101,58 +4448,17 @@ class TestUringProactor:
     def test_accept_many_drops_connection_when_accept_completes_after_cancel(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        accepted: list[socket.socket] = []
         try:
             server.setblocking(False)
-            operation = proactor.accept_many(server, accepted.append, recv_size=64)
+            operation = proactor.accept_many(server, accepted.append)
             operation.cancel()
             assert operation.cancelled() is True
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
             assert accepted == []
-            assert proactor.ring.pending_accept_recv == []
         finally:
-            for conn, _data, _recv_error in accepted:
-                conn.close()
-            server.close()
-            proactor.close()
-
-    def test_accept_many_recv_size_late_recv_after_cancel_is_ignored(self) -> None:
-        proactor = UringProactor(ring_factory=_FakeUringRing)
-        server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        try:
-            server.setblocking(False)
-            operation = proactor.accept_many(server, accepted.append, recv_size=64)
-            proactor.ring.complete_accept_multishot("peer-1")
-            proactor.wait(proactor.get_time() + 0.05)
-            assert len(proactor.ring.pending_accept_recv) == 1
-            operation.cancel()
-            assert operation.cancelled() is True
-            proactor.ring.complete_accept_recv(b"late")
-            proactor.wait(proactor.get_time() + 0.05)
-            assert accepted == []
-        finally:
-            for conn, _data, _recv_error in accepted:
-                conn.close()
-            server.close()
-            proactor.close()
-
-    def test_accept_many_recv_size_closes_idle_peer_without_delivery(self) -> None:
-        proactor = UringProactor(ring_factory=_FakeUringRing)
-        server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        try:
-            server.setblocking(False)
-            proactor.accept_many(server, accepted.append, recv_size=64)
-            proactor.ring.complete_accept_multishot("peer-1")
-            proactor.wait(proactor.get_time() + 0.05)
-            assert accepted == []
-            proactor.ring.complete_accept_recv(b"")
-            proactor.wait(proactor.get_time() + 0.05)
-            assert accepted == []
-        finally:
-            for conn, _data, _recv_error in accepted:
+            for conn in accepted:
                 conn.close()
             server.close()
             proactor.close()
@@ -4689,7 +4995,7 @@ class TestUringProactor:
 
             task = scheduler.spawn(receive)
             scheduler.spawn(cancel_after_first_chunk)
-            with pytest.raises((CancelledError, asyncio.CancelledError)):
+            with pytest.raises(CancelledError):
                 scheduler.run_until_complete(task)
 
             assert progress == [b"hello"]

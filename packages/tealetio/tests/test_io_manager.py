@@ -141,6 +141,44 @@ class TestProactorIOManager:
             scheduler.close()
 
 
+class TestProactorIOManagerAcceptMany:
+    @pytest.mark.parametrize("recv_size", [0, -1])
+    def test_accept_many_rejects_invalid_recv_size(self, recv_size: int) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            server.setblocking(False)
+            with pytest.raises(ValueError):
+                io.accept_many(server, lambda _: None, recv_size=recv_size)
+        finally:
+            server.close()
+
+    def test_accept_many_uses_callback_factory_only_when_recv_size_set(self) -> None:
+        class _CaptureProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                self.last_callback = callback
+                self.last_callback_factory = callback_factory
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            io.accept_many(server, lambda _: None)
+            assert proactor.last_callback is not None
+            assert proactor.last_callback_factory is None
+            io.accept_many(server, lambda _: None, recv_size=64)
+            assert proactor.last_callback_factory is not None
+        finally:
+            server.close()
+
+    def test_accept_many_caps_oversized_recv_size(self) -> None:
+        from tealetio.continuous_callbacks import normalize_accept_recv_size
+
+        assert normalize_accept_recv_size(2**16 + 1) == 2**16
+
+
 class TestProactorIOManagerDirect:
     def test_wait_operation_returns_immediate_result(self):
         proactor = _MockProactor()

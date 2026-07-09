@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable
-from concurrent.futures import CancelledError
+from .tasks import CancelledError
 from typing import Any, cast
 
 from .types import SocketSendBuffer
