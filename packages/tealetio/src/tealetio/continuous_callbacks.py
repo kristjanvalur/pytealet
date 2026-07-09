@@ -5,19 +5,23 @@ from __future__ import annotations
 import socket
 from collections.abc import Callable
 from .tasks import CancelledError
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 from .operation_callbacks import chain_suboperation  # re-exported for continuous call sites
 from .operations import ContinuousOperation, Operation
+from .socket_helpers import abortive_close
 
-AcceptManyDelivery = tuple[socket.socket, bytes | None, BaseException | None]
+T = TypeVar("T")
+
+AcceptReadResult = tuple[socket.socket, bytes | None, BaseException | None]
+AcceptManyDelivery = tuple[socket.socket, bytes | None]
+AcceptStreamsDelivery: TypeAlias = tuple[Any, Any]
+AcceptRecvErrorCallback = Callable[[socket.socket, BaseException], object]
 _MAX_ACCEPT_RECV_SIZE = 2**16
 
 if TYPE_CHECKING:
     from .proactor import Proactor
     from .scheduler import BaseScheduler
-
-T = TypeVar("T")
 
 
 def normalize_accept_recv_size(recv_size: int | None) -> int | None:
@@ -30,8 +34,26 @@ def normalize_accept_recv_size(recv_size: int | None) -> int | None:
     return recv_size
 
 
+def finalize_accept_recv_error(
+    conn: socket.socket,
+    recv_error: BaseException,
+    on_recv_error: AcceptRecvErrorCallback | None,
+) -> None:
+    """Invoke ``on_recv_error`` when provided, then close ``conn``."""
+
+    hook_error: BaseException | None = None
+    if on_recv_error is not None:
+        try:
+            on_recv_error(conn, recv_error)
+        except BaseException as exc:
+            hook_error = exc
+    abortive_close(conn)
+    if hook_error is not None:
+        raise hook_error
+
+
 def wrap_accept_delivery(
-    deliver: Callable[[AcceptManyDelivery], object],
+    deliver: Callable[[AcceptReadResult], object],
 ) -> Callable[[socket.socket], None]:
     """Adapt a delivery callback to the proactor's bare-socket ``accept_many`` results."""
 
@@ -56,16 +78,17 @@ def marshal_to_scheduler(
 def accept_read_delivery(
     proactor: Proactor,
     parent: ContinuousOperation[socket.socket],
-    deliver: Callable[[AcceptManyDelivery], object],
+    deliver: Callable[[AcceptReadResult], object],
     *,
     recv_size: int,
 ) -> Callable[[socket.socket], None]:
     """Read initial bytes on each accepted socket before ``deliver`` runs.
 
     The proactor emits the accepted ``socket``; this handler submits a nested
-    ``recv`` and delivers ``(conn, initial_data, recv_error)`` tuples. Empty reads
-    close the connection without delivery. Recv failures are delivered as
-    ``(conn, None, recv_error)``.
+    ``recv`` and delivers ``AcceptReadResult`` tuples. Recv failures are
+    delivered as ``(conn, None, recv_error)``; ``ProactorIOManager`` routes
+    those through ``on_recv_error`` instead of the user accept callback. Empty
+    reads close the connection without delivery.
 
     ``deliver`` may run after the parent ``ContinuousOperation`` has finished
     (for example terminal multishot accept) when the connection was handed off
@@ -81,13 +104,13 @@ def accept_read_delivery(
             exc = op.exception()
             if exc is not None:
                 if isinstance(exc, CancelledError):
-                    conn.close()
+                    abortive_close(conn)
                     return
                 deliver((conn, None, exc))
                 return
             data = op.result()
             if not data:
-                conn.close()
+                abortive_close(conn)
                 return
             deliver((conn, data, None))
 
@@ -96,6 +119,6 @@ def accept_read_delivery(
             lambda: proactor.recv(conn, normalized_recv_size),
             on_recv_complete,
         ):
-            conn.close()
+            abortive_close(conn)
 
     return on_conn

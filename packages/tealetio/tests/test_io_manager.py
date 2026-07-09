@@ -17,6 +17,30 @@ from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 class _StubScheduler:
     """Minimal scheduler stand-in for direct ``ProactorIOManager`` unit tests."""
 
+    def __init__(self) -> None:
+        self._exception_handler: Any = None
+
+    def set_exception_handler(self, handler: Any) -> None:
+        self._exception_handler = handler
+
+    def call_exception_handler(self, context: dict[str, Any]) -> None:
+        handler = self._exception_handler
+        if handler is None:
+            raise context["exception"]
+        handler(context)
+
+    def call_soon_threadsafe(self, callback, *args: object) -> None:
+        try:
+            callback(*args)
+        except BaseException as exc:
+            self.call_exception_handler(
+                {
+                    "message": "Exception in callback",
+                    "exception": exc,
+                    "scheduler": self,
+                }
+            )
+
 
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(_StubScheduler(), proactor)  # type: ignore[arg-type]
@@ -145,6 +169,17 @@ class TestProactorIOManager:
             scheduler.close()
 
 
+class TestAbortiveClose:
+    def test_abortive_close_closes_fd(self) -> None:
+        from tealetio.socket_helpers import abortive_close
+
+        conn, peer = socket.socketpair()
+        peer.close()
+        abortive_close(conn)
+        assert conn.fileno() == -1
+        abortive_close(conn)
+
+
 class TestProactorIOManagerAcceptMany:
     @pytest.mark.parametrize("recv_size", [0, -1])
     def test_accept_many_rejects_invalid_recv_size(self, recv_size: int) -> None:
@@ -181,6 +216,338 @@ class TestProactorIOManagerAcceptMany:
         from tealetio.continuous_callbacks import normalize_accept_recv_size
 
         assert normalize_accept_recv_size(2**16 + 1) == 2**16
+
+    def test_accept_many_on_recv_error_closes_after_callback(self, monkeypatch) -> None:
+        captured_errors: list[tuple[socket.socket, BaseException]] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback_factory is not None:
+                    on_conn = callback_factory(
+                        ContinuousOperation(kind="accept_many", fileobj=sock)
+                    )
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    on_conn(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        def immediate_recv_error(proactor, parent, deliver, *, recv_size: int):
+            del proactor, parent, recv_size
+
+            def on_conn(conn: socket.socket) -> None:
+                deliver((conn, None, OSError("recv failed")))
+
+            return on_conn
+
+        monkeypatch.setattr(
+            "tealetio.io_manager.accept_read_delivery",
+            immediate_recv_error,
+        )
+
+        proactor = _EagerAcceptProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            io.accept_many(
+                server,
+                lambda _: (_ for _ in ()).throw(AssertionError("accept callback")),
+                recv_size=64,
+                on_recv_error=lambda conn, exc: captured_errors.append((conn, exc)),
+            )
+            assert len(captured_errors) == 1
+            conn, exc = captured_errors[0]
+            assert str(exc) == "recv failed"
+            assert conn.fileno() == -1
+        finally:
+            server.close()
+
+    def test_accept_many_recv_error_without_hook_closes_silently(self, monkeypatch) -> None:
+        captured: list[tuple[socket.socket, bytes | None]] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback_factory is not None:
+                    on_conn = callback_factory(
+                        ContinuousOperation(kind="accept_many", fileobj=sock)
+                    )
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    on_conn(conn)
+                    captured.append((conn, None))
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        def immediate_recv_error(proactor, parent, deliver, *, recv_size: int):
+            del proactor, parent, recv_size
+
+            def on_conn(conn: socket.socket) -> None:
+                deliver((conn, None, OSError("recv failed")))
+
+            return on_conn
+
+        monkeypatch.setattr(
+            "tealetio.io_manager.accept_read_delivery",
+            immediate_recv_error,
+        )
+
+        proactor = _EagerAcceptProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            io.accept_many(
+                server,
+                lambda delivery: (_ for _ in ()).throw(AssertionError("accept callback")),
+                recv_size=64,
+            )
+            conn, _initial = captured[0]
+            assert conn.fileno() == -1
+        finally:
+            server.close()
+
+    def test_accept_many_reports_callback_exception(self) -> None:
+        handler_errors: list[BaseException] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback is not None:
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    callback(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        scheduler = _StubScheduler()
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many(server, lambda _: (_ for _ in ()).throw(ValueError("accept failed")))
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "accept failed"
+        finally:
+            server.close()
+
+    def test_accept_many_streams_reports_callback_exception(self) -> None:
+        handler_errors: list[BaseException] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback is not None:
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    callback(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        scheduler = _StubScheduler()
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many_streams(
+                server,
+                lambda _: (_ for _ in ()).throw(ValueError("streams failed")),
+            )
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "streams failed"
+        finally:
+            server.close()
+
+    def test_accept_many_reports_on_recv_error_hook_exception(self, monkeypatch) -> None:
+        handler_errors: list[BaseException] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback_factory is not None:
+                    on_conn = callback_factory(
+                        ContinuousOperation(kind="accept_many", fileobj=sock)
+                    )
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    on_conn(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        def immediate_recv_error(proactor, parent, deliver, *, recv_size: int):
+            del proactor, parent, recv_size
+
+            def on_conn(conn: socket.socket) -> None:
+                deliver((conn, None, OSError("recv failed")))
+
+            return on_conn
+
+        monkeypatch.setattr(
+            "tealetio.io_manager.accept_read_delivery",
+            immediate_recv_error,
+        )
+
+        scheduler = _StubScheduler()
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many(
+                server,
+                lambda _: None,
+                recv_size=64,
+                on_recv_error=lambda _conn, _exc: (_ for _ in ()).throw(RuntimeError("hook failed")),
+            )
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "hook failed"
+        finally:
+            server.close()
+
+    def test_accept_many_streams_uses_bare_socket_callback(self) -> None:
+        class _CaptureProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                self.last_callback = callback
+                self.last_callback_factory = callback_factory
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            io.accept_many_streams(server, lambda _: None)
+            assert proactor.last_callback is not None
+            assert proactor.last_callback_factory is None
+        finally:
+            server.close()
+
+    def test_accept_many_streams_uses_read_delivery_when_recv_size_set(self) -> None:
+        class _CaptureProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                self.last_callback = callback
+                self.last_callback_factory = callback_factory
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            io.accept_many_streams(server, lambda _: None, recv_size=64)
+            assert proactor.last_callback_factory is not None
+        finally:
+            server.close()
+
+    def test_accept_many_streams_on_recv_error_closes_after_callback(self, monkeypatch) -> None:
+        captured_errors: list[tuple[socket.socket, BaseException]] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback_factory is not None:
+                    on_conn = callback_factory(
+                        ContinuousOperation(kind="accept_many", fileobj=sock)
+                    )
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    on_conn(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        def immediate_recv_error(proactor, parent, deliver, *, recv_size: int):
+            del proactor, parent, recv_size
+
+            def on_conn(conn: socket.socket) -> None:
+                deliver((conn, None, OSError("recv failed")))
+
+            return on_conn
+
+        monkeypatch.setattr(
+            "tealetio.io_manager.accept_read_delivery",
+            immediate_recv_error,
+        )
+
+        proactor = _EagerAcceptProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            io.accept_many_streams(
+                server,
+                lambda _: (_ for _ in ()).throw(AssertionError("streams callback")),
+                recv_size=64,
+                on_recv_error=lambda conn, exc: captured_errors.append((conn, exc)),
+            )
+            assert len(captured_errors) == 1
+            conn, exc = captured_errors[0]
+            assert str(exc) == "recv failed"
+            assert conn.fileno() == -1
+        finally:
+            server.close()
+
+    def test_accept_many_streams_recv_error_without_hook_closes_silently(self, monkeypatch) -> None:
+        captured_errors: list[tuple[socket.socket, BaseException]] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback_factory is not None:
+                    on_conn = callback_factory(
+                        ContinuousOperation(kind="accept_many", fileobj=sock)
+                    )
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    on_conn(conn)
+                    captured_errors.append((conn, OSError("placeholder")))
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        def immediate_recv_error(proactor, parent, deliver, *, recv_size: int):
+            del proactor, parent, recv_size
+
+            def on_conn(conn: socket.socket) -> None:
+                deliver((conn, None, OSError("recv failed")))
+
+            return on_conn
+
+        monkeypatch.setattr(
+            "tealetio.io_manager.accept_read_delivery",
+            immediate_recv_error,
+        )
+
+        proactor = _EagerAcceptProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            io.accept_many_streams(server, lambda _: None, recv_size=64)
+            conn, _exc = captured_errors[0]
+            assert conn.fileno() == -1
+        finally:
+            server.close()
+
+
+class TestProactorIOManagerSockCreateStreams:
+    def test_sock_create_streams_without_connect_to(self) -> None:
+        from tealetio.streams import StreamReader, StreamWriter
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        reader, writer = io.sock_create_streams(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            assert isinstance(reader, StreamReader)
+            assert isinstance(writer, StreamWriter)
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
+        finally:
+            writer.close()
+
+    def test_sock_create_streams_uses_connect_streams_factory(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        address = ("127.0.0.1", 9)
+        reader, writer = io.sock_create_streams(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=address,
+            initial_data=b"hi",
+        )
+        try:
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
+            assert len(proactor.send_calls) == 1
+        finally:
+            writer.close()
+
+    def test_sock_create_streams_rejects_initial_data_without_connect_to(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        with pytest.raises(ValueError, match="initial_data requires connect_to"):
+            io.sock_create_streams(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                initial_data=b"hi",
+            )
 
 
 class TestProactorIOManagerDirect:

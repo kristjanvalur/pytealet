@@ -130,12 +130,51 @@ def _close_socket(sock: socket.socket) -> None:
         pass
 
 
+def _close_wrapper_result(result: object) -> None:
+    if not isinstance(result, tuple) or len(result) != 2:
+        return
+    _reader, writer = result
+    close = getattr(writer, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except BaseException:
+        pass
+
+
+def _complete_connect_result(
+    operation: Operation[Any],
+    sock: socket.socket,
+    result_wrapper: Callable[[socket.socket], T] | None,
+) -> None:
+    if result_wrapper is None:
+        operation.complete(sock)
+        return
+    try:
+        result = result_wrapper(sock)
+    except BaseException as exc:
+        _close_socket(sock)
+        operation.complete_error(exc)
+        return
+    try:
+        operation.complete(result)
+    except BaseException as exc:
+        _close_wrapper_result(result)
+        operation.complete_error(exc)
+
+
 def create_connect_delivery(
     proactor: Proactor,
     connect_to: Any,
     initial: SocketSendBuffer | None = None,
+    result_wrapper: Callable[[socket.socket], T] | None = None,
 ) -> DeliveryHandler:
-    """After create_socket succeeds, connect and optionally send ``initial`` bytes."""
+    """After create_socket succeeds, connect and optionally send ``initial`` bytes.
+
+    When ``result_wrapper`` is set, it runs on the connected socket before the
+    root operation completes (for example to build a stream pair).
+    """
 
     payload = memoryview(initial) if initial is not None else None
 
@@ -157,7 +196,7 @@ def create_connect_delivery(
                 operation.complete_error(connect_exc)
                 return
             if payload is None or not payload:
-                operation.complete(sock)
+                _complete_connect_result(operation, sock, result_wrapper)
                 return
 
             def on_send_complete(send_op: Operation[Any]) -> None:
@@ -166,7 +205,7 @@ def create_connect_delivery(
                     _close_socket(sock)
                     operation.complete_error(send_exc)
                     return
-                operation.complete(sock)
+                _complete_connect_result(operation, sock, result_wrapper)
 
             try:
                 if not chain_suboperation(
@@ -199,10 +238,11 @@ def create_connect_operation_factory(
     proactor: Proactor,
     connect_to: Any,
     initial: SocketSendBuffer | None = None,
+    result_wrapper: Callable[[socket.socket], T] | None = None,
 ) -> OperationFactory:
     """Factory for ``proactor.create_socket`` when ``connect_to`` is set."""
 
-    return operation_factory(delivery=create_connect_delivery(proactor, connect_to, initial))
+    return operation_factory(delivery=create_connect_delivery(proactor, connect_to, initial, result_wrapper))
 
 
 def connect_initial_send_operation_factory(
