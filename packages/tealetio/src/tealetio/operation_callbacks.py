@@ -130,6 +130,19 @@ def _close_socket(sock: socket.socket) -> None:
         pass
 
 
+def _close_wrapper_result(result: object) -> None:
+    if not isinstance(result, tuple) or len(result) != 2:
+        return
+    _reader, writer = result
+    close = getattr(writer, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except BaseException:
+        pass
+
+
 def _complete_connect_result(
     operation: Operation[Any],
     sock: socket.socket,
@@ -147,6 +160,7 @@ def _complete_connect_result(
     try:
         operation.complete(result)
     except BaseException as exc:
+        _close_wrapper_result(result)
         operation.complete_error(exc)
 
 

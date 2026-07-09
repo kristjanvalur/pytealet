@@ -17,8 +17,29 @@ from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 class _StubScheduler:
     """Minimal scheduler stand-in for direct ``ProactorIOManager`` unit tests."""
 
+    def __init__(self) -> None:
+        self._exception_handler: Any = None
+
+    def set_exception_handler(self, handler: Any) -> None:
+        self._exception_handler = handler
+
+    def call_exception_handler(self, context: dict[str, Any]) -> None:
+        handler = self._exception_handler
+        if handler is None:
+            raise context["exception"]
+        handler(context)
+
     def call_soon_threadsafe(self, callback, *args: object) -> None:
-        callback(*args)
+        try:
+            callback(*args)
+        except BaseException as exc:
+            self.call_exception_handler(
+                {
+                    "message": "Exception in callback",
+                    "exception": exc,
+                    "scheduler": self,
+                }
+            )
 
 
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
@@ -279,6 +300,96 @@ class TestProactorIOManagerAcceptMany:
             )
             conn, _initial = captured[0]
             assert conn.fileno() == -1
+        finally:
+            server.close()
+
+    def test_accept_many_reports_callback_exception(self) -> None:
+        handler_errors: list[BaseException] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback is not None:
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    callback(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        scheduler = _StubScheduler()
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many(server, lambda _: (_ for _ in ()).throw(ValueError("accept failed")))
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "accept failed"
+        finally:
+            server.close()
+
+    def test_accept_many_streams_reports_callback_exception(self) -> None:
+        handler_errors: list[BaseException] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback is not None:
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    callback(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        scheduler = _StubScheduler()
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many_streams(
+                server,
+                lambda _: (_ for _ in ()).throw(ValueError("streams failed")),
+            )
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "streams failed"
+        finally:
+            server.close()
+
+    def test_accept_many_reports_on_recv_error_hook_exception(self, monkeypatch) -> None:
+        handler_errors: list[BaseException] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+                if callback_factory is not None:
+                    on_conn = callback_factory(
+                        ContinuousOperation(kind="accept_many", fileobj=sock)
+                    )
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    on_conn(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        def immediate_recv_error(proactor, parent, deliver, *, recv_size: int):
+            del proactor, parent, recv_size
+
+            def on_conn(conn: socket.socket) -> None:
+                deliver((conn, None, OSError("recv failed")))
+
+            return on_conn
+
+        monkeypatch.setattr(
+            "tealetio.io_manager.accept_read_delivery",
+            immediate_recv_error,
+        )
+
+        scheduler = _StubScheduler()
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many(
+                server,
+                lambda _: None,
+                recv_size=64,
+                on_recv_error=lambda _conn, _exc: (_ for _ in ()).throw(RuntimeError("hook failed")),
+            )
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "hook failed"
         finally:
             server.close()
 

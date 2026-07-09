@@ -41,12 +41,15 @@ def finalize_accept_recv_error(
 ) -> None:
     """Invoke ``on_recv_error`` when provided, then close ``conn``."""
 
+    hook_error: BaseException | None = None
     if on_recv_error is not None:
         try:
             on_recv_error(conn, recv_error)
-        except BaseException:
-            pass
+        except BaseException as exc:
+            hook_error = exc
     abortive_close(conn)
+    if hook_error is not None:
+        raise hook_error
 
 
 def wrap_accept_delivery(

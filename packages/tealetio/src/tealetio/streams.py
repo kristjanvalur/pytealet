@@ -750,14 +750,14 @@ def _bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket
 
 
 class StreamServer:
-    """Listening stream server backed by a continuous ``accept_many`` operation.
+    """Listening stream server backed by a continuous ``accept_many_streams`` operation.
 
     ``close()`` stops accepting and closes the listening socket(s). Handler
     tealets already spawned for accepted connections keep running until they
     finish on their own; ``close()`` does not cancel them. ``wait_closed()``
     blocks until the server is closed and every dispatched handler tealet has
     finished. Accept callbacks are marshalled onto the scheduler thread before
-    ``_dispatch_client()`` runs. An early, lock-free ``_closed`` check closes
+    ``_dispatch_streams()`` runs. An early, lock-free ``_closed`` check closes
     stray connections without touching ``Condition`` state. Queued ``dispatch()``
     re-checks ``_closed`` under ``_shutdown`` and closes without incrementing
     ``_active_handlers`` when the server is already shut down.

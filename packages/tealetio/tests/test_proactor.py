@@ -1050,6 +1050,35 @@ def test_create_connect_delivery_result_wrapper_completes_with_streams() -> None
         assert isinstance(writer, StreamWriter)
         writer.close()
     finally:
+        pass
+
+
+def test_complete_connect_result_closes_streams_when_complete_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tealetio.operation_callbacks import _complete_connect_result
+    from tealetio.streams import StreamReader, StreamWriter, default_stream_factory
+
+    from test_io_manager import _MockProactor, _manager
+
+    proactor = _MockProactor()
+    io = _manager(proactor)
+    operation = Operation[tuple[StreamReader, StreamWriter]](kind="create_socket")
+    sock = socket.socket()
+    try:
+        reader, writer = default_stream_factory(io, sock)
+
+        def fail_complete(_result: object) -> None:
+            raise RuntimeError("complete failed")
+
+        monkeypatch.setattr(operation, "complete", fail_complete)
+        _complete_connect_result(
+            operation,
+            sock,
+            lambda _conn: (reader, writer),
+        )
+        assert operation.done()
+        assert isinstance(operation.exception(), RuntimeError)
+        assert writer.is_closing()
+    finally:
         if sock.fileno() != -1:
             sock.close()
 

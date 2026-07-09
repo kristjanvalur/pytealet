@@ -453,6 +453,7 @@ class ProactorIOManager:
                     callback((conn, initial_data))
                 except BaseException:
                     abortive_close(conn)
+                    raise
 
             self._marshal_accept_callback(run)
 
@@ -517,6 +518,7 @@ class ProactorIOManager:
                         writer.close()
                     else:
                         abortive_close(conn)
+                    raise
 
             self._marshal_accept_callback(run)
 
