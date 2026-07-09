@@ -103,7 +103,7 @@ class Operation(Generic[T]):
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
 
-        self._set_cancelled()
+        self._finish(exception=CancelledError(), cancelled=True)
 
     def result(self) -> T:
         """Return the operation result, or raise its completion exception."""
@@ -198,9 +198,6 @@ class Operation(Generic[T]):
             self._finish(exception=exc)
         except InvalidStateError:
             return
-
-    def _set_cancelled(self) -> bool:
-        return self._finish(exception=CancelledError(), cancelled=True)
 
     def _finish(
         self,

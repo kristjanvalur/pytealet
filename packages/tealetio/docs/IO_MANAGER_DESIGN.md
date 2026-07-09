@@ -248,7 +248,7 @@ backend routing.
 
 `chain_suboperation()` spawns each child under the parent ``_lock`` and registers
 it in ``_active_suboperations``. Parent ``cancel()`` snapshots that set,
-``_finish(cancelled=True)`` (via ``cancel()`` / ``_set_cancelled()``) runs the
+``_finish(cancelled=True)`` (via ``cancel()``) runs the
 backend ``cancel_hook``, terminalises the root (``_done`` / ``_cancelled`` /
 ``CancelledError``), and cancels attached children. Late attach and delivery are
 rejected once ``_done`` is set.
@@ -283,7 +283,7 @@ children submitted from result callbacks. It is **not** a drain barrier.
 |--------------|-------------------|
 | Normal finish (EOF, final multishot CQE, …) | Keep running; completion handlers may still run |
 | Error finish (`_finish(exception=…)`) | Keep running — e.g. `ECONNRESET` on the parent socket must not cancel accepts/recvs already started from earlier callbacks |
-| `cancel()` | `_set_cancelled()` each child via the unified cancel path once the parent is `_done` |
+| `cancel()` | `_finish(cancelled=True)` on each child once the parent is `_done` |
 
 `_finish()` does not clear or cancel `_active_suboperations`. Each child removes
 itself with `detach_suboperation()` from its done handler (typically via
