@@ -830,15 +830,6 @@ class TestOperation:
         assert child_cancelled
         assert child.cancelled()
 
-    def test_before_delivery_runs_handler_before_deliver(self):
-        from tealetio.continuous_callbacks import before_delivery
-
-        seen: list[int] = []
-        deliver = before_delivery(lambda value: value + 1, seen.append)
-        deliver(1)
-        deliver(2)
-        assert seen == [2, 3]
-
     def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
         from tealetio.continuous_callbacks import marshal_to_scheduler
 
@@ -1823,7 +1814,7 @@ class TestSelectorProactor:
             proactor.close()
 
     def test_recv_many_echo_handler_runs_before_client_delivery(self):
-        from tealetio.continuous_callbacks import recv_many_echo_delivery
+        from callback_helpers import recv_many_echo_delivery
 
         def _drain_peer(sock: socket.socket, proactor: SelectorProactor) -> bytes:
             chunks: list[bytes] = []
@@ -1874,8 +1865,9 @@ class TestSelectorProactor:
             proactor.close()
 
     def test_recv_many_echo_delivery_chains_send_completion_before_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import tealetio.continuous_callbacks as continuous_callbacks_module
-        from tealetio.continuous_callbacks import chain_suboperation, recv_many_echo_delivery
+        import callback_helpers
+        from callback_helpers import recv_many_echo_delivery
+        from tealetio.continuous_callbacks import chain_suboperation
 
         order: list[str] = []
         original_chain = chain_suboperation
@@ -1889,7 +1881,7 @@ class TestSelectorProactor:
 
             original_chain(parent, suboperation, on_complete_wrapped)
 
-        monkeypatch.setattr(continuous_callbacks_module, "chain_suboperation", spy_chain)
+        monkeypatch.setattr(callback_helpers, "chain_suboperation", spy_chain)
 
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -1927,8 +1919,9 @@ class TestSelectorProactor:
     def test_recv_many_echo_fire_and_forget_delivers_before_send_completes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import tealetio.continuous_callbacks as continuous_callbacks_module
-        from tealetio.continuous_callbacks import chain_suboperation, recv_many_echo_delivery
+        import callback_helpers
+        from callback_helpers import recv_many_echo_delivery
+        from tealetio.continuous_callbacks import chain_suboperation
 
         order: list[str] = []
         original_chain = chain_suboperation
@@ -1943,7 +1936,7 @@ class TestSelectorProactor:
 
             original_chain(parent, suboperation, on_complete_wrapped)
 
-        monkeypatch.setattr(continuous_callbacks_module, "chain_suboperation", spy_chain)
+        monkeypatch.setattr(callback_helpers, "chain_suboperation", spy_chain)
 
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -1985,7 +1978,7 @@ class TestSelectorProactor:
             proactor.close()
 
     def test_recv_many_echo_delivery_registers_send_suboperation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from tealetio.continuous_callbacks import recv_many_echo_delivery
+        from callback_helpers import recv_many_echo_delivery
 
         attached: list[Operation[Any]] = []
         original_attach = ContinuousOperation.attach_suboperation
