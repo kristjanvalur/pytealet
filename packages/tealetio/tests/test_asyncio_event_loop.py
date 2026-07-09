@@ -43,7 +43,7 @@ class _SendTrackingProactor:
         del sock, progress
         self.last_send = bytes(data)
         operation = Operation[None](kind="send", fileobj=None)
-        operation._set_result(None)
+        operation._finish(result=None)
         return operation
 
 

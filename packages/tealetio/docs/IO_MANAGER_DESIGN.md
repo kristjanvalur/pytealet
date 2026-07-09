@@ -158,6 +158,153 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 `StreamServer` lifecycle stays in `streams`; it needs `scheduler.io` (for
 `accept_many`), `spawn`, and `call_soon_threadsafe`.
 
+## Operation chaining
+
+Multi-leg socket work (create → connect → send, connect → send) is built in
+`operation_chaining.py`, not inside the proactor. The proactor only accepts an
+optional `operation_factory` on `create_socket` and `connect`; chaining policy
+lives on `ProactorIOManager`.
+
+```text
+ProactorIOManager.sock_create(connect_to=…)
+        │
+        ▼
+create_socket_chain_factory(proactor, …)   ← chained_fdclose_link root
+        │
+        └─ connect_send_chain_factory(proactor, initial, parent=root)
+               └─ chained_send_link tail
+```
+
+Chain factories take `proactor` as their first argument. Delivery handlers,
+advance hooks, and `next_operation` callbacks are nested closures built at
+chain creation time — they bind the proactor, addresses, initial send buffers,
+parent operations, cleanup policy, and result shaping before any `Operation` is
+submitted. When a backend completion arrives on the worker thread, those
+handlers start the next leg (`proactor.connect`, `proactor.send`) without the
+scheduler blocking on intermediate results.
+
+Production chains today:
+
+| Entry point | Root factory | Connect → send leg |
+|-------------|--------------|-------------------|
+| `sock_connect(…, initial=…)` | `connect_send_chain_factory` | same factory |
+| `sock_create(…, connect_to=…)` | `create_socket_chain_factory` + `chained_fdclose_link` | `connect_send_chain_factory` as child |
+
+`chained_connect_link` is a composable building block used in tests; production
+paths use `connect_send_chain_factory` directly.
+
+Intermediate legs are not awaited by the scheduler task. Only the root
+`Operation` is passed to `wait_operation`; child submissions happen from
+delivery callbacks as completions arrive.
+
+### Succeed or raise
+
+Blocking IO helpers (`sock_create`, `sock_connect`, `sock_recv`, …) either
+return the requested value or raise. There is no partial-success tuple,
+hint-honour flag, or internal fallback inside `ProactorIOManager`.
+
+In the create→connect→send chain, only the root ``create_socket`` operation
+has a non-``None`` success result: the ``socket.socket``. Connect and send legs
+complete with ``None``; their work is done when the chain advances without
+error. ``sock_create(connect_to=…)`` blocks on that root and returns the
+socket (already connected, initial data flushed when requested).
+``sock_connect()`` returns ``None``.
+
+### `proactor.connect` and `AF_UNIX`
+
+`ProactorIOManager` always chains through `proactor.connect` (including the
+connect leg of `sock_create(..., connect_to=…)`). Both proactor backends route
+``AF_UNIX`` sockets through ``ProactorBase._sync_unix_connect()``: a brief
+blocking ``sock.connect()`` followed by ``deliver()``. io_uring
+``submit_connect`` does not accept UNIX sockaddr paths today, so this is not a
+special-case deferral at the io_manager layer — the chained ``Operation`` may
+simply complete synchronously before ``wait_operation`` returns. That is
+acceptable in practice: Unix-domain connects are near-instant on the local
+machine, so a brief blocking ``connect()`` on the completion thread does not
+carry the same latency risk as a remote TCP handshake. Inet sockets still use
+the backend async connect path. If io_uring gains Unix ``submit_connect``
+support, ``UringProactor.connect()`` can switch ``AF_UNIX`` to the same async
+completion path as inet; no io_manager or chaining changes are required beyond
+that backend routing.
+
+### Chain spine: cancel down, advance up
+
+Each link carries two pointers in opposite directions:
+
+```text
+cancel:  root ──cancel_forward──► connect ──cancel_forward──► send (active leaf)
+advance: root ◄──chain_parent──── connect ◄──chain_parent──── send
+```
+
+`cancel_forward` is a weak reference to the **active** child leg. The proactor
+entry for that leg holds the strong reference while IO is live.
+
+### Advance hooks (one shot per leg)
+
+When a child leg completes, `Operation.advance()` walks **up** `chain_parent`
+and dispatches the first `_advance_hook` it finds. The hook stays installed
+while the handler runs; `advance_continue()` asserts it is still present, clears
+it under the link lock, and bubbles toward the root. That single clear point is
+the contract boundary for the link.
+
+Today each leg has at most one hook invocation before one `advance_continue()`.
+If links later gain DAG shape (multiple upstream arrivals per link), a hook may
+run more than once on the same leg until the final arrival; only the last
+`advance_continue()` clears the hook and propagates upward.
+
+Intermediate legs often stay `_done=False` on the success path; only the root
+future is awaited by the caller. `_done` on a child means that leg's own
+`Operation` completed (cancel, explicit `complete()`, or a non-chain delivery
+path), not merely that its backend work finished.
+
+### Cancel vs dynamic chain extension
+
+Worker threads extend the chain from delivery handlers (`proactor.connect`,
+`proactor.send`) while the scheduler thread may call `cancel()` on the root at
+the same time. Without synchronisation, cancel can miss a child that was not yet
+linked on `cancel_forward`, leaving live proactor IO unreachable from
+`cancel()`.
+
+**Linking** — `Operation.attach_child()` installs `chain_parent` and
+`cancel_forward` under the **parent** lock only when `not parent._done`.
+`operation_factory` uses this path; a failed attach marks the orphan child
+cancelled so the proactor skips submit. Delivery handlers and
+`_chain_next_operation` call `may_extend_chain()` (same lock, same check) before
+starting the next leg.
+
+**Cancel snapshot** — `cancel()` reads `_done` and `cancel_forward` under the
+node lock, recurses into the child **without** holding the parent lock across
+the descent, then runs this node's `cancel_hook` and `_set_cancelled()` on the
+unwind.
+
+Invariant: once `parent._done`, no new leg may be linked; once a leg is
+published on `cancel_forward`, cancel from the root must reach it (or a
+descendant on the same spine).
+
+### Cancel traversal and fd cleanup
+
+`cancel()` walks **down** the active spine depth-first: `forward.cancel()` on
+the child before local teardown on the parent. That stops outstanding IO at the
+leaf before retiring links above it.
+
+On the **leaf** unwind only (no `cancel_forward` at cancel entry), when the
+node still has a `chain_parent`, call `advance(exception=CancelledError())`
+**before** `cancel_hook` and `_set_cancelled()`. That bubbles up to advance
+hooks such as `chained_fdclose_link`, which close captured sockets on error
+paths. One leaf bubble is sufficient: `advance()` walks the full parent chain.
+The root finishes with `cancelled=True`.
+
+Order on each node during unwind:
+
+1. `forward.cancel()` — recurse to the active child (already completed on the
+   return path for non-leaf nodes).
+2. At leaf only: `advance(CancelledError)` when chained.
+3. `cancel_hook` — backend teardown (uring cancel, selector deregistration).
+4. `_set_cancelled()` — terminal fallback when the hook did not finish the leg.
+
+Intermediate nodes do **not** call `advance()`; the leaf bubble already
+reached the root hook.
+
 ## Capability gate
 
 | Concern | asyncio | tealetio (proactor) |
@@ -208,6 +355,7 @@ static typing after `ProactorScheduler` narrowing.
 ## References
 
 - `packages/tealetio/src/tealetio/io_manager.py` — `ProactorIOManager`
+- `packages/tealetio/src/tealetio/operation_chaining.py` — chain factories and link handlers
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `OperationWaiter`
 - `packages/tealetio/src/tealetio/streams.py` — streams API

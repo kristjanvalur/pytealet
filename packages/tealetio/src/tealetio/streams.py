@@ -534,7 +534,7 @@ def _connect_tcp_streams(
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
         sock: socket.socket | None = None
         try:
-            sock, _is_connected, _initial_sent = io.sock_create(
+            sock = io.sock_create(
                 addr_family,
                 socktype,
                 addr_proto,
@@ -631,9 +631,8 @@ def open_connection(
     ``async_=True`` returns asyncio-shaped streams. The flag only selects the
     default factory when ``stream_factory`` is omitted.
 
-    ``initial_send`` opts into connect-time pre-send on backends that honour
-    the proactor hint; any unsent remainder is flushed with ``sock_sendall`` before
-    streams are returned.
+    ``initial_send`` is flushed during the connect chain before streams are
+    returned.
     """
 
     sched = _resolve_scheduler(scheduler)
@@ -675,7 +674,7 @@ def _connect_unix_streams(
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
     io = _require_proactor_io(scheduler)
-    sock, _, _ = io.sock_create(
+    sock = io.sock_create(
         socket.AF_UNIX,
         socket.SOCK_STREAM,
         connect_to=path,
@@ -734,7 +733,7 @@ def _bind_tcp_socket(
     if reuse_address is None:
         reuse_address = _default_reuse_address()
     host, port = addr
-    sock, _, _ = io.sock_create(family, socket.SOCK_STREAM)
+    sock = io.sock_create(family, socket.SOCK_STREAM)
     try:
         if reuse_address:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -758,7 +757,7 @@ def _bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket
     except FileNotFoundError:
         pass
 
-    sock, _, _ = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.bind(path)
         sock.listen(backlog)

@@ -248,11 +248,17 @@ the `Completion` pointer we stored at submit time) are not caller errors. Do not
 convert them into `SystemError`, `RuntimeError`, or similar — that suggests
 recovery or external misuse when the real problem is an internal logic bug.
 
-**`assert` is the right contract check in C extension code** for those
-impossible-unless-we-messed-up cases. It documents the invariant, fails loudly
-in debug builds, and keeps production paths free of defensive noise. Do not
-replace such asserts with `PyErr_SetString` guards just to survive release
-builds with a tidier Python exception.
+**`assert` is the right contract check** for structural invariants that cannot
+fail unless our own code broke an assumption — in Python as well as C extension
+code. It documents the logical structure of the program and fails loudly when
+that structure is violated. Stripping under `python -O` is intentional: these
+are not user-recoverable error paths.
+
+Do not replace such asserts with `RuntimeError`, `PyErr_SetString`, or similar
+guards just to survive optimised builds with a tidier exception. Review comments
+that warn “assert does not work in production” miss the point; ignore or correct
+those suggestions rather than papering over internal bugs with user-facing
+exceptions.
 
 ### Python boolean style
 

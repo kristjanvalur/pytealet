@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from tealetio import Event, set_scheduler
-from tealetio.operations import Operation
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.streams import (
     AsyncStreamReader,
@@ -122,7 +121,7 @@ class TestStreamsPoC:
             writer.close()
 
         def exercise() -> None:
-            blocker, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            blocker = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
             blocker.bind(("127.0.0.1", 0))
             port = blocker.getsockname()[1]
             blocker.listen(1)
@@ -796,28 +795,55 @@ class TestStreamsPoC:
             if server is not None:
                 server.close()
 
-    def test_sock_connect_initial_send_flushes_when_backend_ignores_hint(
+    def test_sock_connect_passes_connect_send_factory_when_initial_provided(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from tealetio.operation_chaining import connect_initial_send_factory
+
         io = scheduler.io
-        client, _peer = socket.socketpair()
-        sent: list[bytes] = []
+        captured: list[object | None] = []
+        real_connect = scheduler.proactor.connect
 
-        def fake_connect(sock: socket.socket, address, *, initial=None):
-            del sock, address, initial
-            operation = Operation[None](kind="connect", fileobj=client)
-            operation._set_result(None)
-            return operation
+        def capture_connect(sock: socket.socket, address, *, operation_factory=None):
+            captured.append(operation_factory)
+            return real_connect(sock, address, operation_factory=operation_factory)
 
-        monkeypatch.setattr(scheduler.proactor, "connect", fake_connect)
-        monkeypatch.setattr(io, "sock_sendall", lambda _sock, data: sent.append(bytes(data)))
+        monkeypatch.setattr(scheduler.proactor, "connect", capture_connect)
 
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: socket.socket | None = None
         try:
+            server.setblocking(False)
             client.setblocking(False)
-            io.sock_connect(client, ("127.0.0.1", 0), initial=b"helloworld")
-            assert sent == [b"helloworld"]
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            address = server.getsockname()
+
+            def exercise() -> None:
+                io.sock_connect(client, address, initial=b"helloworld")
+
+            run_scheduler_task(scheduler, exercise)
+
+            accepted, _peer = server.accept()
+            assert len(captured) == 1
+            factory = captured[0]
+            assert factory is not None
+            chained = factory("connect", client)
+            expected = connect_initial_send_factory(scheduler.proactor, b"helloworld")(
+                "connect",
+                client,
+            )
+            assert chained._delivery is not None
+            assert chained._advance_hook is not None
+            assert expected._delivery is not None
+            assert expected._advance_hook is not None
+            assert accepted.recv(1024) == b"helloworld"
         finally:
+            if accepted is not None:
+                accepted.close()
             client.close()
+            server.close()
 
     def test_open_connection_passes_initial_send_to_sock_create(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
@@ -1091,7 +1117,7 @@ class TestStartServerListenOptions:
             writer.close()
 
         def exercise() -> None:
-            listen_sock, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
             listen_sock.bind(("127.0.0.1", 0))
             try:
                 with pytest.raises(ValueError, match="addr/path and sock cannot be specified"):
@@ -1111,7 +1137,7 @@ class TestStartServerListenOptions:
             writer.close()
 
         def exercise() -> None:
-            listen_sock, _, _ = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
             listen_sock.bind(("127.0.0.1", 0))
             port = listen_sock.getsockname()[1]
             server = start_server(client_handler, sock=listen_sock, scheduler=scheduler)

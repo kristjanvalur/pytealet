@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, Operation
+from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
@@ -20,8 +21,7 @@ _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
 
 # sockaddr shapes vary by family; tighten when accept/connect types are unified.
-SocketAddress: TypeAlias = Any
-SocketSendBuffer: TypeAlias = bytes | bytearray | memoryview
+SocketAddress = Any
 
 IO_UNSUPPORTED_ERROR = "operation requires a scheduler with IO support"
 SELECTOR_IO_UNSUPPORTED_ERROR = (
@@ -112,7 +112,7 @@ class SocketIO(Protocol):
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> tuple[socket.socket, bool, bool]: ...
+    ) -> socket.socket: ...
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: "RecvBufferPool | None" = None
@@ -315,10 +315,15 @@ class ProactorIOManager:
         if initial is None:
             self.wait_operation(self._proactor.connect(sock, address))
             return
-        sent = self.wait_operation(self._proactor.connect(sock, address, initial=initial))
-        if sent:
-            return
-        self.sock_sendall(sock, initial)
+        from .operation_chaining import connect_initial_send_factory
+
+        self.wait_operation(
+            self._proactor.connect(
+                sock,
+                address,
+                operation_factory=connect_initial_send_factory(self._proactor, initial),
+            )
+        )
 
     def sock_create(
         self,
@@ -329,30 +334,33 @@ class ProactorIOManager:
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> tuple[socket.socket, bool, bool]:
+    ) -> socket.socket:
         if initial_data is not None and connect_to is None:
             raise ValueError("initial_data requires connect_to")
-        sock, is_connected, initial_sent = self.wait_operation(
-            self._proactor.create_socket(
-                family,
-                type,
-                proto,
-                flags=flags,
-                connect_to=connect_to,
-                initial_data=initial_data,
+        if connect_to is None:
+            return self.wait_operation(
+                self._proactor.create_socket(
+                    family,
+                    type,
+                    proto,
+                    flags=flags,
+                )
             )
+
+        from .operation_chaining import create_socket_chain_factory
+
+        operation = self._proactor.create_socket(
+            family,
+            type,
+            proto,
+            flags=flags,
+            operation_factory=create_socket_chain_factory(
+                self._proactor,
+                connect_to,
+                initial_data,
+            ),
         )
-        try:
-            if connect_to is not None and not is_connected:
-                self.sock_connect(sock, connect_to, initial=initial_data)
-                return sock, True, initial_data is not None
-            if initial_data is not None and is_connected and not initial_sent:
-                self.sock_sendall(sock, initial_data)
-                return sock, is_connected, True
-            return sock, is_connected, initial_sent
-        except BaseException:
-            sock.close()
-            raise
+        return self.wait_operation(operation)
 
     def poll(self, fd: int, mask: int) -> int:
         return self.wait_operation(self._proactor.poll(fd, mask))

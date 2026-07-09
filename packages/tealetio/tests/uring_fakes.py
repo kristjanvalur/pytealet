@@ -378,11 +378,17 @@ class _FakeUringRing:
         completion = self._completion(
             user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
         )
-        if getattr(user_data, "parent", None) is not None:
+        if self._defer_stream_send_completion(user_data):
             self.pending_connect_send.append(completion)
             return completion
         self._deliver(completion)
         return completion
+
+    def _defer_stream_send_completion(self, user_data: object) -> bool:
+        if getattr(user_data, "parent", None) is not None:
+            return True
+        operation = getattr(user_data, "operation", None)
+        return getattr(operation, "_delivery", None) is not None
 
     def complete_connect_send(self, nbytes: int | None = None) -> None:
         completion = self.pending_connect_send.pop(0)
@@ -428,7 +434,7 @@ class _FakeUringRing:
         completion = self._completion(
             user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=len(payload), result=len(payload)
         )
-        if getattr(user_data, "parent", None) is not None:
+        if self._defer_stream_send_completion(user_data):
             self.pending_connect_send.append(completion)
             return completion
         self._deliver(completion)
@@ -836,6 +842,13 @@ class _DeferredUringRing(_FakeUringRing):
         completion.res = len(data)
         completion.flags = 0
         completion.result = len(data)
+        self._deliver(completion)
+
+    def complete_recv_error(self, err: int) -> None:
+        completion = self.pending_recv.pop(-1)
+        completion.res = err
+        completion.result = err
+        completion.flags = 0
         self._deliver(completion)
 
 
