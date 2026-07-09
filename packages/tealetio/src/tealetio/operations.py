@@ -379,7 +379,8 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
 
     Callbacks that submit nested ``Operation`` objects must not block waiting on
     them. Register each child with ``attach_suboperation()`` (or
-    ``chain_suboperation()`` in ``operation_callbacks`` / ``continuous_callbacks``)
+    ``chain_suboperation()`` / ``chain_spawned_suboperation()`` in
+    ``operation_callbacks`` / ``continuous_callbacks``)
     so ``cancel()`` can reach in-flight child work.
     """
 

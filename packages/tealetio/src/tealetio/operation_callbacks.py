@@ -16,19 +16,14 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-def chain_suboperation(
+def _register_suboperation(
     parent: Operation[Any],
     suboperation: Operation[T],
     on_complete: Callable[[Operation[T]], object],
 ) -> bool:
-    """Track ``suboperation`` and run ``on_complete`` from its done callback.
-
-    Returns ``False`` when the parent is already done or cancelling (the
-    suboperation is cancelled and no completion handler is registered).
-    """
+    """Register a child completion handler; caller must hold ``parent._lock``."""
 
     if not parent.attach_suboperation(suboperation):
-        suboperation.cancel()
         return False
 
     suboperation._suboperation_parent = weakref.ref(parent)
@@ -41,6 +36,72 @@ def chain_suboperation(
 
     suboperation.add_done_callback(complete)
     return True
+
+
+def chain_suboperation(
+    parent: Operation[Any],
+    suboperation: Operation[T],
+    on_complete: Callable[[Operation[T]], object],
+) -> bool:
+    """Track an already-spawned child and run ``on_complete`` on completion.
+
+    Returns ``False`` when the parent is already done or cancelling (the
+    suboperation is cancelled and no completion handler is registered).
+    """
+
+    with parent._lock:
+        if parent._done or parent._cancelling:
+            suboperation.cancel()
+            return False
+        if not _register_suboperation(parent, suboperation, on_complete):
+            suboperation.cancel()
+            return False
+        return True
+
+
+def chain_spawned_suboperation(
+    parent: Operation[Any],
+    spawn: Callable[[], Operation[T]],
+    on_complete: Callable[[Operation[T]], object],
+) -> bool:
+    """Spawn a child under ``parent._lock`` and register it before returning.
+
+    Serialises against ``parent.cancel()`` so an in-flight backend submit
+    cannot outrun ``attach_suboperation()``.
+    """
+
+    with parent._lock:
+        if parent._done or parent._cancelling:
+            return False
+        child = spawn()
+        if not _register_suboperation(parent, child, on_complete):
+            child.cancel()
+            return False
+        return True
+
+
+def chain_prespawned_suboperation(
+    parent: Operation[Any],
+    suboperation: Operation[T],
+    submit: Callable[[], object],
+    on_complete: Callable[[Operation[T]], object],
+) -> bool:
+    """Register a pre-built child, submit under ``parent._lock``, then return.
+
+    Use when the backend consults ``_suboperation_parent`` at submit time
+    (for example fake-ring send deferral) and the child must be attached
+    before ``submit()`` runs.
+    """
+
+    with parent._lock:
+        if parent._done or parent._cancelling:
+            suboperation.cancel()
+            return False
+        if not _register_suboperation(parent, suboperation, on_complete):
+            suboperation.cancel()
+            return False
+        submit()
+        return True
 
 
 def connect_initial_send_delivery(
@@ -73,13 +134,15 @@ def connect_initial_send_delivery(
             operation.complete(None)
 
         send_op = Operation(kind="send", fileobj=sock)
-        if not chain_suboperation(operation, send_op, on_send_complete):
+
+        def submit_send() -> None:
+            def send_factory(kind: str, fileobj: object | None) -> Operation[Any]:
+                return send_op
+
+            proactor.send(sock, payload, operation_factory=send_factory)
+
+        if not chain_prespawned_suboperation(operation, send_op, submit_send, on_send_complete):
             return
-
-        def send_factory(kind: str, fileobj: object | None) -> Operation[Any]:
-            return send_op
-
-        proactor.send(sock, payload, operation_factory=send_factory)
 
     return delivery
 
@@ -116,18 +179,14 @@ def create_connect_delivery(
                 return
             operation.complete(sock)
 
-        connect_op = Operation(kind="connect", fileobj=sock)
-        if not chain_suboperation(operation, connect_op, on_connect_complete):
-            _close_socket(sock)
-            return
-
-        def connect_factory(kind: str, fileobj: object | None) -> Operation[Any]:
-            return connect_op
-
         try:
-            proactor.connect(sock, connect_to, operation_factory=connect_factory)
+            if not chain_spawned_suboperation(
+                operation,
+                lambda: proactor.connect(sock, connect_to),
+                on_connect_complete,
+            ):
+                _close_socket(sock)
         except BaseException as exc:
-            operation.detach_suboperation(connect_op)
             _close_socket(sock)
             operation.complete_error(exc)
 
