@@ -101,7 +101,13 @@ class Operation(Generic[T]):
             self.detach_suboperation(suboperation)
 
     def cancel(self) -> None:
-        """Cancel the operation if it has not completed yet."""
+        """Cancel the operation if it has not completed yet.
+
+        Cancellation always races in-flight backend completions on worker
+        threads. ``cancel_hook`` is best-effort IO teardown only; a late
+        ``deliver()`` may still finish the operation successfully, in which
+        case cancel is abandoned after the hook runs.
+        """
 
         self._finish(exception=CancelledError(), cancelled=True)
 
@@ -207,6 +213,8 @@ class Operation(Generic[T]):
         cancelled: bool = False,
     ) -> bool:
         if cancelled:
+            # Best-effort backend teardown, then terminalise unless a worker
+            # thread completed the operation during the hook.
             if self._done:
                 return False
             with self._lock:

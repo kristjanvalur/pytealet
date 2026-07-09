@@ -247,11 +247,14 @@ backend routing.
 ### Cancel propagation and error cleanup
 
 `chain_suboperation()` spawns each child under the parent ``_lock`` and registers
-it in ``_active_suboperations``. Parent ``cancel()`` snapshots that set,
-``_finish(cancelled=True)`` (via ``cancel()``) runs the
-backend ``cancel_hook``, terminalises the root (``_done`` / ``_cancelled`` /
-``CancelledError``), and cancels attached children. Late attach and delivery are
-rejected once ``_done`` is set.
+it in ``_active_suboperations``. Parent ``cancel()`` calls
+``_finish(cancelled=True)``: best-effort ``cancel_hook`` IO teardown, then
+terminal state (``_done`` / ``_cancelled`` / ``CancelledError``) unless a
+worker-thread completion won the race, then child ``cancel()`` and parent
+callbacks. Late attach and delivery are rejected once ``_done`` is set.
+
+Cancellation always races in-flight backend completions; see
+``OPERATION_CALLBACKS.md`` (cancel vs in-flight completion).
 
 Worker threads spawn children from delivery handlers while the scheduler thread
 may call ``cancel()`` on the root at the same time. Holding the parent lock

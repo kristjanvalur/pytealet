@@ -111,6 +111,23 @@ Named factories (thin `operation_factory(delivery=…)` wrappers):
 | Parent `cancel()` | `_finish(cancelled=True)`: backend hook, terminal state, children, callbacks | Same |
 | Child completion | `on_complete` may call `parent.complete(…)` | Handlers may run after `parent.done()` when handed off while active |
 
+### Cancel vs in-flight completion
+
+`Operation.cancel()` always races backend worker threads. Proactor completions
+arrive asynchronously; the scheduler or a waiter may call `cancel()` on the
+same operation while a CQE is already in flight.
+
+`cancel_hook` is **best-effort IO teardown** only (drop deferred resubmits,
+submit async cancel, deregister selector interest, `break_wait()`, and similar).
+It does not own terminal state. Hooks do not call `_finish()`; `cancel()` routes
+through `_finish(cancelled=True)`, which runs the hook and then terminalises
+unless `_done` is already set.
+
+A late `deliver()` / `complete()` may therefore still succeed after
+`cancel_hook` runs. That is expected: whichever path reaches `_finish` first
+wins. Callers waiting on `wait_operation` observe either a normal result or
+`CancelledError`, not an ambiguous in-between state.
+
 Only the root one-shot `Operation` is passed to `wait_operation`. Child
 operations complete independently; the parent finishes when the final
 `on_complete` calls `parent.complete(…)` or `parent.complete_error(…)`.

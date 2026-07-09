@@ -1769,21 +1769,6 @@ class UringProactor(ProactorBase):
         if deferred_count > self._deferred_queue_peak:
             self._deferred_queue_peak = deferred_count
 
-    def _cancel_all_deferred_for_operation(self, operation: Operation[Any]) -> bool:
-        cancelled = False
-        index = 0
-        while index < len(self._deferred_submissions):
-            submission = self._deferred_submissions[index]
-            entry = submission.entry
-            if entry is not None and entry.operation is operation:
-                del self._deferred_submissions[index]
-                entry.active = False
-                entry.completion = None
-                cancelled = True
-            else:
-                index += 1
-        return cancelled
-
     def _uring_entry(
         self,
         operation: Operation[Any],

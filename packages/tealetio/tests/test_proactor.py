@@ -1021,8 +1021,10 @@ def test_create_connect_delivery_ignored_after_cancel() -> None:
         delivery(object(), operation, sock, None)
         assert operation.cancelled()
         assert connected is False
+        assert sock.fileno() == -1
     finally:
-        sock.close()
+        if sock.fileno() != -1:
+            sock.close()
 
 
 def test_chain_suboperation_on_complete_failure_finishes_parent() -> None:
