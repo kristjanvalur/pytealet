@@ -108,7 +108,7 @@ Named factories (thin `operation_factory(delivery=…)` wrappers):
 |-------|-----------------|-------------------|
 | Parent `complete()` / normal `_finish` | Children keep running | Same |
 | Parent error finish | Children keep running | Same |
-| Parent `cancel()` | `_set_cancelled()` finishes the root, then cancels children, then backend hook | Same |
+| Parent `cancel()` | Backend `cancel_hook`, then `_set_cancelled()` (terminal state + children + callbacks) | Same |
 | Child completion | `on_complete` may call `parent.complete(…)` | Handlers may run after `parent.done()` when handed off while active |
 
 Only the root one-shot `Operation` is passed to `wait_operation`. Child
