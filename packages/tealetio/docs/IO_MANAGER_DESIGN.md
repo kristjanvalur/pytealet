@@ -222,7 +222,10 @@ simply complete synchronously before ``wait_operation`` returns. That is
 acceptable in practice: Unix-domain connects are near-instant on the local
 machine, so a brief blocking ``connect()`` on the completion thread does not
 carry the same latency risk as a remote TCP handshake. Inet sockets still use
-the backend async connect path.
+the backend async connect path. If io_uring gains Unix ``submit_connect``
+support, ``UringProactor.connect()`` can switch ``AF_UNIX`` to the same async
+completion path as inet; no io_manager or chaining changes are required beyond
+that backend routing.
 
 ### Chain spine: cancel down, advance up
 
