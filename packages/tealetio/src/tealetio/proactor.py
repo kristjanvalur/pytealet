@@ -394,8 +394,8 @@ class Proactor(Protocol):
         blocking ``sock.connect()`` and ``deliver()``, including when chained
         from ``sock_create``. Inet sockets use the backend's async path.
 
-        ``operation_factory`` may install delivery and advance hooks for
-        chained follow-on work (for example connect-time send via
+        ``operation_factory`` may install a delivery handler for composed
+        follow-on work (for example connect-time send via
         ``ProactorIOManager.sock_connect(..., initial=...)``).
         """
 
@@ -412,9 +412,9 @@ class Proactor(Protocol):
     ) -> Operation[socket.socket]:
         """Create a scheduler-contract socket.
 
-        ``operation_factory`` may install delivery and advance hooks for
-        chained follow-on work. ``ProactorIOManager.sock_create()`` handles
-        connect-time chaining for all socket families.
+        ``operation_factory`` may install a delivery handler for composed
+        follow-on work. ``ProactorIOManager.sock_create()`` handles
+        create→connect composition for all socket families.
         """
 
         ...

@@ -93,14 +93,14 @@ sockets.
 `create_socket(family, type, proto=0, *, flags=0, connect_to=None,
 initial_data=None)` creates a scheduler-contract socket (non-blocking,
 close-on-exec). On success it completes with the socket — the only non-``None``
-result in a create→connect→send chain; connect and send legs complete with
-``None``. Optional ``connect_to`` and ``initial_data`` are handled by
-``ProactorIOManager`` via operation chaining (create → connect → send). ``UringProactor`` uses ``uring_api.Ring.submit_socket()`` when
+result in a create→connect→send composition; connect and send run as child
+operations before the root completes. Optional ``connect_to`` and ``initial_data`` are handled by
+``ProactorIOManager`` via delivery-composed ``operation_factory`` hooks (create → connect → send). ``UringProactor`` uses ``uring_api.Ring.submit_socket()`` when
 ``IORING_OP_SOCKET`` is available. Extra ``flags`` are ORed with non-blocking
 and close-on-exec on the uring socket path. ``SelectorProactor`` ignores
 ``flags`` beyond the scheduler defaults from ``configure_scheduler_socket()``
 (non-blocking, close-on-exec). ``initial_data`` without ``connect_to`` raises
-``ValueError``. ``scheduler.io.sock_create()`` blocks on the chained operation and either
+``ValueError``. ``scheduler.io.sock_create()`` blocks on the root operation and either
 returns the socket or raises. When ``connect_to`` is set the returned socket is
 already connected (and any ``initial_data`` was flushed). ``open_connection(…,
 initial_send=…)`` passes ``connect_to`` and ``initial_data`` through this path
@@ -108,8 +108,8 @@ for TCP and Unix ``path=`` connects.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
-``ProactorIOManager.sock_connect(..., initial=...)`` and ``operation_factory``
-chaining, not a separate proactor ``initial`` parameter.
+``ProactorIOManager.sock_connect(..., initial=...)`` via a delivery-composed
+``operation_factory`` hook, not a separate proactor ``initial`` parameter.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
@@ -609,8 +609,8 @@ metadata, and selector-backed backends share one handle type.
 `scheduler.io.sock_create(family, type, proto=0, *, flags=0, connect_to=None,
 initial_data=None)` is the socket creation entry point for proactor-backed
 blocking IO. It returns a non-blocking, close-on-exec socket. When
-``connect_to`` is set, ``ProactorIOManager`` chains connect (and optional
-initial send) before returning. `UringProactor` uses
+``connect_to`` is set, ``ProactorIOManager`` composes connect (and optional
+initial send) via delivery callbacks before the root completes. `UringProactor` uses
 `uring_api.Ring.submit_socket()` (`IORING_OP_SOCKET`) when probed, then wraps
 the returned fd with `socket.socket(fileno=fd)` (the same
 pattern already used for `accept_many` completions). Connect/server helpers call

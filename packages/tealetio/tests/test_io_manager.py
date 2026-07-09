@@ -89,6 +89,8 @@ class _MockProactor:
         delivery = operation._delivery
         if delivery is not None:
             delivery(self, operation, None, None)
+        elif not operation.done():
+            operation._finish(result=None)
         return operation
 
     def send(
@@ -109,6 +111,8 @@ class _MockProactor:
         delivery = operation._delivery
         if delivery is not None:
             delivery(self, operation, None, None)
+        elif not operation.done():
+            operation._finish(result=None)
         return operation
 
     def poll_many(
@@ -241,7 +245,7 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
-    def test_sock_create_uses_chain_factory_when_connect_to_set(self):
+    def test_sock_create_uses_connect_factory_when_connect_to_set(self):
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)

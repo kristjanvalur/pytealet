@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from .tasks import CancelledError
@@ -22,9 +21,7 @@ _CancelHook = Callable[[], None]
 _ProactorRef = Any
 # ``result`` and ``exception`` are mutually exclusive; one is always ``None``.
 DeliveryHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
-AdvanceHook = Callable[["Operation[Any]", Any, BaseException | None], None]
 OperationFactory = Callable[[str, object | None], "Operation[Any]"]
-_CancelForwardRef = weakref.ReferenceType["Operation[Any]"]
 
 
 @dataclass
@@ -52,9 +49,8 @@ class Operation(Generic[T]):
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] | None = []
         self._cancel_hook: _CancelHook | None = None
-        self._cancel_forward: _CancelForwardRef | None = None
-        self._chain_parent: Operation[Any] | None = None
-        self._advance_hook: AdvanceHook | None = None
+        self._active_suboperations: set[Operation[Any]] = set()
+        self._cancelling = False
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -71,45 +67,39 @@ class Operation(Generic[T]):
 
         self._cancel_hook = cancel
 
-    def set_cancel_forward(self, operation: "Operation[Any] | None") -> None:
-        """Forward ``cancel()`` to a chained child operation."""
-
-        self._cancel_forward = None if operation is None else weakref.ref(operation)
-
-    def attach_child(self, child: "Operation[Any]") -> bool:
-        """Publish ``child`` on the cancel/advance spine.
-
-        Returns ``False`` when this operation is already done, for example
-        because ``cancel()`` won before the downlink was installed.
-        """
-
-        with self._lock:
-            if self._done:
-                return False
-            child.set_chain_parent(self)
-            self._cancel_forward = weakref.ref(child)
-            return True
-
-    def may_extend_chain(self) -> bool:
-        """Return whether a new chained leg may be started on this link."""
-
-        with self._lock:
-            return not self._done
-
-    def set_chain_parent(self, parent: "Operation[Any] | None") -> None:
-        """Record the parent operation that receives bubbled chain completions."""
-
-        self._chain_parent = parent
-
-    def set_advance_hook(self, handler: AdvanceHook | None) -> None:
-        """Install the handler invoked when a chain completion reaches this link."""
-
-        self._advance_hook = handler
-
     def set_delivery(self, handler: DeliveryHandler | None) -> None:
         """Install the proactor completion handler for this operation."""
 
         self._delivery = handler
+
+    def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
+        """Register a child for ``cancel()`` propagation.
+
+        Returns ``False`` when the parent is done or ``cancel()`` is in progress.
+        """
+
+        with self._lock:
+            if self._done or self._cancelling:
+                return False
+            self._active_suboperations.add(suboperation)
+            return True
+
+    def detach_suboperation(self, suboperation: Operation[Any]) -> None:
+        with self._lock:
+            self._active_suboperations.discard(suboperation)
+
+    @contextmanager
+    def track_suboperation(self, suboperation: Operation[Any]) -> Iterator[Operation[Any]]:
+        """Register ``suboperation`` until the context exits or ``cancel()`` runs."""
+
+        if not self.attach_suboperation(suboperation):
+            suboperation.cancel()
+            yield suboperation
+            return
+        try:
+            yield suboperation
+        finally:
+            self.detach_suboperation(suboperation)
 
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet."""
@@ -117,17 +107,11 @@ class Operation(Generic[T]):
         with self._lock:
             if self._done:
                 return
-            forward = self._cancel_forward_target()
-            is_leaf = forward is None
-        if forward is not None:
-            forward.cancel()
-        if is_leaf:
-            with self._lock:
-                bubble_cancelled = self._chain_parent is not None and not self._done
-            if bubble_cancelled:
-                # Bubble before this leg is terminalised so chain_parent links
-                # remain intact and advance hooks (for example fd-close) run.
-                self.advance(exception=CancelledError())
+            self._cancelling = True
+            suboperations = set(self._active_suboperations)
+        for suboperation in suboperations:
+            suboperation.cancel()
+
         cancel_hook = self._cancel_hook
         if cancel_hook is not None:
             cancel_hook()
@@ -197,7 +181,7 @@ class Operation(Generic[T]):
         """
 
         with self._lock:
-            if self._done:
+            if self._done or self._cancelling:
                 return
             delivery = self._delivery
         if delivery is not None:
@@ -208,88 +192,30 @@ class Operation(Generic[T]):
         else:
             self._finish(result=cast(T, result))
 
-    def advance(
-        self,
-        *,
-        result: Any = None,
-        exception: BaseException | None = None,
-    ) -> None:
-        """Accept a bubbled completion from a chained child operation.
-
-        Unlike ``deliver()``, this does not re-enter the proactor delivery
-        handler. Walks the parent chain from this link, invoking the first
-        ``_advance_hook`` found (each hook runs at most once per leg and is
-        cleared in ``advance_continue()`` after local work). When no hook is
-        installed on a link the walk continues to its parent. At the chain root
-        with no hook the operation completes. Hooks must finish propagation by
-        calling ``advance_continue()`` on the link that owns the hook.
-        """
-
-        op: Operation[Any] | None = self
-        while op is not None:
-            handler: AdvanceHook | None = None
-            parent: Operation[Any] | None = None
-            finish_here = False
-            with op._lock:
-                if op._done:
-                    return
-                handler = op._advance_hook
-                if handler is None and op._chain_parent is None:
-                    finish_here = True
-                else:
-                    parent = op._chain_parent
-            if handler is not None:
-                handler(op, result, exception)
-                return
-            if finish_here:
-                if exception is not None:
-                    op._finish(
-                        exception=exception,
-                        cancelled=isinstance(exception, CancelledError),
-                    )
-                else:
-                    op._finish(result=result)
-                return
-            op = parent
-
-    def advance_continue(
-        self,
-        *,
-        result: Any = None,
-        exception: BaseException | None = None,
-    ) -> None:
-        """Resume propagation after local advance-hook work on this link.
-
-        Clears this link's advance hook and delegates to ``advance()`` without
-        re-entering it. Intended for use from advance-hook handlers only. On a
-        linear chain each leg calls this once; DAG-shaped links may invoke the
-        hook multiple times until the final arrival issues the single
-        ``advance_continue()`` that clears and bubbles.
-        """
-
-        with self._lock:
-            assert self._advance_hook is not None
-            self._advance_hook = None
-        self.advance(result=result, exception=exception)
-
     def complete(self, result: T) -> None:
         """Finish the operation from a delivery handler."""
 
-        self._finish(result=result)
+        with self._lock:
+            if self._done or self._cancelling:
+                return
+        try:
+            self._finish(result=result)
+        except InvalidStateError:
+            return
 
     def complete_error(self, exc: BaseException) -> None:
         """Fail the operation from a delivery handler."""
 
-        self._finish(exception=exc)
+        with self._lock:
+            if self._done or self._cancelling:
+                return
+        try:
+            self._finish(exception=exc)
+        except InvalidStateError:
+            return
 
     def _set_cancelled(self) -> bool:
         return self._finish(exception=CancelledError(), cancelled=True)
-
-    def _cancel_forward_target(self) -> Operation[Any] | None:
-        ref = self._cancel_forward
-        if ref is None:
-            return None
-        return ref()
 
     def _finish(
         self,
@@ -308,14 +234,6 @@ class Operation(Generic[T]):
             self._cancelled = cancelled
             self._done = True
             self._cancel_hook = None
-            self._advance_hook = None
-            parent = self._chain_parent
-            self._chain_parent = None
-            if parent is not None:
-                forward_ref = parent._cancel_forward
-                if forward_ref is not None and forward_ref() is self:
-                    parent._cancel_forward = None
-            self._cancel_forward = None
             callbacks = self._callbacks
             self._callbacks = None
         assert callbacks is not None
@@ -333,10 +251,8 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
 
     Callbacks that submit nested ``Operation`` objects must not block waiting on
     them. Register each child with ``attach_suboperation()`` (or
-    ``chain_suboperation()`` in ``continuous_callbacks``) so ``cancel()`` can
-    reach in-flight child work. Finish and error finish do not cancel children;
-    each child removes itself from ``_active_suboperations`` when its completion
-    handler runs ``detach_suboperation()``.
+    ``chain_suboperation()`` in ``operation_callbacks`` / ``continuous_callbacks``)
+    so ``cancel()`` can reach in-flight child work.
     """
 
     def __init__(
@@ -348,8 +264,6 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj)
         self._result_callback = result_callback
-        self._active_suboperations: set[Operation[Any]] = set()
-        self._cancelling = False
 
     def set_result_callback(self, callback: _ResultCallback[T_co] | None) -> None:
         """Install or replace the result callback before the operation finishes."""
@@ -358,45 +272,6 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             if self._done:
                 raise InvalidStateError("continuous operation is already done")
             self._result_callback = callback
-
-    def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
-        """Register a child for ``cancel()`` propagation.
-
-        Returns ``False`` when the parent is done or ``cancel()`` is in progress.
-        """
-
-        with self._lock:
-            if self._done or self._cancelling:
-                return False
-            self._active_suboperations.add(suboperation)
-            return True
-
-    def detach_suboperation(self, suboperation: Operation[Any]) -> None:
-        with self._lock:
-            self._active_suboperations.discard(suboperation)
-
-    @contextmanager
-    def track_suboperation(self, suboperation: Operation[Any]) -> Iterator[Operation[Any]]:
-        """Register ``suboperation`` until the context exits or ``cancel()`` runs."""
-
-        if not self.attach_suboperation(suboperation):
-            suboperation.cancel()
-            yield suboperation
-            return
-        try:
-            yield suboperation
-        finally:
-            self.detach_suboperation(suboperation)
-
-    def cancel(self) -> None:
-        with self._lock:
-            if self._done:
-                return
-            self._cancelling = True
-            suboperations = set(self._active_suboperations)
-        for suboperation in suboperations:
-            suboperation.cancel()
-        super().cancel()
 
     def _emit_result(self, result: T_co) -> bool:
         """Deliver one result when the operation is still active.

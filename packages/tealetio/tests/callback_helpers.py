@@ -6,7 +6,7 @@ import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from tealetio.continuous_callbacks import chain_suboperation
+from tealetio.operation_callbacks import chain_suboperation
 from tealetio.operations import ContinuousOperation, Operation
 from tealetio.recv_iter import RECV_MANY_BUFFER_PRESSURE, _RecvManyResult
 
@@ -37,13 +37,16 @@ def recv_many_echo_delivery(
             deliver(result)
             return
         if isinstance(payload, memoryview) and payload:
-            send_op = proactor.send(sock, payload.tobytes())
             if fire_and_forget:
 
                 def on_send_complete(_op: Operation[Any]) -> None:
                     return
 
-                chain_suboperation(parent, send_op, on_send_complete)
+                chain_suboperation(
+                    parent,
+                    lambda: proactor.send(sock, payload.tobytes()),
+                    on_send_complete,
+                )
                 deliver(result)
                 return
 
@@ -52,7 +55,11 @@ def recv_many_echo_delivery(
                     return
                 deliver(result)
 
-            chain_suboperation(parent, send_op, on_send_complete)
+            chain_suboperation(
+                parent,
+                lambda: proactor.send(sock, payload.tobytes()),
+                on_send_complete,
+            )
             return
         deliver(result)
 

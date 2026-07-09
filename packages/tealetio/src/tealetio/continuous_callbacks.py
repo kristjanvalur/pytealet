@@ -5,8 +5,9 @@ from __future__ import annotations
 import socket
 from collections.abc import Callable
 from .tasks import CancelledError
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
+from .operation_callbacks import chain_suboperation  # re-exported for continuous call sites
 from .operations import ContinuousOperation, Operation
 
 AcceptManyDelivery = tuple[socket.socket, bytes | None, BaseException | None]
@@ -52,31 +53,6 @@ def marshal_to_scheduler(
     return deliver
 
 
-def chain_suboperation(
-    parent: ContinuousOperation[Any],
-    suboperation: Operation[T],
-    on_complete: Callable[[Operation[T]], object],
-) -> bool:
-    """Track ``suboperation`` and run ``on_complete`` from its done callback.
-
-    Returns ``False`` when the parent is already done (the suboperation is
-    cancelled and no completion handler is registered).
-    """
-
-    if not parent.attach_suboperation(suboperation):
-        suboperation.cancel()
-        return False
-
-    def complete(op: Operation[T]) -> None:
-        try:
-            on_complete(op)
-        finally:
-            parent.detach_suboperation(op)
-
-    suboperation.add_done_callback(complete)
-    return True
-
-
 def accept_read_delivery(
     proactor: Proactor,
     parent: ContinuousOperation[socket.socket],
@@ -101,8 +77,6 @@ def accept_read_delivery(
     assert normalized_recv_size is not None
 
     def on_conn(conn: socket.socket) -> None:
-        recv_op = proactor.recv(conn, normalized_recv_size)
-
         def on_recv_complete(op: Operation[bytes]) -> None:
             exc = op.exception()
             if exc is not None:
@@ -117,7 +91,11 @@ def accept_read_delivery(
                 return
             deliver((conn, data, None))
 
-        if not chain_suboperation(parent, recv_op, on_recv_complete):
+        if not chain_suboperation(
+            parent,
+            lambda: proactor.recv(conn, normalized_recv_size),
+            on_recv_complete,
+        ):
             conn.close()
 
     return on_conn
