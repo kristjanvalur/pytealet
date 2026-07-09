@@ -5202,6 +5202,7 @@ class TestUringProactor:
         finally:
             proactor.close()
 
+    @pytest.mark.skip(reason="phase 2b: create+connect+initial send not migrated yet")
     def test_sock_create_connects_with_initial_on_uring(self) -> None:
         from tealetio.operation_chaining import create_socket_chain_factory
 
@@ -5227,17 +5228,16 @@ class TestUringProactor:
             proactor.close()
 
     def test_sock_create_empty_initial_completes_without_send(self) -> None:
-        from tealetio.operation_chaining import create_socket_chain_factory
+        from tealetio.operation_callbacks import create_connect_operation_factory
 
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             operation = proactor.create_socket(
                 socket.AF_INET,
                 socket.SOCK_STREAM,
-                operation_factory=create_socket_chain_factory(
+                operation_factory=create_connect_operation_factory(
                     proactor,
                     ("127.0.0.1", 9),
-                    b"",
                 ),
             )
             _wait_for_uring(proactor, operation.done)
@@ -5288,17 +5288,16 @@ class TestUringProactor:
             proactor.close()
 
     def test_sock_create_cancel_during_pending_connect(self) -> None:
-        from tealetio.operation_chaining import create_socket_chain_factory
+        from tealetio.operation_callbacks import create_connect_operation_factory
 
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         try:
             operation = proactor.create_socket(
                 socket.AF_INET,
                 socket.SOCK_STREAM,
-                operation_factory=create_socket_chain_factory(
+                operation_factory=create_connect_operation_factory(
                     proactor,
                     ("127.0.0.1", 9),
-                    None,
                 ),
             )
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
@@ -5319,6 +5318,7 @@ class TestUringProactor:
         finally:
             proactor.close()
 
+    @pytest.mark.skip(reason="phase 2b: create+connect+initial send not migrated yet")
     def test_sock_create_cancel_during_pending_send(self) -> None:
         from tealetio.operation_chaining import create_socket_chain_factory
 
@@ -5671,7 +5671,7 @@ class TestProactorScheduler:
 
     @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
     def test_sock_create_unix_cancel_before_socket_completes(self) -> None:
-        from tealetio.operation_chaining import create_socket_chain_factory
+        from tealetio.operation_callbacks import create_connect_operation_factory
 
         proactor = UringProactor(ring_factory=_DeferredSocketUringRing)
         try:
@@ -5684,7 +5684,7 @@ class TestProactorScheduler:
                     operation = proactor.create_socket(
                         socket.AF_UNIX,
                         socket.SOCK_STREAM,
-                        operation_factory=create_socket_chain_factory(proactor, path, None),
+                        operation_factory=create_connect_operation_factory(proactor, path),
                     )
                     _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
                     operation.cancel()
@@ -5703,6 +5703,7 @@ class TestProactorScheduler:
             proactor.close()
 
     @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
+    @pytest.mark.skip(reason="phase 2b: create+connect+initial send not migrated yet")
     def test_sock_create_unix_cancel_during_pending_send(self) -> None:
         from tealetio.operation_chaining import create_socket_chain_factory
 

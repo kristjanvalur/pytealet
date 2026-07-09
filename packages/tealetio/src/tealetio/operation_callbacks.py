@@ -84,6 +84,72 @@ def connect_initial_send_delivery(
     return delivery
 
 
+def _close_socket(sock: socket.socket) -> None:
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+def create_connect_delivery(
+    proactor: Proactor,
+    connect_to: Any,
+) -> DeliveryHandler:
+    """After create_socket succeeds, connect then complete with the socket."""
+
+    def delivery(
+        _proactor: object,
+        operation: Operation[Any],
+        result: object,
+        exception: BaseException | None,
+    ) -> None:
+        if exception is not None:
+            operation.complete_error(exception)
+            return
+        sock = cast(socket.socket, result)
+
+        def on_connect_complete(connect_op: Operation[Any]) -> None:
+            connect_exc = connect_op.exception()
+            if connect_exc is not None:
+                _close_socket(sock)
+                operation.complete_error(connect_exc)
+                return
+            operation.complete(sock)
+
+        connect_op = Operation(kind="connect", fileobj=sock)
+        if not chain_suboperation(operation, connect_op, on_connect_complete):
+            _close_socket(sock)
+            return
+
+        def connect_factory(kind: str, fileobj: object | None) -> Operation[Any]:
+            return connect_op
+
+        try:
+            proactor.connect(sock, connect_to, operation_factory=connect_factory)
+        except BaseException as exc:
+            operation.detach_suboperation(connect_op)
+            _close_socket(sock)
+            operation.complete_error(exc)
+
+    return delivery
+
+
+def create_connect_operation_factory(
+    proactor: Proactor,
+    connect_to: Any,
+) -> OperationFactory:
+    """Factory for ``proactor.create_socket`` when ``connect_to`` is set."""
+
+    handler = create_connect_delivery(proactor, connect_to)
+
+    def factory(kind: str, fileobj: object | None) -> Operation[Any]:
+        operation = Operation(kind=kind, fileobj=fileobj)
+        operation.set_delivery(handler)
+        return operation
+
+    return factory
+
+
 def connect_initial_send_operation_factory(
     proactor: Proactor,
     initial: SocketSendBuffer,

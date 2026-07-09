@@ -361,18 +361,25 @@ class ProactorIOManager:
                 )
             )
 
-        from .operation_chaining import create_socket_chain_factory
+        if initial_data:
+            from .operation_chaining import create_socket_chain_factory
+
+            operation_factory = create_socket_chain_factory(
+                self._proactor,
+                connect_to,
+                initial_data,
+            )
+        else:
+            from .operation_callbacks import create_connect_operation_factory
+
+            operation_factory = create_connect_operation_factory(self._proactor, connect_to)
 
         operation = self._proactor.create_socket(
             family,
             type,
             proto,
             flags=flags,
-            operation_factory=create_socket_chain_factory(
-                self._proactor,
-                connect_to,
-                initial_data,
-            ),
+            operation_factory=operation_factory,
         )
         return self.wait_operation(operation)
 
