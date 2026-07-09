@@ -790,6 +790,19 @@ class TestOperation:
         assert operation._emit_result(2) is False
         assert seen == [1]
 
+    def test_continuous_operation_result_pipeline_runs_before_callbacks(self):
+        operation: ContinuousOperation[int] = ContinuousOperation(
+            kind="test",
+            result_pipeline=lambda value: value + 1,
+        )
+        seen: list[int] = []
+
+        operation.add_result_callback(seen.append)
+        operation._emit_result(1)
+        operation._emit_result(2)
+
+        assert seen == [2, 3]
+
 
 def test_operation_deliver_completes_without_handler() -> None:
     operation = Operation[int](kind="test")
@@ -1694,6 +1707,58 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
 
             assert all(isinstance(data, memoryview) for _, data in seen)
+            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
+            assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_result_pipeline_echoes_before_client_delivery(self):
+        from tealetio.continuous_callbacks import recv_many_echo_pipeline
+
+        def _drain_peer(sock: socket.socket, proactor: SelectorProactor) -> bytes:
+            chunks: list[bytes] = []
+            deadline = proactor.get_time() + 1.0
+            while proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+                try:
+                    chunk = sock.recv(1024, socket.MSG_DONTWAIT)
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    chunks.append(chunk)
+            return b"".join(chunks)
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[tuple[int, memoryview]] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv_many(
+                reader,
+                seen.append,
+                buf_group=proactor.shared_recv_buffer_pool(),
+                result_pipeline=recv_many_echo_pipeline(reader),
+            )
+
+            writer.send(b"hello")
+            while len(seen) < 1:
+                proactor.wait(proactor.get_time() + 1.0)
+            first_echo = _drain_peer(writer, proactor)
+
+            writer.send(b"world")
+            while len(seen) < 2:
+                proactor.wait(proactor.get_time() + 1.0)
+            second_echo = _drain_peer(writer, proactor)
+
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done():
+                proactor.wait(proactor.get_time() + 1.0)
+
+            assert first_echo == b"hello"
+            assert second_echo == b"world"
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
         finally:
