@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, cast
@@ -329,6 +330,9 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     Result callbacks may run on any backend worker thread. Callers that need
     thread affinity must marshal from the callback into the desired thread or
     event loop themselves.
+
+    Callbacks that submit nested ``Operation`` objects should register them with
+    ``track_suboperation()`` so ``cancel()`` cancels in-flight child work too.
     """
 
     def __init__(
@@ -340,12 +344,47 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj)
         self._result_callback = result_callback
+        self._active_suboperations: set[Operation[Any]] = set()
+
+    def set_result_callback(self, callback: _ResultCallback[T_co] | None) -> None:
+        """Install or replace the result callback before the operation finishes."""
+
+        with self._lock:
+            if self._done:
+                raise InvalidStateError("continuous operation is already done")
+            self._result_callback = callback
+
+    @contextmanager
+    def track_suboperation(self, suboperation: Operation[Any]) -> Iterator[Operation[Any]]:
+        """Register ``suboperation`` until the context exits or ``cancel()`` runs."""
+
+        with self._lock:
+            if self._done:
+                suboperation.cancel()
+                yield suboperation
+                return
+            self._active_suboperations.add(suboperation)
+        try:
+            yield suboperation
+        finally:
+            with self._lock:
+                self._active_suboperations.discard(suboperation)
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._done:
+                return
+            suboperations = set(self._active_suboperations)
+        for suboperation in suboperations:
+            suboperation.cancel()
+        super().cancel()
 
     def _emit_result(self, result: T_co) -> bool:
         """Deliver one result when the operation is still active.
 
-        Returns ``True`` when the callback ran, ``False`` when the operation was
-        already done (including cancelled).
+        Returns ``True`` when delivery was accepted and the operation is still
+        active afterwards, ``False`` when the operation was already done or became
+        done during the callback (including cancellation).
         """
 
         with self._lock:
@@ -354,4 +393,16 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             callback = self._result_callback
         if callback is not None:
             callback(result)
-        return True
+        with self._lock:
+            return not self._done
+
+    def _finish(
+        self,
+        *,
+        result: Any = None,
+        exception: BaseException | None = None,
+        cancelled: bool = False,
+    ) -> bool:
+        with self._lock:
+            self._active_suboperations.clear()
+        return super()._finish(result=result, exception=exception, cancelled=cancelled)

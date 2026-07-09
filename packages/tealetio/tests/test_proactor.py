@@ -784,6 +784,23 @@ class TestOperation:
         assert operation._emit_result(2) is False
         assert seen == [1]
 
+    def test_continuous_operation_cancel_cancels_tracked_suboperation(self):
+        parent = ContinuousOperation(kind="test")
+        child = Operation[None](kind="child")
+        child_cancelled = False
+
+        def cancel_child() -> None:
+            nonlocal child_cancelled
+            child_cancelled = True
+            child._set_cancelled()
+
+        child.set_cancel(cancel_child)
+        with parent.track_suboperation(child):
+            parent.cancel()
+        assert parent.cancelled()
+        assert child_cancelled
+        assert child.cancelled()
+
     def test_before_delivery_runs_handler_before_deliver(self):
         from tealetio.continuous_callbacks import before_delivery
 
@@ -1758,7 +1775,10 @@ class TestSelectorProactor:
             writer.setblocking(False)
             operation = proactor.recv_many(
                 reader,
-                before_delivery(recv_many_echo_handler(reader), seen.append),
+                callback_factory=lambda op: before_delivery(
+                    recv_many_echo_handler(proactor, op, reader),
+                    seen.append,
+                ),
                 buf_group=proactor.shared_recv_buffer_pool(),
             )
 
@@ -1780,6 +1800,51 @@ class TestSelectorProactor:
             assert second_echo == b"world"
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_echo_handler_tracks_send_suboperation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from contextlib import contextmanager
+
+        from tealetio.continuous_callbacks import before_delivery, recv_many_echo_handler
+
+        tracked: list[Operation[Any]] = []
+        original_track = ContinuousOperation.track_suboperation
+
+        @contextmanager
+        def spy_track(self, suboperation: Operation[Any]):
+            tracked.append(suboperation)
+            with original_track(self, suboperation):
+                yield suboperation
+
+        monkeypatch.setattr(ContinuousOperation, "track_suboperation", spy_track)
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            operation = proactor.recv_many(
+                reader,
+                callback_factory=lambda op: before_delivery(
+                    recv_many_echo_handler(proactor, op, reader),
+                    lambda _result: None,
+                ),
+                buf_group=proactor.shared_recv_buffer_pool(),
+            )
+
+            writer.send(b"x")
+            deadline = proactor.get_time() + 1.0
+            while not tracked and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+            writer.shutdown(socket.SHUT_WR)
+            while not operation.done() and proactor.get_time() < deadline:
+                proactor.wait(proactor.get_time() + 0.05)
+
+            assert [entry.kind for entry in tracked] == ["send"]
         finally:
             reader.close()
             writer.close()
