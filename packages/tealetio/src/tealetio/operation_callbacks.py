@@ -64,10 +64,11 @@ def chain_spawned_suboperation(
     spawn: Callable[[], Operation[T]],
     on_complete: Callable[[Operation[T]], object],
 ) -> bool:
-    """Spawn a child under ``parent._lock`` and register it before returning.
+    """Spawn a child under ``parent._lock`` and register its done callback.
 
     Serialises against ``parent.cancel()`` so an in-flight backend submit
-    cannot outrun ``attach_suboperation()``.
+    cannot outrun ``attach_suboperation()``. If the child is already done
+    when registered, ``add_done_callback`` runs ``on_complete`` immediately.
     """
 
     with parent._lock:
@@ -171,8 +172,8 @@ def create_connect_delivery(
             return
         sock = cast(socket.socket, result)
 
-        def on_connect_complete(connect_op: Operation[Any]) -> None:
-            connect_exc = connect_op.exception()
+        def on_connect_complete(op: Operation[Any]) -> None:
+            connect_exc = op.exception()
             if connect_exc is not None:
                 _close_socket(sock)
                 operation.complete_error(connect_exc)

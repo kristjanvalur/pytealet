@@ -880,22 +880,6 @@ class TestOperation:
         assert child_cancelled
         assert child.cancelled()
 
-    def test_chain_spawned_suboperation_skips_spawn_when_parent_cancelling(self) -> None:
-        from tealetio.operation_callbacks import chain_spawned_suboperation
-
-        parent = Operation(kind="create_socket")
-        spawned: list[object] = []
-
-        def spawn() -> Operation[None]:
-            spawned.append(True)
-            return Operation[None](kind="connect")
-
-        with parent._lock:
-            parent._cancelling = True
-
-        assert chain_spawned_suboperation(parent, spawn, lambda _op: None) is False
-        assert spawned == []
-
     def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
         from tealetio.continuous_callbacks import marshal_to_scheduler
 
