@@ -801,6 +801,19 @@ class TestOperation:
         assert child_cancelled
         assert child.cancelled()
 
+    def test_continuous_operation_cancel_rejects_late_suboperation_attach(self) -> None:
+        parent = ContinuousOperation(kind="test")
+        parent._cancelling = True
+        child = Operation[None](kind="child")
+        assert parent.attach_suboperation(child) is False
+
+    def test_continuous_operation_emit_result_false_while_cancelling(self) -> None:
+        seen: list[int] = []
+        parent = ContinuousOperation(kind="test", result_callback=seen.append)
+        parent._cancelling = True
+        assert parent._emit_result(1) is False
+        assert seen == []
+
     def test_chain_suboperation_runs_on_complete_after_child_finishes(self):
         from tealetio.continuous_callbacks import chain_suboperation
 

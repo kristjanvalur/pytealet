@@ -1128,8 +1128,9 @@ def start_server(
     An explicit ``stream_factory`` must match those stream types; ``async_`` only
     picks the default factory when it is omitted.
 
-    Accepts use ``proactor.accept_many()``, so ``UringProactor`` can service
-    connections through multishot accept when the runtime probe allows it.
+    Accepts use ``scheduler.io.accept_many()`` (``ProactorIOManager``), so
+    ``UringProactor`` can service connections through multishot accept when the
+    runtime probe allows it.
     ``recv_size`` opts into accept-time pre-read and reader prefill for
     client-speaks-first protocols (for example HTTP); leave it ``None`` when
     the server may speak first. Accept callbacks are marshalled onto the

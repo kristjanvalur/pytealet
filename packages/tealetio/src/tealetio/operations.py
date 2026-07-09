@@ -349,6 +349,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         super().__init__(kind=kind, fileobj=fileobj)
         self._result_callback = result_callback
         self._active_suboperations: set[Operation[Any]] = set()
+        self._cancelling = False
 
     def set_result_callback(self, callback: _ResultCallback[T_co] | None) -> None:
         """Install or replace the result callback before the operation finishes."""
@@ -359,10 +360,13 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             self._result_callback = callback
 
     def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
-        """Register a child for ``cancel()`` propagation. Returns False when the parent is done."""
+        """Register a child for ``cancel()`` propagation.
+
+        Returns ``False`` when the parent is done or ``cancel()`` is in progress.
+        """
 
         with self._lock:
-            if self._done:
+            if self._done or self._cancelling:
                 return False
             self._active_suboperations.add(suboperation)
             return True
@@ -388,6 +392,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         with self._lock:
             if self._done:
                 return
+            self._cancelling = True
             suboperations = set(self._active_suboperations)
         for suboperation in suboperations:
             suboperation.cancel()
@@ -402,13 +407,13 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         """
 
         with self._lock:
-            if self._done:
+            if self._done or self._cancelling:
                 return False
             callback = self._result_callback
         if callback is not None:
             callback(result)
         with self._lock:
-            return not self._done
+            return not self._done and not self._cancelling
 
     def _finish(
         self,

@@ -323,7 +323,7 @@ children submitted from result callbacks. It is **not** a drain barrier.
 |--------------|-------------------|
 | Normal finish (EOF, final multishot CQE, …) | Keep running; completion handlers may still run |
 | Error finish (`_finish(exception=…)`) | Keep running — e.g. `ECONNRESET` on the parent socket must not cancel accepts/recvs already started from earlier callbacks |
-| `cancel()` | Snapshot the set and `cancel()` each child |
+| `cancel()` | Set `_cancelling`, snapshot the set, and `cancel()` each child (blocks late attach and result delivery during the cancel wave) |
 
 `_finish()` does not clear or cancel `_active_suboperations`. Each child removes
 itself with `detach_suboperation()` from its done handler (typically via
