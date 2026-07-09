@@ -20,11 +20,7 @@ from .io_manager import (
     SocketSendBuffer,
     SupportsProactorIO,
 )
-from .continuous_callbacks import (
-    AcceptManyDelivery as _AcceptedConnection,
-    AcceptStreamsDelivery as _AcceptedStreams,
-    marshal_to_scheduler,
-)
+from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler

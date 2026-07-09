@@ -223,9 +223,7 @@ def create_connect_operation_factory(
 ) -> OperationFactory:
     """Factory for ``proactor.create_socket`` when ``connect_to`` is set."""
 
-    return operation_factory(
-        delivery=create_connect_delivery(proactor, connect_to, initial, result_wrapper)
-    )
+    return operation_factory(delivery=create_connect_delivery(proactor, connect_to, initial, result_wrapper))
 
 
 def connect_initial_send_operation_factory(

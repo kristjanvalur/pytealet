@@ -57,7 +57,7 @@ def marshal_to_scheduler(
 def accept_read_delivery(
     proactor: Proactor,
     parent: ContinuousOperation[socket.socket],
-    deliver: Callable[[Any], object],
+    deliver: Callable[..., object],
     *,
     recv_size: int,
     deliver_conn_data: bool = False,

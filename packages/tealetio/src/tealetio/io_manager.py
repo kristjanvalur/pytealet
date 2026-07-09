@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
@@ -414,6 +414,8 @@ class ProactorIOManager:
         return self._proactor.poll_many(fd, mask, callback)
 
     def _marshal_accept_callback(self, thunk: Callable[[], object]) -> None:
+        self._check_open()
+        assert self._scheduler is not None
         self._scheduler.call_soon_threadsafe(thunk)
 
     def accept_many(
@@ -567,7 +569,7 @@ class ProactorIOManager:
                 open_streams,
             ),
         )
-        return self.wait_operation(operation)
+        return self.wait_operation(cast(Operation[AcceptStreamsDelivery], operation))
 
     def open(self, path: str, mode: str = "rb") -> IOFile:
         flags, file_mode = parse_open_mode(mode)
