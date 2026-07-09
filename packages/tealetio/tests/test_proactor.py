@@ -4347,6 +4347,53 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
+    def test_accept_many_callback_factory_read_finishes_while_recv_pending_drains(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
+
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        server = socket.socket()
+        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(
+                server,
+                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
+            )
+            proactor.ring.complete_accept_multishot("peer-1", more=False)
+            proactor.wait(proactor.get_time() + 0.05)
+            assert operation.done() is True
+            assert accepted == []
+            assert len(proactor.ring.pending_recv) == 1
+            proactor.ring.complete_recv(b"hello")
+            _wait_for_uring(proactor, lambda: len(accepted) == 1)
+
+            assert accepted[0][1] == b"hello"
+            assert accepted[0][2] is None
+            assert operation.done() is True
+        finally:
+            for conn, _data, _recv_error in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_read_delivery_closes_conn_when_attach_fails(self) -> None:
+        from tealetio.continuous_callbacks import accept_read_delivery
+
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=socket.socket())
+        parent._finish(result=None)
+        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
+        conn, peer = socket.socketpair()
+        try:
+            on_conn = accept_read_delivery(proactor, parent, accepted.append, recv_size=64)
+            on_conn(conn)
+            assert accepted == []
+            with pytest.raises(OSError):
+                conn.getsockname()
+        finally:
+            peer.close()
+            proactor.close()
+
     def test_accept_many_callback_factory_read_cancel_drops_pending_recv(self) -> None:
         from tealetio.continuous_callbacks import accept_read_delivery
 

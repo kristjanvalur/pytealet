@@ -56,12 +56,16 @@ def chain_suboperation(
     parent: ContinuousOperation[Any],
     suboperation: Operation[T],
     on_complete: Callable[[Operation[T]], object],
-) -> None:
-    """Track ``suboperation`` and run ``on_complete`` from its done callback."""
+) -> bool:
+    """Track ``suboperation`` and run ``on_complete`` from its done callback.
+
+    Returns ``False`` when the parent is already done (the suboperation is
+    cancelled and no completion handler is registered).
+    """
 
     if not parent.attach_suboperation(suboperation):
         suboperation.cancel()
-        return
+        return False
 
     def complete(op: Operation[T]) -> None:
         try:
@@ -70,6 +74,7 @@ def chain_suboperation(
             parent.detach_suboperation(op)
 
     suboperation.add_done_callback(complete)
+    return True
 
 
 def accept_read_delivery(
@@ -85,6 +90,11 @@ def accept_read_delivery(
     ``recv`` and delivers ``(conn, initial_data, recv_error)`` tuples. Empty reads
     close the connection without delivery. Recv failures are delivered as
     ``(conn, None, recv_error)``.
+
+    ``deliver`` may run after the parent ``ContinuousOperation`` has finished
+    (for example terminal multishot accept) when the connection was handed off
+    while the parent was still active. Only ``CancelledError`` suppresses
+    delivery. If the nested recv cannot be attached, the socket is closed.
     """
 
     normalized_recv_size = normalize_accept_recv_size(recv_size)
@@ -107,6 +117,7 @@ def accept_read_delivery(
                 return
             deliver((conn, data, None))
 
-        chain_suboperation(parent, recv_op, on_recv_complete)
+        if not chain_suboperation(parent, recv_op, on_recv_complete):
+            conn.close()
 
     return on_conn
