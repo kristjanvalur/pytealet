@@ -139,9 +139,14 @@ def _complete_connect_result(
         operation.complete(sock)
         return
     try:
-        operation.complete(result_wrapper(sock))
+        result = result_wrapper(sock)
     except BaseException as exc:
         _close_socket(sock)
+        operation.complete_error(exc)
+        return
+    try:
+        operation.complete(result)
+    except BaseException as exc:
         operation.complete_error(exc)
 
 

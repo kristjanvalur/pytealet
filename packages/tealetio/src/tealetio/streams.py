@@ -20,7 +20,11 @@ from .io_manager import (
     SocketSendBuffer,
     SupportsProactorIO,
 )
-from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
+from .continuous_callbacks import (
+    AcceptManyDelivery,
+    AcceptStreamsDelivery as _AcceptedStreams,
+    AcceptStreamsManyDelivery as _AcceptedDelivery,
+)
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -929,7 +933,13 @@ def _start_stream_server(
     server: StreamServer | None = None
     io = cast(ServerIO, _require_proactor_io(scheduler))
 
-    def on_accept_streams(streams: _AcceptedStreams) -> None:
+    def on_accept(delivery: _AcceptedDelivery) -> None:
+        if isinstance(delivery[0], socket.socket):
+            conn, _initial_data, recv_error = cast(AcceptManyDelivery, delivery)
+            if recv_error is not None:
+                conn.close()
+            return
+        streams = cast(_AcceptedStreams, delivery)
         if server is None:
             reader, writer = streams
             writer.close()
@@ -944,7 +954,7 @@ def _start_stream_server(
 
     accept_operation = io.accept_many_streams(
         sock,
-        on_accept_streams,
+        on_accept,
         limit=limit,
         stream_factory=stream_factory,
         async_=async_,
@@ -1119,9 +1129,9 @@ def start_server(
     An explicit ``stream_factory`` must match those stream types; ``async_`` only
     picks the default factory when it is omitted.
 
-    Accepts use ``scheduler.io.accept_many()`` (``ProactorIOManager``), so
-    ``UringProactor`` can service connections through multishot accept when the
-    runtime probe allows it.
+    Accepts use ``scheduler.io.accept_many_streams()`` (``ProactorIOManager``),
+    so ``UringProactor`` can service connections through multishot accept when
+    the runtime probe allows it.
     ``recv_size`` opts into accept-time pre-read and reader prefill for
     client-speaks-first protocols (for example HTTP); leave it ``None`` when
     the server may speak first or when the reader will arm eager receive later.

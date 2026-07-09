@@ -10,6 +10,7 @@ from .locks import ThreadsafeEvent
 from .continuous_callbacks import (
     AcceptManyDelivery,
     AcceptStreamsDelivery,
+    AcceptStreamsManyDelivery,
     accept_read_delivery,
     normalize_accept_recv_size,
     wrap_accept_delivery,
@@ -180,7 +181,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
     def accept_many_streams(
         self,
         sock: socket.socket,
-        callback: Callable[[AcceptStreamsDelivery], object],
+        callback: Callable[[AcceptStreamsManyDelivery], object],
         *,
         limit: int = 2**16,
         stream_factory: Any | None = None,
@@ -459,7 +460,7 @@ class ProactorIOManager:
     def accept_many_streams(
         self,
         sock: socket.socket,
-        callback: Callable[[AcceptStreamsDelivery], object],
+        callback: Callable[[AcceptStreamsManyDelivery], object],
         *,
         limit: int = 2**16,
         stream_factory: Any | None = None,
@@ -469,28 +470,41 @@ class ProactorIOManager:
         """Start ``proactor.accept_many`` and deliver a stream pair per accept.
 
         When ``recv_size`` is set, the accept-time read pre-fills the reader
-        buffer via ``feed_initial``.
+        buffer via ``feed_initial``. Recv failures are delivered as
+        ``(conn, None, recv_error)`` tuples so callers can log or close.
         """
 
         from .streams import _open_streams
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
 
-        def deliver_streams(conn: socket.socket, received: bytes | None = None) -> None:
+        def deliver_accept(accepted: AcceptManyDelivery) -> None:
+            conn, initial_data, recv_error = accepted
+
             def run() -> None:
+                if recv_error is not None:
+                    try:
+                        callback(accepted)
+                    except BaseException:
+                        conn.close()
+                    return
+
+                writer: Any = None
                 try:
-                    callback(
-                        _open_streams(
-                            self,
-                            conn,
-                            limit=limit,
-                            stream_factory=stream_factory,
-                            async_=async_,
-                            initial=received,
-                        )
+                    reader, writer = _open_streams(
+                        self,
+                        conn,
+                        limit=limit,
+                        stream_factory=stream_factory,
+                        async_=async_,
+                        initial=initial_data,
                     )
+                    callback((reader, writer))
                 except BaseException:
-                    conn.close()
+                    if writer is not None:
+                        writer.close()
+                    else:
+                        conn.close()
 
             self._marshal_accept_callback(run)
 
@@ -500,16 +514,12 @@ class ProactorIOManager:
                 callback_factory=lambda op: accept_read_delivery(
                     self._proactor,
                     op,
-                    deliver_streams,
+                    deliver_accept,
                     recv_size=normalized_recv_size,
-                    deliver_conn_data=True,
                 ),
             )
 
-        def on_conn(conn: socket.socket) -> None:
-            deliver_streams(conn)
-
-        return self._proactor.accept_many(sock, on_conn)
+        return self._proactor.accept_many(sock, wrap_accept_delivery(deliver_accept))
 
     def sock_create_streams(
         self,

@@ -1048,6 +1048,7 @@ def test_create_connect_delivery_result_wrapper_completes_with_streams() -> None
         reader, writer = operation.result()
         assert isinstance(reader, StreamReader)
         assert isinstance(writer, StreamWriter)
+        writer.close()
     finally:
         if sock.fileno() != -1:
             sock.close()

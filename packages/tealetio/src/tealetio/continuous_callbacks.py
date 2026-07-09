@@ -14,6 +14,7 @@ T = TypeVar("T")
 
 AcceptManyDelivery = tuple[socket.socket, bytes | None, BaseException | None]
 AcceptStreamsDelivery: TypeAlias = tuple[Any, Any]
+AcceptStreamsManyDelivery: TypeAlias = AcceptStreamsDelivery | AcceptManyDelivery
 _MAX_ACCEPT_RECV_SIZE = 2**16
 
 if TYPE_CHECKING:
@@ -57,21 +58,16 @@ def marshal_to_scheduler(
 def accept_read_delivery(
     proactor: Proactor,
     parent: ContinuousOperation[socket.socket],
-    deliver: Callable[..., object],
+    deliver: Callable[[AcceptManyDelivery], object],
     *,
     recv_size: int,
-    deliver_conn_data: bool = False,
 ) -> Callable[[socket.socket], None]:
     """Read initial bytes on each accepted socket before ``deliver`` runs.
 
     The proactor emits the accepted ``socket``; this handler submits a nested
-    ``recv``. By default ``deliver`` receives ``(conn, initial_data,
-    recv_error)`` tuples. With ``deliver_conn_data=True``, a successful read
-    calls ``deliver(conn, initial_data)`` so callers can marshal and map the
-    socket on the scheduler thread. Recv failures close the socket when
-    ``deliver_conn_data`` is set.
-
-    Empty reads close the connection without delivery.
+    ``recv`` and delivers ``(conn, initial_data, recv_error)`` tuples. Recv
+    failures are delivered as ``(conn, None, recv_error)`` so callers can log or
+    close the socket. Empty reads close the connection without delivery.
 
     ``deliver`` may run after the parent ``ContinuousOperation`` has finished
     (for example terminal multishot accept) when the connection was handed off
@@ -89,20 +85,11 @@ def accept_read_delivery(
                 if isinstance(exc, CancelledError):
                     conn.close()
                     return
-                if deliver_conn_data:
-                    conn.close()
-                else:
-                    deliver((conn, None, exc))
+                deliver((conn, None, exc))
                 return
             data = op.result()
             if not data:
                 conn.close()
-                return
-            if deliver_conn_data:
-                try:
-                    deliver(conn, data)
-                except BaseException:
-                    conn.close()
                 return
             deliver((conn, data, None))
 

@@ -17,6 +17,9 @@ from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 class _StubScheduler:
     """Minimal scheduler stand-in for direct ``ProactorIOManager`` unit tests."""
 
+    def call_soon_threadsafe(self, callback, *args: object) -> None:
+        callback(*args)
+
 
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(_StubScheduler(), proactor)  # type: ignore[arg-type]
