@@ -20,6 +20,7 @@ from .io_manager import (
     SocketSendBuffer,
     SupportsProactorIO,
 )
+from .continuous_callbacks import marshal_to_scheduler
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -774,11 +775,11 @@ class StreamServer:
     tealets already spawned for accepted connections keep running until they
     finish on their own; ``close()`` does not cancel them. ``wait_closed()``
     blocks until the server is closed and every dispatched handler tealet has
-    finished. Accept callbacks may run on proactor worker threads. An early,
-    lock-free ``_closed`` check in ``_dispatch_client()`` closes stray
-    connections without touching ``Condition`` state. Queued ``dispatch()``
-    turns re-check ``_closed`` under ``_shutdown`` and close without
-    incrementing ``_active_handlers`` when the server is already shut down.
+    finished. Accept callbacks are marshalled onto the scheduler thread before
+    ``_dispatch_client()`` runs. An early, lock-free ``_closed`` check closes
+    stray connections without touching ``Condition`` state. Queued ``dispatch()``
+    re-checks ``_closed`` under ``_shutdown`` and closes without incrementing
+    ``_active_handlers`` when the server is already shut down.
 
     Use as a context manager to call ``close()`` and ``wait_closed()`` on
     scope exit. ``serve_forever()`` blocks the current tealet until
@@ -917,7 +918,7 @@ class StreamServer:
                 conn.close()
                 raise
 
-        self._scheduler.call_soon_threadsafe(dispatch)
+        self._scheduler.call_soon(dispatch)
 
 
 def _start_stream_server(
@@ -947,8 +948,6 @@ def _start_stream_server(
             conn.close()
             return
         if server is None:
-            # accept_many may deliver on a worker thread before StreamServer
-            # exists; drop the connection (extremely unlikely race).
             conn.close()
             return
         server._dispatch_client(
@@ -961,7 +960,7 @@ def _start_stream_server(
         )
 
     io = cast(ServerIO, _require_proactor_io(scheduler))
-    accept_operation = io.proactor.accept_many(sock, on_accept, recv_size=recv_size)
+    accept_operation = io.proactor.accept_many(sock, marshal_to_scheduler(scheduler, on_accept), recv_size=recv_size)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
 
@@ -1134,9 +1133,9 @@ def start_server(
     connections through multishot accept when the runtime probe allows it.
     ``recv_size`` opts into accept-time pre-read and reader prefill for
     client-speaks-first protocols (for example HTTP); leave it ``None`` when
-    the server may speak first. Handler tealets are spawned through
-    ``call_soon_threadsafe`` because accept
-    callbacks may run on completion worker threads. Handler exceptions propagate
+    the server may speak first. Accept callbacks are marshalled onto the
+    scheduler thread (``continuous_callbacks.marshal_to_scheduler``) before
+    handler tealets are spawned. Handler exceptions propagate
     in the handler tealet and do not stop the listener. ``spawn()`` failures
     during dispatch are reported through the scheduler exception handler.
     """

@@ -406,7 +406,6 @@ class Proactor(Protocol):
         callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        result_pipeline: Callable[[_RecvManyResult], _RecvManyResult] | None = None,
     ) -> ContinuousOperation[_RecvManyResult]: ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
@@ -484,7 +483,6 @@ class ProactorBase:
         callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        result_pipeline: Callable[[_RecvManyResult], _RecvManyResult] | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         raise NotImplementedError
 
@@ -1126,7 +1124,6 @@ class SelectorProactor(ProactorBase):
         callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        result_pipeline: Callable[[_RecvManyResult], _RecvManyResult] | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start receiving byte chunks until EOF, cancellation, or failure.
 
@@ -1141,16 +1138,12 @@ class SelectorProactor(ProactorBase):
 
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
-
-        When ``result_pipeline`` is set, it runs on each emitted result before
-        ``callback`` and may transform or observe the value in place.
         """
 
         operation = ContinuousOperation[_RecvManyResult](
             kind="recv_many",
             fileobj=sock,
             result_callback=callback,
-            result_pipeline=result_pipeline,
         )
         sequence = 0
 
@@ -2622,7 +2615,6 @@ class UringProactor(ProactorBase):
         callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        result_pipeline: Callable[[_RecvManyResult], _RecvManyResult] | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start a continuous receive operation that completes on EOF.
 
@@ -2648,16 +2640,12 @@ class UringProactor(ProactorBase):
 
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
-
-        When ``result_pipeline`` is set, it runs on each emitted result before
-        ``callback`` and may transform or observe the value in place.
         """
 
         operation = ContinuousOperation[_RecvManyResult](
             kind="recv_many",
             fileobj=sock,
             result_callback=callback,
-            result_pipeline=result_pipeline,
         )
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
             uring_group = cast(_UringBufGroup, buf_group)

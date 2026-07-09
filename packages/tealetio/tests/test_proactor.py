@@ -766,10 +766,8 @@ class TestOperation:
             operation.result()
 
     def test_continuous_operation_emits_results_before_completion(self):
-        operation: ContinuousOperation[int] = ContinuousOperation(kind="test")
         seen: list[int] = []
-
-        operation.add_result_callback(seen.append)
+        operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
         operation._emit_result(1)
         operation._emit_result(2)
         operation._finish(result=None)
@@ -777,31 +775,53 @@ class TestOperation:
         assert seen == [1, 2]
         assert operation.done() is True
         assert operation.result() is None
-        with pytest.raises(InvalidStateError, match="already done"):
-            operation.add_result_callback(seen.append)
 
     def test_continuous_operation_emit_result_skips_when_done(self):
-        operation: ContinuousOperation[int] = ContinuousOperation(kind="test")
         seen: list[int] = []
-
-        operation.add_result_callback(seen.append)
+        operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
         assert operation._emit_result(1) is True
         operation._set_cancelled()
         assert operation._emit_result(2) is False
         assert seen == [1]
 
-    def test_continuous_operation_result_pipeline_runs_before_callbacks(self):
-        operation: ContinuousOperation[int] = ContinuousOperation(
-            kind="test",
-            result_pipeline=lambda value: value + 1,
-        )
+    def test_before_delivery_runs_handler_before_deliver(self):
+        from tealetio.continuous_callbacks import before_delivery
+
         seen: list[int] = []
-
-        operation.add_result_callback(seen.append)
-        operation._emit_result(1)
-        operation._emit_result(2)
-
+        deliver = before_delivery(lambda value: value + 1, seen.append)
+        deliver(1)
+        deliver(2)
         assert seen == [2, 3]
+
+    def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
+        from tealetio.continuous_callbacks import marshal_to_scheduler
+
+        scheduler = SyncProactorScheduler()
+        delivery_threads: list[int] = []
+
+        def exercise() -> None:
+            owner = threading.get_ident()
+            marshalled = marshal_to_scheduler(
+                scheduler,
+                lambda _result: delivery_threads.append(threading.get_ident()),
+            )
+
+            def invoke_from_worker() -> None:
+                marshalled(7)
+
+            worker = threading.Thread(target=invoke_from_worker)
+            worker.start()
+            worker.join()
+            deadline = scheduler.time() + 1.0
+            while len(delivery_threads) < 1 and scheduler.time() < deadline:
+                scheduler.sleep(0)
+            assert delivery_threads == [owner]
+
+        set_scheduler(scheduler)
+        try:
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.close()
 
 
 def test_operation_deliver_completes_without_handler() -> None:
@@ -1714,8 +1734,8 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_recv_many_result_pipeline_echoes_before_client_delivery(self):
-        from tealetio.continuous_callbacks import recv_many_echo_pipeline
+    def test_recv_many_echo_handler_runs_before_client_delivery(self):
+        from tealetio.continuous_callbacks import before_delivery, recv_many_echo_handler
 
         def _drain_peer(sock: socket.socket, proactor: SelectorProactor) -> bytes:
             chunks: list[bytes] = []
@@ -1738,9 +1758,8 @@ class TestSelectorProactor:
             writer.setblocking(False)
             operation = proactor.recv_many(
                 reader,
-                seen.append,
+                before_delivery(recv_many_echo_handler(reader), seen.append),
                 buf_group=proactor.shared_recv_buffer_pool(),
-                result_pipeline=recv_many_echo_pipeline(reader),
             )
 
             writer.send(b"hello")

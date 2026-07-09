@@ -619,7 +619,7 @@ class TestStreamsPoC:
         finally:
             _client.close()
 
-    def test_start_server_closes_accept_before_server_is_ready(
+    def test_start_server_marshalled_accept_sees_ready_server(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         real_accept_many = scheduler.proactor.accept_many
@@ -630,7 +630,7 @@ class TestStreamsPoC:
             accepted.setblocking(False)
             try:
                 callback((accepted, None, None))
-                assert accepted.fileno() == -1
+                assert accepted.fileno() != -1
             finally:
                 _client.close()
             return operation

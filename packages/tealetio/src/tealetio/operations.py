@@ -17,7 +17,6 @@ class InvalidStateError(Exception):
 
 _DoneCallback = Callable[["Operation[Any]"], object]
 _ResultCallback = Callable[[T_co], object]
-_ResultPipeline = Callable[[T_co], T_co]
 _CancelHook = Callable[[], None]
 _ProactorRef = Any
 # ``result`` and ``exception`` are mutually exclusive; one is always ``None``.
@@ -338,36 +337,21 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         kind: str,
         fileobj: object | None = None,
         result_callback: _ResultCallback[T_co] | None = None,
-        result_pipeline: _ResultPipeline[T_co] | None = None,
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj)
-        self._result_callbacks: list[_ResultCallback[T_co]] = []
-        self._result_pipeline = result_pipeline
-        if result_callback is not None:
-            self._result_callbacks.append(result_callback)
-
-    def add_result_callback(self, callback: _ResultCallback[T_co]) -> None:
-        """Register `callback` for each result produced by the operation."""
-
-        with self._lock:
-            if self._done:
-                raise InvalidStateError("continuous operation is already done")
-            self._result_callbacks.append(callback)
+        self._result_callback = result_callback
 
     def _emit_result(self, result: T_co) -> bool:
         """Deliver one result when the operation is still active.
 
-        Returns ``True`` when callbacks ran, ``False`` when the operation was
+        Returns ``True`` when the callback ran, ``False`` when the operation was
         already done (including cancelled).
         """
 
         with self._lock:
             if self._done:
                 return False
-            callbacks = list(self._result_callbacks)
-            pipeline = self._result_pipeline
-        if pipeline is not None:
-            result = pipeline(result)
-        for callback in callbacks:
+            callback = self._result_callback
+        if callback is not None:
             callback(result)
         return True
