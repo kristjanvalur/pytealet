@@ -7,6 +7,12 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .locks import ThreadsafeEvent
+from .continuous_callbacks import (
+    AcceptManyDelivery,
+    accept_read_delivery,
+    normalize_accept_recv_size,
+    wrap_accept_delivery,
+)
 from .operations import ContinuousOperation, Operation
 from .types import SocketSendBuffer
 
@@ -161,6 +167,14 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
     At runtime use ``isinstance(io, SocketIO)`` and ``io.proactor``; do not rely
     on ``isinstance(io, ServerIO)`` or ``isinstance(io, ProactorSocketIO)``.
     """
+
+    def accept_many(
+        self,
+        sock: socket.socket,
+        callback: Callable[[AcceptManyDelivery], object],
+        *,
+        recv_size: int | None = None,
+    ) -> ContinuousOperation[socket.socket]: ...
 
 
 ProactorSocketIO = ServerIO
@@ -372,6 +386,28 @@ class ProactorIOManager:
         callback: Callable[[int], object],
     ) -> ContinuousOperation[int]:
         return self._proactor.poll_many(fd, mask, callback)
+
+    def accept_many(
+        self,
+        sock: socket.socket,
+        callback: Callable[[AcceptManyDelivery], object],
+        *,
+        recv_size: int | None = None,
+    ) -> ContinuousOperation[socket.socket]:
+        """Start ``proactor.accept_many`` with optional accept-time pre-read."""
+
+        normalized_recv_size = normalize_accept_recv_size(recv_size)
+        if normalized_recv_size is None:
+            return self._proactor.accept_many(sock, wrap_accept_delivery(callback))
+        return self._proactor.accept_many(
+            sock,
+            callback_factory=lambda op: accept_read_delivery(
+                self._proactor,
+                op,
+                callback,
+                recv_size=normalized_recv_size,
+            ),
+        )
 
     def open(self, path: str, mode: str = "rb") -> IOFile:
         flags, file_mode = parse_open_mode(mode)

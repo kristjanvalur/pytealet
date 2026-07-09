@@ -4,19 +4,41 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, TypeVar
+from .tasks import CancelledError
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from .operations import ContinuousOperation, Operation
-from .proactor import _normalize_accept_recv_size
 from .recv_iter import RECV_MANY_BUFFER_PRESSURE, _RecvManyResult
 
-AcceptManyResult = tuple[socket.socket, bytes | None, BaseException | None]
+AcceptManyDelivery = tuple[socket.socket, bytes | None, BaseException | None]
+_MAX_ACCEPT_RECV_SIZE = 2**16
 
 if TYPE_CHECKING:
     from .proactor import Proactor
     from .scheduler import BaseScheduler
 
 T = TypeVar("T")
+
+
+def normalize_accept_recv_size(recv_size: int | None) -> int | None:
+    if recv_size is None:
+        return None
+    if recv_size <= 0:
+        raise ValueError("recv_size must be positive when provided")
+    if recv_size > _MAX_ACCEPT_RECV_SIZE:
+        return _MAX_ACCEPT_RECV_SIZE
+    return recv_size
+
+
+def wrap_accept_delivery(
+    deliver: Callable[[AcceptManyDelivery], object],
+) -> Callable[[socket.socket], None]:
+    """Adapt a delivery callback to the proactor's bare-socket ``accept_many`` results."""
+
+    def on_conn(conn: socket.socket) -> None:
+        deliver((conn, None, None))
+
+    return on_conn
 
 
 def before_delivery(
@@ -66,7 +88,6 @@ def chain_suboperation(
 def recv_many_echo_delivery(
     proactor: Proactor,
     parent: ContinuousOperation[_RecvManyResult],
-    sock: socket.socket,
     deliver: Callable[[_RecvManyResult], object],
     *,
     fire_and_forget: bool = False,
@@ -78,6 +99,8 @@ def recv_many_echo_delivery(
     cancellation, but ``deliver`` runs immediately without waiting for echo
     completion. Send failures are always swallowed; ``recv_many`` keeps running.
     """
+
+    sock = cast(socket.socket, parent.fileobj)
 
     def on_result(result: _RecvManyResult) -> None:
         index, payload = result
@@ -109,34 +132,31 @@ def recv_many_echo_delivery(
 
 def accept_read_delivery(
     proactor: Proactor,
-    parent: ContinuousOperation[AcceptManyResult],
-    deliver: Callable[[AcceptManyResult], object],
+    parent: ContinuousOperation[socket.socket],
+    deliver: Callable[[AcceptManyDelivery], object],
     *,
     recv_size: int,
-) -> Callable[[AcceptManyResult], None]:
+) -> Callable[[socket.socket], None]:
     """Read initial bytes on each accepted socket before ``deliver`` runs.
 
-    Alternative to built-in ``accept_many(..., recv_size=...)``: the proactor
-    emits ``(conn, None, None)`` on accept, this handler submits a nested
-    ``recv``, and ``deliver`` runs from the recv completion callback. Empty reads
+    The proactor emits the accepted ``socket``; this handler submits a nested
+    ``recv`` and delivers ``(conn, initial_data, recv_error)`` tuples. Empty reads
     close the connection without delivery. Recv failures are delivered as
     ``(conn, None, recv_error)``.
     """
 
-    normalized_recv_size = _normalize_accept_recv_size(recv_size)
+    normalized_recv_size = normalize_accept_recv_size(recv_size)
     assert normalized_recv_size is not None
 
-    def on_accept(result: AcceptManyResult) -> None:
-        conn, initial_data, recv_error = result
-        if recv_error is not None or initial_data is not None:
-            deliver(result)
-            return
-
+    def on_conn(conn: socket.socket) -> None:
         recv_op = proactor.recv(conn, normalized_recv_size)
 
         def on_recv_complete(op: Operation[bytes]) -> None:
             exc = op.exception()
             if exc is not None:
+                if isinstance(exc, CancelledError):
+                    conn.close()
+                    return
                 deliver((conn, None, exc))
                 return
             data = op.result()
@@ -147,4 +167,4 @@ def accept_read_delivery(
 
         chain_suboperation(parent, recv_op, on_recv_complete)
 
-    return on_accept
+    return on_conn

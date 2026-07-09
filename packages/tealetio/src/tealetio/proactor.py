@@ -93,10 +93,9 @@ _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyCallback = Callable[[_RecvManyResult], object]
 _RecvManyCallbackFactory = Callable[[ContinuousOperation[_RecvManyResult]], _RecvManyCallback]
 _RecvIterBuffer = RecvIterBuffer
-AcceptManyResult: TypeAlias = tuple[socket.socket, bytes | None, BaseException | None]
+AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
 _AcceptManyCallbackFactory = Callable[[ContinuousOperation[AcceptManyResult]], _AcceptManyCallback]
-_MAX_ACCEPT_RECV_SIZE = 2**16
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
@@ -173,28 +172,16 @@ def _close_raw_fd(fd: int) -> None:
 def _handoff_accept_many(
     parent: ContinuousOperation[AcceptManyResult],
     conn: socket.socket,
-    initial_data: bytes | None,
-    recv_error: BaseException | None,
 ) -> bool:
     """Emit one accepted connection or close the socket when the parent is done."""
 
-    if parent._emit_result((conn, initial_data, recv_error)):
+    if parent._emit_result(conn):
         return True
     conn.close()
     return False
 
 
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
-
-
-def _normalize_accept_recv_size(recv_size: int | None) -> int | None:
-    if recv_size is None:
-        return None
-    if recv_size <= 0:
-        raise ValueError("recv_size must be positive when provided")
-    if recv_size > _MAX_ACCEPT_RECV_SIZE:
-        return _MAX_ACCEPT_RECV_SIZE
-    return recv_size
 
 
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
@@ -382,15 +369,14 @@ class Proactor(Protocol):
         sock: socket.socket,
         callback: _AcceptManyCallback | None = None,
         *,
-        recv_size: int | None = None,
         callback_factory: _AcceptManyCallbackFactory | None = None,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections until cancelled or failed.
 
-        Callback results are ``(socket, initial_data, recv_error)``. Call
-        ``socket.getpeername()`` when the peer address is needed. When
-        ``recv_error`` is set the callback must close the socket (or delegate to
-        a helper such as ``start_server`` that does).
+        Each callback receives the accepted ``socket``. Call
+        ``socket.getpeername()`` when the peer address is needed. Use
+        ``ProactorIOManager.accept_many`` or ``continuous_callbacks`` helpers to
+        attach accept-time reads or richer delivery shapes.
         """
 
         ...
@@ -1046,24 +1032,17 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         callback: _AcceptManyCallback | None = None,
         *,
-        recv_size: int | None = None,
         callback_factory: _AcceptManyCallbackFactory | None = None,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Start accepting connections until the operation is cancelled or fails.
 
         `callback` may run on any backend worker thread. Each accepted connection
-        is delivered as ``(socket, initial_data, recv_error)``. Call
-        ``socket.getpeername()`` when the peer address is needed. ``recv_error``
-        is ``None`` on success. When it is set the callback must close the
-        socket. ``recv_size`` is an optional hint; this backend does
-        not capture initial bytes and always delivers ``initial_data`` as
-        ``None``.
+        is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
+        the peer address is needed.
 
         Pass ``callback_factory`` instead of ``callback`` when the handler needs
         a reference to the returned ``ContinuousOperation``.
         """
-
-        recv_size = _normalize_accept_recv_size(recv_size)
 
         operation = _spawn_accept_many_operation(sock, callback, callback_factory=callback_factory)
 
@@ -1075,7 +1054,7 @@ class SelectorProactor(ProactorBase):
                 except (BlockingIOError, InterruptedError):
                     return ContinuousStepResult(progressed=progressed)
                 configure_scheduler_socket(conn)
-                _handoff_accept_many(operation, conn, None, None)
+                _handoff_accept_many(operation, conn)
                 progressed = True
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
@@ -1188,8 +1167,7 @@ class SelectorProactor(ProactorBase):
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
 
         Pass ``callback_factory`` instead of ``callback`` when the handler needs
-        a reference to the returned ``ContinuousOperation`` (for example to
-        register cancellable child operations).
+        a reference to the returned ``ContinuousOperation``.
         """
 
         operation = _spawn_recv_many_operation(sock, callback, callback_factory=callback_factory)
@@ -2171,7 +2149,6 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         callback: _AcceptManyCallback | None = None,
         *,
-        recv_size: int | None = None,
         callback_factory: _AcceptManyCallbackFactory | None = None,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Start a continuous accept operation.
@@ -2180,28 +2157,16 @@ class UringProactor(ProactorBase):
         resubmits one-shot ``submit_accept()`` after each connection. `callback`
         may run on any uring completion service thread.
 
-        Each accepted connection is delivered as ``(socket, initial_data,
-        recv_error)``. Call ``socket.getpeername()`` when the peer address is
-        needed. ``recv_error`` is ``None`` on success; when set the callback must
-        close the socket (or delegate to a helper such as ``start_server`` that
-        does). ``initial_data`` is ``None`` when no
-        initial bytes were captured. ``recv_size`` is an optional hint: when
-        multishot accept is available,
-        each accept completion arms a ``receive_on_accept`` recv leg and the
-        parent callback runs only after data arrives (or the peer closes without
-        sending, in which case the connection is dropped). When the hint cannot
-        be honoured, connections are delivered with ``initial_data`` set to
-        ``None``.
+        Each accepted connection is delivered as the accepted ``socket``. Call
+        ``socket.getpeername()`` when the peer address is needed. Use
+        ``ProactorIOManager.accept_many`` or ``continuous_callbacks`` helpers to
+        attach accept-time reads or richer delivery shapes.
 
         Pass ``callback_factory`` instead of ``callback`` when the handler needs
         a reference to the returned ``ContinuousOperation``.
         """
 
-        recv_size = _normalize_accept_recv_size(recv_size)
-
         operation = _spawn_accept_many_operation(sock, callback, callback_factory=callback_factory)
-        pending_recv: list[_UringEntry] = []
-        accept_finished: list[bool] = [False]
         accept_entry_ref: list[_UringEntry | None] = [None]
         if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
             # one multishot accept stays armed until F_MORE clears or we cancel.
@@ -2210,15 +2175,11 @@ class UringProactor(ProactorBase):
                 lambda entry, completion: self._deliver_uring_accept_many(
                     entry,
                     completion,
-                    recv_size,
-                    pending_recv,
-                    accept_finished,
                     accept_entry_ref,
                 ),
                 multishot=True,
             )
             accept_entry_ref[0] = entry
-            self._bind_accept_many_cancel(operation, pending_recv)
             self._submit_uring_entry(
                 entry,
                 lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
@@ -2231,7 +2192,6 @@ class UringProactor(ProactorBase):
             operation,
             lambda entry, completion: self._deliver_uring_accept_many_oneshot(entry, completion, submit_box),
         )
-        self._bind_accept_many_cancel(operation, pending_recv)
 
         def submit_accept() -> _UringCompletion:
             return self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS)
@@ -2240,52 +2200,12 @@ class UringProactor(ProactorBase):
         self._submit_uring_entry(entry, submit_accept)
         return operation
 
-    def _bind_accept_many_cancel(
-        self,
-        operation: ContinuousOperation[AcceptManyResult],
-        pending_recv: list[_UringEntry],
-    ) -> None:
-        backend_cancel = operation._cancel_hook
-        if backend_cancel is None:
-            return
-
-        def cancel() -> None:
-            backend_cancel()
-            self._cancel_pending_receive_on_accept(pending_recv)
-
-        operation.set_cancel(cancel)
-
-    def _cancel_pending_receive_on_accept(self, pending_recv: list[_UringEntry]) -> None:
-        while pending_recv:
-            entry = pending_recv.pop()
-            completion = entry.completion
-            if completion is not None:
-                self._submit_cancel(completion)
-            cast(socket.socket, entry.operation.fileobj).close()
-            if not entry.operation.done():
-                entry.operation._set_cancelled()
-            if entry.active:
-                self._deactivate_uring_entry(entry)
-            else:
-                entry.completion = None
-
-    def _finish_accept_many_if_ready(
-        self,
-        operation: ContinuousOperation[AcceptManyResult],
-        pending_recv: list[_UringEntry],
-        accept_finished: list[bool],
-    ) -> None:
-        if accept_finished[0] and not pending_recv and not operation.done():
-            operation._finish(result=None)
-
     def _fail_accept_many_operation(
         self,
         operation: ContinuousOperation[AcceptManyResult],
-        pending_recv: list[_UringEntry],
         accept_entry_ref: list[_UringEntry | None],
         exc: BaseException,
     ) -> None:
-        self._cancel_pending_receive_on_accept(pending_recv)
         accept_entry = accept_entry_ref[0]
         if accept_entry is not None:
             if accept_entry.active:
@@ -2311,7 +2231,7 @@ class UringProactor(ProactorBase):
             operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
         conn = socket_from_uring_fd(completion.res)
-        _handoff_accept_many(operation, conn, None, None)
+        _handoff_accept_many(operation, conn)
         if operation.done():
             return operation
         self._queue_entry_resubmit(entry, submit_box[0])
@@ -2321,9 +2241,6 @@ class UringProactor(ProactorBase):
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
-        recv_size: int | None,
-        pending_recv: list[_UringEntry],
-        accept_finished: list[bool],
         accept_entry_ref: list[_UringEntry | None],
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[AcceptManyResult], entry.operation)
@@ -2333,7 +2250,6 @@ class UringProactor(ProactorBase):
             accept_entry_ref[0] = None
             self._fail_accept_many_operation(
                 operation,
-                pending_recv,
                 accept_entry_ref,
                 OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
             )
@@ -2341,81 +2257,14 @@ class UringProactor(ProactorBase):
         conn = socket_from_uring_fd(completion.res)
         if operation.done():
             conn.close()
-        elif recv_size is None:
-            _handoff_accept_many(operation, conn, None, None)
         else:
-            buffer = bytearray(recv_size)
-            view = memoryview(buffer)
-            recv_operation = Operation[None](kind="receive_on_accept", fileobj=conn)
-            recv_entry = self._uring_entry(
-                recv_operation,
-                lambda recv_entry, recv_completion: self._deliver_receive_on_accept(
-                    recv_entry,
-                    recv_completion,
-                    operation,
-                    conn,
-                    view,
-                    pending_recv,
-                    accept_finished,
-                    accept_entry_ref,
-                ),
-            )
-            # Re-check before arming: cancel may have completed after the guard above.
-            if operation.done():
-                conn.close()
-            else:
-                pending_recv.append(recv_entry)
-                self._submit_uring_entry(recv_entry, lambda: self._ring.submit_recv(conn.fileno(), buffer, recv_entry))
+            _handoff_accept_many(operation, conn)
         if not completion.flags & uring_api.IORING_CQE_F_MORE:
             self._deactivate_uring_entry(entry)
             accept_entry_ref[0] = None
-            if pending_recv:
-                accept_finished[0] = True
-            else:
+            if not operation.done():
                 operation._finish(result=None)
         return operation
-
-    def _deliver_receive_on_accept(
-        self,
-        entry: _UringEntry,
-        completion: _UringCompletion,
-        parent: ContinuousOperation[AcceptManyResult],
-        conn: socket.socket,
-        data: memoryview,
-        pending_recv: list[_UringEntry],
-        accept_finished: list[bool],
-        accept_entry_ref: list[_UringEntry | None],
-    ) -> Operation[Any] | None:
-        recv_operation = entry.operation
-        res = completion.res
-        try:
-            pending_recv.remove(entry)
-        except ValueError:
-            pass
-        if parent.done():
-            conn.close()
-            recv_operation._finish(result=None)
-            self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
-            return recv_operation
-        if res < 0:
-            _handoff_accept_many(
-                parent,
-                conn,
-                None,
-                OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
-            )
-            recv_operation._finish(result=None)
-            self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
-            return recv_operation
-        if res == 0:
-            conn.close()
-            recv_operation._finish(result=None)
-            self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
-            return recv_operation
-        _handoff_accept_many(parent, conn, data[:res].tobytes(), None)
-        recv_operation._finish(result=None)
-        self._finish_accept_many_if_ready(parent, pending_recv, accept_finished)
-        return recv_operation
 
     def create_socket(
         self,
@@ -3064,9 +2913,6 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
-        if entry.operation.kind == "receive_on_accept" and not entry.active:
-            self._deactivate_uring_entry(entry)
-            return None
         if entry.operation.done():
             if entry.active:
                 self._deactivate_uring_entry(entry)
@@ -3088,7 +2934,7 @@ class UringProactor(ProactorBase):
             self._deactivate_uring_entry(entry)
         if entry.operation.done():
             return entry.operation
-        if res < 0 and entry.operation.kind != "receive_on_accept":
+        if res < 0:
             entry.operation.deliver(
                 self,
                 exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),

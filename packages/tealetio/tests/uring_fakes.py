@@ -276,10 +276,6 @@ class _FakeUringRing:
         operation = getattr(user_data, "operation", None)
         kind = getattr(operation, "kind", None)
         self.submitted_recv.append((fd, buf, user_data))
-        if kind == "receive_on_accept":
-            completion = self._completion(user_data, res=0, result=0)
-            self.pending_accept_recv.append(completion)
-            return completion
         if kind == "recv_many":
             completion = self._completion(user_data, res=0, result=0)
             self.pending_recv_oneshot.append(completion)

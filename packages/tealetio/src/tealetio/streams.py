@@ -20,7 +20,7 @@ from .io_manager import (
     SocketSendBuffer,
     SupportsProactorIO,
 )
-from .continuous_callbacks import marshal_to_scheduler
+from .continuous_callbacks import AcceptManyDelivery as _AcceptedConnection, marshal_to_scheduler
 from .locks import Condition
 from .operations import ContinuousOperation
 from .scheduler import BaseScheduler
@@ -388,7 +388,6 @@ _StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
 _NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
 _AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 _ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
-_AcceptedConnection: TypeAlias = tuple[socket.socket, bytes | None, BaseException | None]
 
 
 def default_stream_factory(
@@ -793,7 +792,7 @@ class StreamServer:
         self,
         scheduler: BaseScheduler,
         sockets: list[socket.socket],
-        accept_operation: ContinuousOperation[_AcceptedConnection],
+        accept_operation: ContinuousOperation[socket.socket],
     ) -> None:
         self._scheduler = scheduler
         self._io = _require_proactor_io(scheduler)
@@ -815,7 +814,7 @@ class StreamServer:
         return self._sockets
 
     @property
-    def accept_operation(self) -> ContinuousOperation[_AcceptedConnection]:
+    def accept_operation(self) -> ContinuousOperation[socket.socket]:
         return self._accept_operation
 
     def close(self) -> None:
@@ -934,8 +933,8 @@ def _start_stream_server(
     """Start ``accept_many`` on a listening socket and return a ``StreamServer``.
 
     Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
-    ``recv_size`` opts into accept-time pre-read on backends that honour the
-    hint (multishot io_uring accept). Use only for client-speaks-first
+    ``recv_size`` opts into accept-time pre-read via ``io.accept_many``. Use only
+    for client-speaks-first
     protocols such as HTTP; server-speaks-first clients will not reach the
     handler until they send data or close.
     """
@@ -960,7 +959,7 @@ def _start_stream_server(
         )
 
     io = cast(ServerIO, _require_proactor_io(scheduler))
-    accept_operation = io.proactor.accept_many(sock, marshal_to_scheduler(scheduler, on_accept), recv_size=recv_size)
+    accept_operation = io.accept_many(sock, marshal_to_scheduler(scheduler, on_accept), recv_size=recv_size)
     server = StreamServer(scheduler, [sock], accept_operation)
     return server
 

@@ -24,6 +24,7 @@ from tealetio.streams import (
 )
 from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
+    _DeferredUringRing,
     _FakeUringRing,
     _patch_uring_capabilities,
     run_scheduler_task,
@@ -36,6 +37,10 @@ _HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
 
 def _scheduler_with_fake_ring() -> SyncProactorScheduler:
     return SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+
+
+def _scheduler_with_deferred_ring() -> SyncProactorScheduler:
+    return SyncProactorScheduler(lambda: UringProactor(ring_factory=_DeferredUringRing))
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
@@ -622,10 +627,10 @@ class TestStreamsPoC:
     def test_start_server_marshalled_accept_sees_ready_server(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        real_accept_many = scheduler.proactor.accept_many
+        real_io_accept_many = scheduler.io.accept_many
 
         def eager_accept_many(sock: socket.socket, callback, *, recv_size=None):
-            operation = real_accept_many(sock, callback, recv_size=recv_size)
+            operation = real_io_accept_many(sock, callback, recv_size=recv_size)
             _client, accepted = socket.socketpair()
             accepted.setblocking(False)
             try:
@@ -635,7 +640,7 @@ class TestStreamsPoC:
                 _client.close()
             return operation
 
-        monkeypatch.setattr(scheduler.proactor, "accept_many", eager_accept_many)
+        monkeypatch.setattr(scheduler.io, "accept_many", eager_accept_many)
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
@@ -670,13 +675,13 @@ class TestStreamsPoC:
 
         def run_with_recv_size(recv_size: int | None) -> None:
             captured: list[int | None] = []
-            real_accept_many = scheduler.proactor.accept_many
+            real_accept_many = scheduler.io.accept_many
 
             def capture_accept_many(sock: socket.socket, callback, *, recv_size=None):
                 captured.append(recv_size)
                 return real_accept_many(sock, callback, recv_size=recv_size)
 
-            monkeypatch.setattr(scheduler.proactor, "accept_many", capture_accept_many)
+            monkeypatch.setattr(scheduler.io, "accept_many", capture_accept_many)
 
             def exercise() -> None:
                 server = start_server(
@@ -1032,7 +1037,7 @@ class TestStreamsFakeUring:
 
     def test_start_server_closes_connection_on_recv_error(self, monkeypatch: pytest.MonkeyPatch):
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
-        scheduler = _scheduler_with_fake_ring()
+        scheduler = _scheduler_with_deferred_ring()
         set_scheduler(scheduler)
         handled = Event()
 
@@ -1045,7 +1050,7 @@ class TestStreamsFakeUring:
             proactor = scheduler.proactor
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
-            proactor.ring.complete_accept_recv_error(-errno.EIO)
+            proactor.ring.complete_recv_error(-errno.EIO)
             proactor.wait(proactor.get_time() + 0.05)
             assert handled.is_set() is False
             assert server._active_handlers == 0
@@ -1055,7 +1060,7 @@ class TestStreamsFakeUring:
 
     def test_start_server_prefills_reader_from_accept_preread(self, monkeypatch: pytest.MonkeyPatch):
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
-        scheduler = _scheduler_with_fake_ring()
+        scheduler = _scheduler_with_deferred_ring()
         set_scheduler(scheduler)
         handled = Event()
         received: list[bytes] = []
@@ -1072,7 +1077,7 @@ class TestStreamsFakeUring:
             def exercise() -> None:
                 proactor.ring.complete_accept_multishot("peer-1")
                 proactor.wait(proactor.get_time() + 0.05)
-                proactor.ring.complete_accept_recv(b"early")
+                proactor.ring.complete_recv(b"early")
                 handled.swait()
 
             scheduler.run_until_complete(scheduler.spawn(exercise))

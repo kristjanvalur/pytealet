@@ -4,7 +4,7 @@ import threading
 import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from concurrent.futures import CancelledError
+from .tasks import CancelledError
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, cast
 
