@@ -161,32 +161,3 @@ class IOWaiterFake(Generic[T]):
     def wait(self) -> T:
         return self._value
 
-
-class IOWaiterComposite(Generic[T]):
-    """IO handle backed by caller-supplied ``wait``, ``cancel``, and ``forget`` hooks.
-
-    For composite work over multiple underlying operations (for example a chunked
-    send) where each disposition needs its own continuation logic.
-    """
-
-    __slots__ = ("_wait", "_cancel", "_forget")
-
-    def __init__(
-        self,
-        *,
-        wait: Callable[[], T],
-        cancel: Callable[[], None],
-        forget: Callable[[], None],
-    ) -> None:
-        self._wait = wait
-        self._cancel = cancel
-        self._forget = forget
-
-    def wait(self) -> T:
-        return self._wait()
-
-    def cancel(self) -> None:
-        self._cancel()
-
-    def forget(self) -> None:
-        self._forget()

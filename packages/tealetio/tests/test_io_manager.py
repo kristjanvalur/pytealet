@@ -31,7 +31,8 @@ class _StubScheduler:
             raise context["exception"]
         handler(context)
 
-    def call_soon_threadsafe(self, callback, *args: object) -> None:
+    def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
+        del kwargs
         try:
             callback(*args)
         except BaseException as exc:
