@@ -160,4 +160,3 @@ class IOWaiterFake(Generic[T]):
 
     def wait(self) -> T:
         return self._value
-

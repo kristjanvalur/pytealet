@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .continuous_callbacks import (
@@ -53,7 +52,6 @@ __all__ = [
     "IO_UNSUPPORTED_ERROR",
     "IOFile",
     "IOOperation",
-
     "IOWaiter",
     "IOWaiterChainableProtocol",
     "IOWaiterFake",
@@ -101,9 +99,7 @@ class SocketIO(Protocol):
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> IOWaiter[tuple[bytes, Any]]: ...
 
-    def sock_recvfrom_into(
-        self, sock: socket.socket, buf: Any, nbytes: int = 0
-    ) -> IOWaiter[tuple[int, Any]]: ...
+    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> IOWaiter[tuple[int, Any]]: ...
 
     def sock_sendall(
         self,
