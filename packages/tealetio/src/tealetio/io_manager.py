@@ -385,6 +385,54 @@ class ProactorIOManager:
             )
         )
 
+    def _guard_waiter_close_on_failure(
+        self,
+        waiter: IOWaiterProtocol[T],
+        on_failure: Callable[[], None],
+    ) -> IOWaiterProtocol[T]:
+        """POC helper: run ``on_failure`` when a chained ``wait()`` exits exceptionally."""
+
+        class _Guard:
+            __slots__ = ("_waiter",)
+
+            def __init__(self, inner: IOWaiterProtocol[T]) -> None:
+                self._waiter = inner
+
+            def forget(self) -> None:
+                self._waiter.forget()
+
+            def wait(self) -> T:
+                try:
+                    return self._waiter.wait()
+                except BaseException:
+                    on_failure()
+                    raise
+
+        return _Guard(waiter)
+
+    def sock_connect_alt(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: SocketSendBuffer | None = None,
+    ) -> IOWaiter[None]:
+        """POC: connect then optional send via ``IOWaiterChainable`` primitives."""
+
+        if initial is None:
+            return self._waiter(self._proactor.connect(sock, address))
+        payload = memoryview(initial)
+        if not payload:
+            return self._waiter(self._proactor.connect(sock, address))
+
+        def create_send(_parent: IOWaiterChainableProtocol[None]) -> IOWaiterProtocol[None]:
+            return self._waiter(self._proactor.send(sock, payload))
+
+        return self._waiter(
+            self._proactor.connect(sock, address),
+            create_next=create_send,
+        )
+
     def sock_create(
         self,
         family: int,
@@ -421,6 +469,70 @@ class ProactorIOManager:
                     initial_data,
                 ),
             )
+        )
+
+    def sock_create_alt(
+        self,
+        family: int,
+        type: int,
+        proto: int = 0,
+        *,
+        flags: int = 0,
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
+    ) -> IOWaiter[socket.socket]:
+        """POC: create, optional connect, optional send via ``IOWaiterChainable`` primitives."""
+
+        if initial_data is not None and connect_to is None:
+            raise ValueError("initial_data requires connect_to")
+        if connect_to is None:
+            return self._waiter(
+                self._proactor.create_socket(
+                    family,
+                    type,
+                    proto,
+                    flags=flags,
+                )
+            )
+
+        payload = memoryview(initial_data) if initial_data is not None else None
+
+        def create_connect(parent: IOWaiterChainableProtocol[socket.socket]) -> IOWaiterProtocol[socket.socket]:
+            sock = parent.value()
+
+            def finish_connected(
+                connect_parent: IOWaiterChainableProtocol[socket.socket],
+            ) -> IOWaiterProtocol[socket.socket]:
+                connected_sock = connect_parent.value()
+                if payload is None or not payload:
+                    return IOWaiterFake(connected_sock)
+                return self._waiter(
+                    self._proactor.send(connected_sock, payload),
+                    map_result=lambda _sent: connected_sock,
+                    on_cleanup=abortive_close,
+                )
+
+            try:
+                connect_waiter = self._waiter(
+                    self._proactor.connect(sock, connect_to),
+                    map_result=lambda _none: sock,
+                    create_next=finish_connected,
+                    on_cleanup=abortive_close,
+                )
+            except BaseException:
+                abortive_close(sock)
+                raise
+            return self._guard_waiter_close_on_failure(connect_waiter, lambda: abortive_close(sock))
+
+        return self._waiter(
+            self._proactor.create_socket(
+                family,
+                type,
+                proto,
+                flags=flags,
+            ),
+            create_next=create_connect,
+            on_cleanup=abortive_close,
         )
 
     def poll(self, fd: int, mask: int) -> IOWaiter[int]:

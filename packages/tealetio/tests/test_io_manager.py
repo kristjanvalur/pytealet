@@ -947,6 +947,141 @@ class TestProactorIOManagerDirect:
         assert isinstance(operation, ContinuousOperation)
 
 
+class TestProactorIOManagerSockComposeAlt:
+    def test_sock_connect_alt_without_initial_uses_plain_connect(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        try:
+            io.sock_connect_alt(sock, ("127.0.0.1", 9)).wait()
+            assert proactor.send_calls == []
+        finally:
+            sock.close()
+
+    def test_sock_connect_alt_chains_send_after_connect(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        try:
+            io.sock_connect_alt(sock, ("127.0.0.1", 9), initial=b"hi").wait()
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hi"
+            assert proactor.send_calls[0][0] is sock
+        finally:
+            sock.close()
+
+    def test_sock_connect_alt_skips_empty_initial(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        try:
+            io.sock_connect_alt(sock, ("127.0.0.1", 9), initial=b"").wait()
+            assert proactor.send_calls == []
+        finally:
+            sock.close()
+
+    def test_sock_create_alt_without_connect_to_uses_plain_create(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = io.sock_create_alt(socket.AF_INET, socket.SOCK_STREAM).wait()
+        try:
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
+        finally:
+            sock.close()
+
+    def test_sock_create_alt_chains_connect_without_factory(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        address = ("127.0.0.1", 9)
+        sock = io.sock_create_alt(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=address,
+        ).wait()
+        try:
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
+            assert proactor.send_calls == []
+        finally:
+            sock.close()
+
+    def test_sock_create_alt_chains_connect_and_send_without_factory(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        address = ("127.0.0.1", 9)
+        sock = io.sock_create_alt(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=address,
+            initial_data=b"hi",
+        ).wait()
+        try:
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hi"
+            assert proactor.send_calls[0][0] is sock
+        finally:
+            sock.close()
+
+    def test_sock_create_alt_rejects_initial_data_without_connect_to(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        with pytest.raises(ValueError, match="initial_data requires connect_to"):
+            io.sock_create_alt(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                initial_data=b"hi",
+            )
+
+    def test_sock_create_alt_closes_socket_when_connect_fails(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def failing_connect(
+            sock: socket.socket,
+            address: Any,
+            *,
+            operation_factory: Any | None = None,
+        ) -> Operation[None]:
+            del address, operation_factory
+            operation = Operation[None](kind="connect", fileobj=sock)
+            operation._finish(exception=OSError("connect failed"))
+            return operation
+
+        proactor.connect = failing_connect  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="connect failed"):
+            io.sock_create_alt(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+            ).wait()
+        assert proactor.last_create_socket is not None
+        assert proactor.last_create_socket.fileno() == -1
+
+    def test_sock_create_alt_uses_io_waiter_chain(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        seen: list[str] = []
+        original_waiter = io._waiter
+
+        def tracking_waiter(*args: Any, **kwargs: Any) -> IOWaiter[Any]:
+            waiter = original_waiter(*args, **kwargs)
+            if kwargs.get("create_next") is not None:
+                seen.append("chained")
+            return waiter
+
+        io._waiter = tracking_waiter  # type: ignore[method-assign]
+        sock = io.sock_create_alt(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            initial_data=b"hi",
+        ).wait()
+        try:
+            assert seen == ["chained", "chained"]
+        finally:
+            sock.close()
+
+
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 class TestProactorIOManagerIntegration:
     @pytest.fixture
