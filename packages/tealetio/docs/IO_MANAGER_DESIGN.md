@@ -360,12 +360,18 @@ If `wait()` exits exceptionally (for example `timeout()` throwing into the
 blocked tealet while `ThreadsafeEvent.swait()` is parked), `IOWaiter` cancels
 the underlying `Operation` before re-raising. The handle cannot be waited on
 again; the caller must submit fresh work. `forget()` is different: it drops
-waiter interest without cancelling backend work.
+waiter interest without cancelling backend work. It is mostly caveat emptor —
+nulling the waiter's ``_operation`` reference breaks callback cycles; it does not
+cancel backend work. Forgetting handles for resource-creating operations (for
+example connect or ``sock_create_streams``) may leak sockets or streams.
 
-**Chained waiters (`IOWaiterChainable`).** `create_next` runs during `wait()` on
-the scheduler tealet, not from the operation done-callback thread. `forget()`
-skips `create_next` and closes a completed parent socket when no tail was built
-(stream open failure uses the same socket cleanup).
+**Chained waiters (`IOWaiterChainable`).** `create_next` runs from the parent
+operation's done callback so the chain can finish before `wait()` is called.
+Each link clears ``_operation`` once its completion is handled (priming the
+successor for chain parents; after ``wait()`` resolves for plain waiters).
+`create_next` failures close a connected parent socket (same cleanup the old
+connect `result_wrapper` path used). Forgetting a chain head is unsupported and
+may leak if the tail was already primed.
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the

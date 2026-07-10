@@ -66,17 +66,27 @@ class IOWaiter(Generic[T]):
         self._map_result = map_result
 
     def forget(self) -> None:
-        """Drop interest in the result; backend work continues to completion."""
+        """Drop interest in the result; backend work continues to completion.
+
+        Caveat emptor: mostly breaks reference cycles with completion callbacks
+        by nulling ``_operation``. Does not cancel backend work. Forgetting
+        handles for resource-creating operations (for example connect or stream
+        setup) may leak resources.
+        """
 
         self._operation = None
 
     def wait(self) -> T:
         self._wait_self()
-        return self._resolved()
+        try:
+            return self._resolved()
+        finally:
+            self._operation = None
 
     def _wait_self(self) -> None:
         operation = self._operation
-        assert operation is not None
+        if operation is None:
+            return
         if operation.done():
             return
         ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
@@ -102,16 +112,14 @@ class IOWaiter(Generic[T]):
 
 
 class IOWaiterChainable(IOWaiter[T]):
-    """``IOWaiter`` that primes a successor via ``create_next`` during ``wait()``.
+    """``IOWaiter`` that primes a successor via ``create_next`` on completion.
 
-    ``create_next`` runs on the scheduler tealet after the parent operation
-    completes, not from the operation done-callback thread. ``wait()`` on the
-    head blocks through the tail. The owner calls either ``wait()`` or
-    ``forget()``; ``forget()`` does not cancel backend work or disarm operation
-    callbacks, but ``create_next`` is skipped when interest is dropped.
+    ``create_next`` runs from the parent operation's done callback so the chain
+    can advance before anyone calls ``wait()``. ``wait()`` on the head blocks
+    through the tail once results are needed.
     """
 
-    __slots__ = ("_next", "_create_next", "_chain_error", "_forgotten")
+    __slots__ = ("_next", "_create_next", "_chain_error")
 
     def __init__(
         self,
@@ -125,17 +133,12 @@ class IOWaiterChainable(IOWaiter[T]):
         self._next: IOWaiterProtocol[Any] | None = None
         self._create_next = create_next
         self._chain_error: BaseException | None = None
-        self._forgotten = False
-        operation.add_done_callback(lambda _op: self._on_parent_done())
+        operation.add_done_callback(lambda _op: self._prime_next())
 
     def value(self) -> T:
         """Return this step's result without waiting on chained successors."""
 
         return self._resolved()
-
-    def _on_parent_done(self) -> None:
-        if self._forgotten and self._next is None:
-            self._release_parent_socket()
 
     def _prime_next(self) -> None:
         if self._next is not None or self._chain_error is not None:
@@ -145,6 +148,8 @@ class IOWaiterChainable(IOWaiter[T]):
         except BaseException as exc:
             self._chain_error = exc
             self._release_parent_socket()
+        finally:
+            self._operation = None
 
     def _release_parent_socket(self) -> None:
         operation = self._operation
@@ -158,19 +163,15 @@ class IOWaiterChainable(IOWaiter[T]):
             abortive_close(result)
 
     def forget(self) -> None:
-        self._forgotten = True
+        """Unsupported for chain heads; may leak resources if the tail was primed."""
+
+        super().forget()
         next_link = self._next
         if next_link is not None:
             next_link.forget()
-        if self._next is None:
-            self._release_parent_socket()
 
     def wait(self) -> T:
         self._wait_self()
-        assert self._operation is not None
-        self._operation.result()
-        if not self._forgotten:
-            self._prime_next()
         if self._chain_error is not None:
             raise self._chain_error
         next_link = self._next
