@@ -44,9 +44,10 @@ class IOOperation(Protocol[T_co]):
 class IOWaiter(Generic[T]):
     """Single-shot IO completion backed by a proactor ``Operation``.
 
-    Call ``wait()`` to block for the result or ``forget()`` to drop interest while
-    backend work continues. An exceptional exit from ``wait()`` (for example a
-    timeout) cancels the underlying operation.
+    The owning call site chooses exactly one disposition: ``wait()`` or
+    ``forget()``. This layer does not enforce that contract; ``wait()`` after
+    ``forget()`` is undefined. An exceptional exit from ``wait()`` (for example
+    a timeout) cancels the underlying operation.
 
     An optional ``map_result`` hook maps the operation result after completion.
     """
@@ -79,10 +80,15 @@ class IOWaiter(Generic[T]):
         if operation.done():
             return
         ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
-        operation.add_done_callback(lambda _op: ready.set())
+
+        def wake(_op: Operation[Any]) -> None:
+            ready.set()
+
+        operation.add_done_callback(wake)
         try:
             ready.swait()
         except BaseException:
+            operation.remove_done_callback(wake)
             operation.cancel()
             raise
 
@@ -98,8 +104,9 @@ class IOWaiter(Generic[T]):
 class IOWaiterChainable(IOWaiter[T]):
     """``IOWaiter`` that primes a successor via ``create_next`` on completion.
 
-    ``wait()`` on the head blocks through the tail. Each link gets exactly one
-    of ``wait()`` or ``forget()``.
+    ``wait()`` on the head blocks through the tail. Like ``IOWaiter``, the owner
+    calls either ``wait()`` or ``forget()``; completion callbacks may still run
+    after ``forget()`` because backend work is not cancelled.
     """
 
     __slots__ = ("_next", "_create_next", "_chain_error")

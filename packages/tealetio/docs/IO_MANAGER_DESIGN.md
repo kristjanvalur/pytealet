@@ -349,10 +349,12 @@ static typing after `ProactorScheduler` narrowing.
 ## IOWaiter and interrupted waits
 
 One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The underlying
-`Operation` is submitted when the helper returns; the caller blocks explicitly
-via `wait()` or drops interest via `forget()`. There is no public `cancel()` on
-`IOWaiter` — cancellation is an internal concern at the operation / proactor
-layer, not a third blocking-IO disposition.
+`Operation` is submitted when the helper returns. The code that owns the handle
+calls either `wait()` or `forget()` — not both, and not as a public end-user
+API (`streams` / `files` call `wait()` internally today). `IOWaiter` does not
+enforce that contract; calling `wait()` after `forget()` is undefined. There is
+no public `cancel()` on `IOWaiter` — cancellation is an internal concern at the
+operation / proactor layer, not a third blocking-IO disposition.
 
 If `wait()` exits exceptionally (for example `timeout()` throwing into the
 blocked tealet while `ThreadsafeEvent.swait()` is parked), `IOWaiter` cancels

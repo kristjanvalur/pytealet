@@ -91,7 +91,7 @@ class ProactorAccess(Protocol):
 
 @runtime_checkable
 class SocketIO(Protocol):
-    """Asyncio-shaped socket helpers; each method returns an ``IOOperation``."""
+    """Asyncio-shaped socket helpers; one-shot methods return ``IOWaiter``."""
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]: ...
 
@@ -579,8 +579,8 @@ class ProactorIOManager:
         from .operation_callbacks import create_connect_operation_factory
         from .streams import _open_streams
 
-        # A future create_streams may arm a recv_many so it may itselv be an IOWatier operation.
-        # For now, it is a simple non-blocking op so it is wrapped in a Fake IOWaiter for chaining.
+        # A future create_streams may arm recv_many and return a real IOWaiter tail.
+        # For now, stream open is synchronous so the tail is an IOWaiterFake.
         def create_streams(parent: IOWaiterChainableProtocol[socket.socket]) -> IOWaiterProtocol[AcceptStreamsDelivery]:
             sock = parent.value()
             return IOWaiterFake(

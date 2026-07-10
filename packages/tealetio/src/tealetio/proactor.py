@@ -2234,6 +2234,14 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_void_socket(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
         operation = cast(Operation[None], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation.deliver(
+                self,
+                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
+            return operation
         operation.deliver(self, result=None)
         return operation
 

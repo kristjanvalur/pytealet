@@ -10,7 +10,6 @@ import pytest
 from tealetio import set_scheduler
 from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, ServerIO, SocketIO
 from tealetio.io_waiter import IOWaiter, IOWaiterChainable, IOWaiterChainableProtocol, IOWaiterFake
-from tealetio.operations import Operation
 from tealetio.operations import ContinuousOperation, Operation
 from tealetio.proactor import SyncProactorScheduler
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
