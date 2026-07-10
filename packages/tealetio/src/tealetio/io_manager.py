@@ -579,8 +579,8 @@ class ProactorIOManager:
         from .operation_callbacks import create_connect_operation_factory
         from .streams import _open_streams
 
-        # A future create_streams may arm recv_many and return a real IOWaiter tail.
-        # For now, stream open is synchronous so the tail is an IOWaiterFake.
+        # create_streams runs from IOWaiterChainable.wait() on the scheduler tealet.
+        # A future tail may arm recv_many; for now stream open is an IOWaiterFake.
         def create_streams(parent: IOWaiterChainableProtocol[socket.socket]) -> IOWaiterProtocol[AcceptStreamsDelivery]:
             sock = parent.value()
             return IOWaiterFake(

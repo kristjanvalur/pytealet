@@ -337,9 +337,9 @@ static typing after `ProactorScheduler` narrowing.
 
 ## Resolved decisions
 
-1. **`wait_operation` on `IOManager`** — lives on `ProactorIOManager`; blocks via
-   `ThreadsafeEvent.swait()` in the current tealet. `ProactorFile` depends on the
-   `OperationWaiter` protocol.
+1. **Blocking one-shot IO** — `ProactorIOManager` helpers return `IOWaiter`;
+   callers block via `IOWaiter.wait()`. `ProactorFile` still types against the
+   narrow `OperationWaiter` protocol (`wait_operation(op)` name retired).
 2. **`BasicScheduler.io`** — property raises `RuntimeError`, not `None`.
 3. **`AsyncProactorScheduler`** — shares the same `ProactorIOManager` instance as
    the sync proactor core on a given scheduler object.
@@ -361,6 +361,11 @@ blocked tealet while `ThreadsafeEvent.swait()` is parked), `IOWaiter` cancels
 the underlying `Operation` before re-raising. The handle cannot be waited on
 again; the caller must submit fresh work. `forget()` is different: it drops
 waiter interest without cancelling backend work.
+
+**Chained waiters (`IOWaiterChainable`).** `create_next` runs during `wait()` on
+the scheduler tealet, not from the operation done-callback thread. `forget()`
+skips `create_next` and closes a completed parent socket when no tail was built
+(stream open failure uses the same socket cleanup).
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the

@@ -646,9 +646,43 @@ class TestProactorIOManagerDirect:
 
         head = IOWaiterChainable(io, first, create_next=create_second)
         first._finish(result=7)
-        assert primed == ["primed"]
         second._finish(result=9)
+        assert primed == []
         assert head.wait() == 9
+        assert primed == ["primed"]
+
+    def test_io_waiter_chainable_forget_closes_parent_socket(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[socket.socket](kind="create", fileobj=None)
+        sock = socket.socketpair()[0]
+
+        head = IOWaiterChainable(
+            io,
+            operation,
+            create_next=lambda _parent: IOWaiterFake(None),
+        )
+        head.forget()
+        operation._finish(result=sock)
+        assert sock.fileno() == -1
+
+    def test_sock_create_streams_closes_socket_when_stream_factory_raises(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def boom(_io: Any, _sock: socket.socket, **kwargs: Any) -> tuple[Any, Any]:
+            raise ValueError("stream failed")
+
+        waiter = io.sock_create_streams(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            stream_factory=boom,
+        )
+        with pytest.raises(ValueError, match="stream failed"):
+            waiter.wait()
+        assert proactor.last_create_socket is not None
+        assert proactor.last_create_socket.fileno() == -1
 
     def test_io_waiter_forget_allows_backend_completion(self) -> None:
         proactor = _MockProactor()

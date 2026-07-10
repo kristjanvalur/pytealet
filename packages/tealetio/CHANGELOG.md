@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
+- One-shot `ProactorIOManager` helpers (`sock_recv`, `sock_connect`, `open`,
+  etc.) return `IOWaiter`; call `.wait()` to block (or `.forget()` to drop
+  interest). `streams` / `files` call `.wait()` internally. Convenience helpers
+  (`sock_recvall`, `sock_recv_iter`, `sock_send_iter`) remain blocking and return
+  values directly.
+- `sock_create_streams()` requires `connect_to`; the unconnected create-only
+  path was removed. Use `sock_create()` plus `open_streams()` when needed.
 - `accept()` / ``sock_accept()`` and ``accept_many`` callbacks no longer return
   peer addresses. Accepted sockets are returned alone (``accept_many`` still
   delivers ``(socket, initial_data, recv_error)``). Call

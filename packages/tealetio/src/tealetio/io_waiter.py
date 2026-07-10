@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .locks import ThreadsafeEvent
 from .operations import Operation
+from .socket_helpers import abortive_close
 
 if TYPE_CHECKING:
     from .io_manager import ProactorIOManager
@@ -100,14 +102,16 @@ class IOWaiter(Generic[T]):
 
 
 class IOWaiterChainable(IOWaiter[T]):
-    """``IOWaiter`` that primes a successor via ``create_next`` on completion.
+    """``IOWaiter`` that primes a successor via ``create_next`` during ``wait()``.
 
-    ``wait()`` on the head blocks through the tail. Like ``IOWaiter``, the owner
-    calls either ``wait()`` or ``forget()``; completion callbacks may still run
-    after ``forget()`` because backend work is not cancelled.
+    ``create_next`` runs on the scheduler tealet after the parent operation
+    completes, not from the operation done-callback thread. ``wait()`` on the
+    head blocks through the tail. The owner calls either ``wait()`` or
+    ``forget()``; ``forget()`` does not cancel backend work or disarm operation
+    callbacks, but ``create_next`` is skipped when interest is dropped.
     """
 
-    __slots__ = ("_next", "_create_next", "_chain_error")
+    __slots__ = ("_next", "_create_next", "_chain_error", "_forgotten")
 
     def __init__(
         self,
@@ -121,29 +125,52 @@ class IOWaiterChainable(IOWaiter[T]):
         self._next: IOWaiterProtocol[Any] | None = None
         self._create_next = create_next
         self._chain_error: BaseException | None = None
-        operation.add_done_callback(lambda _op: self._prime_next())
+        self._forgotten = False
+        operation.add_done_callback(lambda _op: self._on_parent_done())
 
     def value(self) -> T:
         """Return this step's result without waiting on chained successors."""
 
         return self._resolved()
 
+    def _on_parent_done(self) -> None:
+        if self._forgotten and self._next is None:
+            self._release_parent_socket()
+
     def _prime_next(self) -> None:
+        if self._next is not None or self._chain_error is not None:
+            return
         try:
             self._next = self._create_next(self)
         except BaseException as exc:
             self._chain_error = exc
+            self._release_parent_socket()
+
+    def _release_parent_socket(self) -> None:
+        operation = self._operation
+        if operation is None or not operation.done():
+            return
+        try:
+            result = operation.result()
+        except BaseException:
+            return
+        if isinstance(result, socket.socket):
+            abortive_close(result)
 
     def forget(self) -> None:
-        super().forget()
+        self._forgotten = True
         next_link = self._next
         if next_link is not None:
             next_link.forget()
+        if self._next is None:
+            self._release_parent_socket()
 
     def wait(self) -> T:
         self._wait_self()
         assert self._operation is not None
         self._operation.result()
+        if not self._forgotten:
+            self._prime_next()
         if self._chain_error is not None:
             raise self._chain_error
         next_link = self._next
