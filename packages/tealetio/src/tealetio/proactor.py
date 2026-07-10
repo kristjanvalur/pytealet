@@ -665,7 +665,7 @@ class ProactorBase:
         io_uring ``submit_connect`` does not accept UNIX sockaddr paths today.
         Both proactor backends use this path so chained ``connect`` legs from
         ``sock_create`` / ``sock_connect`` behave uniformly at the io_manager
-        layer even when the operation finishes before ``wait_operation`` returns.
+        layer even when the operation finishes before the caller's ``wait()`` returns.
         """
 
         def finish_connect() -> None:
@@ -2198,7 +2198,7 @@ class UringProactor(ProactorBase):
             return operation
         entry = self._uring_entry(
             operation,
-            lambda entry, completion: self._complete_uring_void_socket(entry, completion),
+            lambda entry, completion: self._complete_uring_void_op(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_shutdown(sock.fileno(), how, entry))
         return operation
@@ -2213,7 +2213,7 @@ class UringProactor(ProactorBase):
         fd = sock.detach()
         entry = self._uring_entry(
             operation,
-            lambda entry, completion: self._complete_uring_void_socket(entry, completion),
+            lambda entry, completion: self._complete_uring_void_op(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_close(fd, entry))
         return operation
@@ -2227,12 +2227,12 @@ class UringProactor(ProactorBase):
             return operation
         entry = self._uring_entry(
             operation,
-            lambda entry, completion: self._complete_uring_void_socket(entry, completion),
+            lambda entry, completion: self._complete_uring_void_op(entry, completion),
         )
         self._submit_uring_entry(entry, lambda: self._ring.submit_close(fd, entry))
         return operation
 
-    def _complete_uring_void_socket(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
+    def _complete_uring_void_op(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
         operation = cast(Operation[None], entry.operation)
         res = completion.res
         if res < 0:
