@@ -8,14 +8,38 @@ import pytest
 
 import tealetio.files as files_module
 from tealetio.files import ProactorFile
+from tealetio.io_manager import ProactorIOManager
 from tealetio.operations import Operation
 
 _TEST_FD = 901
 
 
-class _ImmediateWaiter:
-    def wait_operation(self, operation: Operation[Any]) -> Any:
-        return operation.result()
+class _StubScheduler:
+    """Minimal scheduler stand-in for direct ``ProactorIOManager`` unit tests."""
+
+    def __init__(self) -> None:
+        self._exception_handler: Any = None
+
+    def set_exception_handler(self, handler: Any) -> None:
+        self._exception_handler = handler
+
+    def call_exception_handler(self, context: dict[str, Any]) -> None:
+        handler = self._exception_handler
+        if handler is None:
+            raise context["exception"]
+        handler(context)
+
+    def call_soon_threadsafe(self, callback, *args: object) -> None:
+        try:
+            callback(*args)
+        except BaseException as exc:
+            self.call_exception_handler(
+                {
+                    "message": "Exception in callback",
+                    "exception": exc,
+                    "scheduler": self,
+                }
+            )
 
 
 class _MemoryProactor:
@@ -77,10 +101,9 @@ def _make_file(
 ) -> tuple[ProactorFile, _MemoryProactor, dict[int, bytearray]]:
     store: dict[int, bytearray] = {_TEST_FD: bytearray(data)}
     proactor = _MemoryProactor(store)
-    waiter = _ImmediateWaiter()
+    io = ProactorIOManager(_StubScheduler(), proactor)  # type: ignore[arg-type]
     handle = ProactorFile(
-        waiter,
-        proactor,  # type: ignore[arg-type]
+        io,
         _TEST_FD,
         path="/tmp/memory.txt",
         flags=flags,

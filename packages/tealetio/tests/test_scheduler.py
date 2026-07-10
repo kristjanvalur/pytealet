@@ -1550,11 +1550,11 @@ class TestSchedulerAccessors:
             writer.setblocking(False)
 
             def receive() -> bytes:
-                return s.io.sock_recv(reader, 5)
+                return s.io.sock_recv(reader, 5).wait()
 
             def send() -> None:
                 s.sleep(0.001)
-                s.io.sock_sendall(writer, b"hello")
+                s.io.sock_sendall(writer, b"hello").wait()
 
             task = s.spawn(receive)
             s.spawn(send)

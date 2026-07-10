@@ -76,7 +76,7 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
 
     ``AsyncStream*`` methods are ``async def`` for handler compatibility, but
     they ultimately block through the scheduler-owned IO manager's
-    ``wait_operation``
+    ``IOWaiter.wait()``
     path rather than yielding asyncio futures. Public stream and factory APIs
     depend on ``SocketIO`` only. Unexpected yields surface as ``RuntimeError``.
     """
@@ -100,13 +100,13 @@ class SocketTransport:
         return self._sock
 
     def recv(self, n: int) -> bytes:
-        return self._io.sock_recv(self._sock, n)
+        return self._io.sock_recv(self._sock, n).wait()
 
     def recv_into(self, buf: Any) -> int:
-        return self._io.sock_recv_into(self._sock, buf)
+        return self._io.sock_recv_into(self._sock, buf).wait()
 
     def sendall(self, data: bytes | bytearray | memoryview) -> None:
-        self._io.sock_sendall(self._sock, data)
+        self._io.sock_sendall(self._sock, data).wait()
 
     def close(self) -> None:
         if self._closed:
@@ -543,7 +543,7 @@ def _connect_tcp_streams(
                 limit=limit,
                 stream_factory=stream_factory,
                 async_=async_,
-            )
+            ).wait()
         except OSError as exc:
             last_error = exc
     if last_error is not None:
@@ -672,7 +672,7 @@ def _connect_unix_streams(
         limit=limit,
         stream_factory=stream_factory,
         async_=async_,
-    )
+    ).wait()
 
 
 def _default_reuse_address() -> bool:
@@ -715,7 +715,7 @@ def _bind_tcp_socket(
     if reuse_address is None:
         reuse_address = _default_reuse_address()
     host, port = addr
-    sock = io.sock_create(family, socket.SOCK_STREAM)
+    sock = io.sock_create(family, socket.SOCK_STREAM).wait()
     try:
         if reuse_address:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -739,7 +739,7 @@ def _bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket
     except FileNotFoundError:
         pass
 
-    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM).wait()
     try:
         sock.bind(path)
         sock.listen(backlog)
