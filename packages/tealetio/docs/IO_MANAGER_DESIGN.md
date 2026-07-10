@@ -369,9 +369,15 @@ example connect or ``sock_create_streams``) may leak sockets or streams.
 operation's done callback so the chain can finish before `wait()` is called.
 Each link clears ``_operation`` once its completion is handled (priming the
 successor for chain parents; after ``wait()`` resolves for plain waiters).
-`create_next` failures close a connected parent socket (same cleanup the old
-connect `result_wrapper` path used). Forgetting a chain head is unsupported and
-may leak if the tail was already primed.
+``value()`` is one-shot: ``create_next`` takes this step's resolved result and
+clears the cached copy. An optional ``on_cleanup`` hook receives any
+still-unreleased value when ``wait()`` fails (primary path; hook exceptions
+propagate) or from ``__del__`` as a best-effort fallback (hook exceptions
+there surface as Python's ``Exception ignored in:`` log; forgetting chain heads
+remains caveat emptor). ``sock_create_streams`` passes ``abortive_close``
+and closes locally when stream open fails after ``value()`` (same cleanup the
+old connect ``result_wrapper`` path used). Forgetting a chain
+head is unsupported and may leak if the tail was already primed.
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the

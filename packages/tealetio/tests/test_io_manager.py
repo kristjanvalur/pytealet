@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import socket
 from typing import Any
@@ -649,6 +650,117 @@ class TestProactorIOManagerDirect:
         assert primed == ["primed"]
         second._finish(result=9)
         assert head.wait() == 9
+
+    def test_io_waiter_wait_raises_operation_error_without_priming_create_next(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[int](kind="first", fileobj=None)
+        primed = False
+
+        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
+            nonlocal primed
+            primed = True
+            return IOWaiterFake(0)
+
+        head = IOWaiterChainable(io, first, create_next=create_second)
+        first._finish(exception=OSError("connect failed"))
+        with pytest.raises(OSError, match="connect failed"):
+            head.wait()
+        assert not primed
+
+    def test_io_waiter_value_handles_none_result(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[None](kind="first", fileobj=None)
+
+        def create_second(parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[str]:
+            assert parent.value() is None
+            return IOWaiterFake("done")
+
+        head = IOWaiterChainable(io, first, create_next=create_second)
+        first._finish(result=None)
+        assert head.wait() == "done"
+
+    def test_io_waiter_on_cleanup_runs_on_wait_when_create_next_fails(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[int](kind="first", fileobj=None)
+        seen: list[int] = []
+
+        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
+            raise ValueError("create failed")
+
+        head = IOWaiterChainable(
+            io,
+            first,
+            create_next=create_second,
+            on_cleanup=lambda value: seen.append(value),
+        )
+        first._finish(result=11)
+        with pytest.raises(ValueError, match="create failed"):
+            head.wait()
+        assert seen == [11]
+
+    def test_io_waiter_on_cleanup_exception_propagates_from_wait(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[int](kind="first", fileobj=None)
+
+        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
+            raise ValueError("create failed")
+
+        def on_cleanup(_value: int) -> None:
+            raise OSError("teardown failed")
+
+        head = IOWaiterChainable(io, first, create_next=create_second, on_cleanup=on_cleanup)
+        first._finish(result=1)
+        with pytest.raises(OSError, match="teardown failed"):
+            head.wait()
+
+    def test_io_waiter_on_cleanup_runs_on_wait_when_tail_wait_fails(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[int](kind="first", fileobj=None)
+        seen: list[int] = []
+
+        class _FailingTail:
+            def forget(self) -> None:
+                return None
+
+            def wait(self) -> int:
+                raise ValueError("tail failed")
+
+        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> _FailingTail:
+            return _FailingTail()
+
+        head = IOWaiterChainable(
+            io,
+            first,
+            create_next=create_second,
+            on_cleanup=lambda value: seen.append(value),
+        )
+        first._finish(result=22)
+        with pytest.raises(ValueError, match="tail failed"):
+            head.wait()
+        assert seen == [22]
+
+    def test_io_waiter_on_cleanup_runs_from_del_when_waiter_abandoned(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[int](kind="first", fileobj=None)
+        seen: list[int] = []
+
+        head = IOWaiterChainable(
+            io,
+            first,
+            create_next=lambda _parent: IOWaiterFake(0),
+            on_cleanup=lambda value: seen.append(value),
+        )
+        first._finish(result=33)
+        head.forget()
+        del head
+        gc.collect()
+        assert seen == [33]
 
     def test_sock_create_streams_closes_socket_when_stream_factory_raises(self) -> None:
         proactor = _MockProactor()

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .locks import ThreadsafeEvent
 from .operations import Operation
-from .socket_helpers import abortive_close
 
 if TYPE_CHECKING:
     from .io_manager import ProactorIOManager
@@ -15,6 +13,7 @@ T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 _RawResult = TypeVar("_RawResult")
 _CreateNext = Callable[["IOWaiterChainableProtocol[Any]"], "IOWaiterProtocol[Any]"]
+_OnCleanup = Callable[[T], None]
 
 
 class IOWaiterProtocol(Protocol[T_co]):
@@ -116,10 +115,18 @@ class IOWaiterChainable(IOWaiter[T]):
 
     ``create_next`` runs from the parent operation's done callback so the chain
     can advance before anyone calls ``wait()``. ``wait()`` on the head blocks
-    through the tail once results are needed.
+    through the tail once results are needed. ``value()`` is one-shot: it hands
+    this step's resolved result to ``create_next`` and clears the cached copy.
+
+    An optional ``on_cleanup`` hook receives any still-unreleased resolved value
+    when ``wait()`` fails (hook exceptions propagate) or from ``__del__`` as a
+    best-effort fallback (hook exceptions there are logged by Python as
+    ``Exception ignored in:``). ``create_next`` should call ``value()`` to take
+    ownership of resource-bearing results; failures after that must clean up
+    locally.
     """
 
-    __slots__ = ("_next", "_create_next", "_chain_error")
+    __slots__ = ("_next", "_create_next", "_chain_error", "_on_cleanup", "_resolved_value")
 
     def __init__(
         self,
@@ -128,39 +135,43 @@ class IOWaiterChainable(IOWaiter[T]):
         *,
         map_result: Callable[[_RawResult], T] | None = None,
         create_next: _CreateNext,
+        on_cleanup: _OnCleanup | None = None,
     ) -> None:
         super().__init__(io, operation, map_result=map_result)
         self._next: IOWaiterProtocol[Any] | None = None
         self._create_next = create_next
         self._chain_error: BaseException | None = None
+        self._on_cleanup = on_cleanup
+        self._resolved_value: tuple[T] | None = None
         operation.add_done_callback(lambda _op: self._prime_next())
 
     def value(self) -> T:
-        """Return this step's result without waiting on chained successors."""
+        """Return this step's result once; clears the cached copy."""
 
-        return self._resolved()
+        cached = self._resolved_value
+        assert cached is not None
+        self._resolved_value = None
+        return cached[0]
+
+    def _cleanup_unresolved_value(self) -> None:
+        cached = self._resolved_value
+        if cached is None:
+            return
+        self._resolved_value = None
+        if self._on_cleanup is not None:
+            self._on_cleanup(cached[0])
+
+    def __del__(self) -> None:
+        self._cleanup_unresolved_value()
 
     def _prime_next(self) -> None:
-        if self._next is not None or self._chain_error is not None:
-            return
         try:
+            self._resolved_value = (self._resolved(),)
             self._next = self._create_next(self)
         except BaseException as exc:
             self._chain_error = exc
-            self._release_parent_socket()
         finally:
             self._operation = None
-
-    def _release_parent_socket(self) -> None:
-        operation = self._operation
-        if operation is None or not operation.done():
-            return
-        try:
-            result = operation.result()
-        except BaseException:
-            return
-        if isinstance(result, socket.socket):
-            abortive_close(result)
 
     def forget(self) -> None:
         """Unsupported for chain heads; may leak resources if the tail was primed."""
@@ -172,12 +183,16 @@ class IOWaiterChainable(IOWaiter[T]):
 
     def wait(self) -> T:
         self._wait_self()
-        if self._chain_error is not None:
-            raise self._chain_error
-        next_link = self._next
-        if next_link is not None:
-            return next_link.wait()
-        return self._resolved()
+        try:
+            if self._chain_error is not None:
+                raise self._chain_error
+            next_link = self._next
+            if next_link is not None:
+                return next_link.wait()
+            return self.value()
+        except BaseException:
+            self._cleanup_unresolved_value()
+            raise
 
 
 class IOWaiterFake(Generic[T]):

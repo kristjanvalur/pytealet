@@ -262,9 +262,16 @@ class ProactorIOManager:
         *,
         map_result: Callable[[Any], T] | None = None,
         create_next: Callable[[IOWaiterChainableProtocol[Any]], IOWaiterProtocol[Any]] | None = None,
+        on_cleanup: Callable[[Any], None] | None = None,
     ) -> IOWaiter[T]:
         if create_next is not None:
-            return IOWaiterChainable(self, operation, map_result=map_result, create_next=create_next)
+            return IOWaiterChainable(
+                self,
+                operation,
+                map_result=map_result,
+                create_next=create_next,
+                on_cleanup=on_cleanup,
+            )
         return IOWaiter(self, operation, map_result=map_result)
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
@@ -583,15 +590,19 @@ class ProactorIOManager:
         # A future tail may arm recv_many; for now stream open is an IOWaiterFake.
         def create_streams(parent: IOWaiterChainableProtocol[socket.socket]) -> IOWaiterProtocol[AcceptStreamsDelivery]:
             sock = parent.value()
-            return IOWaiterFake(
-                _open_streams(
-                    self,
-                    sock,
-                    limit=limit,
-                    stream_factory=stream_factory,
-                    async_=async_,
+            try:
+                return IOWaiterFake(
+                    _open_streams(
+                        self,
+                        sock,
+                        limit=limit,
+                        stream_factory=stream_factory,
+                        async_=async_,
+                    )
                 )
-            )
+            except BaseException:
+                abortive_close(sock)
+                raise
 
         return self._waiter(
             self._proactor.create_socket(
@@ -606,6 +617,7 @@ class ProactorIOManager:
                 ),
             ),
             create_next=create_streams,
+            on_cleanup=abortive_close,
         )
 
     def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]:
