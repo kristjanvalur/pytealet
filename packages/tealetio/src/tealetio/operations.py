@@ -155,11 +155,6 @@ class Operation(Generic[T]):
             self._callbacks = kept
             return removed
 
-    def forget(self) -> None:
-        """Drop pending done callbacks without cancelling backend work."""
-
-        self._callbacks.clear()
-
     def deliver(
         self,
         proactor: _ProactorRef,
