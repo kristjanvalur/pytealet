@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .locks import ThreadsafeEvent
 from .operations import Operation
@@ -12,10 +12,23 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 _RawResult = TypeVar("_RawResult")
-_CreateNext = Callable[["IOWaiterChainable[Any]"], "IOWaiter[Any]"]
+_CreateNext = Callable[["IOWaiterChainableProtocol[Any]"], "IOWaiterProtocol[Any]"]
 
 
-@runtime_checkable
+class IOWaiterProtocol(Protocol[T_co]):
+    """Blocking IO handle returned by one-shot helpers and chain links."""
+
+    def forget(self) -> None: ...
+
+    def wait(self) -> T_co: ...
+
+
+class IOWaiterChainableProtocol(IOWaiterProtocol[T_co], Protocol[T_co]):
+    """Chain parent handle; exposes this step's result to ``create_next``."""
+
+    def value(self) -> T_co: ...
+
+
 class IOOperation(Protocol[T_co]):
     """User-facing IO handle; call ``wait()`` to block for the result."""
 
@@ -50,11 +63,6 @@ class IOWaiter(Generic[T]):
         self._io = io
         self._operation: Operation[Any] | None = operation
         self._map_result = map_result
-
-    def value(self) -> T:
-        """Return this step's result without waiting on chained successors."""
-
-        return self._resolved()
 
     def forget(self) -> None:
         """Drop interest in the result; backend work continues to completion."""
@@ -105,10 +113,15 @@ class IOWaiterChainable(IOWaiter[T]):
         create_next: _CreateNext,
     ) -> None:
         super().__init__(io, operation, map_result=map_result)
-        self._next: IOWaiter[Any] | None = None
+        self._next: IOWaiterProtocol[Any] | None = None
         self._create_next = create_next
         self._chain_error: BaseException | None = None
         operation.add_done_callback(lambda _op: self._prime_next())
+
+    def value(self) -> T:
+        """Return this step's result without waiting on chained successors."""
+
+        return self._resolved()
 
     def _prime_next(self) -> None:
         try:
@@ -132,6 +145,21 @@ class IOWaiterChainable(IOWaiter[T]):
         if next_link is not None:
             return next_link.wait()
         return self._resolved()
+
+
+class IOWaiterFake(Generic[T]):
+    """Pre-resolved chain tail that returns a wrapped value from ``wait()``."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: T) -> None:
+        self._value = value
+
+    def forget(self) -> None:
+        return None
+
+    def wait(self) -> T:
+        return self._value
 
 
 class IOWaiterComposite(Generic[T]):

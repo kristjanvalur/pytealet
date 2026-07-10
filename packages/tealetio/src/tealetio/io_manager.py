@@ -16,7 +16,14 @@ from .continuous_callbacks import (
     normalize_accept_recv_size,
     wrap_accept_delivery,
 )
-from .io_waiter import IOOperation, IOWaiter, IOWaiterChainable
+from .io_waiter import (
+    IOOperation,
+    IOWaiter,
+    IOWaiterChainable,
+    IOWaiterChainableProtocol,
+    IOWaiterFake,
+    IOWaiterProtocol,
+)
 
 from .operations import ContinuousOperation, Operation
 from .socket_helpers import abortive_close
@@ -48,6 +55,9 @@ __all__ = [
     "IOOperation",
 
     "IOWaiter",
+    "IOWaiterChainableProtocol",
+    "IOWaiterFake",
+    "IOWaiterProtocol",
     "PollIO",
     "ProactorAccess",
     "ProactorIOManager",
@@ -210,8 +220,8 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         type: int,
         proto: int = 0,
         *,
+        connect_to: Any,
         flags: int = 0,
-        connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
         limit: int = 2**16,
         stream_factory: Any | None = None,
@@ -255,7 +265,7 @@ class ProactorIOManager:
         operation: Operation[Any],
         *,
         map_result: Callable[[Any], T] | None = None,
-        create_next: Callable[[IOWaiterChainable[Any]], IOWaiter[Any]] | None = None,
+        create_next: Callable[[IOWaiterChainableProtocol[Any]], IOWaiterProtocol[Any]] | None = None,
     ) -> IOWaiter[T]:
         if create_next is not None:
             return IOWaiterChainable(self, operation, map_result=map_result, create_next=create_next)
@@ -558,40 +568,34 @@ class ProactorIOManager:
         type: int,
         proto: int = 0,
         *,
+        connect_to: Any,
         flags: int = 0,
-        connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
     ) -> IOWaiter[AcceptStreamsDelivery]:
-        """Create a socket and return stream endpoints.
+        """Create a socket, connect, and return stream endpoints.
 
-        When ``connect_to`` is set, the connect chain runs first and
-        ``initial_data`` is sent on the wire before streams are returned.
+        ``initial_data`` is sent on the wire after connect, before streams open.
         """
 
+        from .operation_callbacks import create_connect_operation_factory
         from .streams import _open_streams
 
-        if initial_data is not None and connect_to is None:
-            raise ValueError("initial_data requires connect_to")
-
-        def open_streams(sock: socket.socket) -> AcceptStreamsDelivery:
-            return _open_streams(
-                self,
-                sock,
-                limit=limit,
-                stream_factory=stream_factory,
-                async_=async_,
+        # A future create_streams may arm a recv_many so it may itselv be an IOWatier operation.
+        # For now, it is a simple non-blocking op so it is wrapped in a Fake IOWaiter for chaining.
+        def create_streams(parent: IOWaiterChainableProtocol[socket.socket]) -> IOWaiterProtocol[AcceptStreamsDelivery]:
+            sock = parent.value()
+            return IOWaiterFake(
+                _open_streams(
+                    self,
+                    sock,
+                    limit=limit,
+                    stream_factory=stream_factory,
+                    async_=async_,
+                )
             )
-
-        if connect_to is None:
-            return self._waiter(
-                self._proactor.create_socket(family, type, proto, flags=flags),
-                map_result=open_streams,
-            )
-
-        from .operation_callbacks import create_connect_operation_factory
 
         return self._waiter(
             self._proactor.create_socket(
@@ -605,7 +609,7 @@ class ProactorIOManager:
                     initial_data,
                 ),
             ),
-            map_result=open_streams,
+            create_next=create_streams,
         )
 
     def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]:

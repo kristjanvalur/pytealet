@@ -9,7 +9,7 @@ import pytest
 
 from tealetio import set_scheduler
 from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, ServerIO, SocketIO
-from tealetio.io_waiter import IOWaiter, IOWaiterChainable
+from tealetio.io_waiter import IOWaiter, IOWaiterChainable, IOWaiterChainableProtocol, IOWaiterFake
 from tealetio.operations import Operation
 from tealetio.operations import ContinuousOperation, Operation
 from tealetio.proactor import SyncProactorScheduler
@@ -537,19 +537,6 @@ class TestProactorIOManagerAcceptMany:
 
 
 class TestProactorIOManagerSockCreateStreams:
-    def test_sock_create_streams_without_connect_to(self) -> None:
-        from tealetio.streams import StreamReader, StreamWriter
-
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        reader, writer = io.sock_create_streams(socket.AF_INET, socket.SOCK_STREAM).wait()
-        try:
-            assert isinstance(reader, StreamReader)
-            assert isinstance(writer, StreamWriter)
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
-        finally:
-            writer.close()
-
     def test_sock_create_streams_uses_connect_streams_factory(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -566,15 +553,35 @@ class TestProactorIOManagerSockCreateStreams:
         finally:
             writer.close()
 
-    def test_sock_create_streams_rejects_initial_data_without_connect_to(self) -> None:
+    def test_sock_create_streams_chains_socket_to_stream_open(self) -> None:
+        from tealetio.streams import StreamReader, StreamWriter
+
         proactor = _MockProactor()
         io = _manager(proactor)
-        with pytest.raises(ValueError, match="initial_data requires connect_to"):
-            io.sock_create_streams(
+        seen: list[str] = []
+
+        original_waiter = io._waiter
+
+        def tracking_waiter(*args: Any, **kwargs: Any) -> IOWaiter[Any]:
+            waiter = original_waiter(*args, **kwargs)
+            if kwargs.get("create_next") is not None:
+                seen.append("chained")
+            return waiter
+
+        io._waiter = tracking_waiter  # type: ignore[method-assign]
+        writer = None
+        try:
+            reader, writer = io.sock_create_streams(
                 socket.AF_INET,
                 socket.SOCK_STREAM,
-                initial_data=b"hi",
-            )
+                connect_to=("127.0.0.1", 9),
+            ).wait()
+            assert seen == ["chained"]
+            assert isinstance(reader, StreamReader)
+            assert isinstance(writer, StreamWriter)
+        finally:
+            if writer is not None:
+                writer.close()
 
 
 class TestProactorIOManagerDirect:
@@ -603,16 +610,23 @@ class TestProactorIOManagerDirect:
             waiter.wait()
         waiter.forget()
 
+    def test_io_waiter_fake_returns_wrapped_value(self) -> None:
+        fake = IOWaiterFake(9)
+        assert fake.wait() == 9
+
+    def test_io_waiter_fake_forget_is_noop(self) -> None:
+        fake = IOWaiterFake(1)
+        fake.forget()
+        assert fake.wait() == 1
+
     def test_io_waiter_create_next_waits_through_tail_from_head(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         first = Operation[int](kind="first", fileobj=None)
 
-        def create_second(parent: IOWaiterChainable[Any]) -> IOWaiter[int]:
+        def create_second(parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
             assert parent.value() == 1
-            second = Operation[int](kind="second", fileobj=None)
-            second._finish(result=2)
-            return IOWaiter(io, second)
+            return IOWaiterFake(2)
 
         head = IOWaiterChainable(io, first, create_next=create_second)
         first._finish(result=1)
@@ -625,7 +639,7 @@ class TestProactorIOManagerDirect:
         second = Operation[int](kind="second", fileobj=None)
         primed: list[str] = []
 
-        def create_second(parent: IOWaiterChainable[Any]) -> IOWaiter[int]:
+        def create_second(parent: IOWaiterChainableProtocol[Any]) -> IOWaiter[int]:
             primed.append("primed")
             assert parent.value() == 7
             return IOWaiter(io, second)
