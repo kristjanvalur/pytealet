@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 _RawResult = TypeVar("_RawResult")
+_CreateNext = Callable[["IOWaiterChainable[Any]"], "IOWaiter[Any]"]
 
 
 @runtime_checkable
@@ -22,8 +23,6 @@ class IOOperation(Protocol[T_co]):
 
     def cancelled(self) -> bool: ...
 
-    def cancel(self) -> None: ...
-
     def forget(self) -> None: ...
 
     def wait(self) -> T_co: ...
@@ -32,8 +31,9 @@ class IOOperation(Protocol[T_co]):
 class IOWaiter(Generic[T]):
     """Single-shot IO completion backed by a proactor ``Operation``.
 
-    Call ``wait()`` to block for the result, ``forget()`` to drop interest while
-    backend work continues, or ``cancel()`` to request backend cancellation.
+    Call ``wait()`` to block for the result or ``forget()`` to drop interest while
+    backend work continues. An exceptional exit from ``wait()`` (for example a
+    timeout) cancels the underlying operation.
 
     An optional ``map_result`` hook maps the operation result after completion.
     """
@@ -51,12 +51,10 @@ class IOWaiter(Generic[T]):
         self._operation: Operation[Any] | None = operation
         self._map_result = map_result
 
-    def cancel(self) -> None:
-        """Cancel backend work if the operation is still active."""
+    def value(self) -> T:
+        """Return this step's result without waiting on chained successors."""
 
-        operation = self._operation
-        if operation is not None:
-            operation.cancel()
+        return self._resolved()
 
     def forget(self) -> None:
         """Drop interest in the result; backend work continues to completion."""
@@ -64,17 +62,76 @@ class IOWaiter(Generic[T]):
         self._operation = None
 
     def wait(self) -> T:
+        self._wait_self()
+        return self._resolved()
+
+    def _wait_self(self) -> None:
         operation = self._operation
-        if operation is None:
-            raise RuntimeError("IO operation was forgotten")
-        if not operation.done():
-            ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
-            operation.add_done_callback(lambda _op: ready.set())
+        assert operation is not None
+        if operation.done():
+            return
+        ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
+        operation.add_done_callback(lambda _op: ready.set())
+        try:
             ready.swait()
+        except BaseException:
+            operation.cancel()
+            raise
+
+    def _resolved(self) -> T:
+        operation = self._operation
+        assert operation is not None
         raw = operation.result()
         if self._map_result is not None:
             return self._map_result(raw)
         return cast(T, raw)
+
+
+class IOWaiterChainable(IOWaiter[T]):
+    """``IOWaiter`` that primes a successor via ``create_next`` on completion.
+
+    ``wait()`` on the head blocks through the tail. Each link gets exactly one
+    of ``wait()`` or ``forget()``.
+    """
+
+    __slots__ = ("_next", "_create_next", "_chain_error")
+
+    def __init__(
+        self,
+        io: ProactorIOManager,
+        operation: Operation[_RawResult],
+        *,
+        map_result: Callable[[_RawResult], T] | None = None,
+        create_next: _CreateNext,
+    ) -> None:
+        super().__init__(io, operation, map_result=map_result)
+        self._next: IOWaiter[Any] | None = None
+        self._create_next = create_next
+        self._chain_error: BaseException | None = None
+        operation.add_done_callback(lambda _op: self._prime_next())
+
+    def _prime_next(self) -> None:
+        try:
+            self._next = self._create_next(self)
+        except BaseException as exc:
+            self._chain_error = exc
+
+    def forget(self) -> None:
+        super().forget()
+        next_link = self._next
+        if next_link is not None:
+            next_link.forget()
+
+    def wait(self) -> T:
+        self._wait_self()
+        assert self._operation is not None
+        self._operation.result()
+        if self._chain_error is not None:
+            raise self._chain_error
+        next_link = self._next
+        if next_link is not None:
+            return next_link.wait()
+        return self._resolved()
 
 
 class IOWaiterComposite(Generic[T]):

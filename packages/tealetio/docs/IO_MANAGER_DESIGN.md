@@ -346,8 +346,48 @@ static typing after `ProactorScheduler` narrowing.
 4. **Stream helpers** — module-level only (`open_connection`, `start_server`);
    optional `scheduler=` for callers outside a running driver turn.
 
+## IOWaiter and interrupted waits
+
+One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The underlying
+`Operation` is submitted when the helper returns; the caller blocks explicitly
+via `wait()` or drops interest via `forget()`. There is no public `cancel()` on
+`IOWaiter` — cancellation is an internal concern at the operation / proactor
+layer, not a third blocking-IO disposition.
+
+If `wait()` exits exceptionally (for example `timeout()` throwing into the
+blocked tealet while `ThreadsafeEvent.swait()` is parked), `IOWaiter` cancels
+the underlying `Operation` before re-raising. The handle cannot be waited on
+again; the caller must submit fresh work. `forget()` is different: it drops
+waiter interest without cancelling backend work.
+
+**Data loss on interrupted waits (current behaviour).** We do **not** currently
+guarantee that bytes already read from the kernel but not yet delivered to the
+caller remain visible on the socket after a timed-out or otherwise interrupted
+wait. A timeout on `sock_recv` / stream `recv` should be treated as aborting
+that receive attempt, not as a restartable partial read. Compare with asyncio's
+stream and socket receive timeout semantics in a follow-up — document whether
+asyncio preserves kernel/socket buffer state on timeout or also abandons the
+in-flight read.
+
+**UringProactor races.** Delivery runs on worker threads while `wait()` blocks
+on the scheduler tealet. Completion delivery, `Operation._finish`, and
+wait-side cancellation can race: a CQE may be processed on the worker thread
+around the same time the tealet cancels from a timeout. That makes uring paths
+especially sensitive here.
+
+**Subsequent PR (waitable cancel).** A likely direction is *waitable cancel*:
+route cancellation through the proactor / uring submission path so cancel and
+completion are ordered relative to the same ring, rather than racing a Python
+`Operation.cancel()` on the main thread against worker delivery. Until that
+exists, treat interrupted waits as best-effort abort, not atomic “keep bytes,
+drop waiter only”.
+
 ## Open follow-ups
 
+- **Waitable cancel for interrupted `IOWaiter` waits** — design and implement
+  proactor/uring-integrated cancel so timeout and exceptional `wait()` exits
+  race less with worker-thread delivery; revisit asyncio parity for buffered
+  bytes on recv timeout.
 - Implement `SelectorIOManager` and wire `SelectorScheduler.io` when selector
   blocking IO should share the same capability gate as proactor schedulers.
 - `SocketIO`, `PollIO`, and `FileIO` entry protocols are implemented; a future

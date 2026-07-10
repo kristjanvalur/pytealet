@@ -5243,7 +5243,7 @@ class TestProactorSchedulerIntegration:
             sender.close()
             receiver.close()
 
-    def test_io_waiter_timeout_does_not_cancel_operation(self, scheduler: SyncProactorScheduler) -> None:
+    def test_io_waiter_timeout_cancels_operation(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -5251,19 +5251,19 @@ class TestProactorSchedulerIntegration:
             operation = scheduler.proactor.recv(reader, 1)
             waiter = IOWaiter(scheduler.io, operation)
 
-            def wait_with_timeout() -> bytes:
+            def wait_with_timeout() -> bool:
                 with pytest.raises(TimeoutError):
                     with timeout(0.001):
                         waiter.wait()
-                assert not operation.cancelled()
-                writer.send(b"x")
                 deadline = scheduler.time() + 1.0
-                while scheduler.time() < deadline and not operation.done():
+                while scheduler.time() < deadline and (
+                    not operation.cancelled() or scheduler.proactor.has_pending_operations()
+                ):
                     scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
-                return operation.result()
+                return operation.cancelled() and not scheduler.proactor.has_pending_operations()
 
             task = scheduler.spawn(wait_with_timeout)
-            assert scheduler.run_until_complete(task) == b"x"
+            assert scheduler.run_until_complete(task) is True
         finally:
             reader.close()
             writer.close()

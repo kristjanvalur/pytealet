@@ -16,7 +16,7 @@ from .continuous_callbacks import (
     normalize_accept_recv_size,
     wrap_accept_delivery,
 )
-from .io_waiter import IOOperation, IOWaiter
+from .io_waiter import IOOperation, IOWaiter, IOWaiterChainable
 
 from .operations import ContinuousOperation, Operation
 from .socket_helpers import abortive_close
@@ -255,7 +255,10 @@ class ProactorIOManager:
         operation: Operation[Any],
         *,
         map_result: Callable[[Any], T] | None = None,
+        create_next: Callable[[IOWaiterChainable[Any]], IOWaiter[Any]] | None = None,
     ) -> IOWaiter[T]:
+        if create_next is not None:
+            return IOWaiterChainable(self, operation, map_result=map_result, create_next=create_next)
         return IOWaiter(self, operation, map_result=map_result)
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:

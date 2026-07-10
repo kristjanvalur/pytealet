@@ -9,7 +9,7 @@ import pytest
 
 from tealetio import set_scheduler
 from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, ServerIO, SocketIO
-from tealetio.io_waiter import IOWaiter
+from tealetio.io_waiter import IOWaiter, IOWaiterChainable
 from tealetio.operations import Operation
 from tealetio.operations import ContinuousOperation, Operation
 from tealetio.proactor import SyncProactorScheduler
@@ -599,9 +599,42 @@ class TestProactorIOManagerDirect:
         assert not operation.cancelled()
         operation._finish(result=None)
         assert seen == [1]
-        with pytest.raises(RuntimeError, match="forgotten"):
+        with pytest.raises(AssertionError):
             waiter.wait()
         waiter.forget()
+
+    def test_io_waiter_create_next_waits_through_tail_from_head(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[int](kind="first", fileobj=None)
+
+        def create_second(parent: IOWaiterChainable[Any]) -> IOWaiter[int]:
+            assert parent.value() == 1
+            second = Operation[int](kind="second", fileobj=None)
+            second._finish(result=2)
+            return IOWaiter(io, second)
+
+        head = IOWaiterChainable(io, first, create_next=create_second)
+        first._finish(result=1)
+        assert head.wait() == 2
+
+    def test_io_waiter_create_next_primes_next_link_on_completion(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[int](kind="first", fileobj=None)
+        second = Operation[int](kind="second", fileobj=None)
+        primed: list[str] = []
+
+        def create_second(parent: IOWaiterChainable[Any]) -> IOWaiter[int]:
+            primed.append("primed")
+            assert parent.value() == 7
+            return IOWaiter(io, second)
+
+        head = IOWaiterChainable(io, first, create_next=create_second)
+        first._finish(result=7)
+        assert primed == ["primed"]
+        second._finish(result=9)
+        assert head.wait() == 9
 
     def test_io_waiter_forget_allows_backend_completion(self) -> None:
         proactor = _MockProactor()
