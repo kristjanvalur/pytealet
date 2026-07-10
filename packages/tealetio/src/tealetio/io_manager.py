@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
-from .locks import ThreadsafeEvent
 from .continuous_callbacks import (
     AcceptManyDelivery,
     AcceptReadResult,
@@ -17,6 +15,15 @@ from .continuous_callbacks import (
     normalize_accept_recv_size,
     wrap_accept_delivery,
 )
+from .io_waiter import (
+    IOOperation,
+    IOWaiter,
+    IOWaiterChainable,
+    IOWaiterChainableProtocol,
+    IOWaiterFake,
+    IOWaiterProtocol,
+)
+
 from .operations import ContinuousOperation, Operation
 from .socket_helpers import abortive_close
 from .types import SocketSendBuffer
@@ -44,6 +51,11 @@ __all__ = [
     "FileIO",
     "IO_UNSUPPORTED_ERROR",
     "IOFile",
+    "IOOperation",
+    "IOWaiter",
+    "IOWaiterChainableProtocol",
+    "IOWaiterFake",
+    "IOWaiterProtocol",
     "PollIO",
     "ProactorAccess",
     "ProactorIOManager",
@@ -71,7 +83,7 @@ class SupportsProactorIO(Protocol):
 
 
 class ProactorAccess(Protocol):
-    """Blocking IO facade with access to proactor submission (``accept_many``, …)."""
+    """IO facade with access to proactor submission (``accept_many``, …)."""
 
     @property
     def proactor(self) -> "Proactor": ...
@@ -79,22 +91,22 @@ class ProactorAccess(Protocol):
 
 @runtime_checkable
 class SocketIO(Protocol):
-    """Blocking asyncio-shaped socket helpers over a scheduler IO backend."""
+    """Asyncio-shaped socket helpers; one-shot methods return ``IOWaiter``."""
 
-    def sock_recv(self, sock: socket.socket, n: int) -> bytes: ...
+    def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]: ...
 
-    def sock_recv_into(self, sock: socket.socket, buf: Any) -> int: ...
+    def sock_recv_into(self, sock: socket.socket, buf: Any) -> IOWaiter[int]: ...
 
-    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]: ...
+    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> IOWaiter[tuple[bytes, Any]]: ...
 
-    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]: ...
+    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> IOWaiter[tuple[int, Any]]: ...
 
     def sock_sendall(
         self,
         sock: socket.socket,
         data: SocketSendBuffer,
         progress: _ProgressCallback | None = None,
-    ) -> None: ...
+    ) -> IOWaiter[None]: ...
 
     def sock_send_iter(
         self,
@@ -102,9 +114,9 @@ class SocketIO(Protocol):
         chunks: Iterable[SocketSendBuffer],
     ) -> None: ...
 
-    def sock_sendto(self, sock: socket.socket, data: SocketSendBuffer, address: Any) -> int: ...
+    def sock_sendto(self, sock: socket.socket, data: SocketSendBuffer, address: Any) -> IOWaiter[int]: ...
 
-    def sock_accept(self, sock: socket.socket) -> socket.socket: ...
+    def sock_accept(self, sock: socket.socket) -> IOWaiter[socket.socket]: ...
 
     def sock_connect(
         self,
@@ -112,7 +124,7 @@ class SocketIO(Protocol):
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-    ) -> None: ...
+    ) -> IOWaiter[None]: ...
 
     def sock_create(
         self,
@@ -123,7 +135,7 @@ class SocketIO(Protocol):
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> socket.socket: ...
+    ) -> IOWaiter[socket.socket]: ...
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: "RecvBufferPool | None" = None
@@ -137,6 +149,10 @@ class SocketIO(Protocol):
         buffer_pool: "RecvBufferPool | None" = None,
     ) -> bytes: ...
 
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
+
+    def sock_close(self, sock: socket.socket) -> IOWaiter[None]: ...
+
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> "RecvBufferPool": ...
 
     def shared_recv_buffer_pool(self) -> "RecvBufferPool": ...
@@ -146,9 +162,9 @@ class SocketIO(Protocol):
 
 @runtime_checkable
 class PollIO(Protocol):
-    """Blocking poll helpers over a scheduler IO backend."""
+    """Poll helpers over a scheduler IO backend."""
 
-    def poll(self, fd: int, mask: int) -> int: ...
+    def poll(self, fd: int, mask: int) -> IOWaiter[int]: ...
 
     def poll_many(
         self,
@@ -160,13 +176,13 @@ class PollIO(Protocol):
 
 @runtime_checkable
 class FileIO(Protocol):
-    """Positioned binary file open helper over a blocking IO backend."""
+    """Positioned binary file open helper over a scheduler IO backend."""
 
-    def open(self, path: str, mode: str = "rb") -> IOFile: ...
+    def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]: ...
 
 
 class ServerIO(SocketIO, ProactorAccess, Protocol):
-    """Blocking socket IO plus proactor submission for stream servers.
+    """Socket IO plus proactor submission for stream servers.
 
     Static typing only: ``proactor`` is a property (same limitation as ``IOFile``).
     At runtime use ``isinstance(io, SocketIO)`` and ``io.proactor``; do not rely
@@ -200,25 +216,24 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         type: int,
         proto: int = 0,
         *,
+        connect_to: Any,
         flags: int = 0,
-        connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
-    ) -> AcceptStreamsDelivery: ...
+    ) -> IOWaiter[AcceptStreamsDelivery]: ...
 
 
 ProactorSocketIO = ServerIO
 
 
 class ProactorIOManager:
-    """Blocking IO facade over a ``Proactor`` backend.
+    """IO facade over a ``Proactor`` backend.
 
-    Structurally implements ``SocketIO``, ``ServerIO``, ``PollIO``, and
-    ``FileIO``, plus ``wait_operation`` for blocking on submitted ``Operation``
-    objects. Always owned by a proactor scheduler and holds a direct reference
-    to that scheduler instead of querying thread-local scheduler state.
+    One-shot helpers return ``IOWaiter``; call ``wait()`` to block the current
+    tealet. Streaming helpers (``accept_many``, ``poll_many``, ``sock_recv_iter``)
+    return long-lived handles. Always owned by a proactor scheduler.
     """
 
     def __init__(self, scheduler: BaseScheduler, proactor: Proactor) -> None:
@@ -241,32 +256,26 @@ class ProactorIOManager:
         if self._closed:
             raise RuntimeError("IO manager is closed")
 
-    def wait_operation(self, operation: Operation[T]) -> T:
-        """Block until ``operation`` completes.
+    def _waiter(
+        self,
+        operation: Operation[Any],
+        *,
+        map_result: Callable[[Any], T] | None = None,
+        create_next: Callable[[IOWaiterChainableProtocol[Any]], IOWaiterProtocol[Any]] | None = None,
+        on_cleanup: Callable[[Any], None] | None = None,
+    ) -> IOWaiter[T]:
+        if create_next is not None:
+            return IOWaiterChainable(
+                self,
+                operation,
+                map_result=map_result,
+                create_next=create_next,
+                on_cleanup=on_cleanup,
+            )
+        return IOWaiter(self, operation, map_result=map_result)
 
-        Park the current tealet through ``ThreadsafeEvent`` until the operation
-        callback fires. Call only from scheduler-owned tealets.
-        """
-
-        if operation.done():
-            return operation.result()
-
-        ready = ThreadsafeEvent(self._scheduler)
-
-        def wake(_operation: Operation[Any]) -> None:
-            ready.set()
-
-        operation.add_done_callback(wake)
-        try:
-            ready.swait()
-        finally:
-            if not operation.done():
-                operation.remove_done_callback(wake)
-                operation.cancel()
-        return operation.result()
-
-    def sock_recv(self, sock: socket.socket, n: int) -> bytes:
-        return self.wait_operation(self._proactor.recv(sock, n))
+    def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
+        return self._waiter(self._proactor.recv(sock, n))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         return self._proactor.create_recv_buffer_pool(buffer_size, buffer_count)
@@ -321,19 +330,19 @@ class ProactorIOManager:
                     progress(cargo)
                 return cargo
 
-        return b"".join((process(chunk) for _, chunk in self.sock_recv_iter(sock, buffer_pool)))
+        return b"".join(process(chunk) for _index, chunk in self.sock_recv_iter(sock, buffer_pool))
 
-    def sock_recv_into(self, sock: socket.socket, buf: Any) -> int:
-        return self.wait_operation(self._proactor.recv_into(sock, buf))
+    def sock_recv_into(self, sock: socket.socket, buf: Any) -> IOWaiter[int]:
+        return self._waiter(self._proactor.recv_into(sock, buf))
 
-    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> tuple[bytes, Any]:
-        return self.wait_operation(self._proactor.recvfrom(sock, bufsize))
+    def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> IOWaiter[tuple[bytes, Any]]:
+        return self._waiter(self._proactor.recvfrom(sock, bufsize))
 
-    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> tuple[int, Any]:
-        return self.wait_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
+    def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> IOWaiter[tuple[int, Any]]:
+        return self._waiter(self._proactor.recvfrom_into(sock, buf, nbytes))
 
-    def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> None:
-        return self.wait_operation(self._proactor.send(sock, data, progress))
+    def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> IOWaiter[None]:
+        return self._waiter(self._proactor.send(sock, data, progress))
 
     def sock_send_iter(
         self,
@@ -343,13 +352,19 @@ class ProactorIOManager:
         for chunk in chunks:
             if not chunk:
                 continue
-            self.sock_sendall(sock, memoryview(chunk))
+            self.sock_sendall(sock, memoryview(chunk)).wait()
 
-    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> int:
-        return self.wait_operation(self._proactor.sendto(sock, data, address))
+    def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> IOWaiter[int]:
+        return self._waiter(self._proactor.sendto(sock, data, address))
 
-    def sock_accept(self, sock: socket.socket) -> socket.socket:
-        return self.wait_operation(self._proactor.accept(sock))
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]:
+        return self._waiter(self._proactor.shutdown(sock, how))
+
+    def sock_close(self, sock: socket.socket) -> IOWaiter[None]:
+        return self._waiter(self._proactor.close_socket(sock))
+
+    def sock_accept(self, sock: socket.socket) -> IOWaiter[socket.socket]:
+        return self._waiter(self._proactor.accept(sock))
 
     def sock_connect(
         self,
@@ -357,13 +372,12 @@ class ProactorIOManager:
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-    ) -> None:
+    ) -> IOWaiter[None]:
         if initial is None:
-            self.wait_operation(self._proactor.connect(sock, address))
-            return
+            return self._waiter(self._proactor.connect(sock, address))
         from .operation_callbacks import connect_initial_send_operation_factory
 
-        self.wait_operation(
+        return self._waiter(
             self._proactor.connect(
                 sock,
                 address,
@@ -380,11 +394,11 @@ class ProactorIOManager:
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> socket.socket:
+    ) -> IOWaiter[socket.socket]:
         if initial_data is not None and connect_to is None:
             raise ValueError("initial_data requires connect_to")
         if connect_to is None:
-            return self.wait_operation(
+            return self._waiter(
                 self._proactor.create_socket(
                     family,
                     type,
@@ -395,21 +409,37 @@ class ProactorIOManager:
 
         from .operation_callbacks import create_connect_operation_factory
 
-        operation = self._proactor.create_socket(
-            family,
-            type,
-            proto,
-            flags=flags,
-            operation_factory=create_connect_operation_factory(
-                self._proactor,
-                connect_to,
-                initial_data,
-            ),
+        return self._waiter(
+            self._proactor.create_socket(
+                family,
+                type,
+                proto,
+                flags=flags,
+                operation_factory=create_connect_operation_factory(
+                    self._proactor,
+                    connect_to,
+                    initial_data,
+                ),
+            )
         )
-        return self.wait_operation(operation)
 
-    def poll(self, fd: int, mask: int) -> int:
-        return self.wait_operation(self._proactor.poll(fd, mask))
+    def poll(self, fd: int, mask: int) -> IOWaiter[int]:
+        return self._waiter(self._proactor.poll(fd, mask))
+
+    def read(self, fd: int, n: int, offset: int) -> IOWaiter[bytes]:
+        return self._waiter(self._proactor.read(fd, n, offset))
+
+    def read_into(self, fd: int, buf: Any, offset: int) -> IOWaiter[int]:
+        return self._waiter(self._proactor.read_into(fd, buf, offset))
+
+    def write(self, fd: int, data: Any, offset: int) -> IOWaiter[int]:
+        return self._waiter(self._proactor.write(fd, data, offset))
+
+    def stat_fdsize(self, fd: int) -> IOWaiter[int]:
+        return self._waiter(self._proactor.stat_fdsize(fd))
+
+    def close_fd(self, fd: int) -> IOWaiter[None]:
+        return self._waiter(self._proactor.close_fd(fd))
 
     def poll_many(
         self,
@@ -541,78 +571,76 @@ class ProactorIOManager:
         type: int,
         proto: int = 0,
         *,
+        connect_to: Any,
         flags: int = 0,
-        connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
-    ) -> AcceptStreamsDelivery:
-        """Create a socket and return stream endpoints.
+    ) -> IOWaiter[AcceptStreamsDelivery]:
+        """Create a socket, connect, and return stream endpoints.
 
-        When ``connect_to`` is set, the connect chain runs first and
-        ``initial_data`` is sent on the wire before streams are returned.
+        ``initial_data`` is sent on the wire after connect, before streams open.
         """
 
+        from .operation_callbacks import create_connect_operation_factory
         from .streams import _open_streams
 
-        if initial_data is not None and connect_to is None:
-            raise ValueError("initial_data requires connect_to")
-
-        def open_streams(sock: socket.socket) -> AcceptStreamsDelivery:
-            return _open_streams(
-                self,
-                sock,
-                limit=limit,
-                stream_factory=stream_factory,
-                async_=async_,
-            )
-
-        if connect_to is None:
-            sock = self.wait_operation(
-                self._proactor.create_socket(
-                    family,
-                    type,
-                    proto,
-                    flags=flags,
+        # create_streams runs from the connect operation done callback via create_next.
+        # A future tail may arm recv_many; for now stream open is an IOWaiterFake.
+        def create_streams(parent: IOWaiterChainableProtocol[socket.socket]) -> IOWaiterProtocol[AcceptStreamsDelivery]:
+            sock = parent.value()
+            try:
+                return IOWaiterFake(
+                    _open_streams(
+                        self,
+                        sock,
+                        limit=limit,
+                        stream_factory=stream_factory,
+                        async_=async_,
+                    )
                 )
-            )
-            return open_streams(sock)
+            except BaseException:
+                abortive_close(sock)
+                raise
 
-        from .operation_callbacks import create_connect_operation_factory
-
-        operation = self._proactor.create_socket(
-            family,
-            type,
-            proto,
-            flags=flags,
-            operation_factory=create_connect_operation_factory(
-                self._proactor,
-                connect_to,
-                initial_data,
-                open_streams,
+        return self._waiter(
+            self._proactor.create_socket(
+                family,
+                type,
+                proto,
+                flags=flags,
+                operation_factory=create_connect_operation_factory(
+                    self._proactor,
+                    connect_to,
+                    initial_data,
+                ),
             ),
+            create_next=create_streams,
+            on_cleanup=abortive_close,
         )
-        return self.wait_operation(cast(Operation[AcceptStreamsDelivery], operation))
 
-    def open(self, path: str, mode: str = "rb") -> IOFile:
+    def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]:
         flags, file_mode = parse_open_mode(mode)
         try:
-            fd = self.wait_operation(self._proactor.openat(path, flags, file_mode))
+            operation = self._proactor.openat(path, flags, file_mode)
         except NotImplementedError as exc:
             raise NotImplementedError("file I/O requires a proactor with openat support") from exc
-        try:
-            return ProactorFile(
-                self,
-                self._proactor,
-                fd,
-                path=path,
-                flags=flags,
-                append="a" in mode,
-            )
-        except BaseException:
+
+        def make_file(fd: int) -> IOFile:
             try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
+                return ProactorFile(
+                    self,
+                    fd,
+                    path=path,
+                    flags=flags,
+                    append="a" in mode,
+                )
+            except BaseException:
+                try:
+                    self.close_fd(fd).wait()
+                except OSError:
+                    pass
+                raise
+
+        return self._waiter(operation, map_result=make_file)

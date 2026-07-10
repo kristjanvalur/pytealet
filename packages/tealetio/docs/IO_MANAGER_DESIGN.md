@@ -21,7 +21,7 @@ the scheduler's proactor backend, while keeping scheduling on `BaseScheduler`.
 tealetio.streams          open_connection, start_server, StreamReader/Writer
         │
         ▼
-scheduler.io              ProactorIOManager — wait_operation, sock_*, poll, open
+scheduler.io              ProactorIOManager — IOWaiter-returning sock_*, poll, open
         │
         ▼
 Proactor (Protocol)       recv/send/accept/… → Operation[T]
@@ -51,9 +51,8 @@ Composition over subclassing `Scheduler` per IO backend.
 class ProactorIOManager:
     def __init__(self, proactor: Proactor) -> None: ...
 
-    def wait_operation(self, op: Operation[T]) -> T: ...
-    def sock_recv(self, sock: socket.socket, n: int) -> bytes: ...
-    # … remaining sock_*, poll, file helpers
+    def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]: ...
+    # … remaining sock_*, poll, file helpers; callers block via IOWaiter.wait()
 ```
 
 `ProactorScheduler` holds `self._io: ProactorIOManager` and exposes it as
@@ -75,7 +74,7 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 | Protocol | Responsibility | Status |
 |----------|----------------|--------|
 | `Proactor` | submit IO, return `Operation` | exists |
-| `OperationWaiter` | `wait_operation(op) -> T` | implemented in `files.py` |
+| `IOWaiter` | one-shot blocking handle; `.wait()` / `.forget()` | `io_waiter.py`; returned by `ProactorIOManager` helpers |
 | `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, … | protocol in `io_manager.py`; `ProactorIOManager` |
 | `PollIO` | `poll`, `poll_many` | protocol in `io_manager.py`; `ProactorIOManager` |
 | `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` |
@@ -112,8 +111,8 @@ Slices overlap at the concrete manager: `ProactorIOManager` implements
 that only need sockets can type against `SocketIO` without depending on the full
 manager. Lifecycle helpers such as `close()` belong on handles (`ProactorFile`,
 sockets, `ContinuousOperation`) and scheduler/proactor shutdown, not on the IO
-protocols. `OperationWaiter` stays separate for `ProactorFile` even though the
-manager also exposes `wait_operation`.
+protocols. `ProactorFile` holds a `ProactorIOManager` reference and blocks
+through `IOWaiter.wait()` on positioned read/write/close operations.
 
 Module helpers:
 
@@ -147,8 +146,8 @@ Do **not** force a single inheritance tree for all IO styles.
 
 ## What lives on `scheduler.io` (proactor path)
 
-- `wait_operation`
-- all `sock_*` helpers and `create_recv_buffer_pool` / `sock_recv_iter`
+- all `sock_*` helpers (return `IOWaiter`; callers use `.wait()`)
+- `create_recv_buffer_pool` / `sock_recv_iter`
 - `poll` / `poll_many`
 - positioned file `open` → `IOFile` (`ProactorFile` on proactor schedulers)
 
@@ -211,7 +210,7 @@ Production entry points:
 | `sock_create(…, connect_to=…)` | `create_connect_operation_factory` | create → connect → optional send |
 
 Intermediate legs are not awaited by the scheduler task. Only the root
-`Operation` is passed to `wait_operation`; child submissions happen from
+`IOWaiter` is blocked on (via `.wait()`); child submissions happen from
 delivery handlers and `chain_suboperation` as completions arrive.
 
 ### Succeed or raise
@@ -264,7 +263,7 @@ Error cleanup (for example closing a created socket when connect fails) lives in
 ``on_complete`` handlers and ``complete_error`` paths inside the delivery
 handlers — not in a separate advance/unwind hook.
 
-Only the root ``Operation`` is awaited by ``wait_operation``. Child operations
+Only the root ``IOWaiter`` is blocked on by the caller. Child operations
 complete independently; the parent finishes when the final ``on_complete`` calls
 ``parent.complete(…)`` or ``parent.complete_error(…)``.
 
@@ -337,17 +336,76 @@ static typing after `ProactorScheduler` narrowing.
 
 ## Resolved decisions
 
-1. **`wait_operation` on `IOManager`** — lives on `ProactorIOManager`; blocks via
-   `ThreadsafeEvent.swait()` in the current tealet. `ProactorFile` depends on the
-   `OperationWaiter` protocol.
+1. **Blocking one-shot IO** — `ProactorIOManager` helpers return `IOWaiter`;
+   callers block via `IOWaiter.wait()`. `ProactorFile` holds `ProactorIOManager`
+   directly and uses the same `IOWaiter.wait()` path for positioned I/O.
 2. **`BasicScheduler.io`** — property raises `RuntimeError`, not `None`.
 3. **`AsyncProactorScheduler`** — shares the same `ProactorIOManager` instance as
    the sync proactor core on a given scheduler object.
 4. **Stream helpers** — module-level only (`open_connection`, `start_server`);
    optional `scheduler=` for callers outside a running driver turn.
 
+## IOWaiter and interrupted waits
+
+One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The underlying
+`Operation` is submitted when the helper returns. The code that owns the handle
+calls either `wait()` or `forget()` — not both, and not as a public end-user
+API (`streams` / `files` call `wait()` internally today). `IOWaiter` does not
+enforce that contract; calling `wait()` after `forget()` is undefined. There is
+no public `cancel()` on `IOWaiter` — cancellation is an internal concern at the
+operation / proactor layer, not a third blocking-IO disposition.
+
+If `wait()` exits exceptionally (for example `timeout()` throwing into the
+blocked tealet while `ThreadsafeEvent.swait()` is parked), `IOWaiter` cancels
+the underlying `Operation` before re-raising. The handle cannot be waited on
+again; the caller must submit fresh work. `forget()` is different: it drops
+waiter interest without cancelling backend work. It is mostly caveat emptor —
+nulling the waiter's ``_operation`` reference breaks callback cycles; it does not
+cancel backend work. Forgetting handles for resource-creating operations (for
+example connect or ``sock_create_streams``) may leak sockets or streams.
+
+**Chained waiters (`IOWaiterChainable`).** `create_next` runs from the parent
+operation's done callback so the chain can finish before `wait()` is called.
+Each link clears ``_operation`` once its completion is handled (priming the
+successor for chain parents; after ``wait()`` resolves for plain waiters).
+``value()`` is one-shot: ``create_next`` takes this step's resolved result and
+clears the cached copy. An optional ``on_cleanup`` hook receives any
+still-unreleased value when ``wait()`` fails (primary path; hook exceptions
+propagate) or from ``__del__`` as a best-effort fallback (hook exceptions
+there surface as Python's ``Exception ignored in:`` log; forgetting chain heads
+remains caveat emptor). ``sock_create_streams`` passes ``abortive_close``
+and closes locally when stream open fails after ``value()`` (same cleanup the
+old connect ``result_wrapper`` path used). Forgetting a chain
+head is unsupported and may leak if the tail was already primed.
+
+**Data loss on interrupted waits (current behaviour).** We do **not** currently
+guarantee that bytes already read from the kernel but not yet delivered to the
+caller remain visible on the socket after a timed-out or otherwise interrupted
+wait. A timeout on `sock_recv` / stream `recv` should be treated as aborting
+that receive attempt, not as a restartable partial read. Compare with asyncio's
+stream and socket receive timeout semantics in a follow-up — document whether
+asyncio preserves kernel/socket buffer state on timeout or also abandons the
+in-flight read.
+
+**UringProactor races.** Delivery runs on worker threads while `wait()` blocks
+on the scheduler tealet. Completion delivery, `Operation._finish`, and
+wait-side cancellation can race: a CQE may be processed on the worker thread
+around the same time the tealet cancels from a timeout. That makes uring paths
+especially sensitive here.
+
+**Subsequent PR (waitable cancel).** A likely direction is *waitable cancel*:
+route cancellation through the proactor / uring submission path so cancel and
+completion are ordered relative to the same ring, rather than racing a Python
+`Operation.cancel()` on the main thread against worker delivery. Until that
+exists, treat interrupted waits as best-effort abort, not atomic “keep bytes,
+drop waiter only”.
+
 ## Open follow-ups
 
+- **Waitable cancel for interrupted `IOWaiter` waits** — design and implement
+  proactor/uring-integrated cancel so timeout and exceptional `wait()` exits
+  race less with worker-thread delivery; revisit asyncio parity for buffered
+  bytes on recv timeout.
 - Implement `SelectorIOManager` and wire `SelectorScheduler.io` when selector
   blocking IO should share the same capability gate as proactor schedulers.
 - `SocketIO`, `PollIO`, and `FileIO` entry protocols are implemented; a future
@@ -356,6 +414,10 @@ static typing after `ProactorScheduler` narrowing.
   signatures (`RecvBufferPool`, and similar). `IOFile` and `ServerIO` are done.
 - `StreamServer.serve_forever()` sugar (implemented); signal handling stays in
   `Runner`, not the server object.
+- **Stream transport close via `io.sock_close`** — `SocketTransport.close()` still
+  calls `socket.close()` directly; route through `sock_shutdown` / `sock_close`
+  in a follow-up PR when stream closing semantics are cleaned up (this PR adds
+  the proactor/manager close paths as preparation).
 
 ## References
 
@@ -363,7 +425,7 @@ static typing after `ProactorScheduler` narrowing.
 - `packages/tealetio/src/tealetio/operation_callbacks.py` — one-shot delivery composition and factories
 - `packages/tealetio/src/tealetio/continuous_callbacks.py` — continuous result-callback composition
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
-- `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `OperationWaiter`
+- `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`
 - `packages/tealetio/src/tealetio/streams.py` — streams API
 - `packages/tealetio/docs/PYTHON_API.md` — user-facing API
 - `packages/tealetio/docs/OPERATION_CALLBACKS.md` — callback module layout and composition contracts

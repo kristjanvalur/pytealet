@@ -151,6 +151,36 @@ def _close_owned_socket(sock: socket.socket) -> None:
         pass
 
 
+def _deliver_sync_void_socket_op(
+    proactor: object,
+    sock: socket.socket,
+    kind: str,
+    action: Callable[[], object],
+) -> Operation[None]:
+    operation = Operation[None](kind=kind, fileobj=sock)
+    try:
+        action()
+        operation.deliver(proactor, result=None)
+    except OSError as exc:
+        operation.deliver(proactor, exception=exc)
+    return operation
+
+
+def _deliver_sync_void_fd_op(
+    proactor: object,
+    fd: int,
+    kind: str,
+    action: Callable[[], object],
+) -> Operation[None]:
+    operation = Operation[None](kind=kind, fileobj=fd)
+    try:
+        action()
+        operation.deliver(proactor, result=None)
+    except OSError as exc:
+        operation.deliver(proactor, exception=exc)
+    return operation
+
+
 def _spawn_operation(
     kind: str,
     fileobj: object | None = None,
@@ -401,6 +431,16 @@ class Proactor(Protocol):
 
         ...
 
+    def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
+        """Submit ``socket.shutdown(how)`` for ``sock``."""
+
+        ...
+
+    def close_socket(self, sock: socket.socket) -> Operation[None]:
+        """Submit socket close and release the Python wrapper fd."""
+
+        ...
+
     def create_socket(
         self,
         family: int,
@@ -426,6 +466,11 @@ class Proactor(Protocol):
     def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]: ...
 
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]: ...
+
+    def close_fd(self, fd: int) -> Operation[None]:
+        """Close a caller-owned raw file descriptor."""
+
+        ...
 
     def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]: ...
 
@@ -555,6 +600,16 @@ class ProactorBase:
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
         raise NotImplementedError
 
+    def close_fd(self, fd: int) -> Operation[None]:
+        """Close a caller-owned raw file descriptor."""
+
+        self._check_open()
+        if fd < 0:
+            operation = Operation[None](kind="close_fd", fileobj=fd)
+            operation._finish(result=None)
+            return operation
+        return _deliver_sync_void_fd_op(self, fd, "close_fd", lambda: _close_raw_fd(fd))
+
     def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
         """Return file metadata, completing synchronously via ``os.stat`` / ``os.fstat``."""
 
@@ -610,7 +665,7 @@ class ProactorBase:
         io_uring ``submit_connect`` does not accept UNIX sockaddr paths today.
         Both proactor backends use this path so chained ``connect`` legs from
         ``sock_create`` / ``sock_connect`` behave uniformly at the io_manager
-        layer even when the operation finishes before ``wait_operation`` returns.
+        layer even when the operation finishes before the caller's ``wait()`` returns.
         """
 
         def finish_connect() -> None:
@@ -1026,6 +1081,16 @@ class SelectorProactor(ProactorBase):
 
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
+
+    def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
+        """Submit ``socket.shutdown(how)`` for ``sock``."""
+
+        return _deliver_sync_void_socket_op(self, sock, "shutdown", lambda: sock.shutdown(how))
+
+    def close_socket(self, sock: socket.socket) -> Operation[None]:
+        """Submit socket close and release the Python wrapper fd."""
+
+        return _deliver_sync_void_socket_op(self, sock, "close_socket", sock.close)
 
     def accept_many(
         self,
@@ -2122,6 +2187,62 @@ class UringProactor(ProactorBase):
         conn = socket_from_uring_fd(completion.res)
         operation = cast(Operation[socket.socket], entry.operation)
         operation._finish(result=conn)
+        return operation
+
+    def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
+        """Submit ``socket.shutdown(how)`` for ``sock``."""
+
+        operation = Operation[None](kind="shutdown", fileobj=sock)
+        if sock.fileno() == -1:
+            operation.deliver(self, exception=OSError(errno.EBADF, "Bad file descriptor"))
+            return operation
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_void_op(entry, completion),
+        )
+        self._submit_uring_entry(entry, lambda: self._ring.submit_shutdown(sock.fileno(), how, entry))
+        return operation
+
+    def close_socket(self, sock: socket.socket) -> Operation[None]:
+        """Submit socket close and release the Python wrapper fd."""
+
+        operation = Operation[None](kind="close_socket", fileobj=sock)
+        if sock.fileno() == -1:
+            operation.deliver(self, result=None)
+            return operation
+        fd = sock.detach()
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_void_op(entry, completion),
+        )
+        self._submit_uring_entry(entry, lambda: self._ring.submit_close(fd, entry))
+        return operation
+
+    def close_fd(self, fd: int) -> Operation[None]:
+        """Submit raw fd close for caller-owned descriptors (for example from ``openat``)."""
+
+        operation = Operation[None](kind="close_fd", fileobj=fd)
+        if fd < 0:
+            operation.deliver(self, result=None)
+            return operation
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._complete_uring_void_op(entry, completion),
+        )
+        self._submit_uring_entry(entry, lambda: self._ring.submit_close(fd, entry))
+        return operation
+
+    def _complete_uring_void_op(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
+        operation = cast(Operation[None], entry.operation)
+        res = completion.res
+        if res < 0:
+            self._deactivate_uring_entry(entry)
+            operation.deliver(
+                self,
+                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
+            return operation
+        operation.deliver(self, result=None)
         return operation
 
     def accept_many(

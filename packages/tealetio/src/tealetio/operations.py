@@ -47,7 +47,7 @@ class Operation(Generic[T]):
         self._cancelled = False
         self._result: T | None = None
         self._exception: BaseException | None = None
-        self._callbacks: list[_DoneCallback] | None = []
+        self._callbacks: list[_DoneCallback] = []
         self._cancel_hook: _CancelHook | None = None
         self._active_suboperations: set[Operation[Any]] = set()
 
@@ -136,7 +136,6 @@ class Operation(Generic[T]):
             if self._done:
                 run_now = True
             else:
-                assert self._callbacks is not None
                 self._callbacks.append(callback)
                 run_now = False
         if run_now:
@@ -146,8 +145,6 @@ class Operation(Generic[T]):
         """Remove matching done callbacks and return the number removed."""
 
         with self._lock:
-            if self._callbacks is None:
-                return 0
             removed = 0
             kept: list[_DoneCallback] = []
             for stored_callback in self._callbacks:
@@ -236,13 +233,12 @@ class Operation(Generic[T]):
             self._done = True
             self._cancel_hook = None
             callbacks = self._callbacks
-            self._callbacks = None
+            self._callbacks = []
             suboperations = tuple(self._active_suboperations) if cancelled else ()
 
         for suboperation in suboperations:
             suboperation.cancel()
 
-        assert callbacks is not None
         for callback in callbacks:
             callback(self)
         return True

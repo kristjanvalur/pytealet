@@ -5,16 +5,13 @@ import io
 import os
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
-from .operations import Operation
-
 if TYPE_CHECKING:
-    from .proactor import Proactor
+    from .io_manager import ProactorIOManager
 
 T = TypeVar("T")
 
 __all__ = [
     "IOFile",
-    "OperationWaiter",
     "ProactorFile",
     "parse_open_mode",
 ]
@@ -34,12 +31,6 @@ _SUPPORTED_BINARY_OPEN_MODES = frozenset(
         "ab+",
     }
 )
-
-
-class OperationWaiter(Protocol):
-    """Block the current tealet until a submitted ``Operation`` completes."""
-
-    def wait_operation(self, operation: Operation[T]) -> T: ...
 
 
 class IOFile(Protocol):
@@ -135,8 +126,7 @@ class ProactorFile(io.RawIOBase):
 
     def __init__(
         self,
-        waiter: OperationWaiter,
-        proactor: Proactor,
+        io: ProactorIOManager,
         fd: int,
         *,
         path: str,
@@ -144,8 +134,7 @@ class ProactorFile(io.RawIOBase):
         append: bool = False,
     ) -> None:
         super().__init__()
-        self._io = waiter
-        self._proactor = proactor
+        self._io = io
         self._fd = fd
         self._path = path
         self._flags = flags
@@ -222,7 +211,7 @@ class ProactorFile(io.RawIOBase):
         if not view:
             # empty buffer is a no-op; keep append EOF tracking unchanged
             return 0
-        nbytes = self._io.wait_operation(self._proactor.read_into(self._fd, view, self._pos))
+        nbytes = self._io.read_into(self._fd, view, self._pos).wait()
         self._pos += nbytes
         if self._append:
             self._pos_at_eof = False
@@ -234,7 +223,7 @@ class ProactorFile(io.RawIOBase):
             raise OSError(errno.EBADF, "File is not writable")
         if self._append and not self._pos_at_eof:
             self._pos = self._file_size()
-        nbytes = self._io.wait_operation(self._proactor.write(self._fd, b, self._pos))
+        nbytes = self._io.write(self._fd, b, self._pos).wait()
         self._pos += nbytes
         if self._append:
             self._pos_at_eof = True
@@ -249,16 +238,16 @@ class ProactorFile(io.RawIOBase):
         if fd < 0:
             return
         try:
-            os.close(fd)
+            self._io.close_fd(fd).wait()
         except OSError as exc:
             if exc.errno != errno.EBADF:
                 raise
 
     def _file_size(self) -> int:
-        return self._io.wait_operation(self._proactor.stat_fdsize(self._fd))
+        return self._io.stat_fdsize(self._fd).wait()
 
     def _read_chunk(self, size: int) -> bytes:
-        data = self._io.wait_operation(self._proactor.read(self._fd, size, self._pos))
+        data = self._io.read(self._fd, size, self._pos).wait()
         self._pos += len(data)
         if self._append:
             self._pos_at_eof = False

@@ -3,20 +3,43 @@ from __future__ import annotations
 import errno
 import os
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 import tealetio.files as files_module
 from tealetio.files import ProactorFile
+from tealetio.io_manager import ProactorIOManager
 from tealetio.operations import Operation
 
 _TEST_FD = 901
 
 
-class _ImmediateWaiter:
-    def wait_operation(self, operation: Operation[Any]) -> Any:
-        return operation.result()
+class _StubScheduler:
+    """Minimal scheduler stand-in for direct ``ProactorIOManager`` unit tests."""
+
+    def __init__(self) -> None:
+        self._exception_handler: Any = None
+
+    def set_exception_handler(self, handler: Any) -> None:
+        self._exception_handler = handler
+
+    def call_exception_handler(self, context: dict[str, Any]) -> None:
+        handler = self._exception_handler
+        if handler is None:
+            raise context["exception"]
+        handler(context)
+
+    def call_soon_threadsafe(self, callback, *args: object) -> None:
+        try:
+            callback(*args)
+        except BaseException as exc:
+            self.call_exception_handler(
+                {
+                    "message": "Exception in callback",
+                    "exception": exc,
+                    "scheduler": self,
+                }
+            )
 
 
 class _MemoryProactor:
@@ -25,6 +48,7 @@ class _MemoryProactor:
         self.read_calls: list[tuple[int, int, int]] = []
         self.write_calls: list[tuple[int, bytes, int]] = []
         self.read_into_calls: list[tuple[int, int]] = []
+        self.close_fd_calls: list[int] = []
 
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
         self.read_calls.append((fd, n, offset))
@@ -61,6 +85,13 @@ class _MemoryProactor:
         operation._finish(result=len(self._store.get(fd, b"")))
         return operation
 
+    def close_fd(self, fd: int) -> Operation[None]:
+        self.close_fd_calls.append(fd)
+        self._store.pop(fd, None)
+        operation = Operation[None](kind="close_fd", fileobj=fd)
+        operation._finish(result=None)
+        return operation
+
 
 def _make_file(
     *,
@@ -70,22 +101,15 @@ def _make_file(
 ) -> tuple[ProactorFile, _MemoryProactor, dict[int, bytearray]]:
     store: dict[int, bytearray] = {_TEST_FD: bytearray(data)}
     proactor = _MemoryProactor(store)
-    waiter = _ImmediateWaiter()
+    io = ProactorIOManager(_StubScheduler(), proactor)  # type: ignore[arg-type]
     handle = ProactorFile(
-        waiter,
-        proactor,  # type: ignore[arg-type]
+        io,
         _TEST_FD,
         path="/tmp/memory.txt",
         flags=flags,
         append=append,
     )
     return handle, proactor, store
-
-
-@pytest.fixture(autouse=True)
-def _noop_os_close():
-    with patch("tealetio.files.os.close"):
-        yield
 
 
 def test_proactor_file_exposes_iofile_surface() -> None:
@@ -133,10 +157,21 @@ def test_read_all_chunks_until_eof(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_close_is_idempotent() -> None:
-    handle, _proactor, _store = _make_file()
+    handle, proactor, _store = _make_file()
     handle.close()
     handle.close()
     assert handle.closed
+    assert proactor.close_fd_calls == [_TEST_FD]
+
+
+def test_close_delegates_to_proactor_close_fd() -> None:
+    handle, proactor, store = _make_file(data=b"hi")
+    try:
+        handle.close()
+        assert proactor.close_fd_calls == [_TEST_FD]
+        assert _TEST_FD not in store
+    finally:
+        handle.close()
 
 
 def test_append_readinto_empty_buffer_preserves_eof_flag() -> None:
