@@ -911,6 +911,18 @@ class TestIOWaitGroup:
         finally:
             io_waiter_module.ThreadsafeEvent = original_event
 
+    def test_group_attach_sync_completed_operation_clears_members(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        operation = Operation[socket.socket](kind="create", fileobj=None)
+        operation._finish(result=sock)
+        group = IOWaitGroup[socket.socket](io)
+        group.attach(operation, advance=lambda child: group.finish(child.value()))
+        assert group._members == set()
+        assert group.wait() == sock
+        sock.close()
+
     def test_group_child_value_is_one_shot(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)

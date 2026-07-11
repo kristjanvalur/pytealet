@@ -142,7 +142,13 @@ class IOWaitGroupChild(Generic[T]):
         self._on_cleanup = on_cleanup
         self._advance = advance
         self._resolved_value: tuple[T] | None = None
-        operation.add_done_callback(self._on_done)
+
+    def _arm(self) -> None:
+        """Register the done callback after the leg is tracked on the parent group."""
+
+        operation = self._operation
+        if operation is not None:
+            operation.add_done_callback(self._on_done)
 
     def value(self) -> T:
         """Return this leg's result once; clears the cached copy."""
@@ -232,6 +238,7 @@ class IOWaitGroup(Generic[T]):
             advance=advance,
         )
         self._members.add(child)
+        child._arm()
         return child
 
     def attach_operation(
