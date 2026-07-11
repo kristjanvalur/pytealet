@@ -9,7 +9,14 @@ from unittest.mock import patch
 import pytest
 
 from tealetio import set_scheduler
-from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, ServerIO, SocketIO
+from tealetio.io_manager import (
+    FileIO,
+    PollIO,
+    ProactorIOManager,
+    ServerIO,
+    SocketIO,
+    _finish_or_close_socket,
+)
 from tealetio.io_waiter import (
     IOWaiter,
     IOWaitGroup,
@@ -64,7 +71,8 @@ def _wait_for_uring(proactor: UringProactor, predicate: Any, *, timeout: float =
 
 
 class _MockProactor:
-    def __init__(self) -> None:
+    def __init__(self, *, recv_result: bytes = b"mock") -> None:
+        self._recv_result = recv_result
         self.recv_calls: list[tuple[socket.socket, int]] = []
         self.poll_calls: list[tuple[int, int]] = []
         self.send_calls: list[tuple[socket.socket, Any]] = []
@@ -76,7 +84,7 @@ class _MockProactor:
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         self.recv_calls.append((sock, n))
         operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
-        operation._finish(result=b"mock")
+        operation._finish(result=self._recv_result)
         return operation
 
     def accept(self, sock: socket.socket) -> Operation[socket.socket]:
@@ -788,6 +796,21 @@ class TestProactorIOManagerDirect:
         finally:
             listen.close()
 
+    def test_sock_accept_delivers_empty_initial_read_as_eof(self) -> None:
+        proactor = _MockProactor(recv_result=b"")
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        try:
+            waiter = io.sock_accept(listen, 64)
+            conn, data = waiter.wait()
+            try:
+                assert data == b""
+                assert proactor.recv_calls == [(conn, 64)]
+            finally:
+                conn.close()
+        finally:
+            listen.close()
+
     def test_sock_create_rejects_initial_data_without_connect_to(self):
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -876,6 +899,44 @@ class TestProactorIOManagerDirect:
 
 
 class TestProactorIOManagerDeferredCompose:
+    def test_sock_accept_cancel_during_pending_recv_closes_connection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        pending_recv: list[Operation[bytes]] = []
+        accepted_conn: list[socket.socket] = []
+
+        def pending_recv_operation(sock: socket.socket, n: int) -> Operation[bytes]:
+            accepted_conn.append(sock)
+            operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
+            pending_recv.append(operation)
+            return operation
+
+        proactor.recv = pending_recv_operation  # type: ignore[method-assign]
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", swait_and_abort)
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            assert len(accepted_conn) == 1
+            conn = accepted_conn[0]
+            assert len(pending_recv) == 1
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            assert pending_recv[0].cancelled()
+            assert conn.fileno() == -1
+        finally:
+            listen.close()
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
     def test_sock_create_cancel_during_pending_connect_closes_socket(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1056,7 +1117,7 @@ class TestIOWaitGroup:
             group.wait()
         assert seen == [(True, None)]
 
-    def test_group_attach_operation_completes_group(self) -> None:
+    def test_group_chained_attach_completes_group(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         first = Operation[None](kind="first", fileobj=None)
@@ -1064,12 +1125,99 @@ class TestIOWaitGroup:
         group = IOWaitGroup[str](io)
 
         def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
-            group.attach_operation(second, on_complete=lambda: group.finish("done"))
+            group.attach(second, advance=lambda _second: group.finish("done"))
 
         group.attach(first, advance=advance_first)
         first._finish(result=None)
         second._finish(result=None)
         assert group.wait() == "done"
+
+    def test_group_finish_returns_false_after_wait_interrupt(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[None](kind="pending", fileobj=None)
+        group = IOWaitGroup[str](io)
+        group.attach(operation)
+
+        import tealetio.io_waiter as io_waiter_module
+
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError("abort wait")
+
+        io_waiter_module.ThreadsafeEvent.swait = swait_and_abort  # type: ignore[method-assign]
+        try:
+            with pytest.raises(TimeoutError, match="abort wait"):
+                group.wait()
+            assert group.finish("late") is False
+        finally:
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+    def test_finish_or_close_socket_closes_on_rejected_delivery(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitGroup[tuple[socket.socket, bytes]](io)
+        conn, _peer = socket.socketpair()
+        group._closed = True
+        _finish_or_close_socket(group, conn, (conn, b"hi"))
+        assert conn.fileno() == -1
+
+    def test_group_wait_returns_result_when_delivery_races_interrupt(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[None](kind="pending", fileobj=None)
+        group = IOWaitGroup[str](io)
+        group.attach(operation)
+
+        import tealetio.io_waiter as io_waiter_module
+
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def swait_finish_then_abort(self: Any) -> None:
+            group.finish("delivered")
+            raise TimeoutError("abort wait")
+
+        io_waiter_module.ThreadsafeEvent.swait = swait_finish_then_abort  # type: ignore[method-assign]
+        try:
+            assert group.wait() == "delivered"
+        finally:
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+    def test_io_waiter_returns_result_when_delivery_races_interrupt(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        pending: list[Operation[socket.socket]] = []
+
+        def pending_accept(sock: socket.socket) -> Operation[socket.socket]:
+            operation = Operation[socket.socket](kind="accept", fileobj=None)
+            pending.append(operation)
+            return operation
+
+        proactor.accept = pending_accept  # type: ignore[method-assign]
+
+        import tealetio.io_waiter as io_waiter_module
+
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+        waiter = io.sock_accept(listen)
+
+        def swait_complete_then_abort(self: Any) -> None:
+            conn, _peer = socket.socketpair()
+            pending[0]._finish(result=conn)
+            raise TimeoutError("abort wait")
+
+        io_waiter_module.ThreadsafeEvent.swait = swait_complete_then_abort  # type: ignore[method-assign]
+        try:
+            conn, initial = waiter.wait()
+            try:
+                assert initial is None
+                assert conn.fileno() != -1
+            finally:
+                conn.close()
+        finally:
+            listen.close()
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
 
     def test_group_wait_cancels_active_operations_on_exception(self) -> None:
         proactor = _MockProactor()

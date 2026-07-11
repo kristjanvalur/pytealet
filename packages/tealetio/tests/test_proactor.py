@@ -1269,7 +1269,7 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
-    def test_accept_many_callback_factory_read_closes_idle_peer_without_delivery(self) -> None:
+    def test_accept_many_callback_factory_delivers_empty_initial_read_as_eof(self) -> None:
         from tealetio.continuous_callbacks import accept_read_delivery
 
         proactor = SelectorProactor()
@@ -1290,16 +1290,20 @@ class TestSelectorProactor:
                 client.connect(server.getsockname())
             except (BlockingIOError, InterruptedError):
                 pass
+            client.shutdown(socket.SHUT_WR)
             deadline = proactor.get_time() + 2.0
             while proactor.get_time() < deadline:
                 proactor.wait(proactor.get_time() + 0.05)
                 if accepted:
                     break
-            client.shutdown(socket.SHUT_WR)
-            while proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
 
-            assert accepted == []
+            assert len(accepted) == 1
+            conn, data, recv_error = accepted[0]
+            try:
+                assert data == b""
+                assert recv_error is None
+            finally:
+                conn.close()
         finally:
             client.close()
             server.close()

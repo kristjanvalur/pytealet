@@ -74,15 +74,15 @@ callback, *, recv_size=None)` emits
 active until it is cancelled or the backend reports a terminal error. Call
 `conn.getpeername()` when the peer address is needed.
 `initial_data` holds accept-time pre-read bytes when the backend honours
-`recv_size`; otherwise it is `None`. `recv_error` is `None` on success; when it
-is set the callback must close `conn` (or delegate to a helper such as
-`start_server` that does). One-shot `accept()` / `sock_accept()` return the
-accepted socket only; call `conn.getpeername()` when the peer address is needed.
+`recv_size`; otherwise it is `None`. An empty `initial_data` (`b""`) means the
+peer closed the write side before sending data (EOF). `recv_error` is `None` on
+success; when it is set the callback must close `conn` (or delegate to a helper
+such as `start_server` that does). One-shot `sock_accept()` returns
+`(conn, initial_data)`; without `recv_size`, `initial_data` is `None`. Call
+`conn.getpeername()` when the peer address is needed.
 `recv_size` must be positive when provided; values
-above 64 KiB (`2**16`) are silently capped. On `UringProactor` with multishot
-accept, a non-`None` `recv_size` arms `receive_on_accept` and the callback runs
-only after the peer sends data or closes without sending (idle peers are
-dropped). Leave `recv_size` at the default for server-speaks-first protocols.
+above 64 KiB (`2**16`) are silently capped. Leave `recv_size` at the default
+for server-speaks-first protocols.
 `poll(fd, mask)` waits for fd readiness and returns a one-shot `Operation[int]`.
 The result is the event bitmask currently set on the fd (`select.POLL*` bits
 among those requested in `mask`). `poll_many(fd, mask, callback)` emits that

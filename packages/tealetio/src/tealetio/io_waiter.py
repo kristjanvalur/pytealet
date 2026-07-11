@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .locks import ThreadsafeEvent
 from .operations import InvalidStateError, Operation
@@ -14,11 +15,14 @@ T_co = TypeVar("T_co", covariant=True)
 _RawResult = TypeVar("_RawResult")
 _OnLegCleanup = Callable[[bool, Any], object]
 _AdvanceHandler = Callable[["IOWaitGroupChild[Any]"], object]
-_OnCompleteHandler = Callable[[], object]
 
 
 class IOWaitable(Protocol[T_co]):
-    """Blocking IO handle with ``wait()`` / ``forget()``; satisfied by ``IOWaiter`` and ``IOWaitGroup``."""
+    """Blocking IO handle with ``wait()`` / ``forget()``; satisfied by ``IOWaiter`` and ``IOWaitGroup``.
+
+    Resource-creating helpers are intended for ``wait()`` only; ``forget()`` on
+    those handles is undefined.
+    """
 
     def forget(self) -> None: ...
 
@@ -68,10 +72,11 @@ class IOWaiter(Generic[T]):
     def forget(self) -> None:
         """Drop interest in the result; backend work continues to completion.
 
-        Caveat emptor: mostly breaks reference cycles with completion callbacks
-        by nulling ``_operation``. Does not cancel backend work. Forgetting
-        handles for resource-creating operations (for example connect or stream
-        setup) may leak resources.
+        Mostly breaks reference cycles with completion callbacks by nulling
+        ``_operation``. Does not cancel backend work. ``forget()`` on handles
+        from resource-creating helpers (for example ``sock_accept``,
+        ``sock_create`` with ``connect_to``, ``sock_create_streams``) is
+        undefined — always ``wait()`` for those.
         """
 
         self._operation = None
@@ -99,6 +104,8 @@ class IOWaiter(Generic[T]):
             ready.swait()
         except BaseException:
             operation.remove_done_callback(wake)
+            if operation.done():
+                return
             operation.cancel()
             raise
 
@@ -199,29 +206,31 @@ class IOWaitGroupChild(Generic[T]):
             self._group._complete_error(exc)
 
 
-_ActiveMember: TypeAlias = Operation[Any] | IOWaitGroupChild[Any]
-
-
 class IOWaitGroup(Generic[T]):
     """Grouped IO wait with a single ``ThreadsafeEvent`` park for the composition.
 
     Active work is tracked as ``IOWaitGroupChild`` legs and/or bare ``Operation``
     objects. Leg completion runs on worker threads; ``finish()`` unblocks one
-    ``wait()`` on the group. Call exactly one of ``wait()`` or ``forget()``;
-    this type does not track that contract. Child legs expose ``value()`` for
-    one-shot handoff of raw operation results into advance handlers.
+    ``wait()`` on the group. Resource-creating compose helpers (``sock_create``
+    with ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
+    ``recv_size``, ``sock_create_streams``, and similar) are intended to be
+    driven to completion via ``wait()`` only; ``forget()`` on those handles is
+    undefined. Child legs expose ``value()`` for one-shot handoff of raw
+    operation results into advance handlers.
     """
 
-    __slots__ = ("_completion", "_io", "_members", "_ready")
+    __slots__ = ("_closed", "_completion", "_io", "_lock", "_members", "_ready")
 
     def __init__(
         self,
         io: "ProactorIOManager",
     ) -> None:
         self._io = io
+        self._lock = threading.Lock()
+        self._closed = False
         self._completion: tuple[bool, Any] | None = None
         self._ready: ThreadsafeEvent | None = None
-        self._members: set[_ActiveMember] = set()
+        self._members: set[IOWaitGroupChild[Any]] = set()
 
     def attach(
         self,
@@ -232,105 +241,105 @@ class IOWaitGroup(Generic[T]):
     ) -> IOWaitGroupChild[Any]:
         """Register an operation leg that may expose a ``value()`` to advance hooks."""
 
-        if self._completion is not None:
-            operation.cancel()
-            raise RuntimeError("IOWaitGroup is closed")
-        child = IOWaitGroupChild(
-            self,
-            operation,
-            on_cleanup=on_cleanup,
-            advance=advance,
-        )
-        self._members.add(child)
+        with self._lock:
+            if self._closed or self._completion is not None:
+                operation.cancel()
+                raise RuntimeError("IOWaitGroup is closed")
+            child = IOWaitGroupChild(
+                self,
+                operation,
+                on_cleanup=on_cleanup,
+                advance=advance,
+            )
+            self._members.add(child)
         child._arm()
         return child
 
-    def attach_operation(
-        self,
-        operation: Operation[Any],
-        *,
-        on_complete: _OnCompleteHandler | None = None,
-    ) -> None:
-        """Register a bare operation leg without a ``value()`` handoff."""
+    def finish(self, result: T) -> bool:
+        """Mark the grouped composition successful and wake a blocked ``wait()``.
 
-        if self._completion is not None:
-            operation.cancel()
-            raise RuntimeError("IOWaitGroup is closed")
+        Returns ``False`` when ``wait()`` has already ended or delivery was
+        rejected (for example after an interrupted wait); the caller must
+        discard ``result`` (close sockets, streams, and similar).
+        """
 
-        def on_done(op: Operation[Any]) -> None:
-            if self._completion is not None:
-                return
-            try:
-                op.result()
-            except BaseException as exc:
-                self._complete_error(exc)
-                return
-            if on_complete is not None:
-                try:
-                    on_complete()
-                except BaseException as exc:
-                    self._complete_error(exc)
-
-        operation.add_done_callback(on_done)
-        self._members.add(operation)
-
-    def finish(self, result: T) -> None:
-        """Mark the grouped composition successful and wake a blocked ``wait()``."""
-
-        self._complete(ok=True, value=result)
+        return self._complete(ok=True, value=result)
 
     def _complete_error(self, exc: BaseException) -> None:
-        if self._completion is not None:
-            return
-        self._cleanup_members()
+        with self._lock:
+            if self._closed or self._completion is not None:
+                return
+            members = tuple(self._members)
+        self._cleanup_members(members)
         self._complete(ok=False, value=exc)
 
-    def _cleanup_members(self) -> None:
-        for member in tuple(self._members):
-            if isinstance(member, IOWaitGroupChild):
-                member._cleanup_unresolved_value()
+    def _cleanup_members(self, members: tuple[IOWaitGroupChild[Any], ...] | None = None) -> None:
+        if members is None:
+            with self._lock:
+                members = tuple(self._members)
+        for member in members:
+            member._cleanup_unresolved_value()
 
-    def _complete(self, *, ok: bool, value: Any) -> None:
-        if self._completion is not None:
-            return
-        self._completion = (ok, value)
-        if not ok:
-            self._cancel_pending()
-        self._members.clear()
-        ready = self._ready
+    def _complete(self, *, ok: bool, value: Any) -> bool:
+        ready: ThreadsafeEvent | None
+        cancel_members: tuple[IOWaitGroupChild[Any], ...] = ()
+        with self._lock:
+            if self._closed or self._completion is not None:
+                return False
+            self._completion = (ok, value)
+            if not ok:
+                cancel_members = tuple(self._members)
+            self._members.clear()
+            ready = self._ready
+        if cancel_members:
+            self._cancel_members(cancel_members)
         if ready is not None:
             ready.set()
+        return True
+
+    def _cancel_members(self, members: tuple[IOWaitGroupChild[Any], ...]) -> None:
+        for member in members:
+            operation = member._operation
+            if operation is not None and not operation.done():
+                operation.cancel()
 
     def _cancel_pending(self) -> None:
-        for member in tuple(self._members):
-            if isinstance(member, IOWaitGroupChild):
-                operation = member._operation
-                if operation is not None and not operation.done():
-                    operation.cancel()
-                continue
-            if not member.done():
-                member.cancel()
+        with self._lock:
+            members = tuple(self._members)
+        self._cancel_members(members)
 
     def forget(self) -> None:
-        """Drop interest in the grouped result; active backend work continues."""
+        """Drop interest in the grouped result; active backend work continues.
+
+        Undefined for resource-creating compose handles — always ``wait()`` for
+        those (see ``IOWaitGroup`` class docstring).
+        """
 
         for member in self._members:
-            if isinstance(member, IOWaitGroupChild):
-                member._forget()
+            member._forget()
         self._members.clear()
 
     def wait(self) -> T:
-        if self._completion is None:
+        completion = self._completion
+        if completion is None:
             ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
             self._ready = ready
-            if self._completion is None:
-                try:
-                    ready.swait()
-                except BaseException:
-                    self._cancel_pending()
-                    self._cleanup_members()
-                    raise
-        completion = self._completion
+            try:
+                ready.swait()
+            except BaseException as exc:
+                with self._lock:
+                    if self._completion is not None:
+                        completion = self._completion
+                        members = ()
+                    else:
+                        self._closed = True
+                        members = tuple(self._members)
+                if completion is None:
+                    self._cancel_members(members)
+                    self._cleanup_members(members)
+                    raise exc
+            completion = self._completion
+
         assert completion is not None
         ok, value = completion
         if not ok:

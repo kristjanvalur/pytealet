@@ -187,7 +187,6 @@ IOWaitGroup
 | Helper | Role |
 |--------|------|
 | `IOWaitGroup.attach` | Register one leg; optional `advance` runs on worker thread after success |
-| `IOWaitGroup.attach_operation` | Register a bare `Operation` with `on_complete` |
 | `IOWaitGroupChild.value()` | One-shot handoff of a leg's result into the next advance handler |
 | `on_cleanup(fail, value)` | Per-leg teardown (for example `abortive_close(sock)` on connect failure) |
 
@@ -332,27 +331,38 @@ no public `cancel()` on `IOWaiter` — cancellation is an internal concern at th
 operation / proactor layer, not a third blocking-IO disposition.
 
 If `wait()` exits exceptionally (for example `timeout()` throwing into the
-blocked tealet while `ThreadsafeEvent.swait()` is parked), `IOWaiter` cancels
-the underlying `Operation` before re-raising. The handle cannot be waited on
-again; the caller must submit fresh work. `forget()` is different: it drops
-waiter interest without cancelling backend work. It is mostly caveat emptor —
-nulling the waiter's ``_operation`` reference breaks callback cycles; it does not
-cancel backend work. Forgetting handles for resource-creating operations (for
-example connect or ``sock_create_streams``) may leak sockets or streams.
+blocked tealet while `ThreadsafeEvent.swait()` is parked), the waiter cancels
+pending backend work and re-raises — unless delivery already completed, in
+which case the interrupt is swallowed and the result (or completion exception)
+is returned. ``IOWaiter`` checks the underlying ``Operation``; ``IOWaitGroup``
+serialises ``finish()`` / ``_complete()`` and the interrupt path on a lock so a
+worker-thread delivery that wins the race is not torn down by a concurrent
+timeout. An interrupted ``wait()`` sets ``IOWaitGroup._closed``; a late
+``finish()`` then returns ``False`` and compose handlers discard the result
+(for example ``abortive_close`` on a socket). The handle cannot be waited on
+again after a genuine interrupt; the caller must submit fresh work. `forget()`
+is different: it drops waiter
+interest without cancelling backend work — mostly to break callback cycles by
+nulling the waiter's ``_operation`` reference.
+
+**Resource-creating helpers must use ``wait()``.** ``forget()`` on handles from
+``sock_accept``, ``sock_create`` (with ``connect_to``), ``sock_create_streams``,
+and other helpers that hand back sockets or streams is undefined behaviour.
+Callers always want the created resource; use ``wait()`` (or let ``streams`` /
+``files`` call it internally). ``forget()`` remains available for narrow
+internal uses on non-resource one-shot ops.
 
 **Grouped waiters (`IOWaitGroup`).** Multi-leg helpers (`sock_create` with
 ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
-group. Each leg is registered with ``attach()`` or ``attach_operation()``;
+group. Each leg is registered with ``attach()``;
 advance handlers run on worker threads and submit the next leg. The group parks
 once on a single ``ThreadsafeEvent`` until ``finish()`` or an error.
 ``IOWaitGroupChild.value()`` is one-shot and hands a leg result into the next
 advance handler. An optional ``on_cleanup`` hook on each leg receives failures
 (``fail=True``) or unreleased success values when ``wait()`` exits exceptionally
 or from ``__del__``. ``sock_create_streams`` passes ``abortive_close`` on connect
-failure and closes locally when stream open fails after ``value()``. Forgetting a
-group handle mid-compose is unsupported and may leak if legs already created
-resources.
+failure and closes locally when stream open fails after ``value()``.
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the
