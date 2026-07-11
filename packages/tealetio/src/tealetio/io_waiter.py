@@ -326,6 +326,8 @@ class IOWaitGroup(Generic[T]):
             return cast(T, value)
 
         ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
+        # lazy ready: publish _ready under lock and re-check completion so a
+        # racing finish() cannot complete before the waiter is armed
         with self._lock:
             completion = self._completion
             if completion is None:
