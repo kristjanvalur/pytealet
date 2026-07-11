@@ -1076,13 +1076,14 @@ class TestProactorIOManagerDirect:
         assert waiter.wait() is None
         assert seen == [select.POLLIN]
 
-    def test_io_waiter_cancel_stops_continuous_operation(self) -> None:
+    def test_proactor_cancel_stops_continuous_operation_behind_waiter(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         pending = ContinuousOperation[None](kind="poll_many", fileobj=5)
         waiter = IOWaiter(io, pending)
-        waiter.cancel()
+        proactor.cancel(pending)
         assert pending.cancelled() is True
+        assert waiter.operation is pending
 
     def test_poll_many_returns_io_waitable(self):
         proactor = _MockProactor()

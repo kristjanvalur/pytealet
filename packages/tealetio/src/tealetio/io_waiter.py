@@ -101,13 +101,6 @@ class IOWaiter(Generic[T]):
 
         self._operation = None
 
-    def cancel(self) -> None:
-        """Cancel the underlying operation when it is still active."""
-
-        operation = self._operation
-        if operation is not None and not operation.done():
-            self._io._proactor.cancel(operation)
-
     def poll(self) -> bool:
         """Return ``True`` when the underlying operation has completed."""
 

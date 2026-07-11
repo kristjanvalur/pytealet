@@ -4245,11 +4245,11 @@ class TestProactorSchedulerIntegration:
     def test_poll_many_emits_until_cancelled(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         seen: list[int] = []
-        operation = None
+        waiter = None
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = scheduler.io.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            waiter = scheduler.io.poll_many(reader.fileno(), select.POLLIN, seen.append)
 
             def send() -> None:
                 scheduler.sleep(0.001)
@@ -4258,15 +4258,19 @@ class TestProactorSchedulerIntegration:
             def wait_for_event() -> None:
                 while not seen:
                     scheduler.sleep(0.001)
-                operation.cancel()
+                op = waiter.operation
+                assert op is not None
+                scheduler.proactor.cancel(op)
 
             scheduler.spawn(send)
             task = scheduler.spawn(wait_for_event)
             scheduler.run_until_complete(task)
             assert seen[0] & select.POLLIN
         finally:
-            if operation is not None:
-                operation.cancel()
+            if waiter is not None:
+                op = waiter.operation
+                if op is not None and not op.done():
+                    scheduler.proactor.cancel(op)
             reader.close()
             writer.close()
 
