@@ -10,7 +10,6 @@ from .continuous_callbacks import (
     AcceptReadResult,
     AcceptRecvErrorCallback,
     AcceptStreamsDelivery,
-    accept_read_delivery,
     finalize_accept_recv_error,
     normalize_accept_recv_size,
     wrap_accept_delivery,
@@ -24,7 +23,8 @@ from .io_waiter import (
     IOWaitable,
 )
 
-from .operations import ContinuousOperation
+from .operations import Operation
+from .tasks import CancelledError
 from .socket_helpers import abortive_close
 from .types import SocketSendBuffer
 
@@ -512,6 +512,31 @@ class ProactorIOManager:
         assert self._scheduler is not None
         self._scheduler.call_soon_threadsafe(thunk)
 
+    def _accept_many_read_on_conn(
+        self,
+        deliver: Callable[[AcceptReadResult], object],
+        *,
+        recv_size: int,
+    ) -> Callable[[socket.socket], None]:
+        """Return a proactor ``accept_many`` callback that pre-reads each accept."""
+
+        def on_conn(conn: socket.socket) -> None:
+            recv_op = self._proactor.recv(conn, recv_size)
+
+            def on_recv_complete(op: Operation[bytes]) -> None:
+                exc = op.exception()
+                if exc is not None:
+                    if isinstance(exc, CancelledError):
+                        abortive_close(conn)
+                        return
+                    deliver((conn, None, exc))
+                    return
+                deliver((conn, op.result(), None))
+
+            recv_op.add_done_callback(on_recv_complete)
+
+        return on_conn
+
     def accept_many(
         self,
         sock: socket.socket,
@@ -550,9 +575,7 @@ class ProactorIOManager:
                 self,
                 self._proactor.accept_many(
                     sock,
-                    callback_factory=lambda op: accept_read_delivery(
-                        self._proactor,
-                        op,
+                    self._accept_many_read_on_conn(
                         deliver_wrapped,
                         recv_size=normalized_recv_size,
                     ),
@@ -618,9 +641,7 @@ class ProactorIOManager:
                 self,
                 self._proactor.accept_many(
                     sock,
-                    callback_factory=lambda op: accept_read_delivery(
-                        self._proactor,
-                        op,
+                    self._accept_many_read_on_conn(
                         deliver_accept,
                         recv_size=normalized_recv_size,
                     ),
