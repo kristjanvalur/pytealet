@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
 from .locks import ThreadsafeEvent
-from .operations import Operation
+from .operations import InvalidStateError, Operation
 
 if TYPE_CHECKING:
     from .io_manager import ProactorIOManager
@@ -154,9 +154,13 @@ class IOWaitGroupChild(Generic[T]):
         """Return this leg's result once; clears the cached copy."""
 
         cached = self._resolved_value
-        assert cached is not None
-        self._resolved_value = None
-        return cached[0]
+        if cached is not None:
+            self._resolved_value = None
+            return cached[0]
+        operation = self._operation
+        if operation is not None and not operation.done():
+            raise InvalidStateError("IOWaitGroupChild value is not ready")
+        raise InvalidStateError("IOWaitGroupChild value already consumed")
 
     def _notify_cleanup(self, *, fail: bool, value: Any | None) -> None:
         on_cleanup = self._on_cleanup

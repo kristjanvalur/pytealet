@@ -340,19 +340,19 @@ nulling the waiter's ``_operation`` reference breaks callback cycles; it does no
 cancel backend work. Forgetting handles for resource-creating operations (for
 example connect or ``sock_create_streams``) may leak sockets or streams.
 
-**Chained waiters (`IOWaiterChainable`).** `create_next` runs from the parent
-operation's done callback so the chain can finish before `wait()` is called.
-Each link clears ``_operation`` once its completion is handled (priming the
-successor for chain parents; after ``wait()`` resolves for plain waiters).
-``value()`` is one-shot: ``create_next`` takes this step's resolved result and
-clears the cached copy. An optional ``on_cleanup`` hook receives any
-still-unreleased value when ``wait()`` fails (primary path; hook exceptions
-propagate) or from ``__del__`` as a best-effort fallback (hook exceptions
-there surface as Python's ``Exception ignored in:`` log; forgetting chain heads
-remains caveat emptor). ``sock_create_streams`` passes ``abortive_close``
-and closes locally when stream open fails after ``value()`` (same cleanup the
-old connect ``result_wrapper`` path used). Forgetting a chain
-head is unsupported and may leak if the tail was already primed.
+**Grouped waiters (`IOWaitGroup`).** Multi-leg helpers (`sock_create` with
+``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
+``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
+group. Each leg is registered with ``attach()`` or ``attach_operation()``;
+advance handlers run on worker threads and submit the next leg. The group parks
+once on a single ``ThreadsafeEvent`` until ``finish()`` or an error.
+``IOWaitGroupChild.value()`` is one-shot and hands a leg result into the next
+advance handler. An optional ``on_cleanup`` hook on each leg receives failures
+(``fail=True``) or unreleased success values when ``wait()`` exits exceptionally
+or from ``__del__``. ``sock_create_streams`` passes ``abortive_close`` on connect
+failure and closes locally when stream open fails after ``value()``. Forgetting a
+group handle mid-compose is unsupported and may leak if legs already created
+resources.
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the

@@ -16,9 +16,9 @@ from tealetio.io_waiter import (
     IOWaitGroupChild,
     IOWaitGroupChildProtocol,
 )
-from tealetio.operations import ContinuousOperation, Operation
-from tealetio.proactor import SyncProactorScheduler
-from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
+from tealetio.operations import ContinuousOperation, InvalidStateError, Operation
+from tealetio.proactor import SyncProactorScheduler, UringProactor
+from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES, _DeferredCreateSocketUringRing
 
 
 class _StubScheduler:
@@ -52,6 +52,15 @@ class _StubScheduler:
 
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(_StubScheduler(), proactor)  # type: ignore[arg-type]
+
+
+def _wait_for_uring(proactor: UringProactor, predicate: Any, *, timeout: float = 1.0) -> None:
+    deadline = proactor.get_time() + timeout
+    while proactor.get_time() < deadline:
+        if predicate():
+            return
+        proactor.wait(proactor.get_time() + 0.05)
+    raise TimeoutError("timed out waiting for uring condition")
 
 
 class _MockProactor:
@@ -866,6 +875,82 @@ class TestProactorIOManagerDirect:
         assert isinstance(operation, ContinuousOperation)
 
 
+class TestProactorIOManagerDeferredCompose:
+    def test_sock_create_cancel_during_pending_connect_closes_socket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
+        scheduler = SyncProactorScheduler(lambda: proactor)
+        set_scheduler(scheduler)
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def staged_swait(self: Any) -> None:
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
+            proactor.ring.complete_socket()
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", staged_swait)
+        try:
+            waiter = scheduler.io.sock_create(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            assert isinstance(waiter, IOWaitGroup)
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            leaked_fd = proactor.ring.last_socket_fd
+            assert leaked_fd is not None
+            with pytest.raises(OSError):
+                os.fstat(leaked_fd)
+        finally:
+            scheduler.close()
+            proactor.close()
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+    def test_sock_create_cancel_during_pending_send_closes_socket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
+        scheduler = SyncProactorScheduler(lambda: proactor)
+        set_scheduler(scheduler)
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def staged_swait(self: Any) -> None:
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
+            proactor.ring.complete_socket()
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            proactor.ring.complete_connect()
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", staged_swait)
+        try:
+            waiter = scheduler.io.sock_create(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            assert isinstance(waiter, IOWaitGroup)
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            leaked_fd = proactor.ring.last_socket_fd
+            assert leaked_fd is not None
+            with pytest.raises(OSError):
+                os.fstat(leaked_fd)
+        finally:
+            scheduler.close()
+            proactor.close()
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+
 class TestIOWaitGroup:
     def test_group_wait_uses_single_threadsafe_event_for_multi_leg_compose(self) -> None:
         import tealetio.io_waiter as io_waiter_module
@@ -931,7 +1016,16 @@ class TestIOWaitGroup:
         child = group.attach(operation, advance=lambda _leg: None)
         operation._finish(result=7)
         assert child.value() == 7
-        with pytest.raises(AssertionError):
+        with pytest.raises(InvalidStateError, match="already consumed"):
+            child.value()
+
+    def test_group_child_value_not_ready_raises_invalid_state(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[int](kind="test", fileobj=None)
+        group = IOWaitGroup[int](io)
+        child = group.attach(operation, advance=lambda _leg: None)
+        with pytest.raises(InvalidStateError, match="not ready"):
             child.value()
 
     def test_group_child_on_cleanup_runs_when_value_not_consumed(self) -> None:
