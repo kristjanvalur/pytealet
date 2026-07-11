@@ -12,9 +12,6 @@ from tealetio import set_scheduler
 from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, ServerIO, SocketIO
 from tealetio.io_waiter import (
     IOWaiter,
-    IOWaiterChainable,
-    IOWaiterChainableProtocol,
-    IOWaiterFake,
     IOWaitGroup,
     IOWaitGroupChild,
     IOWaitGroupChildProtocol,
@@ -555,51 +552,61 @@ class TestProactorIOManagerAcceptMany:
 
 
 class TestProactorIOManagerSockCreateStreams:
-    def test_sock_create_streams_uses_connect_streams_factory(self) -> None:
+    def test_sock_create_streams_composes_create_connect_and_send(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
-        reader, writer = io.sock_create_streams(
+        waiter = io.sock_create_streams(
             socket.AF_INET,
             socket.SOCK_STREAM,
             connect_to=address,
             initial_data=b"hi",
-        ).wait()
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        reader, writer = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
             assert len(proactor.send_calls) == 1
         finally:
             writer.close()
 
-    def test_sock_create_streams_chains_socket_to_stream_open(self) -> None:
+    def test_sock_create_streams_uses_io_wait_group(self) -> None:
         from tealetio.streams import StreamReader, StreamWriter
 
         proactor = _MockProactor()
         io = _manager(proactor)
-        seen: list[str] = []
-
-        original_waiter = io._waiter
-
-        def tracking_waiter(*args: Any, **kwargs: Any) -> IOWaiter[Any]:
-            waiter = original_waiter(*args, **kwargs)
-            if kwargs.get("create_next") is not None:
-                seen.append("chained")
-            return waiter
-
-        io._waiter = tracking_waiter  # type: ignore[method-assign]
+        waiter = io.sock_create_streams(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+        )
+        assert isinstance(waiter, IOWaitGroup)
         writer = None
         try:
-            reader, writer = io.sock_create_streams(
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                connect_to=("127.0.0.1", 9),
-            ).wait()
-            assert seen == ["chained"]
+            reader, writer = waiter.wait()
             assert isinstance(reader, StreamReader)
             assert isinstance(writer, StreamWriter)
         finally:
             if writer is not None:
                 writer.close()
+
+    def test_sock_create_streams_closes_socket_when_stream_factory_raises(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def boom(_io: Any, _sock: socket.socket, **kwargs: Any) -> tuple[Any, Any]:
+            raise ValueError("stream failed")
+
+        waiter = io.sock_create_streams(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            stream_factory=boom,
+        )
+        with pytest.raises(ValueError, match="stream failed"):
+            waiter.wait()
+        assert proactor.last_create_socket is not None
+        assert proactor.last_create_socket.fileno() == -1
 
 
 class TestProactorIOManagerDirect:
@@ -627,175 +634,6 @@ class TestProactorIOManagerDirect:
         with pytest.raises(AssertionError):
             waiter.wait()
         waiter.forget()
-
-    def test_io_waiter_fake_returns_wrapped_value(self) -> None:
-        fake = IOWaiterFake(9)
-        assert fake.wait() == 9
-
-    def test_io_waiter_fake_forget_is_noop(self) -> None:
-        fake = IOWaiterFake(1)
-        fake.forget()
-        assert fake.wait() == 1
-
-    def test_io_waiter_create_next_waits_through_tail_from_head(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-
-        def create_second(parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
-            assert parent.value() == 1
-            return IOWaiterFake(2)
-
-        head = IOWaiterChainable(io, first, create_next=create_second)
-        first._finish(result=1)
-        assert head.wait() == 2
-
-    def test_io_waiter_create_next_primes_next_link_on_completion(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        second = Operation[int](kind="second", fileobj=None)
-        primed: list[str] = []
-
-        def create_second(parent: IOWaiterChainableProtocol[Any]) -> IOWaiter[int]:
-            primed.append("primed")
-            assert parent.value() == 7
-            return IOWaiter(io, second)
-
-        head = IOWaiterChainable(io, first, create_next=create_second)
-        first._finish(result=7)
-        assert primed == ["primed"]
-        second._finish(result=9)
-        assert head.wait() == 9
-
-    def test_io_waiter_wait_raises_operation_error_without_priming_create_next(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        primed = False
-
-        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
-            nonlocal primed
-            primed = True
-            return IOWaiterFake(0)
-
-        head = IOWaiterChainable(io, first, create_next=create_second)
-        first._finish(exception=OSError("connect failed"))
-        with pytest.raises(OSError, match="connect failed"):
-            head.wait()
-        assert not primed
-
-    def test_io_waiter_value_handles_none_result(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[None](kind="first", fileobj=None)
-
-        def create_second(parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[str]:
-            assert parent.value() is None
-            return IOWaiterFake("done")
-
-        head = IOWaiterChainable(io, first, create_next=create_second)
-        first._finish(result=None)
-        assert head.wait() == "done"
-
-    def test_io_waiter_on_cleanup_runs_on_wait_when_create_next_fails(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        seen: list[int] = []
-
-        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
-            raise ValueError("create failed")
-
-        head = IOWaiterChainable(
-            io,
-            first,
-            create_next=create_second,
-            on_cleanup=lambda value: seen.append(value),
-        )
-        first._finish(result=11)
-        with pytest.raises(ValueError, match="create failed"):
-            head.wait()
-        assert seen == [11]
-
-    def test_io_waiter_on_cleanup_exception_propagates_from_wait(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-
-        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
-            raise ValueError("create failed")
-
-        def on_cleanup(_value: int) -> None:
-            raise OSError("teardown failed")
-
-        head = IOWaiterChainable(io, first, create_next=create_second, on_cleanup=on_cleanup)
-        first._finish(result=1)
-        with pytest.raises(OSError, match="teardown failed"):
-            head.wait()
-
-    def test_io_waiter_on_cleanup_runs_on_wait_when_tail_wait_fails(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        seen: list[int] = []
-
-        class _FailingTail:
-            def forget(self) -> None:
-                return None
-
-            def wait(self) -> int:
-                raise ValueError("tail failed")
-
-        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> _FailingTail:
-            return _FailingTail()
-
-        head = IOWaiterChainable(
-            io,
-            first,
-            create_next=create_second,
-            on_cleanup=lambda value: seen.append(value),
-        )
-        first._finish(result=22)
-        with pytest.raises(ValueError, match="tail failed"):
-            head.wait()
-        assert seen == [22]
-
-    def test_io_waiter_on_cleanup_runs_from_del_when_waiter_abandoned(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        seen: list[int] = []
-
-        head = IOWaiterChainable(
-            io,
-            first,
-            create_next=lambda _parent: IOWaiterFake(0),
-            on_cleanup=lambda value: seen.append(value),
-        )
-        first._finish(result=33)
-        head.forget()
-        del head
-        gc.collect()
-        assert seen == [33]
-
-    def test_sock_create_streams_closes_socket_when_stream_factory_raises(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-
-        def boom(_io: Any, _sock: socket.socket, **kwargs: Any) -> tuple[Any, Any]:
-            raise ValueError("stream failed")
-
-        waiter = io.sock_create_streams(
-            socket.AF_INET,
-            socket.SOCK_STREAM,
-            connect_to=("127.0.0.1", 9),
-            stream_factory=boom,
-        )
-        with pytest.raises(ValueError, match="stream failed"):
-            waiter.wait()
-        assert proactor.last_create_socket is not None
-        assert proactor.last_create_socket.fileno() == -1
 
     def test_io_waiter_forget_allows_backend_completion(self) -> None:
         proactor = _MockProactor()
@@ -1199,141 +1037,6 @@ class TestProactorIOManagerSockComposeGroupAlt:
             waiter.wait()
         assert proactor.last_create_socket is not None
         assert proactor.last_create_socket.fileno() == -1
-
-
-class TestProactorIOManagerSockComposeAlt:
-    def test_sock_connect_alt_without_initial_uses_plain_connect(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock = socket.socketpair()[0]
-        try:
-            io.sock_connect_alt(sock, ("127.0.0.1", 9)).wait()
-            assert proactor.send_calls == []
-        finally:
-            sock.close()
-
-    def test_sock_connect_alt_chains_send_after_connect(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock = socket.socketpair()[0]
-        try:
-            io.sock_connect_alt(sock, ("127.0.0.1", 9), initial=b"hi").wait()
-            assert len(proactor.send_calls) == 1
-            assert bytes(proactor.send_calls[0][1]) == b"hi"
-            assert proactor.send_calls[0][0] is sock
-        finally:
-            sock.close()
-
-    def test_sock_connect_alt_skips_empty_initial(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock = socket.socketpair()[0]
-        try:
-            io.sock_connect_alt(sock, ("127.0.0.1", 9), initial=b"").wait()
-            assert proactor.send_calls == []
-        finally:
-            sock.close()
-
-    def test_sock_create_alt_without_connect_to_uses_plain_create(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock = io.sock_create_alt(socket.AF_INET, socket.SOCK_STREAM).wait()
-        try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
-        finally:
-            sock.close()
-
-    def test_sock_create_alt_chains_connect_without_factory(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        address = ("127.0.0.1", 9)
-        sock = io.sock_create_alt(
-            socket.AF_INET,
-            socket.SOCK_STREAM,
-            connect_to=address,
-        ).wait()
-        try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
-            assert proactor.send_calls == []
-        finally:
-            sock.close()
-
-    def test_sock_create_alt_chains_connect_and_send_without_factory(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        address = ("127.0.0.1", 9)
-        sock = io.sock_create_alt(
-            socket.AF_INET,
-            socket.SOCK_STREAM,
-            connect_to=address,
-            initial_data=b"hi",
-        ).wait()
-        try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
-            assert len(proactor.send_calls) == 1
-            assert bytes(proactor.send_calls[0][1]) == b"hi"
-            assert proactor.send_calls[0][0] is sock
-        finally:
-            sock.close()
-
-    def test_sock_create_alt_rejects_initial_data_without_connect_to(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        with pytest.raises(ValueError, match="initial_data requires connect_to"):
-            io.sock_create_alt(
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                initial_data=b"hi",
-            )
-
-    def test_sock_create_alt_closes_socket_when_connect_fails(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-
-        def failing_connect(
-            sock: socket.socket,
-            address: Any,
-            *,
-            operation_factory: Any | None = None,
-        ) -> Operation[None]:
-            del address, operation_factory
-            operation = Operation[None](kind="connect", fileobj=sock)
-            operation._finish(exception=OSError("connect failed"))
-            return operation
-
-        proactor.connect = failing_connect  # type: ignore[method-assign]
-        with pytest.raises(OSError, match="connect failed"):
-            io.sock_create_alt(
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                connect_to=("127.0.0.1", 9),
-            ).wait()
-        assert proactor.last_create_socket is not None
-        assert proactor.last_create_socket.fileno() == -1
-
-    def test_sock_create_alt_uses_io_waiter_chain(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        seen: list[str] = []
-        original_waiter = io._waiter
-
-        def tracking_waiter(*args: Any, **kwargs: Any) -> IOWaiter[Any]:
-            waiter = original_waiter(*args, **kwargs)
-            if kwargs.get("create_next") is not None:
-                seen.append("chained")
-            return waiter
-
-        io._waiter = tracking_waiter  # type: ignore[method-assign]
-        sock = io.sock_create_alt(
-            socket.AF_INET,
-            socket.SOCK_STREAM,
-            connect_to=("127.0.0.1", 9),
-            initial_data=b"hi",
-        ).wait()
-        try:
-            assert seen == ["chained", "chained"]
-        finally:
-            sock.close()
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
