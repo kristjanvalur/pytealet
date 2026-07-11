@@ -21,6 +21,9 @@ from .io_waiter import (
     IOWaiterChainable,
     IOWaiterChainableProtocol,
     IOWaiterFake,
+    IOWaitGroup,
+    IOWaitGroupChild,
+    IOWaitGroupChildProtocol,
     IOWaiterProtocol,
 )
 
@@ -55,6 +58,9 @@ __all__ = [
     "IOWaiter",
     "IOWaiterChainableProtocol",
     "IOWaiterFake",
+    "IOWaitGroup",
+    "IOWaitGroupChild",
+    "IOWaitGroupChildProtocol",
     "IOWaiterProtocol",
     "PollIO",
     "ProactorAccess",
@@ -274,6 +280,9 @@ class ProactorIOManager:
             )
         return IOWaiter(self, operation, map_result=map_result)
 
+    def _group(self) -> IOWaitGroup[Any]:
+        return IOWaitGroup(self)
+
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
         return self._waiter(self._proactor.recv(sock, n))
 
@@ -365,6 +374,44 @@ class ProactorIOManager:
 
     def sock_accept(self, sock: socket.socket) -> IOWaiter[socket.socket]:
         return self._waiter(self._proactor.accept(sock))
+
+    def sock_accept_group_alt(
+        self,
+        sock: socket.socket,
+        n: int | None = None,
+    ) -> IOWaiterProtocol[AcceptManyDelivery]:
+        """POC: accept only, or accept then recv via ``IOWaitGroup`` composition."""
+
+        normalized_recv_size = normalize_accept_recv_size(n)
+        if normalized_recv_size is None:
+            return self._waiter(
+                self._proactor.accept(sock),
+                map_result=lambda conn: (conn, None),
+            )
+
+        group = self._group()
+
+        def advance_accept(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
+            conn = child.value()
+
+            def advance_recv(recv_child: IOWaitGroupChildProtocol[bytes]) -> None:
+                data = recv_child.value()
+                if not data:
+                    abortive_close(conn)
+                    raise ConnectionResetError("accepted connection closed before initial read")
+                group.finish((conn, data))
+
+            group.attach(
+                self._proactor.recv(conn, normalized_recv_size),
+                on_cleanup=lambda fail, _value: abortive_close(conn) if fail else None,
+                advance=advance_recv,
+            )
+
+        group.attach(
+            self._proactor.accept(sock),
+            advance=advance_accept,
+        )
+        return group
 
     def sock_connect(
         self,
@@ -534,6 +581,86 @@ class ProactorIOManager:
             create_next=create_connect,
             on_cleanup=abortive_close,
         )
+
+    def sock_connect_group_alt(
+        self,
+        sock: socket.socket,
+        address: Any,
+        *,
+        initial: SocketSendBuffer | None = None,
+    ) -> IOWaiterProtocol[None]:
+        """POC: plain ``IOWaiter`` for connect-only; ``IOWaitGroup`` when send follows."""
+
+        if initial is None:
+            return self._waiter(self._proactor.connect(sock, address))
+
+        payload = memoryview(initial)
+        if not payload:
+            return self._waiter(self._proactor.connect(sock, address))
+
+        group = self._group()
+
+        def advance_connect(_child: IOWaitGroupChildProtocol[None]) -> None:
+            group.attach_operation(
+                self._proactor.send(sock, payload),
+                on_complete=lambda: group.finish(None),
+            )
+
+        group.attach(self._proactor.connect(sock, address), advance=advance_connect)
+        return group
+
+    def sock_create_group_alt(
+        self,
+        family: int,
+        type: int,
+        proto: int = 0,
+        *,
+        flags: int = 0,
+        connect_to: Any | None = None,
+        initial_data: SocketSendBuffer | None = None,
+    ) -> IOWaiterProtocol[socket.socket]:
+        """POC: plain ``IOWaiter`` for create-only; ``IOWaitGroup`` when connect/send follow."""
+
+        if initial_data is not None and connect_to is None:
+            raise ValueError("initial_data requires connect_to")
+
+        if connect_to is None:
+            return self._waiter(
+                self._proactor.create_socket(
+                    family,
+                    type,
+                    proto,
+                    flags=flags,
+                )
+            )
+
+        group = self._group()
+        payload = memoryview(initial_data) if initial_data is not None else None
+
+        def advance_connect(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
+            sock = child.value()
+
+            def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
+                if payload is None or not payload:
+                    group.finish(sock)
+                    return
+                group.attach_operation(
+                    self._proactor.send(sock, payload),
+                    on_complete=lambda: group.finish(sock),
+                )
+
+            group.attach(
+                self._proactor.connect(sock, connect_to),
+                on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
+                advance=finish_connected,
+            )
+
+        group.attach(
+            self._proactor.create_socket(family, type, proto, flags=flags),
+            on_cleanup=lambda fail, value: abortive_close(value) if not fail else None,
+            advance=advance_connect,
+        )
+        return group
 
     def poll(self, fd: int, mask: int) -> IOWaiter[int]:
         return self._waiter(self._proactor.poll(fd, mask))
