@@ -509,11 +509,6 @@ class ProactorIOManager:
     ) -> IOWaitable[None]:
         return IOWaiter(self, self._proactor.poll_many(fd, mask, callback))
 
-    def _marshal_accept_callback(self, thunk: Callable[[], object]) -> None:
-        self._check_open()
-        assert self._scheduler is not None
-        self._scheduler.call_soon_threadsafe(thunk)
-
     def _schedule_accept_recv_timeout(
         self,
         recv_op: Operation[bytes],
@@ -530,7 +525,7 @@ class ProactorIOManager:
 
             timer_box[0] = self._scheduler.call_later(timeout, on_timeout)
 
-        self._marshal_accept_callback(arm)
+        self._scheduler.call_soon_threadsafe(arm)
 
     def _cancel_accept_recv_timeout(self, timer_box: list[TimerHandle | None]) -> None:
         def cancel() -> None:
@@ -539,7 +534,7 @@ class ProactorIOManager:
                 handle.cancel()
                 timer_box[0] = None
 
-        self._marshal_accept_callback(cancel)
+        self._scheduler.call_soon_threadsafe(cancel)
 
     def _accept_many_read_on_conn(
         self,
@@ -616,7 +611,7 @@ class ProactorIOManager:
                     abortive_close(conn)
                     raise
 
-            self._marshal_accept_callback(run)
+            self._scheduler.call_soon_threadsafe(run)
 
         if normalized_recv_size is not None:
             return IOWaiter(
@@ -689,7 +684,7 @@ class ProactorIOManager:
                         abortive_close(conn)
                     raise
 
-            self._marshal_accept_callback(run)
+            self._scheduler.call_soon_threadsafe(run)
 
         if normalized_recv_size is not None:
             return IOWaiter(
