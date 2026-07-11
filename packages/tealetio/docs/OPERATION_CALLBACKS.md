@@ -1,27 +1,26 @@
 # Operation callback composition
 
-Multi-leg proactor work is composed in callback helpers, not inside the
-proactor. One-shot operations (`connect`, `create_socket`, …) and continuous
-operations (`accept_many`, `recv_many`, …) share the same suboperation model for
-cancel propagation; they differ in where the proactor invokes composition hooks.
+Nested proactor work from continuous operations is composed in callback helpers,
+not inside the proactor. One-shot multi-leg socket work (create → connect → send)
+lives in `ProactorIOManager` via `IOWaitGroup`; see `IO_MANAGER_DESIGN.md`.
 
-See `IO_MANAGER_DESIGN.md` for how `ProactorIOManager` wires factories into
-`sock_connect` / `sock_create`. This document covers the callback modules and
-completion contracts.
+This document covers `chain_suboperation`, continuous callback modules, and
+completion contracts on `Operation` / `ContinuousOperation`.
 
 ## Two operation kinds
 
 | Kind | Proactor completion path | Composition hook |
 |------|--------------------------|------------------|
-| One-shot (`connect`, `create_socket`, …) | `operation.deliver(proactor, result=…, exception=…)` | Optional `delivery` handler; else `_finish` immediately |
+| One-shot (`connect`, `create_socket`, …) | `operation.deliver(proactor, result=…, exception=…)` | `ProactorIOManager` advance handlers via `IOWaitGroup` |
 | Continuous (`accept_many`, `recv_many`, …) | `operation._emit_result(chunk)` | `result_callback` or `callback_factory(parent)` |
 
-For one-shot ops the proactor calls `deliver()`. That is the right place to spawn
-nested work before the parent completes.
+For one-shot ops the proactor calls `deliver()`, which finishes the operation
+immediately. Multi-leg blocking helpers compose separate operations in
+`io_waiter.IOWaitGroup` instead of delivery handlers on a single root operation.
 
-`Operation.complete(result)` / `complete_error(exc)` finish the parent **after**
-local composition. Delivery handlers and child `on_complete` callbacks must not
-raise without expecting `complete_error` from the suboperation wrapper.
+`Operation.complete(result)` / `complete_error(exc)` finish a one-shot parent
+from a chained suboperation callback. Handlers must not raise without expecting
+`complete_error` from the `chain_suboperation` wrapper.
 
 ## Shared primitive: `chain_suboperation`
 
@@ -40,41 +39,9 @@ responsibility when composition cannot start.
 
 `spawn()` runs while holding `parent._lock`, which serialises attach against
 `cancel()` but can defer another thread's `cancel()` until a synchronous backend
-path (for example `AF_UNIX` connect) returns from `spawn()`.
-
-## One-shot flows
-
-### Connect + initial send
-
-```text
-proactor.connect(sock, addr, operation_factory=connect_initial_send_operation_factory(...))
-  └─ connect Operation (root; scheduler waits on this)
-       deliver(connect success)
-         └─ chain_suboperation → proactor.send(sock, initial)
-       on_send_complete:
-         └─ send error  → connect_op.complete_error(exc)
-         └─ send success → connect_op.complete(None)
-```
-
-Empty `initial` payload: `deliver` calls `connect_op.complete(None)` immediately
-without spawning a send. When `chain_suboperation` returns `False`, no extra
-cleanup is needed on the connect socket (`operation.fileobj`).
-
-### Create → connect → send
-
-```text
-proactor.create_socket(..., operation_factory=create_connect_operation_factory(...))
-  └─ create Operation (root)
-       deliver(create success)
-         └─ chain_suboperation → proactor.connect(sock, connect_to)
-       on_connect_complete:
-         └─ connect error → close(sock), complete_error(exc)
-         └─ connect success, no initial → complete(sock)
-         └─ connect success, initial → chain_suboperation → send → complete(sock)
-```
-
-When `chain_suboperation` returns `False`, close the created socket; `cancel()`
-finishes the root.
+path (for example `AF_UNIX` connect) returns from `spawn()`. The done callback is
+registered after releasing `parent._lock` so a synchronously completing child
+does not deadlock when `on_complete` finishes the parent.
 
 ## Continuous flows
 
@@ -93,14 +60,10 @@ callback composition).
 
 | Module | Responsibility |
 |--------|----------------|
-| `operations.py` | `Operation`, `ContinuousOperation`, `OperationFactory` type, suboperation tracking |
-| `operation_callbacks.py` | `operation_factory`, `chain_suboperation`, one-shot delivery handlers, named factories |
-| `continuous_callbacks.py` | Continuous-specific helpers; imports `chain_suboperation` for nested work |
-
-Named factories (thin `operation_factory(delivery=…)` wrappers):
-
-- `sock_connect(..., initial=…)` → `connect_initial_send_operation_factory`
-- `sock_create(..., connect_to=…)` → `create_connect_operation_factory`
+| `operations.py` | `Operation`, `ContinuousOperation`, suboperation tracking |
+| `io_waiter.py` | `IOWaiter`, `IOWaitGroup` — one-shot multi-leg composition |
+| `operation_callbacks.py` | `chain_suboperation` for nested work under continuous parents |
+| `continuous_callbacks.py` | Continuous-specific helpers; imports `chain_suboperation` |
 
 ## Semantics
 
@@ -128,12 +91,12 @@ A late `deliver()` / `complete()` may therefore still succeed after
 wins. Callers waiting on `wait_operation` observe either a normal result or
 `CancelledError`, not an ambiguous in-between state.
 
-Only the root one-shot `Operation` is passed to `wait_operation`. Child
-operations complete independently; the parent finishes when the final
-`on_complete` calls `parent.complete(…)` or `parent.complete_error(…)`.
+For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
+`IO_MANAGER_DESIGN.md`.
 
 ## References
 
+- `packages/tealetio/src/tealetio/io_waiter.py`
 - `packages/tealetio/src/tealetio/operation_callbacks.py`
 - `packages/tealetio/src/tealetio/continuous_callbacks.py`
 - `packages/tealetio/src/tealetio/operations.py`

@@ -19,7 +19,6 @@ _DoneCallback = Callable[["Operation[Any]"], object]
 _ResultCallback = Callable[[T_co], object]
 _CancelHook = Callable[[], None]
 _ProactorRef = Any
-OperationFactory = Callable[[str, object | None], "Operation[Any]"]
 
 
 @dataclass

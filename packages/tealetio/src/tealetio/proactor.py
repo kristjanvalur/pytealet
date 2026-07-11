@@ -34,7 +34,7 @@ from .recv_iter import (
     _RecvManyResume,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket, socket_from_uring_fd
-from .operations import ContinuousOperation, ContinuousStepResult, Operation, OperationFactory
+from .operations import ContinuousOperation, ContinuousStepResult, Operation
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -184,11 +184,7 @@ def _deliver_sync_void_fd_op(
 def _spawn_operation(
     kind: str,
     fileobj: object | None = None,
-    *,
-    operation_factory: OperationFactory | None = None,
 ) -> Operation[Any]:
-    if operation_factory is not None:
-        return operation_factory(kind, fileobj)
     return Operation(kind=kind, fileobj=fileobj)
 
 
@@ -371,8 +367,6 @@ class Proactor(Protocol):
         self,
         sock: socket.socket,
         n: int,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[bytes]: ...
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]: ...
@@ -386,8 +380,6 @@ class Proactor(Protocol):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
@@ -415,18 +407,14 @@ class Proactor(Protocol):
         self,
         sock: socket.socket,
         address: Any,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
         """Connect a socket.
 
         For ``AF_UNIX``, the connect completes synchronously via a brief
         blocking ``sock.connect()`` and ``deliver()``, including when chained
         from ``sock_create``. Inet sockets use the backend's async path.
-
-        ``operation_factory`` may return a pre-built ``Operation`` (for example
-        one already cancelled). ``ProactorIOManager.sock_connect`` composes
-        connect-time send via ``IOWaitGroup`` instead.
+        ``ProactorIOManager.sock_connect`` composes connect-time send via
+        ``IOWaitGroup`` instead.
         """
 
         ...
@@ -448,12 +436,11 @@ class Proactor(Protocol):
         proto: int = 0,
         *,
         flags: int = 0,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[socket.socket]:
         """Create a scheduler-contract socket.
 
-        ``operation_factory`` may return a pre-built ``Operation``. ``ProactorIOManager.sock_create``
-        composes create→connect (and optional send) via ``IOWaitGroup``.
+        ``ProactorIOManager.sock_create`` composes create→connect (and optional
+        send) via ``IOWaitGroup``.
         """
 
         ...
@@ -656,8 +643,6 @@ class ProactorBase:
         self,
         sock: socket.socket,
         address: Any,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
         """Complete a UNIX-domain connect synchronously and deliver the result.
 
@@ -674,12 +659,7 @@ class ProactorBase:
             finally:
                 sock.setblocking(False)
 
-        operation = cast(
-            Operation[None],
-            _spawn_operation("connect", sock, operation_factory=operation_factory),
-        )
-        if operation.done():
-            return operation
+        operation = cast(Operation[None], _spawn_operation("connect", sock))
         try:
             finish_connect()
             operation.deliver(self, result=None)
@@ -971,17 +951,10 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         n: int,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        operation = cast(
-            Operation[bytes],
-            _spawn_operation("recv", sock, operation_factory=operation_factory),
-        )
-        if operation.done():
-            return operation
+        operation = cast(Operation[bytes], _spawn_operation("recv", sock))
 
         def attempt() -> bytes:
             return sock.recv(n)
@@ -1029,17 +1002,10 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
         """Submit a stream send that drains ``data`` before completing."""
 
-        operation = cast(
-            Operation[None],
-            _spawn_operation("send", sock, operation_factory=operation_factory),
-        )
-        if operation.done():
-            return operation
+        operation = cast(Operation[None], _spawn_operation("send", sock))
         view = memoryview(data)
         offset = 0
 
@@ -1131,18 +1097,13 @@ class SelectorProactor(ProactorBase):
         proto: int = 0,
         *,
         flags: int = 0,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[socket.socket]:
         """Create a scheduler-contract socket."""
 
         del flags
         operation = cast(
             Operation[socket.socket],
-            _spawn_operation(
-                "create_socket",
-                (family, type, proto),
-                operation_factory=operation_factory,
-            ),
+            _spawn_operation("create_socket", (family, type, proto)),
         )
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
@@ -1156,22 +1117,18 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         address: Any,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
         """Submit a socket connect operation."""
 
         if sock.family == socket.AF_UNIX:
-            return self._sync_unix_connect(sock, address, operation_factory=operation_factory)
+            return self._sync_unix_connect(sock, address)
 
-        return self._submit_selector_connect(sock, address, operation_factory=operation_factory)
+        return self._submit_selector_connect(sock, address)
 
     def _submit_selector_connect(
         self,
         sock: socket.socket,
         address: Any,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
         started = False
 
@@ -1195,12 +1152,7 @@ class SelectorProactor(ProactorBase):
                 raise BlockingIOError(err, errno.errorcode.get(err, "connect in progress"))
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
-        operation = cast(
-            Operation[None],
-            _spawn_operation("connect", sock, operation_factory=operation_factory),
-        )
-        if operation.done():
-            return operation
+        operation = cast(Operation[None], _spawn_operation("connect", sock))
 
         def attempt() -> None:
             finish_connect()
@@ -2003,17 +1955,10 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         n: int,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[bytes]:
         """Submit a socket receive operation."""
 
-        operation = cast(
-            Operation[bytes],
-            _spawn_operation("recv", sock, operation_factory=operation_factory),
-        )
-        if operation.done():
-            return operation
+        operation = cast(Operation[bytes], _spawn_operation("recv", sock))
         if n == 0:
             operation.deliver(self, result=b"")
             return operation
@@ -2101,17 +2046,10 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
         """Submit a stream send that drains ``data`` before completing."""
 
-        operation = cast(
-            Operation[None],
-            _spawn_operation("send", sock, operation_factory=operation_factory),
-        )
-        if operation.done():
-            return operation
+        operation = cast(Operation[None], _spawn_operation("send", sock))
         payload = memoryview(data)
         if not payload:
             self._check_open()
@@ -2373,7 +2311,6 @@ class UringProactor(ProactorBase):
         proto: int = 0,
         *,
         flags: int = 0,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[socket.socket]:
         """Create a scheduler-contract socket."""
 
@@ -2381,11 +2318,7 @@ class UringProactor(ProactorBase):
             socket_type = type | flags | _DEFAULT_ACCEPT_FLAGS
             operation = cast(
                 Operation[socket.socket],
-                _spawn_operation(
-                    "create_socket",
-                    (family, type, proto),
-                    operation_factory=operation_factory,
-                ),
+                _spawn_operation("create_socket", (family, type, proto)),
             )
             entry = self._uring_entry(
                 operation,
@@ -2399,11 +2332,7 @@ class UringProactor(ProactorBase):
 
         operation = cast(
             Operation[socket.socket],
-            _spawn_operation(
-                "create_socket",
-                (family, type, proto),
-                operation_factory=operation_factory,
-            ),
+            _spawn_operation("create_socket", (family, type, proto)),
         )
         try:
             sock = _sync_create_scheduler_socket(family, type, proto)
@@ -2417,20 +2346,13 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         address: Any,
-        *,
-        operation_factory: OperationFactory | None = None,
     ) -> Operation[None]:
         """Submit a socket connect operation."""
 
         if sock.family == socket.AF_UNIX:
-            return self._sync_unix_connect(sock, address, operation_factory=operation_factory)
+            return self._sync_unix_connect(sock, address)
 
-        operation = cast(
-            Operation[None],
-            _spawn_operation("connect", sock, operation_factory=operation_factory),
-        )
-        if operation.done():
-            return operation
+        operation = cast(Operation[None], _spawn_operation("connect", sock))
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_connect(entry, completion),

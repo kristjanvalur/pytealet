@@ -157,61 +157,52 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 `StreamServer` lifecycle stays in `streams`; it needs `scheduler.io` (for
 `accept_many`), `spawn`, and `call_soon_threadsafe`.
 
-## One-shot operation callback composition
+## One-shot IO composition via `IOWaitGroup`
 
-Multi-leg socket work (create → connect → send, connect → send) is built in
-`operation_callbacks.py`, not inside the proactor. The proactor accepts an
-optional `operation_factory` on `create_socket` and `connect`; composition
-policy lives on `ProactorIOManager`.
+Multi-leg socket work (create → connect → send, connect → send) is composed in
+`ProactorIOManager` with `IOWaitGroup`, not inside the proactor. Each leg is a
+normal proactor `Operation`; the group wires advance handlers and a single
+`ThreadsafeEvent` park for the caller's `.wait()`.
 
 ```text
 ProactorIOManager.sock_create(connect_to=…, initial_data=…)
         │
         ▼
-create_connect_operation_factory(proactor, connect_to, initial_data)
-        │
-        └─ root Operation with delivery=create_connect_delivery
-               deliver(create success) → chain_suboperation → connect
-               on_connect_complete → chain_suboperation → send (if initial_data)
-               final complete(sock) or complete_error(exc)
+IOWaitGroup
+  attach(create_socket) → advance_connect(sock)
+    attach(connect) → finish_connected
+      attach(send) when initial_data → group.finish(sock)
+      else group.finish(sock)
 ```
 
 ```text
 ProactorIOManager.sock_connect(…, initial=…)
         │
         ▼
-connect_initial_send_operation_factory(proactor, initial)
-        │
-        └─ root Operation with delivery=connect_initial_send_delivery
-               deliver(connect success) → chain_suboperation → send
-               on_send_complete → complete(None)
+IOWaitGroup
+  attach(connect) → advance_connect
+    attach(send) when initial → group.finish(None)
 ```
-
-Helpers in `operation_callbacks.py`:
 
 | Helper | Role |
 |--------|------|
-| `operation_factory(delivery=…)` | Thin proactor factory hook: create `Operation`, attach delivery |
-| `chain_suboperation(parent, spawn, on_complete)` | Spawn child under `parent._lock`; cancel propagates via `_active_suboperations` |
-| `create_connect_delivery` / `connect_initial_send_delivery` | Delivery handlers that start the next leg on backend completion |
-
-Factories take `proactor` as their first argument. Delivery handlers and
-`on_complete` callbacks are nested closures built at factory creation time — they
-bind the proactor, addresses, initial send buffers, and cleanup policy before any
-`Operation` is submitted. When a backend completion arrives on the worker thread,
-those handlers spawn the next leg (`proactor.connect`, `proactor.send`) without
-the scheduler blocking on intermediate results.
+| `IOWaitGroup.attach` | Register one leg; optional `advance` runs on worker thread after success |
+| `IOWaitGroup.attach_operation` | Register a bare `Operation` with `on_complete` |
+| `IOWaitGroupChild.value()` | One-shot handoff of a leg's result into the next advance handler |
+| `on_cleanup(fail, value)` | Per-leg teardown (for example `abortive_close(sock)` on connect failure) |
 
 Production entry points:
 
-| Entry point | Factory | Composition |
-|-------------|---------|-------------|
-| `sock_connect(…, initial=…)` | `connect_initial_send_operation_factory` | connect → optional send |
-| `sock_create(…, connect_to=…)` | `create_connect_operation_factory` | create → connect → optional send |
+| Entry point | Composition |
+|-------------|-------------|
+| `sock_connect(…, initial=…)` | connect → optional send |
+| `sock_create(…, connect_to=…)` | create → connect → optional send |
+| `sock_accept(…, recv_size=…)` | accept → optional recv |
+| `sock_create_streams(…, connect_to=…)` | create → connect → optional send → stream pair |
 
-Intermediate legs are not awaited by the scheduler task. Only the root
-`IOWaiter` is blocked on (via `.wait()`); child submissions happen from
-delivery handlers and `chain_suboperation` as completions arrive.
+Intermediate legs are not awaited by the scheduler task. Only the returned
+`IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is
+submitted from advance handlers as completions arrive on worker threads.
 
 ### Succeed or raise
 
@@ -219,12 +210,9 @@ Blocking IO helpers (`sock_create`, `sock_connect`, `sock_recv`, …) either
 return the requested value or raise. There is no partial-success tuple,
 hint-honour flag, or internal fallback inside `ProactorIOManager`.
 
-In the create→connect→send composition, only the root ``create_socket``
-operation has a non-``None`` success result: the ``socket.socket``. Connect and
-send legs are separate child operations; the root ``complete(sock)`` runs only
-after connect (and optional send) succeed. ``sock_create(connect_to=…)`` blocks
-on that root and returns the socket (already connected, initial data flushed
-when requested). ``sock_connect()`` returns ``None``.
+In the create→connect→send composition, ``sock_create(connect_to=…)`` returns
+the connected ``socket.socket`` after connect (and optional send) succeed.
+``sock_connect()`` returns ``None``.
 
 ### `proactor.connect` and `AF_UNIX`
 
@@ -245,27 +233,15 @@ backend routing.
 
 ### Cancel propagation and error cleanup
 
-`chain_suboperation()` spawns each child under the parent ``_lock`` and registers
-it in ``_active_suboperations``. Parent ``cancel()`` calls
-``_finish(cancelled=True)``: best-effort ``cancel_hook`` IO teardown, then
-terminal state (``_done`` / ``_cancelled`` / ``CancelledError``) unless a
-worker-thread completion won the race, then child ``cancel()`` and parent
-callbacks. Late attach and delivery are rejected once ``_done`` is set.
+``IOWaitGroup`` tracks active legs in ``_members``. ``wait()`` exceptional exit
+and ``forget()`` cancel every tracked ``Operation``. Per-leg ``on_cleanup`` hooks
+run on worker-thread failure or when an unreleased success value is dropped.
 
 Cancellation always races in-flight backend completions; see
 ``OPERATION_CALLBACKS.md`` (cancel vs in-flight completion).
 
-Worker threads spawn children from delivery handlers while the scheduler thread
-may call ``cancel()`` on the root at the same time. Holding the parent lock
-across spawn + attach prevents a child from outrunning cancel registration.
-
 Error cleanup (for example closing a created socket when connect fails) lives in
-``on_complete`` handlers and ``complete_error`` paths inside the delivery
-handlers — not in a separate advance/unwind hook.
-
-Only the root ``IOWaiter`` is blocked on by the caller. Child operations
-complete independently; the parent finishes when the final ``on_complete`` calls
-``parent.complete(…)`` or ``parent.complete_error(…)``.
+``on_cleanup`` handlers on each ``IOWaitGroupChild`` leg.
 
 ## Continuous callback composition
 
@@ -422,7 +398,8 @@ drop waiter only”.
 ## References
 
 - `packages/tealetio/src/tealetio/io_manager.py` — `ProactorIOManager`
-- `packages/tealetio/src/tealetio/operation_callbacks.py` — one-shot delivery composition and factories
+- `packages/tealetio/src/tealetio/io_waiter.py` — `IOWaiter`, `IOWaitGroup`, grouped composition
+- `packages/tealetio/src/tealetio/operation_callbacks.py` — `chain_suboperation` for continuous nested work
 - `packages/tealetio/src/tealetio/continuous_callbacks.py` — continuous result-callback composition
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`

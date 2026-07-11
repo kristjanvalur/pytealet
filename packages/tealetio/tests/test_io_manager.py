@@ -98,37 +98,24 @@ class _MockProactor:
         proto: int = 0,
         *,
         flags: int = 0,
-        operation_factory: Any | None = None,
     ) -> Operation[Any]:
-        self.create_socket_calls.append((family, type, proto, flags, operation_factory is not None))
+        self.create_socket_calls.append((family, type, proto, flags))
         sock = socket.socket(family, type, proto)
         sock.setblocking(False)
         os.set_inheritable(sock.fileno(), False)
         self.last_create_socket = sock
-        if operation_factory is None:
-            operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
-            operation._finish(result=sock)
-            return operation
-        operation = operation_factory("create_socket", (family, type, proto))
-        if not operation.done():
-            operation._finish(result=sock)
+        operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
+        operation._finish(result=sock)
         return operation
 
     def connect(
         self,
         sock: socket.socket,
         address: Any,
-        *,
-        operation_factory: Any | None = None,
     ) -> Operation[None]:
         del address
-        if operation_factory is None:
-            operation = Operation[None](kind="connect", fileobj=sock)
-            operation._finish(result=None)
-            return operation
-        operation = operation_factory("connect", sock)
-        if not operation.done():
-            operation._finish(result=None)
+        operation = Operation[None](kind="connect", fileobj=sock)
+        operation._finish(result=None)
         return operation
 
     def send(
@@ -136,18 +123,11 @@ class _MockProactor:
         sock: socket.socket,
         data: Any,
         progress: Any = None,
-        *,
-        operation_factory: Any | None = None,
     ) -> Operation[None]:
         del progress
         self.send_calls.append((sock, data))
-        if operation_factory is None:
-            operation = Operation[None](kind="send", fileobj=sock)
-            operation._finish(result=None)
-            return operation
-        operation = operation_factory("send", sock)
-        if not operation.done():
-            operation._finish(result=None)
+        operation = Operation[None](kind="send", fileobj=sock)
+        operation._finish(result=None)
         return operation
 
     def poll_many(
@@ -558,7 +538,7 @@ class TestProactorIOManagerSockCreateStreams:
         assert isinstance(waiter, IOWaitGroup)
         reader, writer = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0)]
             assert len(proactor.send_calls) == 1
         finally:
             writer.close()
@@ -719,7 +699,7 @@ class TestProactorIOManagerDirect:
         assert isinstance(waiter, IOWaitGroup)
         sock = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0)]
         finally:
             sock.close()
 
@@ -736,7 +716,7 @@ class TestProactorIOManagerDirect:
         assert isinstance(waiter, IOWaitGroup)
         sock = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0)]
             assert len(proactor.send_calls) == 1
             assert proactor.send_calls[0][0] is sock
         finally:
@@ -816,10 +796,8 @@ class TestProactorIOManagerDirect:
         def failing_connect(
             sock: socket.socket,
             address: Any,
-            *,
-            operation_factory: Any | None = None,
         ) -> Operation[None]:
-            del address, operation_factory
+            del address
             operation = Operation[None](kind="connect", fileobj=sock)
             operation._finish(exception=OSError("connect failed"))
             return operation

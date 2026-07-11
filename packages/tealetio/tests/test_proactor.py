@@ -916,32 +916,6 @@ def test_operation_deliver_completes_without_handler() -> None:
     assert operation.result() == 7
 
 
-@pytest.mark.parametrize("proactor_factory", PROACTOR_UNIT_TEST_FACTORIES)
-def test_recv_skips_io_when_factory_returns_done_operation(
-    proactor_factory: Callable[[], SelectorProactor | UringProactor],
-) -> None:
-    def factory(kind: str, fileobj: object | None) -> Operation[Any]:
-        operation = Operation(kind=kind, fileobj=fileobj)
-        operation.cancel()
-        return operation
-
-    proactor = proactor_factory()
-    reader, writer = socket.socketpair()
-    try:
-        reader.setblocking(False)
-        operation = proactor.recv(reader, 5, operation_factory=factory)
-        assert operation.cancelled() is True
-        if isinstance(proactor, UringProactor):
-            assert proactor.ring.submitted_recv == []
-        else:
-            with pytest.raises(KeyError):
-                proactor._selector.get_key(reader.fileno())
-    finally:
-        reader.close()
-        writer.close()
-        proactor.close()
-
-
 def test_operation_cancel_forwards_to_suboperation() -> None:
     child_cancelled = False
     parent = Operation[None](kind="parent")
