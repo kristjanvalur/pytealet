@@ -271,17 +271,20 @@ class ProactorIOManager:
         if self._closed:
             raise RuntimeError("IO manager is closed")
 
-    def _cancel_operation(self, operation: Operation[Any]) -> IOWaiter[None] | None:
-        """Cancel ``operation`` and return an ``IOWaiter`` for its teardown leg.
+    def _cancel_operation(self, operation: Operation[Any]) -> IOWaitable[None]:
+        """Cancel ``operation`` and return a waitable for its teardown leg.
 
         Internal helper for io_manager composition paths that hold raw
-        ``Operation`` handles (for example accept-time ``recv``). Returns ``None``
-        when the target was already done and no teardown was started.
+        ``Operation`` handles (for example accept-time ``recv``). Always returns
+        an ``IOWaitable`` that is already complete when the target was done or
+        produced no backend teardown operation.
         """
 
         teardown = operation.cancel()
         if teardown is None:
-            return None
+            noop = Operation[None](kind="cancel", fileobj=operation)
+            noop._finish(result=None)
+            teardown = noop
         return IOWaiter(self, teardown)
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:

@@ -245,19 +245,21 @@ class TestProactorIOManagerCancelOperation:
         io = _manager(_MockProactor())
         waiter = io._cancel_operation(target)
 
-        assert waiter is not None
         assert target.cancelled()
         assert waiter.operation is not None
         assert waiter.operation.kind == "cancel"
         assert waiter.poll() is True
         assert waiter.wait() is None
 
-    def test_cancel_operation_returns_none_when_target_already_done(self) -> None:
+    def test_cancel_operation_returns_completed_waitable_when_target_already_done(self) -> None:
         target = Operation[bytes](kind="recv")
         target._finish(result=b"done")
 
         io = _manager(_MockProactor())
-        assert io._cancel_operation(target) is None
+        waiter = io._cancel_operation(target)
+
+        assert waiter.poll() is True
+        assert waiter.wait() is None
 
 
 class TestProactorIOManagerAcceptMany:
