@@ -30,7 +30,7 @@ from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
-    from .scheduler import BaseScheduler
+    from .scheduler import BaseScheduler, TimerHandle
 
 T = TypeVar("T")
 
@@ -206,6 +206,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         callback: Callable[[AcceptDelivery], object],
         *,
         recv_size: int | None = None,
+        recv_timeout: float | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> IOWaitable[None]: ...
 
@@ -218,6 +219,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         stream_factory: Any | None = None,
         async_: bool = False,
         recv_size: int | None = None,
+        recv_timeout: float | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> IOWaitable[None]: ...
 
@@ -512,18 +514,55 @@ class ProactorIOManager:
         assert self._scheduler is not None
         self._scheduler.call_soon_threadsafe(thunk)
 
+    def _schedule_accept_recv_timeout(
+        self,
+        recv_op: Operation[bytes],
+        timer_box: list[TimerHandle | None],
+        *,
+        timeout: float,
+    ) -> None:
+        """Arm a scheduler timer that cancels ``recv_op`` when it fires."""
+
+        def arm() -> None:
+            def on_timeout() -> None:
+                if not recv_op.done():
+                    recv_op.cancel()
+
+            timer_box[0] = self._scheduler.call_later(timeout, on_timeout)
+
+        self._marshal_accept_callback(arm)
+
+    def _cancel_accept_recv_timeout(self, timer_box: list[TimerHandle | None]) -> None:
+        def cancel() -> None:
+            handle = timer_box[0]
+            if handle is not None:
+                handle.cancel()
+                timer_box[0] = None
+
+        self._marshal_accept_callback(cancel)
+
     def _accept_many_read_on_conn(
         self,
         deliver: Callable[[AcceptReadResult], object],
         *,
         recv_size: int,
+        recv_timeout: float | None = None,
     ) -> Callable[[socket.socket], None]:
         """Return a proactor ``accept_many`` callback that pre-reads each accept."""
 
         def on_conn(conn: socket.socket) -> None:
             recv_op = self._proactor.recv(conn, recv_size)
+            timer_box: list[TimerHandle | None] = [None]
+
+            if recv_timeout is not None:
+                self._schedule_accept_recv_timeout(
+                    recv_op,
+                    timer_box,
+                    timeout=recv_timeout,
+                )
 
             def on_recv_complete(op: Operation[bytes]) -> None:
+                self._cancel_accept_recv_timeout(timer_box)
                 exc = op.exception()
                 if exc is not None:
                     if isinstance(exc, CancelledError):
@@ -543,6 +582,7 @@ class ProactorIOManager:
         callback: Callable[[AcceptDelivery], object],
         *,
         recv_size: int | None = None,
+        recv_timeout: float | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> IOWaitable[None]:
         """Start ``proactor.accept_many`` with optional accept-time pre-read.
@@ -551,9 +591,17 @@ class ProactorIOManager:
         runs. Recv failures invoke ``on_recv_error(conn, exc)`` when provided;
         the socket is always closed afterwards. With no ``on_recv_error``, recv
         failures close the socket silently.
+
+        When ``recv_timeout`` is set (requires ``recv_size``), each accept-time
+        ``recv`` is cancelled if it has not completed by then.
         """
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
+        if recv_timeout is not None:
+            if normalized_recv_size is None:
+                raise ValueError("recv_timeout requires recv_size")
+            if recv_timeout <= 0:
+                raise ValueError("recv_timeout must be positive when provided")
 
         def deliver_wrapped(result: AcceptReadResult) -> None:
             conn, initial_data, recv_error = result
@@ -578,6 +626,7 @@ class ProactorIOManager:
                     self._accept_many_read_on_conn(
                         deliver_wrapped,
                         recv_size=normalized_recv_size,
+                        recv_timeout=recv_timeout,
                     ),
                 ),
             )
@@ -593,6 +642,7 @@ class ProactorIOManager:
         stream_factory: Any | None = None,
         async_: bool = False,
         recv_size: int | None = None,
+        recv_timeout: float | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> IOWaitable[None]:
         """Start ``proactor.accept_many`` and deliver a stream pair per accept.
@@ -607,6 +657,11 @@ class ProactorIOManager:
         from .streams import _open_streams
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
+        if recv_timeout is not None:
+            if normalized_recv_size is None:
+                raise ValueError("recv_timeout requires recv_size")
+            if recv_timeout <= 0:
+                raise ValueError("recv_timeout must be positive when provided")
 
         def deliver_accept(accepted: AcceptReadResult) -> None:
             conn, initial_data, recv_error = accepted
@@ -644,6 +699,7 @@ class ProactorIOManager:
                     self._accept_many_read_on_conn(
                         deliver_accept,
                         recv_size=normalized_recv_size,
+                        recv_timeout=recv_timeout,
                     ),
                 ),
             )

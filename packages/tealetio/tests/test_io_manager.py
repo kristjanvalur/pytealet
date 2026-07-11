@@ -26,6 +26,7 @@ from tealetio.io_waiter import (
 )
 from tealetio.operations import ContinuousOperation, InvalidStateError, Operation
 from tealetio.proactor import SyncProactorScheduler, UringProactor
+from tealetio.scheduler import TimerHandle
 from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
     _DeferredCreateSocketUringRing,
@@ -42,6 +43,7 @@ class _StubScheduler:
 
     def __init__(self) -> None:
         self._exception_handler: Any = None
+        self.timer_handles: list[tuple[TimerHandle, Any, tuple[object, ...]]] = []
 
     def set_exception_handler(self, handler: Any) -> None:
         self._exception_handler = handler
@@ -64,6 +66,23 @@ class _StubScheduler:
                     "scheduler": self,
                 }
             )
+
+    def call_later(
+        self,
+        delay: float,
+        callback: Any,
+        *args: object,
+        context: Any = None,
+    ) -> TimerHandle:
+        del delay, context
+        handle = TimerHandle(0.0, callback, args)
+        self.timer_handles.append((handle, callback, args))
+        return handle
+
+    def fire_timers(self) -> None:
+        for handle, callback, args in self.timer_handles:
+            if not handle.cancelled():
+                callback(*args)
 
 
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
@@ -272,6 +291,107 @@ class TestProactorIOManagerAcceptMany:
         from tealetio.continuous_callbacks import normalize_accept_recv_size
 
         assert normalize_accept_recv_size(2**16 + 1) == 2**16
+
+    @pytest.mark.parametrize("recv_timeout", [0, -1])
+    def test_accept_many_rejects_invalid_recv_timeout(self, recv_timeout: float) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            with pytest.raises(ValueError):
+                io.accept_many(
+                    server,
+                    lambda _: None,
+                    recv_size=64,
+                    recv_timeout=recv_timeout,
+                )
+        finally:
+            server.close()
+
+    def test_accept_many_recv_timeout_requires_recv_size(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        server = socket.socket()
+        try:
+            with pytest.raises(ValueError, match="recv_timeout requires recv_size"):
+                io.accept_many(server, lambda _: None, recv_timeout=1.0)
+        finally:
+            server.close()
+
+    def test_accept_many_recv_timeout_cancels_pending_recv(self) -> None:
+        class _PendingRecvProactor(_MockProactor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.pending_recvs: list[Operation[bytes]] = []
+
+            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+                self.recv_calls.append((sock, n))
+                operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
+                self.pending_recvs.append(operation)
+                return operation
+
+        class _EagerAcceptProactor(_PendingRecvProactor):
+            def accept_many(self, sock: socket.socket, callback=None):
+                if callback is not None:
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    callback(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        delivered: list[tuple[socket.socket, bytes | None]] = []
+        proactor = _EagerAcceptProactor()
+        scheduler = _StubScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many(
+                server,
+                lambda delivery: delivered.append(delivery),
+                recv_size=8,
+                recv_timeout=0.5,
+            )
+            assert len(proactor.pending_recvs) == 1
+            assert len(scheduler.timer_handles) == 1
+            recv_op = proactor.pending_recvs[0]
+            assert not recv_op.done()
+            scheduler.fire_timers()
+            assert recv_op.cancelled()
+            assert delivered == []
+            conn, _size = proactor.recv_calls[0]
+            assert conn.fileno() == -1
+        finally:
+            server.close()
+
+    def test_accept_many_recv_timeout_cancelled_when_recv_completes(self) -> None:
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None):
+                if callback is not None:
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    callback(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        delivered: list[tuple[socket.socket, bytes | None]] = []
+        proactor = _EagerAcceptProactor(recv_result=b"peek")
+        scheduler = _StubScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many(
+                server,
+                lambda delivery: delivered.append(delivery),
+                recv_size=8,
+                recv_timeout=0.5,
+            )
+            assert len(scheduler.timer_handles) == 1
+            handle, _, _ = scheduler.timer_handles[0]
+            assert handle.cancelled()
+            scheduler.fire_timers()
+            assert delivered == [(delivered[0][0], b"peek")]
+        finally:
+            for conn, _data in delivered:
+                conn.close()
+            server.close()
 
     def test_accept_many_on_recv_error_closes_after_callback(self) -> None:
         captured_errors: list[tuple[socket.socket, BaseException]] = []
