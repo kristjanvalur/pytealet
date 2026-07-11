@@ -188,8 +188,6 @@ class IOWaitGroupChild(Generic[T]):
         self._operation = None
 
     def _on_done(self, operation: Operation[Any]) -> None:
-        if self._group._completion is not None:
-            return
         try:
             self._resolved_value = (cast(T, operation.result()),)
         except BaseException as exc:
@@ -303,13 +301,13 @@ class IOWaitGroup(Generic[T]):
             if operation is not None and not operation.done():
                 operation.cancel()
 
-    def _cancel_pending(self) -> None:
-        with self._lock:
-            members = tuple(self._members)
-        self._cancel_members(members)
-
     def forget(self) -> None:
-        """Drop interest in the grouped result; active backend work continues.
+        """Drop interest in the grouped result; backend compose work keeps running.
+
+        Clears member tracking and breaks waiter references so the chain can
+        continue without a blocked ``wait()``. Does not set ``_closed`` or
+        cancel in-flight legs — later advance hooks may still ``attach()``
+        successfully.
 
         Undefined for resource-creating compose handles — always ``wait()`` for
         those (see ``IOWaitGroup`` class docstring).
@@ -320,24 +318,42 @@ class IOWaitGroup(Generic[T]):
         self._members.clear()
 
     def wait(self) -> T:
-        completion = self._completion
-        if completion is None:
-            ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
-            self._ready = ready
-            try:
-                ready.swait()
-            except BaseException as exc:
-                with self._lock:
-                    if self._completion is not None:
-                        completion = self._completion
-                        members = ()
-                    else:
-                        self._closed = True
-                        members = tuple(self._members)
-                if completion is None:
-                    self._cancel_members(members)
-                    self._cleanup_members(members)
-                    raise exc
+        with self._lock:
+            completion = self._completion
+
+        if completion is not None:
+            ok, value = completion
+            if not ok:
+                raise value
+            return cast(T, value)
+
+        ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
+        with self._lock:
+            completion = self._completion
+            if completion is None:
+                self._ready = ready
+            else:
+                ok, value = completion
+                if not ok:
+                    raise value
+                return cast(T, value)
+
+        try:
+            ready.swait()
+        except BaseException as exc:
+            with self._lock:
+                if self._completion is not None:
+                    completion = self._completion
+                    members = ()
+                else:
+                    self._closed = True
+                    members = tuple(self._members)
+            if completion is None:
+                self._cancel_members(members)
+                self._cleanup_members(members)
+                raise exc
+            completion = self._completion
+        else:
             completion = self._completion
 
         assert completion is not None

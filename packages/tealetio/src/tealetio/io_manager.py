@@ -412,7 +412,6 @@ class ProactorIOManager:
 
             group.attach(
                 self._proactor.send(sock, payload),
-                on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
                 advance=advance_send,
             )
 

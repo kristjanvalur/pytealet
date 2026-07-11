@@ -845,6 +845,31 @@ class TestProactorIOManagerDirect:
         assert proactor.last_create_socket is not None
         assert proactor.last_create_socket.fileno() == -1
 
+    def test_sock_connect_leaves_socket_open_when_send_fails(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def failing_send(
+            sock: socket.socket,
+            data: Any,
+            progress: Any = None,
+        ) -> Operation[None]:
+            del data, progress
+            operation = Operation[None](kind="send", fileobj=sock)
+            operation._finish(exception=OSError("send failed"))
+            return operation
+
+        proactor.send = failing_send  # type: ignore[method-assign]
+        sock = socket.socketpair()[0]
+        try:
+            waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
+            assert isinstance(waiter, IOWaitGroup)
+            with pytest.raises(OSError, match="send failed"):
+                waiter.wait()
+            assert sock.fileno() != -1
+        finally:
+            sock.close()
+
     def test_sock_create_closes_socket_when_send_fails(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -1142,6 +1167,21 @@ class TestIOWaitGroup:
         second._finish(result=None)
         assert group.wait() == "done"
 
+    def test_group_late_advance_after_finish_is_rejected(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[None](kind="first", fileobj=None)
+        group = IOWaitGroup[str](io)
+
+        def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
+            group.finish("done")
+            with pytest.raises(RuntimeError, match="IOWaitGroup is closed"):
+                group.attach(Operation[None](kind="late", fileobj=None))
+
+        group.attach(first, advance=advance_first)
+        first._finish(result=None)
+        assert group.wait() == "done"
+
     def test_group_finish_returns_false_after_wait_interrupt(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -1172,6 +1212,28 @@ class TestIOWaitGroup:
         group._closed = True
         _finish_or_close_socket(group, conn, (conn, b"hi"))
         assert conn.fileno() == -1
+
+    def test_group_wait_survives_finish_during_ready_registration(self) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[None](kind="pending", fileobj=None)
+        group = IOWaitGroup[str](io)
+        group.attach(operation)
+
+        original_event = io_waiter_module.ThreadsafeEvent
+
+        class RacingEvent(original_event):
+            def __init__(self, scheduler: Any) -> None:
+                super().__init__(scheduler)
+                group.finish("raced")
+
+        io_waiter_module.ThreadsafeEvent = RacingEvent  # type: ignore[misc]
+        try:
+            assert group.wait() == "raced"
+        finally:
+            io_waiter_module.ThreadsafeEvent = original_event
 
     def test_group_wait_returns_result_when_delivery_races_interrupt(self) -> None:
         proactor = _MockProactor()
