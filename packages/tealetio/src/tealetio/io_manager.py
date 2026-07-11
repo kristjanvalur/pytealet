@@ -21,7 +21,7 @@ from .io_waiter import (
     IOWaitGroup,
     IOWaitGroupChild,
     IOWaitGroupChildProtocol,
-    IOWaiterProtocol,
+    IOWaitable,
 )
 
 from .operations import ContinuousOperation, Operation
@@ -56,7 +56,7 @@ __all__ = [
     "IOWaitGroup",
     "IOWaitGroupChild",
     "IOWaitGroupChildProtocol",
-    "IOWaiterProtocol",
+    "IOWaitable",
     "PollIO",
     "ProactorAccess",
     "ProactorIOManager",
@@ -121,7 +121,7 @@ class SocketIO(Protocol):
         self,
         sock: socket.socket,
         n: int | None = None,
-    ) -> IOWaiterProtocol[AcceptDelivery]: ...
+    ) -> IOWaitable[AcceptDelivery]: ...
 
     def sock_connect(
         self,
@@ -129,7 +129,7 @@ class SocketIO(Protocol):
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-    ) -> IOWaiterProtocol[None]: ...
+    ) -> IOWaitable[None]: ...
 
     def sock_create(
         self,
@@ -140,7 +140,7 @@ class SocketIO(Protocol):
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> IOWaiterProtocol[socket.socket]: ...
+    ) -> IOWaitable[socket.socket]: ...
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: "RecvBufferPool | None" = None
@@ -365,7 +365,7 @@ class ProactorIOManager:
         self,
         sock: socket.socket,
         n: int | None = None,
-    ) -> IOWaiterProtocol[AcceptDelivery]:
+    ) -> IOWaitable[AcceptDelivery]:
         normalized_recv_size = normalize_accept_recv_size(n)
         if normalized_recv_size is None:
             return self._waiter(
@@ -403,7 +403,7 @@ class ProactorIOManager:
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-    ) -> IOWaiterProtocol[None]:
+    ) -> IOWaitable[None]:
         if initial is None:
             return self._waiter(self._proactor.connect(sock, address))
 
@@ -431,7 +431,7 @@ class ProactorIOManager:
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> IOWaiterProtocol[socket.socket]:
+    ) -> IOWaitable[socket.socket]:
         if initial_data is not None and connect_to is None:
             raise ValueError("initial_data requires connect_to")
 
@@ -627,7 +627,7 @@ class ProactorIOManager:
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
-    ) -> IOWaiterProtocol[AcceptStreamsDelivery]:
+    ) -> IOWaitable[AcceptStreamsDelivery]:
         """Create a socket, connect, and return stream endpoints.
 
         ``initial_data`` is sent on the wire after connect, before streams open.

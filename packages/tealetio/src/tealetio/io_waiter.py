@@ -17,8 +17,8 @@ _AdvanceHandler = Callable[["IOWaitGroupChild[Any]"], object]
 _OnCompleteHandler = Callable[[], object]
 
 
-class IOWaiterProtocol(Protocol[T_co]):
-    """Blocking IO handle returned by one-shot helpers and grouped compositions."""
+class IOWaitable(Protocol[T_co]):
+    """Blocking IO handle with ``wait()`` / ``forget()``; satisfied by ``IOWaiter`` and ``IOWaitGroup``."""
 
     def forget(self) -> None: ...
 
