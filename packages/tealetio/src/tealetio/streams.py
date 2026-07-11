@@ -835,6 +835,7 @@ class StreamServer:
 
         def accept_loop() -> None:
             while not self._closed:
+
                 def on_accept(streams: _AcceptedStreams) -> None:
                     if self._closed:
                         _reader, writer = streams

@@ -271,13 +271,20 @@ class ProactorIOManager:
         if self._closed:
             raise RuntimeError("IO manager is closed")
 
+    def _marshal_on_scheduler(self, thunk: Callable[[], object]) -> None:
+        self._check_open()
+        assert self._scheduler is not None
+        self._scheduler.call_soon_threadsafe(thunk)
+
     def _cancel_operation(self, operation: Operation[Any]) -> IOWaitable[None]:
         """Cancel ``operation`` and return a waitable for its teardown leg.
 
         Internal helper for io_manager composition paths that hold raw
-        ``Operation`` handles (for example accept-time ``recv``). Always returns
-        an ``IOWaitable`` that is already complete when the target was done or
-        produced no backend teardown operation.
+        ``Operation`` handles (for example accept-time ``recv``). Returns a
+        teardown ``IOWaitable``; call ``wait()`` to block until ring cancel
+        settles, or ``forget()`` when only the target's terminal state matters.
+        The waitable is already complete when the target was done or produced no
+        async backend teardown operation.
         """
 
         return IOWaiter(self, self._proactor.cancel(operation))
@@ -532,11 +539,12 @@ class ProactorIOManager:
         def arm() -> None:
             def on_timeout() -> None:
                 if not recv_op.done():
-                    self._cancel_operation(recv_op)
+                    self._cancel_operation(recv_op).forget()
 
+            assert self._scheduler is not None
             timer_box[0] = self._scheduler.call_later(timeout, on_timeout)
 
-        self._scheduler.call_soon_threadsafe(arm)
+        self._marshal_on_scheduler(arm)
 
     def _cancel_accept_recv_timeout(self, timer_box: list[TimerHandle | None]) -> None:
         def cancel() -> None:
@@ -545,7 +553,7 @@ class ProactorIOManager:
                 handle.cancel()
                 timer_box[0] = None
 
-        self._scheduler.call_soon_threadsafe(cancel)
+        self._marshal_on_scheduler(cancel)
 
     def _accept_many_read_on_conn(
         self,
@@ -622,7 +630,7 @@ class ProactorIOManager:
                     abortive_close(conn)
                     raise
 
-            self._scheduler.call_soon_threadsafe(run)
+            self._marshal_on_scheduler(run)
 
         if normalized_recv_size is not None:
             return IOWaiter(
@@ -695,7 +703,7 @@ class ProactorIOManager:
                         abortive_close(conn)
                     raise
 
-            self._scheduler.call_soon_threadsafe(run)
+            self._marshal_on_scheduler(run)
 
         if normalized_recv_size is not None:
             return IOWaiter(
