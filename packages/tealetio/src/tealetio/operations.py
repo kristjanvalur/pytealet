@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from .tasks import CancelledError
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, cast
@@ -45,7 +44,6 @@ class Operation(Generic[T]):
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] = []
         self._cancel_hook: _CancelHook | None = None
-        self._active_suboperations: set[Operation[Any]] = set()
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -61,35 +59,6 @@ class Operation(Generic[T]):
         """Install or clear the backend cancel hook for this operation."""
 
         self._cancel_hook = cancel
-
-    def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
-        """Register a child for ``cancel()`` propagation.
-
-        Returns ``False`` when the parent is already done.
-        """
-
-        with self._lock:
-            if self._done:
-                return False
-            self._active_suboperations.add(suboperation)
-            return True
-
-    def detach_suboperation(self, suboperation: Operation[Any]) -> None:
-        with self._lock:
-            self._active_suboperations.discard(suboperation)
-
-    @contextmanager
-    def track_suboperation(self, suboperation: Operation[Any]) -> Iterator[Operation[Any]]:
-        """Register ``suboperation`` until the context exits or ``cancel()`` runs."""
-
-        if not self.attach_suboperation(suboperation):
-            suboperation.cancel()
-            yield suboperation
-            return
-        try:
-            yield suboperation
-        finally:
-            self.detach_suboperation(suboperation)
 
     def cancel(self) -> None:
         """Cancel the operation if it has not completed yet.
@@ -163,28 +132,6 @@ class Operation(Generic[T]):
         else:
             self._finish(result=cast(T, result))
 
-    def complete(self, result: T) -> None:
-        """Finish the operation from a chained suboperation callback."""
-
-        with self._lock:
-            if self._done:
-                return
-        try:
-            self._finish(result=result)
-        except InvalidStateError:
-            return
-
-    def complete_error(self, exc: BaseException) -> None:
-        """Fail the operation from a chained suboperation callback."""
-
-        with self._lock:
-            if self._done:
-                return
-        try:
-            self._finish(exception=exc)
-        except InvalidStateError:
-            return
-
     def _finish(
         self,
         *,
@@ -217,10 +164,6 @@ class Operation(Generic[T]):
             self._cancel_hook = None
             callbacks = self._callbacks
             self._callbacks = []
-            suboperations = tuple(self._active_suboperations) if cancelled else ()
-
-        for suboperation in suboperations:
-            suboperation.cancel()
 
         for callback in callbacks:
             callback(self)
@@ -235,8 +178,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     event loop themselves.
 
     Callbacks that submit nested ``Operation`` objects must not block waiting on
-    them. Delivery-spawned work is independent unless callers opt into tracking
-    via ``attach_suboperation()``.
+    them. Delivery-spawned work is independent of the parent continuous op.
     """
 
     def __init__(
@@ -265,14 +207,3 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             callback(result)
         with self._lock:
             return not self._done
-
-    def _finish(
-        self,
-        *,
-        result: Any = None,
-        exception: BaseException | None = None,
-        cancelled: bool = False,
-    ) -> bool:
-        # non-cancel finish leaves _active_suboperations alone: children started
-        # from result callbacks keep running after finish or error finish.
-        return super()._finish(result=result, exception=exception, cancelled=cancelled)

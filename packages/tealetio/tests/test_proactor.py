@@ -789,35 +789,6 @@ class TestOperation:
         assert operation._emit_result(2) is False
         assert seen == [1]
 
-    def test_continuous_operation_cancel_cancels_tracked_suboperation(self):
-        parent = ContinuousOperation(kind="test")
-        child = Operation[None](kind="child")
-        child_cancelled = False
-
-        def cancel_child() -> None:
-            nonlocal child_cancelled
-            child_cancelled = True
-            child.cancel()
-
-        child.set_cancel(cancel_child)
-        with parent.track_suboperation(child):
-            parent.cancel()
-        assert parent.cancelled()
-        assert child_cancelled
-        assert child.cancelled()
-
-    def test_operation_cancel_rejects_late_suboperation_attach(self) -> None:
-        parent = Operation(kind="test")
-        parent.cancel()
-        child = Operation[None](kind="child")
-        assert parent.attach_suboperation(child) is False
-
-    def test_continuous_operation_cancel_rejects_late_suboperation_attach(self) -> None:
-        parent = ContinuousOperation(kind="test")
-        parent.cancel()
-        child = Operation[None](kind="child")
-        assert parent.attach_suboperation(child) is False
-
     def test_operation_deliver_ignored_after_cancel(self) -> None:
         operation = Operation(kind="test")
         operation.cancel()
@@ -866,31 +837,6 @@ def test_operation_deliver_completes_without_handler() -> None:
     operation = Operation[int](kind="test")
     operation.deliver(object(), result=7)
     assert operation.result() == 7
-
-
-def test_operation_cancel_forwards_to_suboperation() -> None:
-    child_cancelled = False
-    parent = Operation[None](kind="parent")
-    child = Operation[None](kind="child")
-    parent.attach_suboperation(child)
-
-    def cancel_child() -> None:
-        nonlocal child_cancelled
-        child_cancelled = True
-        child.cancel()
-
-    child.set_cancel(cancel_child)
-    parent.cancel()
-    assert child_cancelled is True
-    assert child.cancelled()
-    assert parent.cancelled()
-
-
-def test_operation_complete_ignores_race_with_cancel() -> None:
-    operation = Operation[None](kind="test")
-    operation.cancel()
-    operation.complete(None)
-    assert operation.cancelled()
 
 
 @pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
