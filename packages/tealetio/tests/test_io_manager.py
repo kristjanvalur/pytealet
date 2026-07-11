@@ -25,7 +25,15 @@ from tealetio.io_waiter import (
 )
 from tealetio.operations import ContinuousOperation, InvalidStateError, Operation
 from tealetio.proactor import SyncProactorScheduler, UringProactor
-from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES, _DeferredCreateSocketUringRing
+from uring_fakes import (
+    SCHEDULER_INTEGRATION_FACTORIES,
+    _DeferredCreateSocketUringRing,
+    _await_deferred_create_socket_stage,
+    _ensure_deferred_connect_completed,
+    _ensure_deferred_socket_completed,
+    _patch_uring_capabilities,
+    _wait_for_uring,
+)
 
 
 class _StubScheduler:
@@ -59,15 +67,6 @@ class _StubScheduler:
 
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(_StubScheduler(), proactor)  # type: ignore[arg-type]
-
-
-def _wait_for_uring(proactor: UringProactor, predicate: Any, *, timeout: float = 1.0) -> None:
-    deadline = proactor.get_time() + timeout
-    while proactor.get_time() < deadline:
-        if predicate():
-            return
-        proactor.wait(proactor.get_time() + 0.05)
-    raise TimeoutError("timed out waiting for uring condition")
 
 
 class _MockProactor:
@@ -899,6 +898,10 @@ class TestProactorIOManagerDirect:
 
 
 class TestProactorIOManagerDeferredCompose:
+    @pytest.fixture(autouse=True)
+    def _patch_uring_probe_capabilities(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch)
+
     def test_sock_accept_cancel_during_pending_recv_closes_connection(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -948,9 +951,10 @@ class TestProactorIOManagerDeferredCompose:
         original_swait = io_waiter_module.ThreadsafeEvent.swait
 
         def staged_swait(self: Any) -> None:
-            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
-            proactor.ring.complete_socket()
-            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            stage = _await_deferred_create_socket_stage(proactor)
+            if stage == "socket":
+                _ensure_deferred_socket_completed(proactor.ring)
+                _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
             raise TimeoutError("abort wait")
 
         monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", staged_swait)
@@ -984,10 +988,16 @@ class TestProactorIOManagerDeferredCompose:
         original_swait = io_waiter_module.ThreadsafeEvent.swait
 
         def staged_swait(self: Any) -> None:
-            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
-            proactor.ring.complete_socket()
-            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
-            proactor.ring.complete_connect()
+            stage = _await_deferred_create_socket_stage(proactor)
+            if stage == "socket":
+                _ensure_deferred_socket_completed(proactor.ring)
+            if stage in {"socket", "connect"}:
+                _wait_for_uring(
+                    proactor,
+                    lambda: len(proactor.ring.pending_connect) == 1
+                    or len(proactor.ring.pending_connect_send) == 1,
+                )
+            _ensure_deferred_connect_completed(proactor.ring)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             raise TimeoutError("abort wait")
 

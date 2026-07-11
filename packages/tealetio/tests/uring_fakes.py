@@ -873,6 +873,58 @@ class _DeferredCreateSocketUringRing(_DeferredSocketUringRing):
         self._deliver(completion)
 
 
+def _wait_for_uring(proactor: Any, predicate: Callable[[], bool], *, timeout: float = 5.0) -> None:
+    """Pump a fake or native ``UringProactor`` until ``predicate()`` is true."""
+
+    deadline = proactor.get_time() + timeout
+    while not predicate():
+        if proactor.get_time() >= deadline:
+            raise TimeoutError("timed out waiting for uring condition")
+        proactor.wait(min(deadline, proactor.get_time() + 0.05))
+
+
+def _deferred_create_socket_stage(ring: _DeferredCreateSocketUringRing) -> str | None:
+    """Return the current deferred compose stage, if any."""
+
+    if ring.pending_socket:
+        return "socket"
+    if ring.pending_connect:
+        return "connect"
+    if ring.pending_connect_send:
+        return "send"
+    if ring.submitted_socket:
+        if ring.submitted_connect:
+            if ring.pending_connect_send:
+                return "send"
+            if ring.pending_connect:
+                return "connect"
+            if ring.submitted_stream_sends():
+                return "send"
+        elif ring.pending_connect:
+            return "connect"
+    return None
+
+
+def _await_deferred_create_socket_stage(proactor: Any, *, timeout: float = 5.0) -> str:
+    """Wait until a deferred create→connect compose reaches a known ring stage."""
+
+    ring = proactor.ring
+    _wait_for_uring(proactor, lambda: _deferred_create_socket_stage(ring) is not None, timeout=timeout)
+    found = _deferred_create_socket_stage(ring)
+    assert found is not None
+    return found
+
+
+def _ensure_deferred_socket_completed(ring: _DeferredCreateSocketUringRing) -> None:
+    if ring.pending_socket:
+        ring.complete_socket()
+
+
+def _ensure_deferred_connect_completed(ring: _DeferredCreateSocketUringRing) -> None:
+    if ring.pending_connect:
+        ring.complete_connect()
+
+
 class _DeferredUringRing(_FakeUringRing):
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
