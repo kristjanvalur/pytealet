@@ -231,6 +231,35 @@ class TestAbortiveClose:
         abortive_close(conn)
 
 
+class TestProactorIOManagerCancelOperation:
+    def test_cancel_operation_returns_waiter_for_teardown(self) -> None:
+        target = Operation[bytes](kind="recv")
+
+        def cancel_target() -> Operation[None]:
+            teardown = Operation[None](kind="cancel", fileobj=target)
+            teardown._finish(result=None)
+            return teardown
+
+        target.set_cancel(cancel_target)
+
+        io = _manager(_MockProactor())
+        waiter = io._cancel_operation(target)
+
+        assert waiter is not None
+        assert target.cancelled()
+        assert waiter.operation is not None
+        assert waiter.operation.kind == "cancel"
+        assert waiter.poll() is True
+        assert waiter.wait() is None
+
+    def test_cancel_operation_returns_none_when_target_already_done(self) -> None:
+        target = Operation[bytes](kind="recv")
+        target._finish(result=b"done")
+
+        io = _manager(_MockProactor())
+        assert io._cancel_operation(target) is None
+
+
 class TestProactorIOManagerAcceptMany:
     @pytest.mark.parametrize("recv_size", [0, -1])
     def test_accept_many_rejects_invalid_recv_size(self, recv_size: int) -> None:

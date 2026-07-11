@@ -271,6 +271,19 @@ class ProactorIOManager:
         if self._closed:
             raise RuntimeError("IO manager is closed")
 
+    def _cancel_operation(self, operation: Operation[Any]) -> IOWaiter[None] | None:
+        """Cancel ``operation`` and return an ``IOWaiter`` for its teardown leg.
+
+        Internal helper for io_manager composition paths that hold raw
+        ``Operation`` handles (for example accept-time ``recv``). Returns ``None``
+        when the target was already done and no teardown was started.
+        """
+
+        teardown = operation.cancel()
+        if teardown is None:
+            return None
+        return IOWaiter(self, teardown)
+
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
         return IOWaiter(self, self._proactor.recv(sock, n))
 
@@ -521,7 +534,7 @@ class ProactorIOManager:
         def arm() -> None:
             def on_timeout() -> None:
                 if not recv_op.done():
-                    recv_op.cancel()
+                    self._cancel_operation(recv_op)
 
             timer_box[0] = self._scheduler.call_later(timeout, on_timeout)
 
