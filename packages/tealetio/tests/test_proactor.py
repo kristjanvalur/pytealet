@@ -1173,6 +1173,9 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    @pytest.mark.skipif(
+        not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
+    )
     def test_recv_many_emits_pressure_when_pool_is_full(self):
         proactor = SelectorProactor()
         buf_group = proactor.create_buf_group(1024, 2)
