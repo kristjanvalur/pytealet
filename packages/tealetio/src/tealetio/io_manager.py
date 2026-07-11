@@ -414,9 +414,10 @@ class ProactorIOManager:
         group = self._group()
 
         def advance_connect(_child: IOWaitGroupChildProtocol[None]) -> None:
-            group.attach_operation(
+            group.attach(
                 self._proactor.send(sock, payload),
-                on_complete=lambda: group.finish(None),
+                on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
+                advance=lambda _send_child: group.finish(None),
             )
 
         group.attach(self._proactor.connect(sock, address), advance=advance_connect)
@@ -455,9 +456,10 @@ class ProactorIOManager:
                 if payload is None or not payload:
                     group.finish(sock)
                     return
-                group.attach_operation(
+                group.attach(
                     self._proactor.send(sock, payload),
-                    on_complete=lambda: group.finish(sock),
+                    on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
+                    advance=lambda _send_child: group.finish(sock),
                 )
 
             group.attach(
@@ -659,9 +661,10 @@ class ProactorIOManager:
                 if payload is None or not payload:
                     open_and_finish(sock)
                     return
-                group.attach_operation(
+                group.attach(
                     self._proactor.send(sock, payload),
-                    on_complete=lambda: open_and_finish(sock),
+                    on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
+                    advance=lambda _send_child: open_and_finish(sock),
                 )
 
             group.attach(

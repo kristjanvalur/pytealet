@@ -814,6 +814,33 @@ class TestProactorIOManagerDirect:
         assert proactor.last_create_socket is not None
         assert proactor.last_create_socket.fileno() == -1
 
+    def test_sock_create_closes_socket_when_send_fails(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def failing_send(
+            sock: socket.socket,
+            data: Any,
+            progress: Any = None,
+        ) -> Operation[None]:
+            del data, progress
+            operation = Operation[None](kind="send", fileobj=sock)
+            operation._finish(exception=OSError("send failed"))
+            return operation
+
+        proactor.send = failing_send  # type: ignore[method-assign]
+        waiter = io.sock_create(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            initial_data=b"hi",
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        with pytest.raises(OSError, match="send failed"):
+            waiter.wait()
+        assert proactor.last_create_socket is not None
+        assert proactor.last_create_socket.fileno() == -1
+
     def test_open_returns_proactor_file(self):
         proactor = _MockProactor()
         io = _manager(proactor)
