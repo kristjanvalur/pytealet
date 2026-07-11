@@ -235,9 +235,8 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     event loop themselves.
 
     Callbacks that submit nested ``Operation`` objects must not block waiting on
-    them. Register each child with ``attach_suboperation()`` (or
-    ``chain_suboperation()`` in ``operation_callbacks`` / ``continuous_callbacks``)
-    so ``cancel()`` can reach in-flight child work.
+    them. Delivery-spawned work is independent unless callers opt into tracking
+    via ``attach_suboperation()``.
     """
 
     def __init__(
@@ -249,14 +248,6 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj)
         self._result_callback = result_callback
-
-    def set_result_callback(self, callback: _ResultCallback[T_co] | None) -> None:
-        """Install or replace the result callback before the operation finishes."""
-
-        with self._lock:
-            if self._done:
-                raise InvalidStateError("continuous operation is already done")
-            self._result_callback = callback
 
     def _emit_result(self, result: T_co) -> bool:
         """Deliver one result when the operation is still active.

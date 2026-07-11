@@ -227,9 +227,8 @@ class TestProactorIOManagerAcceptMany:
 
     def test_accept_many_wires_plain_callback_with_recv_size(self) -> None:
         class _CaptureProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+            def accept_many(self, sock: socket.socket, callback=None):
                 self.last_callback = callback
-                self.last_callback_factory = callback_factory
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         proactor = _CaptureProactor()
@@ -238,17 +237,14 @@ class TestProactorIOManagerAcceptMany:
         try:
             io.accept_many(server, lambda _: None)
             assert proactor.last_callback is not None
-            assert proactor.last_callback_factory is None
             io.accept_many(server, lambda _: None, recv_size=64)
             assert proactor.last_callback is not None
-            assert proactor.last_callback_factory is None
         finally:
             server.close()
 
     def test_accept_many_recv_size_submits_recv_from_io_manager_callback(self) -> None:
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
-                assert callback_factory is None
+            def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
@@ -281,8 +277,7 @@ class TestProactorIOManagerAcceptMany:
         captured_errors: list[tuple[socket.socket, BaseException]] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
-                assert callback_factory is None
+            def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
@@ -315,8 +310,7 @@ class TestProactorIOManagerAcceptMany:
         closed: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
-                assert callback_factory is None
+            def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
@@ -346,7 +340,7 @@ class TestProactorIOManagerAcceptMany:
         handler_errors: list[BaseException] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+            def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
@@ -368,7 +362,7 @@ class TestProactorIOManagerAcceptMany:
         handler_errors: list[BaseException] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+            def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
@@ -393,8 +387,7 @@ class TestProactorIOManagerAcceptMany:
         handler_errors: list[BaseException] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
-                assert callback_factory is None
+            def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
@@ -424,9 +417,8 @@ class TestProactorIOManagerAcceptMany:
 
     def test_accept_many_streams_uses_bare_socket_callback(self) -> None:
         class _CaptureProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+            def accept_many(self, sock: socket.socket, callback=None):
                 self.last_callback = callback
-                self.last_callback_factory = callback_factory
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         proactor = _CaptureProactor()
@@ -435,15 +427,13 @@ class TestProactorIOManagerAcceptMany:
         try:
             io.accept_many_streams(server, lambda _: None)
             assert proactor.last_callback is not None
-            assert proactor.last_callback_factory is None
         finally:
             server.close()
 
     def test_accept_many_streams_wires_plain_callback_with_recv_size(self) -> None:
         class _CaptureProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
+            def accept_many(self, sock: socket.socket, callback=None):
                 self.last_callback = callback
-                self.last_callback_factory = callback_factory
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         proactor = _CaptureProactor()
@@ -452,7 +442,6 @@ class TestProactorIOManagerAcceptMany:
         try:
             io.accept_many_streams(server, lambda _: None, recv_size=64)
             assert proactor.last_callback is not None
-            assert proactor.last_callback_factory is None
         finally:
             server.close()
 
@@ -460,8 +449,7 @@ class TestProactorIOManagerAcceptMany:
         captured_errors: list[tuple[socket.socket, BaseException]] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
-                assert callback_factory is None
+            def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
@@ -494,8 +482,7 @@ class TestProactorIOManagerAcceptMany:
         closed: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, callback_factory=None):
-                assert callback_factory is None
+            def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()

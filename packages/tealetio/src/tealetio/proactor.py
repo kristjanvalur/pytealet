@@ -91,11 +91,9 @@ _DEFAULT_RECVITER_BUFFER_SIZE = 16 * 1024
 _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyCallback = Callable[[_RecvManyResult], object]
-_RecvManyCallbackFactory = Callable[[ContinuousOperation[_RecvManyResult]], _RecvManyCallback]
 _RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
-_AcceptManyCallbackFactory = Callable[[ContinuousOperation[AcceptManyResult]], _AcceptManyCallback]
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
@@ -104,18 +102,8 @@ def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> soc
 
 def _spawn_recv_many_operation(
     sock: socket.socket,
-    callback: _RecvManyCallback | None,
-    *,
-    callback_factory: _RecvManyCallbackFactory | None = None,
+    callback: _RecvManyCallback,
 ) -> ContinuousOperation[_RecvManyResult]:
-    if callback_factory is not None:
-        if callback is not None:
-            raise TypeError("recv_many accepts callback or callback_factory, not both")
-        operation = ContinuousOperation[_RecvManyResult](kind="recv_many", fileobj=sock)
-        operation.set_result_callback(callback_factory(operation))
-        return operation
-    if callback is None:
-        raise TypeError("recv_many requires callback or callback_factory")
     return ContinuousOperation[_RecvManyResult](
         kind="recv_many",
         fileobj=sock,
@@ -125,18 +113,8 @@ def _spawn_recv_many_operation(
 
 def _spawn_accept_many_operation(
     sock: socket.socket,
-    callback: _AcceptManyCallback | None,
-    *,
-    callback_factory: _AcceptManyCallbackFactory | None = None,
+    callback: _AcceptManyCallback,
 ) -> ContinuousOperation[AcceptManyResult]:
-    if callback_factory is not None:
-        if callback is not None:
-            raise TypeError("accept_many accepts callback or callback_factory, not both")
-        operation = ContinuousOperation[AcceptManyResult](kind="accept_many", fileobj=sock)
-        operation.set_result_callback(callback_factory(operation))
-        return operation
-    if callback is None:
-        raise TypeError("accept_many requires callback or callback_factory")
     return ContinuousOperation[AcceptManyResult](
         kind="accept_many",
         fileobj=sock,
@@ -389,16 +367,14 @@ class Proactor(Protocol):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: _AcceptManyCallback | None = None,
-        *,
-        callback_factory: _AcceptManyCallbackFactory | None = None,
+        callback: _AcceptManyCallback,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections until cancelled or failed.
 
         Each callback receives the accepted ``socket``. Call
         ``socket.getpeername()`` when the peer address is needed. Use
-        ``ProactorIOManager.accept_many`` or ``continuous_callbacks`` helpers to
-        attach accept-time reads or richer delivery shapes.
+        ``ProactorIOManager.accept_many`` for accept-time reads and richer
+        delivery shapes.
         """
 
         ...
@@ -465,10 +441,9 @@ class Proactor(Protocol):
     def recv_many(
         self,
         sock: socket.socket,
-        callback: _RecvManyCallback | None = None,
+        callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        callback_factory: _RecvManyCallbackFactory | None = None,
     ) -> ContinuousOperation[_RecvManyResult]: ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
@@ -543,10 +518,9 @@ class ProactorBase:
     def recv_many(
         self,
         sock: socket.socket,
-        callback: _RecvManyCallback | None = None,
+        callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        callback_factory: _RecvManyCallbackFactory | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         raise NotImplementedError
 
@@ -1060,9 +1034,7 @@ class SelectorProactor(ProactorBase):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: _AcceptManyCallback | None = None,
-        *,
-        callback_factory: _AcceptManyCallbackFactory | None = None,
+        callback: _AcceptManyCallback,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections and deliver each via the result callback.
 
@@ -1075,12 +1047,9 @@ class SelectorProactor(ProactorBase):
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
         the peer address is needed.
-
-        Pass ``callback_factory`` instead of ``callback`` when the handler needs
-        a reference to the returned ``ContinuousOperation``.
         """
 
-        operation = _spawn_accept_many_operation(sock, callback, callback_factory=callback_factory)
+        operation = _spawn_accept_many_operation(sock, callback)
 
         def step() -> ContinuousStepResult:
             try:
@@ -1167,10 +1136,9 @@ class SelectorProactor(ProactorBase):
     def recv_many(
         self,
         sock: socket.socket,
-        callback: _RecvManyCallback | None = None,
+        callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        callback_factory: _RecvManyCallbackFactory | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start receiving byte chunks until EOF, cancellation, or failure.
 
@@ -1185,12 +1153,9 @@ class SelectorProactor(ProactorBase):
 
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
-
-        Pass ``callback_factory`` instead of ``callback`` when the handler needs
-        a reference to the returned ``ContinuousOperation``.
         """
 
-        operation = _spawn_recv_many_operation(sock, callback, callback_factory=callback_factory)
+        operation = _spawn_recv_many_operation(sock, callback)
         sequence = 0
 
         # pre-3.12: no __release_buffer__, so leased views cannot return slots
@@ -2189,9 +2154,7 @@ class UringProactor(ProactorBase):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: _AcceptManyCallback | None = None,
-        *,
-        callback_factory: _AcceptManyCallbackFactory | None = None,
+        callback: _AcceptManyCallback,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections and deliver each via the result callback.
 
@@ -2201,14 +2164,11 @@ class UringProactor(ProactorBase):
 
         Each accepted connection is delivered as the accepted ``socket``. Call
         ``socket.getpeername()`` when the peer address is needed. Use
-        ``ProactorIOManager.accept_many`` or ``continuous_callbacks`` helpers to
-        attach accept-time reads or richer delivery shapes.
-
-        Pass ``callback_factory`` instead of ``callback`` when the handler needs
-        a reference to the returned ``ContinuousOperation``.
+        ``ProactorIOManager.accept_many`` for accept-time reads and richer
+        delivery shapes.
         """
 
-        operation = _spawn_accept_many_operation(sock, callback, callback_factory=callback_factory)
+        operation = _spawn_accept_many_operation(sock, callback)
         accept_entry_ref: list[_UringEntry | None] = [None]
         if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
             # one multishot accept stays armed until F_MORE clears or we cancel.
@@ -2534,10 +2494,9 @@ class UringProactor(ProactorBase):
     def recv_many(
         self,
         sock: socket.socket,
-        callback: _RecvManyCallback | None = None,
+        callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        callback_factory: _RecvManyCallbackFactory | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start a continuous receive operation that completes on EOF.
 
@@ -2563,12 +2522,9 @@ class UringProactor(ProactorBase):
 
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
-
-        Pass ``callback_factory`` instead of ``callback`` when the handler needs
-        a reference to the returned ``ContinuousOperation``.
         """
 
-        operation = _spawn_recv_many_operation(sock, callback, callback_factory=callback_factory)
+        operation = _spawn_recv_many_operation(sock, callback)
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
             uring_group = cast(_UringBufGroup, buf_group)
             # provided-buffer multishot: leased BufViews, ENOBUFS resume callback path.
