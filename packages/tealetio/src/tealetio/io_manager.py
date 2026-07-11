@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .continuous_callbacks import (
-    AcceptManyDelivery,
+    AcceptDelivery,
     AcceptReadResult,
     AcceptRecvErrorCallback,
     AcceptStreamsDelivery,
@@ -121,7 +121,7 @@ class SocketIO(Protocol):
         self,
         sock: socket.socket,
         n: int | None = None,
-    ) -> IOWaiterProtocol[socket.socket] | IOWaiterProtocol[AcceptManyDelivery]: ...
+    ) -> IOWaiterProtocol[AcceptDelivery]: ...
 
     def sock_connect(
         self,
@@ -197,7 +197,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: Callable[[AcceptManyDelivery], object],
+        callback: Callable[[AcceptDelivery], object],
         *,
         recv_size: int | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
@@ -365,10 +365,13 @@ class ProactorIOManager:
         self,
         sock: socket.socket,
         n: int | None = None,
-    ) -> IOWaiterProtocol[socket.socket] | IOWaiterProtocol[AcceptManyDelivery]:
+    ) -> IOWaiterProtocol[AcceptDelivery]:
         normalized_recv_size = normalize_accept_recv_size(n)
         if normalized_recv_size is None:
-            return self._waiter(self._proactor.accept(sock))
+            return self._waiter(
+                self._proactor.accept(sock),
+                map_result=lambda conn: (conn, None),
+            )
 
         group = self._group()
 
@@ -504,7 +507,7 @@ class ProactorIOManager:
     def accept_many(
         self,
         sock: socket.socket,
-        callback: Callable[[AcceptManyDelivery], object],
+        callback: Callable[[AcceptDelivery], object],
         *,
         recv_size: int | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,

@@ -5199,7 +5199,7 @@ class TestProactorSchedulerIntegration:
             server.listen()
 
             def accept_and_read() -> bytes:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 try:
                     return scheduler.io.sock_recv(conn, 4).wait()
                 finally:

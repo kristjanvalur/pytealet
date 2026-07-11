@@ -227,7 +227,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_and_echo() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 try:
                     payload = scheduler.io.sock_recv(conn, len(client_greeting)).wait()
                     scheduler.io.sock_sendall(conn, payload.upper()).wait()
@@ -255,7 +255,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_and_echo() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 try:
                     scheduler.io.sock_sendall(conn, b"PONG").wait()
                 finally:
@@ -292,7 +292,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 conn.close()
 
             def connect_via_literal_ip() -> None:
@@ -325,7 +325,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 conn.close()
 
             def connect_via_hostname() -> None:
@@ -354,7 +354,7 @@ class TestStreamsPoC:
                 return await stream_reader.readexactly(4)
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 try:
                     scheduler.io.sock_sendall(conn, b"pong").wait()
                 finally:
@@ -444,7 +444,7 @@ class TestStreamsPoC:
                 server.setblocking(False)
 
                 def accept_and_echo() -> None:
-                    conn = scheduler.io.sock_accept(server).wait()
+                    conn, _initial = scheduler.io.sock_accept(server).wait()
                     try:
                         payload = scheduler.io.sock_recv(conn, 5).wait()
                         scheduler.io.sock_sendall(conn, payload.upper()).wait()
@@ -876,7 +876,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 conn.close()
 
             def connect_with_initial() -> None:
@@ -940,7 +940,7 @@ class TestStreamsPoC:
             )
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 conn.close()
 
             def connect_side() -> None:
@@ -992,7 +992,7 @@ class TestStreamsPoC:
                 server.setblocking(False)
 
                 def accept_side() -> None:
-                    conn = scheduler.io.sock_accept(server).wait()
+                    conn, _initial = scheduler.io.sock_accept(server).wait()
                     conn.close()
 
                 def connect_with_initial() -> None:

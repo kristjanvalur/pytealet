@@ -781,8 +781,9 @@ class TestProactorIOManagerDirect:
         try:
             waiter = io.sock_accept(listen)
             assert isinstance(waiter, IOWaiter)
-            conn = waiter.wait()
+            conn, initial = waiter.wait()
             try:
+                assert initial is None
                 assert proactor.recv_calls == []
             finally:
                 conn.close()

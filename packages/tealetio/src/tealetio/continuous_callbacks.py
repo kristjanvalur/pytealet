@@ -14,7 +14,7 @@ from .socket_helpers import abortive_close
 T = TypeVar("T")
 
 AcceptReadResult = tuple[socket.socket, bytes | None, BaseException | None]
-AcceptManyDelivery = tuple[socket.socket, bytes | None]
+AcceptDelivery = tuple[socket.socket, bytes | None]
 AcceptStreamsDelivery: TypeAlias = tuple[Any, Any]
 AcceptRecvErrorCallback = Callable[[socket.socket, BaseException], object]
 _MAX_ACCEPT_RECV_SIZE = 2**16
