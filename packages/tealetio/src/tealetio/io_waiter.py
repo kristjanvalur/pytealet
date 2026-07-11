@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
 from .locks import ThreadsafeEvent
 from .operations import Operation
@@ -15,7 +15,6 @@ _RawResult = TypeVar("_RawResult")
 _OnLegCleanup = Callable[[bool, Any], object]
 _AdvanceHandler = Callable[["IOWaitGroupChild[Any]"], object]
 _OnCompleteHandler = Callable[[], object]
-_ActiveMember = Operation[Any] | "IOWaitGroupChild[Any]"
 
 
 class IOWaiterProtocol(Protocol[T_co]):
@@ -188,6 +187,9 @@ class IOWaitGroupChild(Generic[T]):
             advance(self)
         except BaseException as exc:
             self._group._complete_error(exc)
+
+
+_ActiveMember: TypeAlias = Operation[Any] | IOWaitGroupChild[Any]
 
 
 class IOWaitGroup(Generic[T]):
