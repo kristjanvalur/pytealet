@@ -318,9 +318,7 @@ class IOWaitGroup(Generic[T]):
         self._members.clear()
 
     def wait(self) -> T:
-        with self._lock:
-            completion = self._completion
-
+        completion = self._completion
         if completion is not None:
             ok, value = completion
             if not ok:
