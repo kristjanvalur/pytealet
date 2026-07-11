@@ -1,83 +1,119 @@
-# Operation callback composition
+# IO manager callback composition
 
-Nested proactor work from continuous operations is composed in callback helpers,
-not inside the proactor. One-shot multi-leg socket work (create → connect → send)
-lives in `ProactorIOManager` via `IOWaitGroup`; see `IO_MANAGER_DESIGN.md`.
+Continuous proactor work is composed in `ProactorIOManager` and small helpers in
+`continuous_callbacks.py`, not inside the proactor. One-shot multi-leg socket work
+(create → connect → send) uses `IOWaitGroup` in the same layer; see
+`IO_MANAGER_DESIGN.md`.
 
-This document covers `chain_suboperation`, continuous callback modules, and
-completion contracts on `Operation` / `ContinuousOperation`.
+The proactor submits `accept_many`, `recv_many`, `poll_many`, and similar
+operations and emits bare results through each operation's `result_callback`.
+Tuple shaping, accept-time pre-read, scheduler-thread marshalling, and stream
+pair construction live on `scheduler.io`.
 
 ## Two operation kinds
 
 | Kind | Proactor completion path | Composition hook |
 |------|--------------------------|------------------|
 | One-shot (`connect`, `create_socket`, …) | `operation.deliver(proactor, result=…, exception=…)` | `ProactorIOManager` advance handlers via `IOWaitGroup` |
-| Continuous (`accept_many`, `recv_many`, …) | `operation._emit_result(chunk)` | `result_callback` or `callback_factory(parent)` |
+| Continuous (`accept_many`, `recv_many`, …) | `operation._emit_result(chunk)` | `result_callback` on the `ContinuousOperation`; io_manager wraps or extends it |
 
 For one-shot ops the proactor calls `deliver()`, which finishes the operation
 immediately. Multi-leg blocking helpers compose separate operations in
 `io_waiter.IOWaitGroup` instead of delivery handlers on a single root operation.
 
-`Operation.complete(result)` / `complete_error(exc)` finish a one-shot parent
-from a chained suboperation callback. Handlers must not raise without expecting
-`complete_error` from the `chain_suboperation` wrapper.
+For continuous ops the proactor requires a `result_callback` and emits chunks
+until the operation finishes or errors. `ProactorIOManager` is the usual place
+to adapt that callback (marshal onto the scheduler thread, attach accept-time
+`recv`, build stream pairs, and similar).
 
-## Shared primitive: `chain_suboperation`
+## Proactor surface (thin)
 
-`chain_suboperation(parent, spawn, on_complete)` in `operation_callbacks.py`:
+`accept_many` and `recv_many` take a single `callback` argument. The proactor
+does not know about tuple delivery shapes, nested `recv`, or thread affinity.
 
-- Spawns the child under `parent._lock` and registers it in
-  `_active_suboperations`
-- Runs `on_complete` when the child finishes; failures in `on_complete` call
-  `parent.complete_error(exc)`
-- Returns `False` only when the parent is already `_done` (the attach path
-  re-checks the same condition under the lock)
+| Continuous op | Proactor delivers |
+|---------------|-------------------|
+| `accept_many` | accepted `socket.socket` per chunk |
+| `recv_many` | `(bytes, is_eof)` chunks |
+| `poll_many` | ready mask per chunk |
 
-Callers need not finish the parent on `False`. Local cleanup (for example
-closing a created socket that will not be returned) is the caller's
-responsibility when composition cannot start.
+Nested work started from a result callback (for example accept-time `recv`) is
+**independent** of the parent `ContinuousOperation`. Cancelling the parent does
+not automatically cancel per-accept `recv` ops; each layer chooses its own
+disposition (see below).
 
-`spawn()` runs while holding `parent._lock`, which serialises attach against
-`cancel()` but can defer another thread's `cancel()` until a synchronous backend
-path (for example `AF_UNIX` connect) returns from `spawn()`. The done callback is
-registered after releasing `parent._lock` so a synchronously completing child
-does not deadlock when `on_complete` finishes the parent.
+## `ProactorIOManager` continuous helpers
 
-## Continuous flows
+| Entry point | Composition |
+|-------------|---------------|
+| `accept_many(sock, callback, recv_size=…)` | optional accept-time `recv` via `_accept_many_read_on_conn`; deliveries marshalled with `call_soon_threadsafe` before `callback((conn, initial_data))` |
+| `accept_many_streams(…)` | same accept path, then `_open_streams` and `callback((reader, writer))` |
+| `poll_many(fd, mask, callback)` | forwards to `proactor.poll_many` inside an `IOWaiter` |
+| `sock_recv_iter` | blocking iterator over `proactor.recv_many` chunks |
 
-Long-lived operations compose through `continuous_callbacks.py`:
+Accept-time pre-read wiring (when `recv_size` is set):
 
-- `accept_read_delivery` — accept-time pre-read via nested `recv` +
-  `chain_suboperation`
-- `marshal_to_scheduler` — thread affinity for `start_server` delivery
-- `wrap_accept_delivery` — bare `(conn, None, None)` tuples without pre-read
+```text
+proactor.accept_many(sock, on_conn)
+        │
+        ▼  each accept
+proactor.recv(conn, recv_size)     # independent one-shot Operation
+        │
+        ▼  recv done callback
+marshal → deliver_wrapped → user callback
+```
 
-The proactor emits bare sockets from `accept_many`; tuple shaping and pre-read
-live in the callback/io_manager layer. See `IO_MANAGER_DESIGN.md` (continuous
-callback composition).
+`on_conn` registers `recv_op.add_done_callback(on_recv_complete)`; there is no
+parent/child link on `Operation`. A cancelled recv closes the connection with
+`abortive_close` and does not invoke the user callback.
 
-## Module layout
+Helpers in `continuous_callbacks.py` support this layer:
 
-| Module | Responsibility |
-|--------|----------------|
-| `operations.py` | `Operation`, `ContinuousOperation`, suboperation tracking |
-| `io_waiter.py` | `IOWaiter`, `IOWaitGroup` — one-shot multi-leg composition |
-| `operation_callbacks.py` | `chain_suboperation` for nested work under continuous parents |
-| `continuous_callbacks.py` | Continuous-specific helpers; imports `chain_suboperation` |
+- `normalize_accept_recv_size` — cap and validate `recv_size`
+- `finalize_accept_recv_error` — optional `on_recv_error` hook, then close
+- `wrap_accept_delivery` — adapt tuple delivery to bare-socket proactor callbacks
+- `marshal_to_scheduler` — thread affinity for callbacks that must run on the
+  scheduler thread (used by `start_server` paths via `_marshal_accept_callback`)
 
-## Semantics
+## Delivery disposition (application layer)
 
-| Event | One-shot parent | Continuous parent |
-|-------|-----------------|-------------------|
-| Parent `complete()` / normal `_finish` | Children keep running | Same |
-| Parent error finish | Children keep running | Same |
-| Parent `cancel()` | `_finish(cancelled=True)`: backend hook, terminal state, children, callbacks | Same |
-| Child completion | `on_complete` may call `parent.complete(…)` | Handlers may run after `parent.done()` when handed off while active |
+Late or unwanted deliveries are handled by the **application**, not by
+`Operation` suboperation tracking or proactor callback factories.
 
-### Cancel vs in-flight completion
+A continuous op may finish (cancel, error, or natural EOF) while result
+callbacks or nested work they started are still in flight. That is expected:
+ending the accept **stream** does not mean all per-connection work has completed.
+
+Callers choose how to treat deliveries that arrive after shutdown or after they
+have lost interest:
+
+| Disposition | Example |
+|-------------|---------|
+| **Discard** | close the socket or stream and return |
+| **Ignore** | drop the delivery without further work |
+| **Handle** | process anyway (for example drain already-accepted clients) |
+
+`StreamServer` discards late accepts after `close()`:
+
+- `on_accept` checks `_closed`; if set, it closes the writer and returns without
+  spawning a handler.
+- `_dispatch_client` and `_dispatch_streams` perform the same check before
+  incrementing `_active_handlers`.
+- `close()` sets `_closed`, closes listening sockets, and cancels only the
+  accept-loop tealet; in-flight handler tealets keep running until they finish.
+
+The io_manager marshals accept deliveries onto the scheduler thread but does not
+enforce server shutdown policy — `StreamServer` (or any custom `accept_many`
+callback) implements that.
+
+Similarly, `IOWaitGroup` discards late `finish()` results after an interrupted
+`wait()` sets `_closed` (for example `abortive_close` on a socket). That is
+waiter-level disposition for one-shot composition, not continuous accept policy.
+
+## Cancel vs in-flight completion
 
 `Operation.cancel()` always races backend worker threads. Proactor completions
-arrive asynchronously; the scheduler or a waiter may call `cancel()` on the
+arrive asynchronously; a waiter or scheduler task may call `cancel()` on the
 same operation while a CQE is already in flight.
 
 `cancel_hook` is **best-effort IO teardown** only (drop deferred resubmits,
@@ -86,18 +122,29 @@ It does not own terminal state. Hooks do not call `_finish()`; `cancel()` routes
 through `_finish(cancelled=True)`, which runs the hook and then terminalises
 unless `_done` is already set.
 
-A late `deliver()` / `complete()` may therefore still succeed after
-`cancel_hook` runs. That is expected: whichever path reaches `_finish` first
-wins. Callers waiting on `wait_operation` observe either a normal result or
-`CancelledError`, not an ambiguous in-between state.
+A late `deliver()` may therefore still succeed after `cancel_hook` runs. That is
+expected: whichever path reaches `_finish` first wins. Callers waiting on
+`IOWaiter.wait()` observe either a normal result or `CancelledError`, not an
+ambiguous in-between state.
 
 For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 `IO_MANAGER_DESIGN.md`.
 
+## Module layout
+
+| Module | Responsibility |
+|--------|----------------|
+| `operations.py` | `Operation`, `ContinuousOperation`, `ContinuousStepResult` |
+| `io_manager.py` | `ProactorIOManager` — continuous and one-shot composition |
+| `io_waiter.py` | `IOWaiter`, `IOWaitGroup` — blocking wait and one-shot multi-leg composition |
+| `continuous_callbacks.py` | Small helpers used by `ProactorIOManager` accept paths |
+| `proactor.py` | Submit ops; continuous backends call `_emit_result` / `_finish` |
+
 ## References
 
+- `packages/tealetio/src/tealetio/io_manager.py`
 - `packages/tealetio/src/tealetio/io_waiter.py`
-- `packages/tealetio/src/tealetio/operation_callbacks.py`
 - `packages/tealetio/src/tealetio/continuous_callbacks.py`
 - `packages/tealetio/src/tealetio/operations.py`
+- `packages/tealetio/src/tealetio/streams.py` — `StreamServer` late-delivery discard
 - `packages/tealetio/docs/IO_MANAGER_DESIGN.md`
