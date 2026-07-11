@@ -425,8 +425,8 @@ class Proactor(Protocol):
         from ``sock_create``. Inet sockets use the backend's async path.
 
         ``operation_factory`` may install a delivery handler for composed
-        follow-on work (for example connect-time send via
-        ``ProactorIOManager.sock_connect(..., initial=...)``).
+        follow-on work at the proactor layer. ``ProactorIOManager.sock_connect``
+        composes connect-time send via ``IOWaitGroup`` instead.
         """
 
         ...
@@ -453,8 +453,8 @@ class Proactor(Protocol):
         """Create a scheduler-contract socket.
 
         ``operation_factory`` may install a delivery handler for composed
-        follow-on work. ``ProactorIOManager.sock_create()`` handles
-        create→connect composition for all socket families.
+        follow-on work at the proactor layer. ``ProactorIOManager.sock_create``
+        composes create→connect (and optional send) via ``IOWaitGroup``.
         """
 
         ...

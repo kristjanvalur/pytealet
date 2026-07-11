@@ -117,7 +117,11 @@ class SocketIO(Protocol):
 
     def sock_sendto(self, sock: socket.socket, data: SocketSendBuffer, address: Any) -> IOWaiter[int]: ...
 
-    def sock_accept(self, sock: socket.socket) -> IOWaiter[socket.socket]: ...
+    def sock_accept(
+        self,
+        sock: socket.socket,
+        n: int | None = None,
+    ) -> IOWaiterProtocol[socket.socket] | IOWaiterProtocol[AcceptManyDelivery]: ...
 
     def sock_connect(
         self,
@@ -125,7 +129,7 @@ class SocketIO(Protocol):
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-    ) -> IOWaiter[None]: ...
+    ) -> IOWaiterProtocol[None]: ...
 
     def sock_create(
         self,
@@ -136,7 +140,7 @@ class SocketIO(Protocol):
         flags: int = 0,
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
-    ) -> IOWaiter[socket.socket]: ...
+    ) -> IOWaiterProtocol[socket.socket]: ...
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: "RecvBufferPool | None" = None
@@ -357,22 +361,14 @@ class ProactorIOManager:
     def sock_close(self, sock: socket.socket) -> IOWaiter[None]:
         return self._waiter(self._proactor.close_socket(sock))
 
-    def sock_accept(self, sock: socket.socket) -> IOWaiter[socket.socket]:
-        return self._waiter(self._proactor.accept(sock))
-
-    def sock_accept_group_alt(
+    def sock_accept(
         self,
         sock: socket.socket,
         n: int | None = None,
-    ) -> IOWaiterProtocol[AcceptManyDelivery]:
-        """POC: accept only, or accept then recv via ``IOWaitGroup`` composition."""
-
+    ) -> IOWaiterProtocol[socket.socket] | IOWaiterProtocol[AcceptManyDelivery]:
         normalized_recv_size = normalize_accept_recv_size(n)
         if normalized_recv_size is None:
-            return self._waiter(
-                self._proactor.accept(sock),
-                map_result=lambda conn: (conn, None),
-            )
+            return self._waiter(self._proactor.accept(sock))
 
         group = self._group()
 
@@ -404,66 +400,7 @@ class ProactorIOManager:
         address: Any,
         *,
         initial: SocketSendBuffer | None = None,
-    ) -> IOWaiter[None]:
-        if initial is None:
-            return self._waiter(self._proactor.connect(sock, address))
-        from .operation_callbacks import connect_initial_send_operation_factory
-
-        return self._waiter(
-            self._proactor.connect(
-                sock,
-                address,
-                operation_factory=connect_initial_send_operation_factory(self._proactor, initial),
-            )
-        )
-
-    def sock_create(
-        self,
-        family: int,
-        type: int,
-        proto: int = 0,
-        *,
-        flags: int = 0,
-        connect_to: Any | None = None,
-        initial_data: SocketSendBuffer | None = None,
-    ) -> IOWaiter[socket.socket]:
-        if initial_data is not None and connect_to is None:
-            raise ValueError("initial_data requires connect_to")
-        if connect_to is None:
-            return self._waiter(
-                self._proactor.create_socket(
-                    family,
-                    type,
-                    proto,
-                    flags=flags,
-                )
-            )
-
-        from .operation_callbacks import create_connect_operation_factory
-
-        return self._waiter(
-            self._proactor.create_socket(
-                family,
-                type,
-                proto,
-                flags=flags,
-                operation_factory=create_connect_operation_factory(
-                    self._proactor,
-                    connect_to,
-                    initial_data,
-                ),
-            )
-        )
-
-    def sock_connect_group_alt(
-        self,
-        sock: socket.socket,
-        address: Any,
-        *,
-        initial: SocketSendBuffer | None = None,
     ) -> IOWaiterProtocol[None]:
-        """POC: plain ``IOWaiter`` for connect-only; ``IOWaitGroup`` when send follows."""
-
         if initial is None:
             return self._waiter(self._proactor.connect(sock, address))
 
@@ -482,7 +419,7 @@ class ProactorIOManager:
         group.attach(self._proactor.connect(sock, address), advance=advance_connect)
         return group
 
-    def sock_create_group_alt(
+    def sock_create(
         self,
         family: int,
         type: int,
@@ -492,8 +429,6 @@ class ProactorIOManager:
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
     ) -> IOWaiterProtocol[socket.socket]:
-        """POC: plain ``IOWaiter`` for create-only; ``IOWaitGroup`` when connect/send follow."""
-
         if initial_data is not None and connect_to is None:
             raise ValueError("initial_data requires connect_to")
 

@@ -714,35 +714,96 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
-    def test_sock_create_uses_connect_factory_when_connect_to_set(self):
+    def test_sock_create_composes_connect_without_operation_factory(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
-        sock = io.sock_create(
+        waiter = io.sock_create(
             socket.AF_INET,
             socket.SOCK_STREAM,
             connect_to=address,
-        ).wait()
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        sock = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
         finally:
             sock.close()
 
-    def test_sock_create_connect_chain_with_initial_data(self):
+    def test_sock_create_composes_connect_and_send_without_operation_factory(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
-        sock = io.sock_create(
+        waiter = io.sock_create(
             socket.AF_INET,
             socket.SOCK_STREAM,
             connect_to=address,
             initial_data=b"hi",
-        ).wait()
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        sock = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
             assert len(proactor.send_calls) == 1
+            assert proactor.send_calls[0][0] is sock
         finally:
             sock.close()
+
+    def test_sock_connect_without_initial_returns_io_waiter(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        try:
+            waiter = io.sock_connect(sock, ("127.0.0.1", 9))
+            assert isinstance(waiter, IOWaiter)
+            waiter.wait()
+            assert proactor.send_calls == []
+        finally:
+            sock.close()
+
+    def test_sock_connect_composes_send_after_connect(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        try:
+            waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
+            assert isinstance(waiter, IOWaitGroup)
+            waiter.wait()
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hi"
+        finally:
+            sock.close()
+
+    def test_sock_accept_without_recv_returns_io_waiter(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        try:
+            waiter = io.sock_accept(listen)
+            assert isinstance(waiter, IOWaiter)
+            conn = waiter.wait()
+            try:
+                assert proactor.recv_calls == []
+            finally:
+                conn.close()
+        finally:
+            listen.close()
+
+    def test_sock_accept_composes_recv_after_accept(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            conn, data = waiter.wait()
+            try:
+                assert data == b"mock"
+                assert proactor.recv_calls == [(conn, 64)]
+            finally:
+                conn.close()
+        finally:
+            listen.close()
 
     def test_sock_create_rejects_initial_data_without_connect_to(self):
         proactor = _MockProactor()
@@ -754,7 +815,7 @@ class TestProactorIOManagerDirect:
                 initial_data=b"hi",
             )
 
-    def test_sock_create_closes_socket_when_connect_chain_fails(self):
+    def test_sock_create_closes_socket_when_connect_fails(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
 
@@ -764,16 +825,20 @@ class TestProactorIOManagerDirect:
             *,
             operation_factory: Any | None = None,
         ) -> Operation[None]:
-            del sock, address, operation_factory
-            raise OSError("connect failed")
+            del address, operation_factory
+            operation = Operation[None](kind="connect", fileobj=sock)
+            operation._finish(exception=OSError("connect failed"))
+            return operation
 
         proactor.connect = failing_connect  # type: ignore[method-assign]
+        waiter = io.sock_create(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+        )
+        assert isinstance(waiter, IOWaitGroup)
         with pytest.raises(OSError, match="connect failed"):
-            io.sock_create(
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                connect_to=("127.0.0.1", 9),
-            ).wait()
+            waiter.wait()
         assert proactor.last_create_socket is not None
         assert proactor.last_create_socket.fileno() == -1
 
@@ -922,121 +987,6 @@ class TestIOWaitGroup:
             assert operation.cancelled()
         finally:
             io_waiter_module.ThreadsafeEvent.swait = original_swait
-
-
-class TestProactorIOManagerSockComposeGroupAlt:
-    def test_sock_connect_group_alt_without_initial_returns_io_waiter(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock = socket.socketpair()[0]
-        try:
-            waiter = io.sock_connect_group_alt(sock, ("127.0.0.1", 9))
-            assert isinstance(waiter, IOWaiter)
-            waiter.wait()
-            assert proactor.send_calls == []
-        finally:
-            sock.close()
-
-    def test_sock_connect_group_alt_chains_send_after_connect(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock = socket.socketpair()[0]
-        try:
-            waiter = io.sock_connect_group_alt(sock, ("127.0.0.1", 9), initial=b"hi")
-            assert isinstance(waiter, IOWaitGroup)
-            waiter.wait()
-            assert len(proactor.send_calls) == 1
-            assert bytes(proactor.send_calls[0][1]) == b"hi"
-        finally:
-            sock.close()
-
-    def test_sock_create_group_alt_without_connect_to_returns_io_waiter(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        waiter = io.sock_create_group_alt(socket.AF_INET, socket.SOCK_STREAM)
-        assert isinstance(waiter, IOWaiter)
-        sock = waiter.wait()
-        try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
-        finally:
-            sock.close()
-
-    def test_sock_create_group_alt_chains_without_operation_factory(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        waiter = io.sock_create_group_alt(
-            socket.AF_INET,
-            socket.SOCK_STREAM,
-            connect_to=("127.0.0.1", 9),
-            initial_data=b"hi",
-        )
-        assert isinstance(waiter, IOWaitGroup)
-        sock = waiter.wait()
-        try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, False)]
-            assert len(proactor.send_calls) == 1
-            assert proactor.send_calls[0][0] is sock
-        finally:
-            sock.close()
-
-    def test_sock_accept_group_alt_without_recv_returns_io_waiter(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        listen = socket.socketpair()[0]
-        try:
-            waiter = io.sock_accept_group_alt(listen)
-            assert isinstance(waiter, IOWaiter)
-            conn, data = waiter.wait()
-            try:
-                assert data is None
-                assert proactor.recv_calls == []
-            finally:
-                conn.close()
-        finally:
-            listen.close()
-
-    def test_sock_accept_group_alt_chains_recv_after_accept(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        listen = socket.socketpair()[0]
-        try:
-            waiter = io.sock_accept_group_alt(listen, 64)
-            assert isinstance(waiter, IOWaitGroup)
-            conn, data = waiter.wait()
-            try:
-                assert data == b"mock"
-                assert proactor.recv_calls == [(conn, 64)]
-            finally:
-                conn.close()
-        finally:
-            listen.close()
-
-    def test_sock_create_group_alt_closes_socket_when_connect_fails(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-
-        def failing_connect(
-            sock: socket.socket,
-            address: Any,
-            *,
-            operation_factory: Any | None = None,
-        ) -> Operation[None]:
-            del address, operation_factory
-            operation = Operation[None](kind="connect", fileobj=sock)
-            operation._finish(exception=OSError("connect failed"))
-            return operation
-
-        proactor.connect = failing_connect  # type: ignore[method-assign]
-        waiter = io.sock_create_group_alt(
-            socket.AF_INET,
-            socket.SOCK_STREAM,
-            connect_to=("127.0.0.1", 9),
-        )
-        assert isinstance(waiter, IOWaitGroup)
-        with pytest.raises(OSError, match="connect failed"):
-            waiter.wait()
-        assert proactor.last_create_socket is not None
-        assert proactor.last_create_socket.fileno() == -1
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
