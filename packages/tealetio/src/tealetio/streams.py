@@ -22,7 +22,7 @@ from .io_manager import (
 )
 from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
 from .locks import Condition
-from .operations import ContinuousOperation
+from .io_waiter import IOWaiter
 from .scheduler import BaseScheduler
 
 T = TypeVar("T")
@@ -774,7 +774,7 @@ class StreamServer:
         self,
         scheduler: BaseScheduler,
         sockets: list[socket.socket],
-        accept_operation: ContinuousOperation[socket.socket],
+        accept_operation: IOWaiter[None],
     ) -> None:
         self._scheduler = scheduler
         self._io = _require_proactor_io(scheduler)
@@ -796,7 +796,7 @@ class StreamServer:
         return self._sockets
 
     @property
-    def accept_operation(self) -> ContinuousOperation[socket.socket]:
+    def accept_operation(self) -> IOWaiter[None]:
         return self._accept_operation
 
     def close(self) -> None:

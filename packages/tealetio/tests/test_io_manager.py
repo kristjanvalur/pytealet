@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import os
+import select
 import socket
 from typing import Any
 from unittest.mock import patch
@@ -948,13 +949,34 @@ class TestProactorIOManagerDirect:
             handle.close()
         assert proactor.close_fd_calls == [901]
 
-    def test_poll_many_returns_continuous_operation(self):
+    def test_io_waiter_wraps_continuous_operation(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        seen: list[int] = []
+        operation = ContinuousOperation[int](kind="poll_many", fileobj=5, result_callback=seen.append)
+        waiter = IOWaiter(io, operation)
+        operation._emit_result(select.POLLIN)
+        operation._finish(result=None)
+        assert waiter.wait() is None
+        assert seen == [select.POLLIN]
+
+    def test_io_waiter_cancel_stops_continuous_operation(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        pending = ContinuousOperation[None](kind="poll_many", fileobj=5)
+        waiter = IOWaiter(io, pending)
+        waiter.cancel()
+        assert pending.cancelled() is True
+
+    def test_poll_many_returns_io_waitable(self):
         proactor = _MockProactor()
         io = _manager(proactor)
         seen: list[int] = []
 
-        operation = io.poll_many(5, 1, seen.append)
-        assert isinstance(operation, ContinuousOperation)
+        waiter = io.poll_many(5, 1, seen.append)
+        assert isinstance(waiter, IOWaiter)
+        assert waiter.operation is not None
+        assert waiter.operation.kind == "poll_many"
 
 
 class TestProactorIOManagerDeferredCompose:

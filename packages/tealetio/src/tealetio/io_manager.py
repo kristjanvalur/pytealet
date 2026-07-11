@@ -182,7 +182,7 @@ class PollIO(Protocol):
         fd: int,
         mask: int,
         callback: Callable[[int], object],
-    ) -> ContinuousOperation[int]: ...
+    ) -> IOWaitable[None]: ...
 
 
 @runtime_checkable
@@ -207,7 +207,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         *,
         recv_size: int | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
-    ) -> ContinuousOperation[socket.socket]: ...
+    ) -> IOWaitable[None]: ...
 
     def accept_many_streams(
         self,
@@ -219,7 +219,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         async_: bool = False,
         recv_size: int | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
-    ) -> ContinuousOperation[socket.socket]: ...
+    ) -> IOWaitable[None]: ...
 
     def sock_create_streams(
         self,
@@ -243,8 +243,10 @@ class ProactorIOManager:
     """IO facade over a ``Proactor`` backend.
 
     One-shot helpers return ``IOWaiter``; call ``wait()`` to block the current
-    tealet. Streaming helpers (``accept_many``, ``poll_many``, ``sock_recv_iter``)
-    return long-lived handles. Always owned by a proactor scheduler.
+    tealet. Continuous helpers (``accept_many``, ``poll_many``) return
+    ``IOWaitable[None]``; call ``wait()`` to block until the stream ends.
+    ``sock_recv_iter`` remains a blocking iterator over ``recv_many`` chunks.
+    Always owned by a proactor scheduler.
     """
 
     def __init__(self, scheduler: BaseScheduler, proactor: Proactor) -> None:
@@ -502,8 +504,8 @@ class ProactorIOManager:
         fd: int,
         mask: int,
         callback: Callable[[int], object],
-    ) -> ContinuousOperation[int]:
-        return self._proactor.poll_many(fd, mask, callback)
+    ) -> IOWaitable[None]:
+        return IOWaiter(self, self._proactor.poll_many(fd, mask, callback))
 
     def _marshal_accept_callback(self, thunk: Callable[[], object]) -> None:
         self._check_open()
@@ -517,7 +519,7 @@ class ProactorIOManager:
         *,
         recv_size: int | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
-    ) -> ContinuousOperation[socket.socket]:
+    ) -> IOWaitable[None]:
         """Start ``proactor.accept_many`` with optional accept-time pre-read.
 
         Deliveries are marshalled onto the scheduler thread before ``callback``
@@ -544,17 +546,20 @@ class ProactorIOManager:
             self._marshal_accept_callback(run)
 
         if normalized_recv_size is not None:
-            return self._proactor.accept_many(
-                sock,
-                callback_factory=lambda op: accept_read_delivery(
-                    self._proactor,
-                    op,
-                    deliver_wrapped,
-                    recv_size=normalized_recv_size,
+            return IOWaiter(
+                self,
+                self._proactor.accept_many(
+                    sock,
+                    callback_factory=lambda op: accept_read_delivery(
+                        self._proactor,
+                        op,
+                        deliver_wrapped,
+                        recv_size=normalized_recv_size,
+                    ),
                 ),
             )
 
-        return self._proactor.accept_many(sock, wrap_accept_delivery(deliver_wrapped))
+        return IOWaiter(self, self._proactor.accept_many(sock, wrap_accept_delivery(deliver_wrapped)))
 
     def accept_many_streams(
         self,
@@ -566,7 +571,7 @@ class ProactorIOManager:
         async_: bool = False,
         recv_size: int | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
-    ) -> ContinuousOperation[socket.socket]:
+    ) -> IOWaitable[None]:
         """Start ``proactor.accept_many`` and deliver a stream pair per accept.
 
         When ``recv_size`` is set, the accept-time read pre-fills the reader
@@ -609,17 +614,20 @@ class ProactorIOManager:
             self._marshal_accept_callback(run)
 
         if normalized_recv_size is not None:
-            return self._proactor.accept_many(
-                sock,
-                callback_factory=lambda op: accept_read_delivery(
-                    self._proactor,
-                    op,
-                    deliver_accept,
-                    recv_size=normalized_recv_size,
+            return IOWaiter(
+                self,
+                self._proactor.accept_many(
+                    sock,
+                    callback_factory=lambda op: accept_read_delivery(
+                        self._proactor,
+                        op,
+                        deliver_accept,
+                        recv_size=normalized_recv_size,
+                    ),
                 ),
             )
 
-        return self._proactor.accept_many(sock, wrap_accept_delivery(deliver_accept))
+        return IOWaiter(self, self._proactor.accept_many(sock, wrap_accept_delivery(deliver_accept)))
 
     def sock_create_streams(
         self,

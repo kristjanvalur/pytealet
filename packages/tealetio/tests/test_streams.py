@@ -472,7 +472,8 @@ class TestStreamsPoC:
             listen_sock = server.sockets[0]
             with server:
                 assert listen_sock.fileno() != -1
-                assert server.accept_operation.kind == "accept_many"
+                assert server.accept_operation.operation is not None
+                assert server.accept_operation.operation.kind == "accept_many"
             assert listen_sock.fileno() == -1
 
         run_scheduler_task(scheduler, exercise)
@@ -721,7 +722,8 @@ class TestStreamsPoC:
         def exercise() -> None:
             server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
             try:
-                assert server.accept_operation.kind == "accept_many"
+                assert server.accept_operation.operation is not None
+                assert server.accept_operation.operation.kind == "accept_many"
                 _host, port = server.sockets[0].getsockname()
 
                 def connect_and_send() -> None:
@@ -1144,7 +1146,8 @@ class TestStartServerListenOptions:
             try:
                 assert server.sockets[0].fileno() == listen_sock.fileno()
                 assert listen_sock.getsockname() == ("127.0.0.1", port)
-                assert server.accept_operation.kind == "accept_many"
+                assert server.accept_operation.operation is not None
+                assert server.accept_operation.operation.kind == "accept_many"
             finally:
                 server.close()
 
