@@ -14,7 +14,7 @@ from .socket_helpers import abortive_close
 T = TypeVar("T")
 
 AcceptReadResult = tuple[socket.socket, bytes | None, BaseException | None]
-AcceptManyDelivery = tuple[socket.socket, bytes | None]
+AcceptDelivery = tuple[socket.socket, bytes | None]
 AcceptStreamsDelivery: TypeAlias = tuple[Any, Any]
 AcceptRecvErrorCallback = Callable[[socket.socket, BaseException], object]
 _MAX_ACCEPT_RECV_SIZE = 2**16
@@ -87,8 +87,8 @@ def accept_read_delivery(
     The proactor emits the accepted ``socket``; this handler submits a nested
     ``recv`` and delivers ``AcceptReadResult`` tuples. Recv failures are
     delivered as ``(conn, None, recv_error)``; ``ProactorIOManager`` routes
-    those through ``on_recv_error`` instead of the user accept callback. Empty
-    reads close the connection without delivery.
+    those through ``on_recv_error`` instead of the user accept callback. An
+    empty successful read is EOF and is delivered as ``(conn, b"", None)``.
 
     ``deliver`` may run after the parent ``ContinuousOperation`` has finished
     (for example terminal multishot accept) when the connection was handed off
@@ -109,9 +109,6 @@ def accept_read_delivery(
                 deliver((conn, None, exc))
                 return
             data = op.result()
-            if not data:
-                abortive_close(conn)
-                return
             deliver((conn, data, None))
 
         if not chain_suboperation(

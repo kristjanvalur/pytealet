@@ -9,11 +9,31 @@ from unittest.mock import patch
 import pytest
 
 from tealetio import set_scheduler
-from tealetio.io_manager import FileIO, PollIO, ProactorIOManager, ServerIO, SocketIO
-from tealetio.io_waiter import IOWaiter, IOWaiterChainable, IOWaiterChainableProtocol, IOWaiterFake
-from tealetio.operations import ContinuousOperation, Operation
-from tealetio.proactor import SyncProactorScheduler
-from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
+from tealetio.io_manager import (
+    FileIO,
+    PollIO,
+    ProactorIOManager,
+    ServerIO,
+    SocketIO,
+    _finish_or_close_socket,
+)
+from tealetio.io_waiter import (
+    IOWaiter,
+    IOWaitGroup,
+    IOWaitGroupChild,
+    IOWaitGroupChildProtocol,
+)
+from tealetio.operations import ContinuousOperation, InvalidStateError, Operation
+from tealetio.proactor import SyncProactorScheduler, UringProactor
+from uring_fakes import (
+    SCHEDULER_INTEGRATION_FACTORIES,
+    _DeferredCreateSocketUringRing,
+    _await_deferred_create_socket_stage,
+    _ensure_deferred_connect_completed,
+    _ensure_deferred_socket_completed,
+    _patch_uring_capabilities,
+    _wait_for_uring,
+)
 
 
 class _StubScheduler:
@@ -50,7 +70,8 @@ def _manager(proactor: _MockProactor) -> ProactorIOManager:
 
 
 class _MockProactor:
-    def __init__(self) -> None:
+    def __init__(self, *, recv_result: bytes = b"mock") -> None:
+        self._recv_result = recv_result
         self.recv_calls: list[tuple[socket.socket, int]] = []
         self.poll_calls: list[tuple[int, int]] = []
         self.send_calls: list[tuple[socket.socket, Any]] = []
@@ -62,7 +83,16 @@ class _MockProactor:
     def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
         self.recv_calls.append((sock, n))
         operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
-        operation._finish(result=b"mock")
+        operation._finish(result=self._recv_result)
+        return operation
+
+    def accept(self, sock: socket.socket) -> Operation[socket.socket]:
+        del sock
+        conn, _peer = socket.socketpair()
+        conn.setblocking(False)
+        os.set_inheritable(conn.fileno(), False)
+        operation = Operation[socket.socket](kind="accept", fileobj=None)
+        operation._finish(result=conn)
         return operation
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -84,41 +114,24 @@ class _MockProactor:
         proto: int = 0,
         *,
         flags: int = 0,
-        operation_factory: Any | None = None,
     ) -> Operation[Any]:
-        self.create_socket_calls.append((family, type, proto, flags, operation_factory is not None))
+        self.create_socket_calls.append((family, type, proto, flags))
         sock = socket.socket(family, type, proto)
         sock.setblocking(False)
         os.set_inheritable(sock.fileno(), False)
         self.last_create_socket = sock
-        if operation_factory is None:
-            operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
-            operation._finish(result=sock)
-            return operation
-        operation = operation_factory("create_socket", (family, type, proto))
-        delivery = operation._delivery
-        if delivery is not None:
-            delivery(self, operation, sock, None)
+        operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
+        operation._finish(result=sock)
         return operation
 
     def connect(
         self,
         sock: socket.socket,
         address: Any,
-        *,
-        operation_factory: Any | None = None,
     ) -> Operation[None]:
         del address
-        if operation_factory is None:
-            operation = Operation[None](kind="connect", fileobj=sock)
-            operation._finish(result=None)
-            return operation
-        operation = operation_factory("connect", sock)
-        delivery = operation._delivery
-        if delivery is not None:
-            delivery(self, operation, None, None)
-        elif not operation.done():
-            operation._finish(result=None)
+        operation = Operation[None](kind="connect", fileobj=sock)
+        operation._finish(result=None)
         return operation
 
     def send(
@@ -126,21 +139,11 @@ class _MockProactor:
         sock: socket.socket,
         data: Any,
         progress: Any = None,
-        *,
-        operation_factory: Any | None = None,
     ) -> Operation[None]:
         del progress
         self.send_calls.append((sock, data))
-        if operation_factory is None:
-            operation = Operation[None](kind="send", fileobj=sock)
-            operation._finish(result=None)
-            return operation
-        operation = operation_factory("send", sock)
-        delivery = operation._delivery
-        if delivery is not None:
-            delivery(self, operation, None, None)
-        elif not operation.done():
-            operation._finish(result=None)
+        operation = Operation[None](kind="send", fileobj=sock)
+        operation._finish(result=None)
         return operation
 
     def poll_many(
@@ -538,51 +541,61 @@ class TestProactorIOManagerAcceptMany:
 
 
 class TestProactorIOManagerSockCreateStreams:
-    def test_sock_create_streams_uses_connect_streams_factory(self) -> None:
+    def test_sock_create_streams_composes_create_connect_and_send(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
-        reader, writer = io.sock_create_streams(
+        waiter = io.sock_create_streams(
             socket.AF_INET,
             socket.SOCK_STREAM,
             connect_to=address,
             initial_data=b"hi",
-        ).wait()
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        reader, writer = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0)]
             assert len(proactor.send_calls) == 1
         finally:
             writer.close()
 
-    def test_sock_create_streams_chains_socket_to_stream_open(self) -> None:
+    def test_sock_create_streams_uses_io_wait_group(self) -> None:
         from tealetio.streams import StreamReader, StreamWriter
 
         proactor = _MockProactor()
         io = _manager(proactor)
-        seen: list[str] = []
-
-        original_waiter = io._waiter
-
-        def tracking_waiter(*args: Any, **kwargs: Any) -> IOWaiter[Any]:
-            waiter = original_waiter(*args, **kwargs)
-            if kwargs.get("create_next") is not None:
-                seen.append("chained")
-            return waiter
-
-        io._waiter = tracking_waiter  # type: ignore[method-assign]
+        waiter = io.sock_create_streams(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+        )
+        assert isinstance(waiter, IOWaitGroup)
         writer = None
         try:
-            reader, writer = io.sock_create_streams(
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                connect_to=("127.0.0.1", 9),
-            ).wait()
-            assert seen == ["chained"]
+            reader, writer = waiter.wait()
             assert isinstance(reader, StreamReader)
             assert isinstance(writer, StreamWriter)
         finally:
             if writer is not None:
                 writer.close()
+
+    def test_sock_create_streams_closes_socket_when_stream_factory_raises(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def boom(_io: Any, _sock: socket.socket, **kwargs: Any) -> tuple[Any, Any]:
+            raise ValueError("stream failed")
+
+        waiter = io.sock_create_streams(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            stream_factory=boom,
+        )
+        with pytest.raises(ValueError, match="stream failed"):
+            waiter.wait()
+        assert proactor.last_create_socket is not None
+        assert proactor.last_create_socket.fileno() == -1
 
 
 class TestProactorIOManagerDirect:
@@ -610,175 +623,6 @@ class TestProactorIOManagerDirect:
         with pytest.raises(AssertionError):
             waiter.wait()
         waiter.forget()
-
-    def test_io_waiter_fake_returns_wrapped_value(self) -> None:
-        fake = IOWaiterFake(9)
-        assert fake.wait() == 9
-
-    def test_io_waiter_fake_forget_is_noop(self) -> None:
-        fake = IOWaiterFake(1)
-        fake.forget()
-        assert fake.wait() == 1
-
-    def test_io_waiter_create_next_waits_through_tail_from_head(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-
-        def create_second(parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
-            assert parent.value() == 1
-            return IOWaiterFake(2)
-
-        head = IOWaiterChainable(io, first, create_next=create_second)
-        first._finish(result=1)
-        assert head.wait() == 2
-
-    def test_io_waiter_create_next_primes_next_link_on_completion(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        second = Operation[int](kind="second", fileobj=None)
-        primed: list[str] = []
-
-        def create_second(parent: IOWaiterChainableProtocol[Any]) -> IOWaiter[int]:
-            primed.append("primed")
-            assert parent.value() == 7
-            return IOWaiter(io, second)
-
-        head = IOWaiterChainable(io, first, create_next=create_second)
-        first._finish(result=7)
-        assert primed == ["primed"]
-        second._finish(result=9)
-        assert head.wait() == 9
-
-    def test_io_waiter_wait_raises_operation_error_without_priming_create_next(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        primed = False
-
-        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
-            nonlocal primed
-            primed = True
-            return IOWaiterFake(0)
-
-        head = IOWaiterChainable(io, first, create_next=create_second)
-        first._finish(exception=OSError("connect failed"))
-        with pytest.raises(OSError, match="connect failed"):
-            head.wait()
-        assert not primed
-
-    def test_io_waiter_value_handles_none_result(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[None](kind="first", fileobj=None)
-
-        def create_second(parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[str]:
-            assert parent.value() is None
-            return IOWaiterFake("done")
-
-        head = IOWaiterChainable(io, first, create_next=create_second)
-        first._finish(result=None)
-        assert head.wait() == "done"
-
-    def test_io_waiter_on_cleanup_runs_on_wait_when_create_next_fails(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        seen: list[int] = []
-
-        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
-            raise ValueError("create failed")
-
-        head = IOWaiterChainable(
-            io,
-            first,
-            create_next=create_second,
-            on_cleanup=lambda value: seen.append(value),
-        )
-        first._finish(result=11)
-        with pytest.raises(ValueError, match="create failed"):
-            head.wait()
-        assert seen == [11]
-
-    def test_io_waiter_on_cleanup_exception_propagates_from_wait(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-
-        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> IOWaiterFake[int]:
-            raise ValueError("create failed")
-
-        def on_cleanup(_value: int) -> None:
-            raise OSError("teardown failed")
-
-        head = IOWaiterChainable(io, first, create_next=create_second, on_cleanup=on_cleanup)
-        first._finish(result=1)
-        with pytest.raises(OSError, match="teardown failed"):
-            head.wait()
-
-    def test_io_waiter_on_cleanup_runs_on_wait_when_tail_wait_fails(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        seen: list[int] = []
-
-        class _FailingTail:
-            def forget(self) -> None:
-                return None
-
-            def wait(self) -> int:
-                raise ValueError("tail failed")
-
-        def create_second(_parent: IOWaiterChainableProtocol[Any]) -> _FailingTail:
-            return _FailingTail()
-
-        head = IOWaiterChainable(
-            io,
-            first,
-            create_next=create_second,
-            on_cleanup=lambda value: seen.append(value),
-        )
-        first._finish(result=22)
-        with pytest.raises(ValueError, match="tail failed"):
-            head.wait()
-        assert seen == [22]
-
-    def test_io_waiter_on_cleanup_runs_from_del_when_waiter_abandoned(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        first = Operation[int](kind="first", fileobj=None)
-        seen: list[int] = []
-
-        head = IOWaiterChainable(
-            io,
-            first,
-            create_next=lambda _parent: IOWaiterFake(0),
-            on_cleanup=lambda value: seen.append(value),
-        )
-        first._finish(result=33)
-        head.forget()
-        del head
-        gc.collect()
-        assert seen == [33]
-
-    def test_sock_create_streams_closes_socket_when_stream_factory_raises(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-
-        def boom(_io: Any, _sock: socket.socket, **kwargs: Any) -> tuple[Any, Any]:
-            raise ValueError("stream failed")
-
-        waiter = io.sock_create_streams(
-            socket.AF_INET,
-            socket.SOCK_STREAM,
-            connect_to=("127.0.0.1", 9),
-            stream_factory=boom,
-        )
-        with pytest.raises(ValueError, match="stream failed"):
-            waiter.wait()
-        assert proactor.last_create_socket is not None
-        assert proactor.last_create_socket.fileno() == -1
 
     def test_io_waiter_forget_allows_backend_completion(self) -> None:
         proactor = _MockProactor()
@@ -859,35 +703,147 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
-    def test_sock_create_uses_connect_factory_when_connect_to_set(self):
+    def test_sock_create_composes_connect_without_operation_factory(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
-        sock = io.sock_create(
+        waiter = io.sock_create(
             socket.AF_INET,
             socket.SOCK_STREAM,
             connect_to=address,
-        ).wait()
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        sock = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0)]
         finally:
             sock.close()
 
-    def test_sock_create_connect_chain_with_initial_data(self):
+    def test_sock_create_composes_connect_and_send_without_operation_factory(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
-        sock = io.sock_create(
+        waiter = io.sock_create(
             socket.AF_INET,
             socket.SOCK_STREAM,
             connect_to=address,
             initial_data=b"hi",
-        ).wait()
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        sock = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0, True)]
+            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0)]
             assert len(proactor.send_calls) == 1
+            assert proactor.send_calls[0][0] is sock
         finally:
             sock.close()
+
+    def test_sock_connect_without_initial_returns_io_waiter(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        try:
+            waiter = io.sock_connect(sock, ("127.0.0.1", 9))
+            assert isinstance(waiter, IOWaiter)
+            waiter.wait()
+            assert proactor.send_calls == []
+        finally:
+            sock.close()
+
+    def test_sock_connect_composes_send_after_connect(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        try:
+            waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
+            assert isinstance(waiter, IOWaitGroup)
+            waiter.wait()
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hi"
+        finally:
+            sock.close()
+
+    def test_sock_accept_without_recv_returns_io_waiter(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        try:
+            waiter = io.sock_accept(listen)
+            assert isinstance(waiter, IOWaiter)
+            conn, initial = waiter.wait()
+            try:
+                assert initial is None
+                assert proactor.recv_calls == []
+            finally:
+                conn.close()
+        finally:
+            listen.close()
+
+    def test_sock_accept_composes_recv_after_accept(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            conn, data = waiter.wait()
+            try:
+                assert data == b"mock"
+                assert proactor.recv_calls == [(conn, 64)]
+            finally:
+                conn.close()
+        finally:
+            listen.close()
+
+    def test_sock_accept_closes_connection_when_recv_attach_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        accepted: list[socket.socket] = []
+
+        def accept_capture(sock: socket.socket) -> Operation[socket.socket]:
+            conn, _peer = socket.socketpair()
+            accepted.append(conn)
+            operation = Operation[socket.socket](kind="accept", fileobj=None)
+            operation._finish(result=conn)
+            return operation
+
+        proactor.accept = accept_capture  # type: ignore[method-assign]
+
+        real_attach = IOWaitGroup.attach
+
+        def attach_fail_recv(self: IOWaitGroup[Any], operation: Operation[Any], **kwargs: Any) -> Any:
+            if operation.kind == "recv":
+                raise RuntimeError("attach failed")
+            return real_attach(self, operation, **kwargs)
+
+        monkeypatch.setattr(IOWaitGroup, "attach", attach_fail_recv)
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            with pytest.raises(RuntimeError, match="attach failed"):
+                waiter.wait()
+            assert len(accepted) == 1
+            assert accepted[0].fileno() == -1
+        finally:
+            listen.close()
+
+    def test_sock_accept_delivers_empty_initial_read_as_eof(self) -> None:
+        proactor = _MockProactor(recv_result=b"")
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        try:
+            waiter = io.sock_accept(listen, 64)
+            conn, data = waiter.wait()
+            try:
+                assert data == b""
+                assert proactor.recv_calls == [(conn, 64)]
+            finally:
+                conn.close()
+        finally:
+            listen.close()
 
     def test_sock_create_rejects_initial_data_without_connect_to(self):
         proactor = _MockProactor()
@@ -899,26 +855,80 @@ class TestProactorIOManagerDirect:
                 initial_data=b"hi",
             )
 
-    def test_sock_create_closes_socket_when_connect_chain_fails(self):
+    def test_sock_create_closes_socket_when_connect_fails(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
 
         def failing_connect(
             sock: socket.socket,
             address: Any,
-            *,
-            operation_factory: Any | None = None,
         ) -> Operation[None]:
-            del sock, address, operation_factory
-            raise OSError("connect failed")
+            del address
+            operation = Operation[None](kind="connect", fileobj=sock)
+            operation._finish(exception=OSError("connect failed"))
+            return operation
 
         proactor.connect = failing_connect  # type: ignore[method-assign]
+        waiter = io.sock_create(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+        )
+        assert isinstance(waiter, IOWaitGroup)
         with pytest.raises(OSError, match="connect failed"):
-            io.sock_create(
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                connect_to=("127.0.0.1", 9),
-            ).wait()
+            waiter.wait()
+        assert proactor.last_create_socket is not None
+        assert proactor.last_create_socket.fileno() == -1
+
+    def test_sock_connect_leaves_socket_open_when_send_fails(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def failing_send(
+            sock: socket.socket,
+            data: Any,
+            progress: Any = None,
+        ) -> Operation[None]:
+            del data, progress
+            operation = Operation[None](kind="send", fileobj=sock)
+            operation._finish(exception=OSError("send failed"))
+            return operation
+
+        proactor.send = failing_send  # type: ignore[method-assign]
+        sock = socket.socketpair()[0]
+        try:
+            waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
+            assert isinstance(waiter, IOWaitGroup)
+            with pytest.raises(OSError, match="send failed"):
+                waiter.wait()
+            assert sock.fileno() != -1
+        finally:
+            sock.close()
+
+    def test_sock_create_closes_socket_when_send_fails(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def failing_send(
+            sock: socket.socket,
+            data: Any,
+            progress: Any = None,
+        ) -> Operation[None]:
+            del data, progress
+            operation = Operation[None](kind="send", fileobj=sock)
+            operation._finish(exception=OSError("send failed"))
+            return operation
+
+        proactor.send = failing_send  # type: ignore[method-assign]
+        waiter = io.sock_create(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            initial_data=b"hi",
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        with pytest.raises(OSError, match="send failed"):
+            waiter.wait()
         assert proactor.last_create_socket is not None
         assert proactor.last_create_socket.fileno() == -1
 
@@ -945,6 +955,398 @@ class TestProactorIOManagerDirect:
 
         operation = io.poll_many(5, 1, seen.append)
         assert isinstance(operation, ContinuousOperation)
+
+
+class TestProactorIOManagerDeferredCompose:
+    @pytest.fixture(autouse=True)
+    def _patch_uring_probe_capabilities(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch)
+
+    def test_sock_accept_cancel_during_pending_recv_closes_connection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        pending_recv: list[Operation[bytes]] = []
+        accepted_conn: list[socket.socket] = []
+
+        def pending_recv_operation(sock: socket.socket, n: int) -> Operation[bytes]:
+            accepted_conn.append(sock)
+            operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
+            pending_recv.append(operation)
+            return operation
+
+        proactor.recv = pending_recv_operation  # type: ignore[method-assign]
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", swait_and_abort)
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            assert len(accepted_conn) == 1
+            conn = accepted_conn[0]
+            assert len(pending_recv) == 1
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            assert pending_recv[0].cancelled()
+            assert conn.fileno() == -1
+        finally:
+            listen.close()
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+    def test_sock_create_cancel_during_pending_connect_closes_socket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
+        scheduler = SyncProactorScheduler(lambda: proactor)
+        set_scheduler(scheduler)
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def staged_swait(self: Any) -> None:
+            stage = _await_deferred_create_socket_stage(proactor)
+            if stage == "socket":
+                _ensure_deferred_socket_completed(proactor.ring)
+                _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", staged_swait)
+        try:
+            waiter = scheduler.io.sock_create(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            assert isinstance(waiter, IOWaitGroup)
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            leaked_fd = proactor.ring.last_socket_fd
+            assert leaked_fd is not None
+            with pytest.raises(OSError):
+                os.fstat(leaked_fd)
+        finally:
+            scheduler.close()
+            proactor.close()
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+    def test_sock_create_cancel_during_pending_send_closes_socket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
+        scheduler = SyncProactorScheduler(lambda: proactor)
+        set_scheduler(scheduler)
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def staged_swait(self: Any) -> None:
+            stage = _await_deferred_create_socket_stage(proactor)
+            if stage == "socket":
+                _ensure_deferred_socket_completed(proactor.ring)
+            if stage in {"socket", "connect"}:
+                _wait_for_uring(
+                    proactor,
+                    lambda: len(proactor.ring.pending_connect) == 1
+                    or len(proactor.ring.pending_connect_send) == 1,
+                )
+            _ensure_deferred_connect_completed(proactor.ring)
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", staged_swait)
+        try:
+            waiter = scheduler.io.sock_create(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            assert isinstance(waiter, IOWaitGroup)
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            leaked_fd = proactor.ring.last_socket_fd
+            assert leaked_fd is not None
+            with pytest.raises(OSError):
+                os.fstat(leaked_fd)
+        finally:
+            scheduler.close()
+            proactor.close()
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+
+class TestIOWaitGroup:
+    def test_group_wait_uses_single_threadsafe_event_for_multi_leg_compose(self) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        event_count = 0
+        original_event = io_waiter_module.ThreadsafeEvent
+        pending_connect: list[Operation[None]] = []
+
+        class TrackingEvent(original_event):
+            def __init__(self, scheduler: Any) -> None:
+                nonlocal event_count
+                event_count += 1
+                super().__init__(scheduler)
+
+            def swait(self) -> None:
+                connect = pending_connect[0]
+                if not connect.done():
+                    connect._finish(result=None)
+                super().swait()
+
+        io_waiter_module.ThreadsafeEvent = TrackingEvent  # type: ignore[misc]
+        try:
+            create = Operation[socket.socket](kind="create", fileobj=None)
+            connect = Operation[None](kind="connect", fileobj=None)
+            pending_connect.append(connect)
+
+            group = IOWaitGroup[socket.socket](io)
+
+            def advance_create(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
+                sock = child.value()
+                group.attach(
+                    connect,
+                    advance=lambda _connect_child: group.finish(sock),
+                )
+
+            group.attach(create, advance=advance_create)
+            create._finish(result=proactor.last_create_socket)
+            assert group._completion is None
+            assert group.wait() is proactor.last_create_socket
+            assert event_count == 1
+        finally:
+            io_waiter_module.ThreadsafeEvent = original_event
+
+    def test_group_attach_sync_completed_operation_clears_members(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        operation = Operation[socket.socket](kind="create", fileobj=None)
+        operation._finish(result=sock)
+        group = IOWaitGroup[socket.socket](io)
+        group.attach(operation, advance=lambda child: group.finish(child.value()))
+        assert group._members == set()
+        assert group.wait() == sock
+        sock.close()
+
+    def test_group_child_value_is_one_shot(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[int](kind="test", fileobj=None)
+        group = IOWaitGroup[int](io)
+        child = group.attach(operation, advance=lambda _leg: None)
+        operation._finish(result=7)
+        assert child.value() == 7
+        with pytest.raises(InvalidStateError, match="already consumed"):
+            child.value()
+
+    def test_group_child_value_not_ready_raises_invalid_state(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[int](kind="test", fileobj=None)
+        group = IOWaitGroup[int](io)
+        child = group.attach(operation, advance=lambda _leg: None)
+        with pytest.raises(InvalidStateError, match="not ready"):
+            child.value()
+
+    def test_group_child_on_cleanup_runs_when_value_not_consumed(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[int](kind="test", fileobj=None)
+        seen: list[tuple[bool, int | None]] = []
+        group = IOWaitGroup[int](io)
+        group.attach(
+            operation,
+            on_cleanup=lambda fail, value: seen.append((fail, value)),
+            advance=lambda _child: group.finish(0),
+        )
+        operation._finish(result=9)
+        del group
+        gc.collect()
+        assert seen == [(False, 9)]
+
+    def test_group_child_on_cleanup_runs_on_operation_error(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[None](kind="connect", fileobj=None)
+        seen: list[tuple[bool, Any]] = []
+        group = IOWaitGroup[None](io)
+        group.attach(operation, on_cleanup=lambda fail, value: seen.append((fail, value)))
+        operation._finish(exception=OSError("connect failed"))
+        with pytest.raises(OSError, match="connect failed"):
+            group.wait()
+        assert seen == [(True, None)]
+
+    def test_group_chained_attach_completes_group(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[None](kind="first", fileobj=None)
+        second = Operation[None](kind="second", fileobj=None)
+        group = IOWaitGroup[str](io)
+
+        def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
+            group.attach(second, advance=lambda _second: group.finish("done"))
+
+        group.attach(first, advance=advance_first)
+        first._finish(result=None)
+        second._finish(result=None)
+        assert group.wait() == "done"
+
+    def test_group_late_advance_after_finish_is_rejected(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        first = Operation[None](kind="first", fileobj=None)
+        group = IOWaitGroup[str](io)
+
+        def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
+            group.finish("done")
+            with pytest.raises(RuntimeError, match="IOWaitGroup is closed"):
+                group.attach(Operation[None](kind="late", fileobj=None))
+
+        group.attach(first, advance=advance_first)
+        first._finish(result=None)
+        assert group.wait() == "done"
+
+    def test_group_finish_returns_false_after_wait_interrupt(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[None](kind="pending", fileobj=None)
+        group = IOWaitGroup[str](io)
+        group.attach(operation)
+
+        import tealetio.io_waiter as io_waiter_module
+
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError("abort wait")
+
+        io_waiter_module.ThreadsafeEvent.swait = swait_and_abort  # type: ignore[method-assign]
+        try:
+            with pytest.raises(TimeoutError, match="abort wait"):
+                group.wait()
+            assert group.finish("late") is False
+        finally:
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+    def test_finish_or_close_socket_closes_on_rejected_delivery(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitGroup[tuple[socket.socket, bytes]](io)
+        conn, _peer = socket.socketpair()
+        group._closed = True
+        _finish_or_close_socket(group, conn, (conn, b"hi"))
+        assert conn.fileno() == -1
+
+    def test_group_wait_survives_finish_during_ready_registration(self) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[None](kind="pending", fileobj=None)
+        group = IOWaitGroup[str](io)
+        group.attach(operation)
+
+        original_event = io_waiter_module.ThreadsafeEvent
+
+        class RacingEvent(original_event):
+            def __init__(self, scheduler: Any) -> None:
+                super().__init__(scheduler)
+                group.finish("raced")
+
+        io_waiter_module.ThreadsafeEvent = RacingEvent  # type: ignore[misc]
+        try:
+            assert group.wait() == "raced"
+        finally:
+            io_waiter_module.ThreadsafeEvent = original_event
+
+    def test_group_wait_returns_result_when_delivery_races_interrupt(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[None](kind="pending", fileobj=None)
+        group = IOWaitGroup[str](io)
+        group.attach(operation)
+
+        import tealetio.io_waiter as io_waiter_module
+
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def swait_finish_then_abort(self: Any) -> None:
+            group.finish("delivered")
+            raise TimeoutError("abort wait")
+
+        io_waiter_module.ThreadsafeEvent.swait = swait_finish_then_abort  # type: ignore[method-assign]
+        try:
+            assert group.wait() == "delivered"
+        finally:
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+    def test_io_waiter_returns_result_when_delivery_races_interrupt(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        pending: list[Operation[socket.socket]] = []
+
+        def pending_accept(sock: socket.socket) -> Operation[socket.socket]:
+            operation = Operation[socket.socket](kind="accept", fileobj=None)
+            pending.append(operation)
+            return operation
+
+        proactor.accept = pending_accept  # type: ignore[method-assign]
+
+        import tealetio.io_waiter as io_waiter_module
+
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+        waiter = io.sock_accept(listen)
+
+        def swait_complete_then_abort(self: Any) -> None:
+            conn, _peer = socket.socketpair()
+            pending[0]._finish(result=conn)
+            raise TimeoutError("abort wait")
+
+        io_waiter_module.ThreadsafeEvent.swait = swait_complete_then_abort  # type: ignore[method-assign]
+        try:
+            conn, initial = waiter.wait()
+            try:
+                assert initial is None
+                assert conn.fileno() != -1
+            finally:
+                conn.close()
+        finally:
+            listen.close()
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
+
+    def test_group_wait_cancels_active_operations_on_exception(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[None](kind="pending", fileobj=None)
+        group = IOWaitGroup[None](io)
+        group.attach(operation)
+
+        import tealetio.io_waiter as io_waiter_module
+
+        original_swait = io_waiter_module.ThreadsafeEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError()
+
+        io_waiter_module.ThreadsafeEvent.swait = swait_and_abort  # type: ignore[method-assign]
+        try:
+            with pytest.raises(TimeoutError):
+                group.wait()
+            assert operation.cancelled()
+        finally:
+            io_waiter_module.ThreadsafeEvent.swait = original_swait
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)

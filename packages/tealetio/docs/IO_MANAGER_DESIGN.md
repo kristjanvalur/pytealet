@@ -157,61 +157,51 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 `StreamServer` lifecycle stays in `streams`; it needs `scheduler.io` (for
 `accept_many`), `spawn`, and `call_soon_threadsafe`.
 
-## One-shot operation callback composition
+## One-shot IO composition via `IOWaitGroup`
 
-Multi-leg socket work (create → connect → send, connect → send) is built in
-`operation_callbacks.py`, not inside the proactor. The proactor accepts an
-optional `operation_factory` on `create_socket` and `connect`; composition
-policy lives on `ProactorIOManager`.
+Multi-leg socket work (create → connect → send, connect → send) is composed in
+`ProactorIOManager` with `IOWaitGroup`, not inside the proactor. Each leg is a
+normal proactor `Operation`; the group wires advance handlers and a single
+`ThreadsafeEvent` park for the caller's `.wait()`.
 
 ```text
 ProactorIOManager.sock_create(connect_to=…, initial_data=…)
         │
         ▼
-create_connect_operation_factory(proactor, connect_to, initial_data)
-        │
-        └─ root Operation with delivery=create_connect_delivery
-               deliver(create success) → chain_suboperation → connect
-               on_connect_complete → chain_suboperation → send (if initial_data)
-               final complete(sock) or complete_error(exc)
+IOWaitGroup
+  attach(create_socket) → advance_connect(sock)
+    attach(connect) → finish_connected
+      attach(send) when initial_data → group.finish(sock)
+      else group.finish(sock)
 ```
 
 ```text
 ProactorIOManager.sock_connect(…, initial=…)
         │
         ▼
-connect_initial_send_operation_factory(proactor, initial)
-        │
-        └─ root Operation with delivery=connect_initial_send_delivery
-               deliver(connect success) → chain_suboperation → send
-               on_send_complete → complete(None)
+IOWaitGroup
+  attach(connect) → advance_connect
+    attach(send) when initial → group.finish(None)
 ```
-
-Helpers in `operation_callbacks.py`:
 
 | Helper | Role |
 |--------|------|
-| `operation_factory(delivery=…)` | Thin proactor factory hook: create `Operation`, attach delivery |
-| `chain_suboperation(parent, spawn, on_complete)` | Spawn child under `parent._lock`; cancel propagates via `_active_suboperations` |
-| `create_connect_delivery` / `connect_initial_send_delivery` | Delivery handlers that start the next leg on backend completion |
-
-Factories take `proactor` as their first argument. Delivery handlers and
-`on_complete` callbacks are nested closures built at factory creation time — they
-bind the proactor, addresses, initial send buffers, and cleanup policy before any
-`Operation` is submitted. When a backend completion arrives on the worker thread,
-those handlers spawn the next leg (`proactor.connect`, `proactor.send`) without
-the scheduler blocking on intermediate results.
+| `IOWaitGroup.attach` | Register one leg; optional `advance` runs on worker thread after success |
+| `IOWaitGroupChild.value()` | One-shot handoff of a leg's result into the next advance handler |
+| `on_cleanup(fail, value)` | Per-leg teardown (for example `abortive_close(sock)` on connect failure) |
 
 Production entry points:
 
-| Entry point | Factory | Composition |
-|-------------|---------|-------------|
-| `sock_connect(…, initial=…)` | `connect_initial_send_operation_factory` | connect → optional send |
-| `sock_create(…, connect_to=…)` | `create_connect_operation_factory` | create → connect → optional send |
+| Entry point | Composition |
+|-------------|-------------|
+| `sock_connect(…, initial=…)` | connect → optional send |
+| `sock_create(…, connect_to=…)` | create → connect → optional send |
+| `sock_accept(…, recv_size=…)` | accept → optional recv |
+| `sock_create_streams(…, connect_to=…)` | create → connect → optional send → stream pair |
 
-Intermediate legs are not awaited by the scheduler task. Only the root
-`IOWaiter` is blocked on (via `.wait()`); child submissions happen from
-delivery handlers and `chain_suboperation` as completions arrive.
+Intermediate legs are not awaited by the scheduler task. Only the returned
+`IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is
+submitted from advance handlers as completions arrive on worker threads.
 
 ### Succeed or raise
 
@@ -219,12 +209,9 @@ Blocking IO helpers (`sock_create`, `sock_connect`, `sock_recv`, …) either
 return the requested value or raise. There is no partial-success tuple,
 hint-honour flag, or internal fallback inside `ProactorIOManager`.
 
-In the create→connect→send composition, only the root ``create_socket``
-operation has a non-``None`` success result: the ``socket.socket``. Connect and
-send legs are separate child operations; the root ``complete(sock)`` runs only
-after connect (and optional send) succeed. ``sock_create(connect_to=…)`` blocks
-on that root and returns the socket (already connected, initial data flushed
-when requested). ``sock_connect()`` returns ``None``.
+In the create→connect→send composition, ``sock_create(connect_to=…)`` returns
+the connected ``socket.socket`` after connect (and optional send) succeed.
+``sock_connect()`` returns ``None``.
 
 ### `proactor.connect` and `AF_UNIX`
 
@@ -245,27 +232,17 @@ backend routing.
 
 ### Cancel propagation and error cleanup
 
-`chain_suboperation()` spawns each child under the parent ``_lock`` and registers
-it in ``_active_suboperations``. Parent ``cancel()`` calls
-``_finish(cancelled=True)``: best-effort ``cancel_hook`` IO teardown, then
-terminal state (``_done`` / ``_cancelled`` / ``CancelledError``) unless a
-worker-thread completion won the race, then child ``cancel()`` and parent
-callbacks. Late attach and delivery are rejected once ``_done`` is set.
+``IOWaitGroup`` tracks active legs in ``_members``. Exceptional ``wait()`` exit
+cancels every tracked ``Operation`` and runs per-leg ``on_cleanup`` for unreleased
+success values. ``forget()`` drops waiter interest without cancelling backend
+compose work or setting ``_closed`` — the chain may still ``attach()`` later legs.
+Per-leg ``on_cleanup`` hooks also run on worker-thread failure.
 
 Cancellation always races in-flight backend completions; see
 ``OPERATION_CALLBACKS.md`` (cancel vs in-flight completion).
 
-Worker threads spawn children from delivery handlers while the scheduler thread
-may call ``cancel()`` on the root at the same time. Holding the parent lock
-across spawn + attach prevents a child from outrunning cancel registration.
-
 Error cleanup (for example closing a created socket when connect fails) lives in
-``on_complete`` handlers and ``complete_error`` paths inside the delivery
-handlers — not in a separate advance/unwind hook.
-
-Only the root ``IOWaiter`` is blocked on by the caller. Child operations
-complete independently; the parent finishes when the final ``on_complete`` calls
-``parent.complete(…)`` or ``parent.complete_error(…)``.
+``on_cleanup`` handlers on each ``IOWaitGroupChild`` leg.
 
 ## Continuous callback composition
 
@@ -356,27 +333,38 @@ no public `cancel()` on `IOWaiter` — cancellation is an internal concern at th
 operation / proactor layer, not a third blocking-IO disposition.
 
 If `wait()` exits exceptionally (for example `timeout()` throwing into the
-blocked tealet while `ThreadsafeEvent.swait()` is parked), `IOWaiter` cancels
-the underlying `Operation` before re-raising. The handle cannot be waited on
-again; the caller must submit fresh work. `forget()` is different: it drops
-waiter interest without cancelling backend work. It is mostly caveat emptor —
-nulling the waiter's ``_operation`` reference breaks callback cycles; it does not
-cancel backend work. Forgetting handles for resource-creating operations (for
-example connect or ``sock_create_streams``) may leak sockets or streams.
+blocked tealet while `ThreadsafeEvent.swait()` is parked), the waiter cancels
+pending backend work and re-raises — unless delivery already completed, in
+which case the interrupt is swallowed and the result (or completion exception)
+is returned. ``IOWaiter`` checks the underlying ``Operation``; ``IOWaitGroup``
+serialises ``finish()`` / ``_complete()`` and the interrupt path on a lock so a
+worker-thread delivery that wins the race is not torn down by a concurrent
+timeout. An interrupted ``wait()`` sets ``IOWaitGroup._closed``; a late
+``finish()`` then returns ``False`` and compose handlers discard the result
+(for example ``abortive_close`` on a socket). The handle cannot be waited on
+again after a genuine interrupt; the caller must submit fresh work. `forget()`
+is different: it drops waiter
+interest without cancelling backend work — mostly to break callback cycles by
+nulling the waiter's ``_operation`` reference.
 
-**Chained waiters (`IOWaiterChainable`).** `create_next` runs from the parent
-operation's done callback so the chain can finish before `wait()` is called.
-Each link clears ``_operation`` once its completion is handled (priming the
-successor for chain parents; after ``wait()`` resolves for plain waiters).
-``value()`` is one-shot: ``create_next`` takes this step's resolved result and
-clears the cached copy. An optional ``on_cleanup`` hook receives any
-still-unreleased value when ``wait()`` fails (primary path; hook exceptions
-propagate) or from ``__del__`` as a best-effort fallback (hook exceptions
-there surface as Python's ``Exception ignored in:`` log; forgetting chain heads
-remains caveat emptor). ``sock_create_streams`` passes ``abortive_close``
-and closes locally when stream open fails after ``value()`` (same cleanup the
-old connect ``result_wrapper`` path used). Forgetting a chain
-head is unsupported and may leak if the tail was already primed.
+**Resource-creating helpers must use ``wait()``.** ``forget()`` on handles from
+``sock_accept``, ``sock_create`` (with ``connect_to``), ``sock_create_streams``,
+and other helpers that hand back sockets or streams is undefined behaviour.
+Callers always want the created resource; use ``wait()`` (or let ``streams`` /
+``files`` call it internally). ``forget()`` remains available for narrow
+internal uses on non-resource one-shot ops.
+
+**Grouped waiters (`IOWaitGroup`).** Multi-leg helpers (`sock_create` with
+``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
+``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
+group. Each leg is registered with ``attach()``;
+advance handlers run on worker threads and submit the next leg. The group parks
+once on a single ``ThreadsafeEvent`` until ``finish()`` or an error.
+``IOWaitGroupChild.value()`` is one-shot and hands a leg result into the next
+advance handler. An optional ``on_cleanup`` hook on each leg receives failures
+(``fail=True``) or unreleased success values when ``wait()`` exits exceptionally
+or from ``__del__``. ``sock_create_streams`` passes ``abortive_close`` on connect
+failure and closes locally when stream open fails after ``value()``.
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the
@@ -422,7 +410,8 @@ drop waiter only”.
 ## References
 
 - `packages/tealetio/src/tealetio/io_manager.py` — `ProactorIOManager`
-- `packages/tealetio/src/tealetio/operation_callbacks.py` — one-shot delivery composition and factories
+- `packages/tealetio/src/tealetio/io_waiter.py` — `IOWaiter`, `IOWaitGroup`, grouped composition
+- `packages/tealetio/src/tealetio/operation_callbacks.py` — `chain_suboperation` for continuous nested work
 - `packages/tealetio/src/tealetio/continuous_callbacks.py` — continuous result-callback composition
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`

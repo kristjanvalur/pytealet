@@ -16,8 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sock_create_streams()` requires `connect_to`; the unconnected create-only
   path was removed. Use `sock_create()` plus `open_streams()` when needed.
 - `accept()` / ``sock_accept()`` and ``accept_many`` callbacks no longer return
-  peer addresses. Accepted sockets are returned alone (``accept_many`` still
-  delivers ``(socket, initial_data, recv_error)``). Call
+  peer addresses. One-shot ``sock_accept()`` returns ``(conn, initial_data)``
+  (``AcceptDelivery``). Without ``recv_size`` / ``n``, ``initial_data`` is
+  ``None``. With accept-time pre-read, ``initial_data`` holds the bytes read;
+  empty ``initial_data`` (``b""``) means EOF before any payload. ``accept_many``
+  still delivers ``(conn, initial_data, recv_error)``; call
   ``socket.getpeername()`` when the peer address is needed. Close the socket
   when ``recv_error`` is set unless a higher-level helper (for example
   ``start_server``) handles teardown.

@@ -227,7 +227,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_and_echo() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 try:
                     payload = scheduler.io.sock_recv(conn, len(client_greeting)).wait()
                     scheduler.io.sock_sendall(conn, payload.upper()).wait()
@@ -255,7 +255,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_and_echo() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 try:
                     scheduler.io.sock_sendall(conn, b"PONG").wait()
                 finally:
@@ -292,7 +292,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 conn.close()
 
             def connect_via_literal_ip() -> None:
@@ -325,7 +325,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 conn.close()
 
             def connect_via_hostname() -> None:
@@ -354,7 +354,7 @@ class TestStreamsPoC:
                 return await stream_reader.readexactly(4)
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 try:
                     scheduler.io.sock_sendall(conn, b"pong").wait()
                 finally:
@@ -444,7 +444,7 @@ class TestStreamsPoC:
                 server.setblocking(False)
 
                 def accept_and_echo() -> None:
-                    conn = scheduler.io.sock_accept(server).wait()
+                    conn, _initial = scheduler.io.sock_accept(server).wait()
                     try:
                         payload = scheduler.io.sock_recv(conn, 5).wait()
                         scheduler.io.sock_sendall(conn, payload.upper()).wait()
@@ -808,21 +808,12 @@ class TestStreamsPoC:
             if server is not None:
                 server.close()
 
-    def test_sock_connect_passes_connect_send_factory_when_initial_provided(
-        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    def test_sock_connect_composes_send_when_initial_provided(
+        self, scheduler: SyncProactorScheduler
     ) -> None:
-        from tealetio.operation_callbacks import connect_initial_send_operation_factory
+        from tealetio.io_waiter import IOWaitGroup
 
         io = scheduler.io
-        captured: list[object | None] = []
-        real_connect = scheduler.proactor.connect
-
-        def capture_connect(sock: socket.socket, address, *, operation_factory=None):
-            captured.append(operation_factory)
-            return real_connect(sock, address, operation_factory=operation_factory)
-
-        monkeypatch.setattr(scheduler.proactor, "connect", capture_connect)
-
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         accepted: socket.socket | None = None
@@ -834,21 +825,13 @@ class TestStreamsPoC:
             address = server.getsockname()
 
             def exercise() -> None:
-                io.sock_connect(client, address, initial=b"helloworld").wait()
+                waiter = io.sock_connect(client, address, initial=b"helloworld")
+                assert isinstance(waiter, IOWaitGroup)
+                waiter.wait()
 
             run_scheduler_task(scheduler, exercise)
 
             accepted, _peer = server.accept()
-            assert len(captured) == 1
-            factory = captured[0]
-            assert factory is not None
-            chained = factory("connect", client)
-            expected = connect_initial_send_operation_factory(scheduler.proactor, b"helloworld")(
-                "connect",
-                client,
-            )
-            assert chained._delivery is not None
-            assert expected._delivery is not None
             assert accepted.recv(1024) == b"helloworld"
         finally:
             if accepted is not None:
@@ -893,7 +876,7 @@ class TestStreamsPoC:
             _host, port = server.getsockname()
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 conn.close()
 
             def connect_with_initial() -> None:
@@ -957,7 +940,7 @@ class TestStreamsPoC:
             )
 
             def accept_side() -> None:
-                conn = scheduler.io.sock_accept(server).wait()
+                conn, _initial = scheduler.io.sock_accept(server).wait()
                 conn.close()
 
             def connect_side() -> None:
@@ -1009,7 +992,7 @@ class TestStreamsPoC:
                 server.setblocking(False)
 
                 def accept_side() -> None:
-                    conn = scheduler.io.sock_accept(server).wait()
+                    conn, _initial = scheduler.io.sock_accept(server).wait()
                     conn.close()
 
                 def connect_with_initial() -> None:

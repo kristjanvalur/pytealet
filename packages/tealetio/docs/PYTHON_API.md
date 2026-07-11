@@ -74,15 +74,15 @@ callback, *, recv_size=None)` emits
 active until it is cancelled or the backend reports a terminal error. Call
 `conn.getpeername()` when the peer address is needed.
 `initial_data` holds accept-time pre-read bytes when the backend honours
-`recv_size`; otherwise it is `None`. `recv_error` is `None` on success; when it
-is set the callback must close `conn` (or delegate to a helper such as
-`start_server` that does). One-shot `accept()` / `sock_accept()` return the
-accepted socket only; call `conn.getpeername()` when the peer address is needed.
+`recv_size`; otherwise it is `None`. An empty `initial_data` (`b""`) means the
+peer closed the write side before sending data (EOF). `recv_error` is `None` on
+success; when it is set the callback must close `conn` (or delegate to a helper
+such as `start_server` that does). One-shot `sock_accept()` returns
+`(conn, initial_data)`; without `recv_size`, `initial_data` is `None`. Call
+`conn.getpeername()` when the peer address is needed.
 `recv_size` must be positive when provided; values
-above 64 KiB (`2**16`) are silently capped. On `UringProactor` with multishot
-accept, a non-`None` `recv_size` arms `receive_on_accept` and the callback runs
-only after the peer sends data or closes without sending (idle peers are
-dropped). Leave `recv_size` at the default for server-speaks-first protocols.
+above 64 KiB (`2**16`) are silently capped. Leave `recv_size` at the default
+for server-speaks-first protocols.
 `poll(fd, mask)` waits for fd readiness and returns a one-shot `Operation[int]`.
 The result is the event bitmask currently set on the fd (`select.POLL*` bits
 among those requested in `mask`). `poll_many(fd, mask, callback)` emits that
@@ -94,8 +94,8 @@ sockets.
 initial_data=None)` creates a scheduler-contract socket (non-blocking,
 close-on-exec). On success it completes with the socket — the only non-``None``
 result in a create→connect→send composition; connect and send run as child
-operations before the root completes. Optional ``connect_to`` and ``initial_data`` are handled by
-``ProactorIOManager`` via delivery-composed ``operation_factory`` hooks (create → connect → send). ``UringProactor`` uses ``uring_api.Ring.submit_socket()`` when
+operations before the root completes. Optional ``connect_to`` and ``initial_data`` are composed by
+``ProactorIOManager`` via ``IOWaitGroup`` (create → connect → send). ``UringProactor`` uses ``uring_api.Ring.submit_socket()`` when
 ``IORING_OP_SOCKET`` is available. Extra ``flags`` are ORed with non-blocking
 and close-on-exec on the uring socket path. ``SelectorProactor`` ignores
 ``flags`` beyond the scheduler defaults from ``configure_scheduler_socket()``
@@ -108,8 +108,8 @@ for TCP and Unix ``path=`` connects.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
-``ProactorIOManager.sock_connect(..., initial=...)`` via a delivery-composed
-``operation_factory`` hook, not a separate proactor ``initial`` parameter.
+``ProactorIOManager.sock_connect(..., initial=...)`` via ``IOWaitGroup`` (connect
+→ optional send), not a separate proactor ``initial`` parameter.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
