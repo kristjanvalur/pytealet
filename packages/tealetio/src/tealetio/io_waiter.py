@@ -106,7 +106,7 @@ class IOWaiter(Generic[T]):
 
         operation = self._operation
         if operation is not None and not operation.done():
-            operation.cancel()
+            self._io._proactor.cancel(operation)
 
     def poll(self) -> bool:
         """Return ``True`` when the underlying operation has completed."""
@@ -141,7 +141,7 @@ class IOWaiter(Generic[T]):
             operation.remove_done_callback(wake)
             if operation.done():
                 return
-            operation.cancel()
+            self._io._proactor.cancel(operation)
             raise
 
     def _resolved(self) -> T:
@@ -276,7 +276,7 @@ class IOWaitGroup(Generic[T]):
 
         with self._lock:
             if self._closed or self._completion is not None:
-                operation.cancel()
+                self._io._proactor.cancel(operation)
                 raise RuntimeError("IOWaitGroup is closed")
             child = IOWaitGroupChild(
                 self,
@@ -334,7 +334,7 @@ class IOWaitGroup(Generic[T]):
         for member in members:
             operation = member._operation
             if operation is not None and not operation.done():
-                operation.cancel()
+                self._io._proactor.cancel(operation)
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.

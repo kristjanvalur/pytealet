@@ -88,8 +88,10 @@ class RecvIterBuffer:
         self,
         *,
         buf_group: _BufGroupLike,
+        proactor: Any | None = None,
     ) -> None:
         self._buf_group = buf_group
+        self._proactor = proactor
         self._resume: _RecvManyResume | None = None
         self._lock = threading.Lock()
         self._event = ThreadsafeEvent()
@@ -206,4 +208,6 @@ class RecvIterBuffer:
             self._ready.clear()
             self._reorder.reset()
         if stream is not None and not stream.done():
-            stream.cancel()
+            proactor = self._proactor
+            if proactor is not None:
+                proactor.cancel(stream)

@@ -25,6 +25,7 @@ from tealetio.io_waiter import (
     IOWaitGroupChildProtocol,
 )
 from tealetio.operations import ContinuousOperation, InvalidStateError, Operation
+from tealetio.tasks import CancelledError
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.scheduler import TimerHandle
 from uring_fakes import (
@@ -200,6 +201,13 @@ class _MockProactor:
         operation._finish(result=None)
         return operation
 
+    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+        if not operation.done():
+            operation._finish(exception=CancelledError(), cancelled=True)
+        teardown = Operation[None](kind="cancel", fileobj=operation)
+        teardown._finish(result=None)
+        return teardown
+
 
 class TestProactorIOManager:
     def test_basic_scheduler_io_raises(self):
@@ -234,13 +242,6 @@ class TestAbortiveClose:
 class TestProactorIOManagerCancelOperation:
     def test_cancel_operation_returns_waiter_for_teardown(self) -> None:
         target = Operation[bytes](kind="recv")
-
-        def cancel_target() -> Operation[None]:
-            teardown = Operation[None](kind="cancel", fileobj=target)
-            teardown._finish(result=None)
-            return teardown
-
-        target.set_cancel(cancel_target)
 
         io = _manager(_MockProactor())
         waiter = io._cancel_operation(target)

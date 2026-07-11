@@ -280,12 +280,7 @@ class ProactorIOManager:
         produced no backend teardown operation.
         """
 
-        teardown = operation.cancel()
-        if teardown is None:
-            noop = Operation[None](kind="cancel", fileobj=operation)
-            noop._finish(result=None)
-            teardown = noop
-        return IOWaiter(self, teardown)
+        return IOWaiter(self, self._proactor.cancel(operation))
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
         return IOWaiter(self, self._proactor.recv(sock, n))
@@ -308,7 +303,7 @@ class ProactorIOManager:
         from .recv_iter import RecvIterBuffer
 
         pool = self._resolve_recv_buffer_pool(buffer_pool)
-        buffer = RecvIterBuffer(buf_group=pool)
+        buffer = RecvIterBuffer(buf_group=pool, proactor=self._proactor)
         stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=pool)
         buffer.attach_stream(stream)
         return buffer

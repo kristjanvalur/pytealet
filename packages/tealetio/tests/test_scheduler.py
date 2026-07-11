@@ -1635,7 +1635,7 @@ class TestSchedulerAccessors:
             def wait_for_event() -> None:
                 while not seen:
                     s.sleep(0.001)
-                operation.cancel()
+                s.cancel_operation(operation)
 
             s.spawn(send)
             task = s.spawn(wait_for_event)
@@ -1643,7 +1643,7 @@ class TestSchedulerAccessors:
             assert seen[0] & select.POLLIN
         finally:
             if operation is not None:
-                operation.cancel()
+                s.cancel_operation(operation)
             reader.close()
             writer.close()
             s.close()
@@ -1698,7 +1698,7 @@ class TestSchedulerAccessors:
             operation = s.poll_many(reader.fileno(), select.POLLIN, seen.append)
             assert seen == [select.POLLIN]
             assert operation.done() is False
-            operation.cancel()
+            s.cancel_operation(operation)
         finally:
             reader.close()
             writer.close()
@@ -1723,7 +1723,7 @@ class TestSchedulerAccessors:
             def wait_for_event() -> None:
                 while not seen:
                     s.sleep(0.001)
-                operation.cancel()
+                s.cancel_operation(operation)
 
             s.spawn(send)
             task = s.spawn(wait_for_event)
@@ -1732,7 +1732,7 @@ class TestSchedulerAccessors:
             assert seen[0] & mask
         finally:
             if operation is not None:
-                operation.cancel()
+                s.cancel_operation(operation)
             reader.close()
             writer.close()
             s.close()

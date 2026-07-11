@@ -16,7 +16,6 @@ class InvalidStateError(Exception):
 
 _DoneCallback = Callable[["Operation[Any]"], object]
 _ResultCallback = Callable[[T_co], object]
-_CancelHook = Callable[[], "Operation[Any] | None"]
 _ProactorRef = Any
 
 
@@ -43,7 +42,6 @@ class Operation(Generic[T]):
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] = []
-        self._cancel_hook: _CancelHook | None = None
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -54,38 +52,6 @@ class Operation(Generic[T]):
         """Return True if the operation completed by cancellation."""
 
         return self._cancelled
-
-    def set_cancel(self, cancel: _CancelHook | None) -> None:
-        """Install or clear the backend cancel hook for this operation."""
-
-        self._cancel_hook = cancel
-
-    def cancel(self) -> Operation[Any] | None:
-        """Cancel the operation if it has not completed yet.
-
-        Cancellation always races in-flight backend completions on worker
-        threads. The backend ``cancel_hook`` runs first and may return a
-        teardown ``Operation`` (for example an io_uring ``IORING_OP_ASYNC_CANCEL``
-        leg). A late ``deliver()`` may still finish this operation successfully,
-        in which case cancel is abandoned after the hook runs.
-
-        Returns the hook's teardown operation when provided, else ``None``.
-        """
-
-        with self._lock:
-            if self._done:
-                return None
-            cancel_hook = self._cancel_hook
-            self._cancel_hook = None
-
-        cancel_operation: Operation[Any] | None = None
-        if cancel_hook is not None:
-            cancel_operation = cancel_hook()
-            if self._done:
-                return cancel_operation
-
-        self._finish(exception=CancelledError(), cancelled=True)
-        return cancel_operation
 
     def result(self) -> T:
         """Return the operation result, or raise its completion exception."""
@@ -168,7 +134,6 @@ class Operation(Generic[T]):
             self._exception = exception
             self._cancelled = cancelled
             self._done = True
-            self._cancel_hook = None
             callbacks = self._callbacks
             self._callbacks = []
 

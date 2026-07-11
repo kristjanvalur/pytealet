@@ -759,24 +759,38 @@ class TestOperation:
 
         assert seen == [42, 43]
 
-    def test_operation_cancel_completes_with_cancelled_error(self):
-        operation: Operation[int] = Operation(kind="test")
+    def test_proactor_cancel_completes_operation_with_cancelled_error(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 1)
+            proactor.cancel(operation)
+            assert operation.done() is True
+            assert operation.cancelled() is True
+            assert operation.exception()
 
-        operation.cancel()
-        assert operation.done() is True
-        assert operation.cancelled() is True
-        assert operation.exception()
+            with pytest.raises(CancelledError):
+                operation.result()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
 
-        with pytest.raises(CancelledError):
-            operation.result()
-
-    def test_operation_cancel_returns_hook_teardown_operation(self) -> None:
-        target = Operation[None](kind="target")
-        teardown = Operation[None](kind="cancel")
-
-        target.set_cancel(lambda: teardown)
-        assert target.cancel() is teardown
-        assert target.cancelled() is True
+    def test_proactor_cancel_returns_teardown_operation(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            target = proactor.recv(reader, 1)
+            teardown = proactor.cancel(target)
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
+            assert target.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
 
     def test_continuous_operation_emits_results_before_completion(self):
         seen: list[int] = []
@@ -793,20 +807,20 @@ class TestOperation:
         seen: list[int] = []
         operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
         assert operation._emit_result(1) is True
-        operation.cancel()
+        operation._finish(exception=CancelledError(), cancelled=True)
         assert operation._emit_result(2) is False
         assert seen == [1]
 
     def test_operation_deliver_ignored_after_cancel(self) -> None:
         operation = Operation(kind="test")
-        operation.cancel()
+        operation._finish(exception=CancelledError(), cancelled=True)
         operation.deliver(object(), result=None)
         assert operation.cancelled()
 
     def test_continuous_operation_emit_result_false_after_cancel(self) -> None:
         seen: list[int] = []
         parent = ContinuousOperation(kind="test", result_callback=seen.append)
-        parent.cancel()
+        parent._finish(exception=CancelledError(), cancelled=True)
         assert parent._emit_result(1) is False
         assert seen == []
 
@@ -1355,9 +1369,8 @@ class TestSelectorProactor:
                 assert entry.reader is not None
                 assert entry.reader.operation is operation
                 assert entry.reader.step is not None
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
-            assert operation._cancel_hook is None
             with proactor._lock:
                 assert fd not in proactor._fd_operations
         finally:
@@ -1412,7 +1425,7 @@ class TestSelectorProactor:
             recv_many = proactor.recv_many(reader, lambda _chunk: None, buf_group=proactor.shared_recv_buffer_pool())
             with pytest.raises(RuntimeError, match="already pending"):
                 proactor.poll(reader.fileno(), select.POLLIN)
-            recv_many.cancel()
+            proactor.cancel(recv_many)
         finally:
             reader.close()
             writer.close()
@@ -1446,7 +1459,7 @@ class TestSelectorProactor:
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
             assert seen == [select.POLLIN]
             assert operation.done() is False
-            operation.cancel()
+            proactor.cancel(operation)
         finally:
             reader.close()
             writer.close()
@@ -1497,7 +1510,7 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
             assert len(seen) == 1
             assert seen[0] & mask
-            operation.cancel()
+            proactor.cancel(operation)
         finally:
             reader.close()
             writer.close()
@@ -1692,7 +1705,7 @@ class TestSelectorProactor:
             operation = proactor.recv(reader, 1)
 
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
-            operation.cancel()
+            proactor.cancel(operation)
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
             assert operation.cancelled() is True
@@ -1861,7 +1874,7 @@ class TestSelectorProactor:
             operation = proactor.recv(reader, 1)
             seen.clear()
 
-            operation.cancel()
+            proactor.cancel(operation)
             proactor.wait(0)
             assert seen == []
         finally:
@@ -2094,7 +2107,7 @@ class TestThreadedSelectorProactor:
             teardown_holder: list[Operation[None] | None] = []
 
             def cancel_from_thread() -> None:
-                teardown_holder.append(operation.cancel())
+                teardown_holder.append(proactor.cancel(operation))
 
             thread = threading.Thread(target=cancel_from_thread)
             thread.start()
@@ -2771,7 +2784,7 @@ class TestUringProactor:
 
             assert operation.result() == b"hello"
             assert entry.completion is None
-            assert operation._cancel_hook is None
+
         finally:
             reader.close()
             writer.close()
@@ -2791,7 +2804,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: operation.done())
 
             assert entry.completion is None
-            assert operation._cancel_hook is None
+
         finally:
             reader.close()
             writer.close()
@@ -2824,7 +2837,7 @@ class TestUringProactor:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
 
-            teardown = operation.cancel()
+            teardown = proactor.cancel(operation)
             assert teardown is not None
             assert teardown.kind == "cancel"
             assert teardown.done() is True
@@ -2959,7 +2972,7 @@ class TestUringProactor:
 
             proactor.ring.fail_next_recv = True
             second = proactor.recv(reader, 5)
-            second.cancel()
+            proactor.cancel(second)
 
             assert second.cancelled() is True
             proactor.ring.complete_recv(b"first")
@@ -2982,7 +2995,7 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _BackpressuredUringRing)
 
             proactor.ring.fail_next_cancel = True
-            operation.cancel()
+            proactor.cancel(operation)
 
             assert operation.cancelled() is True
             assert proactor.ring.submitted_cancel == []
@@ -3289,7 +3302,7 @@ class TestUringProactor:
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
             handle = proactor.ring.pending_poll_multishot[-1]
-            operation.cancel()
+            proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: proactor.ring.submitted_poll_remove == [handle])
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
             assert operation.cancelled() is True
@@ -3313,7 +3326,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
             assert operation.done() is False
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
         finally:
             reader.close()
@@ -3335,7 +3348,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             assert len(proactor.ring.submitted_poll) == 1
 
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
             proactor.wait(proactor.get_time() + 1.0)
             assert len(proactor.ring.submitted_poll) == 1
@@ -3353,7 +3366,7 @@ class TestUringProactor:
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
             pending = proactor.ring.pending_poll_oneshot[-1]
-            teardown = operation.cancel()
+            teardown = proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
             assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
@@ -3395,7 +3408,7 @@ class TestUringProactor:
             writer.send(b"x")
             _wait_for_uring(proactor, lambda: len(seen) >= 1)
             assert seen[-1] & select.POLLIN
-            operation.cancel()
+            proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
             assert operation.cancelled() is True
         finally:
@@ -3420,7 +3433,7 @@ class TestUringProactor:
 
             pending = proactor.accept_many(server, accepted.append)
             assert len(proactor.ring.submitted_accept) == 2
-            pending.cancel()
+            proactor.cancel(pending)
             assert pending.cancelled() is True
         finally:
             for conn in accepted:
@@ -3456,7 +3469,7 @@ class TestUringProactor:
 
     def test_handoff_accept_many_closes_socket_when_parent_done(self) -> None:
         parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=object())
-        parent.cancel()
+        parent._finish(exception=CancelledError(), cancelled=True)
         client, server = socket.socketpair()
         try:
             assert proactor_module._handoff_accept_many(parent, client) is False
@@ -3472,7 +3485,7 @@ class TestUringProactor:
         try:
             server.setblocking(False)
             operation = proactor.accept_many(server, accepted.append)
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
@@ -3982,7 +3995,7 @@ class TestUringProactor:
             writer.send(b"hello")
             _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
 
-            operation.cancel()
+            proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
 
             assert operation.cancelled() is True
@@ -4102,7 +4115,7 @@ class TestUringProactor:
         try:
             operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1
             proactor.ring.complete_socket()

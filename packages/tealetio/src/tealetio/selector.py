@@ -12,6 +12,7 @@ from typing import Any, Callable, NoReturn, cast
 
 from .locks import Event
 from .operations import ContinuousOperation, Operation
+from .tasks import CancelledError
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
@@ -62,6 +63,7 @@ class SelectorMixin:
             selectors.EVENT_READ,
             self._selector_wakeup_reader.fileno(),
         )
+        self._operation_cancel_handlers: dict[int, Callable[[], Operation[None]]] = {}
 
     # -- Lifecycle -----------------------------------------------------
 
@@ -291,6 +293,38 @@ class SelectorMixin:
                 continue
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
+    def _register_operation_cancel(
+        self,
+        operation: Operation[Any],
+        handler: Callable[[], Operation[None]],
+    ) -> None:
+        key = id(operation)
+
+        def clear(_operation: Operation[Any]) -> None:
+            self._operation_cancel_handlers.pop(key, None)
+
+        self._operation_cancel_handlers[key] = handler
+        operation.add_done_callback(clear)
+
+    def cancel_operation(self, operation: Operation[Any]) -> Operation[None]:
+        """Cancel a selector-backed continuous operation and return its teardown leg."""
+
+        if operation.done():
+            teardown = Operation[None](kind="cancel", fileobj=operation)
+            teardown._finish(result=None)
+            return teardown
+
+        handler = self._operation_cancel_handlers.pop(id(operation), None)
+        if handler is not None:
+            teardown = handler()
+        else:
+            teardown = Operation[None](kind="cancel", fileobj=operation)
+            teardown._finish(result=None)
+
+        if not operation.done():
+            operation._finish(exception=CancelledError(), cancelled=True)
+        return teardown
+
     def poll(self, fd: int, mask: int) -> int:
         """Wait until an fd reports events in `mask` and return the readiness bitmask."""
 
@@ -333,7 +367,7 @@ class SelectorMixin:
             cancel_operation._finish(result=None)
             return cancel_operation
 
-        operation.set_cancel(cancel)
+        self._register_operation_cancel(operation, cancel)
 
         def arm() -> None:
             if operation.done():
