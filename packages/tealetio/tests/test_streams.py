@@ -513,6 +513,26 @@ class TestStreamsPoC:
 
         run_scheduler_task(scheduler, exercise)
 
+    def test_stream_server_close_from_callback_cancels_accept_loop(self, scheduler: SyncProactorScheduler) -> None:
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            accept_task = server.accept_task
+            assert accept_task is not None
+            scheduler.yield_()
+            # close() from a scheduler callback, not from a Task — matches signal
+            # handlers and other non-task teardown paths.
+            scheduler.call_soon(server.close)
+            for _ in range(200):
+                if accept_task.done():
+                    break
+                scheduler.yield_()
+            assert accept_task.done()
+
+        run_scheduler_task(scheduler, exercise)
+
     def test_stream_server_wait_closed_waits_for_in_flight_handler(self, scheduler: SyncProactorScheduler) -> None:
         handler_started = Event()
         release_handler = Event()

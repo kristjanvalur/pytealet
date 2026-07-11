@@ -7,7 +7,6 @@ import os
 import socket
 import sys
 
-import tealet
 from collections.abc import Callable, Coroutine
 from typing import Any, Literal, Protocol, TypeAlias, TypeVar, cast, overload
 
@@ -817,9 +816,10 @@ class StreamServer:
             sock.close()
         accept_task = self._accept_task
         if accept_task is not None and not accept_task.done():
-            current = tealet.current()
-            if isinstance(current, Task):
-                accept_task.cancel()
+            # Defer cancel onto the scheduler thread: Task.cancel() needs a
+            # runnable tealet context and close() may run from main or a foreign
+            # thread (signal handlers, sync teardown, etc.).
+            self._scheduler.call_soon_threadsafe(accept_task.cancel)
 
     def _start_accept_loop(
         self,
@@ -860,6 +860,10 @@ class StreamServer:
                     ).wait()
                 except CancelledError:
                     return
+                except (OSError, RuntimeError):
+                    if self._closed:
+                        return
+                    raise
 
         self._accept_task = self._scheduler.spawn(accept_loop)
 
