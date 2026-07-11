@@ -1064,7 +1064,13 @@ class SelectorProactor(ProactorBase):
         *,
         callback_factory: _AcceptManyCallbackFactory | None = None,
     ) -> ContinuousOperation[AcceptManyResult]:
-        """Start accepting connections until the operation is cancelled or fails.
+        """Accept connections and deliver each via the result callback.
+
+        Without io_uring multishot accept this issues one ``accept()`` per
+        ``accept_many`` call, emits the connection, and finishes. Callers such as
+        ``StreamServer`` re-arm by submitting another ``accept_many``. With
+        multishot (``UringProactor`` only) one kernel leg may deliver many
+        connections until cancel, error, or terminal CQE.
 
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
@@ -1077,15 +1083,13 @@ class SelectorProactor(ProactorBase):
         operation = _spawn_accept_many_operation(sock, callback, callback_factory=callback_factory)
 
         def step() -> ContinuousStepResult:
-            progressed = False
-            while True:
-                try:
-                    conn, address = sock.accept()
-                except (BlockingIOError, InterruptedError):
-                    return ContinuousStepResult(progressed=progressed)
-                configure_scheduler_socket(conn)
-                _handoff_accept_many(operation, conn)
-                progressed = True
+            try:
+                conn, _address = sock.accept()
+            except (BlockingIOError, InterruptedError):
+                return ContinuousStepResult(progressed=False)
+            configure_scheduler_socket(conn)
+            _handoff_accept_many(operation, conn)
+            return ContinuousStepResult(progressed=True, done=True)
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
         return operation
@@ -2189,11 +2193,11 @@ class UringProactor(ProactorBase):
         *,
         callback_factory: _AcceptManyCallbackFactory | None = None,
     ) -> ContinuousOperation[AcceptManyResult]:
-        """Start a continuous accept operation.
+        """Accept connections and deliver each via the result callback.
 
         Uses multishot accept when the runtime probe accepts it; otherwise
-        resubmits one-shot ``submit_accept()`` after each connection. `callback`
-        may run on any uring completion service thread.
+        submits one ``submit_accept()``, emits the connection, and finishes so
+        callers re-arm. `callback` may run on any uring completion service thread.
 
         Each accepted connection is delivered as the accepted ``socket``. Call
         ``socket.getpeername()`` when the peer address is needed. Use
@@ -2224,7 +2228,7 @@ class UringProactor(ProactorBase):
             )
             return operation
 
-        # fallback: accept one connection, emit it, queue another submit_accept().
+        # emulated accept_many: one accept, emit, finish; callers re-arm (for example StreamServer).
         submit_box: list[_UringEntrySubmit] = []
         entry = self._uring_entry(
             operation,
@@ -2261,7 +2265,7 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
         submit_box: list[_UringEntrySubmit],
     ) -> Operation[Any] | None:
-        # one-shot accept completes per connection; re-arm via the deferred queue.
+        del submit_box
         operation = cast(ContinuousOperation[AcceptManyResult], entry.operation)
         res = completion.res
         if res < 0:
@@ -2270,10 +2274,9 @@ class UringProactor(ProactorBase):
             return operation
         conn = socket_from_uring_fd(completion.res)
         _handoff_accept_many(operation, conn)
-        if operation.done():
-            return operation
-        self._queue_entry_resubmit(entry, submit_box[0])
-        return None
+        self._deactivate_uring_entry(entry)
+        operation._finish(result=None)
+        return operation
 
     def _deliver_uring_accept_many(
         self,

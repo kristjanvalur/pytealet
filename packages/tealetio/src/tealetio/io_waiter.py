@@ -28,6 +28,11 @@ class IOWaitable(Protocol[T_co]):
     those handles is undefined.
     """
 
+    def poll(self) -> bool:
+        """Return ``True`` when ``wait()`` would return without parking the tealet."""
+
+        ...
+
     def forget(self) -> None: ...
 
     def wait(self) -> T_co: ...
@@ -102,6 +107,14 @@ class IOWaiter(Generic[T]):
         operation = self._operation
         if operation is not None and not operation.done():
             operation.cancel()
+
+    def poll(self) -> bool:
+        """Return ``True`` when the underlying operation has completed."""
+
+        operation = self._operation
+        if operation is None:
+            return False
+        return operation.done()
 
     def wait(self) -> T:
         self._wait_self()
@@ -338,6 +351,11 @@ class IOWaitGroup(Generic[T]):
         for member in self._members:
             member._forget()
         self._members.clear()
+
+    def poll(self) -> bool:
+        """Return ``True`` when the grouped composition has finished."""
+
+        return self._completion is not None
 
     def wait(self) -> T:
         """Block until the grouped composition completes.

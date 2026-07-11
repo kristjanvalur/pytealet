@@ -1194,7 +1194,7 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_accept_many_emits_connections_until_cancelled(self):
+    def test_accept_many_emulated_path_finishes_after_each_accept(self):
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         clients: list[socket.socket] = []
@@ -1204,8 +1204,8 @@ class TestSelectorProactor:
             server.bind(("127.0.0.1", 0))
             server.listen()
 
-            operation = proactor.accept_many(server, accepted.append)
             for _index in range(2):
+                operation = proactor.accept_many(server, accepted.append)
                 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client.setblocking(False)
                 try:
@@ -1214,15 +1214,14 @@ class TestSelectorProactor:
                     pass
                 clients.append(client)
 
-            while len(accepted) < 2:
-                proactor.wait(proactor.get_time() + 1.0)
+                while len(accepted) <= _index:
+                    proactor.wait(proactor.get_time() + 1.0)
 
-            assert operation.done() is False
+                assert operation.done() is True
+
             assert [conn.getpeername()[0] for conn in accepted] == ["127.0.0.1", "127.0.0.1"]
             assert [conn.getblocking() for conn in accepted] == [False, False]
             assert [os.get_inheritable(conn.fileno()) for conn in accepted] == [False, False]
-            operation.cancel()
-            assert operation.cancelled() is True
         finally:
             for conn in accepted:
                 conn.close()
@@ -1253,6 +1252,7 @@ class TestSelectorProactor:
             for _ in range(5):
                 proactor.wait(proactor.get_time() + 0.05)
             assert accepted == []
+            assert operation.done() is True
 
             client.sendall(b"hello")
             deadline = proactor.get_time() + 2.0
@@ -1261,7 +1261,7 @@ class TestSelectorProactor:
 
             assert accepted[0][1] == b"hello"
             assert accepted[0][2] is None
-            assert operation.done() is False
+            assert operation.done() is True
         finally:
             for conn, _data, _recv_error in accepted:
                 conn.close()
@@ -3793,7 +3793,7 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_accept_many_falls_back_to_oneshot_accept_and_resubmits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_accept_many_falls_back_to_oneshot_accept_and_finishes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
@@ -3805,10 +3805,13 @@ class TestUringProactor:
             assert len(proactor.ring.submitted_accept) == 1
             proactor.ring.complete_accept_oneshot()
             _wait_for_uring(proactor, lambda: len(accepted) == 1)
-            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_accept) == 2)
-            assert operation.done() is False
-            operation.cancel()
-            assert operation.cancelled() is True
+            assert operation.done() is True
+            assert len(proactor.ring.submitted_accept) == 1
+
+            pending = proactor.accept_many(server, accepted.append)
+            assert len(proactor.ring.submitted_accept) == 2
+            pending.cancel()
+            assert pending.cancelled() is True
         finally:
             for conn in accepted:
                 conn.close()

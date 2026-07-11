@@ -1104,6 +1104,58 @@ class TestProactorIOManagerDeferredCompose:
             io_waiter_module.ThreadsafeEvent.swait = original_swait
 
 
+class TestIOWaitablePoll:
+    def test_io_waiter_poll_tracks_operation_completion(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        pending: list[Operation[socket.socket]] = []
+
+        def pending_accept(sock: socket.socket) -> Operation[socket.socket]:
+            operation = Operation[socket.socket](kind="accept", fileobj=None)
+            pending.append(operation)
+            return operation
+
+        proactor.accept = pending_accept  # type: ignore[method-assign]
+        waiter = io.sock_accept(listen)
+        try:
+            assert waiter.poll() is False
+            conn, _peer = socket.socketpair()
+            pending[0]._finish(result=conn)
+            assert waiter.poll() is True
+            accepted, initial = waiter.wait()
+            try:
+                assert initial is None
+                assert accepted is conn
+            finally:
+                accepted.close()
+            assert waiter.poll() is False
+        finally:
+            listen.close()
+
+    def test_io_waiter_poll_is_false_after_forget(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[bytes](kind="recv", fileobj=None)
+        proactor.recv = lambda _sock, _n: operation  # type: ignore[method-assign, assignment]
+        waiter = io.sock_recv(socket.socket(), 4)
+        waiter.forget()
+        assert waiter.poll() is False
+
+    def test_io_wait_group_poll_tracks_group_completion(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[None](kind="pending", fileobj=None)
+        group = IOWaitGroup[str](io)
+        group.attach(operation)
+        assert group.poll() is False
+        group.finish("done")
+        assert group.poll() is True
+        assert group.wait() == "done"
+
+
+
+
 class TestIOWaitGroup:
     def test_group_wait_uses_single_threadsafe_event_for_multi_leg_compose(self) -> None:
         import tealetio.io_waiter as io_waiter_module
