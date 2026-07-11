@@ -318,6 +318,14 @@ class IOWaitGroup(Generic[T]):
         self._members.clear()
 
     def wait(self) -> T:
+        """Block until the grouped composition completes.
+
+        Call once per handle. A second successful ``wait()`` returns the same
+        result (compose helpers may hand back sockets or streams — avoid
+        double-close). Exceptional exit cancels tracked legs; ``forget()`` does
+        not.
+        """
+
         completion = self._completion
         if completion is not None:
             ok, value = completion

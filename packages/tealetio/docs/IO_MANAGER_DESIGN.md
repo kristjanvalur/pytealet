@@ -232,9 +232,11 @@ backend routing.
 
 ### Cancel propagation and error cleanup
 
-``IOWaitGroup`` tracks active legs in ``_members``. ``wait()`` exceptional exit
-and ``forget()`` cancel every tracked ``Operation``. Per-leg ``on_cleanup`` hooks
-run on worker-thread failure or when an unreleased success value is dropped.
+``IOWaitGroup`` tracks active legs in ``_members``. Exceptional ``wait()`` exit
+cancels every tracked ``Operation`` and runs per-leg ``on_cleanup`` for unreleased
+success values. ``forget()`` drops waiter interest without cancelling backend
+compose work or setting ``_closed`` — the chain may still ``attach()`` later legs.
+Per-leg ``on_cleanup`` hooks also run on worker-thread failure.
 
 Cancellation always races in-flight backend completions; see
 ``OPERATION_CALLBACKS.md`` (cancel vs in-flight completion).

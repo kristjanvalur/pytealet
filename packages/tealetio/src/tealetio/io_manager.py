@@ -378,11 +378,15 @@ class ProactorIOManager:
                 data = recv_child.value()
                 _finish_or_close_socket(group, conn, (conn, data))
 
-            group.attach(
-                self._proactor.recv(conn, normalized_recv_size),
-                on_cleanup=lambda fail, _value: abortive_close(conn) if fail else None,
-                advance=advance_recv,
-            )
+            try:
+                group.attach(
+                    self._proactor.recv(conn, normalized_recv_size),
+                    on_cleanup=lambda fail, _value: abortive_close(conn) if fail else None,
+                    advance=advance_recv,
+                )
+            except BaseException:
+                abortive_close(conn)
+                raise
 
         group.attach(
             self._proactor.accept(sock),

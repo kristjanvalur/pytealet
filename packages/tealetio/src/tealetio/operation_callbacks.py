@@ -50,6 +50,8 @@ def chain_suboperation(
         if parent._done:
             child.cancel()
             return False
+        # inline add: spawn() already ran; attach_suboperation() would duplicate
+        # the parent._done check without changing behaviour here
         parent._active_suboperations.add(child)
 
     child.add_done_callback(complete)

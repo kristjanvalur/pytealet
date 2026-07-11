@@ -795,6 +795,41 @@ class TestProactorIOManagerDirect:
         finally:
             listen.close()
 
+    def test_sock_accept_closes_connection_when_recv_attach_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = socket.socketpair()[0]
+        accepted: list[socket.socket] = []
+
+        def accept_capture(sock: socket.socket) -> Operation[socket.socket]:
+            conn, _peer = socket.socketpair()
+            accepted.append(conn)
+            operation = Operation[socket.socket](kind="accept", fileobj=None)
+            operation._finish(result=conn)
+            return operation
+
+        proactor.accept = accept_capture  # type: ignore[method-assign]
+
+        real_attach = IOWaitGroup.attach
+
+        def attach_fail_recv(self: IOWaitGroup[Any], operation: Operation[Any], **kwargs: Any) -> Any:
+            if operation.kind == "recv":
+                raise RuntimeError("attach failed")
+            return real_attach(self, operation, **kwargs)
+
+        monkeypatch.setattr(IOWaitGroup, "attach", attach_fail_recv)
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            with pytest.raises(RuntimeError, match="attach failed"):
+                waiter.wait()
+            assert len(accepted) == 1
+            assert accepted[0].fileno() == -1
+        finally:
+            listen.close()
+
     def test_sock_accept_delivers_empty_initial_read_as_eof(self) -> None:
         proactor = _MockProactor(recv_result=b"")
         io = _manager(proactor)
