@@ -110,9 +110,8 @@ class _MockProactor:
             operation._finish(result=sock)
             return operation
         operation = operation_factory("create_socket", (family, type, proto))
-        delivery = operation._delivery
-        if delivery is not None:
-            delivery(self, operation, sock, None)
+        if not operation.done():
+            operation._finish(result=sock)
         return operation
 
     def connect(
@@ -128,10 +127,7 @@ class _MockProactor:
             operation._finish(result=None)
             return operation
         operation = operation_factory("connect", sock)
-        delivery = operation._delivery
-        if delivery is not None:
-            delivery(self, operation, None, None)
-        elif not operation.done():
+        if not operation.done():
             operation._finish(result=None)
         return operation
 
@@ -150,10 +146,7 @@ class _MockProactor:
             operation._finish(result=None)
             return operation
         operation = operation_factory("send", sock)
-        delivery = operation._delivery
-        if delivery is not None:
-            delivery(self, operation, None, None)
-        elif not operation.done():
+        if not operation.done():
             operation._finish(result=None)
         return operation
 

@@ -19,8 +19,6 @@ _DoneCallback = Callable[["Operation[Any]"], object]
 _ResultCallback = Callable[[T_co], object]
 _CancelHook = Callable[[], None]
 _ProactorRef = Any
-# ``result`` and ``exception`` are mutually exclusive; one is always ``None``.
-DeliveryHandler = Callable[[_ProactorRef, "Operation[Any]", Any, BaseException | None], None]
 OperationFactory = Callable[[str, object | None], "Operation[Any]"]
 
 
@@ -41,8 +39,7 @@ class Operation(Generic[T]):
     ) -> None:
         self.kind = kind
         self.fileobj = fileobj
-        self._delivery: DeliveryHandler | None = None
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()
         self._done = False
         self._cancelled = False
         self._result: T | None = None
@@ -65,11 +62,6 @@ class Operation(Generic[T]):
         """Install or clear the backend cancel hook for this operation."""
 
         self._cancel_hook = cancel
-
-    def set_delivery(self, handler: DeliveryHandler | None) -> None:
-        """Install the proactor completion handler for this operation."""
-
-        self._delivery = handler
 
     def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
         """Register a child for ``cancel()`` propagation.
@@ -162,26 +154,18 @@ class Operation(Generic[T]):
         result: Any = None,
         exception: BaseException | None = None,
     ) -> None:
-        """Accept one backend completion on a worker thread.
-
-        When a delivery handler was installed, it runs instead of finishing
-        the operation. Otherwise this completes immediately.
-        """
+        """Accept one backend completion on a worker thread."""
 
         with self._lock:
             if self._done:
                 return
-            delivery = self._delivery
-        if delivery is not None:
-            delivery(proactor, self, result, exception)
-            return
         if exception is not None:
             self._finish(exception=exception)
         else:
             self._finish(result=cast(T, result))
 
     def complete(self, result: T) -> None:
-        """Finish the operation from a delivery handler."""
+        """Finish the operation from a chained suboperation callback."""
 
         with self._lock:
             if self._done:
@@ -192,7 +176,7 @@ class Operation(Generic[T]):
             return
 
     def complete_error(self, exc: BaseException) -> None:
-        """Fail the operation from a delivery handler."""
+        """Fail the operation from a chained suboperation callback."""
 
         with self._lock:
             if self._done:
