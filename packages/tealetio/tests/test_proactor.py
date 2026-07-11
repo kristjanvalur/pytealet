@@ -770,6 +770,14 @@ class TestOperation:
         with pytest.raises(CancelledError):
             operation.result()
 
+    def test_operation_cancel_returns_hook_teardown_operation(self) -> None:
+        target = Operation[None](kind="target")
+        teardown = Operation[None](kind="cancel")
+
+        target.set_cancel(lambda: teardown)
+        assert target.cancel() is teardown
+        assert target.cancelled() is True
+
     def test_continuous_operation_emits_results_before_completion(self):
         seen: list[int] = []
         operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
@@ -2083,12 +2091,21 @@ class TestThreadedSelectorProactor:
             operation = proactor.recv(reader, 1)
             proactor.wait(0)
 
-            thread = threading.Thread(target=operation.cancel)
+            teardown_holder: list[Operation[None] | None] = []
+
+            def cancel_from_thread() -> None:
+                teardown_holder.append(operation.cancel())
+
+            thread = threading.Thread(target=cancel_from_thread)
             thread.start()
             thread.join(1.0)
 
             assert thread.is_alive() is False
             assert operation.cancelled() is True
+            teardown = teardown_holder[0]
+            assert teardown is not None
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
         finally:
             reader.close()
             writer.close()
@@ -2807,7 +2824,10 @@ class TestUringProactor:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
 
-            operation.cancel()
+            teardown = operation.cancel()
+            assert teardown is not None
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
             assert operation.cancelled() is True
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
             assert proactor.has_pending_operations() is True
@@ -3333,10 +3353,13 @@ class TestUringProactor:
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
             pending = proactor.ring.pending_poll_oneshot[-1]
-            operation.cancel()
+            teardown = operation.cancel()
             _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
             assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
+            assert teardown is not None
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
         finally:
             reader.close()
             writer.close()

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, NoReturn, cast
 
 from .locks import Event
-from .operations import ContinuousOperation
+from .operations import ContinuousOperation, Operation
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
@@ -327,8 +327,11 @@ class SelectorMixin:
             result_callback=callback,
         )
 
-        def cancel() -> None:
+        def cancel() -> Operation[None]:
             disarm()
+            cancel_operation = Operation[None](kind="cancel", fileobj=operation)
+            cancel_operation._finish(result=None)
+            return cancel_operation
 
         operation.set_cancel(cancel)
 
