@@ -20,9 +20,18 @@ _AdvanceHandler = Callable[["IOWaitGroupChild[Any]"], object]
 class IOWaitable(Protocol[T_co]):
     """Blocking IO handle with ``wait()`` / ``forget()``; satisfied by ``IOWaiter`` and ``IOWaitGroup``.
 
+    ``IOWaiter`` wraps one-shot and continuous ``Operation`` objects (including
+    ``ContinuousOperation`` backends that complete with ``None`` after streaming
+    results through their result callback).
+
     Resource-creating helpers are intended for ``wait()`` only; ``forget()`` on
     those handles is undefined.
     """
+
+    def poll(self) -> bool:
+        """Return ``True`` when ``wait()`` would return without parking the tealet."""
+
+        ...
 
     def forget(self) -> None: ...
 
@@ -46,12 +55,30 @@ class IOOperation(Protocol[T_co]):
 
 
 class IOWaiter(Generic[T]):
-    """Single-shot IO completion backed by a proactor ``Operation``.
+    """Blocking IO handle backed by a proactor ``Operation`` or ``ContinuousOperation``.
+
+    One-shot ops return their payload from ``wait()``. Continuous ops (``recv_many``,
+    ``accept_many``, ``poll_many``, and similar) stream chunks through the operation
+    result callback; ``wait()`` blocks until the continuous op finishes and returns
+    ``None`` on success or raises the stored exception.
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
-    ``forget()`` is undefined. An exceptional exit from ``wait()`` (for example
-    a timeout) cancels the underlying operation.
+    ``forget()`` is undefined.
+
+    An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
+    parking timeout) routes cancellation through
+    ``ProactorIOManager._cancel_operation(...).forget()``: the target is
+    terminalised immediately, but any async ring cancel / poll_remove teardown leg
+    is not awaited. ``has_pending_operations()`` may stay true briefly on
+    ``UringProactor`` until those CQEs complete; pump the proactor or ``wait()``
+    on the teardown operation when ring quiescence matters.
+
+    For ``accept_many`` / ``poll_many``, ``wait()`` ends when the underlying
+    accept or poll **stream** finishes, not when accept-time ``recv`` legs or
+    marshalled deliveries complete. Re-arm in a loop (as ``StreamServer`` does) on
+    one-shot backends; use ``waiter.operation`` when the raw ``Operation`` handle
+    is needed.
 
     An optional ``map_result`` hook maps the operation result after completion.
     """
@@ -69,6 +96,12 @@ class IOWaiter(Generic[T]):
         self._operation: Operation[Any] | None = operation
         self._map_result = map_result
 
+    @property
+    def operation(self) -> Operation[Any] | None:
+        """Underlying proactor operation, when the waiter still holds a reference."""
+
+        return self._operation
+
     def forget(self) -> None:
         """Drop interest in the result; backend work continues to completion.
 
@@ -80,6 +113,14 @@ class IOWaiter(Generic[T]):
         """
 
         self._operation = None
+
+    def poll(self) -> bool:
+        """Return ``True`` when the underlying operation has completed."""
+
+        operation = self._operation
+        if operation is None:
+            return False
+        return operation.done()
 
     def wait(self) -> T:
         self._wait_self()
@@ -106,7 +147,7 @@ class IOWaiter(Generic[T]):
             operation.remove_done_callback(wake)
             if operation.done():
                 return
-            operation.cancel()
+            self._io._cancel_operation(operation).forget()
             raise
 
     def _resolved(self) -> T:
@@ -241,7 +282,7 @@ class IOWaitGroup(Generic[T]):
 
         with self._lock:
             if self._closed or self._completion is not None:
-                operation.cancel()
+                self._io._cancel_operation(operation).forget()
                 raise RuntimeError("IOWaitGroup is closed")
             child = IOWaitGroupChild(
                 self,
@@ -299,7 +340,7 @@ class IOWaitGroup(Generic[T]):
         for member in members:
             operation = member._operation
             if operation is not None and not operation.done():
-                operation.cancel()
+                self._io._cancel_operation(operation).forget()
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.
@@ -316,6 +357,11 @@ class IOWaitGroup(Generic[T]):
         for member in self._members:
             member._forget()
         self._members.clear()
+
+    def poll(self) -> bool:
+        """Return ``True`` when the grouped composition has finished."""
+
+        return self._completion is not None
 
     def wait(self) -> T:
         """Block until the grouped composition completes.

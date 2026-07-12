@@ -294,7 +294,8 @@ int UringApiCapi_RingSubmitPollRemove(PyObject *ring, PyObject *target_completio
     if (!ring_type_check(ring)) {
         return -1;
     }
-    return discard_completion_result(UringApiRing_submit_poll_remove_impl((UringApiRing *)ring, target_completion));
+    return discard_completion_result(
+        UringApiRing_submit_poll_remove_impl((UringApiRing *)ring, target_completion, Py_None));
 }
 
 int UringApiCapi_RingSubmitCancel(PyObject *ring, PyObject *target_completion) {
@@ -304,7 +305,8 @@ int UringApiCapi_RingSubmitCancel(PyObject *ring, PyObject *target_completion) {
     if (!completion_type_check(target_completion)) {
         return -1;
     }
-    return discard_completion_result(UringApiRing_submit_cancel_impl((UringApiRing *)ring, target_completion));
+    return discard_completion_result(
+        UringApiRing_submit_cancel_impl((UringApiRing *)ring, target_completion, Py_None));
 }
 
 int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data) {

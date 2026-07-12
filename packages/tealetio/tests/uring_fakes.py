@@ -573,11 +573,14 @@ class _FakeUringRing:
         self._deliver(completion)
         return completion
 
-    def submit_cancel(self, completion: SimpleNamespace) -> SimpleNamespace:
+    def submit_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_cancel.append(completion)
-        cancel_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
+        if user_data is None:
+            user_data = completion
+        cancel_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
+        cancel_completion.cancel_target = completion
         self._deliver(cancel_completion)
         return cancel_completion
 
@@ -662,11 +665,14 @@ class _FakeUringRing:
         )
         self._deliver(completion)
 
-    def submit_poll_remove(self, completion: SimpleNamespace) -> SimpleNamespace:
+    def submit_poll_remove(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_poll_remove.append(completion)
-        remove_completion = self._completion(completion, kind=uring_api.COMPLETION_KIND_POLL_REMOVE, res=0)
+        if user_data is None:
+            user_data = completion
+        remove_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL_REMOVE, res=0)
+        remove_completion.cancel_target = completion
         self._deliver(remove_completion)
         return remove_completion
 
@@ -998,8 +1004,8 @@ class _BackpressuredUringRing(_DeferredUringRing):
             raise uring_api.SubmissionQueueFull("no submission queue entries available")
         return super().submit_recv(fd, buf, user_data)
 
-    def submit_cancel(self, completion: SimpleNamespace) -> SimpleNamespace:
+    def submit_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
         if self.fail_next_cancel:
             self.fail_next_cancel = False
             raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_cancel(completion)
+        return super().submit_cancel(completion, user_data)

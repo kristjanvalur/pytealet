@@ -472,7 +472,7 @@ class TestStreamsPoC:
             listen_sock = server.sockets[0]
             with server:
                 assert listen_sock.fileno() != -1
-                assert server.accept_operation.kind == "accept_many"
+                assert server.accept_task is not None
             assert listen_sock.fileno() == -1
 
         run_scheduler_task(scheduler, exercise)
@@ -508,8 +508,33 @@ class TestStreamsPoC:
 
         def exercise() -> None:
             server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            accept_task = server.accept_task
+            assert accept_task is not None
             server.close()
             server.wait_closed()
+            assert accept_task.done()
+
+        run_scheduler_task(scheduler, exercise)
+
+    def test_stream_server_close_from_callback_cancels_accept_loop(self, scheduler: SyncProactorScheduler) -> None:
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            accept_task = server.accept_task
+            assert accept_task is not None
+            scheduler.yield_()
+            # close() from another scheduled callback, not inline in this task.
+            closed = Event()
+
+            def deferred_close() -> None:
+                server.close()
+                closed.set()
+
+            scheduler.spawn(deferred_close)
+            closed.swait()
+            assert accept_task.done()
 
         run_scheduler_task(scheduler, exercise)
 
@@ -617,7 +642,7 @@ class TestStreamsPoC:
                     async_=False,
                 )
                 server.wait_closed()
-                assert server._active_handlers == 0
+                assert not server._handler_tasks
                 assert accepted.fileno() == -1
 
             run_scheduler_task(scheduler, exercise)
@@ -656,7 +681,7 @@ class TestStreamsPoC:
         def exercise() -> None:
             server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
             try:
-                assert server._active_handlers == 0
+                assert not server._handler_tasks
             finally:
                 server.close()
 
@@ -699,6 +724,10 @@ class TestStreamsPoC:
                     scheduler=scheduler,
                 )
                 try:
+                    for _ in range(20):
+                        if captured:
+                            break
+                        scheduler.yield_()
                     captured_results.append(captured[-1])
                 finally:
                     server.close()
@@ -721,7 +750,7 @@ class TestStreamsPoC:
         def exercise() -> None:
             server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
             try:
-                assert server.accept_operation.kind == "accept_many"
+                assert server.accept_task is not None
                 _host, port = server.sockets[0].getsockname()
 
                 def connect_and_send() -> None:
@@ -766,12 +795,12 @@ class TestStreamsPoC:
                     server = start_server(client_handler, path=path, async_=True, scheduler=scheduler)
                     scheduler.spawn(connect_and_read)
                     finished.swait()
+                    server.close()
 
                 run_scheduler_task(scheduler, exercise)
                 assert responses == [b"PING"]
             finally:
-                if server is not None:
-                    server.close()
+                pass
 
     def test_start_async_server_echoes_over_tcp(self, scheduler: SyncProactorScheduler) -> None:
         server = None
@@ -1042,15 +1071,16 @@ class TestStreamsFakeUring:
 
         server = start_server(client_handler, addr=("127.0.0.1", 0), recv_size=64, scheduler=scheduler)
         try:
+            run_scheduler_task(scheduler, scheduler.yield_)
             proactor = scheduler.proactor
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
             proactor.ring.complete_recv_error(-errno.EIO)
             proactor.wait(proactor.get_time() + 0.05)
             assert handled.is_set() is False
-            assert server._active_handlers == 0
+            assert not server._handler_tasks
         finally:
-            server.close()
+            run_scheduler_task(scheduler, server.close)
             scheduler.close()
 
     def test_start_server_prefills_reader_from_accept_preread(self, monkeypatch: pytest.MonkeyPatch):
@@ -1070,6 +1100,7 @@ class TestStreamsFakeUring:
             proactor = scheduler.proactor
 
             def exercise() -> None:
+                scheduler.yield_()
                 proactor.ring.complete_accept_multishot("peer-1")
                 proactor.wait(proactor.get_time() + 0.05)
                 proactor.ring.complete_recv(b"early")
@@ -1078,7 +1109,7 @@ class TestStreamsFakeUring:
             scheduler.run_until_complete(scheduler.spawn(exercise))
             assert received == [b"early"]
         finally:
-            server.close()
+            run_scheduler_task(scheduler, server.close)
             scheduler.close()
 
 
@@ -1144,7 +1175,7 @@ class TestStartServerListenOptions:
             try:
                 assert server.sockets[0].fileno() == listen_sock.fileno()
                 assert listen_sock.getsockname() == ("127.0.0.1", port)
-                assert server.accept_operation.kind == "accept_many"
+                assert server.accept_task is not None
             finally:
                 server.close()
 

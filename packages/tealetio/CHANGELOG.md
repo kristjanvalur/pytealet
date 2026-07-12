@@ -24,11 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``socket.getpeername()`` when the peer address is needed. Close the socket
   when ``recv_error`` is set unless a higher-level helper (for example
   ``start_server``) handles teardown.
-- Removed private `Operation` backend fields `_proactor`, `_attempt`, and
-  `_cancel_target`. Use `operation.cancel()` (backend hooks via `set_cancel()`)
-  and proactor-side structures (`_FdSlot` for selector fd drivers,
-  `_uring_entry()` cancel binding for io_uring) instead of reaching into
-  operation attributes.
+- Removed `Operation.cancel()`, `set_cancel()`, `complete()`, and suboperation
+  tracking. Cancellation is only through `Proactor.cancel(operation)` (and
+  `scheduler.io._cancel_operation()` / `SelectorScheduler.cancel_operation()`
+  wrappers). Removed private backend fields `_proactor`, `_attempt`, and
+  `_cancel_target`; use proactor-side structures (`_FdSlot` for selector fd
+  drivers, `_uring_entry()` for io_uring) instead of reaching into operation
+  attributes.
 - Blocking proactor IO (`wait_operation`, `sock_*`, `poll*`, positioned file
   `open`, and receive-buffer pool helpers) moved from the scheduler surface to
   `scheduler.io` (`ProactorIOManager`). Use `scheduler.io.sock_recv(...)` instead
@@ -67,8 +69,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   honour flags.
 - Chained ``connect`` operations (``sock_connect(..., initial=...)``,
   ``sock_create(..., connect_to=...)``) complete with ``None``, not ``True``.
+- ``accept_many`` / ``poll_many`` on ``scheduler.io`` return ``IOWaitable[None]``
+  instead of ``ContinuousOperation``. ``wait()`` ends the current stream leg;
+  on non-multishot backends that is one accept or poll event — re-arm in a loop
+  (``StreamServer`` accept tealet) or hold ``waiter.operation`` for the raw
+  ``Operation`` handle. Direct ``proactor.accept_many()`` on oneshot backends
+  **finishes** after each accept; oneshot ``poll_many`` fallbacks still resubmit
+  inside the proactor until cancel — do not assume the same auto-resubmit model.
+- Accept-time ``recv`` legs started by ``accept_many(..., recv_size=...)`` are
+  independent of the parent waiter. Cancelling the accept stream does not cancel
+  in-flight recvs; callers must discard late deliveries after shutdown.
+
+### Fixed
+- ``StreamServer.wait_closed()`` waits for the accept-loop tealet to exit, not
+  only handler tealets.
+- ``StreamServer.close()`` cancels the accept-loop tealet synchronously and no
+  longer closes listening sockets itself; the accept tealet's ``finally`` block
+  closes them on exit.
+- Accept-time ``recv_timeout`` no longer leaks scheduler timers when the recv
+  completes before the arm callback runs on the scheduler thread.
+- ``UringProactor`` deactivates uring entries promptly when ``submit()`` returns
+  on an already-cancelled target, keeping ``has_pending_operations()`` accurate.
 
 ### Added
+- ``start_server(..., recv_timeout=...)`` forwards accept-time preread timeouts
+  to ``accept_many_streams`` (requires ``recv_size``).
 - `Proactor.create_socket()` and `scheduler.io.sock_create()` to create
   scheduler-contract sockets through the proactor. Optional ``connect_to`` and
   ``initial_data`` are chained by ``ProactorIOManager`` (create → connect →

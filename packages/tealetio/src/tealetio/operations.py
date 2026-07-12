@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from .tasks import CancelledError
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, cast
 
@@ -17,7 +15,6 @@ class InvalidStateError(Exception):
 
 _DoneCallback = Callable[["Operation[Any]"], object]
 _ResultCallback = Callable[[T_co], object]
-_CancelHook = Callable[[], None]
 _ProactorRef = Any
 
 
@@ -28,7 +25,14 @@ class ContinuousStepResult:
 
 
 class Operation(Generic[T]):
-    """Future-shaped IO operation owned by a proactor backend."""
+    """Future-shaped IO operation owned by a proactor backend.
+
+    Cancellation is not on ``Operation`` itself. Call
+    ``scheduler.proactor.cancel(operation)`` (or ``scheduler.io`` /
+    ``SelectorScheduler.cancel_operation()`` wrappers). The proactor returns a
+    teardown ``Operation[None]``; ``wait()`` on it when ring cancel must settle
+    before shutdown, or ``forget()`` when only the target's terminal state matters.
+    """
 
     def __init__(
         self,
@@ -44,8 +48,6 @@ class Operation(Generic[T]):
         self._result: T | None = None
         self._exception: BaseException | None = None
         self._callbacks: list[_DoneCallback] = []
-        self._cancel_hook: _CancelHook | None = None
-        self._active_suboperations: set[Operation[Any]] = set()
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
@@ -56,51 +58,6 @@ class Operation(Generic[T]):
         """Return True if the operation completed by cancellation."""
 
         return self._cancelled
-
-    def set_cancel(self, cancel: _CancelHook | None) -> None:
-        """Install or clear the backend cancel hook for this operation."""
-
-        self._cancel_hook = cancel
-
-    def attach_suboperation(self, suboperation: Operation[Any]) -> bool:
-        """Register a child for ``cancel()`` propagation.
-
-        Returns ``False`` when the parent is already done.
-        """
-
-        with self._lock:
-            if self._done:
-                return False
-            self._active_suboperations.add(suboperation)
-            return True
-
-    def detach_suboperation(self, suboperation: Operation[Any]) -> None:
-        with self._lock:
-            self._active_suboperations.discard(suboperation)
-
-    @contextmanager
-    def track_suboperation(self, suboperation: Operation[Any]) -> Iterator[Operation[Any]]:
-        """Register ``suboperation`` until the context exits or ``cancel()`` runs."""
-
-        if not self.attach_suboperation(suboperation):
-            suboperation.cancel()
-            yield suboperation
-            return
-        try:
-            yield suboperation
-        finally:
-            self.detach_suboperation(suboperation)
-
-    def cancel(self) -> None:
-        """Cancel the operation if it has not completed yet.
-
-        Cancellation always races in-flight backend completions on worker
-        threads. ``cancel_hook`` is best-effort IO teardown only; a late
-        ``deliver()`` may still finish the operation successfully, in which
-        case cancel is abandoned after the hook runs.
-        """
-
-        self._finish(exception=CancelledError(), cancelled=True)
 
     def result(self) -> T:
         """Return the operation result, or raise its completion exception."""
@@ -163,28 +120,6 @@ class Operation(Generic[T]):
         else:
             self._finish(result=cast(T, result))
 
-    def complete(self, result: T) -> None:
-        """Finish the operation from a chained suboperation callback."""
-
-        with self._lock:
-            if self._done:
-                return
-        try:
-            self._finish(result=result)
-        except InvalidStateError:
-            return
-
-    def complete_error(self, exc: BaseException) -> None:
-        """Fail the operation from a chained suboperation callback."""
-
-        with self._lock:
-            if self._done:
-                return
-        try:
-            self._finish(exception=exc)
-        except InvalidStateError:
-            return
-
     def _finish(
         self,
         *,
@@ -193,15 +128,6 @@ class Operation(Generic[T]):
         cancelled: bool = False,
     ) -> bool:
         if cancelled:
-            # Best-effort backend teardown, then terminalise unless a worker
-            # thread completed the operation during the hook.
-            if self._done:
-                return False
-            with self._lock:
-                cancel_hook = self._cancel_hook
-                self._cancel_hook = None
-            if cancel_hook is not None:
-                cancel_hook()
             if self._done:
                 return False
 
@@ -214,13 +140,8 @@ class Operation(Generic[T]):
             self._exception = exception
             self._cancelled = cancelled
             self._done = True
-            self._cancel_hook = None
             callbacks = self._callbacks
             self._callbacks = []
-            suboperations = tuple(self._active_suboperations) if cancelled else ()
-
-        for suboperation in suboperations:
-            suboperation.cancel()
 
         for callback in callbacks:
             callback(self)
@@ -235,9 +156,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     event loop themselves.
 
     Callbacks that submit nested ``Operation`` objects must not block waiting on
-    them. Register each child with ``attach_suboperation()`` (or
-    ``chain_suboperation()`` in ``operation_callbacks`` / ``continuous_callbacks``)
-    so ``cancel()`` can reach in-flight child work.
+    them. Delivery-spawned work is independent of the parent continuous op.
     """
 
     def __init__(
@@ -249,14 +168,6 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj)
         self._result_callback = result_callback
-
-    def set_result_callback(self, callback: _ResultCallback[T_co] | None) -> None:
-        """Install or replace the result callback before the operation finishes."""
-
-        with self._lock:
-            if self._done:
-                raise InvalidStateError("continuous operation is already done")
-            self._result_callback = callback
 
     def _emit_result(self, result: T_co) -> bool:
         """Deliver one result when the operation is still active.
@@ -274,14 +185,3 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             callback(result)
         with self._lock:
             return not self._done
-
-    def _finish(
-        self,
-        *,
-        result: Any = None,
-        exception: BaseException | None = None,
-        cancelled: bool = False,
-    ) -> bool:
-        # non-cancel finish leaves _active_suboperations alone: children started
-        # from result callbacks keep running after finish or error finish.
-        return super()._finish(result=result, exception=exception, cancelled=cancelled)

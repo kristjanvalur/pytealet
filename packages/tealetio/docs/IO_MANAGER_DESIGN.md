@@ -244,47 +244,57 @@ Cancellation always races in-flight backend completions; see
 Error cleanup (for example closing a created socket when connect fails) lives in
 ``on_cleanup`` handlers on each ``IOWaitGroupChild`` leg.
 
-## Continuous callback composition
+## Continuous operations and callback composition
 
 Long-lived proactor operations (`accept_many`, `recv_many`, `poll_many`, …)
-emit results through a single result callback (or `callback_factory(parent)` when
-composition needs the parent `ContinuousOperation`). Nested work started from
-that callback — accept-time pre-read, echo sends in tests, and similar — is
-use the same suboperation model as one-shot ops via `chain_suboperation`;
-continuous-specific helpers live in `continuous_callbacks.py`.
+emit bare chunks through each `ContinuousOperation`'s `result_callback`. The
+proactor does not shape delivery tuples, marshal onto the scheduler thread, or
+compose accept-time reads — that lives in `ProactorIOManager` and
+`continuous_callbacks.py`. See `OPERATION_CALLBACKS.md` for the full split.
 
-### Sub-operations: cancel propagation only
-
-`ContinuousOperation._active_suboperations` exists so `cancel()` can reach
-children submitted from result callbacks. It is **not** a drain barrier.
-
-| Parent event | Attached children |
-|--------------|-------------------|
-| Normal finish (EOF, final multishot CQE, …) | Keep running; completion handlers may still run |
-| Error finish (`_finish(exception=…)`) | Keep running — e.g. `ECONNRESET` on the parent socket must not cancel accepts/recvs already started from earlier callbacks |
-| `cancel()` | `_finish(cancelled=True)` on each child once the parent is `_done` |
-
-`_finish()` does not clear or cancel `_active_suboperations`. Each child removes
-itself with `detach_suboperation()` from its done handler (typically via
-`chain_suboperation()`). Once the parent is done, `attach_suboperation()` returns
-false so new children are not linked; in-flight children drain independently.
-
-Fire-and-forget nested work that should not participate in parent cancel should
-not call `attach_suboperation()` (or should detach after submit).
+| Layer | Responsibility |
+|-------|----------------|
+| `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
+| `ProactorIOManager` | wrap proactor callbacks, optional accept-time `recv`, stream pairs, scheduler marshalling |
+| Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read
 
 Built-in uring `receive_on_accept` was removed from the proactor. Accept-time
-pre-read is composed with `accept_read_delivery()` and wired from
-`ProactorIOManager.accept_many(..., recv_size=…)` / `start_server(...,
-recv_size=…)`. The proactor emits bare `socket` connections; tuple delivery
-`(conn, initial_data, recv_error)` is the callback/io_manager layer.
+pre-read is wired in `ProactorIOManager._accept_many_read_on_conn()` and exposed
+via `accept_many(..., recv_size=…)`, `accept_many_streams(...)`, and
+`start_server(..., recv_size=…)`. The proactor emits bare `socket` connections;
+tuple delivery `(conn, initial_data, recv_error)` is the io_manager layer.
+
+Each accept-time `recv` is a separate one-shot `Operation` registered with
+`add_done_callback`. It is not linked to the parent `ContinuousOperation`;
+cancelling the accept stream does not automatically cancel in-flight recvs. A
+recv that completes with `CancelledError` is closed in the io_manager without
+calling the user accept callback.
 
 When multishot accept ends (`IORING_CQE_F_MORE` clears), the parent may finish
 while a nested recv from the last accept is still in flight. That is expected:
 the accept stream has ended, not that all per-connection work has completed.
-User delivery for connections handed off while the parent was still active is
-normal drain behaviour.
+
+### Delivery disposition
+
+Whether a late delivery is processed, ignored, or discarded is **application
+policy**, not enforced by `Operation` or the proactor.
+
+`StreamServer` is the reference pattern. After `close()` synchronously cancels
+the accept-loop tealet, `on_accept` still runs for accepts (and accept-time
+recvs) already in flight. The server checks `_closed` and **discards** those
+deliveries by closing the writer and returning without spawning a handler. The
+accept-loop tealet wraps its main loop in ``try``/``finally`` so ``CancelledError``
+sets `_closed` and closes listening sockets; `close()` does not close listeners
+itself. In-flight handler tealets started before shutdown keep running
+until they exit; `wait_closed()` blocks on the accept-loop ``Task`` and each
+handler ``Task``.
+
+Custom `accept_many` / `accept_many_streams` callbacks should apply the same
+pattern when they need to reject work after shutdown: check a local flag, close
+the connection or streams, and return. The io_manager marshals onto the
+scheduler thread but does not implement server lifecycle.
 
 ## Capability gate
 
@@ -383,8 +393,8 @@ especially sensitive here.
 
 **Subsequent PR (waitable cancel).** A likely direction is *waitable cancel*:
 route cancellation through the proactor / uring submission path so cancel and
-completion are ordered relative to the same ring, rather than racing a Python
-`Operation.cancel()` on the main thread against worker delivery. Until that
+completion are ordered relative to the same ring, rather than racing
+`Proactor.cancel()` teardown submission against worker delivery. Until that
 exists, treat interrupted waits as best-effort abort, not atomic “keep bytes,
 drop waiter only”.
 
@@ -393,7 +403,9 @@ drop waiter only”.
 - **Waitable cancel for interrupted `IOWaiter` waits** — design and implement
   proactor/uring-integrated cancel so timeout and exceptional `wait()` exits
   race less with worker-thread delivery; revisit asyncio parity for buffered
-  bytes on recv timeout.
+  bytes on recv timeout. Current exceptional exits use
+  `Proactor.cancel(operation).forget()`; pump `proactor.wait()` when
+  `has_pending_operations()` must reach zero before ring close.
 - Implement `SelectorIOManager` and wire `SelectorScheduler.io` when selector
   blocking IO should share the same capability gate as proactor schedulers.
 - `SocketIO`, `PollIO`, and `FileIO` entry protocols are implemented; a future
@@ -411,10 +423,9 @@ drop waiter only”.
 
 - `packages/tealetio/src/tealetio/io_manager.py` — `ProactorIOManager`
 - `packages/tealetio/src/tealetio/io_waiter.py` — `IOWaiter`, `IOWaitGroup`, grouped composition
-- `packages/tealetio/src/tealetio/operation_callbacks.py` — `chain_suboperation` for continuous nested work
-- `packages/tealetio/src/tealetio/continuous_callbacks.py` — continuous result-callback composition
+- `packages/tealetio/src/tealetio/continuous_callbacks.py` — helpers for io_manager accept paths
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`
 - `packages/tealetio/src/tealetio/streams.py` — streams API
 - `packages/tealetio/docs/PYTHON_API.md` — user-facing API
-- `packages/tealetio/docs/OPERATION_CALLBACKS.md` — callback module layout and composition contracts
+- `packages/tealetio/docs/OPERATION_CALLBACKS.md` — io_manager continuous composition and delivery disposition

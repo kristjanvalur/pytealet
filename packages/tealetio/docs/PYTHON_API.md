@@ -172,7 +172,25 @@ size is up to 8 KiB, stream indices stay in-order, and
 
 When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
 falls back to repeated one-shot `submit_accept()` after each accepted
-connection.
+connection. `SelectorProactor.accept_many()` uses the same one-shot re-arm
+pattern. Direct `proactor.accept_many()` callers must resubmit after each
+accept; `scheduler.io.accept_many(...).wait()` returns an `IOWaitable` that
+unblocks when the current stream leg ends (one accept on oneshot backends), so
+callers re-arm in a loop — `StreamServer` owns this accept-loop tealet.
+
+Cancelling an operation is only through `scheduler.proactor.cancel(operation)`
+(or `scheduler.io._cancel_operation()` / `SelectorScheduler.cancel_operation()`
+wrappers). `Operation.cancel()` was removed. The proactor returns a teardown
+`Operation[None]`; `wait()` on it when io_uring cancel must settle before
+shutdown, or `forget()` when only the target's terminal state matters.
+Exceptional `IOWaiter.wait()` exit uses `.forget()` on the teardown leg
+(best-effort).
+
+`scheduler.io.accept_many()` / `accept_many_streams()` may start independent
+accept-time `recv` operations when `recv_size` is set. Cancelling the accept
+`IOWaiter` does not cancel those recvs; discard late deliveries after shutdown
+(as `StreamServer` does via `_closed`) or tolerate in-flight work until each
+recv completes or hits `recv_timeout` (cooperative cancel).
 
 When `IORING_POLL_MULTISHOT` is unavailable, `UringProactor.poll_many()` falls
 back to repeated one-shot `submit_poll()` after each readiness event.
@@ -642,8 +660,11 @@ With ``sock=``, tealetio applies the scheduler listen-socket contract
 (non-blocking, close-on-exec) and calls ``listen(backlog)``, like asyncio.
 ``recv_size`` opts into
 accept-time pre-read and reader prefill on backends that honour the proactor hint
-(same semantics as ``accept_many`` above; default ``None``). Each accept arms
-`proactor.accept_many()`. Accepted connections are marshalled onto the scheduler
+(same semantics as ``accept_many`` above; default ``None``). ``recv_timeout``
+(requires ``recv_size``) bounds each accept-time preread. Cancelling the accept
+stream does not cancel in-flight accept-time ``recv`` legs; close listeners and
+discard late deliveries in the accept callback (``StreamServer`` uses ``_closed``).
+Each accept arms `proactor.accept_many()`. Accepted connections are marshalled onto the scheduler
 with `call_soon_threadsafe()` and wrapped as stream endpoints before the handler
 runs in a spawned tealet. ``async_=True`` selects asyncio-shaped streams and
 drives the handler through ``run_coro()``. On ``UringProactor``,
@@ -651,11 +672,13 @@ accept uses multishot `IORING_ACCEPT_MULTISHOT`
 when probed; otherwise the proactor falls back to repeated one-shot accepts (see
 the `accept_many` notes above).
 
-`start_server(...)` returns a `StreamServer`. ``close()`` stops accepting;
-``wait_closed()`` blocks until in-flight handler tealets finish. Use as a context
-manager for both. ``serve_forever()`` parks the current tealet until
-``close()`` is called (accept is already active); it does not install signal
-handlers — use ``tealetio.run()`` / ``Runner`` for shutdown signals.
+`start_server(...)` returns a `StreamServer`. ``close()`` cancels the accept-loop
+tealet synchronously; listening sockets are closed when that tealet exits.
+``wait_closed()`` blocks until the accept-loop tealet and in-flight handler
+tealets finish. Use as a context manager for both. ``serve_forever()`` parks the
+current tealet until ``close()`` is called (accept is already active); it does
+not install signal handlers — use ``tealetio.run()`` / ``Runner`` for shutdown
+signals.
 
 Stream reads use `scheduler.io.sock_recv_into()` through
 `SocketTransport.recv_into()` so `UringProactor.recv_into()` can fill

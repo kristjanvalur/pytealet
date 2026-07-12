@@ -265,7 +265,7 @@ class ForwardingProactor:
 
         def cancel_operation(asyncio_future: _asyncio.Future[int]) -> None:
             if asyncio_future.cancelled():
-                operation.cancel()
+                self._proactor.cancel(operation)
 
         if operation.done():
             complete_future()
@@ -330,7 +330,7 @@ class ForwardingProactor:
 
         def cancel_operation(asyncio_future: _asyncio.Future[T]) -> None:
             if asyncio_future.cancelled():
-                operation.cancel()
+                self._proactor.cancel(operation)
 
         if operation.done():
             complete_future()

@@ -6,6 +6,7 @@ import asyncio
 import os
 import socket
 import sys
+
 from collections.abc import Callable, Coroutine
 from typing import Any, Literal, Protocol, TypeAlias, TypeVar, cast, overload
 
@@ -21,9 +22,9 @@ from .io_manager import (
     SupportsProactorIO,
 )
 from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
-from .locks import Condition
-from .operations import ContinuousOperation
+
 from .scheduler import BaseScheduler
+from .tasks import CancelledError, Task, get_current
 
 T = TypeVar("T")
 
@@ -750,17 +751,20 @@ def _bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket
 
 
 class StreamServer:
-    """Listening stream server backed by a continuous ``accept_many_streams`` operation.
+    """Listening stream server with a scheduler accept-loop tealet.
 
-    ``close()`` stops accepting and closes the listening socket(s). Handler
+    ``start_server()`` spawns a tealet that repeatedly ``wait()``s on
+    ``accept_many_streams`` (one emulated accept per iteration, or one multishot
+    leg until cancel/error). ``close()`` cancels that accept-loop tealet
+    synchronously; it does not close listening socket(s) itself. The accept-loop
+    tealet wraps its main loop in ``try``/``finally`` so ``CancelledError`` from
+    ``cancel()`` runs cleanup that sets ``_closed`` and closes listeners. Handler
     tealets already spawned for accepted connections keep running until they
-    finish on their own; ``close()`` does not cancel them. ``wait_closed()``
-    blocks until the server is closed and every dispatched handler tealet has
-    finished. Accept callbacks are marshalled onto the scheduler thread before
-    ``_dispatch_streams()`` runs. An early, lock-free ``_closed`` check closes
-    stray connections without touching ``Condition`` state. Queued ``dispatch()``
-    re-checks ``_closed`` under ``_shutdown`` and closes without incrementing
-    ``_active_handlers`` when the server is already shut down.
+    finish on their own. Late accepts delivered while shutting down see
+    ``_closed`` and are discarded. ``wait_closed()`` blocks until the accept-loop
+    tealet has exited and every dispatched handler tealet has finished. Accept
+    callbacks are marshalled onto the
+    scheduler thread before ``_dispatch_streams()`` runs.
 
     Use as a context manager to call ``close()`` and ``wait_closed()`` on
     scope exit. ``serve_forever()`` blocks the current tealet until
@@ -774,15 +778,13 @@ class StreamServer:
         self,
         scheduler: BaseScheduler,
         sockets: list[socket.socket],
-        accept_operation: ContinuousOperation[socket.socket],
     ) -> None:
         self._scheduler = scheduler
         self._io = _require_proactor_io(scheduler)
         self._sockets = tuple(sockets)
-        self._accept_operation = accept_operation
-        self._shutdown = Condition()
+        self._accept_task: Task | None = None
+        self._handler_tasks: set[Task] = set()
         self._closed = False
-        self._active_handlers = 0
 
     def __enter__(self) -> StreamServer:
         return self
@@ -796,30 +798,108 @@ class StreamServer:
         return self._sockets
 
     @property
-    def accept_operation(self) -> ContinuousOperation[socket.socket]:
-        return self._accept_operation
+    def accept_task(self) -> Task | None:
+        """Scheduler tealet running the accept loop, when started."""
+
+        return self._accept_task
 
     def close(self) -> None:
-        """Stop accepting and close listening socket(s).
+        """Request shutdown by cancelling the accept-loop tealet.
 
-        Does not interrupt in-flight client handlers. Call ``wait_closed()`` to
-        block until they finish.
+        Listening socket(s) are closed when that tealet exits. Does not interrupt
+        in-flight client handlers. Call ``wait_closed()`` to block until the
+        accept-loop tealet and handlers have finished.
         """
 
         if self._closed:
             return
-        with self._shutdown:
-            self._closed = True
-            self._shutdown.notify_all()
-        self._accept_operation.cancel()
+        accept_task = self._accept_task
+        if accept_task is not None and not accept_task.done():
+            if get_current() is not None:
+                accept_task.cancel()
+            else:
+                # close() may run from main or a foreign thread after the
+                # scheduler has stopped (for example pytest teardown).
+                self._scheduler.call_soon_threadsafe(accept_task.cancel)
+        # cancel() before the accept tealet's first slice skips its ``finally``.
+        if not self._closed:
+            self._finish_close()
+
+    def _finish_close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         for sock in self._sockets:
             sock.close()
 
-    def wait_closed(self) -> None:
-        """Block until this server is closed and all handler tealets have exited."""
+    def _start_accept_loop(
+        self,
+        sock: socket.socket,
+        client_handler: _ClientHandler,
+        *,
+        limit: int,
+        recv_size: int | None,
+        recv_timeout: float | None,
+        stream_factory: _StreamFactoryArg,
+        async_: bool,
+    ) -> None:
+        io = cast(ServerIO, self._io)
 
-        with self._shutdown:
-            self._shutdown.swait_for(lambda: self._closed and self._active_handlers == 0)
+        def accept_loop() -> None:
+            try:
+                while True:
+
+                    def on_accept(streams: _AcceptedStreams) -> None:
+                        if self._closed:
+                            _reader, writer = streams
+                            writer.close()
+                            return
+                        reader, writer = streams
+                        self._dispatch_streams(
+                            reader,
+                            writer,
+                            client_handler=client_handler,
+                            async_=async_,
+                        )
+
+                    try:
+                        io.accept_many_streams(
+                            sock,
+                            on_accept,
+                            limit=limit,
+                            stream_factory=stream_factory,
+                            async_=async_,
+                            recv_size=recv_size,
+                            recv_timeout=recv_timeout,
+                        ).wait()
+                    except (OSError, RuntimeError):
+                        if self._closed:
+                            return
+                        raise
+            finally:
+                self._finish_close()
+
+        self._accept_task = self._scheduler.spawn(accept_loop)
+
+    def _wait_until_closed(self) -> None:
+        while not self._closed:
+            self._scheduler.yield_()
+
+    def wait_closed(self) -> None:
+        """Block until the accept loop has exited and handlers are done."""
+
+        accept_task = self._accept_task
+        if accept_task is not None and not accept_task.done():
+            try:
+                accept_task.wait()
+            except CancelledError:
+                pass
+        if not self._closed:
+            self._finish_close()
+
+        for handler in tuple(self._handler_tasks):
+            if not handler.done():
+                handler.wait()
 
     def serve_forever(self) -> None:
         """Block until ``close()`` is called.
@@ -831,8 +911,7 @@ class StreamServer:
 
         if self._closed:
             raise RuntimeError("server is closed")
-        with self._shutdown:
-            self._shutdown.swait_for(lambda: self._closed)
+        self._wait_until_closed()
 
     def _dispatch_client(
         self,
@@ -867,11 +946,14 @@ class StreamServer:
         async_: bool,
     ) -> None:
         def dispatch() -> None:
+            if self._closed:
+                writer.close()
+                return
+
             def serve() -> None:
                 try:
-                    with self._shutdown:
-                        if self._closed:
-                            return
+                    if self._closed:
+                        return
                     if async_:
                         run_coro(
                             cast(_AsyncClientHandler, client_handler)(
@@ -886,24 +968,19 @@ class StreamServer:
                         )
                 finally:
                     writer.close()
-                    with self._shutdown:
-                        self._active_handlers -= 1
-                        self._shutdown.notify_all()
-
-            with self._shutdown:
-                if self._closed:
-                    writer.close()
-                    return
-                self._active_handlers += 1
 
             try:
-                self._scheduler.spawn(serve)
+                handler_task = self._scheduler.spawn(serve)
             except Exception:
-                with self._shutdown:
-                    self._active_handlers -= 1
-                    self._shutdown.notify_all()
                 writer.close()
                 raise
+
+            self._handler_tasks.add(handler_task)
+
+            def drop_handler(_task: Task[Any]) -> None:
+                self._handler_tasks.discard(handler_task)
+
+            handler_task.add_done_callback(drop_handler)
 
         self._scheduler.call_soon(dispatch)
 
@@ -915,6 +992,7 @@ def _start_stream_server(
     *,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_timeout: float | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
@@ -922,36 +1000,21 @@ def _start_stream_server(
 
     Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
     Accepts deliver stream pairs via ``accept_many_streams``. When ``recv_size``
-    is set, an accept-time read pre-fills the reader buffer; otherwise callers
-    arm eager receive later (for example via ``recv_many``).
+    is set, an accept-time read pre-fills the reader buffer; ``recv_timeout``
+    bounds that preread when set. Otherwise callers arm eager receive later
+    (for example via ``recv_many``).
     """
 
-    server: StreamServer | None = None
-    io = cast(ServerIO, _require_proactor_io(scheduler))
-
-    def on_accept(streams: _AcceptedStreams) -> None:
-        if server is None:
-            reader, writer = streams
-            writer.close()
-            return
-        reader, writer = streams
-        server._dispatch_streams(
-            reader,
-            writer,
-            client_handler=client_handler,
-            async_=async_,
-        )
-
-    accept_operation = io.accept_many_streams(
+    server = StreamServer(scheduler, [sock])
+    server._start_accept_loop(
         sock,
-        on_accept,
+        client_handler,
         limit=limit,
+        recv_size=recv_size,
+        recv_timeout=recv_timeout,
         stream_factory=stream_factory,
         async_=async_,
-        recv_size=recv_size,
     )
-
-    server = StreamServer(scheduler, [sock], accept_operation)
     return server
 
 
@@ -968,6 +1031,7 @@ def _start_server(
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_timeout: float | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
@@ -997,6 +1061,7 @@ def _start_server(
         client_handler,
         limit=limit,
         recv_size=recv_size,
+        recv_timeout=recv_timeout,
         stream_factory=stream_factory,
         async_=async_,
     )
@@ -1013,6 +1078,7 @@ def start_server(
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_timeout: float | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1029,6 +1095,7 @@ def start_server(
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_timeout: float | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1042,6 +1109,7 @@ def start_server(
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_timeout: float | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1055,6 +1123,7 @@ def start_server(
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_timeout: float | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1068,6 +1137,7 @@ def start_server(
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_timeout: float | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1081,6 +1151,7 @@ def start_server(
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_timeout: float | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1098,6 +1169,7 @@ def start_server(
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
     recv_size: int | None = None,
+    recv_timeout: float | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
@@ -1125,6 +1197,14 @@ def start_server(
     ``recv_size`` opts into accept-time pre-read and reader prefill for
     client-speaks-first protocols (for example HTTP); leave it ``None`` when
     the server may speak first or when the reader will arm eager receive later.
+    ``recv_timeout`` (requires ``recv_size``) bounds each accept-time preread.
+
+    Cancelling the accept-loop tealet or its ``accept_many_streams`` waiter does
+    not cancel in-flight accept-time ``recv`` legs. Late deliveries can still
+    reach handlers unless you close listeners and discard them in the accept
+    callback (``StreamServer`` checks ``_closed``). Custom servers using
+    ``scheduler.io.accept_many()`` directly must apply the same pattern.
+
     Accept callbacks are marshalled onto the scheduler thread before handler
     tealets are spawned. Handler exceptions propagate
     in the handler tealet and do not stop the listener. ``spawn()`` failures
@@ -1143,6 +1223,7 @@ def start_server(
         reuse_port=reuse_port,
         limit=limit,
         recv_size=recv_size,
+        recv_timeout=recv_timeout,
         stream_factory=stream_factory,
         async_=async_,
     )

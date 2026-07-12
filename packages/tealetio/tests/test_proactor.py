@@ -131,6 +131,15 @@ def _recviter_test_pool() -> _RecvIterTestPool:
     return _RecvIterTestPool()
 
 
+class _RecvIterTestProactor:
+    def cancel(self, _operation: Any) -> SimpleNamespace:
+        return SimpleNamespace()
+
+
+def _recviter_test_proactor() -> _RecvIterTestProactor:
+    return _RecvIterTestProactor()
+
+
 def _iter_recv_stream(stream: Any):
     yield from stream
 
@@ -302,7 +311,7 @@ def test_selector_buf_group_pressure_threshold_matches_recviter_policy():
 
 def test_recviter_buffer_reorders_out_of_order_chunks():
     def exercise() -> list[tuple[int, memoryview | None]]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((0, memoryview(b"a")))
         return [buffer.take_next(), buffer.take_next()]
@@ -328,7 +337,7 @@ def test_recviter_buffer_resume_waits_until_half_pool_is_free():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
@@ -351,7 +360,7 @@ def test_recviter_buffer_resume_waits_until_half_pool_is_free():
 
 def test_recviter_buffer_ignores_late_callbacks_after_close():
     def exercise() -> tuple[int, bool]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         buffer.close()
         buffer.on_result((1, memoryview(b"b")))
@@ -365,7 +374,7 @@ def test_recviter_buffer_ignores_late_callbacks_after_close():
 
 def test_recviter_buffer_pressure_token_precedes_queued_views():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, _noop_recv_many_resume()))
@@ -379,7 +388,7 @@ def test_recviter_buffer_pressure_token_precedes_queued_views():
 
 def test_recviter_buffer_eof_stops_iteration():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"done")))
         buffer.on_result((1, memoryview(b"")))
         return [buffer.take_next(), buffer.take_next()]
@@ -391,7 +400,7 @@ def test_recviter_buffer_eof_stops_iteration():
 
 def test_recviter_buffer_ordered_eof_wins_cancel_race():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"done")))
         with buffer._lock:
             buffer._stream_done = True
@@ -406,7 +415,7 @@ def test_recviter_buffer_ordered_eof_wins_cancel_race():
 
 def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
     def exercise() -> list[object]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         with buffer._lock:
@@ -430,7 +439,7 @@ def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
 
 def test_recviter_buffer_yields_memoryviews():
     def exercise() -> tuple[int, memoryview | None] | None:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         return buffer.take_next()
 
@@ -448,7 +457,7 @@ def test_recviter_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
     ready_to_wait = threading.Event()
 
     def exercise() -> tuple[int, memoryview]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         real_swait = buffer._event.swait
 
         def swait_and_signal() -> bool:
@@ -489,7 +498,7 @@ def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
 
     def exercise() -> tuple[tuple[int, memoryview], list[bool]]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
 
         def resume() -> None:
             resumed.append(True)
@@ -540,7 +549,7 @@ def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
         first = buffer.take_next()
@@ -571,7 +580,7 @@ def test_recviter_buffer_resumes_when_half_pool_is_free():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
@@ -607,7 +616,7 @@ def test_recviter_buffer_defers_resume_until_all_queued_chunks_yielded():
 
     def exercise() -> tuple[list[tuple[int, memoryview]], list[bool]]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
@@ -647,7 +656,7 @@ def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
 
     def exercise() -> tuple[tuple[int, memoryview | None] | None, list[bool]]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
         token = buffer.take_next()
@@ -679,7 +688,7 @@ def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((2, memoryview(b"c")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
@@ -759,16 +768,38 @@ class TestOperation:
 
         assert seen == [42, 43]
 
-    def test_operation_cancel_completes_with_cancelled_error(self):
-        operation: Operation[int] = Operation(kind="test")
+    def test_proactor_cancel_completes_operation_with_cancelled_error(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 1)
+            proactor.cancel(operation)
+            assert operation.done() is True
+            assert operation.cancelled() is True
+            assert operation.exception()
 
-        operation.cancel()
-        assert operation.done() is True
-        assert operation.cancelled() is True
-        assert operation.exception()
+            with pytest.raises(CancelledError):
+                operation.result()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
 
-        with pytest.raises(CancelledError):
-            operation.result()
+    def test_proactor_cancel_returns_teardown_operation(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            target = proactor.recv(reader, 1)
+            teardown = proactor.cancel(target)
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
+            assert target.cancelled() is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
 
     def test_continuous_operation_emits_results_before_completion(self):
         seen: list[int] = []
@@ -785,99 +816,22 @@ class TestOperation:
         seen: list[int] = []
         operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
         assert operation._emit_result(1) is True
-        operation.cancel()
+        operation._finish(exception=CancelledError(), cancelled=True)
         assert operation._emit_result(2) is False
         assert seen == [1]
 
-    def test_continuous_operation_cancel_cancels_tracked_suboperation(self):
-        parent = ContinuousOperation(kind="test")
-        child = Operation[None](kind="child")
-        child_cancelled = False
-
-        def cancel_child() -> None:
-            nonlocal child_cancelled
-            child_cancelled = True
-            child.cancel()
-
-        child.set_cancel(cancel_child)
-        with parent.track_suboperation(child):
-            parent.cancel()
-        assert parent.cancelled()
-        assert child_cancelled
-        assert child.cancelled()
-
-    def test_operation_cancel_rejects_late_suboperation_attach(self) -> None:
-        parent = Operation(kind="test")
-        parent.cancel()
-        child = Operation[None](kind="child")
-        assert parent.attach_suboperation(child) is False
-
-    def test_continuous_operation_cancel_rejects_late_suboperation_attach(self) -> None:
-        parent = ContinuousOperation(kind="test")
-        parent.cancel()
-        child = Operation[None](kind="child")
-        assert parent.attach_suboperation(child) is False
-
     def test_operation_deliver_ignored_after_cancel(self) -> None:
         operation = Operation(kind="test")
-        operation.cancel()
+        operation._finish(exception=CancelledError(), cancelled=True)
         operation.deliver(object(), result=None)
         assert operation.cancelled()
 
     def test_continuous_operation_emit_result_false_after_cancel(self) -> None:
         seen: list[int] = []
         parent = ContinuousOperation(kind="test", result_callback=seen.append)
-        parent.cancel()
+        parent._finish(exception=CancelledError(), cancelled=True)
         assert parent._emit_result(1) is False
         assert seen == []
-
-    def test_chain_suboperation_runs_on_complete_after_child_finishes(self):
-        from tealetio.operation_callbacks import chain_suboperation
-
-        parent = ContinuousOperation(kind="test")
-        child = Operation[None](kind="child")
-        seen: list[object] = []
-        chain_suboperation(parent, lambda: child, lambda op: seen.append(op.result()))
-        child._finish(result=None)
-        assert seen == [None]
-
-    def test_chain_suboperation_cancel_cancels_active_child_on_continuous_parent(self):
-        from tealetio.operation_callbacks import chain_suboperation
-
-        parent = ContinuousOperation(kind="test")
-        child = Operation[None](kind="child")
-        child_cancelled = False
-
-        def cancel_child() -> None:
-            nonlocal child_cancelled
-            child_cancelled = True
-            child.cancel()
-
-        child.set_cancel(cancel_child)
-        chain_suboperation(parent, lambda: child, lambda _op: None)
-        parent.cancel()
-        assert parent.cancelled()
-        assert child_cancelled
-        assert child.cancelled()
-
-    def test_chain_suboperation_cancel_cancels_active_child_on_operation_parent(self):
-        from tealetio.operation_callbacks import chain_suboperation
-
-        parent = Operation(kind="connect")
-        child = Operation[None](kind="send")
-        child_cancelled = False
-
-        def cancel_child() -> None:
-            nonlocal child_cancelled
-            child_cancelled = True
-            child.cancel()
-
-        child.set_cancel(cancel_child)
-        chain_suboperation(parent, lambda: child, lambda _op: None)
-        parent.cancel()
-        assert parent.cancelled()
-        assert child_cancelled
-        assert child.cancelled()
 
     def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
         from tealetio.continuous_callbacks import marshal_to_scheduler
@@ -914,46 +868,6 @@ def test_operation_deliver_completes_without_handler() -> None:
     operation = Operation[int](kind="test")
     operation.deliver(object(), result=7)
     assert operation.result() == 7
-
-
-def test_operation_cancel_forwards_to_suboperation() -> None:
-    child_cancelled = False
-    parent = Operation[None](kind="parent")
-    child = Operation[None](kind="child")
-    parent.attach_suboperation(child)
-
-    def cancel_child() -> None:
-        nonlocal child_cancelled
-        child_cancelled = True
-        child.cancel()
-
-    child.set_cancel(cancel_child)
-    parent.cancel()
-    assert child_cancelled is True
-    assert child.cancelled()
-    assert parent.cancelled()
-
-
-def test_chain_suboperation_on_complete_failure_finishes_parent() -> None:
-    from tealetio.operation_callbacks import chain_suboperation
-
-    parent = Operation[None](kind="parent")
-    child = Operation[None](kind="child")
-
-    def on_complete(_op: Operation[None]) -> None:
-        raise OSError("boom")
-
-    chain_suboperation(parent, lambda: child, on_complete)
-    child._finish(result=None)
-    assert parent.done()
-    assert isinstance(parent.exception(), OSError)
-
-
-def test_operation_complete_ignores_race_with_cancel() -> None:
-    operation = Operation[None](kind="test")
-    operation.cancel()
-    operation.complete(None)
-    assert operation.cancelled()
 
 
 @pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
@@ -1194,7 +1108,7 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_accept_many_emits_connections_until_cancelled(self):
+    def test_accept_many_emulated_path_finishes_after_each_accept(self):
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         clients: list[socket.socket] = []
@@ -1204,8 +1118,8 @@ class TestSelectorProactor:
             server.bind(("127.0.0.1", 0))
             server.listen()
 
-            operation = proactor.accept_many(server, accepted.append)
             for _index in range(2):
+                operation = proactor.accept_many(server, accepted.append)
                 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client.setblocking(False)
                 try:
@@ -1214,98 +1128,19 @@ class TestSelectorProactor:
                     pass
                 clients.append(client)
 
-            while len(accepted) < 2:
-                proactor.wait(proactor.get_time() + 1.0)
+                while len(accepted) <= _index:
+                    proactor.wait(proactor.get_time() + 1.0)
 
-            assert operation.done() is False
+                assert operation.done() is True
+
             assert [conn.getpeername()[0] for conn in accepted] == ["127.0.0.1", "127.0.0.1"]
             assert [conn.getblocking() for conn in accepted] == [False, False]
             assert [os.get_inheritable(conn.fileno()) for conn in accepted] == [False, False]
-            operation.cancel()
-            assert operation.cancelled() is True
         finally:
             for conn in accepted:
                 conn.close()
             for client in clients:
                 client.close()
-            server.close()
-            proactor.close()
-
-    def test_accept_many_callback_factory_read_defers_until_data(self) -> None:
-        from tealetio.continuous_callbacks import accept_read_delivery
-
-        proactor = SelectorProactor()
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        try:
-            server.setblocking(False)
-            server.bind(("127.0.0.1", 0))
-            server.listen()
-            client.setblocking(False)
-
-            operation = proactor.accept_many(
-                server,
-                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
-            )
-            client.setblocking(True)
-            client.connect(server.getsockname())
-            for _ in range(5):
-                proactor.wait(proactor.get_time() + 0.05)
-            assert accepted == []
-
-            client.sendall(b"hello")
-            deadline = proactor.get_time() + 2.0
-            while len(accepted) < 1 and proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
-
-            assert accepted[0][1] == b"hello"
-            assert accepted[0][2] is None
-            assert operation.done() is False
-        finally:
-            for conn, _data, _recv_error in accepted:
-                conn.close()
-            client.close()
-            server.close()
-            proactor.close()
-
-    def test_accept_many_callback_factory_delivers_empty_initial_read_as_eof(self) -> None:
-        from tealetio.continuous_callbacks import accept_read_delivery
-
-        proactor = SelectorProactor()
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        try:
-            server.setblocking(False)
-            server.bind(("127.0.0.1", 0))
-            server.listen()
-            client.setblocking(False)
-
-            proactor.accept_many(
-                server,
-                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
-            )
-            try:
-                client.connect(server.getsockname())
-            except (BlockingIOError, InterruptedError):
-                pass
-            client.shutdown(socket.SHUT_WR)
-            deadline = proactor.get_time() + 2.0
-            while proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
-                if accepted:
-                    break
-
-            assert len(accepted) == 1
-            conn, data, recv_error = accepted[0]
-            try:
-                assert data == b""
-                assert recv_error is None
-            finally:
-                conn.close()
-        finally:
-            client.close()
             server.close()
             proactor.close()
 
@@ -1342,220 +1177,6 @@ class TestSelectorProactor:
             assert all(isinstance(data, memoryview) for _, data in seen)
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_recv_many_echo_handler_runs_before_client_delivery(self):
-        from callback_helpers import recv_many_echo_delivery
-
-        def _drain_peer(sock: socket.socket, proactor: SelectorProactor) -> bytes:
-            chunks: list[bytes] = []
-            deadline = proactor.get_time() + 1.0
-            while proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
-                try:
-                    chunk = sock.recv(1024, socket.MSG_DONTWAIT)
-                except BlockingIOError:
-                    continue
-                if chunk:
-                    chunks.append(chunk)
-            return b"".join(chunks)
-
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        seen: list[tuple[int, memoryview]] = []
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = proactor.recv_many(
-                reader,
-                callback_factory=lambda op: recv_many_echo_delivery(proactor, op, seen.append),
-                buf_group=proactor.shared_recv_buffer_pool(),
-            )
-
-            writer.send(b"hello")
-            while len(seen) < 1:
-                proactor.wait(proactor.get_time() + 1.0)
-            first_echo = _drain_peer(writer, proactor)
-
-            writer.send(b"world")
-            while len(seen) < 2:
-                proactor.wait(proactor.get_time() + 1.0)
-            second_echo = _drain_peer(writer, proactor)
-
-            writer.shutdown(socket.SHUT_WR)
-            while not operation.done():
-                proactor.wait(proactor.get_time() + 1.0)
-
-            assert first_echo == b"hello"
-            assert second_echo == b"world"
-            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
-            assert operation.result() is None
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_recv_many_echo_delivery_chains_send_completion_before_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import callback_helpers
-        from callback_helpers import recv_many_echo_delivery
-        from tealetio.operation_callbacks import chain_suboperation
-
-        order: list[str] = []
-        original_chain = chain_suboperation
-
-        def spy_chain(parent, spawn, on_complete):
-            order.append("chain")
-
-            def on_complete_wrapped(op: Operation[Any]) -> None:
-                order.append("complete")
-                on_complete(op)
-
-            original_chain(parent, spawn, on_complete_wrapped)
-
-        monkeypatch.setattr(callback_helpers, "chain_suboperation", spy_chain)
-
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        delivered: list[_RecvManySeen] = []
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            def track_delivery(result: _RecvManySeen) -> None:
-                order.append("deliver")
-                delivered.append(result)
-
-            operation = proactor.recv_many(
-                reader,
-                callback_factory=lambda op: recv_many_echo_delivery(proactor, op, track_delivery),
-                buf_group=proactor.shared_recv_buffer_pool(),
-            )
-
-            writer.send(b"x")
-            deadline = proactor.get_time() + 1.0
-            while len(delivered) < 1 and proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
-
-            assert order == ["chain", "complete", "deliver"]
-            assert _recv_many_bytes(delivered) == [(0, b"x")]
-
-            writer.shutdown(socket.SHUT_WR)
-            while not operation.done() and proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_recv_many_echo_fire_and_forget_delivers_before_send_completes(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import callback_helpers
-        from callback_helpers import recv_many_echo_delivery
-        from tealetio.operation_callbacks import chain_suboperation
-
-        order: list[str] = []
-        original_chain = chain_suboperation
-        pending_send = Operation[None](kind="send")
-
-        def spy_chain(parent, spawn, on_complete):
-            order.append("chain")
-
-            def on_complete_wrapped(op: Operation[Any]) -> None:
-                order.append("complete")
-                on_complete(op)
-
-            original_chain(parent, spawn, on_complete_wrapped)
-
-        monkeypatch.setattr(callback_helpers, "chain_suboperation", spy_chain)
-
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        delivered: list[_RecvManySeen] = []
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            monkeypatch.setattr(proactor, "send", lambda _sock, _data: pending_send)
-
-            def track_delivery(result: _RecvManySeen) -> None:
-                order.append("deliver")
-                delivered.append(result)
-
-            operation = proactor.recv_many(
-                reader,
-                callback_factory=lambda op: recv_many_echo_delivery(
-                    proactor, op, track_delivery, fire_and_forget=True
-                ),
-                buf_group=proactor.shared_recv_buffer_pool(),
-            )
-
-            writer.send(b"x")
-            deadline = proactor.get_time() + 1.0
-            while len(delivered) < 1 and proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
-
-            assert order == ["chain", "deliver"]
-            assert _recv_many_bytes(delivered) == [(0, b"x")]
-
-            pending_send._finish(result=None)
-            assert order == ["chain", "deliver", "complete"]
-
-            writer.shutdown(socket.SHUT_WR)
-            while not operation.done() and proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_recv_many_echo_delivery_registers_send_suboperation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import callback_helpers
-        from tealetio import operation_callbacks
-
-        from callback_helpers import recv_many_echo_delivery
-
-        chained: list[Operation[Any]] = []
-        real_chain = operation_callbacks.chain_suboperation
-
-        def track_chain(
-            parent: Operation[Any],
-            spawn: Callable[[], Operation[Any]],
-            on_complete: Callable[[Operation[Any]], object],
-        ) -> bool:
-            def wrapped_spawn() -> Operation[Any]:
-                child = spawn()
-                chained.append(child)
-                return child
-
-            return real_chain(parent, wrapped_spawn, on_complete)
-
-        monkeypatch.setattr(operation_callbacks, "chain_suboperation", track_chain)
-        monkeypatch.setattr(callback_helpers, "chain_suboperation", track_chain)
-
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            operation = proactor.recv_many(
-                reader,
-                callback_factory=lambda op: recv_many_echo_delivery(proactor, op, lambda _result: None),
-                buf_group=proactor.shared_recv_buffer_pool(),
-            )
-
-            writer.send(b"x")
-            deadline = proactor.get_time() + 1.0
-            while not chained and proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
-            writer.shutdown(socket.SHUT_WR)
-            while not operation.done() and proactor.get_time() < deadline:
-                proactor.wait(proactor.get_time() + 0.05)
-
-            assert [entry.kind for entry in chained] == ["send"]
         finally:
             reader.close()
             writer.close()
@@ -1760,9 +1381,8 @@ class TestSelectorProactor:
                 assert entry.reader is not None
                 assert entry.reader.operation is operation
                 assert entry.reader.step is not None
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
-            assert operation._cancel_hook is None
             with proactor._lock:
                 assert fd not in proactor._fd_operations
         finally:
@@ -1817,7 +1437,7 @@ class TestSelectorProactor:
             recv_many = proactor.recv_many(reader, lambda _chunk: None, buf_group=proactor.shared_recv_buffer_pool())
             with pytest.raises(RuntimeError, match="already pending"):
                 proactor.poll(reader.fileno(), select.POLLIN)
-            recv_many.cancel()
+            proactor.cancel(recv_many)
         finally:
             reader.close()
             writer.close()
@@ -1851,7 +1471,7 @@ class TestSelectorProactor:
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
             assert seen == [select.POLLIN]
             assert operation.done() is False
-            operation.cancel()
+            proactor.cancel(operation)
         finally:
             reader.close()
             writer.close()
@@ -1902,7 +1522,7 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
             assert len(seen) == 1
             assert seen[0] & mask
-            operation.cancel()
+            proactor.cancel(operation)
         finally:
             reader.close()
             writer.close()
@@ -2097,7 +1717,7 @@ class TestSelectorProactor:
             operation = proactor.recv(reader, 1)
 
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
-            operation.cancel()
+            proactor.cancel(operation)
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
             assert operation.cancelled() is True
@@ -2266,7 +1886,7 @@ class TestSelectorProactor:
             operation = proactor.recv(reader, 1)
             seen.clear()
 
-            operation.cancel()
+            proactor.cancel(operation)
             proactor.wait(0)
             assert seen == []
         finally:
@@ -2496,12 +2116,21 @@ class TestThreadedSelectorProactor:
             operation = proactor.recv(reader, 1)
             proactor.wait(0)
 
-            thread = threading.Thread(target=operation.cancel)
+            teardown_holder: list[Operation[None] | None] = []
+
+            def cancel_from_thread() -> None:
+                teardown_holder.append(proactor.cancel(operation))
+
+            thread = threading.Thread(target=cancel_from_thread)
             thread.start()
             thread.join(1.0)
 
             assert thread.is_alive() is False
             assert operation.cancelled() is True
+            teardown = teardown_holder[0]
+            assert teardown is not None
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
         finally:
             reader.close()
             writer.close()
@@ -3167,7 +2796,7 @@ class TestUringProactor:
 
             assert operation.result() == b"hello"
             assert entry.completion is None
-            assert operation._cancel_hook is None
+
         finally:
             reader.close()
             writer.close()
@@ -3187,7 +2816,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: operation.done())
 
             assert entry.completion is None
-            assert operation._cancel_hook is None
+
         finally:
             reader.close()
             writer.close()
@@ -3220,7 +2849,10 @@ class TestUringProactor:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
 
-            operation.cancel()
+            teardown = proactor.cancel(operation)
+            assert teardown is not None
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
             assert operation.cancelled() is True
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
             assert proactor.has_pending_operations() is True
@@ -3352,9 +2984,14 @@ class TestUringProactor:
 
             proactor.ring.fail_next_recv = True
             second = proactor.recv(reader, 5)
-            second.cancel()
+            proactor.cancel(second)
 
             assert second.cancelled() is True
+            assert id(second) not in proactor._uring_operation_entries
+            assert not any(
+                submission.entry is not None and submission.entry.operation is second
+                for submission in proactor._deferred_submissions
+            )
             proactor.ring.complete_recv(b"first")
             assert first.result() == b"first"
             assert len(proactor.ring.submitted_recv) == 1
@@ -3375,7 +3012,7 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _BackpressuredUringRing)
 
             proactor.ring.fail_next_cancel = True
-            operation.cancel()
+            proactor.cancel(operation)
 
             assert operation.cancelled() is True
             assert proactor.ring.submitted_cancel == []
@@ -3682,7 +3319,7 @@ class TestUringProactor:
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
             handle = proactor.ring.pending_poll_multishot[-1]
-            operation.cancel()
+            proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: proactor.ring.submitted_poll_remove == [handle])
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
             assert operation.cancelled() is True
@@ -3706,7 +3343,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
             assert operation.done() is False
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
         finally:
             reader.close()
@@ -3728,7 +3365,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             assert len(proactor.ring.submitted_poll) == 1
 
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
             proactor.wait(proactor.get_time() + 1.0)
             assert len(proactor.ring.submitted_poll) == 1
@@ -3746,10 +3383,13 @@ class TestUringProactor:
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
             pending = proactor.ring.pending_poll_oneshot[-1]
-            operation.cancel()
+            teardown = proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
             assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
+            assert teardown is not None
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
         finally:
             reader.close()
             writer.close()
@@ -3785,7 +3425,7 @@ class TestUringProactor:
             writer.send(b"x")
             _wait_for_uring(proactor, lambda: len(seen) >= 1)
             assert seen[-1] & select.POLLIN
-            operation.cancel()
+            proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
             assert operation.cancelled() is True
         finally:
@@ -3793,7 +3433,7 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_accept_many_falls_back_to_oneshot_accept_and_resubmits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_accept_many_falls_back_to_oneshot_accept_and_finishes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
@@ -3805,10 +3445,13 @@ class TestUringProactor:
             assert len(proactor.ring.submitted_accept) == 1
             proactor.ring.complete_accept_oneshot()
             _wait_for_uring(proactor, lambda: len(accepted) == 1)
-            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_accept) == 2)
-            assert operation.done() is False
-            operation.cancel()
-            assert operation.cancelled() is True
+            assert operation.done() is True
+            assert len(proactor.ring.submitted_accept) == 1
+
+            pending = proactor.accept_many(server, accepted.append)
+            assert len(proactor.ring.submitted_accept) == 2
+            proactor.cancel(pending)
+            assert pending.cancelled() is True
         finally:
             for conn in accepted:
                 conn.close()
@@ -3841,140 +3484,9 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_accept_many_callback_factory_read_defers_until_data(self) -> None:
-        from tealetio.continuous_callbacks import accept_read_delivery
-
-        proactor = UringProactor(ring_factory=_DeferredUringRing)
-        server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        try:
-            server.setblocking(False)
-            operation = proactor.accept_many(
-                server,
-                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
-            )
-            proactor.ring.complete_accept_multishot("peer-1")
-            proactor.wait(proactor.get_time() + 0.05)
-            assert accepted == []
-            assert len(proactor.ring.pending_recv) == 1
-            proactor.ring.complete_recv(b"hello")
-            _wait_for_uring(proactor, lambda: len(accepted) == 1)
-
-            assert accepted[0][1] == b"hello"
-            assert accepted[0][2] is None
-            assert operation.done() is False
-        finally:
-            for conn, _data, _recv_error in accepted:
-                conn.close()
-            server.close()
-            proactor.close()
-
-    def test_accept_many_callback_factory_read_delivers_recv_error(self) -> None:
-        from tealetio.continuous_callbacks import accept_read_delivery
-
-        proactor = UringProactor(ring_factory=_DeferredUringRing)
-        server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        try:
-            server.setblocking(False)
-            operation = proactor.accept_many(
-                server,
-                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
-            )
-            proactor.ring.complete_accept_multishot("peer-1")
-            proactor.wait(proactor.get_time() + 0.05)
-            proactor.ring.complete_recv_error(-errno.EIO)
-            _wait_for_uring(proactor, lambda: len(accepted) == 1)
-            conn, initial_data, recv_error = accepted[0]
-
-            assert initial_data is None
-            assert isinstance(recv_error, OSError)
-            assert recv_error.errno == errno.EIO
-            assert conn.fileno() != -1
-            assert operation.done() is False
-        finally:
-            for conn, _data, _recv_error in accepted:
-                conn.close()
-            server.close()
-            proactor.close()
-
-    def test_accept_many_callback_factory_read_finishes_while_recv_pending_drains(self) -> None:
-        from tealetio.continuous_callbacks import accept_read_delivery
-
-        proactor = UringProactor(ring_factory=_DeferredUringRing)
-        server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        try:
-            server.setblocking(False)
-            operation = proactor.accept_many(
-                server,
-                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
-            )
-            proactor.ring.complete_accept_multishot("peer-1", more=False)
-            proactor.wait(proactor.get_time() + 0.05)
-            assert operation.done() is True
-            assert accepted == []
-            assert len(proactor.ring.pending_recv) == 1
-            proactor.ring.complete_recv(b"hello")
-            _wait_for_uring(proactor, lambda: len(accepted) == 1)
-
-            assert accepted[0][1] == b"hello"
-            assert accepted[0][2] is None
-            assert operation.done() is True
-        finally:
-            for conn, _data, _recv_error in accepted:
-                conn.close()
-            server.close()
-            proactor.close()
-
-    def test_accept_read_delivery_closes_conn_when_attach_fails(self) -> None:
-        from tealetio.continuous_callbacks import accept_read_delivery
-
-        proactor = UringProactor(ring_factory=_DeferredUringRing)
-        parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=socket.socket())
-        parent._finish(result=None)
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        conn, peer = socket.socketpair()
-        try:
-            on_conn = accept_read_delivery(proactor, parent, accepted.append, recv_size=64)
-            on_conn(conn)
-            assert accepted == []
-            with pytest.raises(OSError):
-                conn.getsockname()
-        finally:
-            peer.close()
-            proactor.close()
-
-    def test_accept_many_callback_factory_read_cancel_drops_pending_recv(self) -> None:
-        from tealetio.continuous_callbacks import accept_read_delivery
-
-        proactor = UringProactor(ring_factory=_DeferredUringRing)
-        server = socket.socket()
-        accepted: list[tuple[socket.socket, bytes | None, BaseException | None]] = []
-        try:
-            server.setblocking(False)
-            operation = proactor.accept_many(
-                server,
-                callback_factory=lambda op: accept_read_delivery(proactor, op, accepted.append, recv_size=64),
-            )
-            proactor.ring.complete_accept_multishot("peer-1")
-            proactor.wait(proactor.get_time() + 0.05)
-            assert accepted == []
-            assert len(proactor.ring.pending_recv) == 1
-            operation.cancel()
-            assert operation.cancelled() is True
-            assert accepted == []
-            proactor.wait(proactor.get_time() + 0.05)
-            assert accepted == []
-        finally:
-            for conn, _data, _recv_error in accepted:
-                conn.close()
-            server.close()
-            proactor.close()
-
     def test_handoff_accept_many_closes_socket_when_parent_done(self) -> None:
         parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=object())
-        parent.cancel()
+        parent._finish(exception=CancelledError(), cancelled=True)
         client, server = socket.socketpair()
         try:
             assert proactor_module._handoff_accept_many(parent, client) is False
@@ -3990,7 +3502,7 @@ class TestUringProactor:
         try:
             server.setblocking(False)
             operation = proactor.accept_many(server, accepted.append)
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
@@ -4500,7 +4012,7 @@ class TestUringProactor:
             writer.send(b"hello")
             _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
 
-            operation.cancel()
+            proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
 
             assert operation.cancelled() is True
@@ -4620,7 +4132,7 @@ class TestUringProactor:
         try:
             operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
-            operation.cancel()
+            proactor.cancel(operation)
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1
             proactor.ring.complete_socket()
@@ -4750,11 +4262,11 @@ class TestProactorSchedulerIntegration:
     def test_poll_many_emits_until_cancelled(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         seen: list[int] = []
-        operation = None
+        waiter = None
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = scheduler.io.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            waiter = scheduler.io.poll_many(reader.fileno(), select.POLLIN, seen.append)
 
             def send() -> None:
                 scheduler.sleep(0.001)
@@ -4763,15 +4275,19 @@ class TestProactorSchedulerIntegration:
             def wait_for_event() -> None:
                 while not seen:
                     scheduler.sleep(0.001)
-                operation.cancel()
+                op = waiter.operation
+                assert op is not None
+                scheduler.proactor.cancel(op)
 
             scheduler.spawn(send)
             task = scheduler.spawn(wait_for_event)
             scheduler.run_until_complete(task)
             assert seen[0] & select.POLLIN
         finally:
-            if operation is not None:
-                operation.cancel()
+            if waiter is not None:
+                op = waiter.operation
+                if op is not None and not op.done():
+                    scheduler.proactor.cancel(op)
             reader.close()
             writer.close()
 

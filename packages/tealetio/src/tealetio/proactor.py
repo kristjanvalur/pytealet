@@ -29,12 +29,12 @@ from .io_manager import (
 )
 from .recv_iter import (
     RECV_MANY_BUFFER_PRESSURE,
-    RecvIterBuffer,
     _RecvManyResult,
     _RecvManyResume,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket, socket_from_uring_fd
 from .operations import ContinuousOperation, ContinuousStepResult, Operation
+from .tasks import CancelledError
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -91,11 +91,8 @@ _DEFAULT_RECVITER_BUFFER_SIZE = 16 * 1024
 _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyCallback = Callable[[_RecvManyResult], object]
-_RecvManyCallbackFactory = Callable[[ContinuousOperation[_RecvManyResult]], _RecvManyCallback]
-_RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
-_AcceptManyCallbackFactory = Callable[[ContinuousOperation[AcceptManyResult]], _AcceptManyCallback]
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
@@ -104,18 +101,8 @@ def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> soc
 
 def _spawn_recv_many_operation(
     sock: socket.socket,
-    callback: _RecvManyCallback | None,
-    *,
-    callback_factory: _RecvManyCallbackFactory | None = None,
+    callback: _RecvManyCallback,
 ) -> ContinuousOperation[_RecvManyResult]:
-    if callback_factory is not None:
-        if callback is not None:
-            raise TypeError("recv_many accepts callback or callback_factory, not both")
-        operation = ContinuousOperation[_RecvManyResult](kind="recv_many", fileobj=sock)
-        operation.set_result_callback(callback_factory(operation))
-        return operation
-    if callback is None:
-        raise TypeError("recv_many requires callback or callback_factory")
     return ContinuousOperation[_RecvManyResult](
         kind="recv_many",
         fileobj=sock,
@@ -125,18 +112,8 @@ def _spawn_recv_many_operation(
 
 def _spawn_accept_many_operation(
     sock: socket.socket,
-    callback: _AcceptManyCallback | None,
-    *,
-    callback_factory: _AcceptManyCallbackFactory | None = None,
+    callback: _AcceptManyCallback,
 ) -> ContinuousOperation[AcceptManyResult]:
-    if callback_factory is not None:
-        if callback is not None:
-            raise TypeError("accept_many accepts callback or callback_factory, not both")
-        operation = ContinuousOperation[AcceptManyResult](kind="accept_many", fileobj=sock)
-        operation.set_result_callback(callback_factory(operation))
-        return operation
-    if callback is None:
-        raise TypeError("accept_many requires callback or callback_factory")
     return ContinuousOperation[AcceptManyResult](
         kind="accept_many",
         fileobj=sock,
@@ -389,16 +366,14 @@ class Proactor(Protocol):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: _AcceptManyCallback | None = None,
-        *,
-        callback_factory: _AcceptManyCallbackFactory | None = None,
+        callback: _AcceptManyCallback,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections until cancelled or failed.
 
         Each callback receives the accepted ``socket``. Call
         ``socket.getpeername()`` when the peer address is needed. Use
-        ``ProactorIOManager.accept_many`` or ``continuous_callbacks`` helpers to
-        attach accept-time reads or richer delivery shapes.
+        ``ProactorIOManager.accept_many`` for accept-time reads and richer
+        delivery shapes.
         """
 
         ...
@@ -465,10 +440,9 @@ class Proactor(Protocol):
     def recv_many(
         self,
         sock: socket.socket,
-        callback: _RecvManyCallback | None = None,
+        callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        callback_factory: _RecvManyCallbackFactory | None = None,
     ) -> ContinuousOperation[_RecvManyResult]: ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
@@ -485,6 +459,11 @@ class Proactor(Protocol):
         mask: int,
         callback: Callable[[int], object],
     ) -> ContinuousOperation[int]: ...
+
+    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+        """Cancel ``operation`` and return the ring cancel operation when applicable."""
+
+        ...
 
 
 ProactorFactory = Callable[[], Proactor]
@@ -543,10 +522,9 @@ class ProactorBase:
     def recv_many(
         self,
         sock: socket.socket,
-        callback: _RecvManyCallback | None = None,
+        callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        callback_factory: _RecvManyCallbackFactory | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         raise NotImplementedError
 
@@ -573,6 +551,18 @@ class ProactorBase:
 
     def _clear_shared_recv_buffer_pool(self) -> None:
         self._shared_recv_buffer_pool = None
+
+    def _completed_cancel_operation(self, kind: str, target: Operation[Any]) -> Operation[None]:
+        cancel_op = Operation[None](kind=kind, fileobj=target)
+        cancel_op._finish(result=None)
+        return cancel_op
+
+    def _terminalise_cancelled(self, operation: Operation[Any]) -> None:
+        if not operation.done():
+            operation._finish(exception=CancelledError(), cancelled=True)
+
+    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+        raise NotImplementedError
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
         raise NotImplementedError
@@ -719,6 +709,7 @@ class _UringEntry:
         "completion",
         "active",
         "multishot_leg",
+        "poll_remove",
     )
 
     def __init__(
@@ -727,12 +718,14 @@ class _UringEntry:
         complete: _UringEntryComplete,
         *,
         multishot: bool = False,
+        poll_remove: bool = False,
     ) -> None:
         self.operation = operation
         self.complete = complete
         self.completion = None
         self.active = False
         self.multishot_leg = _MultishotLegState() if multishot else None
+        self.poll_remove = poll_remove
 
     def completions_to_process(
         self,
@@ -1060,32 +1053,33 @@ class SelectorProactor(ProactorBase):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: _AcceptManyCallback | None = None,
-        *,
-        callback_factory: _AcceptManyCallbackFactory | None = None,
+        callback: _AcceptManyCallback,
     ) -> ContinuousOperation[AcceptManyResult]:
-        """Start accepting connections until the operation is cancelled or fails.
+        """Accept connections and deliver each via the result callback.
+
+        Without io_uring multishot accept this issues one ``accept()`` per
+        ``accept_many`` call, emits the connection, and **finishes** the
+        ``ContinuousOperation``. Callers must resubmit (``StreamServer`` re-arms
+        in a loop; ``scheduler.io.accept_many().wait()`` returns after each leg).
+        This differs from oneshot ``poll_many`` fallbacks, which resubmit inside
+        the proactor until cancel. With multishot (``UringProactor`` only) one
+        kernel leg may deliver many connections until cancel, error, or terminal CQE.
 
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
         the peer address is needed.
-
-        Pass ``callback_factory`` instead of ``callback`` when the handler needs
-        a reference to the returned ``ContinuousOperation``.
         """
 
-        operation = _spawn_accept_many_operation(sock, callback, callback_factory=callback_factory)
+        operation = _spawn_accept_many_operation(sock, callback)
 
         def step() -> ContinuousStepResult:
-            progressed = False
-            while True:
-                try:
-                    conn, address = sock.accept()
-                except (BlockingIOError, InterruptedError):
-                    return ContinuousStepResult(progressed=progressed)
-                configure_scheduler_socket(conn)
-                _handoff_accept_many(operation, conn)
-                progressed = True
+            try:
+                conn, _address = sock.accept()
+            except (BlockingIOError, InterruptedError):
+                return ContinuousStepResult(progressed=False)
+            configure_scheduler_socket(conn)
+            _handoff_accept_many(operation, conn)
+            return ContinuousStepResult(progressed=True, done=True)
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
         return operation
@@ -1163,10 +1157,9 @@ class SelectorProactor(ProactorBase):
     def recv_many(
         self,
         sock: socket.socket,
-        callback: _RecvManyCallback | None = None,
+        callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        callback_factory: _RecvManyCallbackFactory | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start receiving byte chunks until EOF, cancellation, or failure.
 
@@ -1181,12 +1174,9 @@ class SelectorProactor(ProactorBase):
 
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
-
-        Pass ``callback_factory`` instead of ``callback`` when the handler needs
-        a reference to the returned ``ContinuousOperation``.
         """
 
-        operation = _spawn_recv_many_operation(sock, callback, callback_factory=callback_factory)
+        operation = _spawn_recv_many_operation(sock, callback)
         sequence = 0
 
         # pre-3.12: no __release_buffer__, so leased views cannot return slots
@@ -1368,7 +1358,6 @@ class SelectorProactor(ProactorBase):
             entry.reader = slot
         if selector_events & selectors.EVENT_WRITE:
             entry.writer = slot
-        self._bind_selector_cancel(operation)
 
     def _submit_socket_operation(
         self,
@@ -1439,16 +1428,16 @@ class SelectorProactor(ProactorBase):
             entry.reader = slot
         else:
             entry.writer = slot
-        self._bind_selector_cancel(operation)
 
-    def _bind_selector_cancel(self, operation: Operation[Any]) -> None:
-        def cancel() -> None:
-            with self._lock:
-                removed = self._remove_operation(operation)
-            if removed:
-                self._after_selector_registration_changed()
-
-        operation.set_cancel(cancel)
+    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+        if operation.done():
+            return self._completed_cancel_operation("cancel", operation)
+        with self._lock:
+            removed = self._remove_operation(operation)
+        if removed:
+            self._after_selector_registration_changed()
+        self._terminalise_cancelled(operation)
+        return self._completed_cancel_operation("cancel", operation)
 
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
@@ -1716,6 +1705,7 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
+        self._uring_operation_entries: dict[int, _UringEntry] = {}
         self._retrying_deferred_submissions = False
         self._submit_attempts = 0
         self._submit_queue_full = 0
@@ -1793,22 +1783,65 @@ class UringProactor(ProactorBase):
         multishot: bool = False,
         poll_remove: bool = False,
     ) -> _UringEntry:
-        entry = _UringEntry(operation=operation, complete=complete, multishot=multishot)
-        teardown = self._submit_poll_remove if poll_remove else self._submit_cancel
-
-        def cancel() -> None:
-            # Deferred resubmit legs are dropped here; in-flight legs use the
-            # pending Completion handle when entry.completion is still set.
-            if self._cancel_deferred_operation(operation):
-                self.break_wait()
-                return
-            completion = entry.completion
-            if completion is not None:
-                teardown(completion)
-            self.break_wait()
-
-        operation.set_cancel(cancel)
+        entry = _UringEntry(
+            operation=operation,
+            complete=complete,
+            multishot=multishot,
+            poll_remove=poll_remove,
+        )
+        self._uring_operation_entries[id(operation)] = entry
         return entry
+
+    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+        if operation.done():
+            return self._completed_cancel_operation("cancel", operation)
+
+        entry = self._uring_operation_entries.get(id(operation))
+        if entry is not None:
+            completion = entry.completion
+            if completion is None:
+                self._cancel_deferred_operation(operation)
+                self._deactivate_uring_entry(entry)
+                cancel_op = self._completed_cancel_operation("cancel", operation)
+            elif entry.poll_remove:
+                cancel_op = self._submit_cancel_op(
+                    completion,
+                    kind="poll_remove",
+                    submit=self._ring.submit_poll_remove,
+                )
+            else:
+                cancel_op = self._submit_cancel_op(
+                    completion,
+                    kind="cancel",
+                    submit=self._ring.submit_cancel,
+                )
+            self.break_wait()
+        elif self._cancel_deferred_operation(operation):
+            self.break_wait()
+            cancel_op = self._completed_cancel_operation("cancel", operation)
+        else:
+            cancel_op = self._completed_cancel_operation("cancel", operation)
+
+        self._terminalise_cancelled(operation)
+        return cancel_op
+
+    def _submit_cancel_op(
+        self,
+        target_completion: _UringCompletion,
+        *,
+        kind: str,
+        submit: Callable[[_UringCompletion, _UringEntry], _UringCompletion],
+    ) -> Operation[None]:
+        cancel_operation = Operation[None](kind=kind, fileobj=target_completion)
+
+        def complete_cancel(entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+            operation = cast(Operation[None], entry.operation)
+            operation.deliver(self, result=None)
+            return operation
+
+        entry = self._uring_entry(cancel_operation, complete_cancel)
+        self._submit_uring_entry(entry, lambda: submit(target_completion, entry))
+        return cancel_operation
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
         """Create a provided-buffer group for ``recv_many`` / ``sock_recv_iter``."""
@@ -1871,6 +1904,7 @@ class UringProactor(ProactorBase):
             thread.join()
         self._pending_tokens.clear()
         self._deferred_submissions.clear()
+        self._uring_operation_entries.clear()
         self.break_wait()
         self._ring.callback = None
         self._ring.close()
@@ -2185,26 +2219,21 @@ class UringProactor(ProactorBase):
     def accept_many(
         self,
         sock: socket.socket,
-        callback: _AcceptManyCallback | None = None,
-        *,
-        callback_factory: _AcceptManyCallbackFactory | None = None,
+        callback: _AcceptManyCallback,
     ) -> ContinuousOperation[AcceptManyResult]:
-        """Start a continuous accept operation.
+        """Accept connections and deliver each via the result callback.
 
         Uses multishot accept when the runtime probe accepts it; otherwise
-        resubmits one-shot ``submit_accept()`` after each connection. `callback`
-        may run on any uring completion service thread.
+        submits one ``submit_accept()``, emits the connection, and finishes so
+        callers re-arm. `callback` may run on any uring completion service thread.
 
         Each accepted connection is delivered as the accepted ``socket``. Call
         ``socket.getpeername()`` when the peer address is needed. Use
-        ``ProactorIOManager.accept_many`` or ``continuous_callbacks`` helpers to
-        attach accept-time reads or richer delivery shapes.
-
-        Pass ``callback_factory`` instead of ``callback`` when the handler needs
-        a reference to the returned ``ContinuousOperation``.
+        ``ProactorIOManager.accept_many`` for accept-time reads and richer
+        delivery shapes.
         """
 
-        operation = _spawn_accept_many_operation(sock, callback, callback_factory=callback_factory)
+        operation = _spawn_accept_many_operation(sock, callback)
         accept_entry_ref: list[_UringEntry | None] = [None]
         if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
             # one multishot accept stays armed until F_MORE clears or we cancel.
@@ -2224,7 +2253,7 @@ class UringProactor(ProactorBase):
             )
             return operation
 
-        # fallback: accept one connection, emit it, queue another submit_accept().
+        # emulated accept_many: one accept, emit, finish; callers re-arm (for example StreamServer).
         submit_box: list[_UringEntrySubmit] = []
         entry = self._uring_entry(
             operation,
@@ -2249,7 +2278,11 @@ class UringProactor(ProactorBase):
             if accept_entry.active:
                 completion = accept_entry.completion
                 if completion is not None:
-                    self._submit_cancel(completion)
+                    self._submit_cancel_op(
+                        completion,
+                        kind="cancel",
+                        submit=self._ring.submit_cancel,
+                    )
                 accept_entry.active = False
             accept_entry_ref[0] = None
         if not operation.done():
@@ -2261,7 +2294,7 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
         submit_box: list[_UringEntrySubmit],
     ) -> Operation[Any] | None:
-        # one-shot accept completes per connection; re-arm via the deferred queue.
+        del submit_box
         operation = cast(ContinuousOperation[AcceptManyResult], entry.operation)
         res = completion.res
         if res < 0:
@@ -2270,10 +2303,9 @@ class UringProactor(ProactorBase):
             return operation
         conn = socket_from_uring_fd(completion.res)
         _handoff_accept_many(operation, conn)
-        if operation.done():
-            return operation
-        self._queue_entry_resubmit(entry, submit_box[0])
-        return None
+        self._deactivate_uring_entry(entry)
+        operation._finish(result=None)
+        return operation
 
     def _deliver_uring_accept_many(
         self,
@@ -2531,10 +2563,9 @@ class UringProactor(ProactorBase):
     def recv_many(
         self,
         sock: socket.socket,
-        callback: _RecvManyCallback | None = None,
+        callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
-        callback_factory: _RecvManyCallbackFactory | None = None,
     ) -> ContinuousOperation[_RecvManyResult]:
         """Start a continuous receive operation that completes on EOF.
 
@@ -2560,12 +2591,9 @@ class UringProactor(ProactorBase):
 
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
-
-        Pass ``callback_factory`` instead of ``callback`` when the handler needs
-        a reference to the returned ``ContinuousOperation``.
         """
 
-        operation = _spawn_recv_many_operation(sock, callback, callback_factory=callback_factory)
+        operation = _spawn_recv_many_operation(sock, callback)
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
             uring_group = cast(_UringBufGroup, buf_group)
             # provided-buffer multishot: leased BufViews, ENOBUFS resume callback path.
@@ -2769,11 +2797,7 @@ class UringProactor(ProactorBase):
             entry.active = False
             self._pending_tokens.pop()
         entry.completion = None
-        # Break operation._cancel_hook -> entry closure cycles once the operation is
-        # finished. Mid-stream legs (ENOBUFS resume, sendall chunking) rebind or
-        # keep the hook while the operation is still live.
-        if entry.operation.done():
-            entry.operation.set_cancel(None)
+        self._uring_operation_entries.pop(id(entry.operation), None)
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
@@ -2789,10 +2813,19 @@ class UringProactor(ProactorBase):
         completed_operation: Operation[Any] | None = None
         for completion in completions:
             if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
-                target = cast(_UringCompletion, completion.user_data)
-                self._deactivate_uring_entry(cast(_UringEntry, target.user_data))
+                result = self._complete_uring_operation(completion)
+                if result is not None:
+                    completed_operation = result
+                poll_target = completion.cancel_target
+                if poll_target is not None:
+                    poll_entry = cast(_UringCompletion, poll_target).user_data
+                    if isinstance(poll_entry, _UringEntry):
+                        self._deactivate_uring_entry(poll_entry)
                 continue
             if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
+                result = self._complete_uring_operation(completion)
+                if result is not None:
+                    completed_operation = result
                 continue
             entry = cast(_UringEntry, completion.user_data)
             to_process = entry.completions_to_process(completion)
@@ -2822,6 +2855,10 @@ class UringProactor(ProactorBase):
             entry.active = True
             self._note_submit_attempt()
             entry.completion = submit()
+            # cancel() may have terminalised the target while submit() was in
+            # flight; drop the leg promptly so pending tokens stay accurate.
+            if entry.operation.done():
+                self._deactivate_uring_entry(entry)
         except uring_api.SubmissionQueueFull:
             self._note_submit_queue_full()
             entry.active = False
@@ -2833,30 +2870,6 @@ class UringProactor(ProactorBase):
             entry.active = False
             self.break_wait()
             raise
-        return True
-
-    def _submit_cancel(self, completion: _UringCompletion) -> bool:
-        try:
-            self._note_submit_attempt()
-            self._ring.submit_cancel(completion)
-        except uring_api.SubmissionQueueFull:
-            self._note_submit_queue_full()
-            self._enqueue_deferred_submission(
-                _UringSubmission(entry=None, submit=lambda: self._ring.submit_cancel(completion))
-            )
-            return False
-        return True
-
-    def _submit_poll_remove(self, completion: _UringCompletion) -> bool:
-        try:
-            self._note_submit_attempt()
-            self._ring.submit_poll_remove(completion)
-        except uring_api.SubmissionQueueFull:
-            self._note_submit_queue_full()
-            self._enqueue_deferred_submission(
-                _UringSubmission(entry=None, submit=lambda: self._ring.submit_poll_remove(completion))
-            )
-            return False
         return True
 
     def _retry_deferred_submissions(self) -> None:
@@ -3002,7 +3015,15 @@ class ProactorScheduler(BaseScheduler):
         return self._proactor
 
     def close(self) -> None:
-        """Close proactor and scheduler-owned resources."""
+        """Close proactor and scheduler-owned resources.
+
+        Exceptional ``IOWaiter.wait()`` exits and ``Proactor.cancel()`` submit
+        async ring-cancel / ``poll_remove`` teardown legs without awaiting them.
+        ``UringProactor.has_pending_operations()`` may stay true briefly until
+        those CQEs complete. Pump ``proactor.wait()`` or ``wait()`` on returned
+        teardown operations when strict ring quiescence is required before
+        ``UringProactor.close()``.
+        """
 
         self._io.close()
         self._proactor.close()
