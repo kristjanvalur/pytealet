@@ -2987,7 +2987,7 @@ class TestUringProactor:
             proactor.cancel(second)
 
             assert second.cancelled() is True
-            assert id(second) not in proactor._uring_operation_entries
+            assert second._uring_entry is None
             assert not any(
                 submission.entry is not None and submission.entry.operation is second
                 for submission in proactor._deferred_submissions
