@@ -24,7 +24,7 @@ from .io_manager import (
 from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
 
 from .scheduler import BaseScheduler
-from .tasks import CancelledError, Task
+from .tasks import CancelledError, Task, get_current
 
 T = TypeVar("T")
 
@@ -815,7 +815,12 @@ class StreamServer:
             return
         accept_task = self._accept_task
         if accept_task is not None and not accept_task.done():
-            accept_task.cancel()
+            if get_current() is not None:
+                accept_task.cancel()
+            else:
+                # close() may run from main or a foreign thread after the
+                # scheduler has stopped (for example pytest teardown).
+                self._scheduler.call_soon_threadsafe(accept_task.cancel)
         # cancel() before the accept tealet's first slice skips its ``finally``.
         if not self._closed:
             self._finish_close()
