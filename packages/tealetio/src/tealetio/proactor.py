@@ -194,6 +194,17 @@ def _spawn_uring_accept_many_operation(
     )
 
 
+def _spawn_uring_poll_many_operation(
+    fd: int,
+    callback: Callable[[int], object],
+) -> "UringContinuousOperation[int]":
+    return UringContinuousOperation(
+        kind="poll_many",
+        fileobj=fd,
+        result_callback=callback,
+    )
+
+
 def _uring_entry_of(operation: Operation[Any]) -> "_UringEntry | None":
     return cast("_UringEntry | None", getattr(operation, "_uring_entry", None))
 
@@ -1836,20 +1847,19 @@ class UringProactor(ProactorBase):
 
     def _uring_entry(
         self,
-        operation: Operation[Any],
+        operation: "UringOperation[Any] | UringContinuousOperation[Any]",
         complete: _UringEntryComplete,
         *,
         multishot: bool = False,
         poll_remove: bool = False,
     ) -> _UringEntry:
-        uring_operation = cast("UringOperation[Any] | UringContinuousOperation[Any]", operation)
         entry = _UringEntry(
-            operation=uring_operation,
+            operation=operation,
             complete=complete,
             multishot=multishot,
             poll_remove=poll_remove,
         )
-        uring_operation._uring_entry = entry
+        operation._uring_entry = entry
         return entry
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
@@ -1892,7 +1902,7 @@ class UringProactor(ProactorBase):
         kind: str,
         submit: Callable[[_UringCompletion, _UringEntry], _UringCompletion],
     ) -> Operation[None]:
-        cancel_operation = UringOperation[None](kind=kind, fileobj=target_completion)
+        cancel_operation = _spawn_uring_operation(kind, target_completion)
 
         def complete_cancel(entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
             operation = cast(Operation[None], entry.operation)
@@ -2073,7 +2083,7 @@ class UringProactor(ProactorBase):
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""
 
-        operation = UringOperation[int](kind="recv_into", fileobj=sock)
+        operation = _spawn_uring_operation("recv_into", sock)
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_recv_into(entry, completion),
@@ -2089,7 +2099,7 @@ class UringProactor(ProactorBase):
     def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
         """Submit a datagram receive operation."""
 
-        operation = UringOperation[tuple[bytes, Any]](kind="recvfrom", fileobj=sock)
+        operation = _spawn_uring_operation("recvfrom", sock)
         data = memoryview(bytearray(bufsize))
         self._submit_recvmsg(
             sock,
@@ -2109,7 +2119,7 @@ class UringProactor(ProactorBase):
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
         """Submit a datagram receive-into operation."""
 
-        operation = UringOperation[tuple[int, Any]](kind="recvfrom_into", fileobj=sock)
+        operation = _spawn_uring_operation("recvfrom_into", sock)
         data = memoryview(buf)
         if nbytes < 0:
             raise ValueError("negative buffersize in recvfrom_into")
@@ -2175,13 +2185,13 @@ class UringProactor(ProactorBase):
             operation.deliver(self, result=None)
             return operation
         sock = cast(socket.socket, operation.fileobj)
-        self._submit_sendall(sock, operation, data, offset, progress)
+        self._submit_sendall(sock, cast("UringOperation[None]", entry.operation), data, offset, progress)
         return None
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
 
-        operation = UringOperation[int](kind="sendto", fileobj=sock)
+        operation = _spawn_uring_operation("sendto", sock)
         payload = memoryview(data)
         entry = self._uring_entry(
             operation,
@@ -2205,7 +2215,7 @@ class UringProactor(ProactorBase):
     def accept(self, sock: socket.socket) -> Operation[socket.socket]:
         """Submit a socket accept operation."""
 
-        operation = UringOperation[socket.socket](kind="accept", fileobj=sock)
+        operation = _spawn_uring_operation("accept", sock)
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_accept(entry, completion),
@@ -2222,7 +2232,7 @@ class UringProactor(ProactorBase):
     def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
         """Submit ``socket.shutdown(how)`` for ``sock``."""
 
-        operation = UringOperation[None](kind="shutdown", fileobj=sock)
+        operation = _spawn_uring_operation("shutdown", sock)
         if sock.fileno() == -1:
             operation.deliver(self, exception=OSError(errno.EBADF, "Bad file descriptor"))
             return operation
@@ -2236,7 +2246,7 @@ class UringProactor(ProactorBase):
     def close_socket(self, sock: socket.socket) -> Operation[None]:
         """Submit socket close and release the Python wrapper fd."""
 
-        operation = UringOperation[None](kind="close_socket", fileobj=sock)
+        operation = _spawn_uring_operation("close_socket", sock)
         if sock.fileno() == -1:
             operation.deliver(self, result=None)
             return operation
@@ -2251,7 +2261,7 @@ class UringProactor(ProactorBase):
     def close_fd(self, fd: int) -> Operation[None]:
         """Submit raw fd close for caller-owned descriptors (for example from ``openat``)."""
 
-        operation = UringOperation[None](kind="close_fd", fileobj=fd)
+        operation = _spawn_uring_operation("close_fd", fd)
         if fd < 0:
             operation.deliver(self, result=None)
             return operation
@@ -2462,7 +2472,7 @@ class UringProactor(ProactorBase):
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
         """Submit an io_uring openat operation and return the opened fd on success."""
 
-        operation = UringOperation[int](kind="openat", fileobj=path)
+        operation = _spawn_uring_operation("openat", path)
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_openat(entry, completion),
@@ -2478,7 +2488,7 @@ class UringProactor(ProactorBase):
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
         """Submit a positioned file read that completes with the bytes read."""
 
-        operation = UringOperation[bytes](kind="read", fileobj=fd)
+        operation = _spawn_uring_operation("read", fd)
         data = memoryview(bytearray(n))
         entry = self._uring_entry(
             operation,
@@ -2497,7 +2507,7 @@ class UringProactor(ProactorBase):
     def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
         """Submit a positioned file read into a caller-provided buffer."""
 
-        operation = UringOperation[int](kind="read_into", fileobj=fd)
+        operation = _spawn_uring_operation("read_into", fd)
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_read_into(entry, completion),
@@ -2513,7 +2523,7 @@ class UringProactor(ProactorBase):
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
         """Submit a positioned file write and return the byte count written."""
 
-        operation = UringOperation[int](kind="write", fileobj=fd)
+        operation = _spawn_uring_operation("write", fd)
         payload = memoryview(data)
         entry = self._uring_entry(
             operation,
@@ -2536,9 +2546,9 @@ class UringProactor(ProactorBase):
         if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "submit_statx"):
             return super().stat(path, fd=fd)
 
-        operation = UringOperation[os.stat_result](
-            kind="stat",
-            fileobj=fd if fd >= 0 else path,
+        operation = _spawn_uring_operation(
+            "stat",
+            fd if fd >= 0 else path,
         )
         buf = bytearray(uring_api.STATX_BUFFER_SIZE)
         if fd >= 0:
@@ -2592,7 +2602,7 @@ class UringProactor(ProactorBase):
         if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "submit_statx_fdsize"):
             return super().stat_fdsize(fd)
 
-        operation = UringOperation[int](kind="stat_fdsize", fileobj=fd)
+        operation = _spawn_uring_operation("stat_fdsize", fd)
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_stat_fdsize(entry, completion),
@@ -2719,7 +2729,7 @@ class UringProactor(ProactorBase):
 
         # mask and fd go straight to io_uring; bad values show up as CQE errors.
         # selector validates masks (select() fd lists) and fd>=0; no per-fd exclusivity.
-        operation = UringOperation[int](kind="poll", fileobj=fd)
+        operation = _spawn_uring_operation("poll", fd)
         entry = self._uring_entry(
             operation,
             lambda entry, completion: self._complete_uring_poll(entry, completion),
@@ -2746,11 +2756,7 @@ class UringProactor(ProactorBase):
         """
 
         # mask handling matches poll(); no pre-validation on the uring path.
-        operation = UringContinuousOperation[int](
-            kind="poll_many",
-            fileobj=fd,
-            result_callback=callback,
-        )
+        operation = _spawn_uring_poll_many_operation(fd, callback)
         if self._capabilities.get("IORING_POLL_MULTISHOT", False):
             # kernel keeps the poll armed; cancel via submit_poll_remove().
             entry = self._uring_entry(
@@ -2850,7 +2856,8 @@ class UringProactor(ProactorBase):
             entry.active = False
             self._pending_tokens.pop()
         entry.completion = None
-        entry.operation._uring_entry = None
+        if entry.operation._uring_entry is entry:
+            entry.operation._uring_entry = None
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
@@ -2906,6 +2913,7 @@ class UringProactor(ProactorBase):
         self._pending_tokens.append(None)
         try:
             entry.active = True
+            entry.operation._uring_entry = entry
             self._note_submit_attempt()
             entry.completion = submit()
             # cancel() may have terminalised the target while submit() was in
@@ -2960,14 +2968,16 @@ class UringProactor(ProactorBase):
                 del self._deferred_submissions[index]
                 entry.active = False
                 entry.completion = None
-                cast("UringOperation[Any] | UringContinuousOperation[Any]", operation)._uring_entry = None
+                uring_operation = cast("UringOperation[Any] | UringContinuousOperation[Any]", operation)
+                if uring_operation._uring_entry is entry:
+                    uring_operation._uring_entry = None
                 return True
         return False
 
     def _submit_sendall(
         self,
         sock: socket.socket,
-        operation: Operation[None],
+        operation: "UringOperation[None]",
         data: memoryview,
         offset: int,
         progress: _ProgressCallback | None,
@@ -2988,7 +2998,7 @@ class UringProactor(ProactorBase):
     def _submit_recvmsg(
         self,
         sock: socket.socket,
-        operation: Operation[Any],
+        operation: "UringOperation[Any]",
         data: memoryview,
         complete: _UringEntryComplete,
     ) -> None:
