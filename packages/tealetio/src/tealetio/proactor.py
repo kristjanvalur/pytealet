@@ -1800,6 +1800,8 @@ class UringProactor(ProactorBase):
         if entry is not None:
             completion = entry.completion
             if completion is None:
+                self._cancel_deferred_operation(operation)
+                self._deactivate_uring_entry(entry)
                 cancel_op = self._completed_cancel_operation("cancel", operation)
             elif entry.poll_remove:
                 cancel_op = self._submit_cancel_op(

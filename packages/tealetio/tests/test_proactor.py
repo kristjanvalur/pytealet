@@ -2978,6 +2978,11 @@ class TestUringProactor:
             proactor.cancel(second)
 
             assert second.cancelled() is True
+            assert id(second) not in proactor._uring_operation_entries
+            assert not any(
+                submission.entry is not None and submission.entry.operation is second
+                for submission in proactor._deferred_submissions
+            )
             proactor.ring.complete_recv(b"first")
             assert first.result() == b"first"
             assert len(proactor.ring.submitted_recv) == 1
