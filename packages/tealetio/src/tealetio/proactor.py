@@ -263,8 +263,8 @@ class _SelectorBufGroup:
     """Synthetic provided-buffer pool kept for API compatibility on selector.
 
     Selector ``recv_many`` delivers one copied chunk per call and does not
-    consult ``leased_count``; ``sock_recv_iter`` still accepts a pool for API
-    parity with uring sizing helpers.
+    consult ``leased_count`` itself; ``RecvIterBuffer`` leases copies against
+    this pool so ``sock_recv_iter`` backpressure matches the uring contract.
     """
 
     def __init__(self, buffer_size: int, buffer_count: int) -> None:

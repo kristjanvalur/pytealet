@@ -98,6 +98,10 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
 
+def _chunk_already_leased(data: memoryview) -> bool:
+    return getattr(data.obj, "__release_buffer__", None) is not None
+
+
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``."""
 
@@ -138,6 +142,33 @@ class RecvIterBuffer:
         self._next_base = base_sequence
         self._awaiting_resubmit = True
 
+    def _pool_at_high_water(self) -> bool:
+        """Return True when ``leased_count >= buffer_count`` (real multishot would ENOBUFS)."""
+
+        buf_group = self._buf_group
+        return buf_group.leased_count >= buf_group.buffer_count
+
+    def _pool_at_low_water(self) -> bool:
+        """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``)."""
+
+        buf_group = self._buf_group
+        return buf_group.leased_count * 2 < buf_group.buffer_count
+
+    def _maybe_track_chunk_lease(self, data: memoryview) -> memoryview:
+        if not data or _chunk_already_leased(data):
+            return data
+        if getattr(self._buf_group, "_note_leased", None) is None:
+            return data
+        from .proactor import _leased_selector_memoryview
+
+        return _leased_selector_memoryview(bytes(data), self._buf_group)  # type: ignore[arg-type]
+
+    def _signal_pressure_if_pending(self) -> bool:
+        if self._pressure_pending:
+            return False
+        self._pressure_pending = True
+        return True
+
     def _on_stream_done(self, stream: Operation[Any]) -> None:
         with self._lock:
             if stream.cancelled():
@@ -158,17 +189,15 @@ class RecvIterBuffer:
             if self._closed:
                 return
             if _is_enobufs_delivery(delivery):
-                if self._pressure_pending:
-                    return
                 self._schedule_resubmit(base_sequence=delivery.index)
-                self._pressure_pending = True
-                notify = True
+                if self._signal_pressure_if_pending():
+                    notify = True
             elif delivery.exception is not None:
                 self._stream_error = delivery.exception
                 self._stream_done = True
                 notify = True
             elif delivery.value is not None:
-                data = delivery.value
+                data = self._maybe_track_chunk_lease(delivery.value)
                 ready = self._reorder.pushpop((delivery.index, data))
                 if ready is not None:
                     self._ready.append(ready)
@@ -176,6 +205,8 @@ class RecvIterBuffer:
                 if not delivery.more:
                     if data:
                         self._schedule_resubmit(base_sequence=delivery.index + 1)
+                        if self._pool_at_high_water() and self._signal_pressure_if_pending():
+                            notify = True
                     else:
                         self._stream_done = True
                         self._stream_error = None
@@ -185,12 +216,10 @@ class RecvIterBuffer:
     def _should_resubmit(self) -> bool:
         if self._ready or len(self._reorder):
             return False
-        buf_group = self._buf_group
-        required_free = max(1, buf_group.buffer_count // 2)
-        return buf_group.buffer_count - buf_group.leased_count >= required_free
+        return self._pool_at_low_water()
 
     def consume_pressure_resume(self) -> None:
-        """Start a fresh ``recv_many`` once the buffer pool has enough free slots."""
+        """Start a fresh ``recv_many`` once the pool has drained below the low-water mark."""
 
         with self._lock:
             if not self._awaiting_resubmit or not self._should_resubmit():

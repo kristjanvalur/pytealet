@@ -218,7 +218,14 @@ def _iter_recv_stream(stream: Any):
 
 
 def _recviter_bytes(stream: Any) -> list[tuple[int, bytes]]:
-    return [(index, bytes(chunk)) for index, chunk in _iter_recv_stream(stream) if index >= 0]
+    seen: list[tuple[int, bytes]] = []
+    for index, chunk in _iter_recv_stream(stream):
+        if index < 0:
+            continue
+        seen.append((index, bytes(chunk)))
+        if type(chunk) is memoryview:
+            chunk.release()
+    return seen
 
 
 def _assert_recviter_pressure(item: tuple[int, Any] | None) -> None:
@@ -373,13 +380,13 @@ def test_selector_leased_memoryview_release_returns_pool_slot():
 )
 def test_selector_buf_group_pressure_threshold_matches_recviter_policy():
     pool = proactor_module._SelectorBufGroup(1024, 4)
-    required_free = max(1, pool.buffer_count // 2)
-    assert required_free == 2
     views = [proactor_module._leased_selector_memoryview(b"x", pool) for _ in range(3)]
-    assert pool.buffer_count - pool.leased_count < required_free
+    assert pool.leased_count < pool.buffer_count
+    views.append(proactor_module._leased_selector_memoryview(b"x", pool))
+    assert pool.leased_count >= pool.buffer_count
     for view in views:
         view.release()
-    assert pool.buffer_count - pool.leased_count >= required_free
+    assert pool.leased_count * 2 < pool.buffer_count
 
 
 def test_recviter_buffer_reorders_out_of_order_chunks():
@@ -396,7 +403,7 @@ def test_recviter_buffer_reorders_out_of_order_chunks():
     assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
 
 
-def test_recviter_buffer_resume_waits_until_half_pool_is_free():
+def test_recviter_buffer_resume_waits_until_low_water_mark():
     class _Pool:
         buffer_count = 4
         leased_count = 4
@@ -422,6 +429,10 @@ def test_recviter_buffer_resume_waits_until_half_pool_is_free():
         second = buffer.take_next()
         assert second is not None and second[0] == 1
         pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 2]
         buffer.on_result(_recv_chunk(2, b"", more=False))
         assert buffer.take_next() is None
         return proactor.recv_many_bases
@@ -644,7 +655,7 @@ def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
     assert _exercise_recviter_buffer(exercise) == [0, 1]
 
 
-def test_recviter_buffer_resumes_when_half_pool_is_free():
+def test_recviter_buffer_resumes_when_low_water_mark_reached():
     class _Pool:
         buffer_count = 4
         leased_count = 4
@@ -669,6 +680,10 @@ def test_recviter_buffer_resumes_when_half_pool_is_free():
         second = buffer.take_next()
         assert second is not None and second[0] == 1
         pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 2]
         buffer.on_result(_recv_chunk(2, b"", more=False))
         assert buffer.take_next() is None
         return proactor.recv_many_bases
@@ -702,6 +717,10 @@ def test_recviter_buffer_defers_resume_until_all_queued_chunks_yielded():
         second = buffer.take_next()
         assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
         pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 2]
         buffer.on_result(_recv_chunk(2, b"", more=False))
         eof = buffer.take_next()
         assert eof is None
@@ -734,6 +753,9 @@ def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
         assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
         pool.note_chunk_released()
         assert proactor.recv_many_bases == [0]
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 1]
         buffer.on_result(_recv_chunk(1, b"", more=False))
         second = buffer.take_next()
         assert proactor.recv_many_bases == [0, 1]
@@ -765,6 +787,35 @@ def test_recviter_buffer_resubmits_when_leg_stops_with_data():
     assert _exercise_recviter_buffer(exercise) == [0, 1]
 
 
+def test_recviter_buffer_more_false_triggers_pressure_when_pool_is_full():
+    class _Pool:
+        buffer_count = 2
+        leased_count = 2
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer.on_result(_recv_chunk(0, b"a", more=False))
+        _assert_recviter_pressure(buffer.take_next())
+        assert proactor.recv_many_bases == [0]
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        pool.note_chunk_released()
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 1]
+        buffer.on_result(_recv_chunk(1, b"", more=False))
+        assert buffer.take_next() is None
+        return proactor.recv_many_bases
+
+    assert _exercise_recviter_buffer(exercise) == [0, 1]
+
+
 def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
     class _Pool:
         buffer_count = 4
@@ -787,6 +838,7 @@ def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
         pool.note_chunk_released()
         second = buffer.take_next()
         assert second is not None and second[0] == 1
+        pool.note_chunk_released()
         pool.note_chunk_released()
         buffer.consume_pressure_resume()
         assert proactor.recv_many_bases == [0, 2]
@@ -1326,7 +1378,11 @@ class TestSelectorProactor:
                 seen: list[tuple[int, bytes]] = []
                 pool = scheduler.io.create_recv_buffer_pool(16 * 1024, 2)
                 for index, chunk in _iter_recv_stream(scheduler.io.sock_recv_iter(reader, pool)):
+                    if index == RECV_MANY_BUFFER_PRESSURE:
+                        continue
                     seen.append((index, bytes(chunk)))
+                    if type(chunk) is memoryview:
+                        chunk.release()
                 return seen
 
             def deliver_chunks() -> None:
@@ -3810,6 +3866,8 @@ class TestUringProactor:
                     if index == RECV_MANY_BUFFER_PRESSURE:
                         saw_pressure = True
                         state["got_pressure"] = True
+                        while pool.leased_count * 2 >= pool.buffer_count:
+                            pool.note_chunk_released()
                         deadline = scheduler.proactor.get_time() + 1.0
                         while not state["release"] and scheduler.proactor.get_time() < deadline:
                             scheduler.sleep(0.02)
@@ -3900,6 +3958,8 @@ class TestUringProactor:
                 for index, chunk in _iter_recv_stream(scheduler.io.sock_recv_iter(reader, pool)):
                     if index == RECV_MANY_BUFFER_PRESSURE:
                         state["got_pressure"] = True
+                        while pool.leased_count * 2 >= pool.buffer_count:
+                            pool.note_chunk_released()
                         deadline = scheduler.proactor.get_time() + 1.0
                         while not state["release"] and scheduler.proactor.get_time() < deadline:
                             scheduler.sleep(0.02)
