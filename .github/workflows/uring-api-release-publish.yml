@@ -93,6 +93,9 @@ jobs:
       id-token: write
       contents: write
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
@@ -123,8 +126,9 @@ jobs:
           esac
 
           notes="Release for packages/uring_api ${version}."
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" publish-dist/* --clobber
+          repo="${{ github.repository }}"
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release upload "$tag" publish-dist/* --clobber --repo "$repo"
           else
-            gh release create "$tag" publish-dist/* --title "$title" --notes "$notes" "${prerelease_args[@]}"
+            gh release create "$tag" publish-dist/* --title "$title" --notes "$notes" --repo "$repo" "${prerelease_args[@]}"
           fi
