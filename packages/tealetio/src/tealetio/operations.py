@@ -3,11 +3,10 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, NamedTuple, TypeVar, cast
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
-T_chunk = TypeVar("T_chunk")
 
 
 class InvalidStateError(Exception):
@@ -19,21 +18,22 @@ _MultishotRearm = Callable[[], None]
 _ProactorRef = Any
 
 
-@dataclass(frozen=True, slots=True)
-class MultishotDelivery(Generic[T_chunk]):
+class MultishotDelivery(NamedTuple):
     """One multishot leg delivery to a continuous operation callback.
 
-    ``index`` is the leg-local ordinal for indexed transports such as
-    ``recv_many``. ``value`` carries successful chunk data when present.
-    ``exception`` carries transport failures the consumer may interpret (for
-    example ``errno.ENOBUFS`` on provided-buffer recv). ``more`` mirrors
-    ``IORING_CQE_F_MORE`` on uring backends. For ``recv_many``, ``more=False``
-    with empty data signals EOF; ``more=False`` with non-empty data means the
-    leg stopped before EOF and consumers should start a fresh ``recv_many()``.
+    ``(index, value, exception, more)``. ``index`` is the leg-local ordinal
+    when the backend provides one; otherwise zero for informational use on
+    ``accept_many`` and ``poll_many``. ``value`` carries successful chunk data
+    when present. ``exception`` carries transport failures the consumer may
+    interpret (for example ``errno.ENOBUFS`` on provided-buffer recv). ``more``
+    mirrors ``IORING_CQE_F_MORE`` on uring backends. For ``recv_many``,
+    ``more=False`` with empty data signals EOF; ``more=False`` with non-empty
+    data means the leg stopped before EOF and consumers should start a fresh
+    ``recv_many()``.
     """
 
-    index: int | None = None
-    value: T_chunk | None = None
+    index: int = 0
+    value: Any = None
     exception: BaseException | None = None
     more: bool = True
 
@@ -182,7 +182,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         self,
         kind: str,
         fileobj: object | None = None,
-        result_callback: Callable[[MultishotDelivery[T_co]], object] | None = None,
+        result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> None:
         super().__init__(kind, fileobj)
         self._result_callback = result_callback
@@ -195,7 +195,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         if rearm is not None:
             rearm()
 
-    def _emit_delivery(self, delivery: MultishotDelivery[T_co]) -> bool:
+    def _emit_delivery(self, delivery: MultishotDelivery) -> bool:
         """Deliver one multishot chunk when the operation is still active."""
 
         with self._lock:
@@ -211,12 +211,10 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         self,
         result: T_co,
         *,
-        index: int | None = None,
+        index: int = 0,
         exception: BaseException | None = None,
         more: bool = True,
     ) -> bool:
         """Deliver one successful chunk wrapped in ``MultishotDelivery``."""
 
-        return self._emit_delivery(
-            MultishotDelivery(index=index, value=result, exception=exception, more=more)
-        )
+        return self._emit_delivery(MultishotDelivery(index, result, exception, more))

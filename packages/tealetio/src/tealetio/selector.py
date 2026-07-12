@@ -340,7 +340,7 @@ class SelectorMixin:
         self,
         fd: int,
         mask: int,
-        callback: Callable[[MultishotDelivery[int]], object],
+        callback: Callable[[MultishotDelivery], object],
     ) -> ContinuousOperation[int]:
         """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
 

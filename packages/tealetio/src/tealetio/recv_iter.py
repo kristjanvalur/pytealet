@@ -93,7 +93,7 @@ class _OrderedIngestBuffer(Generic[T_Cargo]):
         self._next_index = start
 
 
-def _is_enobufs_delivery(delivery: MultishotDelivery[_RecvManyValue]) -> bool:
+def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     exc = delivery.exception
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
@@ -154,7 +154,7 @@ class RecvIterBuffer:
                     self._stream_done = True
         self._event.set()
 
-    def on_result(self, delivery: MultishotDelivery[_RecvManyValue]) -> None:
+    def on_result(self, delivery: MultishotDelivery) -> None:
         notify = False
         with self._lock:
             if self._closed:
@@ -162,15 +162,14 @@ class RecvIterBuffer:
             if _is_enobufs_delivery(delivery):
                 if self._pressure_pending:
                     return
-                if delivery.index is not None:
-                    self._schedule_resubmit(leg_index=delivery.index)
+                self._schedule_resubmit(leg_index=delivery.index)
                 self._pressure_pending = True
                 notify = True
             elif delivery.exception is not None:
                 self._stream_error = delivery.exception
                 self._stream_done = True
                 notify = True
-            elif delivery.value is not None and delivery.index is not None:
+            elif delivery.value is not None:
                 leg_index = delivery.index
                 data = delivery.value
                 global_index = self._stream_base + leg_index

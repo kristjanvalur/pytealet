@@ -86,10 +86,10 @@ _DEFAULT_RECVITER_BUFFER_SIZE = 16 * 1024
 _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyValue = memoryview
-_RecvManyCallback = Callable[[MultishotDelivery[_RecvManyValue]], object]
+_RecvManyCallback = Callable[[MultishotDelivery], object]
 AcceptManyResult: TypeAlias = socket.socket
-_AcceptManyCallback = Callable[[MultishotDelivery[socket.socket]], object]
-_PollManyCallback = Callable[[MultishotDelivery[int]], object]
+_AcceptManyCallback = Callable[[MultishotDelivery], object]
+_PollManyCallback = Callable[[MultishotDelivery], object]
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
@@ -797,7 +797,7 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self,
         kind: str,
         fileobj: object | None = None,
-        result_callback: Callable[[MultishotDelivery[T_co]], object] | None = None,
+        result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> None:
         super().__init__(kind, fileobj, result_callback)
         self._uring_entry: _UringEntry | None = None

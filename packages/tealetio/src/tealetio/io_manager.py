@@ -181,7 +181,7 @@ class PollIO(Protocol):
         self,
         fd: int,
         mask: int,
-        callback: Callable[[MultishotDelivery[int]], object],
+        callback: Callable[[MultishotDelivery], object],
     ) -> IOWaitable[None]: ...
 
 
@@ -520,7 +520,7 @@ class ProactorIOManager:
         self,
         fd: int,
         mask: int,
-        callback: Callable[[MultishotDelivery[int]], object],
+        callback: Callable[[MultishotDelivery], object],
     ) -> IOWaitable[None]:
         return IOWaiter(self, self._proactor.poll_many(fd, mask, callback))
 
@@ -561,10 +561,10 @@ class ProactorIOManager:
         *,
         recv_size: int,
         recv_timeout: float | None = None,
-    ) -> Callable[[MultishotDelivery[socket.socket]], None]:
+    ) -> Callable[[MultishotDelivery], None]:
         """Return a proactor ``accept_many`` callback that pre-reads each accept."""
 
-        def on_conn(delivery: MultishotDelivery[socket.socket]) -> None:
+        def on_conn(delivery: MultishotDelivery) -> None:
             if delivery.exception is not None:
                 raise delivery.exception
             conn = delivery.value

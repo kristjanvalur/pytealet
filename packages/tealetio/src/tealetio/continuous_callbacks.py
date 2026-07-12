@@ -51,10 +51,10 @@ def finalize_accept_recv_error(
 
 def wrap_accept_delivery(
     deliver: Callable[[AcceptReadResult], object],
-) -> Callable[[MultishotDelivery[socket.socket]], None]:
+) -> Callable[[MultishotDelivery], None]:
     """Adapt proactor ``accept_many`` deliveries to io_manager accept tuples."""
 
-    def on_conn(delivery: MultishotDelivery[socket.socket]) -> None:
+    def on_conn(delivery: MultishotDelivery) -> None:
         if delivery.exception is not None:
             raise delivery.exception
         if delivery.value is None:
