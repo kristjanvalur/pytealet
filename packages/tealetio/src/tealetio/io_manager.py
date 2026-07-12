@@ -608,6 +608,11 @@ class ProactorIOManager:
 
         When ``recv_timeout`` is set (requires ``recv_size``), each accept-time
         ``recv`` is cancelled if it has not completed by then.
+
+        Accept-time ``recv`` operations are independent of the parent
+        ``accept_many`` waiter. Cancelling the accept stream does not cancel
+        in-flight recv legs; callers must tolerate late deliveries or close
+        listening sockets to stop new accepts.
         """
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)

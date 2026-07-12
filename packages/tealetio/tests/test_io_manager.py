@@ -1085,6 +1085,36 @@ class TestProactorIOManagerDirect:
         assert pending.cancelled() is True
         assert waiter.operation is pending
 
+    def test_io_waiter_exceptional_exit_routes_cancel_through_cancel_operation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.io_waiter as io_waiter_module
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        operation = Operation[bytes](kind="recv")
+        waiter = IOWaiter(io, operation)
+        cancelled: list[Operation[Any]] = []
+
+        def track_cancel(op: Operation[Any]) -> IOWaiter[None]:
+            cancelled.append(op)
+            return IOWaiter(io, Operation[None](kind="cancel"))
+
+        monkeypatch.setattr(io, "_cancel_operation", track_cancel)
+
+        original_event = io_waiter_module.ThreadsafeEvent
+
+        class RaisingEvent(original_event):
+            def swait(self) -> bool:
+                raise KeyboardInterrupt()
+
+        monkeypatch.setattr(io_waiter_module, "ThreadsafeEvent", RaisingEvent)
+
+        with pytest.raises(KeyboardInterrupt):
+            waiter.wait()
+
+        assert cancelled == [operation]
+
     def test_poll_many_returns_io_waitable(self):
         proactor = _MockProactor()
         io = _manager(proactor)

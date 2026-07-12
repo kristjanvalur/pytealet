@@ -70,6 +70,7 @@ class SelectorMixin:
     def close(self) -> None:
         """Close selector resources and scheduler-owned resources."""
 
+        self._operation_cancel_handlers.clear()
         self._selector.close()
         self._selector_wakeup_reader.close()
         self._selector_wakeup_writer.close()

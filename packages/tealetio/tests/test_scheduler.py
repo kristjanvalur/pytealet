@@ -1737,6 +1737,21 @@ class TestSchedulerAccessors:
             writer.close()
             s.close()
 
+    def test_selector_scheduler_close_clears_operation_cancel_handlers(self):
+        s = SyncSelectorScheduler()
+        set_scheduler(s)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            s.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
+            assert s._operation_cancel_handlers
+            s.close()
+            assert not s._operation_cancel_handlers
+        finally:
+            reader.close()
+            writer.close()
+
     def test_selector_scheduler_poll_detects_pollhup_after_peer_close(self):
         s = SyncSelectorScheduler()
         set_scheduler(s)
