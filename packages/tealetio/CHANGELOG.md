@@ -69,6 +69,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   honour flags.
 - Chained ``connect`` operations (``sock_connect(..., initial=...)``,
   ``sock_create(..., connect_to=...)``) complete with ``None``, not ``True``.
+- ``accept_many`` / ``poll_many`` on ``scheduler.io`` return ``IOWaitable[None]``
+  instead of ``ContinuousOperation``. ``wait()`` ends the current stream leg;
+  on non-multishot backends that is one accept or poll event — re-arm in a loop
+  (``StreamServer`` accept tealet) or hold ``waiter.operation`` for the raw
+  ``Operation`` handle.
+- Accept-time ``recv`` legs started by ``accept_many(..., recv_size=...)`` are
+  independent of the parent waiter. Cancelling the accept stream does not cancel
+  in-flight recvs; callers must discard late deliveries after shutdown.
+
+### Fixed
+- ``StreamServer.wait_closed()`` waits for the accept-loop tealet to exit, not
+  only handler tealets.
+- Accept-time ``recv_timeout`` no longer leaks scheduler timers when the recv
+  completes before the arm callback runs on the scheduler thread.
+- ``UringProactor`` deactivates uring entries promptly when ``submit()`` returns
+  on an already-cancelled target, keeping ``has_pending_operations()`` accurate.
 
 ### Added
 - `Proactor.create_socket()` and `scheduler.io.sock_create()` to create

@@ -2855,6 +2855,10 @@ class UringProactor(ProactorBase):
             entry.active = True
             self._note_submit_attempt()
             entry.completion = submit()
+            # cancel() may have terminalised the target while submit() was in
+            # flight; drop the leg promptly so pending tokens stay accurate.
+            if entry.operation.done():
+                self._deactivate_uring_entry(entry)
         except uring_api.SubmissionQueueFull:
             self._note_submit_queue_full()
             entry.active = False

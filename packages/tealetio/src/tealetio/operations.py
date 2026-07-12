@@ -25,7 +25,14 @@ class ContinuousStepResult:
 
 
 class Operation(Generic[T]):
-    """Future-shaped IO operation owned by a proactor backend."""
+    """Future-shaped IO operation owned by a proactor backend.
+
+    Cancellation is not on ``Operation`` itself. Call
+    ``scheduler.proactor.cancel(operation)`` (or ``scheduler.io`` /
+    ``SelectorScheduler.cancel_operation()`` wrappers). The proactor returns a
+    teardown ``Operation[None]``; ``wait()`` on it when ring cancel must settle
+    before shutdown, or ``forget()`` when only the target's terminal state matters.
+    """
 
     def __init__(
         self,

@@ -172,7 +172,25 @@ size is up to 8 KiB, stream indices stay in-order, and
 
 When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
 falls back to repeated one-shot `submit_accept()` after each accepted
-connection.
+connection. `SelectorProactor.accept_many()` uses the same one-shot re-arm
+pattern. Direct `proactor.accept_many()` callers must resubmit after each
+accept; `scheduler.io.accept_many(...).wait()` returns an `IOWaitable` that
+unblocks when the current stream leg ends (one accept on oneshot backends), so
+callers re-arm in a loop — `StreamServer` owns this accept-loop tealet.
+
+Cancelling an operation is only through `scheduler.proactor.cancel(operation)`
+(or `scheduler.io._cancel_operation()` / `SelectorScheduler.cancel_operation()`
+wrappers). `Operation.cancel()` was removed. The proactor returns a teardown
+`Operation[None]`; `wait()` on it when io_uring cancel must settle before
+shutdown, or `forget()` when only the target's terminal state matters.
+Exceptional `IOWaiter.wait()` exit uses `.forget()` on the teardown leg
+(best-effort).
+
+`scheduler.io.accept_many()` / `accept_many_streams()` may start independent
+accept-time `recv` operations when `recv_size` is set. Cancelling the accept
+`IOWaiter` does not cancel those recvs; discard late deliveries after shutdown
+(as `StreamServer` does via `_closed`) or tolerate in-flight work until each
+recv completes or hits `recv_timeout` (cooperative cancel).
 
 When `IORING_POLL_MULTISHOT` is unavailable, `UringProactor.poll_many()` falls
 back to repeated one-shot `submit_poll()` after each readiness event.

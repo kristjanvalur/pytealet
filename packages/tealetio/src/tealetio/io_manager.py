@@ -610,12 +610,19 @@ class ProactorIOManager:
         failures close the socket silently.
 
         When ``recv_timeout`` is set (requires ``recv_size``), each accept-time
-        ``recv`` is cancelled if it has not completed by then.
+        ``recv`` is cancelled if it has not completed by then. Timeout cancel is
+        cooperative/best-effort like other cancel paths: teardown legs are not
+        awaited before the socket is closed in the recv done callback.
 
-        Accept-time ``recv`` operations are independent of the parent
-        ``accept_many`` waiter. Cancelling the accept stream does not cancel
-        in-flight recv legs; callers must tolerate late deliveries or close
-        listening sockets to stop new accepts.
+        ``wait()`` on the returned ``IOWaitable`` ends the accept **stream leg**
+        only. On non-multishot backends the stream finishes after each accept;
+        accept-time ``recv`` and scheduler-marshalled deliveries may still be in
+        flight. Re-arm in a loop when more accepts are needed.
+
+        Accept-time ``recv`` operations are independent of the parent waiter.
+        Cancelling the accept stream does not cancel in-flight recv legs; mirror
+        ``StreamServer``'s ``_closed`` discard pattern or close listening sockets
+        to stop new accepts.
         """
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
@@ -674,6 +681,9 @@ class ProactorIOManager:
         exc)`` when provided (for logging ``getpeername()`` and similar); the
         socket is always closed afterwards. With no ``on_recv_error``, recv
         failures close the socket silently.
+
+        See ``accept_many()`` for ``wait()`` / accept-stream vs nested-recv
+        semantics and shutdown discard responsibilities.
         """
 
         from .streams import _open_streams

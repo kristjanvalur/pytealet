@@ -64,8 +64,21 @@ class IOWaiter(Generic[T]):
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
-    ``forget()`` is undefined. An exceptional exit from ``wait()`` (for example
-    a timeout) cancels the underlying operation unless delivery already completed.
+    ``forget()`` is undefined.
+
+    An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
+    parking timeout) routes cancellation through
+    ``ProactorIOManager._cancel_operation(...).forget()``: the target is
+    terminalised immediately, but any async ring cancel / poll_remove teardown leg
+    is not awaited. ``has_pending_operations()`` may stay true briefly on
+    ``UringProactor`` until those CQEs complete; pump the proactor or ``wait()``
+    on the teardown operation when ring quiescence matters.
+
+    For ``accept_many`` / ``poll_many``, ``wait()`` ends when the underlying
+    accept or poll **stream** finishes, not when accept-time ``recv`` legs or
+    marshalled deliveries complete. Re-arm in a loop (as ``StreamServer`` does) on
+    one-shot backends; use ``waiter.operation`` when the raw ``Operation`` handle
+    is needed.
 
     An optional ``map_result`` hook maps the operation result after completion.
     """
