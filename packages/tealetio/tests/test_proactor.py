@@ -2984,10 +2984,13 @@ class TestUringProactor:
 
             proactor.ring.fail_next_recv = True
             second = proactor.recv(reader, 5)
+            assert second._uring_entry is not None
+            assert second._uring_entry.operation is second
+
             proactor.cancel(second)
 
             assert second.cancelled() is True
-            assert id(second) not in proactor._uring_operation_entries
+            assert second._uring_entry is None
             assert not any(
                 submission.entry is not None and submission.entry.operation is second
                 for submission in proactor._deferred_submissions
@@ -3369,6 +3372,31 @@ class TestUringProactor:
             assert operation.cancelled() is True
             proactor.wait(proactor.get_time() + 1.0)
             assert len(proactor.ring.submitted_poll) == 1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_oneshot_cancel_after_resubmit_succeeds(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            proactor.ring.complete_poll_oneshot(select.POLLIN)
+            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
+            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
+            assert operation._uring_entry is not None
+            assert operation._uring_entry.operation is operation
+
+            pending = proactor.ring.pending_poll_oneshot[-1]
+            teardown = proactor.cancel(operation)
+            _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
+            assert operation.cancelled() is True
+            assert teardown.kind == "cancel"
         finally:
             reader.close()
             writer.close()

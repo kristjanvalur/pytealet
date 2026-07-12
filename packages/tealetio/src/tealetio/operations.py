@@ -36,7 +36,6 @@ class Operation(Generic[T]):
 
     def __init__(
         self,
-        *,
         kind: str,
         fileobj: object | None = None,
     ) -> None:
@@ -161,12 +160,11 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
 
     def __init__(
         self,
-        *,
         kind: str,
         fileobj: object | None = None,
         result_callback: _ResultCallback[T_co] | None = None,
     ) -> None:
-        super().__init__(kind=kind, fileobj=fileobj)
+        super().__init__(kind, fileobj)
         self._result_callback = result_callback
 
     def _emit_result(self, result: T_co) -> bool:
