@@ -774,7 +774,7 @@ class UringOperation(Operation[T]):
         kind: str,
         fileobj: object | None = None,
     ) -> None:
-        super().__init__(kind=kind, fileobj=fileobj)
+        super().__init__(kind, fileobj)
         self._uring_entry: _UringEntry | None = None
 
 
@@ -787,7 +787,7 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         fileobj: object | None = None,
         result_callback: Callable[[T_co], object] | None = None,
     ) -> None:
-        super().__init__(kind=kind, fileobj=fileobj, result_callback=result_callback)
+        super().__init__(kind, fileobj, result_callback)
         self._uring_entry: _UringEntry | None = None
 
 
