@@ -822,11 +822,6 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self._uring_entry: _UringEntry | None = None
 
 
-def _clear_uring_entry(operation: Operation[Any]) -> None:
-    if isinstance(operation, (UringOperation, UringContinuousOperation)):
-        operation._uring_entry = None
-
-
 @dataclass(frozen=True)
 class UringSubmissionStats:
     """Observed io_uring submission pressure for tuning ring queue depth.
@@ -1847,15 +1842,14 @@ class UringProactor(ProactorBase):
         multishot: bool = False,
         poll_remove: bool = False,
     ) -> _UringEntry:
-        if not isinstance(operation, (UringOperation, UringContinuousOperation)):
-            raise TypeError("UringProactor operations must be UringOperation instances")
+        uring_operation = cast("UringOperation[Any] | UringContinuousOperation[Any]", operation)
         entry = _UringEntry(
-            operation=operation,
+            operation=uring_operation,
             complete=complete,
             multishot=multishot,
             poll_remove=poll_remove,
         )
-        operation._uring_entry = entry
+        uring_operation._uring_entry = entry
         return entry
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
@@ -2856,7 +2850,7 @@ class UringProactor(ProactorBase):
             entry.active = False
             self._pending_tokens.pop()
         entry.completion = None
-        _clear_uring_entry(entry.operation)
+        entry.operation._uring_entry = None
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
@@ -2966,7 +2960,7 @@ class UringProactor(ProactorBase):
                 del self._deferred_submissions[index]
                 entry.active = False
                 entry.completion = None
-                _clear_uring_entry(operation)
+                cast("UringOperation[Any] | UringContinuousOperation[Any]", operation)._uring_entry = None
                 return True
         return False
 
