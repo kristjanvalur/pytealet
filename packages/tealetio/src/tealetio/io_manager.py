@@ -537,6 +537,9 @@ class ProactorIOManager:
         """Arm a scheduler timer that cancels ``recv_op`` when it fires."""
 
         def arm() -> None:
+            if recv_op.done():
+                return
+
             def on_timeout() -> None:
                 if not recv_op.done():
                     self._cancel_operation(recv_op).forget()

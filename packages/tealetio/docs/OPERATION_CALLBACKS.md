@@ -112,20 +112,22 @@ waiter-level disposition for one-shot composition, not continuous accept policy.
 
 ## Cancel vs in-flight completion
 
-`Operation.cancel()` always races backend worker threads. Proactor completions
-arrive asynchronously; a waiter or scheduler task may call `cancel()` on the
-same operation while a CQE is already in flight.
+`Proactor.cancel(operation)` always races backend worker threads. Completions
+arrive asynchronously; a waiter or scheduler task may cancel the same operation
+while a CQE is already in flight.
 
-`cancel_hook` is **best-effort IO teardown** only (drop deferred resubmits,
-submit async cancel, deregister selector interest, `break_wait()`, and similar).
-It does not own terminal state. Hooks do not call `_finish()`; `cancel()` routes
-through `_finish(cancelled=True)`, which runs the hook and then terminalises
-unless `_done` is already set.
+Cancellation is backend-specific teardown only (drop deferred resubmits, submit
+async ring cancel or poll_remove, deregister selector interest, `break_wait()`,
+and similar). The proactor terminalises the target operation immediately after
+submitting teardown; it does not wait for the ring cancel CQE before marking the
+target cancelled.
 
-A late `deliver()` may therefore still succeed after `cancel_hook` runs. That is
+A late `deliver()` may therefore still succeed after cancel is submitted. That is
 expected: whichever path reaches `_finish` first wins. Callers waiting on
 `IOWaiter.wait()` observe either a normal result or `CancelledError`, not an
-ambiguous in-between state.
+ambiguous in-between state. Exceptional `wait()` exit routes through
+`ProactorIOManager._cancel_operation(...).forget()` so teardown legs are not
+blocked on.
 
 For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 `IO_MANAGER_DESIGN.md`.

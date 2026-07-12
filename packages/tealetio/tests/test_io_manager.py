@@ -394,6 +394,54 @@ class TestProactorIOManagerAcceptMany:
         finally:
             server.close()
 
+    def test_accept_many_recv_timeout_skips_arm_when_recv_already_done(self) -> None:
+        class _DeferredArmScheduler(_StubScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.deferred: list[tuple[Any, tuple[object, ...]]] = []
+
+            def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
+                del kwargs
+                self.deferred.append((callback, args))
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None):
+                if callback is not None:
+                    conn, peer = socket.socketpair()
+                    peer.close()
+                    callback(conn)
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        delivered: list[tuple[socket.socket, bytes | None]] = []
+        proactor = _EagerAcceptProactor(recv_result=b"peek")
+        scheduler = _DeferredArmScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many(
+                server,
+                lambda delivery: delivered.append(delivery),
+                recv_size=8,
+                recv_timeout=0.5,
+            )
+            assert not scheduler.timer_handles
+            arm_callbacks = [
+                callback
+                for callback, _args in scheduler.deferred
+                if callback.__name__ == "arm"
+            ]
+            assert len(arm_callbacks) == 1
+            for callback, args in list(scheduler.deferred):
+                callback(*args)
+            assert not scheduler.timer_handles
+            scheduler.fire_timers()
+            assert len(delivered) == 1
+            assert delivered[0][1] == b"peek"
+        finally:
+            for conn, _data in delivered:
+                conn.close()
+            server.close()
+
     def test_accept_many_recv_timeout_cancelled_when_recv_completes(self) -> None:
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
@@ -415,11 +463,10 @@ class TestProactorIOManagerAcceptMany:
                 recv_size=8,
                 recv_timeout=0.5,
             )
-            assert len(scheduler.timer_handles) == 1
-            handle, _, _ = scheduler.timer_handles[0]
-            assert handle.cancelled()
+            assert not scheduler.timer_handles
             scheduler.fire_timers()
-            assert delivered == [(delivered[0][0], b"peek")]
+            assert len(delivered) == 1
+            assert delivered[0][1] == b"peek"
         finally:
             for conn, _data in delivered:
                 conn.close()

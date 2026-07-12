@@ -11,6 +11,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Literal, Protocol, TypeAlias, TypeVar, cast, overload
 
 from asynkit import coro_drive
+import tealet
 
 from .io_manager import (
     IO_UNSUPPORTED_ERROR,
@@ -758,8 +759,9 @@ class StreamServer:
     leg until cancel/error). ``close()`` cancels that accept-loop tealet, then
     closes listening socket(s). Handler tealets already
     spawned for accepted connections keep running until they finish on their own.
-    ``wait_closed()`` blocks until the server is closed and every dispatched
-    handler tealet has finished. Accept callbacks are marshalled onto the
+    ``wait_closed()`` blocks until the server is closed, the accept-loop tealet
+    has exited, and every dispatched handler tealet has finished. Accept
+    callbacks are marshalled onto the
     scheduler thread before ``_dispatch_streams()`` runs.
 
     Use as a context manager to call ``close()`` and ``wait_closed()`` on
@@ -804,7 +806,7 @@ class StreamServer:
         """Stop accepting and close listening socket(s).
 
         Does not interrupt in-flight client handlers. Call ``wait_closed()`` to
-        block until they finish.
+        block until the accept-loop tealet and handlers have finished.
         """
 
         if self._closed:
@@ -814,11 +816,18 @@ class StreamServer:
             self._shutdown.notify_all()
         for sock in self._sockets:
             sock.close()
+        self._stop_accept_task()
+
+    def _stop_accept_task(self) -> None:
         accept_task = self._accept_task
-        if accept_task is not None and not accept_task.done():
-            # Defer cancel onto the scheduler thread: Task.cancel() needs a
-            # runnable tealet context and close() may run from main or a foreign
-            # thread (signal handlers, sync teardown, etc.).
+        if accept_task is None or accept_task.done():
+            return
+        current = tealet.current()
+        if isinstance(current, Task):
+            accept_task.cancel()
+        else:
+            # close() may run from main or a foreign thread (signal handlers,
+            # sync teardown, etc.); defer onto the scheduler thread.
             self._scheduler.call_soon_threadsafe(accept_task.cancel)
 
     def _start_accept_loop(
@@ -868,10 +877,18 @@ class StreamServer:
         self._accept_task = self._scheduler.spawn(accept_loop)
 
     def wait_closed(self) -> None:
-        """Block until this server is closed and all handler tealets have exited."""
+        """Block until this server is closed, the accept loop has exited, and handlers are done."""
 
         with self._shutdown:
-            self._shutdown.swait_for(lambda: self._closed and self._active_handlers == 0)
+            while not self._fully_closed():
+                if self._closed:
+                    self._stop_accept_task()
+                self._shutdown.swait()
+
+    def _fully_closed(self) -> bool:
+        accept_task = self._accept_task
+        accept_done = accept_task is None or accept_task.done()
+        return self._closed and self._active_handlers == 0 and accept_done
 
     def serve_forever(self) -> None:
         """Block until ``close()`` is called.

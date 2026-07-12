@@ -508,8 +508,11 @@ class TestStreamsPoC:
 
         def exercise() -> None:
             server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            accept_task = server.accept_task
+            assert accept_task is not None
             server.close()
             server.wait_closed()
+            assert accept_task.done()
 
         run_scheduler_task(scheduler, exercise)
 
