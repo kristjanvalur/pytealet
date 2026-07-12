@@ -463,7 +463,7 @@ class Proactor(Protocol):
     ) -> ContinuousOperation[int]: ...
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
-        """Cancel ``operation`` and return a teardown operation."""
+        """Cancel ``operation`` and return the ring cancel operation when applicable."""
 
         ...
 
@@ -554,10 +554,10 @@ class ProactorBase:
     def _clear_shared_recv_buffer_pool(self) -> None:
         self._shared_recv_buffer_pool = None
 
-    def _completed_teardown_operation(self, kind: str, target: Operation[Any]) -> Operation[None]:
-        teardown = Operation[None](kind=kind, fileobj=target)
-        teardown._finish(result=None)
-        return teardown
+    def _completed_cancel_operation(self, kind: str, target: Operation[Any]) -> Operation[None]:
+        cancel_op = Operation[None](kind=kind, fileobj=target)
+        cancel_op._finish(result=None)
+        return cancel_op
 
     def _terminalise_cancelled(self, operation: Operation[Any]) -> None:
         if not operation.done():
@@ -1431,13 +1431,13 @@ class SelectorProactor(ProactorBase):
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         if operation.done():
-            return self._completed_teardown_operation("cancel", operation)
+            return self._completed_cancel_operation("cancel", operation)
         with self._lock:
             removed = self._remove_operation(operation)
         if removed:
             self._after_selector_registration_changed()
         self._terminalise_cancelled(operation)
-        return self._completed_teardown_operation("cancel", operation)
+        return self._completed_cancel_operation("cancel", operation)
 
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
@@ -1705,8 +1705,8 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
-        self._teardown_entries: dict[int, _UringEntry] = {}
         self._uring_operation_entries: dict[int, _UringEntry] = {}
+        self._uring_completion_entries: dict[int, _UringEntry] = {}
         self._retrying_deferred_submissions = False
         self._submit_attempts = 0
         self._submit_queue_full = 0
@@ -1795,21 +1795,21 @@ class UringProactor(ProactorBase):
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         if operation.done():
-            return self._completed_teardown_operation("cancel", operation)
+            return self._completed_cancel_operation("cancel", operation)
 
         entry = self._uring_operation_entries.get(id(operation))
         if entry is not None:
             completion = entry.completion
             if completion is None:
-                teardown = self._completed_teardown_operation("cancel", operation)
+                cancel_op = self._completed_cancel_operation("cancel", operation)
             elif entry.poll_remove:
-                teardown = self._submit_teardown(
+                cancel_op = self._submit_cancel_op(
                     completion,
                     kind="poll_remove",
                     ring_submit=self._ring.submit_poll_remove,
                 )
             else:
-                teardown = self._submit_teardown(
+                cancel_op = self._submit_cancel_op(
                     completion,
                     kind="cancel",
                     ring_submit=self._ring.submit_cancel,
@@ -1817,14 +1817,14 @@ class UringProactor(ProactorBase):
             self.break_wait()
         elif self._cancel_deferred_operation(operation):
             self.break_wait()
-            teardown = self._completed_teardown_operation("cancel", operation)
+            cancel_op = self._completed_cancel_operation("cancel", operation)
         else:
-            teardown = self._completed_teardown_operation("cancel", operation)
+            cancel_op = self._completed_cancel_operation("cancel", operation)
 
         self._terminalise_cancelled(operation)
-        return teardown
+        return cancel_op
 
-    def _submit_teardown(
+    def _submit_cancel_op(
         self,
         target_completion: _UringCompletion,
         *,
@@ -1832,52 +1832,36 @@ class UringProactor(ProactorBase):
         ring_submit: Callable[[_UringCompletion], _UringCompletion],
     ) -> Operation[None]:
         cancel_operation = Operation[None](kind=kind, fileobj=target_completion)
-        cancel_entry = _UringEntry(
-            cancel_operation,
-            lambda entry, completion: self._complete_uring_teardown_op(entry, completion),
-        )
 
-        def submit() -> _UringCompletion:
-            provisional_key = id(cancel_entry)
-            self._teardown_entries[provisional_key] = cancel_entry
-            try:
-                teardown_completion = ring_submit(target_completion)
-            except BaseException:
-                self._teardown_entries.pop(provisional_key, None)
-                raise
-            self._teardown_entries.pop(provisional_key, None)
-            self._teardown_entries[id(teardown_completion)] = cancel_entry
-            return teardown_completion
+        def complete_cancel(entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
+            operation = cast(Operation[None], entry.operation)
+            operation.deliver(self, result=None)
+            return operation
 
-        self._submit_uring_entry(cancel_entry, submit)
+        entry = self._uring_entry(cancel_operation, complete_cancel)
+        self._submit_uring_entry(entry, lambda: ring_submit(target_completion))
         return cancel_operation
 
-    def _resolve_teardown_entry(self, completion: _UringCompletion) -> _UringEntry | None:
-        entry = self._teardown_entries.pop(id(completion), None)
+    def _resolve_uring_entry(self, completion: _UringCompletion) -> _UringEntry | None:
+        entry = self._uring_completion_entries.get(id(completion))
         if entry is not None:
             return entry
-        target = completion.user_data
-        for key, candidate in list(self._teardown_entries.items()):
-            if candidate.operation.fileobj is target:
-                return self._teardown_entries.pop(key)
+        user_data = completion.user_data
+        if isinstance(user_data, _UringEntry):
+            return user_data
+        # cancel/poll_remove CQEs carry the target completion in user_data, not
+        # the owning entry. Match the in-flight cancel operation while submit() may
+        # still be delivering the CQE before its handle is registered above.
+        if completion.kind in (
+            uring_api.COMPLETION_KIND_CANCEL,
+            uring_api.COMPLETION_KIND_POLL_REMOVE,
+        ):
+            target = user_data
+            for candidate in self._uring_operation_entries.values():
+                operation = candidate.operation
+                if operation.kind in ("cancel", "poll_remove") and operation.fileobj is target and not operation.done():
+                    return candidate
         return None
-
-    def _complete_uring_teardown_op(
-        self,
-        entry: _UringEntry,
-        completion: _UringCompletion,
-    ) -> Operation[None]:
-        operation = cast(Operation[None], entry.operation)
-        res = completion.res
-        self._deactivate_uring_entry(entry)
-        if res < 0:
-            operation.deliver(
-                self,
-                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
-            )
-            return operation
-        operation.deliver(self, result=None)
-        return operation
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
         """Create a provided-buffer group for ``recv_many`` / ``sock_recv_iter``."""
@@ -1940,8 +1924,8 @@ class UringProactor(ProactorBase):
             thread.join()
         self._pending_tokens.clear()
         self._deferred_submissions.clear()
-        self._teardown_entries.clear()
         self._uring_operation_entries.clear()
+        self._uring_completion_entries.clear()
         self.break_wait()
         self._ring.callback = None
         self._ring.close()
@@ -2315,7 +2299,7 @@ class UringProactor(ProactorBase):
             if accept_entry.active:
                 completion = accept_entry.completion
                 if completion is not None:
-                    self._submit_teardown(
+                    self._submit_cancel_op(
                         completion,
                         kind="cancel",
                         ring_submit=self._ring.submit_cancel,
@@ -2833,7 +2817,10 @@ class UringProactor(ProactorBase):
         if entry.active:
             entry.active = False
             self._pending_tokens.pop()
+        completion = entry.completion
         entry.completion = None
+        if completion is not None:
+            self._uring_completion_entries.pop(id(completion), None)
         self._uring_operation_entries.pop(id(entry.operation), None)
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
@@ -2850,22 +2837,22 @@ class UringProactor(ProactorBase):
         completed_operation: Operation[Any] | None = None
         for completion in completions:
             if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
-                teardown_entry = self._resolve_teardown_entry(completion)
-                if teardown_entry is not None:
-                    teardown_result = self._complete_uring_teardown_op(teardown_entry, completion)
-                    if teardown_result is not None:
-                        completed_operation = teardown_result
+                result = self._complete_uring_operation(completion)
+                if result is not None:
+                    completed_operation = result
                 target = cast(_UringCompletion, completion.user_data)
-                self._deactivate_uring_entry(cast(_UringEntry, target.user_data))
+                poll_entry = target.user_data
+                if isinstance(poll_entry, _UringEntry):
+                    self._deactivate_uring_entry(poll_entry)
                 continue
             if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
-                teardown_entry = self._resolve_teardown_entry(completion)
-                if teardown_entry is not None:
-                    teardown_result = self._complete_uring_teardown_op(teardown_entry, completion)
-                    if teardown_result is not None:
-                        completed_operation = teardown_result
+                result = self._complete_uring_operation(completion)
+                if result is not None:
+                    completed_operation = result
                 continue
-            entry = cast(_UringEntry, completion.user_data)
+            entry = self._resolve_uring_entry(completion)
+            if entry is None:
+                continue
             to_process = entry.completions_to_process(completion)
             if not to_process and entry.operation.done():
                 # Late multishot CQEs after cancel/terminal finish: drop the leg
@@ -2892,7 +2879,9 @@ class UringProactor(ProactorBase):
         try:
             entry.active = True
             self._note_submit_attempt()
-            entry.completion = submit()
+            completion = submit()
+            entry.completion = completion
+            self._uring_completion_entries[id(completion)] = entry
         except uring_api.SubmissionQueueFull:
             self._note_submit_queue_full()
             entry.active = False
@@ -2979,7 +2968,9 @@ class UringProactor(ProactorBase):
         self,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        entry = cast(_UringEntry, completion.user_data)
+        entry = self._resolve_uring_entry(completion)
+        if entry is None:
+            return None
         res = completion.res
         if entry.operation.done():
             if entry.active:
