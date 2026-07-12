@@ -14,15 +14,15 @@ class InvalidStateError(Exception):
 
 
 _DoneCallback = Callable[["Operation[Any]"], object]
-_MultishotRearm = Callable[[], None]
 _ProactorRef = Any
 
 
 class MultishotDelivery(NamedTuple):
     """One multishot leg delivery to a continuous operation callback.
 
-    ``(index, value, exception, more)``. ``index`` is the leg-local ordinal
-    when the backend provides one; otherwise zero for informational use on
+    ``(index, value, exception, more)``. For ``recv_many``, ``index`` is the
+    stream ordinal from the backend (``completion.sequence`` on uring, seeded by
+    ``base_sequence`` at submit); otherwise zero for informational use on
     ``accept_many`` and ``poll_many``. ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` on provided-buffer recv). ``more``
@@ -186,14 +186,6 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     ) -> None:
         super().__init__(kind, fileobj)
         self._result_callback = result_callback
-        self._multishot_rearm: _MultishotRearm | None = None
-
-    def multishot_rearm(self) -> None:
-        """Re-submit the backend multishot leg when the previous one ended."""
-
-        rearm = self._multishot_rearm
-        if rearm is not None:
-            rearm()
 
     def _emit_delivery(self, delivery: MultishotDelivery) -> bool:
         """Deliver one multishot chunk when the operation is still active."""

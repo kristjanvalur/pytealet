@@ -117,7 +117,6 @@ class RecvIterBuffer:
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False
         self._awaiting_resubmit = False
-        self._stream_base = 0
         self._next_base = 0
         self._stream_done = False
         self._stream_error: BaseException | None = None
@@ -132,12 +131,11 @@ class RecvIterBuffer:
             buf_group=self._buf_group,
             base_sequence=base_sequence,
         )
-        self._stream_base = base_sequence
         self._streams.append(stream)
         stream.add_done_callback(self._on_stream_done)
 
-    def _schedule_resubmit(self, *, leg_index: int) -> None:
-        self._next_base = self._stream_base + leg_index
+    def _schedule_resubmit(self, *, base_sequence: int) -> None:
+        self._next_base = base_sequence
         self._awaiting_resubmit = True
 
     def _on_stream_done(self, stream: Operation[Any]) -> None:
@@ -162,7 +160,7 @@ class RecvIterBuffer:
             if _is_enobufs_delivery(delivery):
                 if self._pressure_pending:
                     return
-                self._schedule_resubmit(leg_index=delivery.index)
+                self._schedule_resubmit(base_sequence=delivery.index)
                 self._pressure_pending = True
                 notify = True
             elif delivery.exception is not None:
@@ -170,16 +168,14 @@ class RecvIterBuffer:
                 self._stream_done = True
                 notify = True
             elif delivery.value is not None:
-                leg_index = delivery.index
                 data = delivery.value
-                global_index = self._stream_base + leg_index
-                ready = self._reorder.pushpop((global_index, data))
+                ready = self._reorder.pushpop((delivery.index, data))
                 if ready is not None:
                     self._ready.append(ready)
                 notify = bool(self._ready) or len(self._reorder)
                 if not delivery.more:
                     if data:
-                        self._schedule_resubmit(leg_index=leg_index + 1)
+                        self._schedule_resubmit(base_sequence=delivery.index + 1)
                     else:
                         self._stream_done = True
                         self._stream_error = None
