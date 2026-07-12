@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sockaddr buffer to the kernel. Delivered completions expose the accepted fd
   only; resolve peer addresses with `getpeername()` when needed.
 
+## [0.1.0rc4] - 2026-07-12
+
+### Fixed
+- Release workflow: publish job checks out the repository before creating the
+  GitHub release (rc3 wheels reached PyPI but the release step failed).
+
 ## [0.1.0rc3] - 2026-07-12
 
 ### Added

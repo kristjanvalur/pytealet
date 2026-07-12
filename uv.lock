@@ -453,7 +453,7 @@ wheels = [
 
 [[package]]
 name = "uring-api"
-version = "0.1.0rc3"
+version = "0.1.0rc4"
 source = { editable = "packages/uring_api" }
 
 [package.dev-dependencies]
