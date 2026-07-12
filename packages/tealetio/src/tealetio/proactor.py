@@ -29,7 +29,6 @@ from .io_manager import (
 )
 from .recv_iter import (
     RECV_MANY_BUFFER_PRESSURE,
-    RecvIterBuffer,
     _RecvManyResult,
     _RecvManyResume,
 )
@@ -92,7 +91,6 @@ _DEFAULT_RECVITER_BUFFER_SIZE = 16 * 1024
 _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyCallback = Callable[[_RecvManyResult], object]
-_RecvIterBuffer = RecvIterBuffer
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[AcceptManyResult], object]
 

@@ -28,6 +28,10 @@ class _BufGroupLike(Protocol):
     def leased_count(self) -> int: ...
 
 
+class _RecvIterProactor(Protocol):
+    def cancel(self, operation: Operation[Any]) -> Operation[None]: ...
+
+
 class _OrderedIngestBuffer(Generic[T_Cargo]):
     """Hold out-of-order indexed items and release them in strict sequence."""
 
@@ -88,9 +92,8 @@ class RecvIterBuffer:
         self,
         *,
         buf_group: _BufGroupLike,
-        proactor: Any | None = None,
+        proactor: _RecvIterProactor,
     ) -> None:
-        """``proactor`` is required when a ``recv_many`` stream is attached and ``close()`` may run."""
         self._buf_group = buf_group
         self._proactor = proactor
         self._resume: _RecvManyResume | None = None
@@ -209,6 +212,4 @@ class RecvIterBuffer:
             self._ready.clear()
             self._reorder.reset()
         if stream is not None and not stream.done():
-            proactor = self._proactor
-            assert proactor is not None, "RecvIterBuffer.close() requires proactor when recv_many stream is active"
-            proactor.cancel(stream)
+            self._proactor.cancel(stream)

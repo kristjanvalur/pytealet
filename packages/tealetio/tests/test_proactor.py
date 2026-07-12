@@ -131,6 +131,15 @@ def _recviter_test_pool() -> _RecvIterTestPool:
     return _RecvIterTestPool()
 
 
+class _RecvIterTestProactor:
+    def cancel(self, _operation: Any) -> SimpleNamespace:
+        return SimpleNamespace()
+
+
+def _recviter_test_proactor() -> _RecvIterTestProactor:
+    return _RecvIterTestProactor()
+
+
 def _iter_recv_stream(stream: Any):
     yield from stream
 
@@ -302,7 +311,7 @@ def test_selector_buf_group_pressure_threshold_matches_recviter_policy():
 
 def test_recviter_buffer_reorders_out_of_order_chunks():
     def exercise() -> list[tuple[int, memoryview | None]]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((0, memoryview(b"a")))
         return [buffer.take_next(), buffer.take_next()]
@@ -328,7 +337,7 @@ def test_recviter_buffer_resume_waits_until_half_pool_is_free():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
@@ -351,7 +360,7 @@ def test_recviter_buffer_resume_waits_until_half_pool_is_free():
 
 def test_recviter_buffer_ignores_late_callbacks_after_close():
     def exercise() -> tuple[int, bool]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         buffer.close()
         buffer.on_result((1, memoryview(b"b")))
@@ -365,7 +374,7 @@ def test_recviter_buffer_ignores_late_callbacks_after_close():
 
 def test_recviter_buffer_pressure_token_precedes_queued_views():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, _noop_recv_many_resume()))
@@ -379,7 +388,7 @@ def test_recviter_buffer_pressure_token_precedes_queued_views():
 
 def test_recviter_buffer_eof_stops_iteration():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"done")))
         buffer.on_result((1, memoryview(b"")))
         return [buffer.take_next(), buffer.take_next()]
@@ -391,7 +400,7 @@ def test_recviter_buffer_eof_stops_iteration():
 
 def test_recviter_buffer_ordered_eof_wins_cancel_race():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"done")))
         with buffer._lock:
             buffer._stream_done = True
@@ -406,7 +415,7 @@ def test_recviter_buffer_ordered_eof_wins_cancel_race():
 
 def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
     def exercise() -> list[object]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         with buffer._lock:
@@ -430,7 +439,7 @@ def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
 
 def test_recviter_buffer_yields_memoryviews():
     def exercise() -> tuple[int, memoryview | None] | None:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         buffer.on_result((0, memoryview(b"a")))
         return buffer.take_next()
 
@@ -448,7 +457,7 @@ def test_recviter_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
     ready_to_wait = threading.Event()
 
     def exercise() -> tuple[int, memoryview]:
-        buffer = proactor_module._RecvIterBuffer(buf_group=_recviter_test_pool())
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool())
         real_swait = buffer._event.swait
 
         def swait_and_signal() -> bool:
@@ -489,7 +498,7 @@ def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
 
     def exercise() -> tuple[tuple[int, memoryview], list[bool]]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
 
         def resume() -> None:
             resumed.append(True)
@@ -540,7 +549,7 @@ def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
         first = buffer.take_next()
@@ -571,7 +580,7 @@ def test_recviter_buffer_resumes_when_half_pool_is_free():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
@@ -607,7 +616,7 @@ def test_recviter_buffer_defers_resume_until_all_queued_chunks_yielded():
 
     def exercise() -> tuple[list[tuple[int, memoryview]], list[bool]]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
@@ -647,7 +656,7 @@ def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
 
     def exercise() -> tuple[tuple[int, memoryview | None] | None, list[bool]]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((0, memoryview(b"a")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
         token = buffer.take_next()
@@ -679,7 +688,7 @@ def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
 
     def exercise() -> list[bool]:
         pool = _Pool()
-        buffer = proactor_module._RecvIterBuffer(buf_group=pool)
+        buffer = recv_iter_module.RecvIterBuffer(proactor=_recviter_test_proactor(), buf_group=pool)
         buffer.on_result((1, memoryview(b"b")))
         buffer.on_result((2, memoryview(b"c")))
         buffer.on_result((RECV_MANY_BUFFER_PRESSURE, resume))
