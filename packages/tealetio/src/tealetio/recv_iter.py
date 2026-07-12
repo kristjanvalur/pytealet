@@ -90,6 +90,7 @@ class RecvIterBuffer:
         buf_group: _BufGroupLike,
         proactor: Any | None = None,
     ) -> None:
+        """``proactor`` is required when a ``recv_many`` stream is attached and ``close()`` may run."""
         self._buf_group = buf_group
         self._proactor = proactor
         self._resume: _RecvManyResume | None = None
@@ -209,5 +210,5 @@ class RecvIterBuffer:
             self._reorder.reset()
         if stream is not None and not stream.done():
             proactor = self._proactor
-            if proactor is not None:
-                proactor.cancel(stream)
+            assert proactor is not None, "RecvIterBuffer.close() requires proactor when recv_many stream is active"
+            proactor.cancel(stream)

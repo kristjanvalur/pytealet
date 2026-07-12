@@ -660,8 +660,11 @@ With ``sock=``, tealetio applies the scheduler listen-socket contract
 (non-blocking, close-on-exec) and calls ``listen(backlog)``, like asyncio.
 ``recv_size`` opts into
 accept-time pre-read and reader prefill on backends that honour the proactor hint
-(same semantics as ``accept_many`` above; default ``None``). Each accept arms
-`proactor.accept_many()`. Accepted connections are marshalled onto the scheduler
+(same semantics as ``accept_many`` above; default ``None``). ``recv_timeout``
+(requires ``recv_size``) bounds each accept-time preread. Cancelling the accept
+stream does not cancel in-flight accept-time ``recv`` legs; close listeners and
+discard late deliveries in the accept callback (``StreamServer`` uses ``_closed``).
+Each accept arms `proactor.accept_many()`. Accepted connections are marshalled onto the scheduler
 with `call_soon_threadsafe()` and wrapped as stream endpoints before the handler
 runs in a spawned tealet. ``async_=True`` selects asyncio-shaped streams and
 drives the handler through ``run_coro()``. On ``UringProactor``,

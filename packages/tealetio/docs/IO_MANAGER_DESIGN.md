@@ -393,8 +393,8 @@ especially sensitive here.
 
 **Subsequent PR (waitable cancel).** A likely direction is *waitable cancel*:
 route cancellation through the proactor / uring submission path so cancel and
-completion are ordered relative to the same ring, rather than racing a Python
-`Operation.cancel()` on the main thread against worker delivery. Until that
+completion are ordered relative to the same ring, rather than racing
+`Proactor.cancel()` teardown submission against worker delivery. Until that
 exists, treat interrupted waits as best-effort abort, not atomic “keep bytes,
 drop waiter only”.
 
@@ -403,7 +403,9 @@ drop waiter only”.
 - **Waitable cancel for interrupted `IOWaiter` waits** — design and implement
   proactor/uring-integrated cancel so timeout and exceptional `wait()` exits
   race less with worker-thread delivery; revisit asyncio parity for buffered
-  bytes on recv timeout.
+  bytes on recv timeout. Current exceptional exits use
+  `Proactor.cancel(operation).forget()`; pump `proactor.wait()` when
+  `has_pending_operations()` must reach zero before ring close.
 - Implement `SelectorIOManager` and wire `SelectorScheduler.io` when selector
   blocking IO should share the same capability gate as proactor schedulers.
 - `SocketIO`, `PollIO`, and `FileIO` entry protocols are implemented; a future

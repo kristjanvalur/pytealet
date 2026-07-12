@@ -604,25 +604,30 @@ class ProactorIOManager:
     ) -> IOWaitable[None]:
         """Start ``proactor.accept_many`` with optional accept-time pre-read.
 
+        **Shutdown and late deliveries.** Cancelling this ``IOWaitable`` or the
+        hosting accept-loop tealet does **not** cancel accept-time ``recv`` legs
+        started when ``recv_size`` is set. Late accepts and preread completions
+        can still reach ``callback`` after shutdown unless the application
+        discards them — close listening sockets, check a shutdown flag in the
+        accept callback, and ignore or close unwanted connections (``StreamServer``
+        uses ``_closed`` for this). ``recv_timeout`` (requires ``recv_size``)
+        bounds each accept-time preread cooperatively; it does not replace
+        listener close or callback-side discard.
+
         Deliveries are marshalled onto the scheduler thread before ``callback``
         runs. Recv failures invoke ``on_recv_error(conn, exc)`` when provided;
         the socket is always closed afterwards. With no ``on_recv_error``, recv
         failures close the socket silently.
 
-        When ``recv_timeout`` is set (requires ``recv_size``), each accept-time
-        ``recv`` is cancelled if it has not completed by then. Timeout cancel is
-        cooperative/best-effort like other cancel paths: teardown legs are not
-        awaited before the socket is closed in the recv done callback.
+        When ``recv_timeout`` is set, each accept-time ``recv`` is cancelled if
+        it has not completed by then. Timeout cancel is cooperative/best-effort
+        like other cancel paths: teardown legs are not awaited before the socket
+        is closed in the recv done callback.
 
         ``wait()`` on the returned ``IOWaitable`` ends the accept **stream leg**
         only. On non-multishot backends the stream finishes after each accept;
         accept-time ``recv`` and scheduler-marshalled deliveries may still be in
         flight. Re-arm in a loop when more accepts are needed.
-
-        Accept-time ``recv`` operations are independent of the parent waiter.
-        Cancelling the accept stream does not cancel in-flight recv legs; mirror
-        ``StreamServer``'s ``_closed`` discard pattern or close listening sockets
-        to stop new accepts.
         """
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
@@ -682,8 +687,9 @@ class ProactorIOManager:
         socket is always closed afterwards. With no ``on_recv_error``, recv
         failures close the socket silently.
 
-        See ``accept_many()`` for ``wait()`` / accept-stream vs nested-recv
-        semantics and shutdown discard responsibilities.
+        See ``accept_many()`` for ``wait()`` / accept-stream semantics, independent
+        accept-time ``recv`` legs, and the shutdown discard responsibilities
+        (close listeners; check a flag in the accept callback).
         """
 
         from .streams import _open_streams

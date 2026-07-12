@@ -1060,10 +1060,12 @@ class SelectorProactor(ProactorBase):
         """Accept connections and deliver each via the result callback.
 
         Without io_uring multishot accept this issues one ``accept()`` per
-        ``accept_many`` call, emits the connection, and finishes. Callers such as
-        ``StreamServer`` re-arm by submitting another ``accept_many``. With
-        multishot (``UringProactor`` only) one kernel leg may deliver many
-        connections until cancel, error, or terminal CQE.
+        ``accept_many`` call, emits the connection, and **finishes** the
+        ``ContinuousOperation``. Callers must resubmit (``StreamServer`` re-arms
+        in a loop; ``scheduler.io.accept_many().wait()`` returns after each leg).
+        This differs from oneshot ``poll_many`` fallbacks, which resubmit inside
+        the proactor until cancel. With multishot (``UringProactor`` only) one
+        kernel leg may deliver many connections until cancel, error, or terminal CQE.
 
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
@@ -3015,7 +3017,15 @@ class ProactorScheduler(BaseScheduler):
         return self._proactor
 
     def close(self) -> None:
-        """Close proactor and scheduler-owned resources."""
+        """Close proactor and scheduler-owned resources.
+
+        Exceptional ``IOWaiter.wait()`` exits and ``Proactor.cancel()`` submit
+        async ring-cancel / ``poll_remove`` teardown legs without awaiting them.
+        ``UringProactor.has_pending_operations()`` may stay true briefly until
+        those CQEs complete. Pump ``proactor.wait()`` or ``wait()`` on returned
+        teardown operations when strict ring quiescence is required before
+        ``UringProactor.close()``.
+        """
 
         self._io.close()
         self._proactor.close()

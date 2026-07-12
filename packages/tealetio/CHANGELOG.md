@@ -73,7 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of ``ContinuousOperation``. ``wait()`` ends the current stream leg;
   on non-multishot backends that is one accept or poll event — re-arm in a loop
   (``StreamServer`` accept tealet) or hold ``waiter.operation`` for the raw
-  ``Operation`` handle.
+  ``Operation`` handle. Direct ``proactor.accept_many()`` on oneshot backends
+  **finishes** after each accept; oneshot ``poll_many`` fallbacks still resubmit
+  inside the proactor until cancel — do not assume the same auto-resubmit model.
 - Accept-time ``recv`` legs started by ``accept_many(..., recv_size=...)`` are
   independent of the parent waiter. Cancelling the accept stream does not cancel
   in-flight recvs; callers must discard late deliveries after shutdown.
@@ -90,6 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on an already-cancelled target, keeping ``has_pending_operations()`` accurate.
 
 ### Added
+- ``start_server(..., recv_timeout=...)`` forwards accept-time preread timeouts
+  to ``accept_many_streams`` (requires ``recv_size``).
 - `Proactor.create_socket()` and `scheduler.io.sock_create()` to create
   scheduler-contract sockets through the proactor. Optional ``connect_to`` and
   ``initial_data`` are chained by ``ProactorIOManager`` (create → connect →
