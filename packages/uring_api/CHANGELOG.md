@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sockaddr buffer to the kernel. Delivered completions expose the accepted fd
   only; resolve peer addresses with `getpeername()` when needed.
 
+## [0.1.0rc3] - 2026-07-12
+
+### Added
+- `Completion.cancel_target` exposes the operation being cancelled on cancel and
+  poll_remove completions.
+
+### Changed
+- `submit_cancel()` and `submit_poll_remove()` accept optional `user_data` for
+  the cancel completion CQE, matching other submit helpers.
+
 ## [0.1.0rc2] - 2026-07-03
 
 ### Added

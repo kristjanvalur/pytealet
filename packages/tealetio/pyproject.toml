@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "tealetio"
-version = "0.1.0rc1"
+version = "0.1.0rc2"
 description = "Scheduler, synchronisation, selector, and asyncio helpers for tealet"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ classifiers = [
 dependencies = [
     "asynkit>=0.19.2",
     "tealet>=0.1.0rc2,<0.2",
-    "uring-api>=0.1.0rc1,<0.2",
+    "uring-api>=0.1.0rc3,<0.2",
 ]
 
 [project.urls]
