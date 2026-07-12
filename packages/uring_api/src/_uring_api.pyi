@@ -125,7 +125,12 @@ class Ring:
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion: ...
     def submit_recv_buf(self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0) -> Completion: ...
     def submit_recv_multishot(
-        self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
+        self,
+        fd: int,
+        buf_group: BufGroup,
+        user_data: object = None,
+        flags: int = 0,
+        base_sequence: int = 0,
     ) -> Completion: ...
     def submit_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion: ...
     def submit_send_zc(

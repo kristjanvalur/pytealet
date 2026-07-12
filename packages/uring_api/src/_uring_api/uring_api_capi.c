@@ -199,7 +199,7 @@ int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, PyObject *buf_g
         return -1;
     }
     return discard_completion_result(
-        UringApiRing_submit_recv_multishot_impl((UringApiRing *)ring, fd, buf_group, flags, user_data));
+        UringApiRing_submit_recv_multishot_impl((UringApiRing *)ring, fd, buf_group, flags, user_data, 0));
 }
 
 int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data) {
