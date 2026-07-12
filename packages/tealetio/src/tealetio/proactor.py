@@ -747,7 +747,7 @@ class _UringEntry:
 
     def __init__(
         self,
-        operation: Operation[Any],
+        operation: "UringOperation[Any] | UringContinuousOperation[Any]",
         complete: _UringEntryComplete,
         *,
         multishot: bool = False,
@@ -820,6 +820,11 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
     ) -> None:
         super().__init__(kind=kind, fileobj=fileobj, result_callback=result_callback)
         self._uring_entry: _UringEntry | None = None
+
+
+def _clear_uring_entry(operation: Operation[Any]) -> None:
+    if isinstance(operation, (UringOperation, UringContinuousOperation)):
+        operation._uring_entry = None
 
 
 @dataclass(frozen=True)
@@ -2851,7 +2856,7 @@ class UringProactor(ProactorBase):
             entry.active = False
             self._pending_tokens.pop()
         entry.completion = None
-        entry.operation._uring_entry = None
+        _clear_uring_entry(entry.operation)
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
@@ -2961,7 +2966,7 @@ class UringProactor(ProactorBase):
                 del self._deferred_submissions[index]
                 entry.active = False
                 entry.completion = None
-                operation._uring_entry = None
+                _clear_uring_entry(operation)
                 return True
         return False
 
