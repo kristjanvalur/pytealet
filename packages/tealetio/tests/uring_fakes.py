@@ -171,7 +171,7 @@ class _FakeUringRing:
         self.completions: list[SimpleNamespace] = []
         self.accepted_peers: list[socket.socket] = []
         self.submitted_recv: list[tuple[int, object, object]] = []
-        self.submitted_recv_multishot: list[tuple[int, _FakeBufGroup, object]] = []
+        self.submitted_recv_multishot: list[tuple[int, _FakeBufGroup, object, int]] = []
         self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
@@ -316,36 +316,61 @@ class _FakeUringRing:
         buf_group: _FakeBufGroup,
         user_data: object = None,
         flags: int = 0,
+        base_sequence: int = 0,
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_recv_multishot.append((fd, buf_group, user_data))
+        self.submitted_recv_multishot.append((fd, buf_group, user_data, base_sequence))
         self.recv_multishot_sequence = 0
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT, multishot=True)
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
+            multishot=True,
+            sequence=base_sequence,
+        )
         self.pending_recv_multishot.append(completion)
         return completion
 
+    def _recv_multishot_delivery(
+        self,
+        pending: SimpleNamespace,
+        *,
+        res: int,
+        flags: int,
+        result: object,
+        leg_sequence: int,
+    ) -> SimpleNamespace:
+        stream_base = self.submitted_recv_multishot[-1][3]
+        pending.sequence = stream_base + leg_sequence + 1
+        return self._completion(
+            pending.user_data,
+            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
+            res=res,
+            flags=flags,
+            result=result,
+            sequence=stream_base + leg_sequence,
+            multishot=True,
+        )
+
     def complete_recv_multishot_enobufs(self, *, sequence: int | None = None) -> None:
         pending = self.pending_recv_multishot[-1]
-        _, buf_group, _ = self.submitted_recv_multishot[-1]
+        _, buf_group, _, _ = self.submitted_recv_multishot[-1]
         buf_group.leased_count = buf_group.buffer_count
         if sequence is None:
             sequence = self.recv_multishot_sequence
             self.recv_multishot_sequence += 1
-        completion = self._completion(
-            pending.user_data,
-            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
+        completion = self._recv_multishot_delivery(
+            pending,
             res=-errno.ENOBUFS,
             flags=0,
             result=None,
-            sequence=sequence,
-            multishot=True,
+            leg_sequence=sequence,
         )
         self._deliver(completion)
 
     def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
         pending = self.pending_recv_multishot[-1]
-        _, buf_group, _ = self.submitted_recv_multishot[-1]
+        _, buf_group, _, _ = self.submitted_recv_multishot[-1]
         if sequence is None:
             sequence = self.recv_multishot_sequence
             self.recv_multishot_sequence += 1
@@ -357,14 +382,12 @@ class _FakeUringRing:
         else:
             payload = _fake_multishot_recv_payload(data)
             res = len(data)
-        completion = self._completion(
-            pending.user_data,
-            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
+        completion = self._recv_multishot_delivery(
+            pending,
             res=res,
             flags=uring_api.IORING_CQE_F_MORE if more else 0,
             result=payload,
-            sequence=sequence,
-            multishot=True,
+            leg_sequence=sequence,
         )
         self._deliver(completion)
 

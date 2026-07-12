@@ -310,10 +310,7 @@ class ProactorIOManager:
         from .recv_iter import RecvIterBuffer
 
         pool = self._resolve_recv_buffer_pool(buffer_pool)
-        buffer = RecvIterBuffer(buf_group=pool, proactor=self._proactor)
-        stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=pool)
-        buffer.attach_stream(stream)
-        return buffer
+        return RecvIterBuffer(sock=sock, buf_group=pool, proactor=self._proactor)
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None

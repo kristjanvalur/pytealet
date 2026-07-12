@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import heapq
+import socket
 import threading
 from collections import deque
 from .tasks import CancelledError
@@ -27,6 +28,15 @@ class _BufGroupLike(Protocol):
 
 
 class _RecvIterProactor(Protocol):
+    def recv_many(
+        self,
+        sock: socket.socket,
+        callback: Any,
+        *,
+        buf_group: _BufGroupLike,
+        base_sequence: int = 0,
+    ) -> ContinuousOperation[_RecvManyValue]: ...
+
     def cancel(self, operation: Operation[Any]) -> Operation[None]: ...
 
 
@@ -94,9 +104,11 @@ class RecvIterBuffer:
     def __init__(
         self,
         *,
+        sock: socket.socket,
         buf_group: _BufGroupLike,
         proactor: _RecvIterProactor,
     ) -> None:
+        self._sock = sock
         self._buf_group = buf_group
         self._proactor = proactor
         self._lock = threading.Lock()
@@ -104,14 +116,24 @@ class RecvIterBuffer:
         self._reorder = _OrderedIngestBuffer[memoryview]()
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False
-        self._awaiting_rearm = False
+        self._awaiting_resubmit = False
+        self._stream_base = 0
+        self._next_base = 0
         self._stream_done = False
         self._stream_error: BaseException | None = None
-        self._stream: ContinuousOperation[_RecvManyValue] | None = None
+        self._streams: list[ContinuousOperation[_RecvManyValue]] = []
         self._closed = False
+        self._start_recv_many(base_sequence=0)
 
-    def attach_stream(self, stream: ContinuousOperation[_RecvManyValue]) -> None:
-        self._stream = stream
+    def _start_recv_many(self, *, base_sequence: int) -> None:
+        stream = self._proactor.recv_many(
+            self._sock,
+            self.on_result,
+            buf_group=self._buf_group,
+            base_sequence=base_sequence,
+        )
+        self._stream_base = base_sequence
+        self._streams.append(stream)
         stream.add_done_callback(self._on_stream_done)
 
     def _on_stream_done(self, stream: Operation[Any]) -> None:
@@ -133,16 +155,20 @@ class RecvIterBuffer:
             if _is_enobufs_delivery(delivery):
                 if self._pressure_pending:
                     return
+                if delivery.value is not None:
+                    leg_index, _ = delivery.value
+                    self._next_base = self._stream_base + leg_index
                 self._pressure_pending = True
-                self._awaiting_rearm = True
+                self._awaiting_resubmit = True
                 notify = True
             elif delivery.exception is not None:
                 self._stream_error = delivery.exception
                 self._stream_done = True
                 notify = True
             elif delivery.value is not None:
-                index, data = delivery.value
-                ready = self._reorder.pushpop((index, data))
+                leg_index, data = delivery.value
+                global_index = self._stream_base + leg_index
+                ready = self._reorder.pushpop((global_index, data))
                 if ready is not None:
                     self._ready.append(ready)
                 notify = bool(self._ready) or len(self._reorder)
@@ -152,7 +178,7 @@ class RecvIterBuffer:
         if notify:
             self._event.set()
 
-    def _should_rearm(self) -> bool:
+    def _should_resubmit(self) -> bool:
         if self._ready or len(self._reorder):
             return False
         buf_group = self._buf_group
@@ -160,15 +186,14 @@ class RecvIterBuffer:
         return buf_group.buffer_count - buf_group.leased_count >= required_free
 
     def consume_pressure_resume(self) -> None:
-        """Re-arm ``recv_many`` once the buffer pool has enough free slots."""
+        """Start a fresh ``recv_many`` once the buffer pool has enough free slots."""
 
         with self._lock:
-            if not self._awaiting_rearm or not self._should_rearm():
+            if not self._awaiting_resubmit or not self._should_resubmit():
                 return
-            stream = self._stream
-            self._awaiting_rearm = False
-        if stream is not None and not stream.done():
-            stream.multishot_rearm()
+            base_sequence = self._next_base
+            self._awaiting_resubmit = False
+        self._start_recv_many(base_sequence=base_sequence)
 
     def take_next(self) -> _RecvIterYield | None:
         while True:
@@ -199,15 +224,16 @@ class RecvIterBuffer:
             self._event.swait()
 
     def close(self) -> None:
-        stream: ContinuousOperation[_RecvManyValue] | None
+        streams: list[ContinuousOperation[_RecvManyValue]]
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            stream = self._stream
+            streams = list(self._streams)
             self._pressure_pending = False
-            self._awaiting_rearm = False
+            self._awaiting_resubmit = False
             self._ready.clear()
             self._reorder.reset()
-        if stream is not None and not stream.done():
-            self._proactor.cancel(stream)
+        for stream in streams:
+            if not stream.done():
+                self._proactor.cancel(stream)

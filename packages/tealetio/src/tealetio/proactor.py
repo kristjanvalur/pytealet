@@ -450,6 +450,7 @@ class Proactor(Protocol):
         callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[_RecvManyValue]: ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
@@ -532,6 +533,7 @@ class ProactorBase:
         callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[_RecvManyValue]:
         raise NotImplementedError
 
@@ -697,6 +699,7 @@ class _MultishotLegState:
 
     nonterminal_seen: int = 0
     pending_final: _UringCompletion | None = None
+    leg_base: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -756,14 +759,20 @@ class _UringEntry:
                 return ()
             is_termination = not bool(completion.flags & uring_api.IORING_CQE_F_MORE)
             if is_termination:
-                if leg.nonterminal_seen < completion.sequence:
+                # ENOBUFS carries the leg index; deliver immediately and let consumers
+                # reorder any stragglers while a new recv_many leg is re-armed later.
+                if getattr(completion, "res", 0) == -errno.ENOBUFS:
+                    leg.pending_final = None
+                    return (completion,)
+                leg_sequence = int(completion.sequence) - leg.leg_base
+                if leg.nonterminal_seen < leg_sequence:
                     leg.pending_final = completion
                     return ()
                 leg.pending_final = None
                 return (completion,)
             leg.nonterminal_seen += 1
             pending = leg.pending_final
-            if pending is not None and leg.nonterminal_seen >= pending.sequence:
+            if pending is not None and leg.nonterminal_seen >= int(pending.sequence) - leg.leg_base:
                 leg.pending_final = None
                 return (completion, pending)
             return (completion,)
@@ -1192,6 +1201,7 @@ class SelectorProactor(ProactorBase):
         callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[_RecvManyValue]:
         """Start receiving byte chunks until EOF, cancellation, or failure.
 
@@ -1204,12 +1214,15 @@ class SelectorProactor(ProactorBase):
         ``MultishotDelivery`` with ``errno.ENOBUFS``; drop held views and call
         ``operation.multishot_rearm()`` to continue.
 
+        ``base_sequence`` is accepted for API parity with ``UringProactor``;
+        this backend keeps a single leg-local counter per operation.
+
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
         """
 
         operation = _spawn_recv_many_operation(sock, callback)
-        sequence = 0
+        sequence = base_sequence
 
         # pre-3.12: no __release_buffer__, so leased views cannot return slots
         # automatically; keep the legacy drain loop and ignore buf_group pressure.
@@ -1247,7 +1260,9 @@ class SelectorProactor(ProactorBase):
                 if not state.pressure_emitted:
                     state.pressure_emitted = True
                     state.paused = True
-                    operation._emit_delivery(MultishotDelivery(None, _enobufs_error(), more=True))
+                    operation._emit_delivery(
+                        MultishotDelivery((sequence, memoryview(b"")), _enobufs_error(), more=True)
+                    )
                     return ContinuousStepResult(progressed=True)
                 return ContinuousStepResult(progressed=False)
             try:
@@ -2584,6 +2599,7 @@ class UringProactor(ProactorBase):
         callback: _RecvManyCallback,
         *,
         buf_group: RecvBufferPool,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[_RecvManyValue]:
         """Start a continuous receive operation that completes on EOF.
 
@@ -2591,13 +2607,16 @@ class UringProactor(ProactorBase):
 
         When multishot provided-buffer receive is available, each result is an
         ordinal `(index, data)` pair with read-only `data` as a `memoryview`
-        into a leased kernel buffer. Callback delivery may arrive out of order
-        across completion threads; consumers that need stream order must
-        reorder by index themselves. Chunk sizes come from the operation's
-        ``BufGroup`` pool. Holding live views can pin provided buffers and
-        stall further receives. When the pool is exhausted the backend emits
-        ``errno.ENOBUFS`` through ``MultishotDelivery.exception``; consumers
-        drop held views and call ``operation.multishot_rearm()`` to continue.
+        into a leased kernel buffer. Indices are leg-local ordinals starting at
+        zero; pass ``base_sequence`` to ``submit_recv_multishot()`` when callers
+        need a global stream offset (for example ``sock_recv_iter`` after
+        ``ENOBUFS``). Callback delivery may arrive out of order across completion
+        threads; consumers that need stream order must reorder by index
+        themselves. Chunk sizes come from the operation's ``BufGroup`` pool.
+        Holding live views can pin provided buffers and stall further receives.
+        When the pool is exhausted the backend emits ``errno.ENOBUFS`` through
+        ``MultishotDelivery.exception`` together with the leg-local index in
+        ``value``; consumers drop held views and start a fresh ``recv_many()``.
 
         When multishot receive is unavailable, the proactor falls back to
         repeated one-shot ``submit_recv()`` into a reused buffer. Chunks are
@@ -2614,18 +2633,28 @@ class UringProactor(ProactorBase):
         operation = UringContinuousOperation[_RecvManyValue]("recv_many", sock, callback)
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
             uring_group = cast(_UringBufGroup, buf_group)
-            # provided-buffer multishot: leased BufViews, ENOBUFS resume callback path.
-            # mutable box so ENOBUFS recovery can advance the base index in-place.
-            stream_sequence = [0]
+            leg_base = base_sequence
             submit_box: list[_UringEntrySubmit] = []
             entry = self._uring_entry(
                 operation,
-                lambda entry, completion: self._deliver_uring_recv_many(entry, completion, stream_sequence, submit_box),
+                lambda entry, completion: self._deliver_uring_recv_many(
+                    entry, completion, leg_base, submit_box
+                ),
                 multishot=True,
             )
 
             def submit_recv_many() -> _UringCompletion:
-                return self._ring.submit_recv_multishot(sock.fileno(), uring_group, entry)
+                leg = entry.multishot_leg
+                assert leg is not None
+                leg.leg_base = leg_base
+                leg.nonterminal_seen = 0
+                leg.pending_final = None
+                return self._ring.submit_recv_multishot(
+                    sock.fileno(),
+                    uring_group,
+                    entry,
+                    base_sequence=leg_base,
+                )
 
             submit_box.append(submit_recv_many)
             operation._multishot_rearm = self._recv_many_resume_callable(entry, submit_box)
@@ -2776,24 +2805,25 @@ class UringProactor(ProactorBase):
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
-        stream_sequence: list[int],
+        leg_base: int,
         submit_box: list[_UringEntrySubmit],
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
         res = completion.res
-        index = stream_sequence[0] + completion.sequence
+        multishot_leg = entry.multishot_leg
+        assert multishot_leg is not None
+        index = int(completion.sequence) - leg_base
 
         if res < 0:
-            self._deactivate_uring_entry(entry)
             if res == -errno.ENOBUFS:
-                stream_sequence[0] += completion.sequence
-                multishot_leg = entry.multishot_leg
-                if multishot_leg is not None:
-                    multishot_leg.nonterminal_seen = 0
-                    multishot_leg.pending_final = None
-                operation._multishot_rearm = self._recv_many_resume_callable(entry, submit_box)
-                operation._emit_delivery(MultishotDelivery(None, _enobufs_error(), more=True))
+                multishot_leg.nonterminal_seen = 0
+                multishot_leg.pending_final = None
+                self._deactivate_uring_entry(entry)
+                operation._emit_delivery(
+                    MultishotDelivery((index, memoryview(b"")), _enobufs_error(), more=True)
+                )
                 return None
+            self._deactivate_uring_entry(entry)
             operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
             return operation
 
@@ -2981,13 +3011,19 @@ class UringProactor(ProactorBase):
             ):
                 _close_raw_fd(res)
             return None
-        assert entry.active
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         if completion.multishot:
             if entry.operation.done():
-                self._deactivate_uring_entry(entry)
+                if entry.active:
+                    self._deactivate_uring_entry(entry)
                 return entry.operation
+            multishot_leg = entry.multishot_leg
+            if not entry.active:
+                if multishot_leg is not None and entry.operation.kind == "recv_many":
+                    return entry.complete(entry, completion)
+                return None
             return entry.complete(entry, completion)
+        assert entry.active
         if not has_more:
             self._deactivate_uring_entry(entry)
         if entry.operation.done():
