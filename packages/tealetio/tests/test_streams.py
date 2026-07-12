@@ -525,13 +525,15 @@ class TestStreamsPoC:
             accept_task = server.accept_task
             assert accept_task is not None
             scheduler.yield_()
-            # close() from a scheduler callback, not from a Task — matches signal
-            # handlers and other non-task teardown paths.
-            scheduler.call_soon(server.close)
-            for _ in range(200):
-                if accept_task.done():
-                    break
-                scheduler.yield_()
+            # close() from another scheduled callback, not inline in this task.
+            closed = Event()
+
+            def deferred_close() -> None:
+                server.close()
+                closed.set()
+
+            scheduler.spawn(deferred_close)
+            closed.swait()
             assert accept_task.done()
 
         run_scheduler_task(scheduler, exercise)
@@ -640,7 +642,7 @@ class TestStreamsPoC:
                     async_=False,
                 )
                 server.wait_closed()
-                assert server._active_handlers == 0
+                assert not server._handler_tasks
                 assert accepted.fileno() == -1
 
             run_scheduler_task(scheduler, exercise)
@@ -679,7 +681,7 @@ class TestStreamsPoC:
         def exercise() -> None:
             server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
             try:
-                assert server._active_handlers == 0
+                assert not server._handler_tasks
             finally:
                 server.close()
 
@@ -1076,7 +1078,7 @@ class TestStreamsFakeUring:
             proactor.ring.complete_recv_error(-errno.EIO)
             proactor.wait(proactor.get_time() + 0.05)
             assert handled.is_set() is False
-            assert server._active_handlers == 0
+            assert not server._handler_tasks
         finally:
             run_scheduler_task(scheduler, server.close)
             scheduler.close()

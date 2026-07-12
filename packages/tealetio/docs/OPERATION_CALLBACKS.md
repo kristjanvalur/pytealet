@@ -98,9 +98,11 @@ have lost interest:
 - `on_accept` checks `_closed`; if set, it closes the writer and returns without
   spawning a handler.
 - `_dispatch_client` and `_dispatch_streams` perform the same check before
-  incrementing `_active_handlers`.
-- `close()` sets `_closed`, closes listening sockets, and cancels only the
-  accept-loop tealet; in-flight handler tealets keep running until they finish.
+  tracking handler ``Task``s.
+- `close()` synchronously cancels the accept-loop tealet; it does not close
+  listening sockets. The accept-loop tealet wraps its main loop in ``try``/``finally``
+  so ``CancelledError`` runs cleanup that sets `_closed` and closes listeners.
+  In-flight handler tealets keep running until they finish.
 
 The io_manager marshals accept deliveries onto the scheduler thread but does not
 enforce server shutdown policy — `StreamServer` (or any custom `accept_many`

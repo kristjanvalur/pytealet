@@ -281,12 +281,15 @@ the accept stream has ended, not that all per-connection work has completed.
 Whether a late delivery is processed, ignored, or discarded is **application
 policy**, not enforced by `Operation` or the proactor.
 
-`StreamServer` is the reference pattern. After `close()` sets `_closed` and
-cancels the accept-loop tealet, `on_accept` still runs for accepts (and
-accept-time recvs) already in flight. The server checks `_closed` and **discards**
-those deliveries by closing the writer and returning without spawning a handler.
-In-flight handler tealets started before shutdown keep running until they exit;
-`wait_closed()` blocks until `_active_handlers` reaches zero.
+`StreamServer` is the reference pattern. After `close()` synchronously cancels
+the accept-loop tealet, `on_accept` still runs for accepts (and accept-time
+recvs) already in flight. The server checks `_closed` and **discards** those
+deliveries by closing the writer and returning without spawning a handler. The
+accept-loop tealet wraps its main loop in ``try``/``finally`` so ``CancelledError``
+sets `_closed` and closes listening sockets; `close()` does not close listeners
+itself. In-flight handler tealets started before shutdown keep running
+until they exit; `wait_closed()` blocks on the accept-loop ``Task`` and each
+handler ``Task``.
 
 Custom `accept_many` / `accept_many_streams` callbacks should apply the same
 pattern when they need to reject work after shutdown: check a local flag, close

@@ -81,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - ``StreamServer.wait_closed()`` waits for the accept-loop tealet to exit, not
   only handler tealets.
+- ``StreamServer.close()`` cancels the accept-loop tealet synchronously and no
+  longer closes listening sockets itself; the accept tealet's ``finally`` block
+  closes them on exit.
 - Accept-time ``recv_timeout`` no longer leaks scheduler timers when the recv
   completes before the arm callback runs on the scheduler thread.
 - ``UringProactor`` deactivates uring entries promptly when ``submit()`` returns
