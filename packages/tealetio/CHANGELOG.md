@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0rc2] - 2026-07-12
-
-Second release candidate for the proactor IO API: continuous composition via
-`IOWaiter` / `IOWaitGroup`, proactor-owned cancellation, and io_uring cancel
-teardown fixes. Requires `uring-api>=0.1.0rc3`.
-
 ### Breaking Changes
 - One-shot `ProactorIOManager` helpers (`sock_recv`, `sock_connect`, `open`,
   etc.) return `IOWaiter`; call `.wait()` to block (or `.forget()` to drop
