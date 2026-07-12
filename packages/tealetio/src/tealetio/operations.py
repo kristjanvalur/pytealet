@@ -23,12 +23,16 @@ _ProactorRef = Any
 class MultishotDelivery(Generic[T_chunk]):
     """One multishot leg delivery to a continuous operation callback.
 
-    ``value`` carries successful chunk data when present. ``exception`` carries
-    transport failures the consumer may interpret (for example ``errno.ENOBUFS``
-    on provided-buffer recv). ``more`` mirrors ``IORING_CQE_F_MORE`` on uring
-    backends and is ``False`` on terminal successful chunks elsewhere.
+    ``index`` is the leg-local ordinal for indexed transports such as
+    ``recv_many``. ``value`` carries successful chunk data when present.
+    ``exception`` carries transport failures the consumer may interpret (for
+    example ``errno.ENOBUFS`` on provided-buffer recv). ``more`` mirrors
+    ``IORING_CQE_F_MORE`` on uring backends. For ``recv_many``, ``more=False``
+    with empty data signals EOF; ``more=False`` with non-empty data means the
+    leg stopped before EOF and consumers should start a fresh ``recv_many()``.
     """
 
+    index: int | None = None
     value: T_chunk | None = None
     exception: BaseException | None = None
     more: bool = True
@@ -207,9 +211,12 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         self,
         result: T_co,
         *,
+        index: int | None = None,
         exception: BaseException | None = None,
         more: bool = True,
     ) -> bool:
         """Deliver one successful chunk wrapped in ``MultishotDelivery``."""
 
-        return self._emit_delivery(MultishotDelivery(value=result, exception=exception, more=more))
+        return self._emit_delivery(
+            MultishotDelivery(index=index, value=result, exception=exception, more=more)
+        )

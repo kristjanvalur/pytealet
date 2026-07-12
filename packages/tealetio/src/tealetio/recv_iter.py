@@ -15,7 +15,7 @@ T_Cargo = TypeVar("T_Cargo")
 
 # ``sock_recv_iter`` still yields this index for provided-buffer pool pressure.
 RECV_MANY_BUFFER_PRESSURE = -1
-_RecvManyValue = tuple[int, memoryview]
+_RecvManyValue = memoryview
 _RecvIterYield: TypeAlias = tuple[int, memoryview]
 
 
@@ -136,15 +136,22 @@ class RecvIterBuffer:
         self._streams.append(stream)
         stream.add_done_callback(self._on_stream_done)
 
+    def _schedule_resubmit(self, *, leg_index: int) -> None:
+        self._next_base = self._stream_base + leg_index
+        self._awaiting_resubmit = True
+
     def _on_stream_done(self, stream: Operation[Any]) -> None:
         with self._lock:
             if stream.cancelled():
                 self._stream_error = CancelledError()
+                self._stream_done = True
             else:
                 exception = stream.exception()
                 if exception is not None:
                     self._stream_error = exception
-            self._stream_done = True
+                    self._stream_done = True
+                elif not self._awaiting_resubmit:
+                    self._stream_done = True
         self._event.set()
 
     def on_result(self, delivery: MultishotDelivery[_RecvManyValue]) -> None:
@@ -155,26 +162,28 @@ class RecvIterBuffer:
             if _is_enobufs_delivery(delivery):
                 if self._pressure_pending:
                     return
-                if delivery.value is not None:
-                    leg_index, _ = delivery.value
-                    self._next_base = self._stream_base + leg_index
+                if delivery.index is not None:
+                    self._schedule_resubmit(leg_index=delivery.index)
                 self._pressure_pending = True
-                self._awaiting_resubmit = True
                 notify = True
             elif delivery.exception is not None:
                 self._stream_error = delivery.exception
                 self._stream_done = True
                 notify = True
-            elif delivery.value is not None:
-                leg_index, data = delivery.value
+            elif delivery.value is not None and delivery.index is not None:
+                leg_index = delivery.index
+                data = delivery.value
                 global_index = self._stream_base + leg_index
                 ready = self._reorder.pushpop((global_index, data))
                 if ready is not None:
                     self._ready.append(ready)
                 notify = bool(self._ready) or len(self._reorder)
                 if not delivery.more:
-                    self._stream_done = True
-                    self._stream_error = None
+                    if data:
+                        self._schedule_resubmit(leg_index=leg_index + 1)
+                    else:
+                        self._stream_done = True
+                        self._stream_error = None
         if notify:
             self._event.set()
 

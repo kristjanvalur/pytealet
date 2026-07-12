@@ -59,10 +59,10 @@ from tealetio.proactor import (
 from tealetio.recv_iter import RECV_MANY_BUFFER_PRESSURE
 
 
-_RecvManySeen = MultishotDelivery[tuple[int, memoryview]]
+_RecvManySeen = MultishotDelivery[memoryview]
 
 
-def _is_enobufs_delivery(delivery: MultishotDelivery[tuple[int, memoryview]]) -> bool:
+def _is_enobufs_delivery(delivery: MultishotDelivery[memoryview]) -> bool:
     exc = delivery.exception
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
@@ -107,7 +107,7 @@ def _io_sock_create(
 
 def _recv_many_auto_resume_callback(
     seen: list[_RecvManySeen],
-    op_box: list[ContinuousOperation[tuple[int, memoryview]]] | None = None,
+    op_box: list[ContinuousOperation[memoryview]] | None = None,
 ) -> Callable[[_RecvManySeen], None]:
     def on_result(delivery: _RecvManySeen) -> None:
         seen.append(delivery)
@@ -120,11 +120,11 @@ def _recv_many_auto_resume_callback(
 def _recv_many_bytes(seen: list[_RecvManySeen]) -> list[tuple[int, bytes]]:
     collected: list[tuple[int, bytes]] = []
     for delivery in seen:
-        if delivery.value is None or delivery.exception is not None:
+        if delivery.index is None or delivery.exception is not None or delivery.value is None:
             continue
-        index, data = delivery.value
+        index = delivery.index
         if index >= 0:
-            collected.append((index, bytes(data)))
+            collected.append((index, bytes(delivery.value)))
     return collected
 
 
@@ -133,14 +133,15 @@ def _recv_many_bytes_sorted(seen: list[_RecvManySeen]) -> list[tuple[int, bytes]
 
 
 def _recv_chunk(index: int, data: bytes, *, more: bool = True) -> _RecvManySeen:
-    return MultishotDelivery((index, memoryview(data)), more=more)
+    return MultishotDelivery(index=index, value=memoryview(data), more=more)
 
 
 def _enobufs_chunk(leg_index: int = 0) -> _RecvManySeen:
     return MultishotDelivery(
-        (leg_index, memoryview(b"")),
-        OSError(errno.ENOBUFS, errno.errorcode.get(errno.ENOBUFS, "no buffer space")),
-        more=True,
+        index=leg_index,
+        value=memoryview(b""),
+        exception=OSError(errno.ENOBUFS, errno.errorcode.get(errno.ENOBUFS, "no buffer space")),
+        more=False,
     )
 
 
@@ -184,7 +185,7 @@ class _RecvIterTestProactor:
         *,
         buf_group: Any,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[tuple[int, memoryview]]:
+    ) -> ContinuousOperation[memoryview]:
         del sock, callback, buf_group
         self.recv_many_bases.append(base_sequence)
         return ContinuousOperation(kind="recv_many", fileobj=object())
@@ -732,6 +733,27 @@ def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
     assert bases == [0, 1]
 
 
+def test_recviter_buffer_resubmits_when_leg_stops_with_data():
+    class _Pool:
+        buffer_count = 4
+        leased_count = 0
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer.on_result(_recv_chunk(0, b"a", more=False))
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 1]
+        buffer.on_result(_recv_chunk(0, b"", more=False))
+        assert buffer.take_next() is None
+        return proactor.recv_many_bases
+
+    assert _exercise_recviter_buffer(exercise) == [0, 1]
+
+
 def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
     class _Pool:
         buffer_count = 4
@@ -1262,7 +1284,7 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
 
             assert all(
-                delivery.value is not None and isinstance(delivery.value[1], memoryview) for delivery in seen if delivery.value
+                delivery.value is not None and isinstance(delivery.value, memoryview) for delivery in seen if delivery.value
             )
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
@@ -1284,7 +1306,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            op_box: list[ContinuousOperation[tuple[int, memoryview]]] = []
+            op_box: list[ContinuousOperation[memoryview]] = []
 
             def on_result(delivery: _RecvManySeen) -> None:
                 if _is_enobufs_delivery(delivery):
@@ -1295,9 +1317,10 @@ class TestSelectorProactor:
                     if op_box:
                         op_box[0].multishot_rearm()
                     return
-                if delivery.value is None:
+                if delivery.index is None or delivery.value is None:
                     return
-                index, payload = delivery.value
+                index = delivery.index
+                payload = delivery.value
                 if payload:
                     held.append(payload)
                     seen.append((index, bytes(payload)))
@@ -1345,7 +1368,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            op_box: list[ContinuousOperation[tuple[int, memoryview]]] = []
+            op_box: list[ContinuousOperation[memoryview]] = []
 
             def on_result(delivery: _RecvManySeen) -> None:
                 nonlocal pressure_count
@@ -1362,9 +1385,10 @@ class TestSelectorProactor:
                     if op_box:
                         op_box[0].multishot_rearm()
                     return
-                if delivery.value is None:
+                if delivery.index is None or delivery.value is None:
                     return
-                index, payload = delivery.value
+                index = delivery.index
+                payload = delivery.value
                 if payload:
                     held.append(payload)
                     seen.append((index, bytes(payload)))
@@ -3716,7 +3740,7 @@ class TestUringProactor:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         seen: list[_RecvManySeen] = []
-        op_box: list[ContinuousOperation[tuple[int, memoryview]]] = []
+        op_box: list[ContinuousOperation[memoryview]] = []
         try:
             reader.setblocking(False)
             operation = proactor.recv_many(
@@ -3728,7 +3752,8 @@ class TestUringProactor:
             ring.complete_recv_multishot(b"b", more=True, sequence=1)
             ring.complete_recv_multishot_enobufs(sequence=2)
             assert _is_enobufs_delivery(seen[-1])
-            assert seen[-1].value == (2, memoryview(b""))
+            assert seen[-1].index == 2
+            assert bytes(seen[-1].value or b"") == b""
             assert len(ring.submitted_recv_multishot) == 2
             ring.complete_recv_multishot(b"c", more=True, sequence=0)
             ring.complete_recv_multishot(b"", more=False, sequence=1)
@@ -3771,7 +3796,7 @@ class TestUringProactor:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         seen: list[_RecvManySeen] = []
-        op_box: list[ContinuousOperation[tuple[int, memoryview]]] = []
+        op_box: list[ContinuousOperation[memoryview]] = []
         try:
             reader.setblocking(False)
             operation = proactor.recv_many(
@@ -3971,7 +3996,8 @@ class TestUringProactor:
                 deadline = scheduler.proactor.get_time() + 1.0
                 while len(ring.submitted_recv_multishot) < 2 and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.02)
-                ring.complete_recv_multishot(b"d", more=False, sequence=0)
+                ring.complete_recv_multishot(b"d", more=True, sequence=0)
+                ring.complete_recv_multishot(b"", more=False, sequence=1)
 
             task = scheduler.spawn(receive_chunks)
             scheduler.spawn(deliver_chunks)
@@ -4008,7 +4034,8 @@ class TestUringProactor:
                 assert submitted[1].buffer_size == 4096
                 assert submitted[1].buffer_count == 4
                 assert submitted[1] is not scheduler.proactor.shared_recv_buffer_pool()
-                ring.complete_recv_multishot(b"x", more=False, sequence=0)
+                ring.complete_recv_multishot(b"x", more=True, sequence=0)
+                ring.complete_recv_multishot(b"", more=False, sequence=1)
 
             task = scheduler.spawn(receive_first_chunk)
             scheduler.spawn(deliver_first_chunk)
@@ -4058,7 +4085,8 @@ class TestUringProactor:
                 while len(ring.submitted_recv_multishot) < 2 and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.02)
                 assert len(ring.submitted_recv_multishot) == 2
-                ring.complete_recv_multishot(b"d", more=False, sequence=0)
+                ring.complete_recv_multishot(b"d", more=True, sequence=0)
+                ring.complete_recv_multishot(b"", more=False, sequence=1)
 
             task = scheduler.spawn(receive_chunks)
             scheduler.spawn(deliver_chunks)
@@ -4093,7 +4121,8 @@ class TestUringProactor:
                 deadline = scheduler.proactor.get_time() + 1.0
                 while len(ring.submitted_recv_multishot) < 2 and scheduler.proactor.get_time() < deadline:
                     scheduler.sleep(0.02)
-                ring.complete_recv_multishot(b"d", more=False, sequence=0)
+                ring.complete_recv_multishot(b"d", more=True, sequence=0)
+                ring.complete_recv_multishot(b"", more=False, sequence=1)
 
             task = scheduler.spawn(receive)
             scheduler.spawn(deliver)
@@ -4702,8 +4731,13 @@ class TestProactorScheduler:
                 index, chunk = item
                 return index, bytes(chunk)
 
+            def deliver_first_chunk() -> None:
+                ring = scheduler.proactor.ring
+                ring.complete_recv_multishot(b"x", more=True, sequence=0)
+                ring.complete_recv_multishot(b"", more=False, sequence=1)
+
             task = scheduler.spawn(receive_first_chunk)
-            scheduler.spawn(lambda: scheduler.proactor.ring.complete_recv_multishot(b"x", more=False, sequence=0))
+            scheduler.spawn(deliver_first_chunk)
 
             assert scheduler.run_until_complete(task) == (0, b"x")
             submitted = scheduler.proactor.ring.submitted_recv_multishot[0][1]

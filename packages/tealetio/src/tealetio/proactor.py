@@ -85,7 +85,7 @@ _DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
 _DEFAULT_RECVITER_BUFFER_SIZE = 16 * 1024
 _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
-_RecvManyValue = tuple[int, memoryview]
+_RecvManyValue = memoryview
 _RecvManyCallback = Callable[[MultishotDelivery[_RecvManyValue]], object]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery[socket.socket]], object]
@@ -1206,13 +1206,13 @@ class SelectorProactor(ProactorBase):
         """Start receiving byte chunks until EOF, cancellation, or failure.
 
         `callback` may run on any backend worker thread. Each result is an
-        ordinal `(index, data)` pair with read-only `data` as a leased
-        ``memoryview``; EOF emits a final empty view before completing the
-        continuous operation. Chunk sizes follow the kernel; this implementation
-        reads up to 8 KiB per ``recv()`` call. When the synthetic
-        ``buf_group`` pool is exhausted, the callback receives
-        ``MultishotDelivery`` with ``errno.ENOBUFS``; drop held views and call
-        ``operation.multishot_rearm()`` to continue.
+        ``MultishotDelivery`` with leg-local ``index``, leased ``memoryview``
+        data, optional ``exception``, and ``more``; EOF emits a final empty view
+        with ``more=False``. Chunk sizes follow the kernel; this implementation
+        reads up to 8 KiB per ``recv()`` call. When the synthetic ``buf_group``
+        pool is exhausted, the callback receives ``errno.ENOBUFS`` through
+        ``exception``; drop held views and call ``operation.multishot_rearm()``
+        to continue.
 
         ``base_sequence`` is accepted for API parity with ``UringProactor``;
         this backend keeps a single leg-local counter per operation.
@@ -1237,10 +1237,10 @@ class SelectorProactor(ProactorBase):
                     except (BlockingIOError, InterruptedError):
                         return ContinuousStepResult(progressed=progressed)
                     if not data:
-                        operation._emit_result((sequence, memoryview(b"")), more=False)
+                        operation._emit_result(memoryview(b""), index=sequence, more=False)
                         sequence += 1
                         return ContinuousStepResult(progressed=True, done=True)
-                    operation._emit_result((sequence, memoryview(data)))
+                    operation._emit_result(memoryview(data), index=sequence)
                     sequence += 1
                     progressed = True
 
@@ -1261,7 +1261,12 @@ class SelectorProactor(ProactorBase):
                     state.pressure_emitted = True
                     state.paused = True
                     operation._emit_delivery(
-                        MultishotDelivery((sequence, memoryview(b"")), _enobufs_error(), more=True)
+                        MultishotDelivery(
+                            index=sequence,
+                            value=memoryview(b""),
+                            exception=_enobufs_error(),
+                            more=False,
+                        )
                     )
                     return ContinuousStepResult(progressed=True)
                 return ContinuousStepResult(progressed=False)
@@ -1270,10 +1275,10 @@ class SelectorProactor(ProactorBase):
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
             if not data:
-                operation._emit_result((sequence, memoryview(b"")), more=False)
+                operation._emit_result(memoryview(b""), index=sequence, more=False)
                 sequence += 1
                 return ContinuousStepResult(progressed=True, done=True)
-            operation._emit_result((sequence, _leased_selector_memoryview(data, resolved_group)))
+            operation._emit_result(_leased_selector_memoryview(data, resolved_group), index=sequence)
             sequence += 1
             state.pressure_emitted = False
             return ContinuousStepResult(progressed=True)
@@ -2605,18 +2610,18 @@ class UringProactor(ProactorBase):
 
         `callback` may run on any uring completion service thread.
 
-        When multishot provided-buffer receive is available, each result is an
-        ordinal `(index, data)` pair with read-only `data` as a `memoryview`
-        into a leased kernel buffer. Indices are leg-local ordinals starting at
-        zero; pass ``base_sequence`` to ``submit_recv_multishot()`` when callers
-        need a global stream offset (for example ``sock_recv_iter`` after
-        ``ENOBUFS``). Callback delivery may arrive out of order across completion
+        When multishot provided-buffer receive is available, each callback
+        receives ``MultishotDelivery`` with leg-local ``index``, leased
+        ``memoryview`` data in ``value``, optional ``exception``, and ``more``.
+        Pass ``base_sequence`` to ``submit_recv_multishot()`` when callers need
+        a global stream offset (for example ``sock_recv_iter`` after pool
+        pressure). Callback delivery may arrive out of order across completion
         threads; consumers that need stream order must reorder by index
         themselves. Chunk sizes come from the operation's ``BufGroup`` pool.
         Holding live views can pin provided buffers and stall further receives.
-        When the pool is exhausted the backend emits ``errno.ENOBUFS`` through
-        ``MultishotDelivery.exception`` together with the leg-local index in
-        ``value``; consumers drop held views and start a fresh ``recv_many()``.
+        ``errno.ENOBUFS`` is delivered through ``exception`` with the leg-local
+        ``index``. ``more=False`` with non-empty data means the leg stopped
+        before EOF; consumers drop held views and start a fresh ``recv_many()``.
 
         When multishot receive is unavailable, the proactor falls back to
         repeated one-shot ``submit_recv()`` into a reused buffer. Chunks are
@@ -2697,12 +2702,12 @@ class UringProactor(ProactorBase):
             return operation
         index = stream_sequence[0]
         if res == 0:
-            operation._emit_result((index, memoryview(b"")), more=False)
+            operation._emit_result(memoryview(b""), index=index, more=False)
             operation._finish(result=None)
             self._deactivate_uring_entry(entry)
             return operation
         chunk = bytes(data[:res])
-        operation._emit_result((index, memoryview(chunk)), more=True)
+        operation._emit_result(memoryview(chunk), index=index, more=True)
         stream_sequence[0] = index + 1
         if operation.done():
             return operation
@@ -2820,7 +2825,12 @@ class UringProactor(ProactorBase):
                 multishot_leg.pending_final = None
                 self._deactivate_uring_entry(entry)
                 operation._emit_delivery(
-                    MultishotDelivery((index, memoryview(b"")), _enobufs_error(), more=True)
+                    MultishotDelivery(
+                        index=index,
+                        value=memoryview(b""),
+                        exception=_enobufs_error(),
+                        more=False,
+                    )
                 )
                 return None
             self._deactivate_uring_entry(entry)
@@ -2829,9 +2839,13 @@ class UringProactor(ProactorBase):
 
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         if res == 0:
-            operation._emit_result((index, memoryview(b"")), more=more)
+            operation._emit_result(memoryview(b""), index=index, more=more)
         else:
-            operation._emit_result((index, memoryview(cast(Any, completion.result))), more=more)
+            operation._emit_result(
+                memoryview(cast(Any, completion.result)),
+                index=index,
+                more=more,
+            )
 
         if not more:
             operation._finish(result=None)
