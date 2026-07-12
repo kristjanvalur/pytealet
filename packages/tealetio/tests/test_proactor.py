@@ -27,7 +27,6 @@ from uring_fakes import (
     _DeferredCreateSocketUringRing,
     _DeferredSocketUringRing,
     _DeferredUringRing,
-    _FailOnResubmitUringRing,
     _FailingConnectUringRing,
     _FailingSubmitUringRing,
     _FakeUringRing,
@@ -1276,28 +1275,38 @@ class TestSelectorProactor:
         finally:
             proactor.close()
 
-    def test_recv_many_emits_chunks_and_completes_on_eof(self):
+    def test_recv_many_delivers_single_chunk_per_call(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         seen: list[_RecvManySeen] = []
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv_many(reader, seen.append, buf_group=proactor.shared_recv_buffer_pool())
 
+            operation = proactor.recv_many(reader, seen.append, buf_group=proactor.shared_recv_buffer_pool())
             writer.send(b"hello")
             while not seen:
                 proactor.wait(proactor.get_time() + 1.0)
+            assert operation.done() is True
+            assert _recv_many_bytes(seen) == [(0, b"hello")]
+            assert seen[-1].more is False
+
+            operation = proactor.recv_many(
+                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool(), base_sequence=1
+            )
             writer.send(b"world")
             while len(seen) < 2:
                 proactor.wait(proactor.get_time() + 1.0)
-            writer.shutdown(socket.SHUT_WR)
-            while not operation.done():
-                proactor.wait(proactor.get_time() + 1.0)
+            assert operation.done() is True
+            assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world")]
 
-            assert all(
-                delivery.value is not None and isinstance(delivery.value, memoryview) for delivery in seen if delivery.value
+            operation = proactor.recv_many(
+                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool(), base_sequence=2
             )
+            writer.shutdown(socket.SHUT_WR)
+            while len(seen) < 3:
+                proactor.wait(proactor.get_time() + 1.0)
+            assert operation.done() is True
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
             assert operation.result() is None
         finally:
@@ -1305,200 +1314,32 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    @pytest.mark.skipif(
-        not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
-    )
-    def test_recv_many_emits_pressure_when_pool_is_full(self):
-        proactor = SelectorProactor()
-        buf_group = proactor.create_buf_group(1024, 2)
-        reader, writer = socket.socketpair()
-        seen: list[_RecvManySeen] = []
-        snapshots: list[tuple[int, bytes]] = []
-        held: list[memoryview] = []
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            op_box: list[ContinuousOperation[memoryview]] = []
-
-            def on_result(delivery: _RecvManySeen) -> None:
-                seen.append(delivery)
-                if _is_enobufs_delivery(delivery):
-                    for view in held:
-                        view.release()
-                    held.clear()
-                    return
-                snapshot = _snapshot_recv_many_data(delivery)
-                if snapshot is not None:
-                    snapshots.append(snapshot)
-                payload = delivery.value
-                if payload:
-                    held.append(payload)
-
-            operation = proactor.recv_many(reader, on_result, buf_group=buf_group)
-            op_box.append(operation)
-            writer.send(b"a")
-            while len(snapshots) < 1:
-                proactor.wait(proactor.get_time() + 1.0)
-            writer.send(b"b")
-            while len(snapshots) < 2:
-                proactor.wait(proactor.get_time() + 1.0)
-            writer.send(b"c")
-            deadline = proactor.get_time() + 1.0
-            while _enobufs_delivery_count(seen) < 1:
-                if proactor.get_time() >= deadline:
-                    break
-                proactor.wait(proactor.get_time() + 0.05)
-            assert _enobufs_delivery_count(seen) == 1
-            assert operation.done() is True
-            operation = proactor.recv_many(
-                reader, on_result, buf_group=buf_group, base_sequence=seen[-1].index
-            )
-            op_box[0] = operation
-            while len(snapshots) < 3:
-                proactor.wait(proactor.get_time() + 1.0)
-            writer.shutdown(socket.SHUT_WR)
-            while not operation.done():
-                proactor.wait(proactor.get_time() + 1.0)
-            assert snapshots == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"")]
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    @pytest.mark.skipif(
-        not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
-    )
-    def test_recv_many_reemits_pressure_after_premature_resume(self):
-        proactor = SelectorProactor()
-        buf_group = proactor.create_buf_group(1024, 2)
-        reader, writer = socket.socketpair()
-        seen: list[_RecvManySeen] = []
-        snapshots: list[tuple[int, bytes]] = []
-        held: list[memoryview] = []
-        pressure_count = 0
-        premature_base: list[int | None] = [None]
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            def on_result(delivery: _RecvManySeen) -> None:
-                nonlocal pressure_count
-                seen.append(delivery)
-                if _is_enobufs_delivery(delivery):
-                    pressure_count += 1
-                    if pressure_count == 1:
-                        premature_base[0] = delivery.index
-                    return
-                snapshot = _snapshot_recv_many_data(delivery)
-                if snapshot is not None:
-                    snapshots.append(snapshot)
-                payload = delivery.value
-                if payload:
-                    held.append(payload)
-
-            operation = proactor.recv_many(reader, on_result, buf_group=buf_group)
-            writer.send(b"a")
-            while len(snapshots) < 1:
-                proactor.wait(proactor.get_time() + 1.0)
-            writer.send(b"b")
-            while len(snapshots) < 2:
-                proactor.wait(proactor.get_time() + 1.0)
-            writer.send(b"c")
-            deadline = proactor.get_time() + 1.0
-            while pressure_count < 1:
-                if proactor.get_time() >= deadline:
-                    break
-                proactor.wait(proactor.get_time() + 0.05)
-            assert pressure_count == 1
-            assert operation.done() is True
-            assert premature_base[0] is not None
-            # resume before releasing held views: pool is still full, so the leg
-            # should surface ENOBUFS again rather than reading more data.
-            operation = proactor.recv_many(
-                reader, on_result, buf_group=buf_group, base_sequence=premature_base[0]
-            )
-            deadline = proactor.get_time() + 1.0
-            while pressure_count < 2:
-                if proactor.get_time() >= deadline:
-                    break
-                proactor.wait(proactor.get_time() + 0.05)
-            assert pressure_count == 2
-            assert operation.done() is True
-            for view in held:
-                view.release()
-            held.clear()
-            operation = proactor.recv_many(
-                reader, on_result, buf_group=buf_group, base_sequence=seen[-1].index
-            )
-            while len(snapshots) < 3:
-                proactor.wait(proactor.get_time() + 1.0)
-            writer.shutdown(socket.SHUT_WR)
-            while not operation.done():
-                proactor.wait(proactor.get_time() + 1.0)
-            assert snapshots == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"")]
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    @pytest.mark.skipif(
-        not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
-    )
-    def test_recviter_survives_selector_buffer_pressure(self):
-        scheduler = SyncProactorScheduler()
+    def test_recviter_streams_via_repeated_selector_recv_many(self):
+        scheduler = SyncProactorScheduler(lambda: SelectorProactor())
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
-        state = {"got_pressure": False, "release": False}
         try:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            def receive_chunks() -> tuple[bool, list[tuple[int, bytes]]]:
-                got_memview = False
-                saw_pressure = False
+            def receive_chunks() -> list[tuple[int, bytes]]:
                 seen: list[tuple[int, bytes]] = []
-                held: list[memoryview] = []
                 pool = scheduler.io.create_recv_buffer_pool(16 * 1024, 2)
                 for index, chunk in _iter_recv_stream(scheduler.io.sock_recv_iter(reader, pool)):
-                    if index == RECV_MANY_BUFFER_PRESSURE:
-                        saw_pressure = True
-                        state["got_pressure"] = True
-                        for view in held:
-                            view.release()
-                        held.clear()
-                        deadline = scheduler.proactor.get_time() + 1.0
-                        while not state["release"] and scheduler.proactor.get_time() < deadline:
-                            scheduler.sleep(0.02)
-                        assert state["release"]
-                        continue
-                    if type(chunk) is memoryview:
-                        got_memview = True
-                        held.append(chunk)
                     seen.append((index, bytes(chunk)))
-                return got_memview and saw_pressure, seen
+                return seen
 
             def deliver_chunks() -> None:
-                scheduler.io.sock_sendall(writer, b"a").wait()
+                scheduler.io.sock_sendall(writer, b"ab").wait()
                 scheduler.sleep(0.02)
-                scheduler.io.sock_sendall(writer, b"b").wait()
-                scheduler.sleep(0.02)
-                scheduler.io.sock_sendall(writer, b"c").wait()
-                deadline = scheduler.proactor.get_time() + 1.0
-                while not state["got_pressure"] and scheduler.proactor.get_time() < deadline:
-                    scheduler.sleep(0.02)
-                assert state["got_pressure"]
-                state["release"] = True
-                scheduler.sleep(0.05)
-                scheduler.io.sock_sendall(writer, b"d").wait()
+                scheduler.io.sock_sendall(writer, b"cd").wait()
                 writer.shutdown(socket.SHUT_WR)
 
             task = scheduler.spawn(receive_chunks)
             scheduler.spawn(deliver_chunks)
-            saw_memview_and_pressure, seen = scheduler.run_until_complete(task)
-            assert saw_memview_and_pressure
+            seen = scheduler.run_until_complete(task)
             assert b"".join(payload for _, payload in seen) == b"abcd"
-            assert [index for index, _payload in seen] == [0, 1, 2, 3]
+            assert [index for index, _payload in seen] == [0, 1]
         finally:
             reader.close()
             writer.close()
@@ -3652,28 +3493,7 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_deferred_recv_many_resubmit_failure_fails_operation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
-        proactor = UringProactor(ring_factory=_FailOnResubmitUringRing)
-        reader, writer = socket.socketpair()
-        seen: list[_RecvManySeen] = []
-        try:
-            reader.setblocking(False)
-            operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool()
-            )
-            proactor.ring.complete_recv_oneshot(b"hello")
-            assert _recv_many_bytes(seen) == [(0, b"hello")]
-            assert operation.done() is True
-            assert isinstance(operation.exception(), RuntimeError)
-            assert str(operation.exception()) == "deferred recv resubmit failed"
-            assert proactor.has_pending_operations() is False
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_recv_many_falls_back_to_oneshot_recv_and_finishes_on_eof(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_recv_many_falls_back_to_single_oneshot_recv(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -3686,8 +3506,14 @@ class TestUringProactor:
             assert proactor.ring.submitted_recv_multishot == []
             assert len(proactor.ring.submitted_recv) == 1
             proactor.ring.complete_recv_oneshot(b"hello")
-            _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
-            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_recv) == 2)
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert _recv_many_bytes(seen) == [(0, b"hello")]
+            assert seen[-1].more is False
+
+            operation = proactor.recv_many(
+                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool(), base_sequence=1
+            )
+            assert len(proactor.ring.submitted_recv) == 2
             proactor.ring.complete_recv_oneshot(b"")
             _wait_for_uring(proactor, lambda: operation.done())
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
