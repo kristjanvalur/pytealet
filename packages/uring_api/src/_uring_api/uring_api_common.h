@@ -111,6 +111,7 @@ typedef enum {
 typedef struct UringApiCompletion {
     PyObject_HEAD UringApiPendingKind kind;
     PyObject *user_data;
+    PyObject *cancel_target;
     int res;
     unsigned int flags;
     PyObject *result;

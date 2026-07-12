@@ -237,6 +237,7 @@ static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit
     buf_group = UringApiCompletion_get_buf_group(self);
     Py_VISIT(buf_group);
     Py_VISIT(self->user_data);
+    Py_VISIT(self->cancel_target);
     Py_VISIT(self->result);
 
     switch (UringApiCompletion_state_tag(self)) {
@@ -274,6 +275,7 @@ static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit
 static int UringApiCompletion_clear(UringApiCompletion *self) {
     UringApiCompletion_free_state(self);
     Py_CLEAR(self->user_data);
+    Py_CLEAR(self->cancel_target);
     Py_CLEAR(self->result);
     return 0;
 }
@@ -287,6 +289,7 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     }
     completion->kind = kind;
     completion->user_data = Py_NewRef(user_data != NULL ? user_data : Py_None);
+    completion->cancel_target = NULL;
     completion->res = 0;
     completion->flags = 0;
     completion->result = NULL;
@@ -740,6 +743,13 @@ static PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void
     return Py_NewRef(self->user_data);
 }
 
+static PyObject *UringApiCompletion_get_cancel_target(UringApiCompletion *self, void *closure) {
+    if (!self->cancel_target) {
+        Py_RETURN_NONE;
+    }
+    return Py_NewRef(self->cancel_target);
+}
+
 static PyObject *UringApiCompletion_get_kind(UringApiCompletion *self, void *closure) {
     return PyLong_FromLong((long)self->kind);
 }
@@ -769,6 +779,7 @@ static PyObject *UringApiCompletion_get_multishot(UringApiCompletion *self, void
 
 static PyGetSetDef UringApiCompletion_getset[] = {
     {"user_data", (getter)UringApiCompletion_get_user_data, NULL, NULL, NULL},
+    {"cancel_target", (getter)UringApiCompletion_get_cancel_target, NULL, NULL, NULL},
     {"kind", (getter)UringApiCompletion_get_kind, NULL, NULL, NULL},
     {"res", (getter)UringApiCompletion_get_res, NULL, NULL, NULL},
     {"flags", (getter)UringApiCompletion_get_flags, NULL, NULL, NULL},

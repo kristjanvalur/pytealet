@@ -1706,7 +1706,6 @@ class UringProactor(ProactorBase):
         self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
         self._uring_operation_entries: dict[int, _UringEntry] = {}
-        self._uring_completion_entries: dict[int, _UringEntry] = {}
         self._retrying_deferred_submissions = False
         self._submit_attempts = 0
         self._submit_queue_full = 0
@@ -1806,13 +1805,13 @@ class UringProactor(ProactorBase):
                 cancel_op = self._submit_cancel_op(
                     completion,
                     kind="poll_remove",
-                    ring_submit=self._ring.submit_poll_remove,
+                    submit=self._ring.submit_poll_remove,
                 )
             else:
                 cancel_op = self._submit_cancel_op(
                     completion,
                     kind="cancel",
-                    ring_submit=self._ring.submit_cancel,
+                    submit=self._ring.submit_cancel,
                 )
             self.break_wait()
         elif self._cancel_deferred_operation(operation):
@@ -1829,7 +1828,7 @@ class UringProactor(ProactorBase):
         target_completion: _UringCompletion,
         *,
         kind: str,
-        ring_submit: Callable[[_UringCompletion], _UringCompletion],
+        submit: Callable[[_UringCompletion, _UringEntry], _UringCompletion],
     ) -> Operation[None]:
         cancel_operation = Operation[None](kind=kind, fileobj=target_completion)
 
@@ -1839,29 +1838,8 @@ class UringProactor(ProactorBase):
             return operation
 
         entry = self._uring_entry(cancel_operation, complete_cancel)
-        self._submit_uring_entry(entry, lambda: ring_submit(target_completion))
+        self._submit_uring_entry(entry, lambda: submit(target_completion, entry))
         return cancel_operation
-
-    def _resolve_uring_entry(self, completion: _UringCompletion) -> _UringEntry | None:
-        entry = self._uring_completion_entries.get(id(completion))
-        if entry is not None:
-            return entry
-        user_data = completion.user_data
-        if isinstance(user_data, _UringEntry):
-            return user_data
-        # cancel/poll_remove CQEs carry the target completion in user_data, not
-        # the owning entry. Match the in-flight cancel operation while submit() may
-        # still be delivering the CQE before its handle is registered above.
-        if completion.kind in (
-            uring_api.COMPLETION_KIND_CANCEL,
-            uring_api.COMPLETION_KIND_POLL_REMOVE,
-        ):
-            target = user_data
-            for candidate in self._uring_operation_entries.values():
-                operation = candidate.operation
-                if operation.kind in ("cancel", "poll_remove") and operation.fileobj is target and not operation.done():
-                    return candidate
-        return None
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
         """Create a provided-buffer group for ``recv_many`` / ``sock_recv_iter``."""
@@ -1925,7 +1903,6 @@ class UringProactor(ProactorBase):
         self._pending_tokens.clear()
         self._deferred_submissions.clear()
         self._uring_operation_entries.clear()
-        self._uring_completion_entries.clear()
         self.break_wait()
         self._ring.callback = None
         self._ring.close()
@@ -2302,7 +2279,7 @@ class UringProactor(ProactorBase):
                     self._submit_cancel_op(
                         completion,
                         kind="cancel",
-                        ring_submit=self._ring.submit_cancel,
+                        submit=self._ring.submit_cancel,
                     )
                 accept_entry.active = False
             accept_entry_ref[0] = None
@@ -2817,10 +2794,7 @@ class UringProactor(ProactorBase):
         if entry.active:
             entry.active = False
             self._pending_tokens.pop()
-        completion = entry.completion
         entry.completion = None
-        if completion is not None:
-            self._uring_completion_entries.pop(id(completion), None)
         self._uring_operation_entries.pop(id(entry.operation), None)
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
@@ -2840,19 +2814,18 @@ class UringProactor(ProactorBase):
                 result = self._complete_uring_operation(completion)
                 if result is not None:
                     completed_operation = result
-                target = cast(_UringCompletion, completion.user_data)
-                poll_entry = target.user_data
-                if isinstance(poll_entry, _UringEntry):
-                    self._deactivate_uring_entry(poll_entry)
+                poll_target = completion.cancel_target
+                if poll_target is not None:
+                    poll_entry = cast(_UringCompletion, poll_target).user_data
+                    if isinstance(poll_entry, _UringEntry):
+                        self._deactivate_uring_entry(poll_entry)
                 continue
             if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
                 result = self._complete_uring_operation(completion)
                 if result is not None:
                     completed_operation = result
                 continue
-            entry = self._resolve_uring_entry(completion)
-            if entry is None:
-                continue
+            entry = cast(_UringEntry, completion.user_data)
             to_process = entry.completions_to_process(completion)
             if not to_process and entry.operation.done():
                 # Late multishot CQEs after cancel/terminal finish: drop the leg
@@ -2879,9 +2852,7 @@ class UringProactor(ProactorBase):
         try:
             entry.active = True
             self._note_submit_attempt()
-            completion = submit()
-            entry.completion = completion
-            self._uring_completion_entries[id(completion)] = entry
+            entry.completion = submit()
         except uring_api.SubmissionQueueFull:
             self._note_submit_queue_full()
             entry.active = False
@@ -2968,9 +2939,7 @@ class UringProactor(ProactorBase):
         self,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        entry = self._resolve_uring_entry(completion)
-        if entry is None:
-            return None
+        entry = cast(_UringEntry, completion.user_data)
         res = completion.res
         if entry.operation.done():
             if entry.active:
