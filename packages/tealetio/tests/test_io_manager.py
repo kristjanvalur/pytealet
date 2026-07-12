@@ -24,7 +24,7 @@ from tealetio.io_waiter import (
     IOWaitGroupChild,
     IOWaitGroupChildProtocol,
 )
-from tealetio.operations import ContinuousOperation, InvalidStateError, Operation
+from tealetio.operations import ContinuousOperation, InvalidStateError, MultishotDelivery, Operation
 from tealetio.tasks import CancelledError
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.scheduler import TimerHandle
@@ -299,7 +299,7 @@ class TestProactorIOManagerAcceptMany:
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
@@ -367,7 +367,7 @@ class TestProactorIOManagerAcceptMany:
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
@@ -409,7 +409,7 @@ class TestProactorIOManagerAcceptMany:
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
@@ -448,7 +448,7 @@ class TestProactorIOManagerAcceptMany:
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
@@ -480,7 +480,7 @@ class TestProactorIOManagerAcceptMany:
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
             def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
@@ -514,7 +514,7 @@ class TestProactorIOManagerAcceptMany:
                     conn, peer = socket.socketpair()
                     peer.close()
                     closed.append(conn)
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
             def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
@@ -543,7 +543,7 @@ class TestProactorIOManagerAcceptMany:
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         scheduler = _StubScheduler()
@@ -565,7 +565,7 @@ class TestProactorIOManagerAcceptMany:
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         scheduler = _StubScheduler()
@@ -590,7 +590,7 @@ class TestProactorIOManagerAcceptMany:
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
             def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
@@ -652,7 +652,7 @@ class TestProactorIOManagerAcceptMany:
                 if callback is not None:
                     conn, peer = socket.socketpair()
                     peer.close()
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
             def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
@@ -686,7 +686,7 @@ class TestProactorIOManagerAcceptMany:
                     conn, peer = socket.socketpair()
                     peer.close()
                     closed.append(conn)
-                    callback(conn)
+                    callback(MultishotDelivery(value=conn))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
             def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
@@ -1121,7 +1121,7 @@ class TestProactorIOManagerDirect:
         operation._emit_result(select.POLLIN)
         operation._finish(result=None)
         assert waiter.wait() is None
-        assert seen == [select.POLLIN]
+        assert [delivery.value for delivery in seen] == [select.POLLIN]
 
     def test_proactor_cancel_stops_continuous_operation_behind_waiter(self) -> None:
         proactor = _MockProactor()

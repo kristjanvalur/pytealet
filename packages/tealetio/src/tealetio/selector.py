@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, NoReturn, cast
 
 from .locks import Event
-from .operations import ContinuousOperation, Operation
+from .operations import ContinuousOperation, MultishotDelivery, Operation
 from .tasks import CancelledError
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
@@ -340,7 +340,7 @@ class SelectorMixin:
         self,
         fd: int,
         mask: int,
-        callback: Callable[[int], object],
+        callback: Callable[[MultishotDelivery[int]], object],
     ) -> ContinuousOperation[int]:
         """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
 

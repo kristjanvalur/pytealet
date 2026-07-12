@@ -7,6 +7,7 @@ from typing import Any, Generic, TypeVar, cast
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
+T_chunk = TypeVar("T_chunk")
 
 
 class InvalidStateError(Exception):
@@ -14,8 +15,23 @@ class InvalidStateError(Exception):
 
 
 _DoneCallback = Callable[["Operation[Any]"], object]
-_ResultCallback = Callable[[T_co], object]
+_MultishotRearm = Callable[[], None]
 _ProactorRef = Any
+
+
+@dataclass(frozen=True, slots=True)
+class MultishotDelivery(Generic[T_chunk]):
+    """One multishot leg delivery to a continuous operation callback.
+
+    ``value`` carries successful chunk data when present. ``exception`` carries
+    transport failures the consumer may interpret (for example ``errno.ENOBUFS``
+    on provided-buffer recv). ``more`` mirrors ``IORING_CQE_F_MORE`` on uring
+    backends and is ``False`` on terminal successful chunks elsewhere.
+    """
+
+    value: T_chunk | None = None
+    exception: BaseException | None = None
+    more: bool = True
 
 
 @dataclass
@@ -162,24 +178,38 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         self,
         kind: str,
         fileobj: object | None = None,
-        result_callback: _ResultCallback[T_co] | None = None,
+        result_callback: Callable[[MultishotDelivery[T_co]], object] | None = None,
     ) -> None:
         super().__init__(kind, fileobj)
         self._result_callback = result_callback
+        self._multishot_rearm: _MultishotRearm | None = None
 
-    def _emit_result(self, result: T_co) -> bool:
-        """Deliver one result when the operation is still active.
+    def multishot_rearm(self) -> None:
+        """Re-submit the backend multishot leg when the previous one ended."""
 
-        Returns ``True`` when delivery was accepted and the operation is still
-        active afterwards, ``False`` when the operation was already done or became
-        done during the callback (including cancellation).
-        """
+        rearm = self._multishot_rearm
+        if rearm is not None:
+            rearm()
+
+    def _emit_delivery(self, delivery: MultishotDelivery[T_co]) -> bool:
+        """Deliver one multishot chunk when the operation is still active."""
 
         with self._lock:
             if self._done:
                 return False
             callback = self._result_callback
         if callback is not None:
-            callback(result)
+            callback(delivery)
         with self._lock:
             return not self._done
+
+    def _emit_result(
+        self,
+        result: T_co,
+        *,
+        exception: BaseException | None = None,
+        more: bool = True,
+    ) -> bool:
+        """Deliver one successful chunk wrapped in ``MultishotDelivery``."""
+
+        return self._emit_delivery(MultishotDelivery(value=result, exception=exception, more=more))

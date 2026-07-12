@@ -23,7 +23,7 @@ from .io_waiter import (
     IOWaitable,
 )
 
-from .operations import Operation
+from .operations import MultishotDelivery, Operation
 from .tasks import CancelledError
 from .socket_helpers import abortive_close
 from .types import SocketSendBuffer
@@ -181,7 +181,7 @@ class PollIO(Protocol):
         self,
         fd: int,
         mask: int,
-        callback: Callable[[int], object],
+        callback: Callable[[MultishotDelivery[int]], object],
     ) -> IOWaitable[None]: ...
 
 
@@ -523,7 +523,7 @@ class ProactorIOManager:
         self,
         fd: int,
         mask: int,
-        callback: Callable[[int], object],
+        callback: Callable[[MultishotDelivery[int]], object],
     ) -> IOWaitable[None]:
         return IOWaiter(self, self._proactor.poll_many(fd, mask, callback))
 
@@ -564,10 +564,15 @@ class ProactorIOManager:
         *,
         recv_size: int,
         recv_timeout: float | None = None,
-    ) -> Callable[[socket.socket], None]:
+    ) -> Callable[[MultishotDelivery[socket.socket]], None]:
         """Return a proactor ``accept_many`` callback that pre-reads each accept."""
 
-        def on_conn(conn: socket.socket) -> None:
+        def on_conn(delivery: MultishotDelivery[socket.socket]) -> None:
+            if delivery.exception is not None:
+                raise delivery.exception
+            conn = delivery.value
+            if conn is None:
+                return
             recv_op = self._proactor.recv(conn, recv_size)
             timer_box: list[TimerHandle | None] = [None]
 

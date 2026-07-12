@@ -1,22 +1,20 @@
 from __future__ import annotations
 
+import errno
 import heapq
 import threading
 from collections import deque
-from collections.abc import Callable
 from .tasks import CancelledError
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar
 
 from .locks import ThreadsafeEvent
-from .operations import ContinuousOperation, Operation
+from .operations import ContinuousOperation, MultishotDelivery, Operation
 
 T_Cargo = TypeVar("T_Cargo")
 
-# ``recv_many`` result-callback index signalling provided-buffer pool pressure.
+# ``sock_recv_iter`` still yields this index for provided-buffer pool pressure.
 RECV_MANY_BUFFER_PRESSURE = -1
-_RecvManyResume = Callable[[], None]
-_RecvManyResult = tuple[int, memoryview | _RecvManyResume]
-# ``index`` may be ``RECV_MANY_BUFFER_PRESSURE`` (-1) for pressure tokens.
+_RecvManyValue = tuple[int, memoryview]
 _RecvIterYield: TypeAlias = tuple[int, memoryview]
 
 
@@ -85,6 +83,11 @@ class _OrderedIngestBuffer(Generic[T_Cargo]):
         self._next_index = start
 
 
+def _is_enobufs_delivery(delivery: MultishotDelivery[_RecvManyValue]) -> bool:
+    exc = delivery.exception
+    return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
+
+
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``."""
 
@@ -96,18 +99,18 @@ class RecvIterBuffer:
     ) -> None:
         self._buf_group = buf_group
         self._proactor = proactor
-        self._resume: _RecvManyResume | None = None
         self._lock = threading.Lock()
         self._event = ThreadsafeEvent()
         self._reorder = _OrderedIngestBuffer[memoryview]()
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False
+        self._awaiting_rearm = False
         self._stream_done = False
         self._stream_error: BaseException | None = None
-        self._stream: ContinuousOperation[_RecvManyResult] | None = None
+        self._stream: ContinuousOperation[_RecvManyValue] | None = None
         self._closed = False
 
-    def attach_stream(self, stream: ContinuousOperation[_RecvManyResult]) -> None:
+    def attach_stream(self, stream: ContinuousOperation[_RecvManyValue]) -> None:
         self._stream = stream
         stream.add_done_callback(self._on_stream_done)
 
@@ -122,52 +125,50 @@ class RecvIterBuffer:
             self._stream_done = True
         self._event.set()
 
-    def on_result(self, result: _RecvManyResult) -> None:
-        index, data = result
+    def on_result(self, delivery: MultishotDelivery[_RecvManyValue]) -> None:
         notify = False
         with self._lock:
             if self._closed:
                 return
-            if index == RECV_MANY_BUFFER_PRESSURE:
-                # recv_many emits at most one pressure callback until the
-                # consumer advances past the pressure yield and recv restarts.
+            if _is_enobufs_delivery(delivery):
                 if self._pressure_pending:
                     return
-                self._resume = cast(_RecvManyResume, data)
                 self._pressure_pending = True
+                self._awaiting_rearm = True
                 notify = True
-            else:
-                ready = self._reorder.pushpop((index, cast(memoryview, data)))
+            elif delivery.exception is not None:
+                self._stream_error = delivery.exception
+                self._stream_done = True
+                notify = True
+            elif delivery.value is not None:
+                index, data = delivery.value
+                ready = self._reorder.pushpop((index, data))
                 if ready is not None:
                     self._ready.append(ready)
                 notify = bool(self._ready) or len(self._reorder)
+                if not delivery.more:
+                    self._stream_done = True
+                    self._stream_error = None
         if notify:
             self._event.set()
 
-    def _should_resume(self) -> _RecvManyResume | None:
-        # pressure/resume only applies while multishot recv is still active; EOF
-        # is the terminal recv_many message and completes the stream, so any
-        # leftover _resume after EOF delivery is stale and backend resume no-ops
-        if self._resume is None:
-            return None
+    def _should_rearm(self) -> bool:
         if self._ready or len(self._reorder):
-            return None
+            return False
         buf_group = self._buf_group
-        # half the pool must be free; single-slot pools still need one free slot
         required_free = max(1, buf_group.buffer_count // 2)
-        if buf_group.buffer_count - buf_group.leased_count < required_free:
-            return None
-        resume_fn = self._resume
-        self._resume = None
-        return resume_fn
+        return buf_group.buffer_count - buf_group.leased_count >= required_free
 
     def consume_pressure_resume(self) -> None:
         """Re-arm ``recv_many`` once the buffer pool has enough free slots."""
 
         with self._lock:
-            resume_fn = self._should_resume()
-        if resume_fn is not None:
-            resume_fn()
+            if not self._awaiting_rearm or not self._should_rearm():
+                return
+            stream = self._stream
+            self._awaiting_rearm = False
+        if stream is not None and not stream.done():
+            stream.multishot_rearm()
 
     def take_next(self) -> _RecvIterYield | None:
         while True:
@@ -184,7 +185,6 @@ class RecvIterBuffer:
                     if ready_item is not None:
                         index, chunk = ready_item
                         if not chunk:
-                            # ordered EOF beats a concurrent stream error/cancel race
                             self._stream_done = True
                             self._stream_error = None
                             return None
@@ -195,20 +195,18 @@ class RecvIterBuffer:
                         return None
                     self._event.clear()
             finally:
-                with self._lock:
-                    pending_resume = self._should_resume()
-                if pending_resume is not None:
-                    pending_resume()
+                self.consume_pressure_resume()
             self._event.swait()
 
     def close(self) -> None:
-        stream: ContinuousOperation[_RecvManyResult] | None
+        stream: ContinuousOperation[_RecvManyValue] | None
         with self._lock:
             if self._closed:
                 return
             self._closed = True
             stream = self._stream
             self._pressure_pending = False
+            self._awaiting_rearm = False
             self._ready.clear()
             self._reorder.reset()
         if stream is not None and not stream.done():

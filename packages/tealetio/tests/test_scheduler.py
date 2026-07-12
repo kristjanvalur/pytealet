@@ -1626,7 +1626,11 @@ class TestSchedulerAccessors:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = s.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            operation = s.poll_many(
+                reader.fileno(),
+                select.POLLIN,
+                lambda delivery: seen.append(delivery.value) if delivery.value is not None else None,
+            )
 
             def send() -> None:
                 s.sleep(0.001)
@@ -1695,7 +1699,11 @@ class TestSchedulerAccessors:
             reader.setblocking(False)
             writer.setblocking(False)
             writer.send(b"a")
-            operation = s.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            operation = s.poll_many(
+                reader.fileno(),
+                select.POLLIN,
+                lambda delivery: seen.append(delivery.value) if delivery.value is not None else None,
+            )
             assert seen == [select.POLLIN]
             assert operation.done() is False
             s.cancel_operation(operation)
@@ -1714,7 +1722,11 @@ class TestSchedulerAccessors:
             reader.setblocking(False)
             writer.setblocking(False)
             mask = select.POLLIN | select.POLLOUT
-            operation = s.poll_many(reader.fileno(), mask, seen.append)
+            operation = s.poll_many(
+                reader.fileno(),
+                mask,
+                lambda delivery: seen.append(delivery.value) if delivery.value is not None else None,
+            )
 
             def send() -> None:
                 s.sleep(0.001)

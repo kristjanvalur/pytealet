@@ -6,6 +6,7 @@ import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
+from .operations import MultishotDelivery
 from .socket_helpers import abortive_close
 
 T = TypeVar("T")
@@ -50,11 +51,15 @@ def finalize_accept_recv_error(
 
 def wrap_accept_delivery(
     deliver: Callable[[AcceptReadResult], object],
-) -> Callable[[socket.socket], None]:
-    """Adapt a delivery callback to the proactor's bare-socket ``accept_many`` results."""
+) -> Callable[[MultishotDelivery[socket.socket]], None]:
+    """Adapt proactor ``accept_many`` deliveries to io_manager accept tuples."""
 
-    def on_conn(conn: socket.socket) -> None:
-        deliver((conn, None, None))
+    def on_conn(delivery: MultishotDelivery[socket.socket]) -> None:
+        if delivery.exception is not None:
+            raise delivery.exception
+        if delivery.value is None:
+            return
+        deliver((delivery.value, None, None))
 
     return on_conn
 
