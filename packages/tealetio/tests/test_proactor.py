@@ -117,8 +117,14 @@ def _recv_many_auto_resume_callback(
     return on_result
 
 
-def _is_recv_many_data_tuple(item: object) -> bool:
-    return isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], int) and isinstance(item[1], bytes)
+def _enobufs_delivery_count(seen: list[_RecvManySeen]) -> int:
+    return sum(1 for delivery in seen if _is_enobufs_delivery(delivery))
+
+
+def _snapshot_recv_many_data(delivery: _RecvManySeen) -> tuple[int, bytes] | None:
+    if delivery.exception is not None or delivery.value is None:
+        return None
+    return (delivery.index, bytes(delivery.value))
 
 
 def _recv_many_bytes(seen: list[_RecvManySeen]) -> list[tuple[int, bytes]]:
@@ -1305,6 +1311,7 @@ class TestSelectorProactor:
         buf_group = proactor.create_buf_group(1024, 2)
         reader, writer = socket.socketpair()
         seen: list[_RecvManySeen] = []
+        snapshots: list[tuple[int, bytes]] = []
         held: list[memoryview] = []
         try:
             reader.setblocking(False)
@@ -1313,46 +1320,42 @@ class TestSelectorProactor:
             op_box: list[ContinuousOperation[memoryview]] = []
 
             def on_result(delivery: _RecvManySeen) -> None:
+                seen.append(delivery)
                 if _is_enobufs_delivery(delivery):
-                    seen.append(delivery)
                     for view in held:
                         view.release()
                     held.clear()
                     if op_box:
                         op_box[0].multishot_rearm()
                     return
-                if delivery.value is None:
-                    return
-                index = delivery.index
+                snapshot = _snapshot_recv_many_data(delivery)
+                if snapshot is not None:
+                    snapshots.append(snapshot)
                 payload = delivery.value
                 if payload:
                     held.append(payload)
-                    seen.append((index, bytes(payload)))
-                else:
-                    seen.append((index, b""))
 
             operation = proactor.recv_many(reader, on_result, buf_group=buf_group)
             op_box.append(operation)
             writer.send(b"a")
-            while len([item for item in seen if _is_recv_many_data_tuple(item) and item[0] >= 0]) < 1:
+            while len(snapshots) < 1:
                 proactor.wait(proactor.get_time() + 1.0)
             writer.send(b"b")
-            while len([item for item in seen if _is_recv_many_data_tuple(item) and item[0] >= 0]) < 2:
+            while len(snapshots) < 2:
                 proactor.wait(proactor.get_time() + 1.0)
             writer.send(b"c")
             deadline = proactor.get_time() + 1.0
-            while not any(_is_enobufs_delivery(item) for item in seen if isinstance(item, MultishotDelivery)):
+            while _enobufs_delivery_count(seen) < 1:
                 if proactor.get_time() >= deadline:
                     break
                 proactor.wait(proactor.get_time() + 0.05)
-            assert any(_is_enobufs_delivery(item) for item in seen if isinstance(item, MultishotDelivery))
-            while len([item for item in seen if _is_recv_many_data_tuple(item) and item[0] >= 0]) < 3:
+            assert _enobufs_delivery_count(seen) == 1
+            while len(snapshots) < 3:
                 proactor.wait(proactor.get_time() + 1.0)
             writer.shutdown(socket.SHUT_WR)
             while not operation.done():
                 proactor.wait(proactor.get_time() + 1.0)
-            data_seen = [item for item in seen if _is_recv_many_data_tuple(item)]
-            assert data_seen == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"")]
+            assert snapshots == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"")]
         finally:
             reader.close()
             writer.close()
@@ -1366,6 +1369,7 @@ class TestSelectorProactor:
         buf_group = proactor.create_buf_group(1024, 2)
         reader, writer = socket.socketpair()
         seen: list[_RecvManySeen] = []
+        snapshots: list[tuple[int, bytes]] = []
         held: list[memoryview] = []
         pressure_count = 0
         try:
@@ -1376,8 +1380,8 @@ class TestSelectorProactor:
 
             def on_result(delivery: _RecvManySeen) -> None:
                 nonlocal pressure_count
+                seen.append(delivery)
                 if _is_enobufs_delivery(delivery):
-                    seen.append(delivery)
                     pressure_count += 1
                     if pressure_count == 1:
                         if op_box:
@@ -1389,23 +1393,20 @@ class TestSelectorProactor:
                     if op_box:
                         op_box[0].multishot_rearm()
                     return
-                if delivery.value is None:
-                    return
-                index = delivery.index
+                snapshot = _snapshot_recv_many_data(delivery)
+                if snapshot is not None:
+                    snapshots.append(snapshot)
                 payload = delivery.value
                 if payload:
                     held.append(payload)
-                    seen.append((index, bytes(payload)))
-                else:
-                    seen.append((index, b""))
 
             operation = proactor.recv_many(reader, on_result, buf_group=buf_group)
             op_box.append(operation)
             writer.send(b"a")
-            while len([item for item in seen if _is_recv_many_data_tuple(item) and item[0] >= 0]) < 1:
+            while len(snapshots) < 1:
                 proactor.wait(proactor.get_time() + 1.0)
             writer.send(b"b")
-            while len([item for item in seen if _is_recv_many_data_tuple(item) and item[0] >= 0]) < 2:
+            while len(snapshots) < 2:
                 proactor.wait(proactor.get_time() + 1.0)
             writer.send(b"c")
             deadline = proactor.get_time() + 1.0
@@ -1420,13 +1421,12 @@ class TestSelectorProactor:
                     break
                 proactor.wait(proactor.get_time() + 0.05)
             assert pressure_count == 2
-            while len([item for item in seen if _is_recv_many_data_tuple(item) and item[0] >= 0]) < 3:
+            while len(snapshots) < 3:
                 proactor.wait(proactor.get_time() + 1.0)
             writer.shutdown(socket.SHUT_WR)
             while not operation.done():
                 proactor.wait(proactor.get_time() + 1.0)
-            data_seen = [item for item in seen if _is_recv_many_data_tuple(item)]
-            assert data_seen == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"")]
+            assert snapshots == [(0, b"a"), (1, b"b"), (2, b"c"), (3, b"")]
         finally:
             reader.close()
             writer.close()
