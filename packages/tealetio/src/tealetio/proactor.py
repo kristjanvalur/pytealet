@@ -344,8 +344,12 @@ class _LeasedChunk:
 
 
 def _leased_synthetic_memoryview(data: bytes | bytearray, pool: SyntheticRecvBufferPool) -> memoryview:
-    pool._note_leased()
     payload = data if type(data) is bytearray else bytearray(data)
+    if not _supports_release_buffer():
+        # PEP 688 buffer exporters need Python 3.12+; callers cannot release pool
+        # slots via memoryview.release() on older builds, so skip lease accounting.
+        return memoryview(payload)
+    pool._note_leased()
     return memoryview(_LeasedChunk(payload, pool))
 
 

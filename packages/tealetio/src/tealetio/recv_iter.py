@@ -153,8 +153,10 @@ class RecvIterBuffer:
             return data
         if getattr(self._buf_group, "_note_leased", None) is None:
             return data
-        from .proactor import SyntheticRecvBufferPool, _leased_synthetic_memoryview
+        from .proactor import SyntheticRecvBufferPool, _leased_synthetic_memoryview, _supports_release_buffer
 
+        if not _supports_release_buffer():
+            return data
         return _leased_synthetic_memoryview(bytes(data), cast(SyntheticRecvBufferPool, self._buf_group))
 
     def _signal_pressure_if_pending(self) -> bool:

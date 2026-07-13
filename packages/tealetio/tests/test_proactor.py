@@ -395,6 +395,9 @@ def test_selector_recv_many_emits_enobufs_when_synthetic_pool_is_full() -> None:
         proactor.close()
 
 
+@pytest.mark.skipif(
+    not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
+)
 def test_synthetic_leased_memoryview_release_returns_pool_slot():
     pool = proactor_module.SyntheticRecvBufferPool(1024, 4)
     view = proactor_module._leased_synthetic_memoryview(b"abc", pool)
@@ -3642,6 +3645,9 @@ class TestUringProactor:
             reader.close()
             proactor.close()
 
+    @pytest.mark.skipif(
+        not proactor_module._supports_release_buffer(), reason="synthetic recv leases require Python 3.12+"
+    )
     def test_recv_many_synthetic_pool_uses_standard_recv_and_leases_chunks(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
