@@ -187,13 +187,6 @@ class _ReaderCore:
         del self._buffer[:count]
         return chunk
 
-    def _read_some(self, n: int) -> bytes:
-        if self._eof and not self._buffer:
-            return b""
-        if len(self._buffer) < n and not self._eof:
-            self._fill_buffer(n)
-        return self._take_bytes(min(n, len(self._buffer)))
-
     def read(self, n: int = -1) -> bytes:
         if n == 0:
             return b""
@@ -204,7 +197,12 @@ class _ReaderCore:
             payload = bytes(self._buffer)
             self._buffer.clear()
             return payload
-        return self._read_some(n)
+        if self._buffer:
+            return self._take_bytes(min(n, len(self._buffer)))
+        if self._eof:
+            return b""
+        self._append_next_chunk()
+        return self._take_bytes(min(n, len(self._buffer)))
 
     def readinto(self, b: Any) -> int:
         view = memoryview(b).cast("B")
