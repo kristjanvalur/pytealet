@@ -19,6 +19,7 @@ from tealetio.streams import (
     _open_recv_buffer,
     open_connection,
     open_streams,
+    pooled_default_stream_factory,
     run_coro,
     start_server,
 )
@@ -191,6 +192,47 @@ class TestStreamsPoC:
         finally:
             reader.close()
             writer.close()
+
+    def test_pooled_default_stream_factory_uses_per_connection_pool(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        reader_a, writer_a = socket.socketpair()
+        reader_b, writer_b = socket.socketpair()
+        try:
+            reader_a.setblocking(False)
+            reader_b.setblocking(False)
+            factory = pooled_default_stream_factory(buffer_size=16 * 1024, buffer_count=4)
+            stream_a, _ = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
+            stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
+            pool_a = stream_a._core._recv_buffer._buf_group
+            pool_b = stream_b._core._recv_buffer._buf_group
+            assert pool_a is not pool_b
+            assert pool_a is not scheduler.io.shared_recv_buffer_pool()
+        finally:
+            reader_a.close()
+            writer_a.close()
+            reader_b.close()
+            writer_b.close()
+
+    def test_pooled_default_stream_factory_can_share_fixed_pool(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        reader_a, writer_a = socket.socketpair()
+        reader_b, writer_b = socket.socketpair()
+        try:
+            reader_a.setblocking(False)
+            reader_b.setblocking(False)
+            shared = scheduler.io.create_recv_buffer_pool(16 * 1024, 4)
+            factory = pooled_default_stream_factory(pool=shared)
+            stream_a, _ = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
+            stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
+            assert stream_a._core._recv_buffer._buf_group is shared
+            assert stream_b._core._recv_buffer._buf_group is shared
+        finally:
+            reader_a.close()
+            writer_a.close()
+            reader_b.close()
+            writer_b.close()
 
     def test_open_async_streams_uses_custom_stream_factory(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()

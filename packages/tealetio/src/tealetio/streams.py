@@ -42,6 +42,7 @@ __all__ = [
     "StreamServer",
     "default_stream_factory",
     "default_async_stream_factory",
+    "pooled_default_stream_factory",
     "open_connection",
     "open_streams",
     "start_server",
@@ -442,6 +443,37 @@ def default_async_stream_factory(
     return reader, writer
 
 
+def pooled_default_stream_factory(
+    *,
+    async_: bool = False,
+    buffer_size: int = 16 * 1024,
+    buffer_count: int = 4,
+    pool: Any | None = None,
+) -> StreamFactory | AsyncStreamFactory:
+    """Return a default stream factory with an explicit provided-buffer pool.
+
+    When ``pool`` is omitted, each connection gets a fresh pool from
+    ``io.create_recv_buffer_pool(buffer_size, buffer_count)``. When ``pool`` is
+    set, every connection shares that pool. Pair ``async_`` with the stream
+    types returned by ``start_server`` / ``open_streams`` on the call site.
+    """
+
+    delegate = default_async_stream_factory if async_ else default_stream_factory
+
+    def factory(
+        io: SocketIO,
+        sock: socket.socket,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+        recv_buffer_pool: Any | None = None,
+    ) -> tuple[StreamReader, StreamWriter] | tuple[AsyncStreamReader, AsyncStreamWriter]:
+        del recv_buffer_pool
+        chosen = pool if pool is not None else io.create_recv_buffer_pool(buffer_size, buffer_count)
+        return delegate(io, sock, limit=limit, recv_buffer_pool=chosen)
+
+    return factory
+
+
 def _resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:
     if scheduler is not None:
         return scheduler
@@ -471,7 +503,6 @@ def _open_streams(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
-    recv_buffer_pool: Any | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
     # ``async_`` only selects the default stream factory when ``stream_factory`` is
     # omitted. An explicit factory must already match the intended stream types.
@@ -479,7 +510,7 @@ def _open_streams(
         factory = default_async_stream_factory if async_ else default_stream_factory
     else:
         factory = stream_factory
-    reader, writer = factory(io, sock, limit=limit, recv_buffer_pool=recv_buffer_pool)
+    reader, writer = factory(io, sock, limit=limit)
     if async_:
         return cast(_AsyncStreamPair, (reader, writer))
     return cast(_NativeStreamPair, (reader, writer))
@@ -512,7 +543,6 @@ def open_streams(
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
-    recv_buffer_pool: Any | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
     """Wrap a connected non-blocking socket as stream endpoints.
 
@@ -521,8 +551,9 @@ def open_streams(
     only selects the default factory when ``stream_factory`` is omitted.
 
     Default factories on proactor schedulers receive through ``recv_many`` via
-    ``sock_recv_iter``. Pass ``recv_buffer_pool`` to use a dedicated provided-buffer
-    pool instead of the scheduler shared pool.
+    ``sock_recv_iter`` and the scheduler shared provided-buffer pool. Use
+    ``pooled_default_stream_factory`` or a custom ``stream_factory`` for
+    dedicated pool sizing.
     """
 
     return _open_streams(
@@ -531,7 +562,6 @@ def open_streams(
         limit=limit,
         stream_factory=stream_factory,
         async_=async_,
-        recv_buffer_pool=recv_buffer_pool,
     )
 
 
