@@ -164,6 +164,7 @@ class _FakeUringRing:
         self.closed = False
         self.running = False
         self.callback = None
+        self.exception_handler = None
         self.serve_count = 0
         self.stop_serving_count = 0
         self._stop_serving_event = threading.Event()
@@ -857,7 +858,20 @@ class _FakeUringRing:
 
     def _deliver(self, completion: SimpleNamespace) -> None:
         if self.running and self.callback is not None:
-            self.callback([completion])
+            try:
+                self.callback([completion])
+            except BaseException as exc:
+                handler = self.exception_handler
+                if handler is None:
+                    raise
+                handler(
+                    {
+                        "message": "Exception in delivery callback",
+                        "exception": exc,
+                        "ring": self,
+                        "completions": [completion],
+                    }
+                )
         else:
             self.completions.append(completion)
 

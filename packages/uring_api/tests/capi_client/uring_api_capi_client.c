@@ -231,16 +231,18 @@ static PyObject *client_submit_recv_multishot(PyObject *module, PyObject *args) 
     PyObject *user_data;
     int fd;
     unsigned int flags;
+    unsigned long long base_sequence = 0;
 
     (void)module;
     if (!api) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOOI:submit_recv_multishot", &ring, &fd, &buf_group, &user_data, &flags)) {
+    if (!PyArg_ParseTuple(args, "OiOOI|K:submit_recv_multishot", &ring, &fd, &buf_group, &user_data, &flags,
+                          &base_sequence)) {
         return NULL;
     }
-    if (api->ring_submit_recv_multishot(ring, fd, buf_group, flags, user_data) < 0) {
+    if (api->ring_submit_recv_multishot(ring, fd, buf_group, flags, user_data, base_sequence) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -767,7 +769,8 @@ static int client_exec(PyObject *module) {
         !api->ring_submit_cancel || !api->ring_submit_shutdown || !api->ring_submit_close ||
         !api->ring_submit_read || !api->ring_submit_write || !api->ring_submit_openat ||
         !api->ring_submit_statx || !api->ring_submit_socket || !api->ring_break_wait || !api->ring_wait ||
-        !api->ring_set_callback || !api->ring_set_c_callback || !api->ring_serve_completions ||
+        !api->ring_set_callback || !api->ring_set_exception_handler || !api->ring_set_c_callback ||
+        !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
         !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
         !api->completion_kind || !api->ring_submit_statx_fdsize || !api->statx_st_size) {

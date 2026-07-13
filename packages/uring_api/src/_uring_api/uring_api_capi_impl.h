@@ -20,7 +20,7 @@ int UringApiCapi_RingSubmitRecv(PyObject *ring, int fd, PyObject *buf, PyObject 
 int UringApiCapi_RingSubmitRecvBuf(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
                                    PyObject *user_data);
 int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
-                                         PyObject *user_data);
+                                         PyObject *user_data, unsigned long long base_sequence);
 int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
 int UringApiCapi_RingSubmitSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags, unsigned int zc_flags,
                                   PyObject *user_data);
@@ -53,6 +53,7 @@ int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int prot
 int UringApiCapi_RingBreakWait(PyObject *ring);
 PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
 int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
+int UringApiCapi_RingSetExceptionHandler(PyObject *ring, PyObject *handler);
 int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data);
 int UringApiCapi_RingServeCompletions(PyObject *ring);
 int UringApiCapi_RingStopServing(PyObject *ring);

@@ -151,7 +151,9 @@ not a permanent ring failure.
 - `break_wait()` is safe while another thread blocks in `wait()`.
 - While `serve_completions()` workers are running, public `wait()` raises
   `RuntimeError`. Join worker threads and call `stop_serving()` before `close()`.
-- Callback exceptions are reported as unraisable and stop the serving group.
+- Delivery callback exceptions invoke `exception_handler` when set; handler
+  failures (or no handler) propagate from `serve_completions()` and stop only
+  that worker.
 - `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
   `wait()`, `serve_completions()`, and `break_wait()` must run on that same
   thread; worker-thread `serve_completions()` is rejected at entry.

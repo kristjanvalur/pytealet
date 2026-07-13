@@ -136,6 +136,7 @@ typedef struct UringApiStagingBuffer {
 struct UringApiRing {
     PyObject_HEAD struct io_uring ring;
     PyObject *delivery_callback;
+    PyObject *delivery_exception_handler;
     UringApiCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK

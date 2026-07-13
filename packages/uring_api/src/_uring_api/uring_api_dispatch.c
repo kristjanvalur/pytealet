@@ -382,6 +382,81 @@ static void delivery_request_stop_and_wake(UringApiRing *self) {
     Py_DECREF(wakeup);
 }
 
+static int delivery_report_callback_error(UringApiRing *self, PyObject *ready) {
+    PyObject *handler = NULL;
+    PyObject *context = NULL;
+    PyObject *call_result = NULL;
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
+
+    PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+    PyErr_NormalizeException(&exc_type, &exc_value, &exc_tb);
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    handler = self->delivery_exception_handler;
+    if (handler) {
+        Py_INCREF(handler);
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (!handler) {
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+        return -1;
+    }
+
+    context = PyDict_New();
+    if (!context) {
+        goto handler_failed;
+    }
+    {
+        PyObject *message = PyUnicode_FromString("Exception in delivery callback");
+        if (!message) {
+            goto handler_failed;
+        }
+        if (PyDict_SetItemString(context, "message", message) < 0) {
+            Py_DECREF(message);
+            goto handler_failed;
+        }
+        Py_DECREF(message);
+    }
+    if (PyDict_SetItemString(context, "exception", exc_value ? exc_value : Py_None) < 0) {
+        goto handler_failed;
+    }
+    if (PyDict_SetItemString(context, "ring", (PyObject *)self) < 0) {
+        goto handler_failed;
+    }
+    if (PyDict_SetItemString(context, "completions", ready) < 0) {
+        goto handler_failed;
+    }
+
+    call_result = PyObject_CallOneArg(handler, context);
+    Py_DECREF(handler);
+    handler = NULL;
+    Py_DECREF(context);
+    context = NULL;
+    Py_XDECREF(exc_type);
+    Py_XDECREF(exc_value);
+    Py_XDECREF(exc_tb);
+    if (!call_result) {
+        return -1;
+    }
+    Py_DECREF(call_result);
+    return 0;
+
+handler_failed:
+    Py_XDECREF(handler);
+    Py_XDECREF(context);
+    if (!PyErr_Occurred()) {
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+    } else {
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+    }
+    return -1;
+}
+
 static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
     UringApiCompletionCallback c_callback;
     void *c_callback_user_data;
@@ -393,9 +468,10 @@ static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
     if (delivery_get_c_callback(self, &c_callback, &c_callback_user_data)) {
         int callback_ret = c_callback((PyObject *)self, ready, c_callback_user_data);
         if (callback_ret < 0) {
-            PyErr_WriteUnraisable((PyObject *)self);
-            delivery_request_stop_and_wake(self);
-            return -1;
+            if (delivery_report_callback_error(self, ready) < 0) {
+                return -1;
+            }
+            return 0;
         }
         return 0;
     }
@@ -403,16 +479,15 @@ static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
     PyObject *callback = delivery_get_callback(self);
     PyObject *call_result;
     if (!callback) {
-        PyErr_WriteUnraisable((PyObject *)self);
-        delivery_request_stop_and_wake(self);
         return -1;
     }
     call_result = PyObject_CallOneArg(callback, ready);
     Py_DECREF(callback);
     if (!call_result) {
-        PyErr_WriteUnraisable((PyObject *)self);
-        delivery_request_stop_and_wake(self);
-        return -1;
+        if (delivery_report_callback_error(self, ready) < 0) {
+            return -1;
+        }
+        return 0;
     }
     Py_DECREF(call_result);
     return 0;
@@ -454,7 +529,6 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
         PyObject *ready = UringApiRing_wait_impl(self, URING_API_WAIT_BLOCKING, NULL, true, &worker_staging);
 
         if (!ready) {
-            delivery_request_stop(self);
             wait_failed = true;
             break;
         }

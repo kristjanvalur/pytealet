@@ -5,7 +5,7 @@ import heapq
 import socket
 import threading
 from collections import deque
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar
 
 from .locks import ThreadsafeEvent
 from .tasks import CancelledError
@@ -98,10 +98,6 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
 
-def _chunk_already_leased(data: memoryview) -> bool:
-    return getattr(data.obj, "__release_buffer__", None) is not None
-
-
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
 
@@ -111,11 +107,7 @@ class RecvIterBuffer:
 
     On older Python, synthetic pools skip view leases (no PEP 688), so
     ``leased_count`` does not reflect consumer-held chunks and backpressure via the
-    buffer mechanism is effectively dropped there. A lightweight alternative would
-    be queue occupancy: treat ``len(_ready) + len(_reorder)`` as in-flight slots,
-    signal pressure when it reaches ``buffer_count``, and allow resubmit once it
-    falls below half — same thresholds, no extra lease wrapper. Not implemented yet;
-    iterator-only, and direct ``recv_many`` callers would still need their own policy.
+    buffer mechanism is effectively dropped there.
     """
 
     def __init__(
@@ -155,24 +147,10 @@ class RecvIterBuffer:
         self._current_operation = None
 
     def _pool_at_low_water(self) -> bool:
-        """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``).
-
-        See class docstring for a possible queue-length fallback on pre-3.12 synthetic pools.
-        """
+        """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``)."""
 
         buf_group = self._buf_group
         return buf_group.leased_count * 2 < buf_group.buffer_count
-
-    def _maybe_track_chunk_lease(self, data: memoryview) -> memoryview:
-        if not data or _chunk_already_leased(data):
-            return data
-        if getattr(self._buf_group, "_note_leased", None) is None:
-            return data
-        from .proactor import SyntheticRecvBufferPool, _leased_synthetic_memoryview, _supports_release_buffer
-
-        if not _supports_release_buffer():
-            return data
-        return _leased_synthetic_memoryview(bytes(data), cast(SyntheticRecvBufferPool, self._buf_group))
 
     def _signal_pressure_if_pending(self) -> bool:
         if self._pressure_pending:
@@ -194,7 +172,7 @@ class RecvIterBuffer:
                 self._stream_done = True
                 notify = True
             elif delivery.value is not None:
-                data = self._maybe_track_chunk_lease(delivery.value)
+                data = delivery.value
                 ready = self._reorder.pushpop((delivery.index, data))
                 if ready is not None:
                     self._ready.append(ready)

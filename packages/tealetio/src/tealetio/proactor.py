@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, NoReturn, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, NoReturn, Protocol, TypeAlias, TypeVar, cast, overload
 
 import uring_api
 
@@ -337,6 +337,20 @@ class SyntheticRecvBufferPool:
 
         self._note_unleased()
 
+    def lease_delivery_chunk(self, data: bytes | bytearray) -> memoryview:
+        """Return a pool-leased view for one delivered receive chunk when supported."""
+
+        return _leased_synthetic_memoryview(data, self)
+
+    def wrap_delivery_chunk(self, data: memoryview) -> memoryview:
+        """Lease an already-delivered chunk when lease accounting applies."""
+
+        if not data or getattr(data.obj, "__release_buffer__", None) is not None:
+            return data
+        if not _supports_release_buffer():
+            return data
+        return self.lease_delivery_chunk(bytes(data))
+
 
 class _LeasedChunk:
     """PEP 688 buffer exporter whose release returns a synthetic pool slot."""
@@ -358,6 +372,14 @@ class _LeasedChunk:
         self._held.release()
         self._held = None
         self._pool._note_unleased()
+
+
+def _selector_recv_many_chunk_view(data: bytes, buf_group: RecvBufferPool) -> memoryview:
+    if not data:
+        return memoryview(b"")
+    if _is_synthetic_recv_buffer_pool(buf_group):
+        return cast(SyntheticRecvBufferPool, buf_group).lease_delivery_chunk(data)
+    return memoryview(data)
 
 
 def _leased_synthetic_memoryview(data: bytes | bytearray, pool: SyntheticRecvBufferPool) -> memoryview:
@@ -385,6 +407,11 @@ class Proactor(Protocol):
     def break_wait(self) -> None: ...
 
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None: ...
+
+    def set_delivery_exception_handler(
+        self,
+        handler: Callable[[dict[str, Any]], object] | None,
+    ) -> None: ...
 
     def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None: ...
 
@@ -537,6 +564,48 @@ class ProactorBase:
         self._clock = time.monotonic
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
         self._shared_recv_buffer_pool: RecvBufferPool | None = None
+        self._delivery_exception_handler: Callable[[dict[str, Any]], object] | None = None
+
+    def set_delivery_exception_handler(
+        self,
+        handler: Callable[[dict[str, Any]], object] | None,
+    ) -> None:
+        """Route continuous delivery-callback failures to ``handler`` when set."""
+
+        self._delivery_exception_handler = handler
+
+    @overload
+    def _guard_delivery_callback(
+        self,
+        callback: Callable[[MultishotDelivery], object],
+    ) -> Callable[[MultishotDelivery], object]: ...
+
+    @overload
+    def _guard_delivery_callback(self, callback: None) -> None: ...
+
+    def _guard_delivery_callback(
+        self,
+        callback: Callable[[MultishotDelivery], object] | None,
+    ) -> Callable[[MultishotDelivery], object] | None:
+        if callback is None:
+            return None
+
+        def guarded(delivery: MultishotDelivery) -> None:
+            try:
+                callback(delivery)
+            except BaseException as exc:
+                handler = self._delivery_exception_handler
+                if handler is None:
+                    raise
+                handler(
+                    {
+                        "message": "Exception in delivery callback",
+                        "exception": exc,
+                        "delivery": delivery,
+                    }
+                )
+
+        return guarded
 
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
         """Set the callback invoked when backend completions may be ready."""
@@ -1122,7 +1191,7 @@ class SelectorProactor(ProactorBase):
         the peer address is needed.
         """
 
-        operation = _spawn_accept_many_operation(sock, callback)
+        operation = _spawn_accept_many_operation(sock, self._guard_delivery_callback(callback))
 
         def step() -> ContinuousStepResult:
             try:
@@ -1228,7 +1297,7 @@ class SelectorProactor(ProactorBase):
         immediately without submitting ``recv()``.
         """
 
-        operation = _spawn_recv_many_operation(sock, callback)
+        operation = _spawn_recv_many_operation(sock, self._guard_delivery_callback(callback))
         if _synthetic_recv_pool_is_full(buf_group):
             return _complete_recv_many_enobufs(operation, index=base_sequence)
 
@@ -1238,12 +1307,12 @@ class SelectorProactor(ProactorBase):
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
             except OSError as exc:
-                operation._emit_delivery(MultishotDelivery(index=base_sequence, exception=exc, more=False))
+                operation._finish_with_terminal_delivery(
+                    MultishotDelivery(index=base_sequence, exception=exc, more=False)
+                )
                 return ContinuousStepResult(progressed=True, done=True)
-            if not data:
-                operation._emit_result(memoryview(b""), index=base_sequence, more=False)
-            else:
-                operation._emit_result(memoryview(data), index=base_sequence, more=False)
+            chunk = _selector_recv_many_chunk_view(data, buf_group)
+            operation._emit_result(chunk, index=base_sequence, more=False)
             return ContinuousStepResult(progressed=True, done=True)
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
@@ -1274,7 +1343,7 @@ class SelectorProactor(ProactorBase):
         operation = ContinuousOperation[int](
             kind="poll_many",
             fileobj=fd,
-            result_callback=callback,
+            result_callback=self._guard_delivery_callback(callback),
         )
 
         def step() -> ContinuousStepResult:
@@ -1534,7 +1603,8 @@ class SelectorProactor(ProactorBase):
             return
         if step_result.done:
             self._remove_operation(operation)
-            operation._finish(result=None)
+            if not operation.done():
+                operation._finish(result=None)
         else:
             self._update_selector_registration(fd)
         if step_result.progressed or step_result.done:
@@ -1739,8 +1809,30 @@ class UringProactor(ProactorBase):
                 if thread.is_alive():
                     thread.join()
             self._ring.callback = None
+            self._ring.exception_handler = None
             self._ring.close()
             raise
+
+    def set_delivery_exception_handler(
+        self,
+        handler: Callable[[dict[str, Any]], object] | None,
+    ) -> None:
+        """Wire ring and proactor handlers for continuous delivery failures."""
+
+        super().set_delivery_exception_handler(handler)
+        self._ring.exception_handler = handler
+
+    def _uring_continuous_callback(
+        self,
+        callback: Callable[[MultishotDelivery], object],
+        *,
+        native_multishot: bool,
+    ) -> Callable[[MultishotDelivery], object]:
+        """Return ``callback`` for kernel multishot; guard emulated fallbacks in tealetio."""
+
+        if native_multishot:
+            return callback
+        return self._guard_delivery_callback(callback)
 
     @property
     def ring(self) -> _UringRing:
@@ -1918,6 +2010,7 @@ class UringProactor(ProactorBase):
         self._deferred_submissions.clear()
         self.break_wait()
         self._ring.callback = None
+        self._ring.exception_handler = None
         self._ring.close()
 
     def break_wait(self) -> None:
@@ -2244,9 +2337,14 @@ class UringProactor(ProactorBase):
         delivery shapes.
         """
 
-        operation = UringContinuousOperation[AcceptManyResult]("accept_many", sock, callback)
+        native_multishot = self._capabilities.get("IORING_ACCEPT_MULTISHOT", False)
+        operation = UringContinuousOperation[AcceptManyResult](
+            "accept_many",
+            sock,
+            self._uring_continuous_callback(callback, native_multishot=native_multishot),
+        )
         accept_entry_ref: list[_UringEntry | None] = [None]
-        if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
+        if native_multishot:
             # one multishot accept stays armed until F_MORE clears or we cancel.
             entry = self._uring_entry(
                 operation,
@@ -2600,9 +2698,17 @@ class UringProactor(ProactorBase):
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
         """
 
-        operation = UringContinuousOperation[_RecvManyValue]("recv_many", sock, callback)
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
             assert not _is_synthetic_recv_buffer_pool(buf_group)
+        native_multishot = self._capabilities.get(
+            "IORING_RECV_MULTISHOT", False
+        ) and not _is_synthetic_recv_buffer_pool(buf_group)
+        operation = UringContinuousOperation[_RecvManyValue](
+            "recv_many",
+            sock,
+            self._uring_continuous_callback(callback, native_multishot=native_multishot),
+        )
+        if native_multishot:
             uring_group = cast(_UringBufGroup, buf_group)
             leg_base = base_sequence
             entry = self._uring_entry(
@@ -2745,7 +2851,11 @@ class UringProactor(ProactorBase):
         """
 
         # mask handling matches poll(); no pre-validation on the uring path.
-        operation = UringContinuousOperation[int]("poll_many", fd, callback)
+        operation = UringContinuousOperation[int](
+            "poll_many",
+            fd,
+            callback,
+        )
         if self._capabilities.get("IORING_POLL_MULTISHOT", False):
             # kernel keeps the poll armed; cancel via submit_poll_remove().
             entry = self._uring_entry(
@@ -3092,6 +3202,7 @@ class ProactorScheduler(BaseScheduler):
         factory = proactor_factory if proactor_factory is not None else _default_proactor_factory
         self._proactor = factory()
         self._proactor.set_clock(self.time)
+        self._proactor.set_delivery_exception_handler(self.call_exception_handler)
         self._io = ProactorIOManager(self, self._proactor)
 
     @property

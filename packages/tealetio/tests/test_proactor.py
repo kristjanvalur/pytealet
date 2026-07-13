@@ -377,6 +377,73 @@ def test_selector_create_recv_buffer_pool_returns_synthetic_pool() -> None:
         proactor.close()
 
 
+class _FailingRecvSocket:
+    def __init__(self, sock: socket.socket, error: OSError) -> None:
+        self._sock = sock
+        self._error = error
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
+
+    def recv(self, _n: int) -> bytes:
+        raise self._error
+
+    def getblocking(self) -> bool:
+        return self._sock.getblocking()
+
+    def setblocking(self, flag: bool) -> None:
+        self._sock.setblocking(flag)
+
+    def close(self) -> None:
+        self._sock.close()
+
+
+def test_selector_recv_many_transport_error_sets_operation_exception() -> None:
+    proactor = SelectorProactor()
+    reader, writer = socket.socketpair()
+    seen: list[_RecvManySeen] = []
+    transport_error = OSError(errno.EIO, "recv failed")
+    failing_reader = _FailingRecvSocket(reader, transport_error)
+    try:
+        failing_reader.setblocking(False)
+        writer.setblocking(False)
+        pool = proactor.create_recv_buffer_pool(4096, 4)
+        operation = proactor.recv_many(failing_reader, seen.append, buf_group=pool)
+        writer.send(b"x")
+        _pump_until(proactor, lambda: operation.done())
+
+        assert operation.exception() is transport_error
+        assert len(seen) == 1
+        assert seen[0].exception is transport_error
+    finally:
+        writer.close()
+        proactor.close()
+
+
+@pytest.mark.skipif(
+    not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
+)
+def test_selector_recv_many_leases_synthetic_pool_chunk() -> None:
+    proactor = SelectorProactor()
+    reader, writer = socket.socketpair()
+    pool = proactor_module.SyntheticRecvBufferPool(4096, 4)
+    seen: list[_RecvManySeen] = []
+    try:
+        reader.setblocking(False)
+        operation = proactor.recv_many(reader, seen.append, buf_group=pool)
+        writer.send(b"hi")
+        _pump_until(proactor, lambda: bool(seen))
+
+        assert operation.done()
+        assert pool.leased_count == 1
+        assert seen[0].value is not None
+        assert getattr(seen[0].value.obj, "__release_buffer__", None) is not None
+    finally:
+        reader.close()
+        writer.close()
+        proactor.close()
+
+
 def test_selector_recv_many_emits_enobufs_when_synthetic_pool_is_full() -> None:
     proactor = SelectorProactor()
     reader, _writer = socket.socketpair()
@@ -1424,6 +1491,45 @@ class TestSelectorProactor:
             writer.close()
             scheduler.close()
 
+    def test_delivery_error_routes_to_scheduler_exception_handler(self):
+        handler_errors: list[BaseException] = []
+        scheduler = SyncProactorScheduler(SelectorProactor)
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        proactor = scheduler.proactor
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def on_result(delivery: MultishotDelivery) -> None:
+                if delivery.value:
+                    raise ValueError("delivery failed")
+
+            pool = proactor.create_recv_buffer_pool(4096, 4)
+            operation = proactor.recv_many(reader, on_result, buf_group=pool)
+            writer.send(b"x")
+            proactor.wait(proactor.get_time() + 1.0)
+
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "delivery failed"
+            assert operation.done()
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_proactor_scheduler_installs_delivery_exception_handler(self):
+        captured: list[BaseException] = []
+        scheduler = SyncProactorScheduler(SelectorProactor)
+        scheduler.set_exception_handler(lambda context: captured.append(context["exception"]))
+        try:
+            handler = scheduler.proactor._delivery_exception_handler
+            assert handler is not None
+            handler({"message": "test", "exception": ValueError("wired")})
+            assert len(captured) == 1
+            assert str(captured[0]) == "wired"
+        finally:
+            scheduler.close()
+
     def test_continuous_fd_slot_stores_step_and_cancel_clears_registration(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -2056,6 +2162,45 @@ class TestThreadedSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_delivery_error_routes_to_scheduler_exception_handler_on_worker_thread(self):
+        handler_errors: list[BaseException] = []
+        handler_threads: list[int] = []
+        main_thread = threading.get_ident()
+        scheduler = SyncProactorScheduler(ThreadedSelectorProactor)
+        scheduler.set_exception_handler(
+            lambda context: (
+                handler_threads.append(threading.get_ident()),
+                handler_errors.append(context["exception"]),
+            )
+        )
+        proactor = scheduler.proactor
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def on_result(delivery: MultishotDelivery) -> None:
+                if delivery.value:
+                    raise ValueError("delivery failed")
+
+            pool = proactor.create_recv_buffer_pool(4096, 4)
+            operation = proactor.recv_many(reader, on_result, buf_group=pool)
+            proactor.wait(0)
+            assert operation.done() is False
+
+            writer.send(b"x")
+            proactor.wait(proactor.get_time() + 1.0)
+
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "delivery failed"
+            assert handler_threads
+            assert handler_threads[0] != main_thread
+            assert operation.done()
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
     def test_immediate_completion_returns_completed_operation_without_queueing(self):
         proactor = ThreadedSelectorProactor()
         reader, writer = socket.socketpair()
@@ -2517,6 +2662,106 @@ class TestUringProactor:
             reader.close()
             writer.close()
             proactor.close()
+
+    def test_proactor_scheduler_installs_ring_exception_handler(self):
+        captured: list[BaseException] = []
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        scheduler.set_exception_handler(lambda context: captured.append(context["exception"]))
+        try:
+            handler = scheduler.proactor.ring.exception_handler
+            assert handler is not None
+            handler({"message": "test", "exception": ValueError("wired")})
+            assert len(captured) == 1
+            assert str(captured[0]) == "wired"
+        finally:
+            scheduler.close()
+
+    def test_uring_delivery_error_routes_to_scheduler_exception_handler(self):
+        handler_errors: list[BaseException] = []
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        proactor = scheduler.proactor
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def on_result(delivery: MultishotDelivery) -> None:
+                if delivery.value:
+                    raise ValueError("delivery failed")
+
+            pool = proactor.shared_recv_buffer_pool()
+            proactor.recv_many(reader, on_result, buf_group=pool)
+            proactor.ring.complete_recv_multishot(b"x", more=True, sequence=0)
+
+            deadline = time.monotonic() + 1.0
+            while not handler_errors and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "delivery failed"
+            assert proactor.ring.running
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_uring_emulated_recv_many_delivery_error_routes_via_proactor_guard(self) -> None:
+        handler_errors: list[BaseException] = []
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        proactor = scheduler.proactor
+        proactor._capabilities["IORING_RECV_MULTISHOT"] = False
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def on_result(delivery: MultishotDelivery) -> None:
+                if delivery.value:
+                    raise ValueError("emulated recv failed")
+
+            pool = proactor_module.SyntheticRecvBufferPool(8192, 4)
+            proactor.recv_many(reader, on_result, buf_group=pool)
+            proactor.ring.complete_recv_oneshot(b"x")
+
+            deadline = time.monotonic() + 1.0
+            while not handler_errors and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "emulated recv failed"
+            assert proactor.ring.running
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_uring_emulated_accept_many_delivery_error_routes_via_proactor_guard(self) -> None:
+        handler_errors: list[BaseException] = []
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
+        scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+        proactor = scheduler.proactor
+        proactor._capabilities["IORING_ACCEPT_MULTISHOT"] = False
+        server = socket.socket()
+        try:
+            server.setblocking(False)
+
+            def on_result(delivery: MultishotDelivery) -> None:
+                if delivery.value:
+                    raise ValueError("emulated accept failed")
+
+            proactor.accept_many(server, on_result)
+            proactor.ring.complete_accept_oneshot()
+
+            deadline = time.monotonic() + 1.0
+            while not handler_errors and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            assert len(handler_errors) == 1
+            assert str(handler_errors[0]) == "emulated accept failed"
+            assert proactor.ring.running
+        finally:
+            server.close()
+            scheduler.close()
 
     def test_wait_async_completes_from_callback_wakeup(self, monkeypatch):
         async def run() -> bytes:
