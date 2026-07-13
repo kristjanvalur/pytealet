@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``open_streams()`` no longer accepts ``recv_buffer_pool``. Pass a
   ``stream_factory`` (for example ``pooled_default_stream_factory``) for
   dedicated provided-buffer pools on stream endpoints.
+- ``StreamFactory`` / ``AsyncStreamFactory`` no longer declare a
+  ``recv_buffer_pool`` parameter; pool policy belongs to the factory
+  implementation, not per-call framework injection.
 - Default ``StreamReader`` / ``AsyncStreamReader`` construction no longer takes a
   ``transport`` argument; receive is exclusively through ``RecvIterBuffer``.
 - ``SocketTransport`` is send/metadata-only; ``recv`` and ``recv_into`` are

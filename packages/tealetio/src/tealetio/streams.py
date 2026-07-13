@@ -59,7 +59,6 @@ class StreamFactory(Protocol):
         sock: socket.socket,
         *,
         limit: int = _DEFAULT_LIMIT,
-        recv_buffer_pool: Any | None = None,
     ) -> tuple[StreamReader, StreamWriter]: ...
 
 
@@ -72,7 +71,6 @@ class AsyncStreamFactory(Protocol):
         sock: socket.socket,
         *,
         limit: int = _DEFAULT_LIMIT,
-        recv_buffer_pool: Any | None = None,
     ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
 
@@ -471,9 +469,6 @@ def pooled_default_stream_factory(
     ``io.create_recv_buffer_pool(buffer_size, buffer_count)``. When ``pool`` is
     set, every connection shares that pool. Pair ``async_`` with the stream
     types returned by ``start_server`` / ``open_streams`` on the call site.
-
-    The returned factory ignores ``recv_buffer_pool`` on each call; pool policy
-    is owned by this helper's ``pool`` / ``buffer_size`` / ``buffer_count``.
     """
 
     delegate = default_async_stream_factory if async_ else default_stream_factory
@@ -483,9 +478,7 @@ def pooled_default_stream_factory(
         sock: socket.socket,
         *,
         limit: int = _DEFAULT_LIMIT,
-        recv_buffer_pool: Any | None = None,
     ) -> tuple[StreamReader, StreamWriter] | tuple[AsyncStreamReader, AsyncStreamWriter]:
-        del recv_buffer_pool
         chosen = pool if pool is not None else io.create_recv_buffer_pool(buffer_size, buffer_count)
         return delegate(io, sock, limit=limit, recv_buffer_pool=chosen)
 

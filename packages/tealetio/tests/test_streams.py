@@ -175,9 +175,9 @@ class TestStreamsPoC:
             class TaggedStreamReader(StreamReader):
                 tag = "native-custom"
 
-            def custom_factory(io, sock, *, limit, recv_buffer_pool=None):
+            def custom_factory(io, sock, *, limit):
                 transport = SocketTransport(io, sock)
-                recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+                recv_buffer = _open_recv_buffer(io, sock, None)
                 stream_reader = TaggedStreamReader(limit=limit, recv_buffer=recv_buffer)
                 stream_writer = StreamWriter(transport, stream_reader)
                 return stream_reader, stream_writer
@@ -242,9 +242,9 @@ class TestStreamsPoC:
             class TaggedAsyncStreamReader(AsyncStreamReader):
                 tag = "async-custom"
 
-            def custom_factory(io, sock, *, limit, recv_buffer_pool=None):
+            def custom_factory(io, sock, *, limit):
                 transport = SocketTransport(io, sock)
-                recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+                recv_buffer = _open_recv_buffer(io, sock, None)
                 stream_reader = TaggedAsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
                 stream_writer = AsyncStreamWriter(transport, stream_reader)
                 return stream_reader, stream_writer
