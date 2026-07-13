@@ -123,6 +123,15 @@ def _recv_many_error_delivery(*, index: int, res: int) -> MultishotDelivery:
     )
 
 
+def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
+    return MultishotDelivery(
+        index=index,
+        value=memoryview(b""),
+        exception=_enobufs_error(),
+        more=False,
+    )
+
+
 def _continuous_error_delivery(exc: BaseException) -> MultishotDelivery:
     return MultishotDelivery(exception=exc, more=False)
 
@@ -222,15 +231,7 @@ def _complete_recv_many_enobufs(
     *,
     index: int,
 ) -> ContinuousOperation[_RecvManyValue]:
-    operation._emit_delivery(
-        MultishotDelivery(
-            index=index,
-            value=memoryview(b""),
-            exception=_enobufs_error(),
-            more=False,
-        )
-    )
-    operation._finish(result=None)
+    operation._finish_with_terminal_delivery(_recv_many_enobufs_delivery(index=index))
     return operation
 
 
@@ -821,6 +822,7 @@ class _MultishotLegState:
     nonterminal_seen: int = 0
     pending_final: _UringCompletion | None = None
     enobufs_index: int | None = None
+    enobufs_exception: OSError | None = None
     leg_base: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -2723,6 +2725,8 @@ class UringProactor(ProactorBase):
                 leg.leg_base = leg_base
                 leg.nonterminal_seen = 0
                 leg.pending_final = None
+                leg.enobufs_index = None
+                leg.enobufs_exception = None
                 return self._ring.submit_recv_multishot(
                     sock.fileno(),
                     uring_group,
@@ -2929,8 +2933,10 @@ class UringProactor(ProactorBase):
         if enobufs_index is None:
             return
         if multishot_leg.nonterminal_seen >= enobufs_index - multishot_leg.leg_base:
+            exc = multishot_leg.enobufs_exception
             multishot_leg.enobufs_index = None
-            operation._finish(result=None)
+            multishot_leg.enobufs_exception = None
+            operation._finish(exception=exc)
             self._deactivate_uring_entry(entry)
 
     def _deliver_uring_recv_many(
@@ -2947,15 +2953,11 @@ class UringProactor(ProactorBase):
         if res < 0:
             if res == -errno.ENOBUFS:
                 multishot_leg.pending_final = None
+                delivery = _recv_many_enobufs_delivery(index=index)
                 multishot_leg.enobufs_index = index
-                operation._emit_delivery(
-                    MultishotDelivery(
-                        index=index,
-                        value=memoryview(b""),
-                        exception=_enobufs_error(),
-                        more=False,
-                    )
-                )
+                assert isinstance(delivery.exception, OSError)
+                multishot_leg.enobufs_exception = delivery.exception
+                operation._emit_delivery(delivery)
                 self._maybe_finish_recv_many_enobufs_leg(entry, multishot_leg, operation)
                 return operation
             self._deactivate_uring_entry(entry)

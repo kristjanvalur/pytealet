@@ -133,13 +133,20 @@ class RecvIterBuffer:
         self._start_recv_many(base_sequence=0)
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
+        if self._closed:
+            return
         operation = self._proactor.recv_many(
             self._sock,
             self.on_result,
             buf_group=self._buf_group,
             base_sequence=base_sequence,
         )
-        self._current_operation = operation
+        with self._lock:
+            if self._closed:
+                if not operation.done():
+                    self._proactor.cancel(operation)
+                return
+            self._current_operation = operation
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
         self._next_base = base_sequence
@@ -195,7 +202,7 @@ class RecvIterBuffer:
         """Start a fresh ``recv_many`` once the pool has drained below the low-water mark."""
 
         with self._lock:
-            if self._current_operation is not None or self._stream_done or not self._should_resubmit():
+            if self._closed or self._current_operation is not None or self._stream_done or not self._should_resubmit():
                 return
             base_sequence = self._next_base
         self._start_recv_many(base_sequence=base_sequence)

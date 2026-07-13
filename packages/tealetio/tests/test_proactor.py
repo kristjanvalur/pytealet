@@ -457,6 +457,7 @@ def test_selector_recv_many_emits_enobufs_when_synthetic_pool_is_full() -> None:
         assert len(seen) == 1
         assert _is_enobufs_delivery(seen[0])
         assert seen[0].index == 3
+        assert operation.exception() is seen[0].exception
     finally:
         reader.close()
         proactor.close()
@@ -553,6 +554,42 @@ def test_recviter_buffer_ignores_late_callbacks_after_close():
     ready_len, reorder_pending = _exercise_recviter_buffer(exercise)
     assert ready_len == 0
     assert not reorder_pending
+
+
+def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
+    class _Pool:
+        buffer_count = 4
+        leased_count = 0
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer.on_result(_recv_chunk(0, b"a", more=False))
+        assert buffer.take_next() is not None
+        buffer.close()
+        buffer.consume_pressure_resume()
+        return list(proactor.recv_many_bases)
+
+    assert _exercise_recviter_buffer(exercise) == [0, 1]
+
+
+def test_recviter_buffer_start_recv_many_after_close_is_noop():
+    class _Pool:
+        buffer_count = 4
+        leased_count = 0
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer.on_result(_recv_chunk(0, b"a", more=False))
+        assert buffer.take_next() is not None
+        buffer.close()
+        buffer._start_recv_many(base_sequence=9)
+        return list(proactor.recv_many_bases)
+
+    assert _exercise_recviter_buffer(exercise) == [0, 1]
 
 
 def test_recviter_buffer_pressure_token_precedes_queued_views():
@@ -3888,6 +3925,7 @@ class TestUringProactor:
             assert len(seen) == 1
             assert _is_enobufs_delivery(seen[0])
             assert seen[0].index == 4
+            assert operation.exception() is seen[0].exception
         finally:
             reader.close()
             proactor.close()
@@ -3976,6 +4014,26 @@ class TestUringProactor:
             assert delivery.index == 2
             assert isinstance(delivery.exception, OSError)
             assert delivery.exception.errno == errno.EIO
+            assert operation.exception() is delivery.exception
+        finally:
+            reader.close()
+            proactor.close()
+
+    def test_recv_many_enobufs_finishes_operation_and_notifies_callback(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, _writer = socket.socketpair()
+        seen: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(
+                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool()
+            )
+            proactor.ring.complete_recv_multishot_enobufs(sequence=0)
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert len(seen) == 1
+            delivery = seen[0]
+            assert delivery.index == 0
+            assert _is_enobufs_delivery(delivery)
             assert operation.exception() is delivery.exception
         finally:
             reader.close()
