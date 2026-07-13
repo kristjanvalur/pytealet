@@ -92,23 +92,16 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
 
 
 class SocketTransport:
-    """Blocking socket I/O through a scheduler IO facade."""
+    """Send-side socket I/O and connection metadata through a scheduler IO facade."""
 
     def __init__(self, io: SocketIO, sock: socket.socket) -> None:
         self._io = io
         self._sock = sock
         self._closed = False
-        self._recv_buffer: RecvIterBuffer | None = None
 
     @property
     def sock(self) -> socket.socket:
         return self._sock
-
-    def recv(self, n: int) -> bytes:
-        return self._io.sock_recv(self._sock, n).wait()
-
-    def recv_into(self, buf: Any) -> int:
-        return self._io.sock_recv_into(self._sock, buf).wait()
 
     def sendall(self, data: bytes | bytearray | memoryview) -> None:
         self._io.sock_sendall(self._sock, data).wait()
@@ -117,10 +110,6 @@ class SocketTransport:
         if self._closed:
             return
         self._closed = True
-        recv_buffer = self._recv_buffer
-        if recv_buffer is not None:
-            recv_buffer.close()
-            self._recv_buffer = None
         self._sock.close()
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
@@ -287,7 +276,6 @@ class StreamReader:
 
     def __init__(
         self,
-        transport: SocketTransport,
         *,
         limit: int = _DEFAULT_LIMIT,
         recv_buffer: RecvIterBuffer,
@@ -297,6 +285,9 @@ class StreamReader:
     @property
     def at_eof(self) -> bool:
         return self._core.at_eof
+
+    def close(self) -> None:
+        self._core.close()
 
     def read(self, n: int = -1) -> bytes:
         return self._core.read(n)
@@ -320,7 +311,6 @@ class AsyncStreamReader:
 
     def __init__(
         self,
-        transport: SocketTransport,
         *,
         limit: int = _DEFAULT_LIMIT,
         recv_buffer: RecvIterBuffer,
@@ -330,6 +320,9 @@ class AsyncStreamReader:
     @property
     def at_eof(self) -> bool:
         return self._core.at_eof
+
+    def close(self) -> None:
+        self._core.close()
 
     async def read(self, n: int = -1) -> bytes:
         return self._core.read(n)
@@ -366,6 +359,8 @@ class StreamWriter:
         self._core.write(data)
 
     def close(self) -> None:
+        if self._reader is not None:
+            self._reader.close()
         self._core.close()
 
     def is_closing(self) -> bool:
@@ -396,6 +391,8 @@ class AsyncStreamWriter:
         self._core.write(data)
 
     def close(self) -> None:
+        if self._reader is not None:
+            self._reader.close()
         self._core.close()
 
     def is_closing(self) -> bool:
@@ -437,8 +434,7 @@ def default_stream_factory(
 
     transport = SocketTransport(io, sock)
     recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
-    transport._recv_buffer = recv_buffer
-    reader = StreamReader(transport, limit=limit, recv_buffer=recv_buffer)
+    reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
     writer = StreamWriter(transport, reader)
     return reader, writer
 
@@ -454,8 +450,7 @@ def default_async_stream_factory(
 
     transport = SocketTransport(io, sock)
     recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
-    transport._recv_buffer = recv_buffer
-    reader = AsyncStreamReader(transport, limit=limit, recv_buffer=recv_buffer)
+    reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
     writer = AsyncStreamWriter(transport, reader)
     return reader, writer
 
