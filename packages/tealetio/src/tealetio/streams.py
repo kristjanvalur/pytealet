@@ -195,24 +195,19 @@ class _ReaderCore:
             return 0
 
         total = 0
-        if self._buffer:
-            prefix = min(view.nbytes, len(self._buffer))
-            view[:prefix] = self._buffer[:prefix]
-            del self._buffer[:prefix]
-            total += prefix
-            if total == view.nbytes:
-                return total
-
-        if self._eof:
-            return total or 0
-
-        if not self._buffer and not self._eof:
-            self._append_next_chunk()
-        if self._buffer:
-            prefix = min(view.nbytes - total, len(self._buffer))
-            view[total : total + prefix] = self._buffer[:prefix]
-            del self._buffer[:prefix]
-            total += prefix
+        while total < view.nbytes and not self._eof:
+            while self._buffer and total < view.nbytes:
+                prefix = min(view.nbytes - total, len(self._buffer))
+                view[total : total + prefix] = self._buffer[:prefix]
+                del self._buffer[:prefix]
+                total += prefix
+            if total == view.nbytes or self._eof:
+                break
+            if total == 0 or self._recv_buffer.has_pending_chunks():
+                if not self._append_next_chunk():
+                    break
+            else:
+                break
         return total
 
     def readexactly(self, n: int) -> bytes:
@@ -476,6 +471,9 @@ def pooled_default_stream_factory(
     ``io.create_recv_buffer_pool(buffer_size, buffer_count)``. When ``pool`` is
     set, every connection shares that pool. Pair ``async_`` with the stream
     types returned by ``start_server`` / ``open_streams`` on the call site.
+
+    The returned factory ignores ``recv_buffer_pool`` on each call; pool policy
+    is owned by this helper's ``pool`` / ``buffer_size`` / ``buffer_count``.
     """
 
     delegate = default_async_stream_factory if async_ else default_stream_factory
@@ -1256,7 +1254,11 @@ def start_server(
     Accepts use ``scheduler.io.accept_many_streams()`` (``ProactorIOManager``),
     so ``UringProactor`` can service connections through multishot accept when
     the runtime probe allows it. Each accepted connection arms ``recv_many`` on
-    the accept delivery thread before the handler callback runs.
+    the accept delivery thread before the handler callback runs, so inbound data
+    can be ingested while the handler is still queued. A peer that connects and
+    never sends leaves ``recv_many`` pending without blocking delivery to the
+    handler; use handler-side read timeouts or idle policy when that matters.
+    Per-connection pools (the default here) bound memory under high accept rates.
 
     Late accept deliveries can still reach handlers unless you close listeners
     and discard them in the accept callback (``StreamServer`` checks ``_closed``).

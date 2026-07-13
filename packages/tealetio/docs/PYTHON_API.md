@@ -678,7 +678,10 @@ uses ``_closed``).
 Each accept arms `proactor.accept_many()`. On the accept delivery thread,
 ``accept_many_streams()`` wraps the connection as streams and starts
 ``recv_many`` before the accept callback is marshalled onto the scheduler with
-`call_soon_threadsafe()`. The handler runs in a spawned tealet.
+`call_soon_threadsafe()`, so data can arrive while the handler is still queued.
+A peer that connects without sending leaves ``recv_many`` pending; the handler
+still receives the stream pair and can apply read timeouts or idle close policy.
+The handler runs in a spawned tealet.
 ``async_=True`` selects asyncio-shaped streams and drives the handler through
 ``run_coro()``. On ``UringProactor``, accept uses multishot
 `IORING_ACCEPT_MULTISHOT` when probed; otherwise the proactor falls back to
@@ -693,11 +696,13 @@ not install signal handlers — use ``tealetio.run()`` / ``Runner`` for shutdown
 signals.
 
 Default stream readers receive through ``recv_many`` / ``RecvIterBuffer``.
-`StreamReader.readinto()` copies from the reader's internal buffer and the next
-leased chunk; other read methods assemble data in an internal `bytearray` before
-returning `bytes`. Release leased chunk views after copying when holding data
-past a read call (``RecvIterBuffer`` releases on ingest for ``read()`` /
-``readline()`` paths).
+`StreamReader.readinto()` blocks once for the first chunk when empty, then copies
+from the internal buffer and any further chunks already queued by ``recv_many``
+until the caller buffer is full or no more data is pending (partial return like
+asyncio when the peer has not sent enough to fill the buffer). Other read
+methods assemble data in an internal `bytearray` before returning `bytes`.
+Release leased chunk views after copying when holding data past a read call
+(``RecvIterBuffer`` releases on ingest for ``read()`` / ``readline()`` paths).
 
 This module does not integrate with stdlib `asyncio.StreamReader` instances or
 the `ForwardingProactor` guest loop.

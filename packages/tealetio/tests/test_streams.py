@@ -438,6 +438,28 @@ class TestStreamsPoC:
             reader.close()
             writer.close()
 
+    def test_stream_readinto_loops_across_recv_iter_chunks(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            payload = b"a" * 4096 + b"b" * 4096
+
+            def exercise() -> tuple[int, bytes]:
+                stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
+                writer.send(payload[:4096])
+                writer.send(payload[4096:])
+                buf = bytearray(len(payload))
+                nbytes = stream_reader.readinto(buf)
+                return nbytes, bytes(buf[:nbytes])
+
+            nbytes, data = run_scheduler_task(scheduler, exercise)
+            assert nbytes == len(payload)
+            assert data == payload
+        finally:
+            reader.close()
+            writer.close()
+
     def test_stream_reads_use_recv_iter_not_sock_recv(self, scheduler: SyncProactorScheduler, monkeypatch) -> None:
         reader, writer = socket.socketpair()
         recv_calls: list[tuple[object, ...]] = []
@@ -799,6 +821,36 @@ class TestStreamsPoC:
 
         run_scheduler_task(scheduler, exercise)
         assert received == [b"abc"]
+
+    def test_start_server_eager_recv_delivers_presend_payload(self, scheduler: SyncProactorScheduler) -> None:
+        payload = b"presend-payload"
+        received: list[bytes] = []
+        handled = Event()
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            received.append(reader.read(len(payload)))
+            writer.close()
+            handled.set()
+
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            try:
+                _host, port = server.sockets[0].getsockname()
+
+                def connect_and_presend() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    writer.write(payload)
+                    writer.drain()
+                    handled.swait()
+                    writer.close()
+
+                scheduler.spawn(connect_and_presend)
+                handled.swait()
+            finally:
+                server.close()
+
+        run_scheduler_task(scheduler, exercise)
+        assert received == [payload]
 
     def test_start_server_unix_path_dispatches_async_handler(self, scheduler: SyncProactorScheduler) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

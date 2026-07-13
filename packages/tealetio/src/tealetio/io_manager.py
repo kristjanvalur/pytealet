@@ -684,7 +684,10 @@ class ProactorIOManager:
         Each accepted socket is wrapped as streams on the accept **delivery**
         thread (``_open_streams`` / ``RecvIterBuffer`` / ``recv_many`` start
         there). Only the user ``callback`` is marshalled onto the scheduler
-        thread.
+        thread. Receive begins immediately to reduce latency; a silent peer leaves
+        ``recv_many`` pending without withholding the stream pair from the
+        handler. Idle or slow-client policy belongs in the handler (read
+        timeouts, early close, etc.).
 
         See ``accept_many()`` for ``wait()`` / accept-stream semantics and the
         shutdown discard responsibilities (close listeners; check a flag in the
@@ -713,7 +716,10 @@ class ProactorIOManager:
                 try:
                     callback((reader, writer))
                 except BaseException:
-                    writer.close()
+                    try:
+                        writer.close()
+                    except BaseException:
+                        abortive_close(conn)
                     raise
 
             try:
