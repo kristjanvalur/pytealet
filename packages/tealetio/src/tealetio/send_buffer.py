@@ -51,16 +51,14 @@ class SendBuffer:
 
     @property
     def pending_bytes(self) -> int:
-        """Bytes queued or in the active ``sock_sendall`` leg."""
+        """Approximate bytes queued or in the active ``sock_sendall`` leg."""
 
-        with self._lock:
-            return self._pending_bytes + self._in_flight_bytes
+        return self._pending_bytes + self._in_flight_bytes
 
     def get_write_buffer_limits(self) -> tuple[int, int]:
         """Return ``(low_water, high_water)``."""
 
-        with self._lock:
-            return (self._low_water, self._high_water)
+        return (self._low_water, self._high_water)
 
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         """Configure asyncio-style drain watermarks."""
@@ -153,9 +151,8 @@ class SendBuffer:
             low = high // 4
         if high < low or low < 0:
             raise ValueError(f"high ({high!r}) must be >= low ({low!r}) must be >= 0")
-        with self._lock:
-            self._high_water = high
-            self._low_water = low
+        self._high_water = high
+        self._low_water = low
 
     def _submit(self, chunk: bytes) -> None:
         waiter = self._io.sock_sendall(self._sock, chunk)
