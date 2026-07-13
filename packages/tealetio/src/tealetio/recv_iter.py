@@ -233,19 +233,14 @@ class RecvIterBuffer:
         return None
 
     def take_next(self) -> _RecvIterYield | None:
-        # resume recv_many before parking: a consumer may have just released a
-        # pool slot outside the lock.
-        while True:
-            try:
-                with self._cond:
-                    item = self._take_next_locked()
-                    if item:
-                        return item[0]
-            finally:
-                self.consume_pressure_resume()
-            with self._cond:
-                ready = cast(_RecvIterReady, self._cond.swait_for(self._take_next_locked))
-                return ready[0]
+        # resume before parking (consumer may have released a pool slot) and
+        # after dispatch (leg may have ended while we held the chunk).
+        self.consume_pressure_resume()
+        with self._cond:
+            ready = cast(_RecvIterReady, self._cond.swait_for(self._take_next_locked))
+            item = ready[0]
+        self.consume_pressure_resume()
+        return item
 
     def close(self) -> None:
         """Stop iteration and cancel any in-flight ``recv_many`` leg.
