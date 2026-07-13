@@ -669,8 +669,10 @@ POSIX platforms other than Cygwin; ``reuse_port`` is off unless set to ``True``.
 With ``sock=``, tealetio applies the scheduler listen-socket contract
 (non-blocking, close-on-exec) and calls ``listen(backlog)``, like asyncio.
 ``limit`` sets the stream reader line-buffer cap for ``readline()`` (asyncio
-semantics). Pass ``stream_factory=`` for custom stream types or provided-buffer
-pool policy (for example ``pooled_default_stream_factory``). Close listeners and
+semantics). When ``stream_factory`` is omitted, ``start_server()`` uses
+``pooled_default_stream_factory`` (per-connection provided-buffer pools). Pass
+``stream_factory=`` for custom stream types or alternate pool policy (for example
+a shared pool across clients). Close listeners and
 discard late deliveries in the accept callback after shutdown (``StreamServer``
 uses ``_closed``).
 Each accept arms `proactor.accept_many()`. On the accept delivery thread,

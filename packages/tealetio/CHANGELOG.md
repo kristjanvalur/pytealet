@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- ``start_server()`` without an explicit ``stream_factory`` now uses
+  ``pooled_default_stream_factory`` (per-connection provided-buffer pools)
+  instead of the scheduler shared pool, so concurrent clients do not share
+  ``recv_many`` backpressure.
+
 ### Breaking Changes
 - ``accept_many_streams()`` and ``start_server()`` no longer accept ``recv_size``,
   ``recv_timeout``, or ``on_recv_error``. Stream accepts no longer perform

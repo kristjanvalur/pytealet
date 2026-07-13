@@ -496,6 +496,12 @@ def pooled_default_stream_factory(
     return cast(StreamFactory, factory)
 
 
+def _default_server_stream_factory(*, async_: bool) -> StreamFactory | AsyncStreamFactory:
+    """Per-connection provided-buffer pools for multi-client listeners."""
+
+    return pooled_default_stream_factory(async_=async_)
+
+
 def _resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:
     if scheduler is not None:
         return scheduler
@@ -1074,6 +1080,9 @@ def _start_stream_server(
     arms ``recv_many`` when streams open on the accept delivery thread.
     """
 
+    if stream_factory is None:
+        stream_factory = _default_server_stream_factory(async_=async_)
+
     server = StreamServer(scheduler, [sock])
     server._start_accept_loop(
         sock,
@@ -1238,7 +1247,11 @@ def start_server(
     ``run_coro()``. Pair ``async_`` with the handler shape encoded in the
     overloads (sync handler + ``async_=False``, or ``async def`` + ``async_=True``).
     An explicit ``stream_factory`` must match those stream types; ``async_`` only
-    picks the default factory when it is omitted.
+    picks the default factory when it is omitted. When ``stream_factory`` is
+    omitted, ``start_server()`` uses ``pooled_default_stream_factory`` so each
+    accepted connection gets its own provided-buffer pool (avoiding shared-pool
+    pressure across concurrent clients). ``open_streams()`` / ``open_connection()``
+    still default to the scheduler shared pool for single-connection use.
 
     Accepts use ``scheduler.io.accept_many_streams()`` (``ProactorIOManager``),
     so ``UringProactor`` can service connections through multishot accept when

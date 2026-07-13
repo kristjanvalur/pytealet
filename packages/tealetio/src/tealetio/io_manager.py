@@ -716,7 +716,17 @@ class ProactorIOManager:
                     writer.close()
                     raise
 
-            self._marshal_on_scheduler(run)
+            try:
+                self._marshal_on_scheduler(run)
+            except BaseException:
+                # ``writer.close()`` can touch the scheduler via ``RecvIterBuffer``;
+                # always abort the accepted socket when marshalling never ran.
+                abortive_close(conn)
+                try:
+                    writer.close()
+                except BaseException:
+                    pass
+                raise
 
         return IOWaiter(self, self._proactor.accept_many(sock, wrap_accept_delivery(deliver_accept)))
 
