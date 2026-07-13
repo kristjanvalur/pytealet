@@ -366,9 +366,20 @@ def test_ordered_ingest_buffer_reset_restores_next_index():
 @pytest.mark.skipif(
     not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
 )
-def test_selector_leased_memoryview_release_returns_pool_slot():
-    pool = proactor_module._SelectorBufGroup(1024, 4)
-    view = proactor_module._leased_selector_memoryview(b"abc", pool)
+def test_selector_create_recv_buffer_pool_returns_synthetic_pool() -> None:
+    proactor = SelectorProactor()
+    try:
+        pool = proactor.create_recv_buffer_pool(4096, 8)
+        assert isinstance(pool, proactor_module.SyntheticRecvBufferPool)
+        assert pool.buffer_size == 4096
+        assert pool.buffer_count == 8
+    finally:
+        proactor.close()
+
+
+def test_synthetic_leased_memoryview_release_returns_pool_slot():
+    pool = proactor_module.SyntheticRecvBufferPool(1024, 4)
+    view = proactor_module._leased_synthetic_memoryview(b"abc", pool)
     assert pool.leased_count == 1
     assert bytes(view) == b"abc"
     view.release()
@@ -378,11 +389,11 @@ def test_selector_leased_memoryview_release_returns_pool_slot():
 @pytest.mark.skipif(
     not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
 )
-def test_selector_buf_group_pressure_threshold_matches_recviter_policy():
-    pool = proactor_module._SelectorBufGroup(1024, 4)
-    views = [proactor_module._leased_selector_memoryview(b"x", pool) for _ in range(3)]
+def test_synthetic_buf_group_pressure_threshold_matches_recviter_policy():
+    pool = proactor_module.SyntheticRecvBufferPool(1024, 4)
+    views = [proactor_module._leased_synthetic_memoryview(b"x", pool) for _ in range(3)]
     assert pool.leased_count < pool.buffer_count
-    views.append(proactor_module._leased_selector_memoryview(b"x", pool))
+    views.append(proactor_module._leased_synthetic_memoryview(b"x", pool))
     assert pool.leased_count >= pool.buffer_count
     for view in views:
         view.release()
@@ -3547,6 +3558,32 @@ class TestUringProactor:
             for conn in accepted:
                 conn.close()
             server.close()
+            proactor.close()
+
+    def test_create_recv_buffer_pool_falls_back_to_synthetic_when_pbuf_unavailable(self) -> None:
+        class _UnavailableProvidedBuffersRing(_FakeUringRing):
+            def __init__(self, entries: int, flags: int) -> None:
+                super().__init__(entries, flags)
+                self.create_buf_group_calls = 0
+
+            def create_buf_group(self, buffer_size: int, buffer_count: int) -> Any:
+                self.create_buf_group_calls += 1
+                raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+        proactor = UringProactor(ring_factory=_UnavailableProvidedBuffersRing)
+        try:
+            pool = proactor.create_recv_buffer_pool(8192, 4)
+            assert isinstance(pool, proactor_module.SyntheticRecvBufferPool)
+            assert pool.buffer_size == 8192
+            assert pool.buffer_count == 4
+            assert proactor._provided_buffers_supported is False
+            assert proactor.ring.create_buf_group_calls == 1
+
+            second = proactor.create_recv_buffer_pool(4096, 2)
+            assert isinstance(second, proactor_module.SyntheticRecvBufferPool)
+            assert second.buffer_size == 4096
+            assert proactor.ring.create_buf_group_calls == 1
+        finally:
             proactor.close()
 
     def test_recv_many_falls_back_to_single_oneshot_recv(self, monkeypatch: pytest.MonkeyPatch) -> None:

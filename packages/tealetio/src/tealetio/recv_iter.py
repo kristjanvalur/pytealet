@@ -159,9 +159,9 @@ class RecvIterBuffer:
             return data
         if getattr(self._buf_group, "_note_leased", None) is None:
             return data
-        from .proactor import _leased_selector_memoryview
+        from .proactor import _leased_synthetic_memoryview
 
-        return _leased_selector_memoryview(bytes(data), self._buf_group)  # type: ignore[arg-type]
+        return _leased_synthetic_memoryview(bytes(data), self._buf_group)  # type: ignore[arg-type]
 
     def _signal_pressure_if_pending(self) -> bool:
         if self._pressure_pending:

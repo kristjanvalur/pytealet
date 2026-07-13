@@ -68,8 +68,11 @@ __all__ = [
     "ProactorFile",
     "MultishotDelivery",
     "RecvBufferPool",
+    "SyntheticRecvBufferPool",
     "AcceptManyResult",
 ]
+
+_PROVIDED_BUFFER_UNAVAILABLE_ERRNOS = frozenset({errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP})
 
 
 _DoneCallback = Callable[[Operation[Any]], object]
@@ -235,12 +238,14 @@ _UringBufGroup: TypeAlias = uring_api.BufGroup
 
 
 class RecvBufferPool(Protocol):
-    """Provided-buffer pool surface for multishot ``recv_many`` on uring.
+    """Receive buffer pool surface shared by uring ``BufGroup`` and ``SyntheticRecvBufferPool``.
 
     ``leased_count`` tracks how many receive chunks consumers still hold.
-    When the pool is full, multishot ``recv_many`` surfaces ``errno.ENOBUFS``
-    through ``MultishotDelivery.exception`` and completes the current leg;
-    consumers drop held views and start a fresh ``recv_many()`` to continue.
+    On uring multishot, when the pool is full, ``recv_many`` surfaces
+    ``errno.ENOBUFS`` through ``MultishotDelivery.exception`` and completes
+    the current leg; consumers drop held views and start a fresh
+    ``recv_many()`` to continue. ``SyntheticRecvBufferPool`` mirrors the same
+    accounting for degraded selector and uring receive paths.
     """
 
     @property
@@ -259,12 +264,16 @@ def _supports_release_buffer() -> bool:
     return sys.version_info >= (3, 12)
 
 
-class _SelectorBufGroup:
-    """Synthetic provided-buffer pool kept for API compatibility on selector.
+def _provided_buffer_create_unavailable(exc: BaseException) -> bool:
+    return isinstance(exc, OSError) and exc.errno in _PROVIDED_BUFFER_UNAVAILABLE_ERRNOS
 
-    Selector ``recv_many`` delivers one copied chunk per call and does not
-    consult ``leased_count`` itself; ``RecvIterBuffer`` leases copies against
-    this pool so ``sock_recv_iter`` backpressure matches the uring contract.
+
+class SyntheticRecvBufferPool:
+    """Lease-counted buffer pool used when PBUF rings are unavailable or on selector.
+
+    Proactor receive paths deliver copied chunks; ``RecvIterBuffer`` tracks
+    leases against this pool so ``sock_recv_iter`` backpressure matches the
+    uring provided-buffer contract.
     """
 
     def __init__(self, buffer_size: int, buffer_count: int) -> None:
@@ -286,9 +295,9 @@ class _SelectorBufGroup:
 
 
 class _LeasedChunk:
-    """PEP 688 buffer exporter whose release returns a selector pool slot."""
+    """PEP 688 buffer exporter whose release returns a synthetic pool slot."""
 
-    def __init__(self, data: bytearray, pool: _SelectorBufGroup) -> None:
+    def __init__(self, data: bytearray, pool: SyntheticRecvBufferPool) -> None:
         self._data = data
         self._pool = pool
         self._held: memoryview | None = None
@@ -307,7 +316,7 @@ class _LeasedChunk:
         self._pool._note_unleased()
 
 
-def _leased_selector_memoryview(data: bytes | bytearray, pool: _SelectorBufGroup) -> memoryview:
+def _leased_synthetic_memoryview(data: bytes | bytearray, pool: SyntheticRecvBufferPool) -> memoryview:
     pool._note_leased()
     payload = data if type(data) is bytearray else bytearray(data)
     return memoryview(_LeasedChunk(payload, pool))
@@ -829,12 +838,12 @@ class SelectorProactor(ProactorBase):
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
         self._selector.register(self._wakeup_reader.fileno(), selectors.EVENT_READ, None)
-    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> SyntheticRecvBufferPool:
         """Create a synthetic provided-buffer pool for ``recv_many`` / ``sock_recv_iter``."""
 
-        return _SelectorBufGroup(buffer_size, buffer_count)
+        return SyntheticRecvBufferPool(buffer_size, buffer_count)
 
-    def create_buf_group(self, buffer_size: int, buffer_count: int) -> _SelectorBufGroup:
+    def create_buf_group(self, buffer_size: int, buffer_count: int) -> SyntheticRecvBufferPool:
         return self.create_recv_buffer_pool(buffer_size, buffer_count)
 
     def has_pending_operations(self) -> bool:
@@ -1156,8 +1165,8 @@ class SelectorProactor(ProactorBase):
         then the operation completes. Callers that need a byte stream must start
         a fresh ``recv_many()`` for each further chunk.
 
-        ``buf_group`` is accepted for API compatibility with ``UringProactor``;
-        selector receive uses copied ``memoryview`` data and ignores pool pressure.
+        ``buf_group`` sizes ``SyntheticRecvBufferPool`` lease accounting;
+        selector receive delivers copied ``memoryview`` data per call.
         """
 
         operation = _spawn_recv_many_operation(sock, callback)
@@ -1652,6 +1661,7 @@ class UringProactor(ProactorBase):
         self._submit_attempts = 0
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
+        self._provided_buffers_supported: bool | None = None
         self._wait_ready = threading.Event()
         self._async_wait_thread_id: int | None = None
         self._async_wait_event: _asyncio.Event | None = None
@@ -1785,12 +1795,22 @@ class UringProactor(ProactorBase):
         self._submit_uring_entry(entry, lambda: submit(target_completion, entry))
         return cancel_operation
 
-    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
-        """Create a provided-buffer group for ``recv_many`` / ``sock_recv_iter``."""
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
+        """Create a provided-buffer group, or ``SyntheticRecvBufferPool`` when PBUF rings fail."""
 
-        return self._ring.create_buf_group(buffer_size, buffer_count)
+        if self._provided_buffers_supported is False:
+            return SyntheticRecvBufferPool(buffer_size, buffer_count)
+        try:
+            pool = self._ring.create_buf_group(buffer_size, buffer_count)
+        except OSError as exc:
+            if not _provided_buffer_create_unavailable(exc):
+                raise
+            self._provided_buffers_supported = False
+            return SyntheticRecvBufferPool(buffer_size, buffer_count)
+        self._provided_buffers_supported = True
+        return pool
 
-    def create_buf_group(self, buffer_size: int, buffer_count: int) -> _UringBufGroup:
+    def create_buf_group(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         return self.create_recv_buffer_pool(buffer_size, buffer_count)
 
     def _default_shared_recv_buffer_pool_sizes(self) -> tuple[int, int]:
