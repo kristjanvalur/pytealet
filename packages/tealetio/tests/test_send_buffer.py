@@ -175,6 +175,112 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
+    def test_write_eof_defers_shutdown_until_queue_drains(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            pending_ops: list[Operation[None]] = []
+            real_sendall = scheduler.io.sock_sendall
+            real_shutdown = scheduler.io.sock_shutdown
+
+            def staged_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del progress
+                operation = Operation[None](kind="send", fileobj=sock)
+                pending_ops.append(operation)
+                return IOWaiter(scheduler.io, operation)
+
+            shutdown_calls: list[int] = []
+
+            def track_shutdown(sock: socket.socket, how: int):
+                shutdown_calls.append(how)
+                return real_shutdown(sock, how)
+
+            scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+
+            def exercise() -> None:
+                send_buffer.write(b"ab")
+                send_buffer.write_eof()
+                assert send_buffer.eof_pending
+                assert not send_buffer.write_eof_done
+                assert shutdown_calls == []
+                pending_ops[0]._finish(result=None)
+                assert send_buffer.write_eof_done
+                assert shutdown_calls == [socket.SHUT_WR]
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown = real_shutdown  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
+    def test_write_eof_on_idle_socket_shuts_down_immediately(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            shutdown_calls: list[int] = []
+            real_shutdown = scheduler.io.sock_shutdown
+
+            def track_shutdown(sock: socket.socket, how: int):
+                shutdown_calls.append(how)
+                return real_shutdown(sock, how)
+
+            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+
+            def exercise() -> None:
+                send_buffer.write_eof()
+                assert send_buffer.write_eof_done
+                assert shutdown_calls == [socket.SHUT_WR]
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.io.sock_shutdown = real_shutdown  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
+    def test_write_eof_is_idempotent(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            shutdown_calls: list[int] = []
+            real_shutdown = scheduler.io.sock_shutdown
+
+            def track_shutdown(sock: socket.socket, how: int):
+                shutdown_calls.append(how)
+                return real_shutdown(sock, how)
+
+            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+
+            def exercise() -> None:
+                send_buffer.write_eof()
+                send_buffer.write_eof()
+                assert send_buffer.write_eof_done
+                assert shutdown_calls == [socket.SHUT_WR]
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.io.sock_shutdown = real_shutdown  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
+    def test_write_after_write_eof_raises(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+
+            def exercise() -> None:
+                send_buffer.write_eof()
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+            with pytest.raises(RuntimeError, match="write\\(\\) after write_eof"):
+                send_buffer.write(b"x")
+        finally:
+            reader.close()
+            writer.close()
+
     def test_write_after_close_raises(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:

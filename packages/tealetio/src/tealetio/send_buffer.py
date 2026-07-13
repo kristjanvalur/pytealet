@@ -45,6 +45,8 @@ class SendBuffer:
         self._active_waiter: IOWaiter[None] | None = None
         self._send_error: BaseException | None = None
         self._closed = False
+        self._eof_pending = False
+        self._write_eof_done = False
         self._set_write_buffer_limits(high=high_water, low=low_water)
 
     @property
@@ -75,6 +77,8 @@ class SendBuffer:
         with self._cond:
             if self._closed:
                 raise RuntimeError("SendBuffer is closed")
+            if self._eof_pending:
+                raise RuntimeError("cannot write() after write_eof()")
             if self._send_error is not None:
                 raise self._send_error
             self._pending.append(chunk)
@@ -117,6 +121,20 @@ class SendBuffer:
                 raise self._send_error
             self._cond.swait_for(self._flush_ready)
 
+    def write_eof(self) -> None:
+        """Mark end-of-write; ``SHUT_WR`` is deferred until queued data is sent."""
+
+        with self._cond:
+            if self._closed:
+                raise RuntimeError("SendBuffer is closed")
+            if self._send_error is not None:
+                raise self._send_error
+            if self._eof_pending:
+                return
+            self._eof_pending = True
+            self._maybe_shutdown()
+            self._cond.notify_all()
+
     def close(self) -> None:
         """Reject further ``write()`` calls; queued data may still be flushed."""
 
@@ -129,6 +147,14 @@ class SendBuffer:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def eof_pending(self) -> bool:
+        return self._eof_pending
+
+    @property
+    def write_eof_done(self) -> bool:
+        return self._write_eof_done
 
     def _drain_ready(self) -> bool:
         if self._send_error is not None:
@@ -152,6 +178,19 @@ class SendBuffer:
             raise ValueError(f"high ({high!r}) must be >= low ({low!r}) must be >= 0")
         self._high_water = high
         self._low_water = low
+
+    def _maybe_shutdown(self) -> None:
+        """Shut down the write side when EOF is pending and the queue is idle.
+
+        Caller must hold ``self._cond``.
+        """
+
+        if self._write_eof_done or not self._eof_pending:
+            return
+        if self._active or self._pending_bytes or self._in_flight_bytes:
+            return
+        self._write_eof_done = True
+        self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
 
     def _submit(self, chunk: bytes) -> None:
         waiter = self._io.sock_sendall(self._sock, chunk)
@@ -178,6 +217,7 @@ class SendBuffer:
                 self._in_flight_bytes = len(next_chunk)
             else:
                 self._active = False
+                self._maybe_shutdown()
             self._cond.notify_all()
         if next_chunk is not None:
             self._submit(next_chunk)

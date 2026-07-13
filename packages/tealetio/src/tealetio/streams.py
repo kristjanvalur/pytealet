@@ -7,7 +7,7 @@ import os
 import socket
 import sys
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
 from typing import Any, Literal, Protocol, TypeAlias, TypeVar, cast, overload
 
 from asynkit import coro_drive
@@ -33,7 +33,6 @@ T = TypeVar("T")
 _DEFAULT_LIMIT = 2**16
 
 __all__ = [
-    "SocketTransport",
     "StreamReader",
     "StreamWriter",
     "AsyncStreamReader",
@@ -91,35 +90,20 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
     return coro_drive(coro, on_yield)
 
 
-class SocketTransport:
-    """Connection metadata for a stream writer; outbound I/O uses ``SendBuffer``."""
-
-    def __init__(self, sock: socket.socket, send_buffer: SendBuffer) -> None:
-        self._sock = sock
-        self._send_buffer = send_buffer
-
-    @property
-    def sock(self) -> socket.socket:
-        return self._sock
-
-    @property
-    def send_buffer(self) -> SendBuffer:
-        return self._send_buffer
-
-    def get_extra_info(self, name: str, default: Any = None) -> Any:
-        if name == "socket":
-            return self._sock
-        if name == "peername":
-            try:
-                return self._sock.getpeername()
-            except OSError:
-                return default
-        if name == "sockname":
-            try:
-                return self._sock.getsockname()
-            except OSError:
-                return default
-        return default
+def _writer_extra_info(sock: socket.socket, name: str, default: Any = None) -> Any:
+    if name == "socket":
+        return sock
+    if name == "peername":
+        try:
+            return sock.getpeername()
+        except OSError:
+            return default
+    if name == "sockname":
+        try:
+            return sock.getsockname()
+        except OSError:
+            return default
+    return default
 
 
 class _ReaderCore:
@@ -263,12 +247,18 @@ class _WriterCore:
     def __init__(self, *, send_buffer: SendBuffer, sock: socket.socket) -> None:
         self._send_buffer = send_buffer
         self._sock = sock
+        self._io = send_buffer._io
+        self._closing = False
         self._closed = False
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
-        if self._closed:
+        if self._closing or self._closed:
             raise RuntimeError("StreamWriter is closed")
         self._send_buffer.write(data)
+
+    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
+        for line in lines:
+            self.write(line)
 
     def drain(self) -> None:
         self._send_buffer.drain()
@@ -279,16 +269,50 @@ class _WriterCore:
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         self._send_buffer.set_write_buffer_limits(high, low)
 
+    def can_write_eof(self) -> bool:
+        return (
+            not self._closing and not self._closed and not self._send_buffer.eof_pending and self._sock.fileno() != -1
+        )
+
+    def write_eof(self) -> None:
+        """Request half-close of the write side after queued data is sent."""
+
+        if self._closing or self._closed:
+            raise RuntimeError("write_eof() called on closed StreamWriter")
+        if self._sock.fileno() == -1:
+            raise RuntimeError("write_eof() called on closed StreamWriter")
+        self._send_buffer.write_eof()
+
     def close(self) -> None:
+        """Begin writer shutdown without waiting for queued data or socket close."""
+
+        if self._closing or self._closed:
+            return
+        self._closing = True
+        self._send_buffer.close()
+
+    def wait_closed(self) -> None:
+        """Block until queued sends finish and the socket is closed via the proactor."""
+
         if self._closed:
             return
-        self._send_buffer.flush()
+        if not self._closing:
+            self.close()
+        try:
+            self._send_buffer.flush()
+        except BaseException:
+            pass
+        if self._sock.fileno() != -1:
+            if not self._send_buffer.write_eof_done:
+                self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
+            try:
+                self._io.sock_close(self._sock).wait()
+            except OSError:
+                pass
         self._closed = True
-        self._send_buffer.close()
-        self._sock.close()
 
     def is_closing(self) -> bool:
-        return self._closed
+        return self._closing or self._closed
 
 
 class StreamReader:
@@ -363,19 +387,19 @@ class StreamWriter:
         sock: socket.socket,
         reader: StreamReader | None = None,
     ) -> None:
+        self._send_buffer = send_buffer
+        self._sock = sock
         self._core = _WriterCore(send_buffer=send_buffer, sock=sock)
-        self._transport = SocketTransport(sock, send_buffer)
         self._reader = reader
 
-    @property
-    def transport(self) -> SocketTransport:
-        return self._transport
-
     def get_extra_info(self, name: str, default: Any = None) -> Any:
-        return self._transport.get_extra_info(name, default)
+        return _writer_extra_info(self._sock, name, default)
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)
+
+    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
+        self._core.writelines(lines)
 
     def close(self) -> None:
         if self._reader is not None:
@@ -394,8 +418,14 @@ class StreamWriter:
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         self._core.set_write_buffer_limits(high, low)
 
+    def can_write_eof(self) -> bool:
+        return self._core.can_write_eof()
+
+    def write_eof(self) -> None:
+        self._core.write_eof()
+
     def wait_closed(self) -> None:
-        return None
+        self._core.wait_closed()
 
 
 class AsyncStreamWriter:
@@ -408,19 +438,19 @@ class AsyncStreamWriter:
         sock: socket.socket,
         reader: AsyncStreamReader | None = None,
     ) -> None:
+        self._send_buffer = send_buffer
+        self._sock = sock
         self._core = _WriterCore(send_buffer=send_buffer, sock=sock)
-        self._transport = SocketTransport(sock, send_buffer)
         self._reader = reader
 
-    @property
-    def transport(self) -> SocketTransport:
-        return self._transport
-
     def get_extra_info(self, name: str, default: Any = None) -> Any:
-        return self._transport.get_extra_info(name, default)
+        return _writer_extra_info(self._sock, name, default)
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)
+
+    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
+        self._core.writelines(lines)
 
     def close(self) -> None:
         if self._reader is not None:
@@ -439,8 +469,14 @@ class AsyncStreamWriter:
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         self._core.set_write_buffer_limits(high, low)
 
+    def can_write_eof(self) -> bool:
+        return self._core.can_write_eof()
+
+    def write_eof(self) -> None:
+        self._core.write_eof()
+
     async def wait_closed(self) -> None:
-        return None
+        self._core.wait_closed()
 
 
 _NativeStreamPair: TypeAlias = tuple[StreamReader, StreamWriter]
