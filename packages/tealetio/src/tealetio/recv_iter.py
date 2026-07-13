@@ -134,7 +134,7 @@ class RecvIterBuffer:
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False
         self._next_base = 0
-        self._stream_done = False
+        self._stream_eof = False
         self._stream_error: BaseException | None = None
         self._current_operation: ContinuousOperation[_RecvManyValue] | None = None
         self._closed = False
@@ -191,7 +191,7 @@ class RecvIterBuffer:
                     notify = True
             elif delivery.exception is not None:
                 self._stream_error = delivery.exception
-                self._stream_done = True
+                self._stream_eof = True
                 notify = True
             elif delivery.value is not None:
                 data = self._maybe_track_chunk_lease(delivery.value)
@@ -203,7 +203,7 @@ class RecvIterBuffer:
                     if data:
                         self._schedule_resubmit(base_sequence=delivery.index + 1)
                     else:
-                        self._stream_done = True
+                        self._stream_eof = True
                         self._stream_error = None
         if notify:
             self._event.set()
@@ -217,7 +217,7 @@ class RecvIterBuffer:
         """Start a fresh ``recv_many`` once the pool has drained below the low-water mark."""
 
         with self._lock:
-            if self._current_operation is not None or self._stream_done or not self._should_resubmit():
+            if self._current_operation is not None or self._stream_eof or not self._should_resubmit():
                 return
             base_sequence = self._next_base
         self._start_recv_many(base_sequence=base_sequence)
@@ -237,11 +237,11 @@ class RecvIterBuffer:
                     if ready_item is not None:
                         index, chunk = ready_item
                         if not chunk:
-                            self._stream_done = True
+                            self._stream_eof = True
                             self._stream_error = None
                             return None
                         return (index, chunk)
-                    if self._stream_done:
+                    if self._stream_eof:
                         if self._stream_error is not None:
                             raise self._stream_error
                         return None
@@ -268,9 +268,9 @@ class RecvIterBuffer:
             self._pressure_pending = False
             self._ready.clear()
             self._reorder.reset()
-            if not self._stream_done:
+            if not self._stream_eof:
                 self._stream_error = CancelledError()
-                self._stream_done = True
+                self._stream_eof = True
         self._event.set()
         if operation is not None and not operation.done():
             self._proactor.cancel(operation)
