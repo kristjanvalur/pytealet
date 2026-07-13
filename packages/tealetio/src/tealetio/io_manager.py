@@ -312,7 +312,7 @@ class ProactorIOManager:
 
         pool = self._resolve_recv_buffer_pool(buffer_pool)
         proactor = cast(_RecvIterProactor, self._proactor)
-        return RecvIterBuffer(sock=sock, buf_group=pool, proactor=proactor)
+        return RecvIterBuffer(sock=sock, buf_group=pool, proactor=proactor, scheduler=self._scheduler)
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None

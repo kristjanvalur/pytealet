@@ -98,6 +98,14 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
 
+def release_recv_view(view: memoryview) -> None:
+    releaser = getattr(view.obj, "__release_buffer__", None)
+    if releaser is not None:
+        releaser(view)
+    else:
+        view.release()
+
+
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
 
@@ -116,12 +124,13 @@ class RecvIterBuffer:
         sock: socket.socket,
         buf_group: _BufGroupLike,
         proactor: _RecvIterProactor,
+        scheduler: Any = None,
     ) -> None:
         self._sock = sock
         self._buf_group = buf_group
         self._proactor = proactor
         self._lock = threading.Lock()
-        self._event = ThreadsafeEvent()
+        self._event = ThreadsafeEvent(scheduler)
         self._reorder = _OrderedIngestBuffer[memoryview]()
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False

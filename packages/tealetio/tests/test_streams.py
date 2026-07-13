@@ -17,6 +17,7 @@ from tealetio.streams import (
     SocketTransport,
     StreamReader,
     StreamWriter,
+    _open_recv_buffer,
     open_connection,
     open_streams,
     run_coro,
@@ -174,9 +175,11 @@ class TestStreamsPoC:
             class TaggedStreamReader(StreamReader):
                 tag = "native-custom"
 
-            def custom_factory(io, sock, *, limit):
+            def custom_factory(io, sock, *, limit, recv_buffer_pool=None):
                 transport = SocketTransport(io, sock)
-                stream_reader = TaggedStreamReader(transport, limit=limit)
+                recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+                transport._recv_buffer = recv_buffer
+                stream_reader = TaggedStreamReader(transport, limit=limit, recv_buffer=recv_buffer)
                 stream_writer = StreamWriter(transport, stream_reader)
                 return stream_reader, stream_writer
 
@@ -199,9 +202,11 @@ class TestStreamsPoC:
             class TaggedAsyncStreamReader(AsyncStreamReader):
                 tag = "async-custom"
 
-            def custom_factory(io, sock, *, limit):
+            def custom_factory(io, sock, *, limit, recv_buffer_pool=None):
                 transport = SocketTransport(io, sock)
-                stream_reader = TaggedAsyncStreamReader(transport, limit=limit)
+                recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+                transport._recv_buffer = recv_buffer
+                stream_reader = TaggedAsyncStreamReader(transport, limit=limit, recv_buffer=recv_buffer)
                 stream_writer = AsyncStreamWriter(transport, stream_reader)
                 return stream_reader, stream_writer
 
@@ -394,7 +399,7 @@ class TestStreamsPoC:
             reader.close()
             writer.close()
 
-    def test_stream_reads_use_recv_into_not_sock_recv(self, scheduler: SyncProactorScheduler, monkeypatch) -> None:
+    def test_stream_reads_use_recv_iter_not_sock_recv(self, scheduler: SyncProactorScheduler, monkeypatch) -> None:
         reader, writer = socket.socketpair()
         recv_calls: list[tuple[object, ...]] = []
         recv_into_calls: list[tuple[object, ...]] = []
@@ -411,6 +416,7 @@ class TestStreamsPoC:
 
         monkeypatch.setattr(scheduler.io, "sock_recv", tracking_recv)
         monkeypatch.setattr(scheduler.io, "sock_recv_into", tracking_recv_into)
+
         try:
             reader.setblocking(False)
             writer.setblocking(True)
@@ -428,8 +434,7 @@ class TestStreamsPoC:
 
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello"
             assert recv_calls == []
-            assert recv_into_calls
-            assert recv_into_calls[0][1] >= 5
+            assert recv_into_calls == []
         finally:
             reader.close()
             writer.close()
@@ -695,6 +700,46 @@ class TestStreamsPoC:
             stream_reader.feed_initial(b"cached")
             assert stream_reader.read(6) == b"cached"
         finally:
+            reader.close()
+            writer.close()
+
+    def test_default_stream_reader_uses_recv_iter_buffer(self, scheduler: SyncProactorScheduler) -> None:
+        from tealetio.recv_iter import RecvIterBuffer
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
+            assert isinstance(stream_reader._core._recv_buffer, RecvIterBuffer)
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_stream_reader_readline_fills_from_recv_iter_chunks(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        recv_calls = 0
+        real_recv = scheduler.proactor.recv
+
+        def counting_recv(sock, n):
+            nonlocal recv_calls
+            recv_calls += 1
+            return real_recv(sock, n)
+
+        scheduler.proactor.recv = counting_recv  # type: ignore[method-assign]
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def exercise() -> bytes:
+                stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
+                payload = b"x" * 4096 + b"\n"
+                writer.send(payload)
+                return stream_reader.readline()
+
+            assert run_scheduler_task(scheduler, exercise) == b"x" * 4096 + b"\n"
+            assert recv_calls == 0
+        finally:
+            scheduler.proactor.recv = real_recv  # type: ignore[method-assign]
             reader.close()
             writer.close()
 
@@ -1038,7 +1083,12 @@ class TestStreamsPoC:
 
 class TestStreamsFakeUring:
     def test_async_stream_readexactly_with_fake_uring_ring(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False, IORING_OP_SENDMSG_ZC=False)
+        _patch_uring_capabilities(
+            monkeypatch,
+            IORING_OP_SEND_ZC=False,
+            IORING_OP_SENDMSG_ZC=False,
+            IORING_RECV_MULTISHOT=False,
+        )
         scheduler = _scheduler_with_fake_ring()
         set_scheduler(scheduler)
         reader, writer = socket.socketpair()
@@ -1050,9 +1100,13 @@ class TestStreamsFakeUring:
                 return await stream_reader.readexactly(5)
 
             def exercise() -> bytes:
-                return run_coro(handler())
+                task = scheduler.spawn(lambda: run_coro(handler()))
+                scheduler.yield_()
+                proactor = scheduler.proactor
+                proactor.ring.complete_recv_buf(b"world")
+                proactor.wait(proactor.get_time() + 0.05)
+                return task.wait()
 
-            # _FakeUringRing completes recv_into synchronously with b"world".
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"world"
         finally:
             reader.close()
