@@ -443,6 +443,26 @@ def default_async_stream_factory(
     return reader, writer
 
 
+@overload
+def pooled_default_stream_factory(
+    *,
+    async_: Literal[False] = False,
+    buffer_size: int = 16 * 1024,
+    buffer_count: int = 4,
+    pool: Any | None = None,
+) -> StreamFactory: ...
+
+
+@overload
+def pooled_default_stream_factory(
+    *,
+    async_: Literal[True],
+    buffer_size: int = 16 * 1024,
+    buffer_count: int = 4,
+    pool: Any | None = None,
+) -> AsyncStreamFactory: ...
+
+
 def pooled_default_stream_factory(
     *,
     async_: bool = False,
@@ -471,7 +491,9 @@ def pooled_default_stream_factory(
         chosen = pool if pool is not None else io.create_recv_buffer_pool(buffer_size, buffer_count)
         return delegate(io, sock, limit=limit, recv_buffer_pool=chosen)
 
-    return factory
+    if async_:
+        return cast(AsyncStreamFactory, factory)
+    return cast(StreamFactory, factory)
 
 
 def _resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:
