@@ -12,6 +12,7 @@ from .continuous_callbacks import (
     AcceptStreamsDelivery,
     finalize_accept_recv_error,
     normalize_accept_recv_size,
+    is_cancellation_delivery,
     wrap_accept_delivery,
 )
 from .io_waiter import (
@@ -566,6 +567,8 @@ class ProactorIOManager:
         """Return a proactor ``accept_many`` callback that pre-reads each accept."""
 
         def on_conn(delivery: MultishotDelivery) -> None:
+            if is_cancellation_delivery(delivery):
+                return
             if delivery.exception is not None:
                 raise delivery.exception
             conn = delivery.value

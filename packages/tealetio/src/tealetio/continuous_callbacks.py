@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 from .operations import MultishotDelivery
 from .socket_helpers import abortive_close
+from .tasks import CancelledError
 
 T = TypeVar("T")
 
@@ -49,12 +50,25 @@ def finalize_accept_recv_error(
         raise hook_error
 
 
+def is_cancellation_delivery(delivery: MultishotDelivery) -> bool:
+    """Return True when ``delivery`` ends a continuous op by cancellation.
+
+    Proactor cancel currently surfaces ``CancelledError``; backends may use
+    other terminal exceptions later. Accept and receive callbacks should treat
+    this as "no further chunks" rather than a transport failure.
+    """
+
+    return isinstance(delivery.exception, CancelledError)
+
+
 def wrap_accept_delivery(
     deliver: Callable[[AcceptReadResult], object],
 ) -> Callable[[MultishotDelivery], None]:
     """Adapt proactor ``accept_many`` deliveries to io_manager accept tuples."""
 
     def on_conn(delivery: MultishotDelivery) -> None:
+        if is_cancellation_delivery(delivery):
+            return
         if delivery.exception is not None:
             raise delivery.exception
         if delivery.value is None:

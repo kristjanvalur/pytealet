@@ -594,8 +594,6 @@ class ProactorBase:
         def guarded(delivery: MultishotDelivery) -> None:
             try:
                 callback(delivery)
-            except (SystemExit, KeyboardInterrupt, CancelledError):
-                raise
             except BaseException as exc:
                 handler = self._delivery_exception_handler
                 if handler is None:

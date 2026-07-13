@@ -324,6 +324,16 @@ class TestProactorIOManagerAcceptMany:
 
         assert normalize_accept_recv_size(2**16 + 1) == 2**16
 
+    def test_wrap_accept_delivery_swallows_cancellation_terminal(self) -> None:
+        from tealetio.continuous_callbacks import wrap_accept_delivery
+        from tealetio.operations import MultishotDelivery
+        from tealetio.tasks import CancelledError
+
+        seen: list[object] = []
+        wrapped = wrap_accept_delivery(lambda item: seen.append(item))
+        wrapped(MultishotDelivery(exception=CancelledError()))
+        assert seen == []
+
     @pytest.mark.parametrize("recv_timeout", [0, -1])
     def test_accept_many_rejects_invalid_recv_timeout(self, recv_timeout: float) -> None:
         proactor = _MockProactor()
