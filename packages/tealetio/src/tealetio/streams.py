@@ -244,10 +244,16 @@ class _ReaderCore:
 
 
 class _WriterCore:
-    def __init__(self, *, send_buffer: SendBuffer, sock: socket.socket) -> None:
+    def __init__(
+        self,
+        *,
+        send_buffer: SendBuffer,
+        sock: socket.socket,
+        io: ProactorIOManager,
+    ) -> None:
         self._send_buffer = send_buffer
         self._sock = sock
-        self._io = send_buffer._io
+        self._io = io
         self._closing = False
         self._closed = False
 
@@ -385,11 +391,13 @@ class StreamWriter:
         *,
         send_buffer: SendBuffer,
         sock: socket.socket,
+        io: ProactorIOManager,
         reader: StreamReader | None = None,
     ) -> None:
         self._send_buffer = send_buffer
         self._sock = sock
-        self._core = _WriterCore(send_buffer=send_buffer, sock=sock)
+        self._io = io
+        self._core = _WriterCore(send_buffer=send_buffer, sock=sock, io=io)
         self._reader = reader
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
@@ -436,11 +444,13 @@ class AsyncStreamWriter:
         *,
         send_buffer: SendBuffer,
         sock: socket.socket,
+        io: ProactorIOManager,
         reader: AsyncStreamReader | None = None,
     ) -> None:
         self._send_buffer = send_buffer
         self._sock = sock
-        self._core = _WriterCore(send_buffer=send_buffer, sock=sock)
+        self._io = io
+        self._core = _WriterCore(send_buffer=send_buffer, sock=sock, io=io)
         self._reader = reader
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
@@ -479,6 +489,17 @@ class AsyncStreamWriter:
         self._core.wait_closed()
 
 
+def _shutdown_stream_writer(writer: StreamWriter | AsyncStreamWriter) -> None:
+    try:
+        writer.close()
+        if isinstance(writer, AsyncStreamWriter):
+            run_coro(writer.wait_closed())
+        else:
+            writer.wait_closed()
+    except BaseException:
+        pass
+
+
 _NativeStreamPair: TypeAlias = tuple[StreamReader, StreamWriter]
 _AsyncStreamPair: TypeAlias = tuple[AsyncStreamReader, AsyncStreamWriter]
 _StreamFactoryArg: TypeAlias = StreamFactory | AsyncStreamFactory | None
@@ -512,10 +533,11 @@ def default_stream_factory(
 ) -> tuple[StreamReader, StreamWriter]:
     """Construct the default native stream pair for a connected socket."""
 
+    proactor_io = cast(ProactorIOManager, io)
     recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
     send_buffer = _open_send_buffer(io, sock)
     reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = StreamWriter(send_buffer=send_buffer, sock=sock, reader=reader)
+    writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=proactor_io, reader=reader)
     return reader, writer
 
 
@@ -528,10 +550,11 @@ def default_async_stream_factory(
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
     """Construct the default asyncio-shaped stream pair for a connected socket."""
 
+    proactor_io = cast(ProactorIOManager, io)
     recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
     send_buffer = _open_send_buffer(io, sock)
     reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, reader=reader)
+    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, io=proactor_io, reader=reader)
     return reader, writer
 
 
@@ -1025,7 +1048,7 @@ class StreamServer:
                     def on_accept(streams: _AcceptedStreams) -> None:
                         if self._closed:
                             _reader, writer = streams
-                            writer.close()
+                            _shutdown_stream_writer(writer)
                             return
                         reader, writer = streams
                         self._dispatch_streams(
@@ -1116,7 +1139,7 @@ class StreamServer:
     ) -> None:
         def dispatch() -> None:
             if self._closed:
-                writer.close()
+                _shutdown_stream_writer(writer)
                 return
 
             def serve() -> None:
@@ -1136,12 +1159,12 @@ class StreamServer:
                             cast(StreamWriter, writer),
                         )
                 finally:
-                    writer.close()
+                    _shutdown_stream_writer(writer)
 
             try:
                 handler_task = self._scheduler.spawn(serve)
             except Exception:
-                writer.close()
+                _shutdown_stream_writer(writer)
                 raise
 
             self._handler_tasks.add(handler_task)

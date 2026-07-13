@@ -4,11 +4,12 @@ import asyncio
 import socket
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from tealetio import Event, set_scheduler
+from tealetio.io_manager import ProactorIOManager
 from tealetio.io_waiter import IOWaiter
 from tealetio.operations import Operation
 from tealetio.proactor import SyncProactorScheduler, UringProactor
@@ -181,7 +182,9 @@ class TestStreamsPoC:
                 recv_buffer = _open_recv_buffer(io, sock, None)
                 send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = StreamWriter(send_buffer=send_buffer, sock=sock, reader=stream_reader)
+                stream_writer = StreamWriter(
+                    send_buffer=send_buffer, sock=sock, io=cast(ProactorIOManager, io), reader=stream_reader
+                )
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -248,7 +251,9 @@ class TestStreamsPoC:
                 recv_buffer = _open_recv_buffer(io, sock, None)
                 send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedAsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, reader=stream_reader)
+                stream_writer = AsyncStreamWriter(
+                    send_buffer=send_buffer, sock=sock, io=cast(ProactorIOManager, io), reader=stream_reader
+                )
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -816,6 +821,7 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
+                io=scheduler.io,
             )
 
             def exercise() -> bytes:
@@ -852,6 +858,7 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
+                io=scheduler.io,
             )
             stream_writer.write(b"xy")
             stream_writer.close()
@@ -876,6 +883,7 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
+                io=scheduler.io,
             )
             stream_writer.write(b"z")
             assert not stream_writer.is_closing()
@@ -899,6 +907,7 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
+                io=scheduler.io,
             )
             assert stream_writer.can_write_eof()
 
@@ -957,6 +966,7 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
+                io=scheduler.io,
             )
             shutdown_calls: list[tuple[socket.socket, int]] = []
             close_calls: list[socket.socket] = []
@@ -1012,6 +1022,37 @@ class TestStreamsPoC:
             scheduler.proactor.recv = real_recv  # type: ignore[method-assign]
             reader.close()
             writer.close()
+
+    def test_stream_server_handler_close_shuts_down_client_socket(self, scheduler: SyncProactorScheduler) -> None:
+        handled = Event()
+        client_socks: list[socket.socket] = []
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            client_socks.append(writer._sock)
+            writer.close()
+            handled.set()
+
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            try:
+                _host, port = server.sockets[0].getsockname()
+
+                def connect_and_send() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    writer.write(b"x")
+                    writer.drain()
+                    writer.close()
+
+                scheduler.spawn(connect_and_send)
+                handled.swait()
+                server.close()
+                server.wait_closed()
+            finally:
+                server.close()
+
+        run_scheduler_task(scheduler, exercise)
+        assert len(client_socks) == 1
+        assert client_socks[0].fileno() == -1
 
     def test_start_server_uses_accept_many_and_dispatches_handler(self, scheduler: SyncProactorScheduler) -> None:
         handled = Event()

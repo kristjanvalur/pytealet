@@ -416,10 +416,10 @@ drop waiter only”.
   signatures (`RecvBufferPool`, and similar). `IOFile` and `ServerIO` are done.
 - `StreamServer.serve_forever()` sugar (implemented); signal handling stays in
   `Runner`, not the server object.
-- **Stream transport close via `io.sock_close`** — `SocketTransport.close()` still
-  calls `socket.close()` directly; route through `sock_shutdown` / `sock_close`
-  in a follow-up PR when stream closing semantics are cleaned up (this PR adds
-  the proactor/manager close paths as preparation).
+- **Stream writer shutdown** — `StreamWriter.close()` is non-blocking; callers
+  must `wait_closed()` to flush queued sends and release the socket via
+  `sock_shutdown` / `sock_close`. `StreamServer` handler cleanup calls
+  `wait_closed()` after `close()`.
 - **Consolidate buffer bridges and stream modules** — `RecvIterBuffer`
   (`recv_iter.py`), `SendBuffer` (`send_buffer.py`), and their
   `_open_sock_recv_iter` / `_open_send_buffer` factories are intentionally split

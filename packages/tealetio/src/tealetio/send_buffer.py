@@ -202,16 +202,13 @@ class SendBuffer:
         waiter = self._active_waiter
         assert waiter is not None
         self._active_waiter = None
-        leg_error: BaseException | None = None
-        try:
-            waiter.wait()
-        except BaseException as exc:
-            leg_error = exc
+        assert waiter.poll()
+        leg_error = waiter.exception()
         with self._cond:
             self._in_flight_bytes = 0
             if leg_error is not None:
                 self._send_error = leg_error
-            if self._send_error is None and self._pending and not self._closed:
+            if self._send_error is None and self._pending:
                 next_chunk = self._pending.popleft()
                 self._pending_bytes -= len(next_chunk)
                 self._in_flight_bytes = len(next_chunk)

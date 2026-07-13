@@ -281,6 +281,38 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
+    def test_close_drains_pending_after_in_flight_leg(self, scheduler: SyncProactorScheduler) -> None:
+        _reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            pending_ops: list[Operation[None]] = []
+            real_sendall = scheduler.io.sock_sendall
+
+            def staged_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del progress
+                operation = Operation[None](kind="send", fileobj=sock)
+                pending_ops.append(operation)
+                return IOWaiter(scheduler.io, operation)
+
+            scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+
+            def exercise() -> None:
+                send_buffer.write(b"ab")
+                send_buffer.write(b"cd")
+                send_buffer.close()
+                assert len(pending_ops) == 1
+                pending_ops[0]._finish(result=None)
+                assert len(pending_ops) == 2
+                pending_ops[1]._finish(result=None)
+                send_buffer.flush()
+                assert send_buffer.pending_bytes == 0
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            writer.close()
+
     def test_write_after_close_raises(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
