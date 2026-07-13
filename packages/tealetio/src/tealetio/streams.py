@@ -158,11 +158,6 @@ class _ReaderCore:
             self._eof = True
             return False
 
-    def feed_initial(self, data: bytes) -> None:
-        """Pre-fill the read buffer; empty ``b""`` is ignored."""
-        if data:
-            self._buffer.extend(data)
-
     def _fill_buffer(self, min_bytes: int) -> None:
         while len(self._buffer) < min_bytes and not self._eof:
             if not self._append_next_chunk():
@@ -301,10 +296,6 @@ class StreamReader:
     def readline(self) -> bytes:
         return self._core.readline()
 
-    def feed_initial(self, data: bytes) -> None:
-        """Pre-fill the read buffer; empty ``b""`` is ignored."""
-        self._core.feed_initial(data)
-
 
 class AsyncStreamReader:
     """Asyncio-shaped stream reader backed by tealet-blocking socket I/O."""
@@ -335,10 +326,6 @@ class AsyncStreamReader:
 
     async def readline(self) -> bytes:
         return self._core.readline()
-
-    def feed_initial(self, data: bytes) -> None:
-        """Pre-fill the read buffer; empty ``b""`` is ignored."""
-        self._core.feed_initial(data)
 
 
 class StreamWriter:
@@ -484,7 +471,6 @@ def _open_streams(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
-    initial: bytes | None = None,
     recv_buffer_pool: Any | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
     # ``async_`` only selects the default stream factory when ``stream_factory`` is
@@ -494,8 +480,6 @@ def _open_streams(
     else:
         factory = stream_factory
     reader, writer = factory(io, sock, limit=limit, recv_buffer_pool=recv_buffer_pool)
-    if initial:
-        reader.feed_initial(initial)
     if async_:
         return cast(_AsyncStreamPair, (reader, writer))
     return cast(_NativeStreamPair, (reader, writer))
@@ -881,8 +865,6 @@ class StreamServer:
         client_handler: _ClientHandler,
         *,
         limit: int,
-        recv_size: int | None,
-        recv_timeout: float | None,
         stream_factory: _StreamFactoryArg,
         async_: bool,
     ) -> None:
@@ -912,8 +894,6 @@ class StreamServer:
                             limit=limit,
                             stream_factory=stream_factory,
                             async_=async_,
-                            recv_size=recv_size,
-                            recv_timeout=recv_timeout,
                         ).wait()
                     except (OSError, RuntimeError):
                         if self._closed:
@@ -960,7 +940,6 @@ class StreamServer:
         self,
         conn: socket.socket,
         *,
-        initial_data: bytes | None = None,
         limit: int,
         stream_factory: _StreamFactoryArg,
         client_handler: _ClientHandler,
@@ -976,7 +955,6 @@ class StreamServer:
             limit=limit,
             stream_factory=stream_factory,
             async_=async_,
-            initial=initial_data,
         )
         self._dispatch_streams(reader, writer, client_handler=client_handler, async_=async_)
 
@@ -1034,18 +1012,14 @@ def _start_stream_server(
     client_handler: _ClientHandler,
     *,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
     """Start accept handling on a listening socket and return a ``StreamServer``.
 
     Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
-    Accepts deliver stream pairs via ``accept_many_streams``. When ``recv_size``
-    is set, an accept-time read pre-fills the reader buffer; ``recv_timeout``
-    bounds that preread when set. Otherwise callers arm eager receive later
-    (for example via ``recv_many``).
+    Accepts deliver stream pairs via ``accept_many_streams``; each connection
+    arms ``recv_many`` when streams open on the accept delivery thread.
     """
 
     server = StreamServer(scheduler, [sock])
@@ -1053,8 +1027,6 @@ def _start_stream_server(
         sock,
         client_handler,
         limit=limit,
-        recv_size=recv_size,
-        recv_timeout=recv_timeout,
         stream_factory=stream_factory,
         async_=async_,
     )
@@ -1073,8 +1045,6 @@ def _start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
@@ -1103,8 +1073,6 @@ def _start_server(
         listen_sock,
         client_handler,
         limit=limit,
-        recv_size=recv_size,
-        recv_timeout=recv_timeout,
         stream_factory=stream_factory,
         async_=async_,
     )
@@ -1120,8 +1088,6 @@ def start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1137,8 +1103,6 @@ def start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1151,8 +1115,6 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1165,8 +1127,6 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1179,8 +1139,6 @@ def start_server(
     sock: socket.socket,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1193,8 +1151,6 @@ def start_server(
     sock: socket.socket,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1211,8 +1167,6 @@ def start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
@@ -1236,17 +1190,13 @@ def start_server(
 
     Accepts use ``scheduler.io.accept_many_streams()`` (``ProactorIOManager``),
     so ``UringProactor`` can service connections through multishot accept when
-    the runtime probe allows it.
-    ``recv_size`` opts into accept-time pre-read and reader prefill for
-    client-speaks-first protocols (for example HTTP); leave it ``None`` when
-    the server may speak first or when the reader will arm eager receive later.
-    ``recv_timeout`` (requires ``recv_size``) bounds each accept-time preread.
+    the runtime probe allows it. Each accepted connection arms ``recv_many`` on
+    the accept delivery thread before the handler callback runs.
 
-    Cancelling the accept-loop tealet or its ``accept_many_streams`` waiter does
-    not cancel in-flight accept-time ``recv`` legs. Late deliveries can still
-    reach handlers unless you close listeners and discard them in the accept
-    callback (``StreamServer`` checks ``_closed``). Custom servers using
-    ``scheduler.io.accept_many()`` directly must apply the same pattern.
+    Late accept deliveries can still reach handlers unless you close listeners
+    and discard them in the accept callback (``StreamServer`` checks ``_closed``).
+    Custom servers using ``scheduler.io.accept_many()`` directly must apply the
+    same pattern.
 
     Accept callbacks are marshalled onto the scheduler thread before handler
     tealets are spawned. Handler exceptions propagate
@@ -1265,8 +1215,6 @@ def start_server(
         reuse_address=reuse_address,
         reuse_port=reuse_port,
         limit=limit,
-        recv_size=recv_size,
-        recv_timeout=recv_timeout,
         stream_factory=stream_factory,
         async_=async_,
     )

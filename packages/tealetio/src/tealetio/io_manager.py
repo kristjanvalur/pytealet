@@ -219,9 +219,6 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
-        recv_size: int | None = None,
-        recv_timeout: float | None = None,
-        on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> IOWaitable[None]: ...
 
     def sock_create_streams(
@@ -681,72 +678,45 @@ class ProactorIOManager:
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
-        recv_size: int | None = None,
-        recv_timeout: float | None = None,
-        on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> IOWaitable[None]:
         """Start ``proactor.accept_many`` and deliver a stream pair per accept.
 
-        When ``recv_size`` is set, the accept-time read pre-fills the reader
-        buffer via ``feed_initial``. Recv failures invoke ``on_recv_error(conn,
-        exc)`` when provided (for logging ``getpeername()`` and similar); the
-        socket is always closed afterwards. With no ``on_recv_error``, recv
-        failures close the socket silently.
+        Each accepted socket is wrapped as streams on the accept **delivery**
+        thread (``_open_streams`` / ``RecvIterBuffer`` / ``recv_many`` start
+        there). Only the user ``callback`` is marshalled onto the scheduler
+        thread.
 
-        See ``accept_many()`` for ``wait()`` / accept-stream semantics, independent
-        accept-time ``recv`` legs, and the shutdown discard responsibilities
-        (close listeners; check a flag in the accept callback).
+        See ``accept_many()`` for ``wait()`` / accept-stream semantics and the
+        shutdown discard responsibilities (close listeners; check a flag in the
+        accept callback).
         """
 
         from .streams import _open_streams
 
-        normalized_recv_size = normalize_accept_recv_size(recv_size)
-        if recv_timeout is not None:
-            if normalized_recv_size is None:
-                raise ValueError("recv_timeout requires recv_size")
-            if recv_timeout <= 0:
-                raise ValueError("recv_timeout must be positive when provided")
-
         def deliver_accept(accepted: AcceptReadResult) -> None:
-            conn, initial_data, recv_error = accepted
+            conn, _initial_data, _recv_error = accepted
+
+            writer: Any = None
+            try:
+                reader, writer = _open_streams(
+                    self,
+                    conn,
+                    limit=limit,
+                    stream_factory=stream_factory,
+                    async_=async_,
+                )
+            except BaseException:
+                abortive_close(conn)
+                raise
 
             def run() -> None:
-                if recv_error is not None:
-                    finalize_accept_recv_error(conn, recv_error, on_recv_error)
-                    return
-
-                writer: Any = None
                 try:
-                    reader, writer = _open_streams(
-                        self,
-                        conn,
-                        limit=limit,
-                        stream_factory=stream_factory,
-                        async_=async_,
-                        initial=initial_data,
-                    )
                     callback((reader, writer))
                 except BaseException:
-                    if writer is not None:
-                        writer.close()
-                    else:
-                        abortive_close(conn)
+                    writer.close()
                     raise
 
             self._marshal_on_scheduler(run)
-
-        if normalized_recv_size is not None:
-            return IOWaiter(
-                self,
-                self._proactor.accept_many(
-                    sock,
-                    self._accept_many_read_on_conn(
-                        deliver_accept,
-                        recv_size=normalized_recv_size,
-                        recv_timeout=recv_timeout,
-                    ),
-                ),
-            )
 
         return IOWaiter(self, self._proactor.accept_many(sock, wrap_accept_delivery(deliver_accept)))
 

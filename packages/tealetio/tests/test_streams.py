@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import socket
 import tempfile
 from pathlib import Path
@@ -690,17 +689,6 @@ class TestStreamsPoC:
 
         run_scheduler_task(scheduler, exercise)
 
-    def test_stream_reader_feed_initial_avoids_socket_recv(self, scheduler: SyncProactorScheduler) -> None:
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
-            stream_reader.feed_initial(b"cached")
-            assert stream_reader.read(6) == b"cached"
-        finally:
-            reader.close()
-            writer.close()
-
     def test_default_stream_reader_uses_recv_iter_buffer(self, scheduler: SyncProactorScheduler) -> None:
         from tealetio.recv_iter import RecvIterBuffer
 
@@ -740,46 +728,6 @@ class TestStreamsPoC:
             scheduler.proactor.recv = real_recv  # type: ignore[method-assign]
             reader.close()
             writer.close()
-
-    def test_start_server_passes_recv_size_only_when_opted_in(
-        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
-            writer.close()
-
-        captured_results: list[int | None] = []
-
-        def run_with_recv_size(recv_size: int | None) -> None:
-            captured: list[int | None] = []
-            real_accept_many_streams = scheduler.io.accept_many_streams
-
-            def capture_accept_many_streams(sock: socket.socket, callback, **kwargs):
-                captured.append(kwargs.get("recv_size"))
-                return real_accept_many_streams(sock, callback, **kwargs)
-
-            monkeypatch.setattr(scheduler.io, "accept_many_streams", capture_accept_many_streams)
-
-            def exercise() -> None:
-                server = start_server(
-                    client_handler,
-                    addr=("127.0.0.1", 0),
-                    recv_size=recv_size,
-                    scheduler=scheduler,
-                )
-                try:
-                    for _ in range(20):
-                        if captured:
-                            break
-                        scheduler.yield_()
-                    captured_results.append(captured[-1])
-                finally:
-                    server.close()
-
-            run_scheduler_task(scheduler, exercise)
-
-        run_with_recv_size(None)
-        run_with_recv_size(1024)
-        assert captured_results == [None, 1024]
 
     def test_start_server_uses_accept_many_and_dispatches_handler(self, scheduler: SyncProactorScheduler) -> None:
         handled = Event()
@@ -1110,60 +1058,6 @@ class TestStreamsFakeUring:
             reader.close()
             writer.close()
             scheduler.close()
-
-    def test_start_server_closes_connection_on_recv_error(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
-        scheduler = _scheduler_with_deferred_ring()
-        set_scheduler(scheduler)
-        handled = Event()
-
-        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
-            handled.set()
-            writer.close()
-
-        server = start_server(client_handler, addr=("127.0.0.1", 0), recv_size=64, scheduler=scheduler)
-        try:
-            run_scheduler_task(scheduler, scheduler.yield_)
-            proactor = scheduler.proactor
-            proactor.ring.complete_accept_multishot("peer-1")
-            proactor.wait(proactor.get_time() + 0.05)
-            proactor.ring.complete_recv_error(-errno.EIO)
-            proactor.wait(proactor.get_time() + 0.05)
-            assert handled.is_set() is False
-            assert not server._handler_tasks
-        finally:
-            run_scheduler_task(scheduler, server.close)
-            scheduler.close()
-
-    def test_start_server_prefills_reader_from_accept_preread(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
-        scheduler = _scheduler_with_deferred_ring()
-        set_scheduler(scheduler)
-        handled = Event()
-        received: list[bytes] = []
-
-        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
-            received.append(reader.read(5))
-            writer.close()
-            handled.set()
-
-        server = start_server(client_handler, addr=("127.0.0.1", 0), recv_size=64, scheduler=scheduler)
-        try:
-            proactor = scheduler.proactor
-
-            def exercise() -> None:
-                scheduler.yield_()
-                proactor.ring.complete_accept_multishot("peer-1")
-                proactor.wait(proactor.get_time() + 0.05)
-                proactor.ring.complete_recv(b"early")
-                handled.swait()
-
-            scheduler.run_until_complete(scheduler.spawn(exercise))
-            assert received == [b"early"]
-        finally:
-            run_scheduler_task(scheduler, server.close)
-            scheduler.close()
-
 
 def test_run_coro_rejects_real_yields() -> None:
     loop = asyncio.new_event_loop()
