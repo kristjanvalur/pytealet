@@ -868,6 +868,65 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
+    def test_sock_sendall_waiter_add_done_callback_registers_after_return(self):
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        completed: list[int] = []
+        try:
+            waiter = io.sock_sendall(sock, b"hello")
+            waiter.add_done_callback(lambda: completed.append(1))
+            waiter.forget()
+            assert completed == [1]
+            assert proactor.send_calls == [(sock, b"hello")]
+        finally:
+            sock.close()
+
+    def test_sock_sendall_waiter_add_done_callback_runs_on_failure(self):
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        completed: list[int] = []
+        try:
+
+            def boom(sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
+                del data, progress
+                operation = Operation[None](kind="send", fileobj=sock)
+                operation._finish(exception=OSError("send failed"))
+                return operation
+
+            proactor.send = boom  # type: ignore[method-assign]
+            waiter = io.sock_sendall(sock, b"hello")
+            waiter.add_done_callback(lambda: completed.append(1))
+            with pytest.raises(OSError, match="send failed"):
+                waiter.wait()
+            assert completed == [1]
+        finally:
+            sock.close()
+
+    def test_sock_sendall_empty_payload_add_done_callback_runs_after_return(self):
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        phase: list[str] = []
+        try:
+
+            def send(target_sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
+                del data, progress
+                phase.append("send")
+                operation = Operation[None](kind="send", fileobj=target_sock)
+                operation._finish(result=None)
+                return operation
+
+            proactor.send = send  # type: ignore[method-assign]
+            waiter = io.sock_sendall(sock, b"")
+            phase.append("returned")
+            waiter.add_done_callback(lambda: phase.append("done"))
+            assert phase == ["send", "returned", "done"]
+            assert proactor.send_calls == []
+        finally:
+            sock.close()
+
     def test_poll_delegates_to_proactor(self):
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -1426,6 +1485,25 @@ class TestIOWaitGroup:
             assert event_count == 1
         finally:
             io_waiter_module.ThreadsafeEvent = original_event
+
+    def test_group_add_done_callback_runs_when_finish_completes(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        completed: list[int] = []
+        group = IOWaitGroup[str](io)
+        group.add_done_callback(lambda: completed.append(1))
+        group.finish("done")
+        assert completed == [1]
+        assert group.wait() == "done"
+
+    def test_group_add_done_callback_runs_immediately_when_already_done(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        completed: list[int] = []
+        group = IOWaitGroup[str](io)
+        group.finish("done")
+        group.add_done_callback(lambda: completed.append(1))
+        assert completed == [1]
 
     def test_group_attach_sync_completed_operation_clears_members(self) -> None:
         proactor = _MockProactor()

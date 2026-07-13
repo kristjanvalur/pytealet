@@ -420,6 +420,13 @@ drop waiter only”.
   calls `socket.close()` directly; route through `sock_shutdown` / `sock_close`
   in a follow-up PR when stream closing semantics are cleaned up (this PR adds
   the proactor/manager close paths as preparation).
+- **Consolidate buffer bridges and stream modules** — `RecvIterBuffer`
+  (`recv_iter.py`), `SendBuffer` (`send_buffer.py`), and their
+  `_open_sock_recv_iter` / `_open_send_buffer` factories are intentionally split
+  today, but file granularity is getting high. Plan to move these helpers out of
+  the `io_manager.py` surface into a shared stream-buffer module and to
+  colocate `StreamReader` / `StreamWriter` cores in the same area. See
+  `packages/tealetio/ROADMAP.md` (Consolidate stream buffer helpers).
 
 ## References
 
@@ -429,5 +436,7 @@ drop waiter only”.
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`
 - `packages/tealetio/src/tealetio/streams.py` — streams API
+- `packages/tealetio/src/tealetio/recv_iter.py` — `RecvIterBuffer`
+- `packages/tealetio/src/tealetio/send_buffer.py` — `SendBuffer`
 - `packages/tealetio/docs/PYTHON_API.md` — user-facing API
 - `packages/tealetio/docs/OPERATION_CALLBACKS.md` — io_manager continuous composition and delivery disposition
