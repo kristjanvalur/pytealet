@@ -461,6 +461,26 @@ class TestLockExamples:
 
         assert seen == ["waiter:done"]
 
+    def test_condition_swait_for_returns_ready_none_via_tuple_box(self):
+        s = _new_scheduler()
+        cond = Condition()
+        state = {"value": False}
+
+        def waiter() -> object:
+            with cond:
+                return cond.swait_for(lambda: (None,) if state["value"] else None)
+
+        def setter() -> None:
+            s.yield_()
+            with cond:
+                state["value"] = True
+                cond.notify_all()
+
+        task = s.spawn(waiter)
+        s.spawn(setter)
+        s.run()
+        assert task.result() == (None,)
+
     def test_threadsafe_condition_cross_thread_notify(self, monkeypatch):
         s = _new_scheduler()
         cond = ThreadsafeCondition(scheduler=s)

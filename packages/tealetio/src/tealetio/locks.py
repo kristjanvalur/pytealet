@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar, cas
 import tealet
 
 T = TypeVar("T")
+_PredicateT = TypeVar("_PredicateT")
 
 
 class _ConditionWaiter(Protocol):
@@ -537,8 +538,13 @@ class _ConditionBase(Generic[_EventT]):
                 pass
             self._lock_reacquire_sync()
 
-    def swait_for(self, predicate: Callable[[], bool]) -> bool:
-        """Synchronously wait until ``predicate`` returns a truthy value."""
+    def swait_for(self, predicate: Callable[[], _PredicateT]) -> _PredicateT:
+        """Synchronously wait until ``predicate()`` returns a truthy value.
+
+        Returns that value. Falsy results (``None``, ``False``, and so on) mean
+        not ready yet; box a ready value that would itself be falsy (for example
+        ``(None,)`` for EOF).
+        """
 
         result = predicate()
         while not result:
@@ -613,8 +619,8 @@ class Condition(_ConditionBase[Event]):
                 pass
             await self._lock.acquire()
 
-    async def wait_for(self, predicate: Callable[[], bool]) -> bool:
-        """Asynchronously wait until ``predicate`` returns a truthy value."""
+    async def wait_for(self, predicate: Callable[[], _PredicateT]) -> _PredicateT:
+        """Asynchronously wait until ``predicate()`` returns a truthy value."""
 
         result = predicate()
         while not result:

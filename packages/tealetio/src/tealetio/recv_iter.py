@@ -4,7 +4,7 @@ import errno
 import heapq
 import socket
 from collections import deque
-from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
 from .locks import ThreadsafeCondition
 from .tasks import CancelledError
@@ -16,6 +16,7 @@ T_Cargo = TypeVar("T_Cargo")
 RECV_MANY_BUFFER_PRESSURE = -1
 _RecvManyValue = memoryview
 _RecvIterYield: TypeAlias = tuple[int, memoryview]
+_RecvIterReady: TypeAlias = tuple[None] | tuple[_RecvIterYield]
 
 
 class _BufGroupLike(Protocol):
@@ -209,10 +210,10 @@ class RecvIterBuffer:
             base_sequence = self._next_base
         self._start_recv_many(base_sequence=base_sequence)
 
-    def _take_next_locked(self) -> _RecvIterYield | None | Literal["wait"]:
+    def _take_next_locked(self) -> _RecvIterReady | None:
         if self._pressure_pending:
             self._pressure_pending = False
-            return (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
+            return ((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")),)
         ready_item: tuple[int, memoryview] | None = None
         if self._ready:
             ready_item = self._ready.popleft()
@@ -223,30 +224,28 @@ class RecvIterBuffer:
             if not chunk:
                 self._stream_done = True
                 self._stream_error = None
-                return None
-            return (index, chunk)
+                return (None,)
+            return ((index, chunk),)
         if self._stream_done:
             if self._stream_error is not None:
                 raise self._stream_error
-            return None
-        return "wait"
+            return (None,)
+        return None
 
     def take_next(self) -> _RecvIterYield | None:
-        # resume recv_many before parking, like the old event.swait() path: a
-        # consumer may have just released a pool slot outside the lock.
+        # resume recv_many before parking: a consumer may have just released a
+        # pool slot outside the lock.
         while True:
             try:
                 with self._cond:
                     item = self._take_next_locked()
-                    if item != "wait":
-                        return item
+                    if item:
+                        return item[0]
             finally:
                 self.consume_pressure_resume()
             with self._cond:
-                item = self._take_next_locked()
-                if item != "wait":
-                    return item
-                self._cond.swait()
+                ready = cast(_RecvIterReady, self._cond.swait_for(self._take_next_locked))
+                return ready[0]
 
     def close(self) -> None:
         """Stop iteration and cancel any in-flight ``recv_many`` leg.
