@@ -377,6 +377,24 @@ def test_selector_create_recv_buffer_pool_returns_synthetic_pool() -> None:
         proactor.close()
 
 
+def test_selector_recv_many_emits_enobufs_when_synthetic_pool_is_full() -> None:
+    proactor = SelectorProactor()
+    reader, _writer = socket.socketpair()
+    pool = proactor_module.SyntheticRecvBufferPool(8192, 2)
+    pool.leased_count = 2
+    seen: list[_RecvManySeen] = []
+    try:
+        reader.setblocking(False)
+        operation = proactor.recv_many(reader, seen.append, buf_group=pool, base_sequence=3)
+        assert operation.done() is True
+        assert len(seen) == 1
+        assert _is_enobufs_delivery(seen[0])
+        assert seen[0].index == 3
+    finally:
+        reader.close()
+        proactor.close()
+
+
 def test_synthetic_leased_memoryview_release_returns_pool_slot():
     pool = proactor_module.SyntheticRecvBufferPool(1024, 4)
     view = proactor_module._leased_synthetic_memoryview(b"abc", pool)
@@ -798,33 +816,22 @@ def test_recviter_buffer_resubmits_when_leg_stops_with_data():
     assert _exercise_recviter_buffer(exercise) == [0, 1]
 
 
-def test_recviter_buffer_more_false_triggers_pressure_when_pool_is_full():
-    class _Pool:
-        buffer_count = 2
-        leased_count = 2
+def test_recviter_buffer_pressure_when_initial_recv_many_hits_full_synthetic_pool() -> None:
+    def exercise() -> bool:
+        proactor = SelectorProactor()
+        reader, _writer = socket.socketpair()
+        pool = proactor_module.SyntheticRecvBufferPool(8192, 2)
+        pool.leased_count = 2
+        try:
+            reader.setblocking(False)
+            buffer = recv_iter_module.RecvIterBuffer(sock=reader, buf_group=pool, proactor=proactor)
+            _assert_recviter_pressure(buffer.take_next())
+            return True
+        finally:
+            reader.close()
+            proactor.close()
 
-        def note_chunk_released(self) -> None:
-            if self.leased_count:
-                self.leased_count -= 1
-
-    def exercise() -> list[int]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
-        buffer.on_result(_recv_chunk(0, b"a", more=False))
-        _assert_recviter_pressure(buffer.take_next())
-        assert proactor.recv_many_bases == [0]
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-        pool.note_chunk_released()
-        pool.note_chunk_released()
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0, 1]
-        buffer.on_result(_recv_chunk(1, b"", more=False))
-        assert buffer.take_next() is None
-        return proactor.recv_many_bases
-
-    assert _exercise_recviter_buffer(exercise) == [0, 1]
+    assert _exercise_recviter_buffer(exercise) is True
 
 
 def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
@@ -3614,6 +3621,25 @@ class TestUringProactor:
         finally:
             reader.close()
             writer.close()
+            proactor.close()
+
+    def test_recv_many_emits_enobufs_when_synthetic_pool_is_full(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, _writer = socket.socketpair()
+        pool = proactor_module.SyntheticRecvBufferPool(8192, 2)
+        pool.leased_count = 2
+        seen: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append, buf_group=pool, base_sequence=4)
+            assert operation.done() is True
+            assert proactor.ring.submitted_recv == []
+            assert len(seen) == 1
+            assert _is_enobufs_delivery(seen[0])
+            assert seen[0].index == 4
+        finally:
+            reader.close()
             proactor.close()
 
     def test_recv_many_synthetic_pool_uses_standard_recv_and_leases_chunks(

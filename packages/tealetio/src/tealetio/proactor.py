@@ -194,6 +194,29 @@ def _enobufs_error() -> OSError:
     return OSError(errno.ENOBUFS, errno.errorcode.get(errno.ENOBUFS, "no buffer space"))
 
 
+def _synthetic_recv_pool_is_full(buf_group: RecvBufferPool) -> bool:
+    if not _is_synthetic_recv_buffer_pool(buf_group):
+        return False
+    return buf_group.leased_count >= buf_group.buffer_count
+
+
+def _complete_recv_many_enobufs(
+    operation: ContinuousOperation[_RecvManyValue],
+    *,
+    index: int,
+) -> ContinuousOperation[_RecvManyValue]:
+    operation._emit_delivery(
+        MultishotDelivery(
+            index=index,
+            value=memoryview(b""),
+            exception=_enobufs_error(),
+            more=False,
+        )
+    )
+    operation._finish(result=None)
+    return operation
+
+
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 
 
@@ -1170,10 +1193,14 @@ class SelectorProactor(ProactorBase):
         a fresh ``recv_many()`` for each further chunk.
 
         ``buf_group`` sizes ``SyntheticRecvBufferPool`` lease accounting;
-        selector receive delivers copied ``memoryview`` data per call.
+        selector receive delivers copied ``memoryview`` data per call. When the
+        synthetic pool is already full, ``recv_many()`` delivers ``errno.ENOBUFS``
+        immediately without submitting ``recv()``.
         """
 
         operation = _spawn_recv_many_operation(sock, callback)
+        if _synthetic_recv_pool_is_full(buf_group):
+            return _complete_recv_many_enobufs(operation, index=base_sequence)
 
         def step() -> ContinuousStepResult:
             try:
@@ -2571,6 +2598,8 @@ class UringProactor(ProactorBase):
             return operation
 
         if _is_synthetic_recv_buffer_pool(buf_group):
+            if _synthetic_recv_pool_is_full(buf_group):
+                return _complete_recv_many_enobufs(operation, index=base_sequence)
             buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
             synthetic_pool = buf_group
             entry = self._uring_entry(

@@ -142,12 +142,6 @@ class RecvIterBuffer:
         self._next_base = base_sequence
         self._awaiting_resubmit = True
 
-    def _pool_at_high_water(self) -> bool:
-        """Return True when ``leased_count >= buffer_count`` (real multishot would ENOBUFS)."""
-
-        buf_group = self._buf_group
-        return buf_group.leased_count >= buf_group.buffer_count
-
     def _pool_at_low_water(self) -> bool:
         """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``)."""
 
@@ -205,8 +199,6 @@ class RecvIterBuffer:
                 if not delivery.more:
                     if data:
                         self._schedule_resubmit(base_sequence=delivery.index + 1)
-                        if self._pool_at_high_water() and self._signal_pressure_if_pending():
-                            notify = True
                     else:
                         self._stream_done = True
                         self._stream_error = None
