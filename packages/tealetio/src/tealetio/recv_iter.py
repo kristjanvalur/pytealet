@@ -5,7 +5,6 @@ import heapq
 import socket
 import threading
 from collections import deque
-from .tasks import CancelledError
 from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
 from .locks import ThreadsafeEvent
@@ -103,7 +102,20 @@ def _chunk_already_leased(data: memoryview) -> bool:
 
 
 class RecvIterBuffer:
-    """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``."""
+    """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
+
+    Resubmit gating uses ``buf_group.leased_count`` against the pool low-water mark
+    (``leased_count < buffer_count / 2``). That tracks real uring ``BufGroup`` slots
+    via ``BufView`` release and synthetic-pool leases on Python 3.12+.
+
+    On older Python, synthetic pools skip view leases (no PEP 688), so
+    ``leased_count`` does not reflect consumer-held chunks and backpressure via the
+    buffer mechanism is effectively dropped there. A lightweight alternative would
+    be queue occupancy: treat ``len(_ready) + len(_reorder)`` as in-flight slots,
+    signal pressure when it reaches ``buffer_count``, and allow resubmit once it
+    falls below half — same thresholds, no extra lease wrapper. Not implemented yet;
+    iterator-only, and direct ``recv_many`` callers would still need their own policy.
+    """
 
     def __init__(
         self,
@@ -120,30 +132,33 @@ class RecvIterBuffer:
         self._reorder = _OrderedIngestBuffer[memoryview]()
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False
-        self._awaiting_resubmit = False
         self._next_base = 0
         self._stream_done = False
         self._stream_error: BaseException | None = None
-        self._streams: list[ContinuousOperation[_RecvManyValue]] = []
+        self._current_operation: ContinuousOperation[_RecvManyValue] | None = None
         self._closed = False
         self._start_recv_many(base_sequence=0)
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
-        stream = self._proactor.recv_many(
+        operation = self._proactor.recv_many(
             self._sock,
             self.on_result,
             buf_group=self._buf_group,
             base_sequence=base_sequence,
         )
-        self._streams.append(stream)
-        stream.add_done_callback(self._on_stream_done)
+        self._current_operation = operation
+        operation.add_done_callback(self._on_stream_done)
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
         self._next_base = base_sequence
-        self._awaiting_resubmit = True
+        # leg ended; hold off on a new ``recv_many`` until queues drain and the pool is low.
+        self._current_operation = None
 
     def _pool_at_low_water(self) -> bool:
-        """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``)."""
+        """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``).
+
+        See class docstring for a possible queue-length fallback on pre-3.12 synthetic pools.
+        """
 
         buf_group = self._buf_group
         return buf_group.leased_count * 2 < buf_group.buffer_count
@@ -167,16 +182,15 @@ class RecvIterBuffer:
 
     def _on_stream_done(self, stream: Operation[Any]) -> None:
         with self._lock:
-            if stream.cancelled():
-                self._stream_error = CancelledError()
+            if stream is not self._current_operation:
+                return
+            self._current_operation = None
+            exception = stream.exception()
+            if exception is not None:
+                self._stream_error = exception
                 self._stream_done = True
-            else:
-                exception = stream.exception()
-                if exception is not None:
-                    self._stream_error = exception
-                    self._stream_done = True
-                elif not self._awaiting_resubmit:
-                    self._stream_done = True
+            elif not self._stream_done:
+                self._stream_done = True
         self._event.set()
 
     def on_result(self, delivery: MultishotDelivery) -> None:
@@ -216,10 +230,9 @@ class RecvIterBuffer:
         """Start a fresh ``recv_many`` once the pool has drained below the low-water mark."""
 
         with self._lock:
-            if not self._awaiting_resubmit or not self._should_resubmit():
+            if self._current_operation is not None or self._stream_done or not self._should_resubmit():
                 return
             base_sequence = self._next_base
-            self._awaiting_resubmit = False
         self._start_recv_many(base_sequence=base_sequence)
 
     def take_next(self) -> _RecvIterYield | None:
@@ -251,16 +264,15 @@ class RecvIterBuffer:
             self._event.swait()
 
     def close(self) -> None:
-        streams: list[ContinuousOperation[_RecvManyValue]]
+        operation: ContinuousOperation[_RecvManyValue] | None
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            streams = list(self._streams)
+            operation = self._current_operation
+            self._current_operation = None
             self._pressure_pending = False
-            self._awaiting_resubmit = False
             self._ready.clear()
             self._reorder.reset()
-        for stream in streams:
-            if not stream.done():
-                self._proactor.cancel(stream)
+        if operation is not None and not operation.done():
+            self._proactor.cancel(operation)

@@ -680,6 +680,8 @@ def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
         second = buffer.take_next()
         assert second is not None and second[0] == 0
         pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 1]
         buffer.on_result(_recv_chunk(1, b"", more=False))
         assert buffer.take_next() is None
         return proactor.recv_many_bases
