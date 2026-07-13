@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
+- ``accept_many_streams()`` and ``start_server()`` no longer accept ``recv_size``,
+  ``recv_timeout``, or ``on_recv_error``. Stream accepts no longer perform
+  accept-time preread or ``feed_initial`` on readers; each connection arms
+  ``recv_many`` through ``RecvIterBuffer`` when streams open.
+- ``StreamReader.feed_initial()`` and ``AsyncStreamReader.feed_initial()`` are
+  removed.
+- ``open_streams()`` no longer accepts ``recv_buffer_pool``. Pass a
+  ``stream_factory`` (for example ``pooled_default_stream_factory``) for
+  dedicated provided-buffer pools on stream endpoints.
+- Default ``StreamReader`` / ``AsyncStreamReader`` construction no longer takes a
+  ``transport`` argument; receive is exclusively through ``RecvIterBuffer``.
+- ``SocketTransport`` is send/metadata-only; ``recv`` and ``recv_into`` are
+  removed from the transport surface.
 - One-shot `ProactorIOManager` helpers (`sock_recv`, `sock_connect`, `open`,
   etc.) return `IOWaiter`; call `.wait()` to block (or `.forget()` to drop
   interest). `streams` / `files` call `.wait()` internally. Convenience helpers
@@ -89,6 +102,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent of the parent waiter. Cancelling the accept stream does not cancel
   in-flight recvs; callers must discard late deliveries after shutdown.
 
+### Changed
+- ``StreamReader.read(n)`` for ``n > 0`` matches asyncio partial-read semantics
+  (one chunk at a time, no read-ahead to ``n``).
+- ``sock_create_streams()`` / ``open_connection()`` open streams in
+  ``IOWaitGroup`` advance hooks on the completion worker thread, arming
+  ``recv_many`` before ``wait()`` returns to the scheduler tealet.
+
 ### Fixed
 - ``StreamServer.wait_closed()`` waits for the accept-loop tealet to exit, not
   only handler tealets.
@@ -101,8 +121,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on an already-cancelled target, keeping ``has_pending_operations()`` accurate.
 
 ### Added
-- ``start_server(..., recv_timeout=...)`` forwards accept-time preread timeouts
-  to ``accept_many_streams`` (requires ``recv_size``).
+- ``pooled_default_stream_factory()`` builds default sync or asyncio-shaped
+  stream pairs with a per-connection or shared provided-buffer pool.
+- ``accept_many_streams()`` wraps each accept as streams on the accept delivery
+  thread and starts ``recv_many`` before marshalling the user callback onto the
+  scheduler thread.
+- Default stream readers receive through ``recv_iter`` / ``recv_many`` chunk
+  delivery; consumers release leased ``memoryview`` chunks after ingest.
 - `Proactor.create_socket()` and `scheduler.io.sock_create()` to create
   scheduler-contract sockets through the proactor. Optional ``connect_to`` and
   ``initial_data`` are chained by ``ProactorIOManager`` (create → connect →

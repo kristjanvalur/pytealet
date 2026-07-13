@@ -47,7 +47,7 @@ disposition (see below).
 | Entry point | Composition |
 |-------------|---------------|
 | `accept_many(sock, callback, recv_size=…)` | optional accept-time `recv` via `_accept_many_read_on_conn`; deliveries marshalled with `call_soon_threadsafe` before `callback((conn, initial_data))` |
-| `accept_many_streams(…)` | same accept path, then `_open_streams` and `callback((reader, writer))` |
+| `accept_many_streams(…)` | `_open_streams` on the accept delivery thread (``recv_many`` starts there); user `callback((reader, writer))` marshalled with `call_soon_threadsafe` |
 | `poll_many(fd, mask, callback)` | forwards to `proactor.poll_many` inside an `IOWaiter` |
 | `sock_recv_iter` | blocking iterator over `proactor.recv_many` chunks |
 
