@@ -3586,33 +3586,70 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_recv_many_falls_back_to_single_oneshot_recv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_recv_many_uses_recv_buf_when_pool_is_real_and_multishot_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         seen: list[_RecvManySeen] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool()
-            )
+            pool = proactor.shared_recv_buffer_pool()
+            operation = proactor.recv_many(reader, seen.append, buf_group=pool)
             assert proactor.ring.submitted_recv_multishot == []
-            assert len(proactor.ring.submitted_recv) == 1
-            proactor.ring.complete_recv_oneshot(b"hello")
+            assert proactor.ring.submitted_recv == []
+            assert len(proactor.ring.submitted_recv_buf) == 1
+            proactor.ring.complete_recv_buf(b"hello")
             _wait_for_uring(proactor, lambda: operation.done())
             assert _recv_many_bytes(seen) == [(0, b"hello")]
             assert seen[-1].more is False
+            assert pool.leased_count == 1
 
-            operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool(), base_sequence=1
-            )
-            assert len(proactor.ring.submitted_recv) == 2
-            proactor.ring.complete_recv_oneshot(b"")
+            operation = proactor.recv_many(reader, seen.append, buf_group=pool, base_sequence=1)
+            assert len(proactor.ring.submitted_recv_buf) == 2
+            proactor.ring.complete_recv_buf(b"")
             _wait_for_uring(proactor, lambda: operation.done())
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
         finally:
             reader.close()
             writer.close()
+            proactor.close()
+
+    def test_recv_many_synthetic_pool_uses_standard_recv_and_leases_chunks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[_RecvManySeen] = []
+        pool = proactor_module.SyntheticRecvBufferPool(8192, 4)
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(reader, seen.append, buf_group=pool)
+            assert proactor.ring.submitted_recv_multishot == []
+            assert proactor.ring.submitted_recv_buf == []
+            assert len(proactor.ring.submitted_recv) == 1
+            proactor.ring.complete_recv_oneshot(b"hello")
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert _recv_many_bytes(seen) == [(0, b"hello")]
+            assert pool.leased_count == 1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_multishot_requires_real_pool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, _writer = socket.socketpair()
+        pool = proactor_module.SyntheticRecvBufferPool(8192, 4)
+        try:
+            reader.setblocking(False)
+            with pytest.raises(AssertionError):
+                proactor.recv_many(reader, lambda _result: None, buf_group=pool)
+        finally:
+            reader.close()
             proactor.close()
 
     @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")

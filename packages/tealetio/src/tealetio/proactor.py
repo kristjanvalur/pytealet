@@ -268,6 +268,10 @@ def _provided_buffer_create_unavailable(exc: BaseException) -> bool:
     return isinstance(exc, OSError) and exc.errno in _PROVIDED_BUFFER_UNAVAILABLE_ERRNOS
 
 
+def _is_synthetic_recv_buffer_pool(buf_group: RecvBufferPool) -> bool:
+    return isinstance(buf_group, SyntheticRecvBufferPool)
+
+
 class SyntheticRecvBufferPool:
     """Lease-counted buffer pool used when PBUF rings are unavailable or on selector.
 
@@ -2529,11 +2533,11 @@ class UringProactor(ProactorBase):
         consumers drop held views and start a fresh ``recv_many()`` with
         ``base_sequence`` set to ``index + 1``.
 
-        When multishot receive is unavailable, the proactor submits one
-        ``submit_recv()`` and delivers a single ``MultishotDelivery`` at
-        ``base_sequence`` with ``more=False`` (copied ``memoryview`` data, empty
-        EOF, or ``exception``), then completes. Callers that need a byte stream
-        must start a fresh ``recv_many()`` for each further chunk.
+        When multishot receive is unavailable but ``buf_group`` is a real
+        provided-buffer pool, the proactor submits one ``submit_recv_buf()`` and
+        delivers a leased ``BufView`` per leg. With a
+        ``SyntheticRecvBufferPool``, it falls back to ``submit_recv()`` and
+        leases copied chunks against the synthetic pool before delivery.
 
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
@@ -2541,6 +2545,7 @@ class UringProactor(ProactorBase):
 
         operation = UringContinuousOperation[_RecvManyValue]("recv_many", sock, callback)
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
+            assert not _is_synthetic_recv_buffer_pool(buf_group)
             uring_group = cast(_UringBufGroup, buf_group)
             leg_base = base_sequence
             entry = self._uring_entry(
@@ -2565,21 +2570,79 @@ class UringProactor(ProactorBase):
             self._submit_uring_entry(entry, submit_recv_many)
             return operation
 
-        buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
+        if _is_synthetic_recv_buffer_pool(buf_group):
+            buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
+            synthetic_pool = buf_group
+            entry = self._uring_entry(
+                operation,
+                lambda entry, completion: self._deliver_uring_recv_oneshot(
+                    entry,
+                    completion,
+                    buffer,
+                    base_sequence,
+                    synthetic_pool=synthetic_pool,
+                ),
+            )
+            self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), buffer, entry))
+            return operation
+
+        uring_group = cast(_UringBufGroup, buf_group)
         entry = self._uring_entry(
             operation,
-            lambda entry, completion: self._deliver_uring_recv_oneshot(
-                entry, completion, buffer, base_sequence
-            ),
+            lambda entry, completion: self._deliver_uring_recv_buf(entry, completion, base_sequence),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), buffer, entry))
+        self._submit_uring_entry(entry, lambda: self._ring.submit_recv_buf(sock.fileno(), uring_group, entry))
         return operation
+
+    def _recv_many_chunk_view(
+        self,
+        buffer: bytearray,
+        res: int,
+        *,
+        synthetic_pool: SyntheticRecvBufferPool | None,
+    ) -> memoryview:
+        if res == 0:
+            return memoryview(b"")
+        data = bytes(buffer[:res])
+        if synthetic_pool is None:
+            return memoryview(data)
+        return _leased_synthetic_memoryview(data, synthetic_pool)
 
     def _deliver_uring_recv_oneshot(
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
         buffer: bytearray,
+        base_sequence: int,
+        *,
+        synthetic_pool: SyntheticRecvBufferPool | None = None,
+    ) -> Operation[Any] | None:
+        operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
+        res = completion.res
+        if res < 0:
+            operation._emit_delivery(
+                MultishotDelivery(
+                    index=base_sequence,
+                    exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+                    more=False,
+                )
+            )
+            operation._finish(result=None)
+            self._deactivate_uring_entry(entry)
+            return operation
+        operation._emit_result(
+            self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
+            index=base_sequence,
+            more=False,
+        )
+        operation._finish(result=None)
+        self._deactivate_uring_entry(entry)
+        return operation
+
+    def _deliver_uring_recv_buf(
+        self,
+        entry: _UringEntry,
+        completion: _UringCompletion,
         base_sequence: int,
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
@@ -2596,9 +2659,11 @@ class UringProactor(ProactorBase):
             self._deactivate_uring_entry(entry)
             return operation
         if res == 0:
-            operation._emit_result(memoryview(b""), index=base_sequence, more=False)
+            payload = completion.result
+            chunk = memoryview(b"") if payload is None else memoryview(cast(Any, payload))
         else:
-            operation._emit_result(memoryview(bytes(buffer[:res])), index=base_sequence, more=False)
+            chunk = memoryview(cast(Any, completion.result))
+        operation._emit_result(chunk, index=base_sequence, more=False)
         operation._finish(result=None)
         self._deactivate_uring_entry(entry)
         return operation
