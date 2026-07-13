@@ -628,7 +628,7 @@ def test_recviter_buffer_ordered_eof_wins_cancel_race():
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"done"))
-        with buffer._lock:
+        with buffer._cond:
             buffer._stream_done = True
             buffer._stream_error = CancelledError()
         buffer.on_result(_recv_chunk(1, b"", more=False))
@@ -646,7 +646,7 @@ def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
         )
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
-        with buffer._lock:
+        with buffer._cond:
             buffer._stream_done = True
             buffer._stream_error = OSError("recv failed")
         results: list[object] = [buffer.take_next(), buffer.take_next()]

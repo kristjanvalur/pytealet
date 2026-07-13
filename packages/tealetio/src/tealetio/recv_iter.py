@@ -4,7 +4,7 @@ import errno
 import heapq
 import socket
 from collections import deque
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar
+from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 from .locks import ThreadsafeCondition
 from .tasks import CancelledError
@@ -209,34 +209,44 @@ class RecvIterBuffer:
             base_sequence = self._next_base
         self._start_recv_many(base_sequence=base_sequence)
 
+    def _take_next_locked(self) -> _RecvIterYield | None | Literal["wait"]:
+        if self._pressure_pending:
+            self._pressure_pending = False
+            return (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
+        ready_item: tuple[int, memoryview] | None = None
+        if self._ready:
+            ready_item = self._ready.popleft()
+        elif self._reorder:
+            ready_item = self._reorder.pop()
+        if ready_item is not None:
+            index, chunk = ready_item
+            if not chunk:
+                self._stream_done = True
+                self._stream_error = None
+                return None
+            return (index, chunk)
+        if self._stream_done:
+            if self._stream_error is not None:
+                raise self._stream_error
+            return None
+        return "wait"
+
     def take_next(self) -> _RecvIterYield | None:
-        # manual swait loop, not swait_for(): ready checks pop and return under
-        # the lock; a predicate would just duplicate that dispatch logic.
+        # resume recv_many before parking, like the old event.swait() path: a
+        # consumer may have just released a pool slot outside the lock.
         while True:
             try:
                 with self._cond:
-                    if self._pressure_pending:
-                        self._pressure_pending = False
-                        return (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
-                    ready_item: tuple[int, memoryview] | None = None
-                    if self._ready:
-                        ready_item = self._ready.popleft()
-                    elif self._reorder:
-                        ready_item = self._reorder.pop()
-                    if ready_item is not None:
-                        index, chunk = ready_item
-                        if not chunk:
-                            self._stream_done = True
-                            self._stream_error = None
-                            return None
-                        return (index, chunk)
-                    if self._stream_done:
-                        if self._stream_error is not None:
-                            raise self._stream_error
-                        return None
-                    self._cond.swait()
+                    item = self._take_next_locked()
+                    if item != "wait":
+                        return item
             finally:
                 self.consume_pressure_resume()
+            with self._cond:
+                item = self._take_next_locked()
+                if item != "wait":
+                    return item
+                self._cond.swait()
 
     def close(self) -> None:
         """Stop iteration and cancel any in-flight ``recv_many`` leg.
