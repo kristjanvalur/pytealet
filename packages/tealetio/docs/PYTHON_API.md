@@ -191,11 +191,12 @@ shutdown, or `forget()` when only the target's terminal state matters.
 Exceptional `IOWaiter.wait()` exit uses `.forget()` on the teardown leg
 (best-effort).
 
-`scheduler.io.accept_many()` / `accept_many_streams()` may start independent
-accept-time `recv` operations when `recv_size` is set. Cancelling the accept
-`IOWaiter` does not cancel those recvs; discard late deliveries after shutdown
-(as `StreamServer` does via `_closed`) or tolerate in-flight work until each
-recv completes or hits `recv_timeout` (cooperative cancel).
+`scheduler.io.accept_many()` may start independent accept-time `recv`
+operations when `recv_size` is set. That preread path does not apply to
+`accept_many_streams()` or `start_server()`; stream accepts arm `recv_many` when
+streams open. Cancelling an accept `IOWaiter` does not cancel in-flight work
+started from accept callbacks; discard late deliveries after shutdown (as
+`StreamServer` does via `_closed`).
 
 When `IORING_POLL_MULTISHOT` is unavailable, `UringProactor.poll_many()` falls
 back to repeated one-shot `submit_poll()` after each readiness event.
@@ -616,14 +617,17 @@ Unix-domain stream sockets without name resolution, e.g.
 for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
 wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
-Under the hood, `SocketTransport` calls `scheduler.io.sock_recv_into()` and
-`scheduler.io.sock_sendall()`.
+Under the hood, `SocketTransport` calls `scheduler.io.sock_sendall()` for
+writes. Default readers receive through `recv_many` via `RecvIterBuffer`.
 
-Pass `stream_factory=` to `open_streams()` or `open_connection(...)` to customise the stream
-types created for each connection. Use `StreamFactory` for native
-`(StreamReader, StreamWriter)` pairs and `AsyncStreamFactory` for asyncio-shaped
-pairs. `default_stream_factory` and `default_async_stream_factory` are the
-built-in implementations.
+Pass `stream_factory=` to `open_streams()`, `open_connection(...)`, or
+`start_server(...)` to customise stream construction. Use `StreamFactory` for
+native `(StreamReader, StreamWriter)` pairs and `AsyncStreamFactory` for
+asyncio-shaped pairs. `default_stream_factory` and
+`default_async_stream_factory` are the built-in implementations.
+`pooled_default_stream_factory(async_=..., buffer_size=..., buffer_count=...,
+pool=...)` delegates to the default factory with a per-connection or shared
+provided-buffer pool.
 
 Proactor socket operations accept `socket.socket` objects. `UringProactor`
 submits the socket's file descriptor to io_uring internally; the public API
@@ -655,7 +659,7 @@ Module helpers `tealetio.getaddrinfo(...)`, `tealetio.getnameinfo(...)`, and
 `sock_connect`; see the name-resolution section above for the literal-IP
 fast path.
 
-`start_server(client_handler, addr=(host, port), async_=False, recv_size=None)`
+`start_server(client_handler, addr=(host, port), async_=False, limit=2**16)`
 binds a TCP listening socket; use ``addr=(None, port)`` or ``addr=("", port)`` for
 all interfaces. Pass ``path=`` for Unix-domain listeners, or ``sock=`` with a
 caller-prepared stream socket (``addr``/``path`` must not be passed as well).
@@ -664,19 +668,24 @@ When binding via ``addr``, ``reuse_address`` and ``reuse_port`` mirror
 POSIX platforms other than Cygwin; ``reuse_port`` is off unless set to ``True``.
 With ``sock=``, tealetio applies the scheduler listen-socket contract
 (non-blocking, close-on-exec) and calls ``listen(backlog)``, like asyncio.
-``recv_size`` opts into
-accept-time pre-read and reader prefill on backends that honour the proactor hint
-(same semantics as ``accept_many`` above; default ``None``). ``recv_timeout``
-(requires ``recv_size``) bounds each accept-time preread. Cancelling the accept
-stream does not cancel in-flight accept-time ``recv`` legs; close listeners and
-discard late deliveries in the accept callback (``StreamServer`` uses ``_closed``).
-Each accept arms `proactor.accept_many()`. Accepted connections are marshalled onto the scheduler
-with `call_soon_threadsafe()` and wrapped as stream endpoints before the handler
-runs in a spawned tealet. ``async_=True`` selects asyncio-shaped streams and
-drives the handler through ``run_coro()``. On ``UringProactor``,
-accept uses multishot `IORING_ACCEPT_MULTISHOT`
-when probed; otherwise the proactor falls back to repeated one-shot accepts (see
-the `accept_many` notes above).
+``limit`` sets the stream reader line-buffer cap for ``readline()`` (asyncio
+semantics). When ``stream_factory`` is omitted, ``start_server()`` uses
+``pooled_default_stream_factory`` (per-connection provided-buffer pools). Pass
+``stream_factory=`` for custom stream types or alternate pool policy (for example
+a shared pool across clients). Close listeners and
+discard late deliveries in the accept callback after shutdown (``StreamServer``
+uses ``_closed``).
+Each accept arms `proactor.accept_many()`. On the accept delivery thread,
+``accept_many_streams()`` wraps the connection as streams and starts
+``recv_many`` before the accept callback is marshalled onto the scheduler with
+`call_soon_threadsafe()`, so data can arrive while the handler is still queued.
+A peer that connects without sending leaves ``recv_many`` pending; the handler
+still receives the stream pair and can apply read timeouts or idle close policy.
+The handler runs in a spawned tealet.
+``async_=True`` selects asyncio-shaped streams and drives the handler through
+``run_coro()``. On ``UringProactor``, accept uses multishot
+`IORING_ACCEPT_MULTISHOT` when probed; otherwise the proactor falls back to
+repeated one-shot accepts (see the `accept_many` notes above).
 
 `start_server(...)` returns a `StreamServer`. ``close()`` cancels the accept-loop
 tealet synchronously; listening sockets are closed when that tealet exits.
@@ -686,14 +695,15 @@ current tealet until ``close()`` is called (accept is already active); it does
 not install signal handlers — use ``tealetio.run()`` / ``Runner`` for shutdown
 signals.
 
-Stream reads use `scheduler.io.sock_recv_into()` through
-`SocketTransport.recv_into()` so `UringProactor.recv_into()` can fill
-caller-owned buffers without an extra `recv()` copy. `StreamReader.readinto()`
-fills a caller buffer directly; other read methods assemble data in an internal
-`bytearray` before returning `bytes`. ``StreamReader.feed_initial(data)`` and
-``AsyncStreamReader.feed_initial(data)`` pre-fill that buffer from accept-time
-bytes (for example after ``start_server(recv_size=...)``); empty ``b""`` is
-ignored.
+Default stream readers receive through ``recv_many`` / ``RecvIterBuffer``.
+`StreamReader.read(n)` for ``n > 0`` waits once for at least one byte, then
+returns at most ``n`` available bytes without blocking to fill the remainder
+(asyncio ``StreamReader.read`` semantics). ``readinto()`` blocks until the
+caller buffer is full or EOF (short return only at EOF), suitable for fixed-size
+protocol reads. Other read methods assemble data in an internal `bytearray`
+before returning `bytes`.
+Release leased chunk views after copying when holding data past a read call
+(``RecvIterBuffer`` releases on ingest for ``read()`` / ``readline()`` paths).
 
 This module does not integrate with stdlib `asyncio.StreamReader` instances or
 the `ForwardingProactor` guest loop.

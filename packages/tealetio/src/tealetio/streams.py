@@ -21,6 +21,7 @@ from .io_manager import (
     SocketSendBuffer,
     SupportsProactorIO,
 )
+from .recv_iter import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer
 from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
 
 from .scheduler import BaseScheduler
@@ -41,6 +42,7 @@ __all__ = [
     "StreamServer",
     "default_stream_factory",
     "default_async_stream_factory",
+    "pooled_default_stream_factory",
     "open_connection",
     "open_streams",
     "start_server",
@@ -89,7 +91,7 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
 
 
 class SocketTransport:
-    """Blocking socket I/O through a scheduler IO facade."""
+    """Send-side socket I/O and connection metadata through a scheduler IO facade."""
 
     def __init__(self, io: SocketIO, sock: socket.socket) -> None:
         self._io = io
@@ -99,12 +101,6 @@ class SocketTransport:
     @property
     def sock(self) -> socket.socket:
         return self._sock
-
-    def recv(self, n: int) -> bytes:
-        return self._io.sock_recv(self._sock, n).wait()
-
-    def recv_into(self, buf: Any) -> int:
-        return self._io.sock_recv_into(self._sock, buf).wait()
 
     def sendall(self, data: bytes | bytearray | memoryview) -> None:
         self._io.sock_sendall(self._sock, data).wait()
@@ -132,90 +128,109 @@ class SocketTransport:
 
 
 class _ReaderCore:
-    def __init__(self, transport: SocketTransport, *, limit: int = _DEFAULT_LIMIT) -> None:
-        self._transport = transport
+    _COMPACT_PREFIX = 4096
+
+    def __init__(self, *, recv_buffer: RecvIterBuffer, limit: int = _DEFAULT_LIMIT) -> None:
+        self._recv_buffer = recv_buffer
         self._limit = limit
         self._buffer = bytearray()
+        self._buffer_pos = 0
         self._eof = False
 
     @property
     def at_eof(self) -> bool:
-        return self._eof and not self._buffer
+        return self._eof and not self._buffer_available()
 
-    def _recv_into_socket(self, view: memoryview) -> int:
-        if not view:
-            return 0
-        nbytes = self._transport.recv_into(view)
-        if nbytes == 0:
+    def close(self) -> None:
+        self._recv_buffer.close()
+
+    def _buffer_available(self) -> int:
+        return len(self._buffer) - self._buffer_pos
+
+    def _compact_buffer(self) -> None:
+        if self._buffer_pos:
+            del self._buffer[: self._buffer_pos]
+            self._buffer_pos = 0
+
+    def _maybe_compact_buffer(self) -> None:
+        if self._buffer_pos >= self._COMPACT_PREFIX and self._buffer_pos >= len(self._buffer) // 2:
+            self._compact_buffer()
+
+    def _append_next_chunk(self) -> bool:
+        while True:
+            item = self._recv_buffer.take_next()
+            if item is None:
+                self._eof = True
+                return False
+            index, chunk = item
+            if index == RECV_MANY_BUFFER_PRESSURE:
+                continue
+            if chunk.nbytes:
+                self._buffer.extend(chunk)
+                chunk.release()
+                return True
             self._eof = True
-        return nbytes
-
-    def _recv_chunk(self, chunk_size: int) -> bytes:
-        chunk = bytearray(chunk_size)
-        nbytes = self._recv_into_socket(memoryview(chunk))
-        return bytes(chunk[:nbytes])
-
-    def feed_initial(self, data: bytes) -> None:
-        """Pre-fill the read buffer; empty ``b""`` is ignored."""
-        if data:
-            self._buffer.extend(data)
+            return False
 
     def _fill_buffer(self, min_bytes: int) -> None:
-        while len(self._buffer) < min_bytes and not self._eof:
-            chunk_size = min(self._limit, max(min_bytes - len(self._buffer), 1))
-            chunk = self._recv_chunk(chunk_size)
-            if not chunk:
+        while self._buffer_available() < min_bytes and not self._eof:
+            if not self._append_next_chunk():
                 return
-            self._buffer.extend(chunk)
 
     def _take_bytes(self, n: int) -> bytes:
-        count = min(n, len(self._buffer))
+        available = self._buffer_available()
+        count = min(n, available)
         if count == 0:
             return b""
-        chunk = bytes(self._buffer[:count])
-        del self._buffer[:count]
+        start = self._buffer_pos
+        chunk = bytes(self._buffer[start : start + count])
+        self._buffer_pos += count
+        self._maybe_compact_buffer()
         return chunk
 
-    def _read_some(self, n: int) -> bytes:
-        if self._eof and not self._buffer:
-            return b""
-        if len(self._buffer) < n and not self._eof:
-            self._fill_buffer(n)
-        return self._take_bytes(min(n, len(self._buffer)))
+    def _take_into(self, view: memoryview, offset: int, n: int) -> int:
+        available = self._buffer_available()
+        count = min(n, available)
+        if count == 0:
+            return 0
+        start = self._buffer_pos
+        view[offset : offset + count] = self._buffer[start : start + count]
+        self._buffer_pos += count
+        self._maybe_compact_buffer()
+        return count
 
     def read(self, n: int = -1) -> bytes:
         if n == 0:
             return b""
         if n < 0:
-            parts: list[bytes] = []
-            if self._buffer:
-                parts.append(self._take_bytes(len(self._buffer)))
             while not self._eof:
-                chunk = self._recv_chunk(self._limit)
-                if not chunk:
+                if not self._append_next_chunk():
                     break
-                parts.append(chunk)
-            return b"".join(parts)
-        return self._read_some(n)
+            payload = bytes(self._buffer[self._buffer_pos :])
+            self._buffer.clear()
+            self._buffer_pos = 0
+            return payload
+        if self._buffer_available():
+            return self._take_bytes(min(n, self._buffer_available()))
+        if self._eof:
+            return b""
+        self._append_next_chunk()
+        return self._take_bytes(min(n, self._buffer_available()))
 
     def readinto(self, b: Any) -> int:
         view = memoryview(b).cast("B")
         if not view.nbytes:
             return 0
+        if self._eof and not self._buffer_available():
+            return 0
+
+        nbytes = view.nbytes
+        if self._buffer_available() < nbytes and not self._eof:
+            self._fill_buffer(nbytes)
 
         total = 0
-        if self._buffer:
-            prefix = min(view.nbytes, len(self._buffer))
-            view[:prefix] = self._buffer[:prefix]
-            del self._buffer[:prefix]
-            total += prefix
-            if total == view.nbytes:
-                return total
-
-        if self._eof:
-            return total or 0
-
-        total += self._recv_into_socket(view[total:])
+        while total < nbytes and self._buffer_available():
+            total += self._take_into(view, total, nbytes - total)
         return total
 
     def readexactly(self, n: int) -> bytes:
@@ -224,27 +239,29 @@ class _ReaderCore:
         if n == 0:
             return b""
 
-        if len(self._buffer) < n and not self._eof:
+        if self._buffer_available() < n and not self._eof:
             self._fill_buffer(n)
-        if len(self._buffer) < n:
-            partial = bytes(self._buffer)
+        if self._buffer_available() < n:
+            partial = bytes(self._buffer[self._buffer_pos :])
             self._buffer.clear()
+            self._buffer_pos = 0
             raise asyncio.IncompleteReadError(partial, n)
         return self._take_bytes(n)
 
     def readline(self) -> bytes:
         while True:
-            newline = self._buffer.find(b"\n")
+            newline = self._buffer.find(b"\n", self._buffer_pos)
             if newline >= 0:
-                return self._take_bytes(newline + 1)
+                return self._take_bytes(newline - self._buffer_pos + 1)
             if self._eof:
-                return self._take_bytes(len(self._buffer))
-            if len(self._buffer) >= self._limit:
+                return self._take_bytes(self._buffer_available())
+            if self._buffer_available() >= self._limit:
                 raise asyncio.LimitOverrunError(
                     "Separator is not found, and chunk exceed the limit",
-                    len(self._buffer),
+                    self._buffer_available(),
                 )
-            self._fill_buffer(len(self._buffer) + 1)
+            if not self._append_next_chunk():
+                return self._take_bytes(self._buffer_available())
 
 
 class _WriterCore:
@@ -272,12 +289,20 @@ class _WriterCore:
 class StreamReader:
     """Native tealet stream reader with synchronous methods."""
 
-    def __init__(self, transport: SocketTransport, *, limit: int = _DEFAULT_LIMIT) -> None:
-        self._core = _ReaderCore(transport, limit=limit)
+    def __init__(
+        self,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+        recv_buffer: RecvIterBuffer,
+    ) -> None:
+        self._core = _ReaderCore(recv_buffer=recv_buffer, limit=limit)
 
     @property
     def at_eof(self) -> bool:
         return self._core.at_eof
+
+    def close(self) -> None:
+        self._core.close()
 
     def read(self, n: int = -1) -> bytes:
         return self._core.read(n)
@@ -291,20 +316,24 @@ class StreamReader:
     def readline(self) -> bytes:
         return self._core.readline()
 
-    def feed_initial(self, data: bytes) -> None:
-        """Pre-fill the read buffer; empty ``b""`` is ignored."""
-        self._core.feed_initial(data)
-
 
 class AsyncStreamReader:
     """Asyncio-shaped stream reader backed by tealet-blocking socket I/O."""
 
-    def __init__(self, transport: SocketTransport, *, limit: int = _DEFAULT_LIMIT) -> None:
-        self._core = _ReaderCore(transport, limit=limit)
+    def __init__(
+        self,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+        recv_buffer: RecvIterBuffer,
+    ) -> None:
+        self._core = _ReaderCore(recv_buffer=recv_buffer, limit=limit)
 
     @property
     def at_eof(self) -> bool:
         return self._core.at_eof
+
+    def close(self) -> None:
+        self._core.close()
 
     async def read(self, n: int = -1) -> bytes:
         return self._core.read(n)
@@ -317,10 +346,6 @@ class AsyncStreamReader:
 
     async def readline(self) -> bytes:
         return self._core.readline()
-
-    def feed_initial(self, data: bytes) -> None:
-        """Pre-fill the read buffer; empty ``b""`` is ignored."""
-        self._core.feed_initial(data)
 
 
 class StreamWriter:
@@ -341,6 +366,8 @@ class StreamWriter:
         self._core.write(data)
 
     def close(self) -> None:
+        if self._reader is not None:
+            self._reader.close()
         self._core.close()
 
     def is_closing(self) -> bool:
@@ -371,6 +398,8 @@ class AsyncStreamWriter:
         self._core.write(data)
 
     def close(self) -> None:
+        if self._reader is not None:
+            self._reader.close()
         self._core.close()
 
     def is_closing(self) -> bool:
@@ -391,16 +420,28 @@ _AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter]
 _ClientHandler: TypeAlias = _NativeClientHandler | _AsyncClientHandler
 
 
+def _open_recv_buffer(
+    io: SocketIO,
+    sock: socket.socket,
+    recv_buffer_pool: Any | None,
+) -> RecvIterBuffer:
+    if not isinstance(io, ProactorIOManager):
+        raise RuntimeError("stream readers require a proactor IO manager")
+    return io._open_sock_recv_iter(sock, recv_buffer_pool)
+
+
 def default_stream_factory(
     io: SocketIO,
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
+    recv_buffer_pool: Any | None = None,
 ) -> tuple[StreamReader, StreamWriter]:
     """Construct the default native stream pair for a connected socket."""
 
     transport = SocketTransport(io, sock)
-    reader = StreamReader(transport, limit=limit)
+    recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+    reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
     writer = StreamWriter(transport, reader)
     return reader, writer
 
@@ -410,13 +451,72 @@ def default_async_stream_factory(
     sock: socket.socket,
     *,
     limit: int = _DEFAULT_LIMIT,
+    recv_buffer_pool: Any | None = None,
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
     """Construct the default asyncio-shaped stream pair for a connected socket."""
 
     transport = SocketTransport(io, sock)
-    reader = AsyncStreamReader(transport, limit=limit)
+    recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+    reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
     writer = AsyncStreamWriter(transport, reader)
     return reader, writer
+
+
+@overload
+def pooled_default_stream_factory(
+    *,
+    async_: Literal[False] = False,
+    buffer_size: int = 16 * 1024,
+    buffer_count: int = 4,
+    pool: Any | None = None,
+) -> StreamFactory: ...
+
+
+@overload
+def pooled_default_stream_factory(
+    *,
+    async_: Literal[True],
+    buffer_size: int = 16 * 1024,
+    buffer_count: int = 4,
+    pool: Any | None = None,
+) -> AsyncStreamFactory: ...
+
+
+def pooled_default_stream_factory(
+    *,
+    async_: bool = False,
+    buffer_size: int = 16 * 1024,
+    buffer_count: int = 4,
+    pool: Any | None = None,
+) -> StreamFactory | AsyncStreamFactory:
+    """Return a default stream factory with an explicit provided-buffer pool.
+
+    When ``pool`` is omitted, each connection gets a fresh pool from
+    ``io.create_recv_buffer_pool(buffer_size, buffer_count)``. When ``pool`` is
+    set, every connection shares that pool. Pair ``async_`` with the stream
+    types returned by ``start_server`` / ``open_streams`` on the call site.
+    """
+
+    delegate = default_async_stream_factory if async_ else default_stream_factory
+
+    def factory(
+        io: SocketIO,
+        sock: socket.socket,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+    ) -> tuple[StreamReader, StreamWriter] | tuple[AsyncStreamReader, AsyncStreamWriter]:
+        chosen = pool if pool is not None else io.create_recv_buffer_pool(buffer_size, buffer_count)
+        return delegate(io, sock, limit=limit, recv_buffer_pool=chosen)
+
+    if async_:
+        return cast(AsyncStreamFactory, factory)
+    return cast(StreamFactory, factory)
+
+
+def _default_server_stream_factory(*, async_: bool) -> StreamFactory | AsyncStreamFactory:
+    """Per-connection provided-buffer pools for multi-client listeners."""
+
+    return pooled_default_stream_factory(async_=async_)
 
 
 def _resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:
@@ -448,7 +548,6 @@ def _open_streams(
     limit: int = _DEFAULT_LIMIT,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
-    initial: bytes | None = None,
 ) -> _NativeStreamPair | _AsyncStreamPair:
     # ``async_`` only selects the default stream factory when ``stream_factory`` is
     # omitted. An explicit factory must already match the intended stream types.
@@ -457,8 +556,6 @@ def _open_streams(
     else:
         factory = stream_factory
     reader, writer = factory(io, sock, limit=limit)
-    if initial:
-        reader.feed_initial(initial)
     if async_:
         return cast(_AsyncStreamPair, (reader, writer))
     return cast(_NativeStreamPair, (reader, writer))
@@ -497,6 +594,11 @@ def open_streams(
     ``async_=False`` returns native ``StreamReader`` / ``StreamWriter`` pairs;
     ``async_=True`` returns asyncio-shaped ``AsyncStream*`` endpoints. The flag
     only selects the default factory when ``stream_factory`` is omitted.
+
+    Default factories on proactor schedulers receive through ``recv_many`` via
+    ``sock_recv_iter`` and the scheduler shared provided-buffer pool. Use
+    ``pooled_default_stream_factory`` or a custom ``stream_factory`` for
+    dedicated pool sizing.
     """
 
     return _open_streams(
@@ -838,8 +940,6 @@ class StreamServer:
         client_handler: _ClientHandler,
         *,
         limit: int,
-        recv_size: int | None,
-        recv_timeout: float | None,
         stream_factory: _StreamFactoryArg,
         async_: bool,
     ) -> None:
@@ -869,8 +969,6 @@ class StreamServer:
                             limit=limit,
                             stream_factory=stream_factory,
                             async_=async_,
-                            recv_size=recv_size,
-                            recv_timeout=recv_timeout,
                         ).wait()
                     except (OSError, RuntimeError):
                         if self._closed:
@@ -917,7 +1015,6 @@ class StreamServer:
         self,
         conn: socket.socket,
         *,
-        initial_data: bytes | None = None,
         limit: int,
         stream_factory: _StreamFactoryArg,
         client_handler: _ClientHandler,
@@ -933,7 +1030,6 @@ class StreamServer:
             limit=limit,
             stream_factory=stream_factory,
             async_=async_,
-            initial=initial_data,
         )
         self._dispatch_streams(reader, writer, client_handler=client_handler, async_=async_)
 
@@ -991,27 +1087,24 @@ def _start_stream_server(
     client_handler: _ClientHandler,
     *,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
     """Start accept handling on a listening socket and return a ``StreamServer``.
 
     Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
-    Accepts deliver stream pairs via ``accept_many_streams``. When ``recv_size``
-    is set, an accept-time read pre-fills the reader buffer; ``recv_timeout``
-    bounds that preread when set. Otherwise callers arm eager receive later
-    (for example via ``recv_many``).
+    Accepts deliver stream pairs via ``accept_many_streams``; each connection
+    arms ``recv_many`` when streams open on the accept delivery thread.
     """
+
+    if stream_factory is None:
+        stream_factory = _default_server_stream_factory(async_=async_)
 
     server = StreamServer(scheduler, [sock])
     server._start_accept_loop(
         sock,
         client_handler,
         limit=limit,
-        recv_size=recv_size,
-        recv_timeout=recv_timeout,
         stream_factory=stream_factory,
         async_=async_,
     )
@@ -1030,8 +1123,6 @@ def _start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
 ) -> StreamServer:
@@ -1060,8 +1151,6 @@ def _start_server(
         listen_sock,
         client_handler,
         limit=limit,
-        recv_size=recv_size,
-        recv_timeout=recv_timeout,
         stream_factory=stream_factory,
         async_=async_,
     )
@@ -1077,8 +1166,6 @@ def start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1094,8 +1181,6 @@ def start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1108,8 +1193,6 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1122,8 +1205,6 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1136,8 +1217,6 @@ def start_server(
     sock: socket.socket,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
 ) -> StreamServer: ...
@@ -1150,8 +1229,6 @@ def start_server(
     sock: socket.socket,
     backlog: int = 100,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -1168,8 +1245,6 @@ def start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = _DEFAULT_LIMIT,
-    recv_size: int | None = None,
-    recv_timeout: float | None = None,
     stream_factory: _StreamFactoryArg = None,
     async_: bool = False,
     scheduler: BaseScheduler | None = None,
@@ -1189,21 +1264,25 @@ def start_server(
     ``run_coro()``. Pair ``async_`` with the handler shape encoded in the
     overloads (sync handler + ``async_=False``, or ``async def`` + ``async_=True``).
     An explicit ``stream_factory`` must match those stream types; ``async_`` only
-    picks the default factory when it is omitted.
+    picks the default factory when it is omitted. When ``stream_factory`` is
+    omitted, ``start_server()`` uses ``pooled_default_stream_factory`` so each
+    accepted connection gets its own provided-buffer pool (avoiding shared-pool
+    pressure across concurrent clients). ``open_streams()`` / ``open_connection()``
+    still default to the scheduler shared pool for single-connection use.
 
     Accepts use ``scheduler.io.accept_many_streams()`` (``ProactorIOManager``),
     so ``UringProactor`` can service connections through multishot accept when
-    the runtime probe allows it.
-    ``recv_size`` opts into accept-time pre-read and reader prefill for
-    client-speaks-first protocols (for example HTTP); leave it ``None`` when
-    the server may speak first or when the reader will arm eager receive later.
-    ``recv_timeout`` (requires ``recv_size``) bounds each accept-time preread.
+    the runtime probe allows it. Each accepted connection arms ``recv_many`` on
+    the accept delivery thread before the handler callback runs, so inbound data
+    can be ingested while the handler is still queued. A peer that connects and
+    never sends leaves ``recv_many`` pending without blocking delivery to the
+    handler; use handler-side read timeouts or idle policy when that matters.
+    Per-connection pools (the default here) bound memory under high accept rates.
 
-    Cancelling the accept-loop tealet or its ``accept_many_streams`` waiter does
-    not cancel in-flight accept-time ``recv`` legs. Late deliveries can still
-    reach handlers unless you close listeners and discard them in the accept
-    callback (``StreamServer`` checks ``_closed``). Custom servers using
-    ``scheduler.io.accept_many()`` directly must apply the same pattern.
+    Late accept deliveries can still reach handlers unless you close listeners
+    and discard them in the accept callback (``StreamServer`` checks ``_closed``).
+    Custom servers using ``scheduler.io.accept_many()`` directly must apply the
+    same pattern.
 
     Accept callbacks are marshalled onto the scheduler thread before handler
     tealets are spawned. Handler exceptions propagate
@@ -1222,8 +1301,6 @@ def start_server(
         reuse_address=reuse_address,
         reuse_port=reuse_port,
         limit=limit,
-        recv_size=recv_size,
-        recv_timeout=recv_timeout,
         stream_factory=stream_factory,
         async_=async_,
     )

@@ -108,6 +108,7 @@ def test_top_level_exports_public_scheduler_api():
         "create_task",
         "default_async_stream_factory",
         "default_stream_factory",
+        "pooled_default_stream_factory",
         "ensure_future",
         "ensure_resolved",
         "gather",

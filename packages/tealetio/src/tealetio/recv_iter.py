@@ -108,6 +108,9 @@ class RecvIterBuffer:
     On older Python, synthetic pools skip view leases (no PEP 688), so
     ``leased_count`` does not reflect consumer-held chunks and backpressure via the
     buffer mechanism is effectively dropped there.
+
+    After copying chunk data, call ``view.release()`` or drop the view; on Python
+    3.12+ that returns leased pool slots via PEP 688.
     """
 
     def __init__(
@@ -116,12 +119,13 @@ class RecvIterBuffer:
         sock: socket.socket,
         buf_group: _BufGroupLike,
         proactor: _RecvIterProactor,
+        scheduler: Any = None,
     ) -> None:
         self._sock = sock
         self._buf_group = buf_group
         self._proactor = proactor
         self._lock = threading.Lock()
-        self._event = ThreadsafeEvent()
+        self._event = ThreadsafeEvent(scheduler)
         self._reorder = _OrderedIngestBuffer[memoryview]()
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False

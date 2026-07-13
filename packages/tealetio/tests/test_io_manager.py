@@ -90,10 +90,18 @@ def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(_StubScheduler(), proactor)  # type: ignore[arg-type]
 
 
+def _eager_accept_conn() -> socket.socket:
+    conn, peer = socket.socketpair()
+    peer.close()
+    conn.setblocking(False)
+    return conn
+
+
 class _MockProactor:
     def __init__(self, *, recv_result: bytes = b"mock") -> None:
         self._recv_result = recv_result
         self.recv_calls: list[tuple[socket.socket, int]] = []
+        self.recv_many_calls: list[socket.socket] = []
         self.poll_calls: list[tuple[int, int]] = []
         self.send_calls: list[tuple[socket.socket, Any]] = []
         self.create_socket_calls: list[tuple[Any, ...]] = []
@@ -106,6 +114,19 @@ class _MockProactor:
         operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
         operation._finish(result=self._recv_result)
         return operation
+
+    def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+        del callback, buf_group, base_sequence
+        self.recv_many_calls.append(sock)
+        return ContinuousOperation(kind="recv_many", fileobj=sock)
+
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int):
+        from tealetio.proactor import SyntheticRecvBufferPool
+
+        return SyntheticRecvBufferPool(buffer_size, buffer_count)
+
+    def shared_recv_buffer_pool(self):
+        return self.create_recv_buffer_pool(8192, 4)
 
     def accept(self, sock: socket.socket) -> Operation[socket.socket]:
         del sock
@@ -551,9 +572,7 @@ class TestProactorIOManagerAcceptMany:
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    callback(MultishotDelivery(value=conn))
+                    callback(MultishotDelivery(value=_eager_accept_conn()))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         scheduler = _StubScheduler()
@@ -573,9 +592,7 @@ class TestProactorIOManagerAcceptMany:
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    callback(MultishotDelivery(value=conn))
+                    callback(MultishotDelivery(value=_eager_accept_conn()))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
         scheduler = _StubScheduler()
@@ -598,9 +615,7 @@ class TestProactorIOManagerAcceptMany:
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
                 if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    callback(MultishotDelivery(value=conn))
+                    callback(MultishotDelivery(value=_eager_accept_conn()))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
             def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
@@ -624,6 +639,88 @@ class TestProactorIOManagerAcceptMany:
         finally:
             server.close()
 
+    def test_accept_many_streams_opens_recv_many_before_marshalled_callback(self) -> None:
+        class _QueueingScheduler(_StubScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.queued: list[tuple[Any, tuple[object, ...]]] = []
+
+            def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
+                del kwargs
+                self.queued.append((callback, args))
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None):
+                if callback is not None:
+                    callback(MultishotDelivery(value=_eager_accept_conn()))
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        proactor = _EagerAcceptProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = socket.socket()
+        handled: list[object] = []
+        try:
+            io.accept_many_streams(server, lambda streams: handled.append(streams))
+            assert proactor.recv_many_calls
+            assert len(scheduler.queued) == 1
+            scheduler.queued[0][0]()
+            assert handled
+            _reader, writer = handled[0]
+            writer.close()
+        finally:
+            server.close()
+
+    def test_accept_many_streams_closes_socket_when_stream_factory_raises(self) -> None:
+        accepted: list[socket.socket] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None):
+                if callback is not None:
+                    conn = _eager_accept_conn()
+                    accepted.append(conn)
+                    callback(MultishotDelivery(value=conn))
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        def boom(_io: Any, _sock: socket.socket, **kwargs: Any) -> tuple[Any, Any]:
+            raise ValueError("stream failed")
+
+        io = _manager(_EagerAcceptProactor())
+        server = socket.socket()
+        try:
+            with pytest.raises(ValueError, match="stream failed"):
+                io.accept_many_streams(server, lambda _: None, stream_factory=boom)
+            assert len(accepted) == 1
+            assert accepted[0].fileno() == -1
+        finally:
+            server.close()
+
+    def test_accept_many_streams_closes_streams_when_marshal_fails(self) -> None:
+        accepted: list[socket.socket] = []
+
+        class _ShutdownScheduler(_StubScheduler):
+            def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
+                del callback, args, kwargs
+                raise RuntimeError("scheduler shut down")
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None):
+                if callback is not None:
+                    conn = _eager_accept_conn()
+                    accepted.append(conn)
+                    callback(MultishotDelivery(value=conn))
+                return ContinuousOperation(kind="accept_many", fileobj=sock)
+
+        io = ProactorIOManager(_ShutdownScheduler(), _EagerAcceptProactor())  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            with pytest.raises(RuntimeError, match="scheduler shut down"):
+                io.accept_many_streams(server, lambda _: None)
+            assert len(accepted) == 1
+            assert accepted[0].fileno() == -1
+        finally:
+            server.close()
+
     def test_accept_many_streams_uses_bare_socket_callback(self) -> None:
         class _CaptureProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
@@ -638,81 +735,6 @@ class TestProactorIOManagerAcceptMany:
             assert proactor.last_callback is not None
         finally:
             server.close()
-
-    def test_accept_many_streams_wires_plain_callback_with_recv_size(self) -> None:
-        class _CaptureProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None):
-                self.last_callback = callback
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
-
-        proactor = _CaptureProactor()
-        io = _manager(proactor)
-        server = socket.socket()
-        try:
-            io.accept_many_streams(server, lambda _: None, recv_size=64)
-            assert proactor.last_callback is not None
-        finally:
-            server.close()
-
-    def test_accept_many_streams_on_recv_error_closes_after_callback(self) -> None:
-        captured_errors: list[tuple[socket.socket, BaseException]] = []
-
-        class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
-
-            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
-                operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
-                operation._finish(exception=OSError("recv failed"))
-                return operation
-
-        proactor = _EagerAcceptProactor()
-        io = _manager(proactor)
-        server = socket.socket()
-        try:
-            io.accept_many_streams(
-                server,
-                lambda _: (_ for _ in ()).throw(AssertionError("streams callback")),
-                recv_size=64,
-                on_recv_error=lambda conn, exc: captured_errors.append((conn, exc)),
-            )
-            assert len(captured_errors) == 1
-            conn, exc = captured_errors[0]
-            assert str(exc) == "recv failed"
-            assert conn.fileno() == -1
-        finally:
-            server.close()
-
-    def test_accept_many_streams_recv_error_without_hook_closes_silently(self) -> None:
-        closed: list[socket.socket] = []
-
-        class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    closed.append(conn)
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
-
-            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
-                operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
-                operation._finish(exception=OSError("recv failed"))
-                return operation
-
-        proactor = _EagerAcceptProactor()
-        io = _manager(proactor)
-        server = socket.socket()
-        try:
-            io.accept_many_streams(server, lambda _: None, recv_size=64)
-            assert closed[0].fileno() == -1
-        finally:
-            server.close()
-
 
 class TestProactorIOManagerSockCreateStreams:
     def test_sock_create_streams_composes_create_connect_and_send(self) -> None:

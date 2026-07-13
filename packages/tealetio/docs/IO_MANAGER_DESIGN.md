@@ -196,8 +196,8 @@ Production entry points:
 |-------------|-------------|
 | `sock_connect(…, initial=…)` | connect → optional send |
 | `sock_create(…, connect_to=…)` | create → connect → optional send |
-| `sock_accept(…, recv_size=…)` | accept → optional recv |
-| `sock_create_streams(…, connect_to=…)` | create → connect → optional send → stream pair |
+| `sock_accept(n=…)` | accept → optional recv |
+| `sock_create_streams(…, connect_to=…)` | create → connect → optional send → `_open_streams` on advance (``recv_many`` armed before ``wait()`` returns) |
 
 Intermediate legs are not awaited by the scheduler task. Only the returned
 `IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is
@@ -262,9 +262,11 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 
 Built-in uring `receive_on_accept` was removed from the proactor. Accept-time
 pre-read is wired in `ProactorIOManager._accept_many_read_on_conn()` and exposed
-via `accept_many(..., recv_size=…)`, `accept_many_streams(...)`, and
-`start_server(..., recv_size=…)`. The proactor emits bare `socket` connections;
-tuple delivery `(conn, initial_data, recv_error)` is the io_manager layer.
+via `accept_many(..., recv_size=…)` and `sock_accept(..., n=…)` only.
+`accept_many_streams()` / `start_server()` do not preread; they open streams on
+the accept delivery thread and arm `recv_many` through `RecvIterBuffer`. The
+proactor emits bare `socket` connections; tuple delivery
+`(conn, initial_data, recv_error)` is the io_manager layer for the preread path.
 
 Each accept-time `recv` is a separate one-shot `Operation` registered with
 `add_done_callback`. It is not linked to the parent `ContinuousOperation`;
