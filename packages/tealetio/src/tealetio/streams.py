@@ -273,9 +273,16 @@ class _WriterCore:
     def drain(self) -> None:
         self._send_buffer.drain()
 
+    def flush(self) -> None:
+        self._send_buffer.flush()
+
+    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
+        self._send_buffer.set_write_buffer_limits(high, low)
+
     def close(self) -> None:
         if self._closed:
             return
+        self._send_buffer.flush()
         self._closed = True
         self._send_buffer.close()
         self._sock.close()
@@ -381,6 +388,12 @@ class StreamWriter:
     def drain(self) -> None:
         self._core.drain()
 
+    def flush(self) -> None:
+        self._core.flush()
+
+    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
+        self._core.set_write_buffer_limits(high, low)
+
     def wait_closed(self) -> None:
         return None
 
@@ -419,6 +432,12 @@ class AsyncStreamWriter:
 
     async def drain(self) -> None:
         self._core.drain()
+
+    async def flush(self) -> None:
+        self._core.flush()
+
+    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
+        self._core.set_write_buffer_limits(high, low)
 
     async def wait_closed(self) -> None:
         return None
