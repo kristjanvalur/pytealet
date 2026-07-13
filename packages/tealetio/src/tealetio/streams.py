@@ -22,6 +22,7 @@ from .io_manager import (
     SupportsProactorIO,
 )
 from .recv_iter import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer
+from .send_buffer import SendBuffer
 from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
 
 from .scheduler import BaseScheduler
@@ -91,25 +92,19 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
 
 
 class SocketTransport:
-    """Send-side socket I/O and connection metadata through a scheduler IO facade."""
+    """Connection metadata for a stream writer; outbound I/O uses ``SendBuffer``."""
 
-    def __init__(self, io: SocketIO, sock: socket.socket) -> None:
-        self._io = io
+    def __init__(self, sock: socket.socket, send_buffer: SendBuffer) -> None:
         self._sock = sock
-        self._closed = False
+        self._send_buffer = send_buffer
 
     @property
     def sock(self) -> socket.socket:
         return self._sock
 
-    def sendall(self, data: bytes | bytearray | memoryview) -> None:
-        self._io.sock_sendall(self._sock, data).wait()
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._sock.close()
+    @property
+    def send_buffer(self) -> SendBuffer:
+        return self._send_buffer
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         if name == "socket":
@@ -265,22 +260,25 @@ class _ReaderCore:
 
 
 class _WriterCore:
-    def __init__(self, transport: SocketTransport) -> None:
-        self._transport = transport
+    def __init__(self, *, send_buffer: SendBuffer, sock: socket.socket) -> None:
+        self._send_buffer = send_buffer
+        self._sock = sock
         self._closed = False
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         if self._closed:
             raise RuntimeError("StreamWriter is closed")
-        if not data:
-            return
-        self._transport.sendall(data)
+        self._send_buffer.write(data)
+
+    def drain(self) -> None:
+        self._send_buffer.drain()
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self._transport.close()
+        self._send_buffer.close()
+        self._sock.close()
 
     def is_closing(self) -> bool:
         return self._closed
@@ -351,16 +349,23 @@ class AsyncStreamReader:
 class StreamWriter:
     """Native tealet stream writer with synchronous methods."""
 
-    def __init__(self, transport: SocketTransport, reader: StreamReader | None = None) -> None:
-        self._core = _WriterCore(transport)
+    def __init__(
+        self,
+        *,
+        send_buffer: SendBuffer,
+        sock: socket.socket,
+        reader: StreamReader | None = None,
+    ) -> None:
+        self._core = _WriterCore(send_buffer=send_buffer, sock=sock)
+        self._transport = SocketTransport(sock, send_buffer)
         self._reader = reader
 
     @property
     def transport(self) -> SocketTransport:
-        return self._core._transport
+        return self._transport
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
-        return self._core._transport.get_extra_info(name, default)
+        return self._transport.get_extra_info(name, default)
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)
@@ -374,7 +379,7 @@ class StreamWriter:
         return self._core.is_closing()
 
     def drain(self) -> None:
-        return None
+        self._core.drain()
 
     def wait_closed(self) -> None:
         return None
@@ -383,16 +388,23 @@ class StreamWriter:
 class AsyncStreamWriter:
     """Asyncio-shaped stream writer backed by tealet-blocking socket I/O."""
 
-    def __init__(self, transport: SocketTransport, reader: AsyncStreamReader | None = None) -> None:
-        self._core = _WriterCore(transport)
+    def __init__(
+        self,
+        *,
+        send_buffer: SendBuffer,
+        sock: socket.socket,
+        reader: AsyncStreamReader | None = None,
+    ) -> None:
+        self._core = _WriterCore(send_buffer=send_buffer, sock=sock)
+        self._transport = SocketTransport(sock, send_buffer)
         self._reader = reader
 
     @property
     def transport(self) -> SocketTransport:
-        return self._core._transport
+        return self._transport
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
-        return self._core._transport.get_extra_info(name, default)
+        return self._transport.get_extra_info(name, default)
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)
@@ -406,7 +418,7 @@ class AsyncStreamWriter:
         return self._core.is_closing()
 
     async def drain(self) -> None:
-        return None
+        self._core.drain()
 
     async def wait_closed(self) -> None:
         return None
@@ -430,6 +442,12 @@ def _open_recv_buffer(
     return io._open_sock_recv_iter(sock, recv_buffer_pool)
 
 
+def _open_send_buffer(io: SocketIO, sock: socket.socket) -> SendBuffer:
+    if not isinstance(io, ProactorIOManager):
+        raise RuntimeError("stream writers require a proactor IO manager")
+    return io._open_send_buffer(sock)
+
+
 def default_stream_factory(
     io: SocketIO,
     sock: socket.socket,
@@ -439,10 +457,10 @@ def default_stream_factory(
 ) -> tuple[StreamReader, StreamWriter]:
     """Construct the default native stream pair for a connected socket."""
 
-    transport = SocketTransport(io, sock)
     recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+    send_buffer = _open_send_buffer(io, sock)
     reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = StreamWriter(transport, reader)
+    writer = StreamWriter(send_buffer=send_buffer, sock=sock, reader=reader)
     return reader, writer
 
 
@@ -455,10 +473,10 @@ def default_async_stream_factory(
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
     """Construct the default asyncio-shaped stream pair for a connected socket."""
 
-    transport = SocketTransport(io, sock)
     recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+    send_buffer = _open_send_buffer(io, sock)
     reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = AsyncStreamWriter(transport, reader)
+    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, reader=reader)
     return reader, writer
 
 

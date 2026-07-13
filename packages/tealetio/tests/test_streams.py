@@ -13,10 +13,10 @@ from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.streams import (
     AsyncStreamReader,
     AsyncStreamWriter,
-    SocketTransport,
     StreamReader,
     StreamWriter,
     _open_recv_buffer,
+    _open_send_buffer,
     open_connection,
     open_streams,
     pooled_default_stream_factory,
@@ -176,10 +176,10 @@ class TestStreamsPoC:
                 tag = "native-custom"
 
             def custom_factory(io, sock, *, limit):
-                transport = SocketTransport(io, sock)
                 recv_buffer = _open_recv_buffer(io, sock, None)
+                send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = StreamWriter(transport, stream_reader)
+                stream_writer = StreamWriter(send_buffer=send_buffer, sock=sock, reader=stream_reader)
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -243,10 +243,10 @@ class TestStreamsPoC:
                 tag = "async-custom"
 
             def custom_factory(io, sock, *, limit):
-                transport = SocketTransport(io, sock)
                 recv_buffer = _open_recv_buffer(io, sock, None)
+                send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedAsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = AsyncStreamWriter(transport, stream_reader)
+                stream_writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, reader=stream_reader)
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -802,6 +802,19 @@ class TestStreamsPoC:
             reader.setblocking(False)
             stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
             assert isinstance(stream_reader._core._recv_buffer, RecvIterBuffer)
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_default_stream_writer_uses_send_buffer(self, scheduler: SyncProactorScheduler) -> None:
+        from tealetio.send_buffer import SendBuffer
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            _stream_reader, stream_writer = open_streams(reader, scheduler=scheduler)
+            assert isinstance(stream_writer._core._send_buffer, SendBuffer)
+            assert stream_writer.transport.send_buffer is stream_writer._core._send_buffer
         finally:
             reader.close()
             writer.close()
