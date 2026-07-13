@@ -440,6 +440,29 @@ class TestStreamsPoC:
             reader.close()
             writer.close()
 
+    def test_stream_read_one_byte_uses_buffer_cursor(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            payload = bytes(range(256)) * 4
+
+            def exercise() -> bytes:
+                stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
+                writer.send(payload)
+                out = bytearray()
+                for _ in range(len(payload)):
+                    chunk = stream_reader.read(1)
+                    assert len(chunk) == 1
+                    out.extend(chunk)
+                assert stream_reader._core._buffer_available() == 0
+                return bytes(out)
+
+            assert run_scheduler_task(scheduler, exercise) == payload
+        finally:
+            reader.close()
+            writer.close()
+
     def test_stream_read_positive_returns_partial_without_filling_n(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
