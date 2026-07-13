@@ -865,6 +865,7 @@ class SelectorProactor(ProactorBase):
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
         self._selector.register(self._wakeup_reader.fileno(), selectors.EVENT_READ, None)
+
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> SyntheticRecvBufferPool:
         """Create a synthetic provided-buffer pool for ``recv_many`` / ``sock_recv_iter``."""
 
@@ -1208,9 +1209,7 @@ class SelectorProactor(ProactorBase):
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
             except OSError as exc:
-                operation._emit_delivery(
-                    MultishotDelivery(index=base_sequence, exception=exc, more=False)
-                )
+                operation._emit_delivery(MultishotDelivery(index=base_sequence, exception=exc, more=False))
                 return ContinuousStepResult(progressed=True, done=True)
             if not data:
                 operation._emit_result(memoryview(b""), index=base_sequence, more=False)
@@ -2601,7 +2600,7 @@ class UringProactor(ProactorBase):
             if _synthetic_recv_pool_is_full(buf_group):
                 return _complete_recv_many_enobufs(operation, index=base_sequence)
             buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
-            synthetic_pool = buf_group
+            synthetic_pool = cast(SyntheticRecvBufferPool, buf_group)
             entry = self._uring_entry(
                 operation,
                 lambda entry, completion: self._deliver_uring_recv_oneshot(

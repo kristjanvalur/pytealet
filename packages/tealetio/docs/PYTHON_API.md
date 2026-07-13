@@ -131,44 +131,49 @@ on the same fd — for example `poll_many(POLLIN)` alongside `recv_many()` on on
 socket. That overlap is uncommon and rarely problematic; the uring path
 deliberately does not enforce selector-style per-fd exclusivity.
 
-`recv_many(sock, callback)` emits `(index, data)` pairs for each received byte
-chunk, where `index` is the ordinal position in the receive stream and `data`
-is a read-only `memoryview` into the received bytes. EOF emits one final empty
-view before the operation completes. Chunk sizes are backend-defined:
-`UringProactor` uses the operation `BufGroup` slot size (16 KiB by default) when
-multishot provided-buffer receive is available, and `SelectorProactor` reads up
-to 8 KiB per `recv()` call. `recv_many(sock, callback, *, buf_group)` requires an explicit provided-buffer
-pool from `create_recv_buffer_pool()` or `shared_recv_buffer_pool()`. Each proactor lazily creates one shared `BufGroup` for `scheduler.io` receive
-helpers (16 KiB × 256 on `UringProactor` backends by default, 16 KiB × 8 on
-selector backends).
-`sock_recv_iter(sock, buffer_pool=None)` and `sock_recvall(sock, ...,
-buffer_pool=None)` use that shared pool when ``buffer_pool`` is omitted; pass a
-dedicated pool from `create_recv_buffer_pool()` for isolated sizing. Concurrent
+`recv_many(sock, callback)` delivers each received byte chunk to `callback` as a
+``MultishotDelivery(index, value, exception, more)``. For receive,
+``index`` is the stream ordinal (``completion.sequence`` on uring, seeded by
+``base_sequence`` at submit); ``value`` is a read-only ``memoryview`` when data
+arrived; ``exception`` carries transport failures (for example ``errno.ENOBUFS``
+when the provided-buffer pool is full on multishot uring); ``more`` mirrors
+``IORING_CQE_F_MORE``. EOF is ``more=False`` with an empty ``value``. Chunk sizes
+are backend-defined: multishot uring uses the operation ``BufGroup`` slot size
+(16 KiB by default); degraded uring and selector paths read up to 8 KiB per leg.
+``recv_many(sock, callback, *, buf_group)`` requires an explicit pool from
+``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``. Each proactor
+lazily creates one shared pool for ``scheduler.io`` receive helpers (16 KiB × 256
+on ``UringProactor`` backends by default, 16 KiB × 8 on selector backends).
+``sock_recv_iter(sock, buffer_pool=None)`` and ``sock_recvall(sock, ...,
+buffer_pool=None)`` use that shared pool when ``buffer_pool`` is omitted; pass a
+dedicated pool from ``create_recv_buffer_pool()`` for isolated sizing. Concurrent
 long-lived generators that share the same pool object therefore draw from the
-same provided-buffer pool: a slow consumer on one stream can trigger
-`RECV_MANY_BUFFER_PRESSURE` or stall another stream even when the second would
+same buffer pool: a slow consumer on one stream can trigger
+``RECV_MANY_BUFFER_PRESSURE`` or stall another stream even when the second would
 otherwise fit. Use separate pool objects when independent streams need isolated
 buffer pools.
-When the provided-buffer pool is exhausted on `UringProactor`, the callback
-receives `(RECV_MANY_BUFFER_PRESSURE, resume)`; drop held views and call
-`resume()` to re-arm multishot receive (stream indices continue from the failed
-completion's `sequence`). On Python 3.12+, `SelectorProactor.recv_many` uses a
-synthetic pool with the same `(RECV_MANY_BUFFER_PRESSURE, resume)` contract;
-older CPython falls back to unpaced reads without pool pressure. Callbacks
-receive borrowed views:
-copy with `bytes(data)` when you need to keep payload past the callback, and
-drop view references you no longer need so backend buffers can be recycled
-(refcount teardown is enough; `memoryview.release()` is optional for early
-release and `memoryview` has no `close()` on 3.12+). On
-`UringProactor`, holding too many live views can pin the shared provided-buffer
-pool and stall further receives.
 
-When `IORING_RECV_MULTISHOT` is unavailable, `UringProactor.recv_many()` falls
-back to repeated one-shot `submit_recv()` calls. Chunks are independent
-`memoryview` objects over copied bytes (not leased `BufView` results), chunk
-size is up to 8 KiB, stream indices stay in-order, and
-`RECV_MANY_BUFFER_PRESSURE` is never emitted. `sock_recvall` and
-`sock_recv_iter` inherit this degraded mode automatically.
+On uring multishot, pool exhaustion delivers ``errno.ENOBUFS`` through
+``MultishotDelivery.exception`` at the terminal ``index`` and completes the
+current leg; drop held views and start a fresh ``recv_many()`` with
+``base_sequence`` set to that ``index``. ``SyntheticRecvBufferPool`` (selector
+backends and uring when PBUF ring creation fails) mirrors lease accounting:
+when the pool is already full at submit, ``recv_many()`` completes immediately
+with ENOBUFS without reading the socket. Callbacks receive borrowed views: copy
+with ``bytes(data)`` when you need to keep payload past the callback. Leased
+chunks (uring ``BufView``, synthetic pool on degraded paths) require
+``memoryview.release()`` (or dropping the last reference after copying) to return
+slots to the pool; holding too many live views can pin the pool and stall
+further receives.
+
+When ``IORING_RECV_MULTISHOT`` is unavailable, ``UringProactor.recv_many()``
+routes by pool type: real ``BufGroup`` pools use one ``submit_recv_buf()`` per
+leg (leased ``BufView`` per chunk); ``SyntheticRecvBufferPool`` uses one-shot
+``submit_recv()`` with synthetic leases over copied bytes. Each leg delivers one
+``MultishotDelivery`` with ``more=False``; callers start a fresh ``recv_many()``
+for the next chunk (``RecvIterBuffer`` / ``sock_recv_iter`` own that re-arm loop).
+Direct ``recv_many`` callbacks do not receive ``RECV_MANY_BUFFER_PRESSURE``;
+that token is only yielded by ``sock_recv_iter``.
 
 When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
 falls back to repeated one-shot `submit_accept()` after each accepted
@@ -210,8 +215,8 @@ chunks from `sock_recv_iter(sock, buffer_pool)`. Each non-pressure chunk is
 converted to `bytes` as the
 iterator advances, so at most one leased `memoryview` is held per iteration
 step. Provided-buffer pressure is handled inside `sock_recv_iter`; receive
-restarts once at least half of the attached pool's slots are free.
-`sock_recvall` does not batch retain views or call `resume()` itself. When
+restarts once ``leased_count < buffer_count / 2`` (low-water mark).
+`sock_recvall` does not batch retain views itself. When
 provided, `progress(chunk)` is
 called after each received non-empty chunk with that chunk's `bytes` payload
 (not a running total).
@@ -231,11 +236,12 @@ dequeued, iteration ends cleanly even if the underlying `recv_many` operation
 recorded cancel or error concurrently — ordered EOF wins that race.
 
 `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` is yielded when the
-provided-buffer pool is exhausted. At most one pressure notification is pending
-until the consumer advances past that yield and receive is re-armed; the
-backend does not emit another pressure callback until receive restarts.
-Consumers should drop every receive `memoryview` they still hold when that
-token appears and avoid keeping more views than needed between reads.
+buffer pool is exhausted (ENOBUFS from the underlying ``recv_many`` leg).
+At most one pressure notification is pending until the consumer advances past
+that yield; ``RecvIterBuffer`` re-arms ``recv_many`` once the pool drains below
+the low-water mark (``leased_count < buffer_count / 2``). Consumers should
+drop every receive `memoryview` they still hold when that token appears and
+avoid keeping more views than needed between reads.
 
 `scheduler.io.create_recv_buffer_pool(buffer_size, buffer_count)` returns a
 `RecvBufferPool` for explicit sizing. Pass it to `sock_recv_iter(sock, pool)`

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .continuous_callbacks import (
@@ -307,10 +307,11 @@ class ProactorIOManager:
         return buffer_pool
 
     def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None):
-        from .recv_iter import RecvIterBuffer
+        from .recv_iter import RecvIterBuffer, _RecvIterProactor
 
         pool = self._resolve_recv_buffer_pool(buffer_pool)
-        return RecvIterBuffer(sock=sock, buf_group=pool, proactor=self._proactor)
+        proactor = cast(_RecvIterProactor, self._proactor)
+        return RecvIterBuffer(sock=sock, buf_group=pool, proactor=proactor)
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None

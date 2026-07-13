@@ -6,7 +6,7 @@ import socket
 import threading
 from collections import deque
 from .tasks import CancelledError
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
 from .locks import ThreadsafeEvent
 from .operations import ContinuousOperation, MultishotDelivery, Operation
@@ -153,9 +153,9 @@ class RecvIterBuffer:
             return data
         if getattr(self._buf_group, "_note_leased", None) is None:
             return data
-        from .proactor import _leased_synthetic_memoryview
+        from .proactor import SyntheticRecvBufferPool, _leased_synthetic_memoryview
 
-        return _leased_synthetic_memoryview(bytes(data), self._buf_group)  # type: ignore[arg-type]
+        return _leased_synthetic_memoryview(bytes(data), cast(SyntheticRecvBufferPool, self._buf_group))
 
     def _signal_pressure_if_pending(self) -> bool:
         if self._pressure_pending:
