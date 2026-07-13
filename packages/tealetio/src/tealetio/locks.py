@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import threading
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar, cast
 
 import tealet
 
 T = TypeVar("T")
+
+
+class _ConditionWaiter(Protocol):
+    def swait(self) -> bool: ...
+
+    def set(self) -> None: ...
+
+
+_EventT = TypeVar("_EventT", bound=_ConditionWaiter)
 
 __all__ = [
     "Barrier",
@@ -24,6 +34,7 @@ __all__ = [
     "QueueFull",
     "QueueShutDown",
     "Semaphore",
+    "ThreadsafeCondition",
     "ThreadsafeEvent",
     "Timeout",
     "TimeoutError",
@@ -482,40 +493,38 @@ class PriorityLock(Lock):
         super().release()
 
 
-class Condition:
-    """A tealet-compatible condition variable."""
+class _ConditionBase(Generic[_EventT]):
+    """Shared condition-variable wait/notify logic."""
 
-    def __init__(self, lock: Lock | None = None) -> None:
-        self._lock = lock if lock is not None else Lock()
-        self._waiters: deque[Event] = deque()
+    _lock: Any
+    _waiters: deque[_EventT]
 
     def locked(self) -> bool:
         """Return True if the underlying lock is currently acquired."""
 
         return self._lock.locked()
 
-    def sacquire(self) -> bool:
-        """Acquire the underlying lock from synchronous tealet code."""
-
-        return self._lock.sacquire()
-
-    async def acquire(self) -> bool:
-        """Acquire the underlying lock from async code."""
-
-        return await self._lock.acquire()
-
     def release(self) -> None:
         """Release the underlying lock."""
 
         self._lock.release()
 
+    def _make_waiter(self) -> _EventT:
+        raise NotImplementedError
+
+    def _lock_acquire_sync(self) -> Any:
+        raise NotImplementedError
+
+    def _lock_reacquire_sync(self) -> Any:
+        raise NotImplementedError
+
     def swait(self) -> bool:
-        """Release the lock and block until notified from sync tealet code."""
+        """Release the lock and block the current tealet until notified."""
 
         if not self.locked():
             raise RuntimeError("cannot wait on un-acquired lock")
 
-        waiter = Event()
+        waiter = self._make_waiter()
         self._waiters.append(waiter)
         self._lock.release()
         try:
@@ -526,29 +535,10 @@ class Condition:
                 self._waiters.remove(waiter)
             except ValueError:
                 pass
-            self._lock.sacquire()
-
-    async def wait(self) -> bool:
-        """Release the lock and await until notified from async code."""
-
-        if not self.locked():
-            raise RuntimeError("cannot wait on un-acquired lock")
-
-        waiter = Event()
-        self._waiters.append(waiter)
-        self._lock.release()
-        try:
-            await waiter.wait()
-            return True
-        finally:
-            try:
-                self._waiters.remove(waiter)
-            except ValueError:
-                pass
-            await self._lock.acquire()
+            self._lock_reacquire_sync()
 
     def swait_for(self, predicate: Callable[[], bool]) -> bool:
-        """Synchronously wait until `predicate` returns a truthy value."""
+        """Synchronously wait until ``predicate`` returns a truthy value."""
 
         result = predicate()
         while not result:
@@ -556,17 +546,8 @@ class Condition:
             result = predicate()
         return result
 
-    async def wait_for(self, predicate: Callable[[], bool]) -> bool:
-        """Asynchronously wait until `predicate` returns a truthy value."""
-
-        result = predicate()
-        while not result:
-            await self.wait()
-            result = predicate()
-        return result
-
     def notify(self, n: int = 1) -> None:
-        """Wake up to `n` tasks waiting on this condition."""
+        """Wake up to ``n`` tasks waiting on this condition."""
 
         if not self.locked():
             raise RuntimeError("cannot notify on un-acquired lock")
@@ -583,12 +564,67 @@ class Condition:
 
         self.notify(len(self._waiters))
 
-    def __enter__(self) -> "Condition":
-        self.sacquire()
-        return self
-
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
+
+
+class Condition(_ConditionBase[Event]):
+    """A tealet-compatible condition variable."""
+
+    def __init__(self, lock: Lock | None = None) -> None:
+        self._lock = lock if lock is not None else Lock()
+        self._waiters: deque[Event] = deque()
+
+    def _make_waiter(self) -> Event:
+        return Event()
+
+    def _lock_acquire_sync(self) -> bool:
+        return self._lock.sacquire()
+
+    def _lock_reacquire_sync(self) -> bool:
+        return self._lock.sacquire()
+
+    def sacquire(self) -> bool:
+        """Acquire the underlying lock from synchronous tealet code."""
+
+        return self._lock_acquire_sync()
+
+    async def acquire(self) -> bool:
+        """Acquire the underlying lock from async code."""
+
+        return await self._lock.acquire()
+
+    async def wait(self) -> bool:
+        """Release the lock and await until notified from async code."""
+
+        if not self.locked():
+            raise RuntimeError("cannot wait on un-acquired lock")
+
+        waiter = self._make_waiter()
+        self._waiters.append(waiter)
+        self._lock.release()
+        try:
+            await waiter.wait()
+            return True
+        finally:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            await self._lock.acquire()
+
+    async def wait_for(self, predicate: Callable[[], bool]) -> bool:
+        """Asynchronously wait until ``predicate`` returns a truthy value."""
+
+        result = predicate()
+        while not result:
+            await self.wait()
+            result = predicate()
+        return result
+
+    def __enter__(self) -> "Condition":
+        self._lock_acquire_sync()
+        return self
 
     async def __aenter__(self) -> "Condition":
         await self.acquire()
@@ -596,6 +632,55 @@ class Condition:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
+
+
+class ThreadsafeCondition(_ConditionBase[ThreadsafeEvent]):
+    """Cross-thread condition for worker threads waking scheduler tealets.
+
+    IO and proactor worker threads finish operations asynchronously and must
+    notify tealets blocked on the scheduler thread. ``ThreadsafeCondition``
+    mirrors ``Condition`` (per-wait events, ``with cond:``, ``swait_for``
+    predicates) but uses a ``threading.Lock`` and ``ThreadsafeEvent`` so
+    ``notify()`` is safe from any thread.
+
+    Typical use: hold the condition lock while checking or updating shared
+    buffer state, park with ``swait()`` or ``swait_for()`` when nothing is
+    ready, and call ``notify()`` or ``notify_all()`` from completion callbacks
+    after publishing new state under the same lock. Each wait allocates a
+    fresh event, so there is no lost-wakeup race from ``clear()`` on a reused
+    event.
+
+    Wakeups are one-way: only the scheduler bound at construction runs
+    ``swait()``; worker threads call ``notify()`` only.
+    """
+
+    def __init__(
+        self,
+        lock: threading.Lock | None = None,
+        *,
+        scheduler: BaseScheduler | None = None,
+    ) -> None:
+        self._lock = lock if lock is not None else threading.Lock()
+        self._scheduler = _get_current_scheduler() if scheduler is None else scheduler
+        self._waiters: deque[ThreadsafeEvent] = deque()
+
+    def _make_waiter(self) -> ThreadsafeEvent:
+        return ThreadsafeEvent(self._scheduler)
+
+    def _lock_acquire_sync(self) -> None:
+        self._lock.acquire()
+
+    def _lock_reacquire_sync(self) -> None:
+        self._lock.acquire()
+
+    def acquire(self) -> None:
+        """Acquire the underlying ``threading.Lock``."""
+
+        self._lock_acquire_sync()
+
+    def __enter__(self) -> "ThreadsafeCondition":
+        self._lock_acquire_sync()
+        return self
 
 
 class Barrier:

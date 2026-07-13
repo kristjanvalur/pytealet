@@ -3,11 +3,10 @@ from __future__ import annotations
 import errno
 import heapq
 import socket
-import threading
 from collections import deque
 from typing import Any, Generic, Protocol, TypeAlias, TypeVar
 
-from .locks import ThreadsafeEvent
+from .locks import ThreadsafeCondition
 from .tasks import CancelledError
 from .operations import ContinuousOperation, MultishotDelivery, Operation
 
@@ -124,8 +123,7 @@ class RecvIterBuffer:
         self._sock = sock
         self._buf_group = buf_group
         self._proactor = proactor
-        self._lock = threading.Lock()
-        self._event = ThreadsafeEvent(scheduler)
+        self._cond = ThreadsafeCondition(scheduler=scheduler)
         self._reorder = _OrderedIngestBuffer[memoryview]()
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False
@@ -145,7 +143,7 @@ class RecvIterBuffer:
             buf_group=self._buf_group,
             base_sequence=base_sequence,
         )
-        with self._lock:
+        with self._cond:
             if self._closed:
                 if not operation.done():
                     self._proactor.cancel(operation)
@@ -170,10 +168,10 @@ class RecvIterBuffer:
         return True
 
     def on_result(self, delivery: MultishotDelivery) -> None:
-        notify = False
-        with self._lock:
+        with self._cond:
             if self._closed:
                 return
+            notify = False
             if _is_enobufs_delivery(delivery):
                 self._schedule_resubmit(base_sequence=delivery.index)
                 if self._signal_pressure_if_pending():
@@ -194,8 +192,8 @@ class RecvIterBuffer:
                     else:
                         self._stream_done = True
                         self._stream_error = None
-        if notify:
-            self._event.set()
+            if notify:
+                self._cond.notify_all()
 
     def _should_resubmit(self) -> bool:
         if self._ready or len(self._reorder):
@@ -205,16 +203,18 @@ class RecvIterBuffer:
     def consume_pressure_resume(self) -> None:
         """Start a fresh ``recv_many`` once the pool has drained below the low-water mark."""
 
-        with self._lock:
+        with self._cond:
             if self._closed or self._current_operation is not None or self._stream_done or not self._should_resubmit():
                 return
             base_sequence = self._next_base
         self._start_recv_many(base_sequence=base_sequence)
 
     def take_next(self) -> _RecvIterYield | None:
+        # manual swait loop, not swait_for(): ready checks pop and return under
+        # the lock; a predicate would just duplicate that dispatch logic.
         while True:
             try:
-                with self._lock:
+                with self._cond:
                     if self._pressure_pending:
                         self._pressure_pending = False
                         return (RECV_MANY_BUFFER_PRESSURE, memoryview(b""))
@@ -234,10 +234,9 @@ class RecvIterBuffer:
                         if self._stream_error is not None:
                             raise self._stream_error
                         return None
-                    self._event.clear()
+                    self._cond.swait()
             finally:
                 self.consume_pressure_resume()
-            self._event.swait()
 
     def close(self) -> None:
         """Stop iteration and cancel any in-flight ``recv_many`` leg.
@@ -248,7 +247,7 @@ class RecvIterBuffer:
         """
 
         operation: ContinuousOperation[_RecvManyValue] | None
-        with self._lock:
+        with self._cond:
             if self._closed:
                 return
             self._closed = True
@@ -260,6 +259,6 @@ class RecvIterBuffer:
             if not self._stream_done:
                 self._stream_error = CancelledError()
                 self._stream_done = True
-        self._event.set()
+            self._cond.notify_all()
         if operation is not None and not operation.done():
             self._proactor.cancel(operation)

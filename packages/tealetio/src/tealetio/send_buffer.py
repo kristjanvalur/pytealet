@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import socket
-import threading
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from .io_waiter import IOWaiter
-from .locks import ThreadsafeEvent
+from .locks import ThreadsafeCondition
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -20,7 +19,7 @@ class SendBuffer:
 
     At most one send operation is active per buffer. Completions may arrive on a
     proactor worker thread; ``drain()`` and ``flush()`` block on the scheduler
-    thread via ``ThreadsafeEvent``.
+    thread via ``ThreadsafeCondition``.
 
     ``drain()`` follows asyncio transport semantics: return immediately while
     ``pending_bytes <= high_water``; otherwise block until ``pending_bytes <=
@@ -38,8 +37,7 @@ class SendBuffer:
     ) -> None:
         self._sock = sock
         self._io = io
-        self._lock = threading.Lock()
-        self._event = ThreadsafeEvent(scheduler)
+        self._cond = ThreadsafeCondition(scheduler=scheduler)
         self._pending: deque[bytes] = deque()
         self._pending_bytes = 0
         self._in_flight_bytes = 0
@@ -63,8 +61,9 @@ class SendBuffer:
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         """Configure asyncio-style drain watermarks."""
 
-        self._set_write_buffer_limits(high=high, low=low)
-        self._event.set()
+        with self._cond:
+            self._set_write_buffer_limits(high=high, low=low)
+            self._cond.notify_all()
 
     def write(self, data: SocketSendBuffer) -> None:
         """Queue one buffer for transmission in FIFO order."""
@@ -73,7 +72,7 @@ class SendBuffer:
             return
         chunk = bytes(data)
         chunk_len = len(chunk)
-        with self._lock:
+        with self._cond:
             if self._closed:
                 raise RuntimeError("SendBuffer is closed")
             if self._send_error is not None:
@@ -89,10 +88,11 @@ class SendBuffer:
         try:
             self._submit(chunk_to_send)
         except BaseException as exc:
-            with self._lock:
+            with self._cond:
                 self._active = False
                 self._in_flight_bytes = 0
                 self._send_error = exc
+                self._cond.notify_all()
             raise
 
     def drain(self) -> None:
@@ -102,44 +102,43 @@ class SendBuffer:
         ``flush()``, some data may remain queued after ``drain()`` returns.
         """
 
-        while True:
-            with self._lock:
-                if self._send_error is not None:
-                    raise self._send_error
-                if self._pending_bytes + self._in_flight_bytes <= self._high_water:
-                    return
-                self._event.clear()
-            self._event.swait()
-            with self._lock:
-                if self._send_error is not None:
-                    raise self._send_error
-                if self._pending_bytes + self._in_flight_bytes <= self._low_water:
-                    return
+        with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
+            if self._pending_bytes + self._in_flight_bytes <= self._high_water:
+                return
+            self._cond.swait_for(self._drain_ready)
 
     def flush(self) -> None:
         """Block until all queued data has been sent."""
 
-        while True:
-            with self._lock:
-                if self._send_error is not None:
-                    raise self._send_error
-                if not self._active and self._pending_bytes == 0 and self._in_flight_bytes == 0:
-                    return
-                self._event.clear()
-            self._event.swait()
+        with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
+            self._cond.swait_for(self._flush_ready)
 
     def close(self) -> None:
         """Reject further ``write()`` calls; queued data may still be flushed."""
 
-        with self._lock:
+        with self._cond:
             if self._closed:
                 return
             self._closed = True
-        self._event.set()
+            self._cond.notify_all()
 
     @property
     def closed(self) -> bool:
         return self._closed
+
+    def _drain_ready(self) -> bool:
+        if self._send_error is not None:
+            raise self._send_error
+        return self._pending_bytes + self._in_flight_bytes <= self._low_water
+
+    def _flush_ready(self) -> bool:
+        if self._send_error is not None:
+            raise self._send_error
+        return not self._active and self._pending_bytes == 0 and self._in_flight_bytes == 0
 
     def _set_write_buffer_limits(self, *, high: int | None, low: int | None) -> None:
         if high is None:
@@ -169,7 +168,7 @@ class SendBuffer:
             waiter.wait()
         except BaseException as exc:
             leg_error = exc
-        with self._lock:
+        with self._cond:
             self._in_flight_bytes = 0
             if leg_error is not None:
                 self._send_error = leg_error
@@ -179,6 +178,6 @@ class SendBuffer:
                 self._in_flight_bytes = len(next_chunk)
             else:
                 self._active = False
+            self._cond.notify_all()
         if next_chunk is not None:
             self._submit(next_chunk)
-        self._event.set()

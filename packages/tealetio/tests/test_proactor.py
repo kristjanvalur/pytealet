@@ -690,13 +690,13 @@ def test_recviter_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
         buffer = recv_iter_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
-        real_swait = buffer._event.swait
+        real_swait = buffer._cond.swait
 
         def swait_and_signal() -> bool:
             ready_to_wait.set()
             return real_swait()
 
-        monkeypatch.setattr(buffer._event, "swait", swait_and_signal)
+        monkeypatch.setattr(buffer._cond, "swait", swait_and_signal)
 
         def producer() -> None:
             assert ready_to_wait.wait(timeout=1.0)
@@ -736,13 +736,13 @@ def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
         first = buffer.take_next()
         assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
 
-        real_swait = buffer._event.swait
+        real_swait = buffer._cond.swait
 
         def swait_and_signal() -> bool:
             ready_to_wait.set()
             return real_swait()
 
-        monkeypatch.setattr(buffer._event, "swait", swait_and_signal)
+        monkeypatch.setattr(buffer._cond, "swait", swait_and_signal)
 
         def producer() -> None:
             assert ready_to_wait.wait(timeout=1.0)
