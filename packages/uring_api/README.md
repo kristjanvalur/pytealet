@@ -396,8 +396,13 @@ callback.
 `break_wait()`. The caller owns the threads, so the caller must join them before
 closing the ring; `close()` and `__exit__()` raise while completion service is
 still active. `reset_serving()` clears the stop flag so a fresh set of workers
-can enter `serve_completions()` again. If a callback raises, the exception is
-reported as unraisable and the worker group exits.
+can enter `serve_completions()` again. If a delivery callback raises, the ring
+invokes `exception_handler` when one is set. The handler receives a context dict
+with `message`, `exception`, `ring`, and `completions` (the batch being
+delivered). When the handler returns normally, that worker continues serving. When
+no handler is set, or the handler itself raises, `serve_completions()` exits with
+the exception; only that worker stops — other serving workers keep running until
+`stop_serving()`.
 
 Native C clients can register a worker-thread callback through the C API. When a
 C callback is present, the serving worker calls it instead of `Ring.callback`;
@@ -457,7 +462,8 @@ The capsule currently exposes:
     `ring_submit_poll_multishot()`,
     `ring_submit_poll_remove()`,
     `ring_break_wait()`, and `ring_wait()`;
-- `ring_set_callback()`, `ring_set_c_callback()`, `ring_serve_completions()`,
+- `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_c_callback()`,
+    `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;
 - `completion_check()`, `completion_user_data()`, `completion_res()`,
@@ -472,8 +478,9 @@ operations. Use `probe()` to check whether this process can create a ring and to
 read runtime support for optional operation helpers from the returned flat
 dictionary. A C completion callback receives the ring object, a list of
 completions for one kernel drain batch, and the supplied `user_data`. Return
-`0` for success; return a negative value with a Python exception set to report
-an unraisable error and stop the serving worker group. Callback pointers must
+`0` for success; return a negative value with a Python exception set so the
+current `serve_completions()` call exits with that error (other workers are not
+stopped). Callback pointers must
 not be changed while `serve_completions()` workers are active.
 
 ## Choosing Ring Sizes

@@ -46,9 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains on ``scheduler.sock_*`` until ``SelectorIOManager``).
 - `recv_many(sock, callback, *, buf_group)` now requires an explicit
   provided-buffer pool; there is no per-operation default at the proactor level.
-- `recv_many` provided-buffer exhaustion now delivers
-  `(RECV_MANY_BUFFER_PRESSURE, resume)`; consumers must drop held views and
-  call `resume()` to continue (no automatic resubmission).
+- `recv_many` continuous-operation callbacks now receive
+  ``MultishotDelivery(index, value, exception, more)`` instead of separate
+  callback arguments. For receive, ``index`` is stream-global
+  (``completion.sequence`` on uring, seeded by ``base_sequence`` at submit).
+- `recv_many` provided-buffer exhaustion delivers ``errno.ENOBUFS`` through
+  ``MultishotDelivery.exception`` on uring multishot, or completes immediately
+  with ENOBUFS when a ``SyntheticRecvBufferPool`` is already full at submit.
+  ``RecvIterBuffer`` / ``sock_recv_iter`` map pool pressure to
+  ``(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))`` and re-arm receive once
+  ``leased_count < buffer_count / 2``; direct ``recv_many`` callers must drop
+  held views and start a fresh ``recv_many()`` with ``base_sequence`` set
+  appropriately.
 - `Proactor.recvall` and `Proactor.recvgen` are removed. Use
   `scheduler.io.sock_recvall` and `scheduler.io.sock_recv_iter` from
   scheduler-owned tealets instead (blocking helpers, not `Operation` returns).
@@ -170,8 +179,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass `ProactorIOManager` from `scheduler.io.open(...)`.
 - `sock_recv_iter` always yields `(index, memoryview)` chunks and
   `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens; consumers
-  release held views between reads so leased kernel buffers can return to the
-  pool. At most one pressure notification is pending until receive restarts.
+  release held views between reads so leased buffers can return to the pool.
+  ``RecvIterBuffer`` re-arms ``recv_many`` once ``leased_count < buffer_count / 2``
+  (low-water mark). At most one pressure notification is pending until receive
+  restarts.
 - Removed the `n` chunk-size argument from `recv_many`, `sock_recvall`, and
   `sock_recv_iter`; chunk sizes are backend-defined
   (`SelectorProactor` reads up to 8 KiB per `recv()`, `UringProactor` uses the
@@ -180,8 +191,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copied `bytes`; `sock_recvall` converts each chunk to `bytes` as
   `sock_recv_iter` advances, with shared-pool pressure handled inside
   `sock_recv_iter`.
-- `SelectorProactor.recv_many` (Python 3.12+) uses a synthetic `BufGroup` and
-  the same `(RECV_MANY_BUFFER_PRESSURE, resume)` backpressure contract as uring.
+- `SelectorProactor.recv_many` uses ``SyntheticRecvBufferPool`` lease
+  accounting; pool exhaustion surfaces as submit-time ENOBUFS (or the
+  ``RECV_MANY_BUFFER_PRESSURE`` token via ``sock_recv_iter``). When uring
+  ``create_buf_group()`` fails (pre-5.19 PBUF rings), ``UringProactor`` falls
+  back to the same synthetic pool and one-shot ``submit_recv()`` path.
+- `UringProactor.recv_many` routes by capability: multishot provided-buffer
+  receive when available, ``submit_recv_buf()`` per leg on real ``BufGroup``
+  pools without multishot, and ``submit_recv()`` with synthetic leases on
+  ``SyntheticRecvBufferPool``.
 - Made `Scheduler` use the proactor-backed synchronous scheduler by default,
   while keeping explicit selector-backed schedulers available.
 - Changed `run_asyncio_in_tealet(...)` to choose the hosted asyncio loop from

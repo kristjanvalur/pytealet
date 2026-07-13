@@ -23,10 +23,13 @@
  * Completion delivery callback invoked from serve_completions() worker threads.
  * completions is a list of Completion objects for one kernel drain batch.
  * user_data is the pointer supplied to ring_set_c_callback(). Return 0 on
- * success; set a Python exception and return -1 to stop the serving worker group.
+ * success; set a Python exception and return -1 so the current serving worker
+ * exits with that error.
  *
  * ring_set_callback() and ring_set_c_callback() must not be called while
- * serve_completions() workers are active.
+ * serve_completions() workers are active. ring_set_exception_handler() may be
+ * called at any time; delivery threads read the current handler under the ring
+ * critical section when reporting callback failures.
  */
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
 
@@ -57,7 +60,7 @@ typedef struct UringApi_CAPI {
     int (*ring_submit_recv)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
     int (*ring_submit_recv_buf)(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags, PyObject *user_data);
     int (*ring_submit_recv_multishot)(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
-                                      PyObject *user_data);
+                                      PyObject *user_data, unsigned long long base_sequence);
     int (*ring_submit_send)(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
     int (*ring_submit_send_zc)(PyObject *ring, int fd, PyObject *data, unsigned int flags, unsigned int zc_flags,
                                PyObject *user_data);
@@ -99,6 +102,7 @@ typedef struct UringApi_CAPI {
 
     /* Completion service control. C callback is preferred over Python callback when both are set. */
     int (*ring_set_callback)(PyObject *ring, PyObject *callback);
+    int (*ring_set_exception_handler)(PyObject *ring, PyObject *handler);
     int (*ring_set_c_callback)(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data);
     int (*ring_serve_completions)(PyObject *ring);
     int (*ring_stop_serving)(PyObject *ring);

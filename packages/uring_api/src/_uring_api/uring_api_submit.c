@@ -121,7 +121,8 @@ PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObj
 }
 
 PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,
-                                                  unsigned int flags, PyObject *user_data) {
+                                                  unsigned int flags, PyObject *user_data,
+                                                  unsigned long long base_sequence) {
     struct io_uring_sqe *sqe;
     UringApiBufGroup *buf_group;
     PyObject *completion = NULL;
@@ -142,6 +143,7 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
         return NULL;
     }
     ((UringApiCompletion *)completion)->multishot = true;
+    ((UringApiCompletion *)completion)->sequence = base_sequence;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
@@ -1111,17 +1113,18 @@ PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject 
 }
 
 PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
+    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", "base_sequence", NULL};
     int fd;
     unsigned int flags = 0;
+    unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
     PyObject *buf_group_obj;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO!|OI", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
-                                     &user_data, &flags)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO!|OIK", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
+                                     &user_data, &flags, &base_sequence)) {
         return NULL;
     }
-    return UringApiRing_submit_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data);
+    return UringApiRing_submit_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence);
 }
 
 PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, PyObject *kwargs) {

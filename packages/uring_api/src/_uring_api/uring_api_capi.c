@@ -190,7 +190,7 @@ int UringApiCapi_RingSubmitRecvBuf(PyObject *ring, int fd, PyObject *buf_group, 
 }
 
 int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
-                                         PyObject *user_data) {
+                                         PyObject *user_data, unsigned long long base_sequence) {
     if (!ring_type_check(ring)) {
         return -1;
     }
@@ -198,8 +198,8 @@ int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, PyObject *buf_g
         PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup");
         return -1;
     }
-    return discard_completion_result(
-        UringApiRing_submit_recv_multishot_impl((UringApiRing *)ring, fd, buf_group, flags, user_data));
+    return discard_completion_result(UringApiRing_submit_recv_multishot_impl((UringApiRing *)ring, fd, buf_group,
+                                                                             flags, user_data, base_sequence));
 }
 
 int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data) {
@@ -423,6 +423,13 @@ int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback) {
         return -1;
     }
     return UringApiRing_set_callback((UringApiRing *)ring, callback ? callback : Py_None, NULL);
+}
+
+int UringApiCapi_RingSetExceptionHandler(PyObject *ring, PyObject *handler) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return UringApiRing_set_exception_handler((UringApiRing *)ring, handler ? handler : Py_None, NULL);
 }
 
 int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data) {

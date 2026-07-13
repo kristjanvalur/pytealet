@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `Ring.exception_handler`: optional callback invoked when a delivery callback
+  raises (Python or C). The handler receives a context dict with `message`,
+  `exception`, `ring`, and `completions`. When it returns normally, that worker
+  continues serving; when it is unset or raises, `serve_completions()` exits with
+  the exception and only that worker stops. C API: `ring_set_exception_handler()`.
+
 ### Changed
 - C API: `UringApi_CCompletionCallback` now receives a `list` of completions per
   kernel drain batch (was a single completion). `ring_wait()` returns a list

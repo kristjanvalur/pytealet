@@ -158,11 +158,11 @@ shape remains subject to change before a stable release.
 
 `UringProactor` (`tealetio.proactor`) `recv_many(sock, callback, *, buf_group)`
 requires an explicit provided-buffer pool (from `create_recv_buffer_pool()` or
-`shared_recv_buffer_pool()`). `recv_many` delivers borrowed `memoryview` chunks from
-leased kernel buffers. When the pool is exhausted, the callback receives
-`(RECV_MANY_BUFFER_PRESSURE, resume)`; drop held views and call `resume()` to
-re-arm multishot receive (stream indices continue from the failed completion's
-`sequence`).
+`shared_recv_buffer_pool()`). Callbacks receive ``MultishotDelivery`` tuples with
+stream-global ``index``, leased ``memoryview`` data, optional ``exception``, and
+``more``. When the pool is exhausted on multishot uring, ``errno.ENOBUFS`` is
+delivered through ``exception``; drop held views and start a fresh ``recv_many()``
+with ``base_sequence`` set to that ``index``.
 
 Each proactor lazily owns one shared `BufGroup` for `scheduler.io.sock_recvall(...)` (16 KiB
 × 256 on `UringProactor` backends by default). `scheduler.io.sock_recvall` joins
@@ -175,10 +175,10 @@ by default; pass a pool from `scheduler.io.create_recv_buffer_pool()` for
 dedicated sizing. `sock_recv_iter` yields read-only `memoryview` chunks and
 `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens. Copy with
 `bytes(data)` when owned storage is required past the current iteration step.
-On Python 3.12+, `SelectorProactor.recv_many` uses a synthetic `BufGroup` for
-the same backpressure contract (`resume` after dropping held views). Older
-CPython falls back to unpaced reads without pool pressure; each `recv()` still
-delivers up to 8 KiB.
+`SelectorProactor.recv_many` uses ``SyntheticRecvBufferPool`` lease accounting;
+pool exhaustion surfaces as submit-time ENOBUFS (or the ``RECV_MANY_BUFFER_PRESSURE``
+token via ``sock_recv_iter``). When uring PBUF ring creation fails,
+``UringProactor`` falls back to the same synthetic pool path.
 
 See [Python API reference](docs/PYTHON_API.md) for ownership details.
 

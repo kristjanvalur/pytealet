@@ -288,42 +288,236 @@ def test_ring_serving_workers_can_dispatch_while_another_callback_blocks_when_av
         left.close()
         right.close()
 
-def test_ring_serve_completions_writes_unraisable_and_exits_when_callback_fails():
+def _run_serve_completions(ring: uring_api.Ring) -> BaseException | None:
+    try:
+        ring.serve_completions()
+    except BaseException as exc:
+        return exc
+    return None
+
+def test_ring_serve_completions_propagates_callback_error_to_worker():
     require_uring()
 
     reader, writer = socket.socketpair()
-    old_hook = sys.unraisablehook
-    unraisable = threading.Event()
-    reports: list[object] = []
-
-    def hook(args):
-        reports.append(args.object)
-        unraisable.set()
+    errors: list[BaseException] = []
 
     def fail_callback(batch):
         raise RuntimeError("callback failed")
 
+    ring = uring_api.Ring()
+    thread: threading.Thread | None = None
     try:
-        sys.unraisablehook = hook
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring() as ring:
-            ring.callback = fail_callback
-            thread = threading.Thread(target=ring.serve_completions)
-            thread.start()
-            ring.submit_recv(reader.fileno(), bytearray(1), 126)
-            writer.send(b"x")
+        ring.callback = fail_callback
+        thread = threading.Thread(target=lambda: errors.append(_run_serve_completions(ring)))
+        thread.start()
+        wait_until_running(ring)
+        ring.submit_recv(reader.fileno(), bytearray(1), 126)
+        writer.send(b"x")
 
-            assert unraisable.wait(1.0)
-            thread.join(1.0)
-            assert not thread.is_alive()
-            assert not ring.running
-
-        assert reports == [ring]
+        thread.join(1.0)
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert str(errors[0]) == "callback failed"
+        assert not ring.running
     finally:
-        sys.unraisablehook = old_hook
+        if thread is not None and thread.is_alive():
+            ring.stop_serving()
+            thread.join(1.0)
+        ring.close()
         reader.close()
         writer.close()
+
+def test_ring_callback_error_exits_only_failing_worker():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    errors: list[BaseException] = []
+    fail_once = {"done": False}
+
+    def fail_once_callback(batch):
+        if not fail_once["done"]:
+            fail_once["done"] = True
+            raise RuntimeError("callback failed")
+
+    ring = uring_api.Ring()
+    threads: list[threading.Thread] = []
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        ring.callback = fail_once_callback
+        threads = [
+            threading.Thread(target=lambda: errors.append(_run_serve_completions(ring))),
+            threading.Thread(target=ring.serve_completions),
+        ]
+        for thread in threads:
+            thread.start()
+        wait_until_running(ring)
+        ring.submit_recv(reader.fileno(), bytearray(1), 126)
+        writer.send(b"x")
+
+        deadline = time.monotonic() + 1.0
+        while len(errors) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert len(errors) == 1
+        assert str(errors[0]) == "callback failed"
+        assert ring.running
+        assert threads[1].is_alive()
+
+        ring.stop_serving()
+        for thread in threads:
+            thread.join(1.0)
+            assert not thread.is_alive()
+    finally:
+        if threads:
+            ring.stop_serving()
+            for thread in threads:
+                if thread.is_alive():
+                    thread.join(1.0)
+        ring.close()
+        reader.close()
+        writer.close()
+
+def test_ring_exception_handler_absorbs_callback_error_and_keeps_serving():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    handled: list[dict[str, object]] = []
+    invocations = 0
+    delivered = 0
+
+    def callback(batch):
+        nonlocal invocations, delivered
+        invocations += 1
+        if invocations == 1:
+            raise RuntimeError("callback failed")
+        delivered += len(batch)
+
+    def exception_handler(context):
+        handled.append(context)
+
+    ring = uring_api.Ring()
+    thread: threading.Thread | None = None
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        ring.callback = callback
+        ring.exception_handler = exception_handler
+        thread = threading.Thread(target=ring.serve_completions)
+        thread.start()
+        wait_until_running(ring)
+        ring.submit_recv(reader.fileno(), bytearray(1), 126)
+        writer.send(b"x")
+
+        deadline = time.monotonic() + 1.0
+        while len(handled) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        ring.submit_recv(reader.fileno(), bytearray(1), 127)
+        writer.send(b"y")
+
+        while delivered < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert invocations == 2
+        assert delivered == 1
+        assert len(handled) == 1
+        assert handled[0]["message"] == "Exception in delivery callback"
+        assert str(handled[0]["exception"]) == "callback failed"
+        assert handled[0]["ring"] is ring
+        assert len(handled[0]["completions"]) == 1
+        assert ring.running
+
+        ring.stop_serving()
+        thread.join(1.0)
+        assert not thread.is_alive()
+    finally:
+        if thread is not None and thread.is_alive():
+            ring.stop_serving()
+            thread.join(1.0)
+        ring.close()
+        reader.close()
+        writer.close()
+
+def test_ring_exception_handler_failure_propagates_to_worker():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    errors: list[BaseException] = []
+
+    def fail_callback(batch):
+        raise RuntimeError("callback failed")
+
+    def failing_handler(context):
+        raise ValueError("handler failed")
+
+    ring = uring_api.Ring()
+    thread: threading.Thread | None = None
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        ring.callback = fail_callback
+        ring.exception_handler = failing_handler
+        thread = threading.Thread(target=lambda: errors.append(_run_serve_completions(ring)))
+        thread.start()
+        wait_until_running(ring)
+        ring.submit_recv(reader.fileno(), bytearray(1), 126)
+        writer.send(b"x")
+
+        thread.join(1.0)
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert str(errors[0]) == "handler failed"
+        assert not ring.running
+    finally:
+        if thread is not None and thread.is_alive():
+            ring.stop_serving()
+            thread.join(1.0)
+        ring.close()
+        reader.close()
+        writer.close()
+
+def test_ring_exception_handler_property_validation_when_available():
+    require_uring()
+
+    def handler(context):
+        return None
+
+    with uring_api.Ring() as ring:
+        assert ring.exception_handler is None
+        ring.exception_handler = handler
+        assert ring.exception_handler is handler
+        ring.exception_handler = None
+        assert ring.exception_handler is None
+
+        with pytest.raises(TypeError, match="exception_handler must be callable or None"):
+            ring.exception_handler = object()
+        with pytest.raises(TypeError, match="cannot delete exception_handler"):
+            del ring.exception_handler
+
+def test_ring_allows_exception_handler_change_while_completion_service_runs_when_available():
+    require_uring()
+
+    seen: list[str] = []
+
+    def replacement_handler(context):
+        seen.append(str(context["exception"]))
+
+    with uring_api.Ring() as ring:
+        ring.callback = lambda batch: None
+        thread = threading.Thread(target=ring.serve_completions)
+        thread.start()
+        try:
+            wait_until_running(ring)
+            ring.exception_handler = replacement_handler
+            assert ring.exception_handler is replacement_handler
+        finally:
+            ring.stop_serving()
+            thread.join(1.0)
+            assert not thread.is_alive()
+            assert seen == []
 
 def test_ring_callback_property_validation_when_available():
     require_uring()

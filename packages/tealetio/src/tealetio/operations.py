@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, NamedTuple, TypeVar, cast
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -14,8 +14,30 @@ class InvalidStateError(Exception):
 
 
 _DoneCallback = Callable[["Operation[Any]"], object]
-_ResultCallback = Callable[[T_co], object]
 _ProactorRef = Any
+
+
+class MultishotDelivery(NamedTuple):
+    """One multishot leg delivery to a continuous operation callback.
+
+    ``(index, value, exception, more)``. For ``recv_many``, ``index`` is the
+    stream ordinal from the backend (``completion.sequence`` on uring, seeded by
+    ``base_sequence`` at submit); otherwise zero for informational use on
+    ``accept_many`` and ``poll_many``. ``value`` carries successful chunk data
+    when present. ``exception`` carries transport failures the consumer may
+    interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
+    Terminal failures finish the ``Operation`` with the same exception, then
+    invoke the result callback. ``more``
+    mirrors ``IORING_CQE_F_MORE`` on uring backends. For ``recv_many``,
+    ``more=False`` with empty data signals EOF; ``more=False`` with non-empty
+    data means the leg stopped before EOF and consumers should start a fresh
+    ``recv_many()``.
+    """
+
+    index: int = 0
+    value: Any = None
+    exception: BaseException | None = None
+    more: bool = True
 
 
 @dataclass
@@ -162,24 +184,54 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         self,
         kind: str,
         fileobj: object | None = None,
-        result_callback: _ResultCallback[T_co] | None = None,
+        result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> None:
         super().__init__(kind, fileobj)
         self._result_callback = result_callback
 
-    def _emit_result(self, result: T_co) -> bool:
-        """Deliver one result when the operation is still active.
-
-        Returns ``True`` when delivery was accepted and the operation is still
-        active afterwards, ``False`` when the operation was already done or became
-        done during the callback (including cancellation).
-        """
+    def _emit_delivery(self, delivery: MultishotDelivery) -> bool:
+        """Deliver one multishot chunk when the operation is still active."""
 
         with self._lock:
             if self._done:
                 return False
             callback = self._result_callback
         if callback is not None:
-            callback(result)
+            callback(delivery)
         with self._lock:
             return not self._done
+
+    def _emit_result(
+        self,
+        result: T_co,
+        *,
+        index: int = 0,
+        exception: BaseException | None = None,
+        more: bool = True,
+    ) -> bool:
+        """Deliver one successful chunk wrapped in ``MultishotDelivery``."""
+
+        return self._emit_delivery(MultishotDelivery(index, result, exception, more))
+
+    def _finish_with_terminal_delivery(
+        self,
+        delivery: MultishotDelivery,
+        *,
+        cancelled: bool = False,
+    ) -> None:
+        """Finish the operation, then deliver one terminal ``MultishotDelivery``.
+
+        Used for io_uring delivery failures and cancellation so
+        ``operation.exception()`` and the result callback both observe the same
+        terminal error.
+        """
+
+        with self._lock:
+            callback = self._result_callback
+        exc = delivery.exception
+        if exc is not None:
+            self._finish(exception=exc, cancelled=cancelled)
+        else:
+            self._finish(result=None, cancelled=cancelled)
+        if callback is not None:
+            callback(delivery)

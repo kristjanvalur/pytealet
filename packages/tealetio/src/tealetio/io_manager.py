@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .continuous_callbacks import (
@@ -12,6 +12,7 @@ from .continuous_callbacks import (
     AcceptStreamsDelivery,
     finalize_accept_recv_error,
     normalize_accept_recv_size,
+    is_cancellation_delivery,
     wrap_accept_delivery,
 )
 from .io_waiter import (
@@ -23,7 +24,7 @@ from .io_waiter import (
     IOWaitable,
 )
 
-from .operations import Operation
+from .operations import MultishotDelivery, Operation
 from .tasks import CancelledError
 from .socket_helpers import abortive_close
 from .types import SocketSendBuffer
@@ -181,7 +182,7 @@ class PollIO(Protocol):
         self,
         fd: int,
         mask: int,
-        callback: Callable[[int], object],
+        callback: Callable[[MultishotDelivery], object],
     ) -> IOWaitable[None]: ...
 
 
@@ -307,13 +308,11 @@ class ProactorIOManager:
         return buffer_pool
 
     def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None):
-        from .recv_iter import RecvIterBuffer
+        from .recv_iter import RecvIterBuffer, _RecvIterProactor
 
         pool = self._resolve_recv_buffer_pool(buffer_pool)
-        buffer = RecvIterBuffer(buf_group=pool, proactor=self._proactor)
-        stream = self._proactor.recv_many(sock, buffer.on_result, buf_group=pool)
-        buffer.attach_stream(stream)
-        return buffer
+        proactor = cast(_RecvIterProactor, self._proactor)
+        return RecvIterBuffer(sock=sock, buf_group=pool, proactor=proactor)
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None
@@ -523,7 +522,7 @@ class ProactorIOManager:
         self,
         fd: int,
         mask: int,
-        callback: Callable[[int], object],
+        callback: Callable[[MultishotDelivery], object],
     ) -> IOWaitable[None]:
         return IOWaiter(self, self._proactor.poll_many(fd, mask, callback))
 
@@ -564,10 +563,17 @@ class ProactorIOManager:
         *,
         recv_size: int,
         recv_timeout: float | None = None,
-    ) -> Callable[[socket.socket], None]:
+    ) -> Callable[[MultishotDelivery], None]:
         """Return a proactor ``accept_many`` callback that pre-reads each accept."""
 
-        def on_conn(conn: socket.socket) -> None:
+        def on_conn(delivery: MultishotDelivery) -> None:
+            if is_cancellation_delivery(delivery):
+                return
+            if delivery.exception is not None:
+                raise delivery.exception
+            conn = delivery.value
+            if conn is None:
+                return
             recv_op = self._proactor.recv(conn, recv_size)
             timer_box: list[TimerHandle | None] = [None]
 

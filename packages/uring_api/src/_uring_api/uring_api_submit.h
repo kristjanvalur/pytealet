@@ -9,7 +9,7 @@ PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *v
 PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
                                             PyObject *user_data);
 PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group, unsigned int flags,
-                                                  PyObject *user_data);
+                                                  PyObject *user_data, unsigned long long base_sequence);
 PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
                                         PyObject *user_data);
 PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,

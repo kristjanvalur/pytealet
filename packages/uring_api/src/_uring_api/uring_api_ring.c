@@ -116,11 +116,13 @@ void UringApiRing_dealloc(UringApiRing *self) {
 
 int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
+    Py_VISIT(self->delivery_exception_handler);
     return 0;
 }
 
 int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
+    Py_CLEAR(self->delivery_exception_handler);
     return 0;
 }
 
@@ -211,6 +213,7 @@ int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *closure
     PyObject *old_callback = NULL;
     int ret = 0;
 
+    (void)closure;
     if (!value) {
         PyErr_SetString(PyExc_TypeError, "cannot delete callback");
         return -1;
@@ -233,6 +236,45 @@ int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *closure
     Py_END_CRITICAL_SECTION();
     Py_XDECREF(callback);
     Py_XDECREF(old_callback);
+    return ret;
+}
+
+static PyObject *UringApiRing_get_exception_handler(UringApiRing *self, void *closure) {
+    PyObject *handler;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    handler = Py_XNewRef(self->delivery_exception_handler);
+    Py_END_CRITICAL_SECTION();
+    if (!handler) {
+        Py_RETURN_NONE;
+    }
+    return handler;
+}
+
+int UringApiRing_set_exception_handler(UringApiRing *self, PyObject *value, void *closure) {
+    PyObject *handler;
+    PyObject *old_handler = NULL;
+    int ret = 0;
+
+    (void)closure;
+    if (!value) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete exception_handler");
+        return -1;
+    }
+    if (value != Py_None && !PyCallable_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "exception_handler must be callable or None");
+        return -1;
+    }
+
+    handler = value == Py_None ? NULL : Py_NewRef(value);
+    Py_BEGIN_CRITICAL_SECTION(self);
+    old_handler = self->delivery_exception_handler;
+    self->delivery_exception_handler = handler;
+    handler = NULL;
+    Py_END_CRITICAL_SECTION();
+    Py_XDECREF(handler);
+    Py_XDECREF(old_handler);
     return ret;
 }
 
@@ -310,6 +352,8 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"closed", (getter)UringApiRing_get_closed, NULL, NULL, NULL},
     {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
+    {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler,
+     NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 
 PyTypeObject UringApiRing_Type = {

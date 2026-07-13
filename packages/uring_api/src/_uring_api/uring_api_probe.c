@@ -203,6 +203,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingBreakWait,
     UringApiCapi_RingWait,
     UringApiCapi_RingSetCallback,
+    UringApiCapi_RingSetExceptionHandler,
     UringApiCapi_RingSetCCallback,
     UringApiCapi_RingServeCompletions,
     UringApiCapi_RingStopServing,
