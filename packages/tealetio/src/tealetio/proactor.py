@@ -110,6 +110,23 @@ def _spawn_recv_many_operation(
     )
 
 
+def _uring_cqe_oserror(res: int) -> OSError:
+    return OSError(-res, errno.errorcode.get(-res, "io_uring operation failed"))
+
+
+def _recv_many_error_delivery(*, index: int, res: int) -> MultishotDelivery:
+    return MultishotDelivery(
+        index=index,
+        value=memoryview(b""),
+        exception=_uring_cqe_oserror(res),
+        more=False,
+    )
+
+
+def _continuous_error_delivery(exc: BaseException) -> MultishotDelivery:
+    return MultishotDelivery(exception=exc, more=False)
+
+
 def _spawn_accept_many_operation(
     sock: socket.socket,
     callback: _AcceptManyCallback,
@@ -601,8 +618,15 @@ class ProactorBase:
         return cancel_op
 
     def _terminalise_cancelled(self, operation: Operation[Any]) -> None:
-        if not operation.done():
-            operation._finish(exception=CancelledError(), cancelled=True)
+        if operation.done():
+            return
+        if isinstance(operation, ContinuousOperation):
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(CancelledError()),
+                cancelled=True,
+            )
+            return
+        operation._finish(exception=CancelledError(), cancelled=True)
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         raise NotImplementedError
@@ -788,9 +812,10 @@ class _UringEntry:
                 return ()
             is_termination = not bool(completion.flags & uring_api.IORING_CQE_F_MORE)
             if is_termination:
-                # ENOBUFS carries the leg index; deliver immediately and let consumers
-                # reorder any stragglers while they start a fresh recv_many() later.
-                if getattr(completion, "res", 0) == -errno.ENOBUFS:
+                res = getattr(completion, "res", 0)
+                # Negative CQEs are terminal failures; deliver immediately so the
+                # operation and result callback both observe the error.
+                if res < 0:
                     leg.pending_final = None
                     return (completion,)
                 leg_sequence = int(completion.sequence) - leg.leg_base
@@ -2272,7 +2297,7 @@ class UringProactor(ProactorBase):
                 accept_entry.active = False
             accept_entry_ref[0] = None
         if not operation.done():
-            operation._finish(exception=exc)
+            operation._finish_with_terminal_delivery(_continuous_error_delivery(exc))
 
     def _deliver_uring_accept_many_oneshot(
         self,
@@ -2285,7 +2310,9 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(_uring_cqe_oserror(res)),
+            )
             return operation
         conn = socket_from_uring_fd(completion.res)
         _handoff_accept_many(operation, conn, more=False)
@@ -2652,15 +2679,8 @@ class UringProactor(ProactorBase):
         operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
         res = completion.res
         if res < 0:
-            operation._emit_delivery(
-                MultishotDelivery(
-                    index=base_sequence,
-                    exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
-                    more=False,
-                )
-            )
-            operation._finish(result=None)
             self._deactivate_uring_entry(entry)
+            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
             return operation
         operation._emit_result(
             self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
@@ -2680,15 +2700,8 @@ class UringProactor(ProactorBase):
         operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
         res = completion.res
         if res < 0:
-            operation._emit_delivery(
-                MultishotDelivery(
-                    index=base_sequence,
-                    exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
-                    more=False,
-                )
-            )
-            operation._finish(result=None)
             self._deactivate_uring_entry(entry)
+            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
             return operation
         if res == 0:
             payload = completion.result
@@ -2769,7 +2782,9 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(_uring_cqe_oserror(res)),
+            )
             return operation
         more = True
         operation._emit_result(res, more=more)
@@ -2783,7 +2798,9 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(_uring_cqe_oserror(res)),
+            )
             return operation
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         operation._emit_result(res, more=more)
@@ -2832,7 +2849,7 @@ class UringProactor(ProactorBase):
                 self._maybe_finish_recv_many_enobufs_leg(entry, multishot_leg, operation)
                 return operation
             self._deactivate_uring_entry(entry)
-            operation._finish(exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")))
+            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=index, res=res))
             return operation
 
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)

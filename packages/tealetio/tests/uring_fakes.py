@@ -386,6 +386,20 @@ class _FakeUringRing:
             multishot=True,
         )
 
+    def complete_recv_multishot_error(self, err: int, *, sequence: int | None = None) -> None:
+        pending = self.pending_recv_multishot[-1]
+        if sequence is None:
+            sequence = self.recv_multishot_sequence
+            self.recv_multishot_sequence += 1
+        completion = self._recv_multishot_delivery(
+            pending,
+            res=err,
+            flags=0,
+            result=None,
+            leg_sequence=sequence,
+        )
+        self._deliver(completion)
+
     def complete_recv_multishot_enobufs(self, *, sequence: int | None = None) -> None:
         pending = self.pending_recv_multishot[-1]
         _, buf_group, _, _ = self.submitted_recv_multishot[-1]

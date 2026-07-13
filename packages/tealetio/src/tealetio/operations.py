@@ -25,7 +25,9 @@ class MultishotDelivery(NamedTuple):
     ``base_sequence`` at submit); otherwise zero for informational use on
     ``accept_many`` and ``poll_many``. ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
-    interpret (for example ``errno.ENOBUFS`` on provided-buffer recv). ``more``
+    interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
+    Terminal failures finish the ``Operation`` with the same exception, then
+    invoke the result callback. ``more``
     mirrors ``IORING_CQE_F_MORE`` on uring backends. For ``recv_many``,
     ``more=False`` with empty data signals EOF; ``more=False`` with non-empty
     data means the leg stopped before EOF and consumers should start a fresh
@@ -210,3 +212,26 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         """Deliver one successful chunk wrapped in ``MultishotDelivery``."""
 
         return self._emit_delivery(MultishotDelivery(index, result, exception, more))
+
+    def _finish_with_terminal_delivery(
+        self,
+        delivery: MultishotDelivery,
+        *,
+        cancelled: bool = False,
+    ) -> None:
+        """Finish the operation, then deliver one terminal ``MultishotDelivery``.
+
+        Used for io_uring delivery failures and cancellation so
+        ``operation.exception()`` and the result callback both observe the same
+        terminal error.
+        """
+
+        with self._lock:
+            callback = self._result_callback
+        exc = delivery.exception
+        if exc is not None:
+            self._finish(exception=exc, cancelled=cancelled)
+        else:
+            self._finish(result=None, cancelled=cancelled)
+        if callback is not None:
+            callback(delivery)

@@ -3715,6 +3715,27 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_recv_many_multishot_delivery_error_finishes_operation_and_notifies_callback(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, _writer = socket.socketpair()
+        seen: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(
+                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool()
+            )
+            proactor.ring.complete_recv_multishot_error(-errno.EIO, sequence=2)
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert len(seen) == 1
+            delivery = seen[0]
+            assert delivery.index == 2
+            assert isinstance(delivery.exception, OSError)
+            assert delivery.exception.errno == errno.EIO
+            assert operation.exception() is delivery.exception
+        finally:
+            reader.close()
+            proactor.close()
+
     def test_recv_many_rearms_after_enobufs_with_stream_indices(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
