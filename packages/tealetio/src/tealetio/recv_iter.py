@@ -8,6 +8,7 @@ from collections import deque
 from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
 from .locks import ThreadsafeEvent
+from .tasks import CancelledError
 from .operations import ContinuousOperation, MultishotDelivery, Operation
 
 T_Cargo = TypeVar("T_Cargo")
@@ -147,7 +148,6 @@ class RecvIterBuffer:
             base_sequence=base_sequence,
         )
         self._current_operation = operation
-        operation.add_done_callback(self._on_stream_done)
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
         self._next_base = base_sequence
@@ -179,19 +179,6 @@ class RecvIterBuffer:
             return False
         self._pressure_pending = True
         return True
-
-    def _on_stream_done(self, stream: Operation[Any]) -> None:
-        with self._lock:
-            if stream is not self._current_operation:
-                return
-            self._current_operation = None
-            exception = stream.exception()
-            if exception is not None:
-                self._stream_error = exception
-                self._stream_done = True
-            elif not self._stream_done:
-                self._stream_done = True
-        self._event.set()
 
     def on_result(self, delivery: MultishotDelivery) -> None:
         notify = False
@@ -264,6 +251,13 @@ class RecvIterBuffer:
             self._event.swait()
 
     def close(self) -> None:
+        """Stop iteration and cancel any in-flight ``recv_many`` leg.
+
+        Terminal state is established here before ``proactor.cancel()`` so a
+        blocked ``take_next()`` wakes even though ``on_result`` ignores
+        deliveries once ``_closed`` is set.
+        """
+
         operation: ContinuousOperation[_RecvManyValue] | None
         with self._lock:
             if self._closed:
@@ -274,5 +268,9 @@ class RecvIterBuffer:
             self._pressure_pending = False
             self._ready.clear()
             self._reorder.reset()
+            if not self._stream_done:
+                self._stream_error = CancelledError()
+                self._stream_done = True
+        self._event.set()
         if operation is not None and not operation.done():
             self._proactor.cancel(operation)
