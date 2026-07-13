@@ -98,14 +98,6 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
 
-def release_recv_view(view: memoryview) -> None:
-    releaser = getattr(view.obj, "__release_buffer__", None)
-    if releaser is not None:
-        releaser(view)
-    else:
-        view.release()
-
-
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
 
@@ -116,6 +108,9 @@ class RecvIterBuffer:
     On older Python, synthetic pools skip view leases (no PEP 688), so
     ``leased_count`` does not reflect consumer-held chunks and backpressure via the
     buffer mechanism is effectively dropped there.
+
+    After copying chunk data, call ``view.release()`` or drop the view; on Python
+    3.12+ that returns leased pool slots via PEP 688.
     """
 
     def __init__(

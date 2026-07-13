@@ -21,7 +21,7 @@ from .io_manager import (
     SocketSendBuffer,
     SupportsProactorIO,
 )
-from .recv_iter import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer, release_recv_view
+from .recv_iter import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer
 from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
 
 from .scheduler import BaseScheduler
@@ -164,7 +164,7 @@ class _ReaderCore:
                 continue
             if chunk.nbytes:
                 self._buffer.extend(chunk)
-                release_recv_view(chunk)
+                chunk.release()
                 return True
             self._eof = True
             return False
