@@ -191,21 +191,19 @@ class _ReaderCore:
         view = memoryview(b).cast("B")
         if not view.nbytes:
             return 0
+        if self._eof and not self._buffer:
+            return 0
+
+        nbytes = view.nbytes
+        if len(self._buffer) < nbytes and not self._eof:
+            self._fill_buffer(nbytes)
 
         total = 0
-        while total < view.nbytes and not self._eof:
-            while self._buffer and total < view.nbytes:
-                prefix = min(view.nbytes - total, len(self._buffer))
-                view[total : total + prefix] = self._buffer[:prefix]
-                del self._buffer[:prefix]
-                total += prefix
-            if total == view.nbytes or self._eof:
-                break
-            if total == 0 or self._recv_buffer.has_pending_chunks():
-                if not self._append_next_chunk():
-                    break
-            else:
-                break
+        while self._buffer and total < nbytes:
+            prefix = min(nbytes - total, len(self._buffer))
+            view[total : total + prefix] = self._buffer[:prefix]
+            del self._buffer[:prefix]
+            total += prefix
         return total
 
     def readexactly(self, n: int) -> bytes:

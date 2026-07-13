@@ -426,6 +426,7 @@ class TestStreamsPoC:
 
             def deliver() -> None:
                 writer.sendall(b"hello")
+                writer.shutdown(socket.SHUT_WR)
 
             def exercise() -> tuple[int, bytes]:
                 scheduler.spawn(deliver)
@@ -434,6 +435,23 @@ class TestStreamsPoC:
             nbytes, payload = scheduler.run_until_complete(scheduler.spawn(exercise))
             assert nbytes == 5
             assert payload[:5] == b"hello"
+            assert payload[5:] == b"\x00" * 3
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_stream_read_positive_returns_partial_without_filling_n(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.send(b"hi")
+
+            def exercise() -> bytes:
+                stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
+                return stream_reader.read(100)
+
+            assert run_scheduler_task(scheduler, exercise) == b"hi"
         finally:
             reader.close()
             writer.close()

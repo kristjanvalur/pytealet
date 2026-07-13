@@ -12,9 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``pooled_default_stream_factory`` (per-connection provided-buffer pools)
   instead of the scheduler shared pool, so concurrent clients do not share
   ``recv_many`` backpressure.
-- ``StreamReader.readinto()`` / ``AsyncStreamReader.readinto()`` loop until the
-  caller buffer is full or EOF, matching asyncio semantics across multiple
-  ``recv_many`` chunks.
+- ``StreamReader.readinto()`` / ``AsyncStreamReader.readinto()`` block until the
+  caller buffer is full or EOF (short return only at EOF), including across
+  multiple ``recv_many`` chunks.
 
 ### Breaking Changes
 - ``accept_many_streams()`` and ``start_server()`` no longer accept ``recv_size``,

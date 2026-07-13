@@ -696,11 +696,12 @@ not install signal handlers — use ``tealetio.run()`` / ``Runner`` for shutdown
 signals.
 
 Default stream readers receive through ``recv_many`` / ``RecvIterBuffer``.
-`StreamReader.readinto()` blocks once for the first chunk when empty, then copies
-from the internal buffer and any further chunks already queued by ``recv_many``
-until the caller buffer is full or no more data is pending (partial return like
-asyncio when the peer has not sent enough to fill the buffer). Other read
-methods assemble data in an internal `bytearray` before returning `bytes`.
+`StreamReader.read(n)` for ``n > 0`` waits once for at least one byte, then
+returns at most ``n`` available bytes without blocking to fill the remainder
+(asyncio ``StreamReader.read`` semantics). ``readinto()`` blocks until the
+caller buffer is full or EOF (short return only at EOF), suitable for fixed-size
+protocol reads. Other read methods assemble data in an internal `bytearray`
+before returning `bytes`.
 Release leased chunk views after copying when holding data past a read call
 (``RecvIterBuffer`` releases on ingest for ``read()`` / ``readline()`` paths).
 

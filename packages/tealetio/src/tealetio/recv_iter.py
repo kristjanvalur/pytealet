@@ -239,12 +239,6 @@ class RecvIterBuffer:
                 self.consume_pressure_resume()
             self._event.swait()
 
-    def has_pending_chunks(self) -> bool:
-        """Return True when ordered chunks are already queued for ``take_next()``."""
-
-        with self._lock:
-            return bool(self._ready or len(self._reorder))
-
     def close(self) -> None:
         """Stop iteration and cancel any in-flight ``recv_many`` leg.
 
