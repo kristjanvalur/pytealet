@@ -421,8 +421,9 @@ drop waiter only”.
   `sock_shutdown` / `sock_close`. `StreamServer` handler cleanup calls
   `wait_closed()` after `close()`.
 - Stream endpoints live under `packages/tealetio/src/tealetio/streams/`
-  (`reader`, `writer`, `factories`, `connect`, `server`); IO bridge buffers
-  remain in `io_buffers.py`.
+  (`reader`, `writer`, `open`, `connect`, `server`); IO bridge buffers remain
+  in `io_buffers.py`. `open` is the leaf `io_manager` imports for stream-pair
+  construction.
 
 ## References
 
