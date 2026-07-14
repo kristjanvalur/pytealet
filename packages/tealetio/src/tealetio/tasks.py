@@ -525,7 +525,7 @@ class TaskFactory(Protocol):
         ...
 
 
-def _prepare_task(task: Task, func: Callable[[], object], context: contextvars.Context) -> None:
+def _make_task_main(task: Task, func: Callable[[], object], context: contextvars.Context):
     def task_main(current: tealet.tealet, _arg: object):
         def run_func():
             token = _current_task.set(task)
@@ -536,7 +536,20 @@ def _prepare_task(task: Task, func: Callable[[], object], context: contextvars.C
 
         return context.run(run_func)
 
-    task.prepare(task_main)
+    return task_main
+
+
+def _prepare_task(task: Task, func: Callable[[], object], context: contextvars.Context) -> None:
+    task.prepare(_make_task_main(task, func, context))
+
+
+def _start_task_eager(
+    scheduler: BaseScheduler,
+    task: Task,
+    func: Callable[[], object],
+    context: contextvars.Context,
+) -> None:
+    scheduler._target_run_eager(task, _make_task_main(task, func, context))
 
 
 def _should_start_eager(scheduler: BaseScheduler, default: bool, override: bool | None) -> bool:
@@ -566,9 +579,10 @@ class DefaultTaskFactory:
         **kwargs: Any,
     ) -> Task:
         task = self.task_constructor(scheduler, **kwargs)
-        _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):
-            task.run()
+            _start_task_eager(scheduler, task, func, context)
+        else:
+            _prepare_task(task, func, context)
         return task
 
 
@@ -614,7 +628,8 @@ class StubTaskFactory:
             stub = self.stub_here()
         task = self.task_constructor(scheduler, **kwargs)
         task.set_stub(stub)
-        _prepare_task(task, func, context)
         if _should_start_eager(scheduler, self.eager_start, eager_start):
-            task.run()
+            _start_task_eager(scheduler, task, func, context)
+        else:
+            _prepare_task(task, func, context)
         return task

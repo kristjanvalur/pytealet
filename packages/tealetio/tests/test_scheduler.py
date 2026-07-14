@@ -919,6 +919,19 @@ class TestSchedulerAccessors:
         assert s.run_until_complete(parent_task) is None
         assert seen == ["deferred", "eager"]
 
+    def test_eager_start_skips_prepare(self):
+        s = _new_scheduler()
+
+        deferred = s.spawn(lambda: "deferred", eager_start=False)
+        assert deferred.state == _tealet.STATE_PREPARED
+
+        def parent() -> None:
+            task = s.spawn(lambda: "eager", eager_start=True)
+            assert task.state == _tealet.STATE_EXIT
+            assert task.result() == "eager"
+
+        s.run_until_complete(s.spawn(parent))
+
     def test_eager_task_that_yields_is_scheduled(self):
         s = _new_scheduler()
         seen = []
@@ -938,6 +951,28 @@ class TestSchedulerAccessors:
         s.run_until_complete(parent_task)
 
         assert seen == ["start", "after-yield"]
+
+    def test_eager_spawn_does_not_double_schedule_blocked_task(self):
+        s = _new_scheduler()
+        gate = Event()
+        order: list[str] = []
+
+        def handler() -> None:
+            order.append("started")
+            gate.swait()
+            order.append("past-gate")
+
+        def parent() -> None:
+            s.spawn(handler, eager_start=True)
+            order.append("after-spawn")
+            s.yield_()
+            order.append("after-yield")
+            assert "past-gate" not in order
+            gate.set()
+            s.yield_()
+            assert order == ["started", "after-spawn", "after-yield", "past-gate"]
+
+        s.run_until_complete(s.spawn(parent))
 
     def test_stub_task_factory_lazily_creates_and_reuses_stub(self):
         s = _new_scheduler()

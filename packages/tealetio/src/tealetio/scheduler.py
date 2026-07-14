@@ -34,6 +34,7 @@ from typing import (
 
 from asynkit import coro_drive as _coro_drive
 from asynkit import syncmethod as _syncmethod
+import _tealet
 import tealet
 
 from .locks import (
@@ -1773,7 +1774,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         t = self._task_factory(self, func, context=context, eager_start=eager_start, **kwargs)
         self._all_tasks.add(t)
-        if not t.done():
+        # prepare() leaves STATE_PREPARED until the first switch/throw; inline eager
+        # start has already entered the worker (STATE_RUN or STATE_EXIT).
+        if t.state == tealet.STATE_PREPARED:
             self._make_runnable(t)
         return t
 
@@ -1922,6 +1925,15 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         cast(_tasks.Task, target)._unlink()
         self._make_runnable(tealet.current())
         target.switch()
+
+    def _target_run_eager(self, target: tealet.tealet, task_main) -> None:
+        """Start an unlinked NEW/STUB task via one-shot tealet.run()."""
+
+        task = cast(_tasks.Task, target)
+        assert task.link is None
+        assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
+        self._make_runnable(tealet.current())
+        tealet.tealet.run(target, task_main, None)
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
         if target is tealet.current():
