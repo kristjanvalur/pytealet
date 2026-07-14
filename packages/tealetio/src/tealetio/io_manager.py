@@ -74,8 +74,6 @@ __all__ = [
     "SocketAddress",
     "SocketSendBuffer",
     "SocketIO",
-    "StreamOpenIO",
-    "StreamWriterIO",
     "SupportsProactorIO",
 ]
 
@@ -256,8 +254,8 @@ class ProactorIOManager:
     ``sock_recv_iter`` remains a blocking iterator over ``recv_many`` chunks.
     Always owned by a proactor scheduler.
 
-    Structurally implements ``StreamOpenIO`` and ``StreamWriterIO`` (re-exported
-    from ``streams.open`` / ``streams.writer``) for stream-pair construction.
+    Structurally implements ``StreamOpenIO`` and ``StreamWriterIO`` (defined in
+    ``streams.open`` / ``streams.writer``) for stream-pair construction.
     """
 
     def __init__(self, scheduler: BaseScheduler, proactor: Proactor) -> None:
@@ -840,5 +838,4 @@ class ProactorIOManager:
         return IOWaiter(self, operation, map_result=make_file)
 
 
-from .streams.open import StreamOpenIO, open_streams  # noqa: E402
-from .streams.writer import StreamWriterIO  # noqa: E402
+from .streams.open import open_streams  # noqa: E402
