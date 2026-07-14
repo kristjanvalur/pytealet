@@ -72,7 +72,6 @@ def test_top_level_exports_public_scheduler_api():
         "Scheduler",
         "SocketIO",
         "SupportsProactorIO",
-        "SocketTransport",
         "start_server",
         "StreamFactory",
         "StreamReader",

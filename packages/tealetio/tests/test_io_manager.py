@@ -868,6 +868,65 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
+    def test_sock_sendall_waiter_add_done_callback_registers_after_return(self):
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        completed: list[int] = []
+        try:
+            waiter = io.sock_sendall(sock, b"hello")
+            waiter.add_done_callback(lambda: completed.append(1))
+            waiter.forget()
+            assert completed == [1]
+            assert proactor.send_calls == [(sock, b"hello")]
+        finally:
+            sock.close()
+
+    def test_sock_sendall_waiter_add_done_callback_runs_on_failure(self):
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        completed: list[int] = []
+        try:
+
+            def boom(sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
+                del data, progress
+                operation = Operation[None](kind="send", fileobj=sock)
+                operation._finish(exception=OSError("send failed"))
+                return operation
+
+            proactor.send = boom  # type: ignore[method-assign]
+            waiter = io.sock_sendall(sock, b"hello")
+            waiter.add_done_callback(lambda: completed.append(1))
+            with pytest.raises(OSError, match="send failed"):
+                waiter.wait()
+            assert completed == [1]
+        finally:
+            sock.close()
+
+    def test_sock_sendall_empty_payload_add_done_callback_runs_after_return(self):
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socketpair()[0]
+        phase: list[str] = []
+        try:
+
+            def send(target_sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
+                del data, progress
+                phase.append("send")
+                operation = Operation[None](kind="send", fileobj=target_sock)
+                operation._finish(result=None)
+                return operation
+
+            proactor.send = send  # type: ignore[method-assign]
+            waiter = io.sock_sendall(sock, b"")
+            phase.append("returned")
+            waiter.add_done_callback(lambda: phase.append("done"))
+            assert phase == ["send", "returned", "done"]
+            assert proactor.send_calls == []
+        finally:
+            sock.close()
+
     def test_poll_delegates_to_proactor(self):
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -1181,13 +1240,13 @@ class TestProactorIOManagerDirect:
 
         monkeypatch.setattr(io, "_cancel_operation", track_cancel)
 
-        original_event = io_waiter_module.ThreadsafeEvent
+        original_event = io_waiter_module.CrossThreadEvent
 
         class RaisingEvent(original_event):
             def swait(self) -> bool:
                 raise KeyboardInterrupt()
 
-        monkeypatch.setattr(io_waiter_module, "ThreadsafeEvent", RaisingEvent)
+        monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", RaisingEvent)
 
         with pytest.raises(KeyboardInterrupt):
             waiter.wait()
@@ -1228,12 +1287,12 @@ class TestProactorIOManagerDeferredCompose:
             return operation
 
         proactor.recv = pending_recv_operation  # type: ignore[method-assign]
-        original_swait = io_waiter_module.ThreadsafeEvent.swait
+        original_swait = io_waiter_module.CrossThreadEvent.swait
 
         def swait_and_abort(self: Any) -> None:
             raise TimeoutError("abort wait")
 
-        monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", swait_and_abort)
+        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", swait_and_abort)
         try:
             waiter = io.sock_accept(listen, 64)
             assert isinstance(waiter, IOWaitGroup)
@@ -1246,7 +1305,7 @@ class TestProactorIOManagerDeferredCompose:
             assert conn.fileno() == -1
         finally:
             listen.close()
-            io_waiter_module.ThreadsafeEvent.swait = original_swait
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
     def test_sock_create_cancel_during_pending_connect_closes_socket(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1256,7 +1315,7 @@ class TestProactorIOManagerDeferredCompose:
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         scheduler = SyncProactorScheduler(lambda: proactor)
         set_scheduler(scheduler)
-        original_swait = io_waiter_module.ThreadsafeEvent.swait
+        original_swait = io_waiter_module.CrossThreadEvent.swait
 
         def staged_swait(self: Any) -> None:
             stage = _await_deferred_create_socket_stage(proactor)
@@ -1265,7 +1324,7 @@ class TestProactorIOManagerDeferredCompose:
                 _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
             raise TimeoutError("abort wait")
 
-        monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", staged_swait)
+        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", staged_swait)
         try:
             waiter = scheduler.io.sock_create(
                 socket.AF_INET,
@@ -1283,7 +1342,7 @@ class TestProactorIOManagerDeferredCompose:
         finally:
             scheduler.close()
             proactor.close()
-            io_waiter_module.ThreadsafeEvent.swait = original_swait
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
     def test_sock_create_cancel_during_pending_send_closes_socket(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1293,7 +1352,7 @@ class TestProactorIOManagerDeferredCompose:
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         scheduler = SyncProactorScheduler(lambda: proactor)
         set_scheduler(scheduler)
-        original_swait = io_waiter_module.ThreadsafeEvent.swait
+        original_swait = io_waiter_module.CrossThreadEvent.swait
 
         def staged_swait(self: Any) -> None:
             stage = _await_deferred_create_socket_stage(proactor)
@@ -1309,7 +1368,7 @@ class TestProactorIOManagerDeferredCompose:
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             raise TimeoutError("abort wait")
 
-        monkeypatch.setattr(io_waiter_module.ThreadsafeEvent, "swait", staged_swait)
+        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", staged_swait)
         try:
             waiter = scheduler.io.sock_create(
                 socket.AF_INET,
@@ -1327,7 +1386,7 @@ class TestProactorIOManagerDeferredCompose:
         finally:
             scheduler.close()
             proactor.close()
-            io_waiter_module.ThreadsafeEvent.swait = original_swait
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
 
 class TestIOWaitablePoll:
@@ -1383,13 +1442,13 @@ class TestIOWaitablePoll:
 
 
 class TestIOWaitGroup:
-    def test_group_wait_uses_single_threadsafe_event_for_multi_leg_compose(self) -> None:
+    def test_group_wait_uses_single_cross_thread_event_for_multi_leg_compose(self) -> None:
         import tealetio.io_waiter as io_waiter_module
 
         proactor = _MockProactor()
         io = _manager(proactor)
         event_count = 0
-        original_event = io_waiter_module.ThreadsafeEvent
+        original_event = io_waiter_module.CrossThreadEvent
         pending_connect: list[Operation[None]] = []
 
         class TrackingEvent(original_event):
@@ -1404,7 +1463,7 @@ class TestIOWaitGroup:
                     connect._finish(result=None)
                 super().swait()
 
-        io_waiter_module.ThreadsafeEvent = TrackingEvent  # type: ignore[misc]
+        io_waiter_module.CrossThreadEvent = TrackingEvent  # type: ignore[misc]
         try:
             create = Operation[socket.socket](kind="create", fileobj=None)
             connect = Operation[None](kind="connect", fileobj=None)
@@ -1425,7 +1484,26 @@ class TestIOWaitGroup:
             assert group.wait() is proactor.last_create_socket
             assert event_count == 1
         finally:
-            io_waiter_module.ThreadsafeEvent = original_event
+            io_waiter_module.CrossThreadEvent = original_event
+
+    def test_group_add_done_callback_runs_when_finish_completes(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        completed: list[int] = []
+        group = IOWaitGroup[str](io)
+        group.add_done_callback(lambda: completed.append(1))
+        group.finish("done")
+        assert completed == [1]
+        assert group.wait() == "done"
+
+    def test_group_add_done_callback_runs_immediately_when_already_done(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        completed: list[int] = []
+        group = IOWaitGroup[str](io)
+        group.finish("done")
+        group.add_done_callback(lambda: completed.append(1))
+        assert completed == [1]
 
     def test_group_attach_sync_completed_operation_clears_members(self) -> None:
         proactor = _MockProactor()
@@ -1526,18 +1604,18 @@ class TestIOWaitGroup:
 
         import tealetio.io_waiter as io_waiter_module
 
-        original_swait = io_waiter_module.ThreadsafeEvent.swait
+        original_swait = io_waiter_module.CrossThreadEvent.swait
 
         def swait_and_abort(self: Any) -> None:
             raise TimeoutError("abort wait")
 
-        io_waiter_module.ThreadsafeEvent.swait = swait_and_abort  # type: ignore[method-assign]
+        io_waiter_module.CrossThreadEvent.swait = swait_and_abort  # type: ignore[method-assign]
         try:
             with pytest.raises(TimeoutError, match="abort wait"):
                 group.wait()
             assert group.finish("late") is False
         finally:
-            io_waiter_module.ThreadsafeEvent.swait = original_swait
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
     def test_finish_or_close_socket_closes_on_rejected_delivery(self) -> None:
         proactor = _MockProactor()
@@ -1557,18 +1635,18 @@ class TestIOWaitGroup:
         group = IOWaitGroup[str](io)
         group.attach(operation)
 
-        original_event = io_waiter_module.ThreadsafeEvent
+        original_event = io_waiter_module.CrossThreadEvent
 
         class RacingEvent(original_event):
             def __init__(self, scheduler: Any) -> None:
                 super().__init__(scheduler)
                 group.finish("raced")
 
-        io_waiter_module.ThreadsafeEvent = RacingEvent  # type: ignore[misc]
+        io_waiter_module.CrossThreadEvent = RacingEvent  # type: ignore[misc]
         try:
             assert group.wait() == "raced"
         finally:
-            io_waiter_module.ThreadsafeEvent = original_event
+            io_waiter_module.CrossThreadEvent = original_event
 
     def test_group_wait_returns_result_when_delivery_races_interrupt(self) -> None:
         proactor = _MockProactor()
@@ -1579,17 +1657,17 @@ class TestIOWaitGroup:
 
         import tealetio.io_waiter as io_waiter_module
 
-        original_swait = io_waiter_module.ThreadsafeEvent.swait
+        original_swait = io_waiter_module.CrossThreadEvent.swait
 
         def swait_finish_then_abort(self: Any) -> None:
             group.finish("delivered")
             raise TimeoutError("abort wait")
 
-        io_waiter_module.ThreadsafeEvent.swait = swait_finish_then_abort  # type: ignore[method-assign]
+        io_waiter_module.CrossThreadEvent.swait = swait_finish_then_abort  # type: ignore[method-assign]
         try:
             assert group.wait() == "delivered"
         finally:
-            io_waiter_module.ThreadsafeEvent.swait = original_swait
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
     def test_io_waiter_returns_result_when_delivery_races_interrupt(self) -> None:
         proactor = _MockProactor()
@@ -1606,7 +1684,7 @@ class TestIOWaitGroup:
 
         import tealetio.io_waiter as io_waiter_module
 
-        original_swait = io_waiter_module.ThreadsafeEvent.swait
+        original_swait = io_waiter_module.CrossThreadEvent.swait
         waiter = io.sock_accept(listen)
 
         def swait_complete_then_abort(self: Any) -> None:
@@ -1614,7 +1692,7 @@ class TestIOWaitGroup:
             pending[0]._finish(result=conn)
             raise TimeoutError("abort wait")
 
-        io_waiter_module.ThreadsafeEvent.swait = swait_complete_then_abort  # type: ignore[method-assign]
+        io_waiter_module.CrossThreadEvent.swait = swait_complete_then_abort  # type: ignore[method-assign]
         try:
             conn, initial = waiter.wait()
             try:
@@ -1624,7 +1702,7 @@ class TestIOWaitGroup:
                 conn.close()
         finally:
             listen.close()
-            io_waiter_module.ThreadsafeEvent.swait = original_swait
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
     def test_group_wait_cancels_active_operations_on_exception(self) -> None:
         proactor = _MockProactor()
@@ -1635,18 +1713,18 @@ class TestIOWaitGroup:
 
         import tealetio.io_waiter as io_waiter_module
 
-        original_swait = io_waiter_module.ThreadsafeEvent.swait
+        original_swait = io_waiter_module.CrossThreadEvent.swait
 
         def swait_and_abort(self: Any) -> None:
             raise TimeoutError()
 
-        io_waiter_module.ThreadsafeEvent.swait = swait_and_abort  # type: ignore[method-assign]
+        io_waiter_module.CrossThreadEvent.swait = swait_and_abort  # type: ignore[method-assign]
         try:
             with pytest.raises(TimeoutError):
                 group.wait()
             assert operation.cancelled()
         finally:
-            io_waiter_module.ThreadsafeEvent.swait = original_swait
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)

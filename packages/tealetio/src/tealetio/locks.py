@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import threading
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar, cast
 
 import tealet
 
 T = TypeVar("T")
+_PredicateT = TypeVar("_PredicateT")
+
+
+class _ConditionWaiter(Protocol):
+    def swait(self) -> bool: ...
+
+    def set(self) -> None: ...
+
+
+_EventT = TypeVar("_EventT", bound=_ConditionWaiter)
 
 __all__ = [
     "Barrier",
@@ -24,7 +35,8 @@ __all__ = [
     "QueueFull",
     "QueueShutDown",
     "Semaphore",
-    "ThreadsafeEvent",
+    "CrossThreadCondition",
+    "CrossThreadEvent",
     "Timeout",
     "TimeoutError",
     "timeout",
@@ -206,8 +218,19 @@ class Event:
         return self._is_set
 
 
-class ThreadsafeEvent:
-    """Synchronous event whose `set` method is safe from another thread."""
+class CrossThreadEvent:
+    """Directional signal from a producer to a consumer tealet.
+
+    Intended for producer→consumer handoff (or consumer→consumer relay): one
+    side publishes readiness and calls ``set()``; the waiting side is usually a
+    scheduler tealet that calls ``swait()``. The producer — which may or may
+    not itself be a tealet — must **never** wait on this primitive.
+
+    ``set()`` routes the wakeup through ``call_soon_threadsafe``, so it is safe
+    from any OS thread and from same-thread proactor callbacks (for example
+    ``SelectorProactor`` completion on the scheduler thread). This is not a
+    thread-safe drop-in for ``Event``.
+    """
 
     def __init__(self, scheduler: BaseScheduler | None = None) -> None:
         self._waiters: list[tealet.tealet] = []
@@ -482,40 +505,38 @@ class PriorityLock(Lock):
         super().release()
 
 
-class Condition:
-    """A tealet-compatible condition variable."""
+class _ConditionBase(Generic[_EventT]):
+    """Shared condition-variable wait/notify logic."""
 
-    def __init__(self, lock: Lock | None = None) -> None:
-        self._lock = lock if lock is not None else Lock()
-        self._waiters: deque[Event] = deque()
+    _lock: Any
+    _waiters: deque[_EventT]
 
     def locked(self) -> bool:
         """Return True if the underlying lock is currently acquired."""
 
         return self._lock.locked()
 
-    def sacquire(self) -> bool:
-        """Acquire the underlying lock from synchronous tealet code."""
-
-        return self._lock.sacquire()
-
-    async def acquire(self) -> bool:
-        """Acquire the underlying lock from async code."""
-
-        return await self._lock.acquire()
-
     def release(self) -> None:
         """Release the underlying lock."""
 
         self._lock.release()
 
+    def _make_waiter(self) -> _EventT:
+        raise NotImplementedError
+
+    def _lock_acquire_sync(self) -> Any:
+        raise NotImplementedError
+
+    def _lock_reacquire_sync(self) -> Any:
+        raise NotImplementedError
+
     def swait(self) -> bool:
-        """Release the lock and block until notified from sync tealet code."""
+        """Release the lock and block the current tealet until notified."""
 
         if not self.locked():
             raise RuntimeError("cannot wait on un-acquired lock")
 
-        waiter = Event()
+        waiter = self._make_waiter()
         self._waiters.append(waiter)
         self._lock.release()
         try:
@@ -526,29 +547,15 @@ class Condition:
                 self._waiters.remove(waiter)
             except ValueError:
                 pass
-            self._lock.sacquire()
+            self._lock_reacquire_sync()
 
-    async def wait(self) -> bool:
-        """Release the lock and await until notified from async code."""
+    def swait_for(self, predicate: Callable[[], _PredicateT]) -> _PredicateT:
+        """Synchronously wait until ``predicate()`` returns a truthy value.
 
-        if not self.locked():
-            raise RuntimeError("cannot wait on un-acquired lock")
-
-        waiter = Event()
-        self._waiters.append(waiter)
-        self._lock.release()
-        try:
-            await waiter.wait()
-            return True
-        finally:
-            try:
-                self._waiters.remove(waiter)
-            except ValueError:
-                pass
-            await self._lock.acquire()
-
-    def swait_for(self, predicate: Callable[[], bool]) -> bool:
-        """Synchronously wait until `predicate` returns a truthy value."""
+        Returns that value. Falsy results (``None``, ``False``, and so on) mean
+        not ready yet; box a ready value that would itself be falsy (for example
+        ``(None,)`` for EOF).
+        """
 
         result = predicate()
         while not result:
@@ -556,17 +563,8 @@ class Condition:
             result = predicate()
         return result
 
-    async def wait_for(self, predicate: Callable[[], bool]) -> bool:
-        """Asynchronously wait until `predicate` returns a truthy value."""
-
-        result = predicate()
-        while not result:
-            await self.wait()
-            result = predicate()
-        return result
-
     def notify(self, n: int = 1) -> None:
-        """Wake up to `n` tasks waiting on this condition."""
+        """Wake up to ``n`` tasks waiting on this condition."""
 
         if not self.locked():
             raise RuntimeError("cannot notify on un-acquired lock")
@@ -583,12 +581,67 @@ class Condition:
 
         self.notify(len(self._waiters))
 
-    def __enter__(self) -> "Condition":
-        self.sacquire()
-        return self
-
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
+
+
+class Condition(_ConditionBase[Event]):
+    """A tealet-compatible condition variable."""
+
+    def __init__(self, lock: Lock | None = None) -> None:
+        self._lock = lock if lock is not None else Lock()
+        self._waiters: deque[Event] = deque()
+
+    def _make_waiter(self) -> Event:
+        return Event()
+
+    def _lock_acquire_sync(self) -> bool:
+        return self._lock.sacquire()
+
+    def _lock_reacquire_sync(self) -> bool:
+        return self._lock.sacquire()
+
+    def sacquire(self) -> bool:
+        """Acquire the underlying lock from synchronous tealet code."""
+
+        return self._lock_acquire_sync()
+
+    async def acquire(self) -> bool:
+        """Acquire the underlying lock from async code."""
+
+        return await self._lock.acquire()
+
+    async def wait(self) -> bool:
+        """Release the lock and await until notified from async code."""
+
+        if not self.locked():
+            raise RuntimeError("cannot wait on un-acquired lock")
+
+        waiter = self._make_waiter()
+        self._waiters.append(waiter)
+        self._lock.release()
+        try:
+            await waiter.wait()
+            return True
+        finally:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            await self._lock.acquire()
+
+    async def wait_for(self, predicate: Callable[[], _PredicateT]) -> _PredicateT:
+        """Asynchronously wait until ``predicate()`` returns a truthy value."""
+
+        result = predicate()
+        while not result:
+            await self.wait()
+            result = predicate()
+        return result
+
+    def __enter__(self) -> "Condition":
+        self._lock_acquire_sync()
+        return self
 
     async def __aenter__(self) -> "Condition":
         await self.acquire()
@@ -596,6 +649,62 @@ class Condition:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
+
+
+class CrossThreadCondition(_ConditionBase[CrossThreadEvent]):
+    """Directional condition variable for producer→consumer signalling.
+
+    Mirrors ``Condition`` (per-wait events, ``with cond:``, ``swait_for``
+    predicates) but uses a ``threading.Lock`` and ``CrossThreadEvent`` so
+    ``notify()`` is safe from any OS thread or same-thread proactor callback.
+
+    **Roles.** The producer publishes shared state under the lock and calls
+    ``notify()`` or ``notify_all()``; it must **never** call ``swait()`` or
+    ``swait_for()``. The consumer is typically a scheduler tealet that waits
+    when nothing is ready; a consumer tealet may also ``notify()`` when relaying
+    to another consumer. The producer need not be a tealet (for example an IO
+    completion callback).
+
+    **Lock discipline.** The underlying lock is a ``threading.Lock``, not the
+    tealet ``Lock``. While holding it, the current tealet must not perform any
+    other tealet-blocking operation — for example ``IOWaiter.wait()``,
+    ``Lock.sacquire()``, or ``Event.swait()`` on a different primitive. Those
+    calls park the tealet without releasing this OS lock, so another tealet that
+    needs the same lock will block the thread and the scheduler deadlocks. The
+    only safe way to block while logically "in" the condition is ``swait()`` or
+    ``swait_for()``, which release the ``threading.Lock`` before parking.
+
+    Each wait allocates a fresh event, so there is no lost-wakeup race from
+    ``clear()`` on a reused event.
+    """
+
+    def __init__(
+        self,
+        lock: threading.Lock | None = None,
+        *,
+        scheduler: BaseScheduler | None = None,
+    ) -> None:
+        self._lock = lock if lock is not None else threading.Lock()
+        self._scheduler = _get_current_scheduler() if scheduler is None else scheduler
+        self._waiters: deque[CrossThreadEvent] = deque()
+
+    def _make_waiter(self) -> CrossThreadEvent:
+        return CrossThreadEvent(self._scheduler)
+
+    def _lock_acquire_sync(self) -> None:
+        self._lock.acquire()
+
+    def _lock_reacquire_sync(self) -> None:
+        self._lock.acquire()
+
+    def acquire(self) -> None:
+        """Acquire the underlying ``threading.Lock``."""
+
+        self._lock_acquire_sync()
+
+    def __enter__(self) -> "CrossThreadCondition":
+        self._lock_acquire_sync()
+        return self
 
 
 class Barrier:

@@ -355,6 +355,11 @@ class ProactorIOManager:
     def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> IOWaiter[None]:
         return IOWaiter(self, self._proactor.send(sock, data, progress))
 
+    def _open_send_buffer(self, sock: socket.socket):
+        from .send_buffer import SendBuffer
+
+        return SendBuffer(sock=sock, io=self, scheduler=self._scheduler)
+
     def sock_send_iter(
         self,
         sock: socket.socket,

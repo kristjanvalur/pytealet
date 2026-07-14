@@ -162,7 +162,7 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 Multi-leg socket work (create → connect → send, connect → send) is composed in
 `ProactorIOManager` with `IOWaitGroup`, not inside the proactor. Each leg is a
 normal proactor `Operation`; the group wires advance handlers and a single
-`ThreadsafeEvent` park for the caller's `.wait()`.
+`CrossThreadEvent` park for the caller's `.wait()`.
 
 ```text
 ProactorIOManager.sock_create(connect_to=…, initial_data=…)
@@ -345,7 +345,7 @@ no public `cancel()` on `IOWaiter` — cancellation is an internal concern at th
 operation / proactor layer, not a third blocking-IO disposition.
 
 If `wait()` exits exceptionally (for example `timeout()` throwing into the
-blocked tealet while `ThreadsafeEvent.swait()` is parked), the waiter cancels
+blocked tealet while `CrossThreadEvent.swait()` is parked), the waiter cancels
 pending backend work and re-raises — unless delivery already completed, in
 which case the interrupt is swallowed and the result (or completion exception)
 is returned. ``IOWaiter`` checks the underlying ``Operation``; ``IOWaitGroup``
@@ -371,7 +371,7 @@ internal uses on non-resource one-shot ops.
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
 group. Each leg is registered with ``attach()``;
 advance handlers run on worker threads and submit the next leg. The group parks
-once on a single ``ThreadsafeEvent`` until ``finish()`` or an error.
+once on a single ``CrossThreadEvent`` until ``finish()`` or an error.
 ``IOWaitGroupChild.value()`` is one-shot and hands a leg result into the next
 advance handler. An optional ``on_cleanup`` hook on each leg receives failures
 (``fail=True``) or unreleased success values when ``wait()`` exits exceptionally
@@ -416,10 +416,17 @@ drop waiter only”.
   signatures (`RecvBufferPool`, and similar). `IOFile` and `ServerIO` are done.
 - `StreamServer.serve_forever()` sugar (implemented); signal handling stays in
   `Runner`, not the server object.
-- **Stream transport close via `io.sock_close`** — `SocketTransport.close()` still
-  calls `socket.close()` directly; route through `sock_shutdown` / `sock_close`
-  in a follow-up PR when stream closing semantics are cleaned up (this PR adds
-  the proactor/manager close paths as preparation).
+- **Stream writer shutdown** — `StreamWriter.close()` is non-blocking; callers
+  must `wait_closed()` to flush queued sends and release the socket via
+  `sock_shutdown` / `sock_close`. `StreamServer` handler cleanup calls
+  `wait_closed()` after `close()`.
+- **Consolidate buffer bridges and stream modules** — `RecvIterBuffer`
+  (`recv_iter.py`), `SendBuffer` (`send_buffer.py`), and their
+  `_open_sock_recv_iter` / `_open_send_buffer` factories are intentionally split
+  today, but file granularity is getting high. Plan to move these helpers out of
+  the `io_manager.py` surface into a shared stream-buffer module and to
+  colocate `StreamReader` / `StreamWriter` cores in the same area. See
+  `packages/tealetio/ROADMAP.md` (Consolidate stream buffer helpers).
 
 ## References
 
@@ -429,5 +436,7 @@ drop waiter only”.
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`
 - `packages/tealetio/src/tealetio/streams.py` — streams API
+- `packages/tealetio/src/tealetio/recv_iter.py` — `RecvIterBuffer`
+- `packages/tealetio/src/tealetio/send_buffer.py` — `SendBuffer`
 - `packages/tealetio/docs/PYTHON_API.md` — user-facing API
 - `packages/tealetio/docs/OPERATION_CALLBACKS.md` — io_manager continuous composition and delivery disposition

@@ -4,19 +4,22 @@ import asyncio
 import socket
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from tealetio import Event, set_scheduler
+from tealetio.io_manager import ProactorIOManager
+from tealetio.io_waiter import IOWaiter
+from tealetio.operations import Operation
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.streams import (
     AsyncStreamReader,
     AsyncStreamWriter,
-    SocketTransport,
     StreamReader,
     StreamWriter,
     _open_recv_buffer,
+    _open_send_buffer,
     open_connection,
     open_streams,
     pooled_default_stream_factory,
@@ -176,10 +179,12 @@ class TestStreamsPoC:
                 tag = "native-custom"
 
             def custom_factory(io, sock, *, limit):
-                transport = SocketTransport(io, sock)
                 recv_buffer = _open_recv_buffer(io, sock, None)
+                send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = StreamWriter(transport, stream_reader)
+                stream_writer = StreamWriter(
+                    send_buffer=send_buffer, sock=sock, io=cast(ProactorIOManager, io), reader=stream_reader
+                )
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -243,10 +248,12 @@ class TestStreamsPoC:
                 tag = "async-custom"
 
             def custom_factory(io, sock, *, limit):
-                transport = SocketTransport(io, sock)
                 recv_buffer = _open_recv_buffer(io, sock, None)
+                send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedAsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = AsyncStreamWriter(transport, stream_reader)
+                stream_writer = AsyncStreamWriter(
+                    send_buffer=send_buffer, sock=sock, io=cast(ProactorIOManager, io), reader=stream_reader
+                )
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -806,6 +813,221 @@ class TestStreamsPoC:
             reader.close()
             writer.close()
 
+    def test_stream_writer_writelines_sends_in_order(self, scheduler: SyncProactorScheduler) -> None:
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            stream_writer = StreamWriter(
+                send_buffer=_open_send_buffer(scheduler.io, conn),
+                sock=conn,
+                io=scheduler.io,
+            )
+
+            def exercise() -> bytes:
+                stream_writer.writelines([b"ab", b"cd"])
+                stream_writer.flush()
+                return scheduler.io.sock_recv(peer, 4).wait()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"abcd"
+        finally:
+            conn.close()
+            peer.close()
+
+    def test_default_stream_writer_uses_send_buffer(self, scheduler: SyncProactorScheduler) -> None:
+        from tealetio.send_buffer import SendBuffer
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            _stream_reader, stream_writer = open_streams(reader, scheduler=scheduler)
+            assert isinstance(stream_writer._send_buffer, SendBuffer)
+            assert stream_writer._send_buffer is stream_writer._core._send_buffer
+            assert stream_writer.get_extra_info("socket") is stream_writer._sock
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_stream_writer_close_is_nonblocking_until_wait_closed(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            stream_writer = StreamWriter(
+                send_buffer=_open_send_buffer(scheduler.io, conn),
+                sock=conn,
+                io=scheduler.io,
+            )
+            stream_writer.write(b"xy")
+            stream_writer.close()
+            assert stream_writer.is_closing()
+            assert stream_writer._sock.fileno() != -1
+
+            def finish_close() -> bytes:
+                stream_writer.wait_closed()
+                return scheduler.io.sock_recv(peer, 2).wait()
+
+            assert scheduler.run_until_complete(scheduler.spawn(finish_close)) == b"xy"
+            assert stream_writer._sock.fileno() == -1
+        finally:
+            conn.close()
+            peer.close()
+
+    def test_stream_writer_wait_closed_initiates_close(self, scheduler: SyncProactorScheduler) -> None:
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            stream_writer = StreamWriter(
+                send_buffer=_open_send_buffer(scheduler.io, conn),
+                sock=conn,
+                io=scheduler.io,
+            )
+            stream_writer.write(b"z")
+            assert not stream_writer.is_closing()
+
+            def close_via_wait() -> bytes:
+                stream_writer.wait_closed()
+                return scheduler.io.sock_recv(peer, 1).wait()
+
+            assert scheduler.run_until_complete(scheduler.spawn(close_via_wait)) == b"z"
+            assert stream_writer.is_closing()
+            assert stream_writer._sock.fileno() == -1
+        finally:
+            conn.close()
+            peer.close()
+
+    def test_stream_writer_write_eof_half_closes(self, scheduler: SyncProactorScheduler) -> None:
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            stream_writer = StreamWriter(
+                send_buffer=_open_send_buffer(scheduler.io, conn),
+                sock=conn,
+                io=scheduler.io,
+            )
+            assert stream_writer.can_write_eof()
+
+            pending_ops: list[Operation[None]] = []
+            shutdown_calls: list[int] = []
+            real_sendall = scheduler.io.sock_sendall
+            real_shutdown = scheduler.io.sock_shutdown
+
+            def staged_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del progress
+                operation = Operation[None](kind="send", fileobj=sock)
+                pending_ops.append(operation)
+                return IOWaiter(scheduler.io, operation)
+
+            def track_shutdown(sock: socket.socket, how: int):
+                shutdown_calls.append(how)
+                return real_shutdown(sock, how)
+
+            scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+
+            def write_and_half_close() -> None:
+                stream_writer.write(b"a")
+                stream_writer.write_eof()
+                assert not stream_writer.can_write_eof()
+                assert stream_writer._send_buffer.eof_pending
+                assert not stream_writer._send_buffer.write_eof_done
+                assert shutdown_calls == []
+                pending_ops[0]._finish(result=None)
+                assert stream_writer._send_buffer.write_eof_done
+                assert shutdown_calls == [socket.SHUT_WR]
+
+            try:
+                scheduler.run_until_complete(scheduler.spawn(write_and_half_close))
+            finally:
+                scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+                scheduler.io.sock_shutdown = real_shutdown  # type: ignore[method-assign]
+
+            def finish_close() -> None:
+                stream_writer.close()
+                stream_writer.wait_closed()
+                assert stream_writer._sock.fileno() == -1
+
+            scheduler.run_until_complete(scheduler.spawn(finish_close))
+        finally:
+            conn.close()
+            peer.close()
+
+    def test_stream_writer_wait_closed_propagates_flush_error(self, scheduler: SyncProactorScheduler) -> None:
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            pending = Operation[None](kind="send", fileobj=conn)
+            real_sendall = scheduler.io.sock_sendall
+
+            def pending_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del data, progress
+                return IOWaiter(scheduler.io, pending)
+
+            scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
+            stream_writer = StreamWriter(
+                send_buffer=_open_send_buffer(scheduler.io, conn),
+                sock=conn,
+                io=scheduler.io,
+            )
+
+            def exercise() -> None:
+                stream_writer.write(b"x")
+                stream_writer.close()
+                pending._finish(exception=OSError("send failed"))
+                with pytest.raises(OSError, match="send failed"):
+                    stream_writer.wait_closed()
+                assert stream_writer._core._closed
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            conn.close()
+            peer.close()
+
+    def test_stream_writer_wait_closed_uses_proactor_shutdown_and_close(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            stream_writer = StreamWriter(
+                send_buffer=_open_send_buffer(scheduler.io, conn),
+                sock=conn,
+                io=scheduler.io,
+            )
+            shutdown_calls: list[tuple[socket.socket, int]] = []
+            close_calls: list[socket.socket] = []
+            real_shutdown = scheduler.io.sock_shutdown
+            real_close = scheduler.io.sock_close
+
+            def track_shutdown(sock: socket.socket, how: int):
+                shutdown_calls.append((sock, how))
+                return real_shutdown(sock, how)
+
+            def track_close(sock: socket.socket):
+                close_calls.append(sock)
+                return real_close(sock)
+
+            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_close = track_close  # type: ignore[method-assign]
+
+            def exercise() -> None:
+                stream_writer.close()
+                stream_writer.wait_closed()
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert shutdown_calls == [(stream_writer._sock, socket.SHUT_WR)]
+            assert close_calls == [stream_writer._sock]
+        finally:
+            conn.close()
+            peer.close()
+
     def test_stream_reader_readline_fills_from_recv_iter_chunks(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         recv_calls = 0
@@ -833,6 +1055,37 @@ class TestStreamsPoC:
             scheduler.proactor.recv = real_recv  # type: ignore[method-assign]
             reader.close()
             writer.close()
+
+    def test_stream_server_handler_close_shuts_down_client_socket(self, scheduler: SyncProactorScheduler) -> None:
+        handled = Event()
+        client_socks: list[socket.socket] = []
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            client_socks.append(writer._sock)
+            writer.close()
+            handled.set()
+
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            try:
+                _host, port = server.sockets[0].getsockname()
+
+                def connect_and_send() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    writer.write(b"x")
+                    writer.drain()
+                    writer.close()
+
+                scheduler.spawn(connect_and_send)
+                handled.swait()
+                server.close()
+                server.wait_closed()
+            finally:
+                server.close()
+
+        run_scheduler_task(scheduler, exercise)
+        assert len(client_socks) == 1
+        assert client_socks[0].fileno() == -1
 
     def test_start_server_uses_accept_many_and_dispatches_handler(self, scheduler: SyncProactorScheduler) -> None:
         handled = Event()

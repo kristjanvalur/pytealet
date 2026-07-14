@@ -7,7 +7,7 @@ import os
 import socket
 import sys
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
 from typing import Any, Literal, Protocol, TypeAlias, TypeVar, cast, overload
 
 from asynkit import coro_drive
@@ -22,6 +22,7 @@ from .io_manager import (
     SupportsProactorIO,
 )
 from .recv_iter import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer
+from .send_buffer import SendBuffer
 from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
 
 from .scheduler import BaseScheduler
@@ -32,7 +33,6 @@ T = TypeVar("T")
 _DEFAULT_LIMIT = 2**16
 
 __all__ = [
-    "SocketTransport",
     "StreamReader",
     "StreamWriter",
     "AsyncStreamReader",
@@ -90,41 +90,20 @@ def run_coro(coro: Coroutine[Any, Any, T]) -> T:
     return coro_drive(coro, on_yield)
 
 
-class SocketTransport:
-    """Send-side socket I/O and connection metadata through a scheduler IO facade."""
-
-    def __init__(self, io: SocketIO, sock: socket.socket) -> None:
-        self._io = io
-        self._sock = sock
-        self._closed = False
-
-    @property
-    def sock(self) -> socket.socket:
-        return self._sock
-
-    def sendall(self, data: bytes | bytearray | memoryview) -> None:
-        self._io.sock_sendall(self._sock, data).wait()
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._sock.close()
-
-    def get_extra_info(self, name: str, default: Any = None) -> Any:
-        if name == "socket":
-            return self._sock
-        if name == "peername":
-            try:
-                return self._sock.getpeername()
-            except OSError:
-                return default
-        if name == "sockname":
-            try:
-                return self._sock.getsockname()
-            except OSError:
-                return default
-        return default
+def _writer_extra_info(sock: socket.socket, name: str, default: Any = None) -> Any:
+    if name == "socket":
+        return sock
+    if name == "peername":
+        try:
+            return sock.getpeername()
+        except OSError:
+            return default
+    if name == "sockname":
+        try:
+            return sock.getsockname()
+        except OSError:
+            return default
+    return default
 
 
 class _ReaderCore:
@@ -265,25 +244,84 @@ class _ReaderCore:
 
 
 class _WriterCore:
-    def __init__(self, transport: SocketTransport) -> None:
-        self._transport = transport
+    def __init__(
+        self,
+        *,
+        send_buffer: SendBuffer,
+        sock: socket.socket,
+        io: ProactorIOManager,
+    ) -> None:
+        self._send_buffer = send_buffer
+        self._sock = sock
+        self._io = io
+        self._closing = False
         self._closed = False
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
-        if self._closed:
+        if self._closing or self._closed:
             raise RuntimeError("StreamWriter is closed")
-        if not data:
-            return
-        self._transport.sendall(data)
+        self._send_buffer.write(data)
+
+    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
+        for line in lines:
+            self.write(line)
+
+    def drain(self) -> None:
+        self._send_buffer.drain()
+
+    def flush(self) -> None:
+        self._send_buffer.flush()
+
+    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
+        self._send_buffer.set_write_buffer_limits(high, low)
+
+    def can_write_eof(self) -> bool:
+        return (
+            not self._closing and not self._closed and not self._send_buffer.eof_pending and self._sock.fileno() != -1
+        )
+
+    def write_eof(self) -> None:
+        """Request half-close of the write side after queued data is sent."""
+
+        if self._closing or self._closed:
+            raise RuntimeError("write_eof() called on closed StreamWriter")
+        if self._sock.fileno() == -1:
+            raise RuntimeError("write_eof() called on closed StreamWriter")
+        self._send_buffer.write_eof()
 
     def close(self) -> None:
+        """Begin writer shutdown without waiting for queued data or socket close."""
+
+        if self._closing or self._closed:
+            return
+        self._closing = True
+        self._send_buffer.close()
+
+    def wait_closed(self) -> None:
+        """Block until queued sends finish and the socket is closed via the proactor."""
+
         if self._closed:
             return
+        if not self._closing:
+            self.close()
+        flush_error: BaseException | None = None
+        try:
+            self._send_buffer.flush()
+        except BaseException as exc:
+            flush_error = exc
+        if self._sock.fileno() != -1:
+            if not self._send_buffer.write_eof_done:
+                self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
+            try:
+                self._io.sock_close(self._sock).wait()
+            except OSError:
+                pass
         self._closed = True
-        self._transport.close()
+        if flush_error is not None:
+            raise flush_error
 
     def is_closing(self) -> bool:
-        return self._closed
+        return self._closing or self._closed
 
 
 class StreamReader:
@@ -351,19 +389,28 @@ class AsyncStreamReader:
 class StreamWriter:
     """Native tealet stream writer with synchronous methods."""
 
-    def __init__(self, transport: SocketTransport, reader: StreamReader | None = None) -> None:
-        self._core = _WriterCore(transport)
+    def __init__(
+        self,
+        *,
+        send_buffer: SendBuffer,
+        sock: socket.socket,
+        io: ProactorIOManager,
+        reader: StreamReader | None = None,
+    ) -> None:
+        self._send_buffer = send_buffer
+        self._sock = sock
+        self._io = io
+        self._core = _WriterCore(send_buffer=send_buffer, sock=sock, io=io)
         self._reader = reader
 
-    @property
-    def transport(self) -> SocketTransport:
-        return self._core._transport
-
     def get_extra_info(self, name: str, default: Any = None) -> Any:
-        return self._core._transport.get_extra_info(name, default)
+        return _writer_extra_info(self._sock, name, default)
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)
+
+    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
+        self._core.writelines(lines)
 
     def close(self) -> None:
         if self._reader is not None:
@@ -374,28 +421,49 @@ class StreamWriter:
         return self._core.is_closing()
 
     def drain(self) -> None:
-        return None
+        self._core.drain()
+
+    def flush(self) -> None:
+        self._core.flush()
+
+    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
+        self._core.set_write_buffer_limits(high, low)
+
+    def can_write_eof(self) -> bool:
+        return self._core.can_write_eof()
+
+    def write_eof(self) -> None:
+        self._core.write_eof()
 
     def wait_closed(self) -> None:
-        return None
+        self._core.wait_closed()
 
 
 class AsyncStreamWriter:
     """Asyncio-shaped stream writer backed by tealet-blocking socket I/O."""
 
-    def __init__(self, transport: SocketTransport, reader: AsyncStreamReader | None = None) -> None:
-        self._core = _WriterCore(transport)
+    def __init__(
+        self,
+        *,
+        send_buffer: SendBuffer,
+        sock: socket.socket,
+        io: ProactorIOManager,
+        reader: AsyncStreamReader | None = None,
+    ) -> None:
+        self._send_buffer = send_buffer
+        self._sock = sock
+        self._io = io
+        self._core = _WriterCore(send_buffer=send_buffer, sock=sock, io=io)
         self._reader = reader
 
-    @property
-    def transport(self) -> SocketTransport:
-        return self._core._transport
-
     def get_extra_info(self, name: str, default: Any = None) -> Any:
-        return self._core._transport.get_extra_info(name, default)
+        return _writer_extra_info(self._sock, name, default)
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)
+
+    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
+        self._core.writelines(lines)
 
     def close(self) -> None:
         if self._reader is not None:
@@ -406,10 +474,47 @@ class AsyncStreamWriter:
         return self._core.is_closing()
 
     async def drain(self) -> None:
-        return None
+        self._core.drain()
+
+    async def flush(self) -> None:
+        self._core.flush()
+
+    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
+        self._core.set_write_buffer_limits(high, low)
+
+    def can_write_eof(self) -> bool:
+        return self._core.can_write_eof()
+
+    def write_eof(self) -> None:
+        self._core.write_eof()
 
     async def wait_closed(self) -> None:
-        return None
+        self._core.wait_closed()
+
+
+def _shutdown_stream_writer(
+    writer: StreamWriter | AsyncStreamWriter,
+    *,
+    best_effort: bool = False,
+) -> None:
+    """Close a stream writer and wait for queued sends and socket teardown.
+
+    When ``best_effort`` is false (normal handler cleanup), flush and transport
+    errors propagate after best-effort socket close. When true (discarded
+    accepts or failed handler spawn), all shutdown errors are suppressed.
+    """
+
+    try:
+        writer.close()
+        if isinstance(writer, AsyncStreamWriter):
+            run_coro(writer.wait_closed())
+        else:
+            writer.wait_closed()
+    except OSError:
+        pass
+    except BaseException:
+        if not best_effort:
+            raise
 
 
 _NativeStreamPair: TypeAlias = tuple[StreamReader, StreamWriter]
@@ -430,6 +535,12 @@ def _open_recv_buffer(
     return io._open_sock_recv_iter(sock, recv_buffer_pool)
 
 
+def _open_send_buffer(io: SocketIO, sock: socket.socket) -> SendBuffer:
+    if not isinstance(io, ProactorIOManager):
+        raise RuntimeError("stream writers require a proactor IO manager")
+    return io._open_send_buffer(sock)
+
+
 def default_stream_factory(
     io: SocketIO,
     sock: socket.socket,
@@ -439,10 +550,11 @@ def default_stream_factory(
 ) -> tuple[StreamReader, StreamWriter]:
     """Construct the default native stream pair for a connected socket."""
 
-    transport = SocketTransport(io, sock)
+    proactor_io = cast(ProactorIOManager, io)
     recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+    send_buffer = _open_send_buffer(io, sock)
     reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = StreamWriter(transport, reader)
+    writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=proactor_io, reader=reader)
     return reader, writer
 
 
@@ -455,10 +567,11 @@ def default_async_stream_factory(
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
     """Construct the default asyncio-shaped stream pair for a connected socket."""
 
-    transport = SocketTransport(io, sock)
+    proactor_io = cast(ProactorIOManager, io)
     recv_buffer = _open_recv_buffer(io, sock, recv_buffer_pool)
+    send_buffer = _open_send_buffer(io, sock)
     reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = AsyncStreamWriter(transport, reader)
+    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, io=proactor_io, reader=reader)
     return reader, writer
 
 
@@ -952,7 +1065,7 @@ class StreamServer:
                     def on_accept(streams: _AcceptedStreams) -> None:
                         if self._closed:
                             _reader, writer = streams
-                            writer.close()
+                            _shutdown_stream_writer(writer, best_effort=True)
                             return
                         reader, writer = streams
                         self._dispatch_streams(
@@ -1043,7 +1156,7 @@ class StreamServer:
     ) -> None:
         def dispatch() -> None:
             if self._closed:
-                writer.close()
+                _shutdown_stream_writer(writer, best_effort=True)
                 return
 
             def serve() -> None:
@@ -1063,13 +1176,13 @@ class StreamServer:
                             cast(StreamWriter, writer),
                         )
                 finally:
-                    writer.close()
+                    _shutdown_stream_writer(writer)
 
             try:
                 handler_task = self._scheduler.spawn(serve)
-            except Exception:
-                writer.close()
-                raise
+            except Exception as spawn_exc:
+                _shutdown_stream_writer(writer, best_effort=True)
+                raise spawn_exc
 
             self._handler_tasks.add(handler_task)
 

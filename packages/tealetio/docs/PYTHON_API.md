@@ -253,7 +253,7 @@ generators or with a custom `recv_many` callback.
 proactor's shared pool.
 
 Out-of-order multishot completions are reordered before yield. The iterator
-must be consumed from a scheduler tealet so `ThreadsafeEvent.swait()` can
+must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
@@ -344,7 +344,7 @@ expose a composed `ProactorIOManager` at `scheduler.io`. This object owns
 blocking tealet IO over the scheduler's `Proactor` backend: `wait_operation`,
 asyncio-shaped `sock_*` helpers, `poll` / `poll_many`, positioned file `open`,
 and receive-buffer pool helpers. Call it from scheduler-owned tealets; it blocks
-the current tealet through `ThreadsafeEvent.swait()` rather than yielding
+the current tealet through `CrossThreadEvent.swait()` rather than yielding
 asyncio futures.
 
 ```python
@@ -617,8 +617,11 @@ Unix-domain stream sockets without name resolution, e.g.
 for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
 wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
-Under the hood, `SocketTransport` calls `scheduler.io.sock_sendall()` for
-writes. Default readers receive through `recv_many` via `RecvIterBuffer`.
+Under the hood, `StreamWriter` queues outbound data through an internal
+`SendBuffer` that chains `scheduler.io.sock_sendall()` legs.
+`close()` rejects further writes; `wait_closed()` flushes queued data, applies
+deferred `SHUT_WR` when `write_eof()` was called, and closes the socket.
+Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()`, `open_connection(...)`, or
 `start_server(...)` to customise stream construction. Use `StreamFactory` for

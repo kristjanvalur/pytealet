@@ -628,7 +628,7 @@ def test_recviter_buffer_ordered_eof_wins_cancel_race():
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"done"))
-        with buffer._lock:
+        with buffer._cond:
             buffer._stream_done = True
             buffer._stream_error = CancelledError()
         buffer.on_result(_recv_chunk(1, b"", more=False))
@@ -646,7 +646,7 @@ def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
         )
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
-        with buffer._lock:
+        with buffer._cond:
             buffer._stream_done = True
             buffer._stream_error = OSError("recv failed")
         results: list[object] = [buffer.take_next(), buffer.take_next()]
@@ -690,13 +690,13 @@ def test_recviter_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
         buffer = recv_iter_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
-        real_swait = buffer._event.swait
+        real_swait = buffer._cond.swait
 
         def swait_and_signal() -> bool:
             ready_to_wait.set()
             return real_swait()
 
-        monkeypatch.setattr(buffer._event, "swait", swait_and_signal)
+        monkeypatch.setattr(buffer._cond, "swait", swait_and_signal)
 
         def producer() -> None:
             assert ready_to_wait.wait(timeout=1.0)
@@ -736,13 +736,13 @@ def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
         first = buffer.take_next()
         assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
 
-        real_swait = buffer._event.swait
+        real_swait = buffer._cond.swait
 
         def swait_and_signal() -> bool:
             ready_to_wait.set()
             return real_swait()
 
-        monkeypatch.setattr(buffer._event, "swait", swait_and_signal)
+        monkeypatch.setattr(buffer._cond, "swait", swait_and_signal)
 
         def producer() -> None:
             assert ready_to_wait.wait(timeout=1.0)
@@ -5085,7 +5085,7 @@ class TestProactorScheduler:
         import tealetio.io_waiter as io_waiter_module
 
         event_set_threads: list[int] = []
-        original_event = io_waiter_module.ThreadsafeEvent
+        original_event = io_waiter_module.CrossThreadEvent
 
         class TrackingEvent(original_event):
             def _set(self) -> None:
@@ -5102,7 +5102,7 @@ class TestProactorScheduler:
         def proactor_factory() -> UringProactor:
             return UringProactor(ring_factory=ring_factory)
 
-        monkeypatch.setattr(io_waiter_module, "ThreadsafeEvent", TrackingEvent)
+        monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", TrackingEvent)
         scheduler = SyncProactorScheduler(proactor_factory)
         set_scheduler(scheduler)
         scheduler_thread = threading.get_ident()

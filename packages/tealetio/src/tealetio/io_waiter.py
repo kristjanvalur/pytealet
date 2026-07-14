@@ -4,8 +4,10 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
-from .locks import ThreadsafeEvent
+from .locks import CrossThreadEvent
 from .operations import InvalidStateError, Operation
+
+_VoidDoneCallback = Callable[[], object]
 
 if TYPE_CHECKING:
     from .io_manager import ProactorIOManager
@@ -34,6 +36,11 @@ class IOWaitable(Protocol[T_co]):
         ...
 
     def forget(self) -> None: ...
+
+    def add_done_callback(self, callback: _VoidDoneCallback) -> None:
+        """Register ``callback`` to run when the waitable completes."""
+
+        ...
 
     def wait(self) -> T_co: ...
 
@@ -122,6 +129,38 @@ class IOWaiter(Generic[T]):
             return False
         return operation.done()
 
+    def cancelled(self) -> bool:
+        """Return ``True`` when the operation completed by cancellation."""
+
+        operation = self._operation
+        if operation is None:
+            raise InvalidStateError("IOWaiter has no operation")
+        return operation.cancelled()
+
+    def exception(self) -> BaseException | None:
+        """Return the completion exception, or ``None`` on success.
+
+        Raises ``InvalidStateError`` when the operation has not finished.
+        """
+
+        operation = self._operation
+        if operation is None:
+            raise InvalidStateError("IOWaiter has no operation")
+        return operation.exception()
+
+    def add_done_callback(self, callback: _VoidDoneCallback) -> None:
+        """Register ``callback`` to run when the operation completes.
+
+        Call after the IO helper returns the waiter so completion cannot run
+        before the caller holds the handle. If the operation is already done,
+        ``callback`` runs before ``add_done_callback`` returns.
+        """
+
+        operation = self._operation
+        if operation is None:
+            raise InvalidStateError("IOWaiter has no operation")
+        operation.add_done_callback(lambda _op: callback())
+
     def wait(self) -> T:
         self._wait_self()
         try:
@@ -135,7 +174,7 @@ class IOWaiter(Generic[T]):
             return
         if operation.done():
             return
-        ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
+        ready = CrossThreadEvent(self._io._scheduler)  # type: ignore[arg-type]
 
         def wake(_op: Operation[Any]) -> None:
             ready.set()
@@ -246,7 +285,7 @@ class IOWaitGroupChild(Generic[T]):
 
 
 class IOWaitGroup(Generic[T]):
-    """Grouped IO wait with a single ``ThreadsafeEvent`` park for the composition.
+    """Grouped IO wait with a single ``CrossThreadEvent`` park for the composition.
 
     Active work is tracked as ``IOWaitGroupChild`` legs and/or bare ``Operation``
     objects. Leg completion runs on worker threads; ``finish()`` unblocks one
@@ -258,7 +297,7 @@ class IOWaitGroup(Generic[T]):
     operation results into advance handlers.
     """
 
-    __slots__ = ("_closed", "_completion", "_io", "_lock", "_members", "_ready")
+    __slots__ = ("_closed", "_completion", "_done_callbacks", "_io", "_lock", "_members", "_ready")
 
     def __init__(
         self,
@@ -268,8 +307,9 @@ class IOWaitGroup(Generic[T]):
         self._lock = threading.Lock()
         self._closed = False
         self._completion: tuple[bool, Any] | None = None
-        self._ready: ThreadsafeEvent | None = None
+        self._ready: CrossThreadEvent | None = None
         self._members: set[IOWaitGroupChild[Any]] = set()
+        self._done_callbacks: list[_VoidDoneCallback] = []
 
     def attach(
         self,
@@ -320,8 +360,9 @@ class IOWaitGroup(Generic[T]):
             member._cleanup_unresolved_value()
 
     def _complete(self, *, ok: bool, value: Any) -> bool:
-        ready: ThreadsafeEvent | None
+        ready: CrossThreadEvent | None
         cancel_members: tuple[IOWaitGroupChild[Any], ...] = ()
+        callbacks: list[_VoidDoneCallback]
         with self._lock:
             if self._closed or self._completion is not None:
                 return False
@@ -330,10 +371,14 @@ class IOWaitGroup(Generic[T]):
                 cancel_members = tuple(self._members)
             self._members.clear()
             ready = self._ready
+            callbacks = self._done_callbacks
+            self._done_callbacks = []
         if cancel_members:
             self._cancel_members(cancel_members)
         if ready is not None:
             ready.set()
+        for callback in callbacks:
+            callback()
         return True
 
     def _cancel_members(self, members: tuple[IOWaitGroupChild[Any], ...]) -> None:
@@ -363,6 +408,18 @@ class IOWaitGroup(Generic[T]):
 
         return self._completion is not None
 
+    def add_done_callback(self, callback: _VoidDoneCallback) -> None:
+        """Register ``callback`` to run when the grouped composition completes."""
+
+        with self._lock:
+            if self._completion is not None:
+                run_now = True
+            else:
+                self._done_callbacks.append(callback)
+                run_now = False
+        if run_now:
+            callback()
+
     def wait(self) -> T:
         """Block until the grouped composition completes.
 
@@ -379,7 +436,7 @@ class IOWaitGroup(Generic[T]):
                 raise value
             return cast(T, value)
 
-        ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
+        ready = CrossThreadEvent(self._io._scheduler)  # type: ignore[arg-type]
         # lazy ready: publish _ready under lock and re-check completion so a
         # racing finish() cannot complete before the waiter is armed
         with self._lock:

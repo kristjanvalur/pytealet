@@ -28,9 +28,35 @@ through proactor `sock_shutdown` / `sock_close` rather than direct
 `socket.close()` where appropriate, and predictable interaction with in-flight
 send operations. Related preparation work lives in io_manager proactor close
 paths; stream-level lifecycle policy remains to be designed and implemented.
+`SendBuffer` (`send_buffer.py`) is the outbound analogue of `RecvIterBuffer`
+(`recv_iter.py`): callback-driven legs, blocking `drain()` / `take_next()` on
+the scheduler thread, wired via `ProactorIOManager._open_send_buffer` and
+`_open_sock_recv_iter` today.
+
+### Consolidate stream buffer helpers and reader/writer modules
+
+Module count and file granularity are getting high. A later refactor should
+group related pieces instead of one tiny concept per file:
+
+- **Stream socket buffers** — `RecvIterBuffer`, `SendBuffer`, and similar
+  `scheduler.io` bridge objects (callback pump ↔ blocking producer/consumer API)
+  belong together, probably out of `io_manager.py` proper. Factories such as
+  `_open_sock_recv_iter` / `_open_send_buffer` move with them; `io_manager`
+  stays a thin facade over `Proactor` submission and `IOWaiter` composition.
+- **Stream readers and writers** — `StreamReader`, `StreamWriter`, transport
+  cores, and asyncio-shaped wrappers can share one module (or a small
+  `streams/` package) rather than growing `streams.py` indefinitely alongside
+  separate `recv_iter.py` / `send_buffer.py` imports.
+
+Naming is open (`stream_buffers.py`, `sock_stream_io.py`, etc.); the intent is
+cohesion by data direction and lifecycle, not one file per class. Do not fold
+`SendBuffer` into `recv_iter.py` — recv-specific `recv_many` machinery stays
+distinct from outbound `sock_sendall` chaining even when colocated.
 
 ## References
 
 - `packages/tealetio/src/tealetio/streams.py` — `StreamServer`, `StreamWriter`
-- `packages/tealetio/docs/IO_MANAGER_DESIGN.md` — io_manager open follow-ups
+- `packages/tealetio/src/tealetio/recv_iter.py` — `RecvIterBuffer`
+- `packages/tealetio/src/tealetio/send_buffer.py` — `SendBuffer`
+- `packages/tealetio/docs/IO_MANAGER_DESIGN.md` — io_manager layout and consolidation note
 - `packages/tealetio/docs/OPERATION_CALLBACKS.md` — continuous delivery disposition

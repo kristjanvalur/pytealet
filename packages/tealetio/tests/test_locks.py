@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 import pytest
 
@@ -17,6 +18,7 @@ from tealetio import (
     TASK_PRIORITY_DEFAULT,
     TASK_PRIORITY_HIGH,
     TASK_PRIORITY_LOW,
+    CrossThreadCondition,
     set_scheduler,
 )
 from helpers import new_scheduler as _new_scheduler
@@ -395,6 +397,124 @@ class TestLockExamples:
 
     def test_condition_wait_and_notify_require_lock(self):
         cond = Condition()
+
+        with pytest.raises(RuntimeError, match="un-acquired lock"):
+            cond.swait()
+        with pytest.raises(RuntimeError, match="un-acquired lock"):
+            cond.notify()
+
+    def test_cross_thread_condition_wait_notify(self):
+        s = _new_scheduler()
+        cond = CrossThreadCondition(scheduler=s)
+        seen: list[str] = []
+
+        def waiter(name: str) -> None:
+            with cond:
+                seen.append(f"{name}:waiting")
+                cond.swait()
+                seen.append(f"{name}:resumed")
+
+        def notifier() -> None:
+            s.yield_()
+            with cond:
+                seen.append("notifier:notify")
+                cond.notify()
+            s.yield_()
+            with cond:
+                seen.append("notifier:notify_all")
+                cond.notify_all()
+
+        s.spawn(lambda: waiter("a"))
+        s.spawn(lambda: waiter("b"))
+        s.spawn(notifier)
+        s.run()
+
+        assert seen == [
+            "a:waiting",
+            "b:waiting",
+            "notifier:notify",
+            "a:resumed",
+            "notifier:notify_all",
+            "b:resumed",
+        ]
+
+    def test_cross_thread_condition_wait_for_predicate(self):
+        s = _new_scheduler()
+        cond = CrossThreadCondition(scheduler=s)
+        state = {"ready": False}
+        seen: list[str] = []
+
+        def waiter() -> None:
+            with cond:
+                cond.swait_for(lambda: state["ready"])
+                seen.append("waiter:done")
+
+        def setter() -> None:
+            s.yield_()
+            with cond:
+                state["ready"] = True
+                cond.notify_all()
+
+        s.spawn(waiter)
+        s.spawn(setter)
+        s.run()
+
+        assert seen == ["waiter:done"]
+
+    def test_condition_swait_for_returns_ready_none_via_tuple_box(self):
+        s = _new_scheduler()
+        cond = Condition()
+        state = {"value": False}
+
+        def waiter() -> object:
+            with cond:
+                return cond.swait_for(lambda: (None,) if state["value"] else None)
+
+        def setter() -> None:
+            s.yield_()
+            with cond:
+                state["value"] = True
+                cond.notify_all()
+
+        task = s.spawn(waiter)
+        s.spawn(setter)
+        s.run()
+        assert task.result() == (None,)
+
+    def test_cross_thread_condition_cross_thread_notify(self, monkeypatch):
+        s = _new_scheduler()
+        cond = CrossThreadCondition(scheduler=s)
+        state = {"ready": False}
+        seen: list[str] = []
+        waiter_blocked = threading.Event()
+        real_swait = cond.swait
+
+        def swait_and_signal() -> bool:
+            waiter_blocked.set()
+            return real_swait()
+
+        monkeypatch.setattr(cond, "swait", swait_and_signal)
+
+        def waiter() -> None:
+            with cond:
+                seen.append("waiting")
+                cond.swait_for(lambda: state["ready"])
+                seen.append("resumed")
+
+        def notifier_from_thread() -> None:
+            assert waiter_blocked.wait(timeout=2.0)
+            with cond:
+                state["ready"] = True
+                cond.notify_all()
+
+        threading.Thread(target=notifier_from_thread, daemon=True).start()
+        s.run_until_complete(s.spawn(waiter))
+
+        assert seen == ["waiting", "resumed"]
+
+    def test_cross_thread_condition_wait_and_notify_require_lock(self):
+        s = _new_scheduler()
+        cond = CrossThreadCondition(scheduler=s)
 
         with pytest.raises(RuntimeError, match="un-acquired lock"):
             cond.swait()
