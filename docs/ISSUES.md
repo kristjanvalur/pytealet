@@ -247,8 +247,8 @@ TLS handling has been migrated to `PyThread_tss_*` APIs (`PyThread_tss_create/ge
 **Implemented:**
 - `BaseScheduler.set_task_factory(...)` and `get_task_factory()` configure
     scheduler-local task construction policy.
-- `DefaultTaskFactory` preserves direct `TealetTask.prepare(...)` task creation.
-- `StubTaskFactory` creates scheduler tasks from a reusable prepared tealet stub;
+- `DefaultTaskFactory` preserves direct `TealetTask.prime(...)` task creation.
+- `StubTaskFactory` creates scheduler tasks from a reusable primed tealet stub;
     `stub_here()` creates the reusable stub at the caller's current tealet stack
     point, and the factory lazily creates one on first use if needed.
 - Factories receive the owning scheduler, target callable, selected

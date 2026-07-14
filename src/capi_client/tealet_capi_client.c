@@ -92,8 +92,8 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (client_dict_set_owned(d, "has_set_stub",
                               PyBool_FromLong(state->api->set_stub != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_prepare",
-                              PyBool_FromLong(state->api->prepare != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_prime",
+                              PyBool_FromLong(state->api->prime != NULL)) < 0)
         goto error;
     if (client_dict_set_owned(d, "has_duplicate",
                               PyBool_FromLong(state->api->duplicate != NULL)) < 0)
@@ -466,7 +466,7 @@ static PyObject *client_capi_thread_id(PyObject *module, PyObject *target) {
     return PyLong_FromUnsignedLong(value);
 }
 
-static PyObject *client_capi_prepare(PyObject *module, PyObject *args) {
+static PyObject *client_capi_prime(PyObject *module, PyObject *args) {
     PyTealetCapiClientState *state = client_get_state(module);
     PyObject *target;
     PyObject *func;
@@ -477,10 +477,10 @@ static PyObject *client_capi_prepare(PyObject *module, PyObject *args) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    if (!PyArg_ParseTuple(args, "OO:capi_prepare", &target, &func))
+    if (!PyArg_ParseTuple(args, "OO:capi_prime", &target, &func))
         return NULL;
 
-    rc = state->api->prepare(state->ctx, target, func, NULL);
+    rc = state->api->prime(state->ctx, target, func, NULL);
     if (rc < 0)
         return NULL;
     Py_RETURN_NONE;
@@ -601,7 +601,7 @@ static PyObject *client_capi_run_c(PyObject *module, PyObject *args) {
     return state->api->run(state->ctx, target, NULL, client_run_c_callback, arg);
 }
 
-static PyObject *client_capi_prepare_c(PyObject *module, PyObject *target) {
+static PyObject *client_capi_prime_c(PyObject *module, PyObject *target) {
     PyTealetCapiClientState *state = client_get_state(module);
     int rc;
 
@@ -610,7 +610,7 @@ static PyObject *client_capi_prepare_c(PyObject *module, PyObject *target) {
     if (client_ensure_ctx(state) < 0)
         return NULL;
 
-    rc = state->api->prepare(state->ctx, target, NULL, client_run_c_callback);
+    rc = state->api->prime(state->ctx, target, NULL, client_run_c_callback);
     if (rc < 0)
         return NULL;
     Py_RETURN_NONE;
@@ -630,10 +630,10 @@ static PyMethodDef client_methods[] = {
      "Attach a duplicated stub from source into target via imported C API."},
     {"capi_duplicate", (PyCFunction)client_capi_duplicate, METH_O,
      "Duplicate a tealet using the imported C API."},
-    {"capi_prepare", (PyCFunction)client_capi_prepare, METH_VARARGS,
-     "Prepare a tealet with a Python callable using the imported C API."},
-    {"capi_prepare_c", (PyCFunction)client_capi_prepare_c, METH_O,
-     "Prepare a tealet with a native C callback using the imported C API."},
+    {"capi_prime", (PyCFunction)client_capi_prime, METH_VARARGS,
+     "Prime a tealet with a Python callable using the imported C API."},
+    {"capi_prime_c", (PyCFunction)client_capi_prime_c, METH_O,
+     "Prime a tealet with a native C callback using the imported C API."},
     {"capi_run", (PyCFunction)client_capi_run, METH_VARARGS,
      "Run a tealet using the imported C API."},
     {"capi_run_c", (PyCFunction)client_capi_run_c, METH_VARARGS,
@@ -700,7 +700,7 @@ static int client_exec(PyObject *module) {
 
     if (!state->api->ctx_new || !state->api->ctx_free || !state->api->current || !state->api->main ||
         !state->api->thread_sweep || !state->api->check_tealet || !state->api->create || !state->api->duplicate ||
-        !state->api->stub || !state->api->prepare || !state->api->run || !state->api->switch_ ||
+        !state->api->stub || !state->api->prime || !state->api->run || !state->api->switch_ ||
         !state->api->throw_ || !state->api->set_pending_exception || !state->api->thread_reap ||
         !state->api->thread_active || !state->api->thread_kill || !state->api->error_was_remote ||
         !state->api->previous || !state->api->frame_introspection_get || !state->api->frame_introspection_set ||

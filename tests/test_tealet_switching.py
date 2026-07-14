@@ -209,7 +209,7 @@ class TestSetException:
         assert seen, "expected unraisable error for uncaught thrown exception"
         assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-throw-run" for u in seen)
 
-    def test_throw_on_prepared_target_behaves_like_set_pending_exception_plus_run(self):
+    def test_throw_on_primed_target_behaves_like_set_pending_exception_plus_run(self):
         seen = []
         called = []
         original_hook = sys.unraisablehook
@@ -227,8 +227,8 @@ class TestSetException:
                 t = _tealet.tealet()
                 if make_stub:
                     t.stub()
-                t.prepare(worker)
-                assert t.throw(RuntimeError("boom-prepared-throw")) is None
+                t.prime(worker)
+                assert t.throw(RuntimeError("boom-primed-throw")) is None
                 assert t.state == _tealet.STATE_EXIT
         finally:
             sys.unraisablehook = original_hook
@@ -236,7 +236,7 @@ class TestSetException:
         # Delivery happens at run entry, so worker is not entered.
         assert called == []
         assert seen, "expected unraisable error for uncaught thrown exception"
-        assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-prepared-throw" for u in seen)
+        assert any(isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-primed-throw" for u in seen)
 
     def test_run_allows_dummy_args_when_pending_exception_exists(self):
         seen = []

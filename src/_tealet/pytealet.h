@@ -30,7 +30,7 @@ PyObject *PyTealetApi_Create(PyTealetModuleState *mstate);
 PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_obj);
 int PyTealetApi_Stub(PyTealetModuleState *mstate, PyObject *target_obj);
 int PyTealetApi_SetStub(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *source_obj, int duplicate);
-int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
+int PyTealetApi_Prime(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
                         PyTealetApi_RunCFunc cfunc);
 PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
                           PyTealetApi_RunCFunc cfunc, PyObject *arg);

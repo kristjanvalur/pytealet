@@ -521,7 +521,7 @@ class TaskFactory(Protocol):
         eager_start: bool | None = None,
         **kwargs: Any,
     ) -> Task:
-        """Create and prepare a task without scheduling it."""
+        """Create and prime a task without scheduling it."""
         ...
 
 
@@ -539,8 +539,8 @@ def _make_task_main(task: Task, func: Callable[[], object], context: contextvars
     return task_main
 
 
-def _prepare_task(task: Task, func: Callable[[], object], context: contextvars.Context) -> None:
-    task.prepare(_make_task_main(task, func, context))
+def _prime_task(task: Task, func: Callable[[], object], context: contextvars.Context) -> None:
+    task.prime(_make_task_main(task, func, context))
 
 
 def _start_task_eager(
@@ -582,12 +582,12 @@ class DefaultTaskFactory:
         if _should_start_eager(scheduler, self.eager_start, eager_start):
             _start_task_eager(scheduler, task, func, context)
         else:
-            _prepare_task(task, func, context)
+            _prime_task(task, func, context)
         return task
 
 
 class StubTaskFactory:
-    """Task factory that prepares tasks from a reusable tealet stub."""
+    """Task factory that primes tasks from a reusable tealet stub."""
 
     def __init__(
         self,
@@ -631,5 +631,5 @@ class StubTaskFactory:
         if _should_start_eager(scheduler, self.eager_start, eager_start):
             _start_task_eager(scheduler, task, func, context)
         else:
-            _prepare_task(task, func, context)
+            _prime_task(task, func, context)
         return task

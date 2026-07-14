@@ -1002,7 +1002,7 @@ validate_target:
     return PyTuple_Pack(3, target_obj, arg_obj ? arg_obj : Py_None, suppress_exc ? Py_True : Py_False);
 }
 
-static PyObject *pytealet_prepare(PyObject *self, PyObject *args, PyObject *kwargs) {
+static PyObject *pytealet_prime(PyObject *self, PyObject *args, PyObject *kwargs) {
     static char *kwlist[] = {"function", NULL};
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     PyObject *func = NULL;
@@ -1010,16 +1010,16 @@ static PyObject *pytealet_prepare(PyObject *self, PyObject *args, PyObject *kwar
     if (!mstate)
         return NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O:prepare", kwlist, &func))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O:prime", kwlist, &func))
         return NULL;
 
-    if (PyTealetApi_Prepare(mstate, self, func, NULL) < 0)
+    if (PyTealetApi_Prime(mstate, self, func, NULL) < 0)
         return NULL;
 
     return Py_NewRef(self);
 }
 
-int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
+int PyTealetApi_Prime(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
                         PyTealetApi_RunCFunc cfunc) {
     PyTealetObject *target;
     PyTealetObject *current;
@@ -1040,7 +1040,7 @@ int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObj
 
     target = (PyTealetObject *)target_obj;
     current = TryGetCurrent(mstate, &mdata);
-    if (CheckTarget(mstate, target, current, "prepare()"))
+    if (CheckTarget(mstate, target, current, "prime()"))
         return -1;
 
     if (target->state != STATE_NEW && target->state != STATE_STUB) {
@@ -1055,7 +1055,7 @@ int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObj
 
     if (func != NULL) {
         if (!PyCallable_Check(func)) {
-            PyErr_SetString(PyExc_TypeError, "prepare() argument 'function' must be callable");
+            PyErr_SetString(PyExc_TypeError, "prime() argument 'function' must be callable");
             return -1;
         }
         Py_XSETREF(target->primed_func, Py_NewRef(func));
@@ -1065,7 +1065,7 @@ int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObj
         target->primed_cfunc = cfunc;
     }
 
-    if (pytealet_prime_primed(mdata, target, current, "prepare()") < 0) {
+    if (pytealet_prime_primed(mdata, target, current, "prime()") < 0) {
         Py_CLEAR(target->primed_func);
         target->primed_cfunc = NULL;
         return -1;
@@ -1940,9 +1940,9 @@ static struct PyMethodDef pytealet_methods[] = {
     {"resolve_target", (PyCFunction)(void (*)(void))pytealet_resolve_target, METH_VARARGS | METH_KEYWORDS,
          "resolve_target(result, exc, exc_target) -> (tealet, arg) | (tealet, arg, suppress)\n\n"
          "Hook for subclasses to resolve exit target routing and exception disposition from pytealet_main()."},
-    {"prepare", (PyCFunction)(void (*)(void))pytealet_prepare, METH_VARARGS | METH_KEYWORDS,
-        "prepare(function) -> tealet\n\n"
-     "Store a callable to be used by the first switch(arg) on this NEW/STUB tealet."},
+    {"prime", (PyCFunction)(void (*)(void))pytealet_prime, METH_VARARGS | METH_KEYWORDS,
+        "prime(function) -> tealet\n\n"
+     "Bind a callable for first entry on this NEW/STUB tealet and leave it in STATE_PRIMED."},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"switch", (PyCFunction)(void (*)(void))pytealet_switch, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},
     {"throw", (PyCFunction)(void (*)(void))pytealet_throw, METH_METHOD | METH_FASTCALL | METH_KEYWORDS,

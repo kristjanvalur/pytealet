@@ -90,8 +90,8 @@ Implemented:
   completion-order iteration.
 - Scheduler-local task creation is configurable with
   `BaseScheduler.set_task_factory(...)` and `BaseScheduler.get_task_factory()`.
-  The default factory preserves direct `Task.prepare(...)` behavior.
-  `tealetio.tasks.StubTaskFactory` can create and reuse a prepared stub via
+  The default factory preserves direct `Task.prime(...)` behavior.
+  `tealetio.tasks.StubTaskFactory` can create and reuse a primed stub via
   `stub_here()`, then create scheduler tasks from that stub.
 - The scheduler main-tealet context is explicit through
   `BaseScheduler.main_context()`. It installs the scheduler's task factory as
@@ -405,7 +405,7 @@ Semantics:
 - Task factories are tealet scheduler construction strategies, not asyncio task
   factory compatibility hooks.
 - A factory receives the target callable and already selected context, creates
-  and prepares a `Task`, and returns it unscheduled.
+  and primes a `Task`, and returns it unscheduled.
 - `BaseScheduler.spawn(..., **kwargs)` forwards extra keyword arguments to the
   configured task factory, mirroring `asyncio.create_task(coro, **kwargs)`. This
   allows custom factories to accept construction-time options such as

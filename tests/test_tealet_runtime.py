@@ -505,22 +505,22 @@ class TestResolveTargetHook:
         assert t.state == _tealet.STATE_EXIT
 
 
-class TestPrepare:
-    def test_prepare_returns_self_for_chaining(self):
+class TestPrime:
+    def test_prime_returns_self_for_chaining(self):
         seen = []
 
         def worker(current, arg):
             seen.append(arg)
             return current.main(), "done-chain"
 
-        t = _tealet.tealet().prepare(worker)
+        t = _tealet.tealet().prime(worker)
         assert isinstance(t, _tealet.tealet)
         assert t.state == _tealet.STATE_PRIMED
         assert t.switch("payload") == "done-chain"
         assert seen == ["payload"]
         assert t.state == _tealet.STATE_EXIT
 
-    def test_prepare_new_first_switch_runs_callable(self):
+    def test_prime_new_first_switch_runs_callable(self):
         seen = []
 
         def worker(current, arg):
@@ -530,13 +530,13 @@ class TestPrepare:
         t = _tealet.tealet()
         assert t.state == _tealet.STATE_NEW
 
-        t.prepare(worker)
+        t.prime(worker)
         assert t.state == _tealet.STATE_PRIMED
         assert t.switch("payload") == "done-new"
         assert seen == ["payload"]
         assert t.state == _tealet.STATE_EXIT
 
-    def test_prepare_stub_first_switch_runs_callable(self):
+    def test_prime_stub_first_switch_runs_callable(self):
         seen = []
 
         def worker(current, arg):
@@ -547,14 +547,14 @@ class TestPrepare:
         t.stub()
         assert t.state == _tealet.STATE_STUB
 
-        t.prepare(worker)
+        t.prime(worker)
         assert t.state == _tealet.STATE_PRIMED
         assert seen == []
         assert t.switch(123) == "done-stub"
         assert seen == [123]
         assert t.state == _tealet.STATE_EXIT
 
-    def test_set_stub_then_prepare_is_primed_not_run(self):
+    def test_set_stub_then_prime_is_primed_not_run(self):
         source = _tealet.tealet()
         source.stub()
 
@@ -565,15 +565,15 @@ class TestPrepare:
         def worker(current, arg):
             return current.main(), arg
 
-        target.prepare(worker)
+        target.prime(worker)
         assert target.state == _tealet.STATE_PRIMED
         assert target.switch("from-stub-template") == "from-stub-template"
         assert target.state == _tealet.STATE_EXIT
 
-    def test_prepare_target_can_be_exit_target(self):
+    def test_prime_target_can_be_exit_target(self):
         for state_name, make_target in [
-            ("new-prepared", _tealet.tealet),
-            ("stub-prepared", lambda: _tealet.tealet().stub()),
+            ("new-primed", _tealet.tealet),
+            ("stub-primed", lambda: _tealet.tealet().stub()),
         ]:
             target = make_target()
 
@@ -581,7 +581,7 @@ class TestPrepare:
                 current.main().switch((state_name, arg))
                 return current.main()
 
-            target.prepare(target_func)
+            target.prime(target_func)
 
             class Routed(_tealet.tealet):
                 def resolve_target(self, result, exc, exc_target):
@@ -598,24 +598,24 @@ class TestPrepare:
             assert target.switch("finish") is None
             assert target.state == _tealet.STATE_EXIT
 
-    def test_prepare_first_throw_on_prepared_reports_unraisable_and_skips_worker(self):
+    def test_prime_first_throw_on_primed_reports_unraisable_and_skips_worker(self):
         called = []
         seen = []
         original_hook = sys.unraisablehook
 
         def worker(current, arg):
             called.append(arg)
-            return current.main(), "done-prepared"
+            return current.main(), "done-primed"
 
         def capture_unraisable(unraisable):
             seen.append(unraisable)
 
         t = _tealet.tealet()
-        t.prepare(worker)
+        t.prime(worker)
 
         sys.unraisablehook = capture_unraisable
         try:
-            assert t.throw(RuntimeError("boom-prepared-first-throw")) is None
+            assert t.throw(RuntimeError("boom-primed-first-throw")) is None
         finally:
             sys.unraisablehook = original_hook
 
@@ -623,16 +623,16 @@ class TestPrepare:
         assert t.state == _tealet.STATE_EXIT
         assert seen, "expected unraisable error for uncaught thrown exception"
         assert any(
-            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-prepared-first-throw"
+            isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-primed-first-throw"
             for u in seen
         )
 
-    def test_prepare_requires_callable(self):
+    def test_prime_requires_callable(self):
         t = _tealet.tealet()
         with pytest.raises(TypeError, match="must be callable"):
-            t.prepare(42)
+            t.prime(42)
 
-    def test_prepare_twice_requires_new_or_stub(self):
+    def test_prime_twice_requires_new_or_stub(self):
         seen = []
 
         def first(current, arg):
@@ -644,42 +644,42 @@ class TestPrepare:
             return current.main(), "second"
 
         t = _tealet.tealet()
-        t.prepare(first)
+        t.prime(first)
         with pytest.raises(_tealet.StateError, match="must be new or stub"):
-            t.prepare(second)
+            t.prime(second)
 
         assert t.switch("x") == "first"
         assert seen == [("first", "x")]
         assert t.state == _tealet.STATE_EXIT
 
-    def test_explicit_run_after_prepare_requires_new_or_stub(self):
+    def test_explicit_run_after_prime_requires_new_or_stub(self):
         seen = []
 
-        def prepared(current, arg):
-            seen.append(("prepared", arg))
-            return current.main(), "prepared"
+        def primed(current, arg):
+            seen.append(("primed", arg))
+            return current.main(), "primed"
 
         def direct(current, arg):
             seen.append(("direct", arg))
             return current.main(), "direct"
 
         t = _tealet.tealet()
-        t.prepare(prepared)
+        t.prime(primed)
 
         with pytest.raises(_tealet.StateError, match="must be new or stub"):
             t.run(direct, "r")
 
-        assert t.switch("p") == "prepared"
-        assert seen == [("prepared", "p")]
+        assert t.switch("p") == "primed"
+        assert seen == [("primed", "p")]
         assert t.state == _tealet.STATE_EXIT
 
-    def test_prepare_cycle_is_collectable_by_gc(self):
+    def test_prime_cycle_is_collectable_by_gc(self):
         t = _tealet.tealet()
 
         def worker(current, arg, _t=t):
             return current.main(), arg
 
-        t.prepare(worker)
+        t.prime(worker)
         ref = weakref.ref(t)
 
         del worker

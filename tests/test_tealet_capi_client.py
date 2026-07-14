@@ -13,7 +13,7 @@ def test_capi_client_api_info():
     assert info["has_create"] is True
     assert info["has_stub"] is True
     assert info["has_set_stub"] is True
-    assert info["has_prepare"] is True
+    assert info["has_prime"] is True
     assert info["has_duplicate"] is True
     assert info["has_run"] is True
     assert info["has_switch"] is True
@@ -72,14 +72,14 @@ def test_capi_client_run_forwarding():
     assert _tealet_capi_client.capi_run(t, worker, 123) == ("via-capi-run", 123)
 
 
-def test_capi_client_prepare_forwarding():
+def test_capi_client_prime_forwarding():
     def worker(current, arg):
-        return current.main(), ("via-capi-prepare", arg)
+        return current.main(), ("via-capi-prime", arg)
 
     t = _tealet.tealet()
-    assert _tealet_capi_client.capi_prepare(t, worker) is None
+    assert _tealet_capi_client.capi_prime(t, worker) is None
     assert _tealet_capi_client.capi_state(t) == _tealet.STATE_PRIMED
-    assert _tealet_capi_client.capi_switch(t, 321) == ("via-capi-prepare", 321)
+    assert _tealet_capi_client.capi_switch(t, 321) == ("via-capi-prime", 321)
 
 
 def test_capi_client_throw_roundtrip():
@@ -278,9 +278,9 @@ def test_capi_client_run_c_forwarding():
     assert _tealet_capi_client.capi_run_c(t, 456) == ("via-capi-run-c", 456)
 
 
-def test_capi_client_prepare_c_forwarding():
+def test_capi_client_prime_c_forwarding():
     t = _tealet.tealet()
-    assert _tealet_capi_client.capi_prepare_c(t) is None
+    assert _tealet_capi_client.capi_prime_c(t) is None
     assert _tealet_capi_client.capi_switch(t, 654) == ("via-capi-run-c", 654)
 
 

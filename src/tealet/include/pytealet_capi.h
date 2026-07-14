@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 
-#define PYTEALET_CAPI_ABI_VERSION 5u
+#define PYTEALET_CAPI_ABI_VERSION 6u
 #define PYTEALET_CAPI_CAPSULE_NAME "_tealet._C_API"
 
 /* Feature flags published in PyTealet_CAPI.feature_flags. */
@@ -93,11 +93,11 @@ typedef struct PyTealet_CAPI {
     /* Equivalent to target.set_stub(source, duplicate=...). */
     int (*set_stub)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *source, int duplicate);
 
-    /* Equivalent to target.prepare(function), but accepts exactly one callable mode.
+    /* Equivalent to target.prime(function), but accepts exactly one callable mode.
      * Provide either function_py or function_c (not both). Returns 0 on success, -1 on error.
      */
-    int (*prepare)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function_py,
-                   PyTealetApi_RunCFunc function_c);
+    int (*prime)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function_py,
+                 PyTealetApi_RunCFunc function_c);
 
     /* Equivalent to target.run(...), with unified callable mode.
      * Provide either function_py or function_c (not both).

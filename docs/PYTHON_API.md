@@ -58,7 +58,7 @@ Methods:
 - `is_foreign() -> bool`
 - `is_main() -> bool`
 - `resolve_target(result, exc, exc_target) -> tuple[_tealet.tealet, object] | tuple[_tealet.tealet, object, bool]`
-- `prepare(function) -> _tealet.tealet`
+- `prime(function) -> _tealet.tealet`
 - `run(function, arg=None) -> object`
 - `switch(arg=None, panic=False) -> object`
 - `set_pending_exception(exception, fallback=None) -> None`
@@ -73,7 +73,7 @@ in-flight injected exception token and that token has a valid fallback target.
 When populated, it is the redirect fallback target for that uncaught exception.
 Overrides must return `(target, arg)` or `(target, arg, suppress)`.
 `target` must be an active tealet in the same lineage. A tealet returned by
-`prepare()` is already active and may be used as an exit target. If `suppress`
+A tealet in `STATE_PRIMED` may be used as an exit target. If `suppress`
 is truthy, any captured worker exception is suppressed before
 uncaught-exception handling.
 The default implementation maps successful worker return values from

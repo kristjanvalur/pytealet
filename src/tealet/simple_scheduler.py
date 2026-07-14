@@ -27,7 +27,7 @@ class SimpleTask(tealet.tealet, Generic[T]):
         self._done = False
         self._result: T | None = None
         self._exception: BaseException | None = None
-        self.prepare(self._main)
+        self.prime(self._main)
 
     def _main(self, current: tealet.tealet, arg: object) -> tealet.tealet:
         try:

@@ -287,12 +287,12 @@ static PyObject *PyTealetApi_DuplicateForward(PyTealet_CAPI_Context *ctx, PyObje
     return PyTealetApi_Duplicate(mstate, source);
 }
 
-static int PyTealetApi_PrepareForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *func,
-                                      PyTealetApi_RunCFunc cfunc) {
+static int PyTealetApi_PrimeForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *func,
+                                    PyTealetApi_RunCFunc cfunc) {
     PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
         return -1;
-    return PyTealetApi_Prepare(mstate, target, func, cfunc);
+    return PyTealetApi_Prime(mstate, target, func, cfunc);
 }
 
 static PyObject *PyTealetApi_RunForward(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *func,
@@ -424,7 +424,7 @@ static const PyTealet_CAPI pytealet_capi_table = {
     PyTealetApi_DuplicateForward,
     PyTealetApi_StubForward,
     PyTealetApi_SetStubForward,
-    PyTealetApi_PrepareForward,
+    PyTealetApi_PrimeForward,
     PyTealetApi_RunForward,
     PyTealetApi_SwitchForward,
     PyTealetApi_ThrowForward,

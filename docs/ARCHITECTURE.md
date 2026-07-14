@@ -111,7 +111,7 @@ Executes a function in the tealet context.
 - **Effect:** Changes state to STATE_RUN, executes function
 
 ```python
-tealet.prepare(function) -> tealet
+tealet.prime(function) -> tealet
 ```
 Primes a tealet with a function without transferring control immediately.
 - **State requirement:** Must be STATE_NEW or STATE_STUB
@@ -307,8 +307,8 @@ The core package exposes low-level tealet primitives. Higher-level runtime layer
 ### API Layering Policy (Python and Capsule C API)
 
 The runtime follows a two-front-door pattern:
-- Python-bound methods (for example, tealet.run, tealet.prepare) are responsible for Python call-shape parsing and Python-facing argument errors.
-- Capsule C API entrypoints (for example, PyTealetApi_Run, PyTealetApi_Prepare) are responsible for C-facing validation at the exported boundary.
+- Python-bound methods (for example, tealet.run, tealet.prime) are responsible for Python call-shape parsing and Python-facing argument errors.
+- Capsule C API entrypoints (for example, PyTealetApi_Run, PyTealetApi_Prime) are responsible for C-facing validation at the exported boundary.
 - Shared runtime state transitions and execution behavior live in internal implementation helpers (for example, operation-specific impl/dispatch helpers).
 
 This keeps core semantics centralized while allowing each public boundary to retain its own contract and diagnostics.
@@ -565,9 +565,9 @@ NEW ──────────────┐
 │  .stub()        │  .run() with NEW
 │                 │
 ▼                 ▼
-STUB ──.prepare()──► PRIMED ──.switch()──► RUN ────► EXIT
-      .run()              ▲                    returns
-                          └── .prepare() from NEW
+STUB ──.prime()──► PRIMED ──.switch()──► RUN ────► EXIT
+      .run()            ▲                    returns
+                        └── .prime() from NEW
 ```
 
 ### State Validation
@@ -712,7 +712,7 @@ tealet_spawn(main->tealet, &stub, pytealet_primed_main, NULL, stack_far, TEALET_
 The pytealet wrapper creates stubs as spawned tealets with a baked-in top-level dispatcher:
 - `pytealet_stub()` calls `tealet_spawn(..., pytealet_primed_main, ..., TEALET_START_DEFAULT)` and marks the wrapper as `STATE_STUB`.
 - `pytealet_run()` switches to the stub with a `PyTealetNewArg`; `pytealet_primed_main()` sees no primed callable and tail-calls `pytealet_main()` with that run payload.
-- `prepare()` stores a primed callable and promotes the wrapper to `STATE_PRIMED`; later `pytealet_primed_main()` consumes the primed callable instead of expecting a `PyTealetNewArg` switch payload.
+- `prime()` stores a primed callable and promotes the wrapper to `STATE_PRIMED`; later `pytealet_primed_main()` consumes the primed callable instead of expecting a `PyTealetNewArg` switch payload.
 - Duplicating a stub wrapper (`existing_stub.duplicate()`) duplicates native state with `tealet_duplicate()` and duplicates saved thread state.
 - `set_stub(source, duplicate=True)` duplicates native source-stub state and attaches it to an already-constructed NEW target wrapper.
 

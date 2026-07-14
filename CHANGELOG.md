@@ -19,14 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packages should depend on compatible `tealet` ranges rather than exact pins.
 
 ### tealet
-- Added `STATE_PRIMED` (`4`) to distinguish tealets primed by `prepare()` from
-  actively running tealets. `prepare()` leaves the wrapper in `STATE_PRIMED`
+- Added `STATE_PRIMED` (`4`) to distinguish tealets primed by `prime()` from
+  actively running tealets. `prime()` leaves the wrapper in `STATE_PRIMED`
   until the first `switch()` or `throw()` entry promotes it to `STATE_RUN`.
-  This makes stub-templated workflows (`set_stub()` then `prepare()`)
+  This makes stub-templated workflows (`set_stub()` then `prime()`)
   observable before worker entry.
+- Renamed `prepare()` to `prime()` on the Python API and capsule C API.
 - Extended `switch()`, `throw()`, `set_pending_exception()`, and
   `resolve_target()` to accept `STATE_PRIMED` targets and fallbacks.
-- Bumped the public C API ABI to version 5 and added `PYTEALET_STATE_PRIMED`.
+- Bumped the public C API ABI to version 6 and added `PYTEALET_STATE_PRIMED`.
 
 ### tealet-greenlet
 - Treat `STATE_PRIMED` as a suspended runnable tealet for `__bool__`,

@@ -6,7 +6,7 @@ import tealet_examples as examples
 
 class TestRawSimpleGenerator:
     def test_raw_simple_generator_yields_then_stops(self):
-        t = _tealet.tealet().prepare(examples.raw_simple_generator)
+        t = _tealet.tealet().prime(examples.raw_simple_generator)
 
         assert t.switch([10, 20, 30]) == 10
         assert t.switch(None) == 20

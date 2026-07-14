@@ -149,7 +149,7 @@ class _PriorityTaskFactory:
         if self._priorities is not None:
             priority = next(self._priorities)
         task = PriorityTask(scheduler, priority)
-        scheduler_module._tasks._prepare_task(task, func, context)
+        scheduler_module._tasks._prime_task(task, func, context)
         return task
 
 
@@ -919,7 +919,7 @@ class TestSchedulerAccessors:
         assert s.run_until_complete(parent_task) is None
         assert seen == ["deferred", "eager"]
 
-    def test_eager_start_skips_prepare(self):
+    def test_eager_start_skips_prime(self):
         s = _new_scheduler()
 
         deferred = s.spawn(lambda: "deferred", eager_start=False)

@@ -78,15 +78,16 @@ Tealet/object operations:
 - `duplicate(ctx, source) -> PyObject *`
 - `stub(ctx, target) -> int`
 - `set_stub(ctx, target, source, duplicate) -> int`
-- `prepare(ctx, target, function_py, function_c) -> int`
+- `prime(ctx, target, function_py, function_c) -> int`
 - `run(ctx, target, function_py, function_c, arg) -> PyObject *`
 - `switch_(ctx, target, arg, flags) -> PyObject *`
 - `throw_(ctx, target, exception, return_target, flags) -> PyObject *`
 - `set_pending_exception(ctx, target, exception, fallback) -> int`
 
-`prepare()` primes the target immediately and leaves it in active `RUN` state;
-subsequent `switch_()`/`throw_()` and Python `resolve_target()` exit routing use
-the normal active-target path.
+`prime()` stores a primed callable and leaves the wrapper in `STATE_PRIMED`;
+the first `switch_()`/`throw_()` entry promotes it to `RUN`. Subsequent
+`switch_()`/`throw_()` and Python `resolve_target()` exit routing use the
+normal active-target path.
 
 `throw_` return-target semantics:
 - `return_target == NULL`: use current tealet as default return target

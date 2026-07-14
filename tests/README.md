@@ -4,7 +4,7 @@ This directory contains the core pytealet tests. Greenlet compatibility tests no
 
 ## Pure pytealet layout
 
-- `test_tealet_runtime.py`: module-level behavior, lifecycle state, prepare/run basics, subclassing, and traversal APIs.
+- `test_tealet_runtime.py`: module-level behavior, lifecycle state, prime/run basics, subclassing, and traversal APIs.
 - `test_tealet_threading.py`: thread ownership, cross-thread restrictions, and lineage cleanup semantics.
 - `test_tealet_context.py`: `contextvars` integration and cross-thread context access rules.
 - `test_tealet_switching.py`: switch/throw/set_pending_exception semantics and panic/remote error handling.
