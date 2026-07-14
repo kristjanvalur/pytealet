@@ -58,7 +58,7 @@ trap cleanup EXIT INT TERM
 echo "waiting for ${HOST}:${PORT} (pid ${SERVER_PID})..."
 ready=0
 for _ in $(seq 1 100); do
-  if curl -fsS -o /dev/null "http://${HOST}:${PORT}/" 2>/dev/null; then
+  if curl -fsS -m 2 -o /dev/null "http://${HOST}:${PORT}/" 2>/dev/null; then
     ready=1
     break
   fi
