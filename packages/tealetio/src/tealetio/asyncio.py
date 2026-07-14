@@ -283,10 +283,50 @@ class ForwardingProactor:
             return future
         return self._future_from_operation(self._proactor.sendto(sock, data, address))
 
-    def accept(self, sock: socket.socket) -> _asyncio.Future[socket.socket]:
-        """Accept a socket through the host proactor."""
+    def accept(self, sock: socket.socket) -> _asyncio.Future[tuple[socket.socket, Any]]:
+        """Accept a connection through the host proactor.
 
-        return self._future_from_operation(self._proactor.accept(sock))
+        asyncio ``BaseProactorEventLoop._start_serving`` expects
+        ``(conn, peername)``, matching Windows ``IocpProactor.accept``.
+        """
+
+        operation = self._proactor.accept(sock)
+        loop = self._require_loop()
+        future: _asyncio.Future[tuple[socket.socket, Any]] = loop.create_future()
+
+        def complete_future() -> None:
+            if future.cancelled():
+                return
+            if operation.cancelled():
+                future.cancel()
+                return
+            try:
+                conn = operation.result()
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                try:
+                    peername = conn.getpeername()
+                except OSError:
+                    peername = None
+                future.set_result((conn, peername))
+
+        def complete_operation(_operation: Operation[Any]) -> None:
+            try:
+                loop.call_soon_threadsafe(complete_future)
+            except RuntimeError:
+                pass
+
+        def cancel_operation(asyncio_future: _asyncio.Future[tuple[socket.socket, Any]]) -> None:
+            if asyncio_future.cancelled():
+                self._proactor.cancel(operation)
+
+        if operation.done():
+            complete_future()
+        else:
+            operation.add_done_callback(complete_operation)
+            future.add_done_callback(cancel_operation)
+        return future
 
     def connect(self, sock: socket.socket, address: Any) -> _asyncio.Future[None]:
         """Connect a socket through the host proactor."""
