@@ -236,10 +236,6 @@ class StreamServer:
 
         self._accept_task = self._scheduler.spawn(accept_loop)
 
-    def _wait_until_closed(self) -> None:
-        while not self._closed:
-            self._scheduler.yield_()
-
     def wait_closed(self) -> None:
         """Block until the accept loop has exited and handlers are done."""
 
@@ -256,16 +252,21 @@ class StreamServer:
                 handler.wait()
 
     def serve_forever(self) -> None:
-        """Block until ``close()`` is called.
+        """Block until the accept-loop tealet exits.
 
-        Accept handling is already active from ``start_server()``; this only
-        parks the current tealet. It does not install signal handlers — use
-        ``tealetio.run()`` / ``Runner`` for that.
+        Accept handling is already active from ``start_server()``; this waits
+        on that tealet (until ``close()`` cancels it and ``_finish_close()``
+        runs in the loop's ``finally``). It does not install signal handlers —
+        use ``tealetio.run()`` / ``Runner`` for that.
         """
 
         if self._closed:
             raise RuntimeError("server is closed")
-        self._wait_until_closed()
+        assert self._accept_task is not None
+        try:
+            self._accept_task.wait()
+        except CancelledError:
+            pass
 
     def _dispatch_client(
         self,
