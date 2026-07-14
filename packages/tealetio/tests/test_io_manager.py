@@ -24,7 +24,7 @@ from tealetio.io_waiter import (
 from tealetio.operations import ContinuousOperation, InvalidStateError, MultishotDelivery, Operation
 from tealetio.tasks import CancelledError
 from tealetio.proactor import SyncProactorScheduler, UringProactor
-from tealetio.scheduler import TimerHandle
+from io_fakes import StubScheduler
 from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
     _DeferredCreateSocketUringRing,
@@ -36,55 +36,8 @@ from uring_fakes import (
 )
 
 
-class _StubScheduler:
-    """Minimal scheduler stand-in for direct ``ProactorIOManager`` unit tests."""
-
-    def __init__(self) -> None:
-        self._exception_handler: Any = None
-        self.timer_handles: list[tuple[TimerHandle, Any, tuple[object, ...]]] = []
-
-    def set_exception_handler(self, handler: Any) -> None:
-        self._exception_handler = handler
-
-    def call_exception_handler(self, context: dict[str, Any]) -> None:
-        handler = self._exception_handler
-        if handler is None:
-            raise context["exception"]
-        handler(context)
-
-    def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
-        del kwargs
-        try:
-            callback(*args)
-        except BaseException as exc:
-            self.call_exception_handler(
-                {
-                    "message": "Exception in callback",
-                    "exception": exc,
-                    "scheduler": self,
-                }
-            )
-
-    def call_later(
-        self,
-        delay: float,
-        callback: Any,
-        *args: object,
-        context: Any = None,
-    ) -> TimerHandle:
-        del delay, context
-        handle = TimerHandle(0.0, callback, args)
-        self.timer_handles.append((handle, callback, args))
-        return handle
-
-    def fire_timers(self) -> None:
-        for handle, callback, args in self.timer_handles:
-            if not handle.cancelled():
-                callback(*args)
-
-
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
-    return ProactorIOManager(_StubScheduler(), proactor)  # type: ignore[arg-type]
+    return ProactorIOManager(StubScheduler(), proactor)  # type: ignore[arg-type]
 
 
 def _eager_accept_conn() -> socket.socket:
@@ -389,7 +342,7 @@ class TestProactorIOManagerAcceptMany:
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
         proactor = _EagerAcceptProactor()
-        scheduler = _StubScheduler()
+        scheduler = StubScheduler()
         io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
         server = socket.socket()
         try:
@@ -412,7 +365,7 @@ class TestProactorIOManagerAcceptMany:
             server.close()
 
     def test_accept_many_recv_timeout_skips_arm_when_recv_already_done(self) -> None:
-        class _DeferredArmScheduler(_StubScheduler):
+        class _DeferredArmScheduler(StubScheduler):
             def __init__(self) -> None:
                 super().__init__()
                 self.deferred: list[tuple[Any, tuple[object, ...]]] = []
@@ -470,7 +423,7 @@ class TestProactorIOManagerAcceptMany:
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
         proactor = _EagerAcceptProactor(recv_result=b"peek")
-        scheduler = _StubScheduler()
+        scheduler = StubScheduler()
         io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
         server = socket.socket()
         try:
@@ -561,7 +514,7 @@ class TestProactorIOManagerAcceptMany:
                     callback(MultishotDelivery(value=_eager_accept_conn()))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
-        scheduler = _StubScheduler()
+        scheduler = StubScheduler()
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
         io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
         server = socket.socket()
@@ -581,7 +534,7 @@ class TestProactorIOManagerAcceptMany:
                     callback(MultishotDelivery(value=_eager_accept_conn()))
                 return ContinuousOperation(kind="accept_many", fileobj=sock)
 
-        scheduler = _StubScheduler()
+        scheduler = StubScheduler()
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
         io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
         server = socket.socket()
@@ -609,7 +562,7 @@ class TestProactorIOManagerAcceptMany:
                 operation._finish(exception=OSError("recv failed"))
                 return operation
 
-        scheduler = _StubScheduler()
+        scheduler = StubScheduler()
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
         io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
         server = socket.socket()
@@ -626,7 +579,7 @@ class TestProactorIOManagerAcceptMany:
             server.close()
 
     def test_accept_many_streams_opens_recv_many_before_marshalled_callback(self) -> None:
-        class _QueueingScheduler(_StubScheduler):
+        class _QueueingScheduler(StubScheduler):
             def __init__(self) -> None:
                 super().__init__()
                 self.queued: list[tuple[Any, tuple[object, ...]]] = []
@@ -684,7 +637,7 @@ class TestProactorIOManagerAcceptMany:
     def test_accept_many_streams_closes_streams_when_marshal_fails(self) -> None:
         accepted: list[socket.socket] = []
 
-        class _ShutdownScheduler(_StubScheduler):
+        class _ShutdownScheduler(StubScheduler):
             def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
                 del callback, args, kwargs
                 raise RuntimeError("scheduler shut down")

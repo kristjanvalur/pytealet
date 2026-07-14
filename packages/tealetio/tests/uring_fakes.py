@@ -91,13 +91,6 @@ def make_fake_uring_proactor():
     return UringProactor(ring_factory=_FakeUringRing)
 
 
-PROACTOR_UNIT_TEST_FACTORIES = (
-    pytest.param(make_selector_proactor, id="selector"),
-    pytest.param(make_threaded_selector_proactor, id="threaded-selector"),
-    pytest.param(make_fake_uring_proactor, id="uring-fake"),
-)
-
-
 def make_native_uring_proactor():
     from tealetio.proactor import UringProactor
 

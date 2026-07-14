@@ -12,6 +12,8 @@ format/check passes but should still follow the same style when edited.
   and the `requires_native_uring_recv_multishot` marker wiring.
 - `helpers.py`: small scheduler construction helper for tests that need an
   explicit `set_scheduler()` call.
+- `io_fakes.py`: shared scheduler stand-ins for direct `ProactorIOManager` unit
+  tests.
 - `uring_fakes.py`: shared io_uring ring fakes, capability patching helpers, and
   deferred/backpressure ring subclasses used by proactor and streams tests.
 
@@ -39,9 +41,8 @@ format/check passes but should still follow the same style when edited.
 
 ### Files
 
-- `test_files.py`: `parse_open_mode()` flag mapping.
-- `test_proactor_files.py`: `ProactorFile` handle behaviour (seek/read/write
-  against a memory proactor fake).
+- `test_proactor_files.py`: `parse_open_mode()` flag mapping and `ProactorFile`
+  handle behaviour (seek/read/write against a memory proactor fake).
 
 ## Markers
 

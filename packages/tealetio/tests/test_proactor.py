@@ -34,7 +34,6 @@ from uring_fakes import (
     _pack_fake_statx_buffer,
     _patch_uring_capabilities,
     PROACTOR_CONTRACT_FACTORIES,
-    PROACTOR_UNIT_TEST_FACTORIES,
     SCHEDULER_INTEGRATION_FACTORIES,
 )
 
