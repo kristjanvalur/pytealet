@@ -254,7 +254,7 @@ int PyTealetThrow_TakeRedirectTarget(PyTealetMainData *mdata, PyTealetObject *te
         assert(PyObject_TypeCheck((PyObject *)fallback_t, mstate->tealet_type));
         assert(fallback_t->owner_tid == tealet->owner_tid);
         assert(fallback_t->tealet->main == tealet->tealet->main);
-        if (fallback_t->state == STATE_RUN && fallback_t->tealet) {
+        if (PYTEALET_STATE_IS_SWITCHABLE(fallback_t->state) && fallback_t->tealet) {
             *redirect_to_out = (PyTealetObject *)Py_NewRef((PyObject *)fallback_t);
             Py_DECREF(throw_exc);
             Py_DECREF(throw_fallback);

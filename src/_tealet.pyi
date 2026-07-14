@@ -15,6 +15,7 @@ STATE_NEW: Final[int]
 STATE_STUB: Final[int]
 STATE_RUN: Final[int]
 STATE_EXIT: Final[int]
+STATE_PREPARED: Final[int]
 _C_API: object
 
 class TealetError(Exception): ...

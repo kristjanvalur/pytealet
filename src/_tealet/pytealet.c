@@ -696,7 +696,7 @@ static int pytealet_traverse(PyObject *obj, visitproc visit, void *arg) {
 static int pytealet_clear(PyObject *obj) {
     /* tracking-ref is cleared in the dealloc it isn't part of the GC cycle */
     PyTealetObject *tealet = (PyTealetObject *)obj;
-    if (tealet->state == STATE_RUN && (tealet->prepared_func || tealet->prepared_cfunc) && tealet->tealet) {
+    if (tealet->state == STATE_PREPARED && tealet->tealet) {
         TEALET_SET_PYOBJECT(tealet->tealet, NULL);
         pytealet_untrack_wrapper(tealet, 0);
         tealet_delete(tealet->tealet);
@@ -716,7 +716,7 @@ static void pytealet_dealloc(PyObject *obj) {
     /* warn if we have an active tealet that is not a stub */
     if (tealet->tealet && !TEALET_IS_MAIN(tealet->tealet) &&
         tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE && tealet->state != STATE_STUB &&
-        !(tealet->prepared_func || tealet->prepared_cfunc)) {
+        tealet->state != STATE_PREPARED) {
         int err = PyErr_WarnEx(PyExc_RuntimeWarning, "freeing an active tealet leaks memory", 1);
         if (err) {
             PyErr_WriteUnraisable(Py_None);
@@ -981,8 +981,8 @@ validate_target:
         PyErr_SetString(PyExc_TypeError, "tealet object expected");
         return NULL;
     }
-    if (((PyTealetObject *)target_obj)->state != STATE_RUN) {
-        PyErr_SetString(mstate->state_error, "must be 'run'");
+    if (!PYTEALET_STATE_IS_SWITCHABLE(((PyTealetObject *)target_obj)->state)) {
+        PyErr_SetString(mstate->state_error, "must be 'run' or 'prepared'");
         return NULL;
     }
     if ((PyTealetObject *)target_obj == current) {
@@ -1216,7 +1216,7 @@ static int pytealet_prime_prepared(PyTealetMainData *mdata, PyTealetObject *targ
         }
     }
 
-    target->state = STATE_RUN;
+    target->state = STATE_PREPARED;
     return 0;
 }
 
@@ -1410,8 +1410,8 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
     if (CheckTarget(mstate, target, current, "switch()"))
         return NULL;
 
-    if (target->state != STATE_RUN) {
-        PyErr_SetString(mstate->state_error, "must be active");
+    if (!PYTEALET_STATE_IS_SWITCHABLE(target->state)) {
+        PyErr_SetString(mstate->state_error, "must be active or prepared");
         return NULL;
     }
     assert(target->tealet);
@@ -1526,13 +1526,13 @@ static int pytealet_set_pending_exception_inner(PyTealetMainData *mdata, PyTeale
         return -1;
     }
 
-    if (target->state == STATE_RUN) {
+    if (PYTEALET_STATE_IS_SWITCHABLE(target->state)) {
         if (!target->tealet) {
             PyErr_SetString(mstate->state_error, "target tealet must be active");
             return -1;
         }
     } else if (target->state != STATE_NEW && target->state != STATE_STUB) {
-        PyErr_SetString(mstate->state_error, "target tealet must be active, new, or stub");
+        PyErr_SetString(mstate->state_error, "target tealet must be active, prepared, new, or stub");
         return -1;
     }
     if (CheckTarget(mstate, target, current, "set_pending_exception()"))
@@ -1555,8 +1555,8 @@ static int pytealet_set_pending_exception_inner(PyTealetMainData *mdata, PyTeale
             return -1;
         }
         fallback_t = (PyTealetObject *)fallback;
-        if (fallback_t->state != STATE_RUN || !fallback_t->tealet) {
-            PyErr_SetString(mstate->state_error, "fallback tealet must be active");
+        if (!PYTEALET_STATE_IS_SWITCHABLE(fallback_t->state) || !fallback_t->tealet) {
+            PyErr_SetString(mstate->state_error, "fallback tealet must be active or prepared");
             return -1;
         }
         if (CheckTarget(mstate, fallback_t, target, "set_pending_exception(fallback)"))
@@ -1796,7 +1796,7 @@ PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, P
         fallback = return_target;
     }
 
-    if (target->state == STATE_RUN) {
+    if (PYTEALET_STATE_IS_SWITCHABLE(target->state)) {
         uint32_t switch_flags = (flags & PYTEALET_THROW_PANIC) ? PYTEALET_SWITCH_PANIC : PYTEALET_SWITCH_FLAGS_DEFAULT;
         if (pytealet_set_pending_exception_inner(mdata, target, current, exc, fallback) < 0)
             return NULL;
@@ -1825,7 +1825,7 @@ PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, P
         return run_result;
     }
 
-    PyErr_SetString(mstate->state_error, "throw() target must be active, new, or stub");
+    PyErr_SetString(mstate->state_error, "throw() target must be active, prepared, new, or stub");
     return NULL;
 }
 
@@ -2378,7 +2378,7 @@ static int pytealet_collect_active_wrappers(PyTealetMainData *mdata, PyObject *a
                 continue;
             }
 
-            if (wrapper->tealet && wrapper->state != STATE_STUB)
+            if (wrapper->tealet && wrapper->state != STATE_STUB && wrapper->state != STATE_PREPARED)
                 add_to_list = (tealet_status(wrapper->tealet) == TEALET_STATUS_ACTIVE);
 
             if (add_to_list && PyList_Append(active_out, obj) < 0) {
@@ -2447,7 +2447,7 @@ static int pytealet_kill_active_snapshot(PyTealetModuleState *mstate, PyObject *
             continue;
         target = (PyTealetObject *)obj;
 
-        if (target->state != STATE_RUN || !target->tealet)
+        if (!PYTEALET_STATE_IS_SWITCHABLE(target->state) || !target->tealet)
             continue;
 
         exc = pytealet_make_kill_exception(mstate, kill_exc_spec);
@@ -2900,8 +2900,8 @@ static void pytealet_apply_resolve_target(PyTealetMainData *mdata, PyTealetObjec
                           &suppress_exc))
         goto err;
 
-    if (new_return_to->state != STATE_RUN) {
-        PyErr_SetString(mstate->state_error, "must be 'run'");
+    if (!PYTEALET_STATE_IS_SWITCHABLE(new_return_to->state)) {
+        PyErr_SetString(mstate->state_error, "must be 'run' or 'prepared'");
         goto err;
     }
     if (new_return_to == current) {
@@ -3005,7 +3005,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
         /* Restore the saved stub tstate; stub snapshots do not inherit context. */
         PyTealetTstate_Restore(&tealet->tstate, tstate);
-    } else if (tealet->state == STATE_RUN) {
+    } else if (tealet->state == STATE_RUN || tealet->state == STATE_PREPARED) {
         assert(t_current == tealet->tealet);
         assert(TEALET_PYOBJECT(t_current) == tealet);
 

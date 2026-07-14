@@ -214,7 +214,7 @@ int PyTealet_LineageReapInner(PyTealetMainData *mdata, PyObject *nerfed, int cle
         if (nerfed) {
             int add_to_list = (tealet_status(wrapper->tealet) == TEALET_STATUS_ACTIVE);
             /* Stubs are safe to delete and do not leak memory. */
-            if (wrapper->state == STATE_STUB)
+            if (wrapper->state == STATE_STUB || wrapper->state == STATE_PREPARED)
                 add_to_list = 0;
             if (add_to_list) {
                 if (PyList_Append(nerfed, obj) < 0) {

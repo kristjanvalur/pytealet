@@ -78,6 +78,7 @@ def test_capi_client_prepare_forwarding():
 
     t = _tealet.tealet()
     assert _tealet_capi_client.capi_prepare(t, worker) is None
+    assert _tealet_capi_client.capi_state(t) == _tealet.STATE_PREPARED
     assert _tealet_capi_client.capi_switch(t, 321) == ("via-capi-prepare", 321)
 
 
