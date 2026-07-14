@@ -167,22 +167,27 @@ class StreamServer:
             return
         accept_task = self._accept_task
         if accept_task is not None and not accept_task.done():
+            # Mark shutdown so late accepts discard, but keep listening socket(s)
+            # open until the accept-loop tealet exits. Closing them here while the
+            # tealet is blocked in ``accept_many().wait()`` can strand threaded
+            # selector proactor worker threads.
+            self._closed = True
             if get_current() is not None:
                 accept_task.cancel()
             else:
                 # close() may run from main or a foreign thread after the
                 # scheduler has stopped (for example pytest teardown).
                 self._scheduler.call_soon_threadsafe(accept_task.cancel)
-        # cancel() before the accept tealet's first slice skips its ``finally``.
-        if not self._closed:
-            self._finish_close()
+            # Unblock threaded selector proactors parked in accept_many().wait().
+            self._io.proactor.break_wait()
+            return
+        self._finish_close()
 
     def _finish_close(self) -> None:
-        if self._closed:
-            return
         self._closed = True
         for sock in self._sockets:
-            sock.close()
+            if sock.fileno() != -1:
+                sock.close()
 
     def _start_accept_loop(
         self,
@@ -197,7 +202,7 @@ class StreamServer:
 
         def accept_loop() -> None:
             try:
-                while True:
+                while not self._closed:
 
                     def on_accept(streams: AcceptedStreams) -> None:
                         if self._closed:
@@ -220,6 +225,8 @@ class StreamServer:
                             stream_factory=stream_factory,
                             async_=async_,
                         ).wait()
+                    except CancelledError:
+                        return
                     except (OSError, RuntimeError):
                         if self._closed:
                             return
@@ -242,8 +249,7 @@ class StreamServer:
                 accept_task.wait()
             except CancelledError:
                 pass
-        if not self._closed:
-            self._finish_close()
+        self._finish_close()
 
         for handler in tuple(self._handler_tasks):
             if not handler.done():
