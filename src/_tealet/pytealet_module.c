@@ -784,7 +784,7 @@ static int pytealet_module_exec(PyObject *m) {
     PyModule_AddIntMacro(m, STATE_STUB);
     PyModule_AddIntMacro(m, STATE_RUN);
     PyModule_AddIntMacro(m, STATE_EXIT);
-    PyModule_AddIntMacro(m, STATE_PREPARED);
+    PyModule_AddIntMacro(m, STATE_PRIMED);
     if (PyModule_AddIntConstant(m, "PYTEALET_DEFER_DELETE", PYTEALET_DEFER_DELETE) < 0)
         return -1;
     if (PyModule_AddIntConstant(m, "PYTEALET_WITH_PENDING_FRAME_INTROSPECTION",

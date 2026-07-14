@@ -47,6 +47,7 @@ State enum:
   - `PYTEALET_STATE_STUB`
   - `PYTEALET_STATE_RUN`
   - `PYTEALET_STATE_EXIT`
+  - `PYTEALET_STATE_PRIMED`
 
 ## Context Lifecycle
 

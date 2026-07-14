@@ -13,10 +13,10 @@
 #define STATE_STUB 1
 #define STATE_RUN 2
 #define STATE_EXIT 3
-#define STATE_PREPARED 4
+#define STATE_PRIMED 4
 
 /* Wrapper has a bound C tealet and may be switched to. */
-#define PYTEALET_STATE_IS_SWITCHABLE(state) ((state) == STATE_RUN || (state) == STATE_PREPARED)
+#define PYTEALET_STATE_IS_SWITCHABLE(state) ((state) == STATE_RUN || (state) == STATE_PRIMED)
 
 #ifndef PYTEALET_VERSION
 #define PYTEALET_VERSION "0.0.0+unknown"

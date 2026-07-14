@@ -17,7 +17,7 @@ The `tealet` package re-exports `_tealet` symbols and provides helper utilities.
 
 Common constants/types re-exported from `_tealet` include:
 - `tealet.tealet` (core type)
-- `tealet.STATE_NEW`, `tealet.STATE_STUB`, `tealet.STATE_RUN`, `tealet.STATE_EXIT`
+- `tealet.STATE_NEW`, `tealet.STATE_STUB`, `tealet.STATE_RUN`, `tealet.STATE_EXIT`, `tealet.STATE_PRIMED`
 - `tealet.TealetError`, `tealet.DefunctError`, `tealet.PanicError`, `tealet.InvalidError`, `tealet.ThreadMismatchError`, `tealet.StateError`, `tealet.TealetExit`
 
 ## _tealet module

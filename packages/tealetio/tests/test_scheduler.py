@@ -923,7 +923,7 @@ class TestSchedulerAccessors:
         s = _new_scheduler()
 
         deferred = s.spawn(lambda: "deferred", eager_start=False)
-        assert deferred.state == _tealet.STATE_PREPARED
+        assert deferred.state == _tealet.STATE_PRIMED
 
         def parent() -> None:
             task = s.spawn(lambda: "eager", eager_start=True)

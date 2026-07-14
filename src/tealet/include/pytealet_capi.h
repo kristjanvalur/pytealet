@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 
-#define PYTEALET_CAPI_ABI_VERSION 4u
+#define PYTEALET_CAPI_ABI_VERSION 5u
 #define PYTEALET_CAPI_CAPSULE_NAME "_tealet._C_API"
 
 /* Feature flags published in PyTealet_CAPI.feature_flags. */
@@ -35,7 +35,7 @@ typedef enum PyTealet_State {
     PYTEALET_STATE_STUB = 1,
     PYTEALET_STATE_RUN = 2,
     PYTEALET_STATE_EXIT = 3,
-    PYTEALET_STATE_PREPARED = 4,
+    PYTEALET_STATE_PRIMED = 4,
 } PyTealet_State;
 
 typedef struct PyTealet_CAPI {

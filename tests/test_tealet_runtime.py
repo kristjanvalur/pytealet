@@ -515,7 +515,7 @@ class TestPrepare:
 
         t = _tealet.tealet().prepare(worker)
         assert isinstance(t, _tealet.tealet)
-        assert t.state == _tealet.STATE_PREPARED
+        assert t.state == _tealet.STATE_PRIMED
         assert t.switch("payload") == "done-chain"
         assert seen == ["payload"]
         assert t.state == _tealet.STATE_EXIT
@@ -531,7 +531,7 @@ class TestPrepare:
         assert t.state == _tealet.STATE_NEW
 
         t.prepare(worker)
-        assert t.state == _tealet.STATE_PREPARED
+        assert t.state == _tealet.STATE_PRIMED
         assert t.switch("payload") == "done-new"
         assert seen == ["payload"]
         assert t.state == _tealet.STATE_EXIT
@@ -548,13 +548,13 @@ class TestPrepare:
         assert t.state == _tealet.STATE_STUB
 
         t.prepare(worker)
-        assert t.state == _tealet.STATE_PREPARED
+        assert t.state == _tealet.STATE_PRIMED
         assert seen == []
         assert t.switch(123) == "done-stub"
         assert seen == [123]
         assert t.state == _tealet.STATE_EXIT
 
-    def test_set_stub_then_prepare_is_prepared_not_run(self):
+    def test_set_stub_then_prepare_is_primed_not_run(self):
         source = _tealet.tealet()
         source.stub()
 
@@ -566,7 +566,7 @@ class TestPrepare:
             return current.main(), arg
 
         target.prepare(worker)
-        assert target.state == _tealet.STATE_PREPARED
+        assert target.state == _tealet.STATE_PRIMED
         assert target.switch("from-stub-template") == "from-stub-template"
         assert target.state == _tealet.STATE_EXIT
 

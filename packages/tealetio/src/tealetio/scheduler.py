@@ -1774,9 +1774,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         t = self._task_factory(self, func, context=context, eager_start=eager_start, **kwargs)
         self._all_tasks.add(t)
-        # prepare() leaves STATE_PREPARED until the first switch/throw; inline eager
+        # prepare() leaves STATE_PRIMED until the first switch/throw; inline eager
         # start has already entered the worker (STATE_RUN or STATE_EXIT).
-        if t.state == tealet.STATE_PREPARED:
+        if t.state == tealet.STATE_PRIMED:
             self._make_runnable(t)
         return t
 

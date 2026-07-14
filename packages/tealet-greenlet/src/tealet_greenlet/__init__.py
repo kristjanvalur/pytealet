@@ -382,7 +382,7 @@ class greenlet(object):
             return
         # must be careful during teardown when module may be half cleared.
         try:
-            if tealet.state in (_tealet.STATE_RUN, _tealet.STATE_PREPARED):
+            if tealet.state in (_tealet.STATE_RUN, _tealet.STATE_PRIMED):
                 if _gc_collecting_depth() > 0:
                     # Avoid dealloc-time switches while GC is actively walking
                     # temporary stack-local lists. Process this after GC.
@@ -527,7 +527,7 @@ class greenlet(object):
     @property
     def _stack_saved(self):
         tealet = getattr(self, "_tealet", None)
-        if tealet is None or tealet.state not in (_tealet.STATE_RUN, _tealet.STATE_PREPARED):
+        if tealet is None or tealet.state not in (_tealet.STATE_RUN, _tealet.STATE_PRIMED):
             return 0
         # Running/current greenlets have no saved suspended stack segment.
         if tealet is _tealet.current():
@@ -537,7 +537,7 @@ class greenlet(object):
 
     def __bool__(self):
         tealet = getattr(self, "_tealet", None)
-        return tealet is not None and tealet.state in (_tealet.STATE_RUN, _tealet.STATE_PREPARED) and not self.dead
+        return tealet is not None and tealet.state in (_tealet.STATE_RUN, _tealet.STATE_PRIMED) and not self.dead
 
     def __copy__(self):
         raise TypeError("uncopyable object")

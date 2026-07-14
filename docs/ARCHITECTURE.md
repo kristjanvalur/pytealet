@@ -117,17 +117,17 @@ Primes a tealet with a function without transferring control immediately.
 - **State requirement:** Must be STATE_NEW or STATE_STUB
 - **Parameters:**
     - `function`: Callable that receives `(current_tealet, arg)` on first entry
-- **Returns:** The prepared tealet
+- **Returns:** The primed tealet (self)
 - **Effect:** Captures native start state immediately with
-    `TEALET_START_DEFAULT` and changes state to STATE_RUN. Later `switch()` or
-    `throw()` use the normal active-target path, and the prepared tealet can also
-    be used as an exit target from `resolve_target()`.
+    `TEALET_START_DEFAULT` and changes state to `STATE_PRIMED`. Later `switch()`
+    or `throw()` promote the wrapper to `STATE_RUN` on first entry. A primed
+    tealet can also be used as an exit target from `resolve_target()`.
 
 ```python
 tealet.switch(arg=None) -> result
 ```
 Switches execution to this tealet, passing an optional argument.
-- **State requirement:** Must be STATE_RUN (active tealet)
+- **State requirement:** Must be `STATE_RUN` or `STATE_PRIMED`
 - **Parameters:**
   - `arg`: Optional value to pass to the target tealet
 - **Returns:** Value passed back when someone switches to us
@@ -146,7 +146,7 @@ this tealet lineage.
 tealet.throw(exception, *, return_target=current) -> result
 ```
 Convenience API that combines injection and transfer.
-- `STATE_RUN` target: equivalent to
+- `STATE_RUN` or `STATE_PRIMED` target: equivalent to
     `set_pending_exception(exception, fallback=return_target)` followed by `switch()`.
 - `STATE_NEW`/`STATE_STUB` target: equivalent to
     `set_pending_exception(exception, fallback=return_target)` followed by `run()`.
@@ -175,8 +175,9 @@ tealet.state -> int
 Current state of the tealet:
 - `STATE_NEW` (0): Created but not initialized
 - `STATE_STUB` (1): Duplicatable template
-- `STATE_RUN` (2): Currently active/runnable
+- `STATE_RUN` (2): Worker entered at least once; currently active or suspended
 - `STATE_EXIT` (3): Exited/finished
+- `STATE_PRIMED` (4): Stack captured and callable bound; worker not entered yet
 
 ```python
 tealet.frame -> frame | None
@@ -244,6 +245,7 @@ _tealet.STATE_NEW = 0
 _tealet.STATE_STUB = 1
 _tealet.STATE_RUN = 2
 _tealet.STATE_EXIT = 3
+_tealet.STATE_PRIMED = 4
 _tealet.PYTEALET_WITH_PENDING_FRAME_INTROSPECTION = 0 | 1
 ```
 
@@ -550,8 +552,9 @@ typedef struct main_data {
 ```c
 #define STATE_NEW 0    // Created but not initialized
 #define STATE_STUB 1   // Duplicatable template
-#define STATE_RUN 2    // Currently active/runnable
+#define STATE_RUN 2    // Worker entered; active or suspended
 #define STATE_EXIT 3   // Exited/finished
+#define STATE_PRIMED 4 // Callable bound; worker not entered yet
 ```
 
 ### State Transitions:
@@ -562,8 +565,9 @@ NEW ──────────────┐
 │  .stub()        │  .run() with NEW
 │                 │
 ▼                 ▼
-STUB ────────► RUN ────► EXIT
-      .run()        returns
+STUB ──.prepare()──► PRIMED ──.switch()──► RUN ────► EXIT
+      .run()              ▲                    returns
+                          └── .prepare() from NEW
 ```
 
 ### State Validation
@@ -612,12 +616,12 @@ Can only run NEW or STUB.
 
 **Switching (pytealet_switch):**
 ```c
-if (self->state != STATE_RUN) {
-    PyErr_SetString(StateError, "must be active");
+if (!PYTEALET_STATE_IS_SWITCHABLE(self->state)) {
+    PyErr_SetString(StateError, "must be active or primed");
     return NULL;
 }
 ```
-Can only switch to RUN.
+Can switch to `STATE_RUN` or `STATE_PRIMED`.
 
 ---
 
@@ -707,8 +711,8 @@ tealet_spawn(main->tealet, &stub, pytealet_primed_main, NULL, stack_far, TEALET_
 
 The pytealet wrapper creates stubs as spawned tealets with a baked-in top-level dispatcher:
 - `pytealet_stub()` calls `tealet_spawn(..., pytealet_primed_main, ..., TEALET_START_DEFAULT)` and marks the wrapper as `STATE_STUB`.
-- `pytealet_run()` switches to the stub with a `PyTealetNewArg`; `pytealet_primed_main()` sees no prepared callable and tail-calls `pytealet_main()` with that run payload.
-- `prepare()` stores a prepared callable, promotes the wrapper to `STATE_RUN`, and later `pytealet_primed_main()` consumes the prepared callable instead of expecting a `PyTealetNewArg` switch payload.
+- `pytealet_run()` switches to the stub with a `PyTealetNewArg`; `pytealet_primed_main()` sees no primed callable and tail-calls `pytealet_main()` with that run payload.
+- `prepare()` stores a primed callable and promotes the wrapper to `STATE_PRIMED`; later `pytealet_primed_main()` consumes the primed callable instead of expecting a `PyTealetNewArg` switch payload.
 - Duplicating a stub wrapper (`existing_stub.duplicate()`) duplicates native state with `tealet_duplicate()` and duplicates saved thread state.
 - `set_stub(source, duplicate=True)` duplicates native source-stub state and attaches it to an already-constructed NEW target wrapper.
 
@@ -716,16 +720,16 @@ The pytealet wrapper creates stubs as spawned tealets with a baked-in top-level 
 1. `tealet_spawn(..., TEALET_START_DEFAULT)` creates a paused tealet whose first entry is `pytealet_primed_main()`.
 2. The stub can be duplicated (`tealet_duplicate`) before use.
 3. Running the stub switches to it with a `PyTealetNewArg` payload.
-4. Prepared first entry switches to the same dispatcher with the user argument; the dispatcher detects `prepared_func` / `prepared_cfunc` on the wrapper and builds the run payload internally.
+4. Primed first entry switches to the same dispatcher with the user argument; the dispatcher detects `primed_func` / `primed_cfunc` on the wrapper and builds the run payload internally.
 5. `pytealet_main()` performs Python-level run/switch semantics.
 
 ### Benefits:
 - Efficient paused-template creation with a pytealet-owned first-entry dispatcher.
 - Supports duplicate-from-stub workflows naturally.
-- Uses the same first-entry path for normal stub runs and prepared tealets.
+- Uses the same first-entry path for normal stub runs and primed tealets.
 
 ### Memory Management:
-The run payload is owned by the calling pytealet lineage and is valid only for the switch handoff. Prepared-callable fields are owned by the wrapper until `pytealet_primed_main()` consumes them on first entry.
+The run payload is owned by the calling pytealet lineage and is valid only for the switch handoff. Primed-callable fields are owned by the wrapper until `pytealet_primed_main()` consumes them on first entry.
 
 ---
 

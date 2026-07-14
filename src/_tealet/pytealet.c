@@ -75,7 +75,7 @@ static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, Py
                                 PyObject *kwnames);
 static PyObject *pytealet_set_pending_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
                                         Py_ssize_t nargs, PyObject *kwnames);
-static int pytealet_prime_prepared(PyTealetMainData *mdata, PyTealetObject *target, PyTealetObject *current,
+static int pytealet_prime_primed(PyTealetMainData *mdata, PyTealetObject *target, PyTealetObject *current,
                                    const char *operation);
 
 enum {
@@ -396,7 +396,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     result->owner_tid = current_tid;
     result->domain_lock_obj = NULL;
     result->tracking_ref = NULL;
-    result->prepared_func = NULL;
+    result->primed_func = NULL;
     result->inflight_throw_token = 0;
     PyTealetTstate_Init(&result->tstate);
     PyTealetFrameInfo_Init(&result->frame_info);
@@ -407,7 +407,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     if (lineage_mdata && lineage_mdata->domain_lock_obj) {
         result->domain_lock_obj = Py_NewRef(lineage_mdata->domain_lock_obj);
     }
-    result->prepared_cfunc = NULL;
+    result->primed_cfunc = NULL;
     return (PyObject *)result;
 }
 
@@ -482,7 +482,7 @@ static PyObject *pytealet_duplicate_impl(PyTealetModuleState *mstate, PyTealetOb
         result->owner_tid = src->owner_tid;
         result->domain_lock_obj = NULL;
         result->tracking_ref = NULL;
-        result->prepared_func = NULL;
+        result->primed_func = NULL;
         result->inflight_throw_token = 0;
         PyTealetTstate_Init(&result->tstate);
         PyTealetFrameInfo_Init(&result->frame_info);
@@ -515,16 +515,16 @@ static PyObject *pytealet_duplicate_impl(PyTealetModuleState *mstate, PyTealetOb
     result->state = src->state;
     if (src->domain_lock_obj)
         result->domain_lock_obj = Py_NewRef(src->domain_lock_obj);
-    if (src->prepared_func)
-        result->prepared_func = Py_NewRef(src->prepared_func);
-    result->prepared_cfunc = src->prepared_cfunc;
+    if (src->primed_func)
+        result->primed_func = Py_NewRef(src->primed_func);
+    result->primed_cfunc = src->primed_cfunc;
 
     return (PyObject *)result;
 }
 
 static int pytealet_set_stub_impl(PyTealetModuleState *mstate, PyTealetObject *target, PyTealetObject *source) {
     PyObject *old_domain_lock_obj;
-    PyObject *old_prepared_func;
+    PyObject *old_primed_func;
     PyTealetMainData *lineage_mdata;
     tealet_t *duplicated;
 
@@ -568,11 +568,11 @@ static int pytealet_set_stub_impl(PyTealetModuleState *mstate, PyTealetObject *t
     target->domain_lock_obj = source->domain_lock_obj ? Py_NewRef(source->domain_lock_obj) : NULL;
     Py_XDECREF(old_domain_lock_obj);
 
-    old_prepared_func = target->prepared_func;
-    target->prepared_func = source->prepared_func ? Py_NewRef(source->prepared_func) : NULL;
-    target->prepared_cfunc = source->prepared_cfunc;
+    old_primed_func = target->primed_func;
+    target->primed_func = source->primed_func ? Py_NewRef(source->primed_func) : NULL;
+    target->primed_cfunc = source->primed_cfunc;
     target->inflight_throw_token = 0;
-    Py_XDECREF(old_prepared_func);
+    Py_XDECREF(old_primed_func);
 
     return 0;
 }
@@ -682,7 +682,7 @@ static int pytealet_traverse(PyObject *obj, visitproc visit, void *arg) {
 
     Py_VISIT(tealet->domain_lock_obj);
     Py_VISIT(tealet->tracking_ref);
-    Py_VISIT(tealet->prepared_func);
+    Py_VISIT(tealet->primed_func);
 
     visit_rc = PyTealetTstate_Visit(&tealet->tstate, visit, arg);
     if (visit_rc)
@@ -696,15 +696,15 @@ static int pytealet_traverse(PyObject *obj, visitproc visit, void *arg) {
 static int pytealet_clear(PyObject *obj) {
     /* tracking-ref is cleared in the dealloc it isn't part of the GC cycle */
     PyTealetObject *tealet = (PyTealetObject *)obj;
-    if (tealet->state == STATE_PREPARED && tealet->tealet) {
+    if (tealet->state == STATE_PRIMED && tealet->tealet) {
         TEALET_SET_PYOBJECT(tealet->tealet, NULL);
         pytealet_untrack_wrapper(tealet, 0);
         tealet_delete(tealet->tealet);
         tealet->tealet = NULL;
         tealet->state = STATE_EXIT;
     }
-    Py_CLEAR(tealet->prepared_func);
-    tealet->prepared_cfunc = NULL;
+    Py_CLEAR(tealet->primed_func);
+    tealet->primed_cfunc = NULL;
     PyTealetTstate_Drop(&tealet->tstate, NULL, 1);
     PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
     return 0;
@@ -716,7 +716,7 @@ static void pytealet_dealloc(PyObject *obj) {
     /* warn if we have an active tealet that is not a stub */
     if (tealet->tealet && !TEALET_IS_MAIN(tealet->tealet) &&
         tealet_status(tealet->tealet) == TEALET_STATUS_ACTIVE && tealet->state != STATE_STUB &&
-        tealet->state != STATE_PREPARED) {
+        tealet->state != STATE_PRIMED) {
         int err = PyErr_WarnEx(PyExc_RuntimeWarning, "freeing an active tealet leaks memory", 1);
         if (err) {
             PyErr_WriteUnraisable(Py_None);
@@ -982,7 +982,7 @@ validate_target:
         return NULL;
     }
     if (!PYTEALET_STATE_IS_SWITCHABLE(((PyTealetObject *)target_obj)->state)) {
-        PyErr_SetString(mstate->state_error, "must be 'run' or 'prepared'");
+        PyErr_SetString(mstate->state_error, "must be 'run' or 'primed'");
         return NULL;
     }
     if ((PyTealetObject *)target_obj == current) {
@@ -1058,16 +1058,16 @@ int PyTealetApi_Prepare(PyTealetModuleState *mstate, PyObject *target_obj, PyObj
             PyErr_SetString(PyExc_TypeError, "prepare() argument 'function' must be callable");
             return -1;
         }
-        Py_XSETREF(target->prepared_func, Py_NewRef(func));
-        target->prepared_cfunc = NULL;
+        Py_XSETREF(target->primed_func, Py_NewRef(func));
+        target->primed_cfunc = NULL;
     } else {
-        Py_CLEAR(target->prepared_func);
-        target->prepared_cfunc = cfunc;
+        Py_CLEAR(target->primed_func);
+        target->primed_cfunc = cfunc;
     }
 
-    if (pytealet_prime_prepared(mdata, target, current, "prepare()") < 0) {
-        Py_CLEAR(target->prepared_func);
-        target->prepared_cfunc = NULL;
+    if (pytealet_prime_primed(mdata, target, current, "prepare()") < 0) {
+        Py_CLEAR(target->primed_func);
+        target->primed_cfunc = NULL;
         return -1;
     }
 
@@ -1151,7 +1151,7 @@ static PyObject *pytealet_run_dispatch(PyTealetMainData *mdata, PyTealetObject *
     return result;
 }
 
-static int pytealet_prime_prepared(PyTealetMainData *mdata, PyTealetObject *target, PyTealetObject *current,
+static int pytealet_prime_primed(PyTealetMainData *mdata, PyTealetObject *target, PyTealetObject *current,
                                    const char *operation) {
     tealet_t *tealet = NULL;
     PyThreadState *tstate = PyThreadState_GET();
@@ -1164,7 +1164,7 @@ static int pytealet_prime_prepared(PyTealetMainData *mdata, PyTealetObject *targ
     assert(target);
     assert(current);
     assert(target->state == STATE_NEW || target->state == STATE_STUB);
-    assert(target->prepared_func || target->prepared_cfunc);
+    assert(target->primed_func || target->primed_cfunc);
 
     if (!mdata) {
         PyErr_SetString(PyExc_RuntimeError, "current tealet lineage unavailable");
@@ -1216,7 +1216,7 @@ static int pytealet_prime_prepared(PyTealetMainData *mdata, PyTealetObject *targ
         }
     }
 
-    target->state = STATE_PREPARED;
+    target->state = STATE_PRIMED;
     return 0;
 }
 
@@ -1341,9 +1341,9 @@ PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyO
     if (!arg)
         arg = Py_None;
 
-    /* Any explicit run consumes a previously prepared callable. */
-    Py_CLEAR(target->prepared_func);
-    target->prepared_cfunc = NULL;
+    /* Any explicit run consumes a previously primed callable. */
+    Py_CLEAR(target->primed_func);
+    target->primed_cfunc = NULL;
 
     return pytealet_run_dispatch(mdata, target, current, func, arg, cfunc);
 }
@@ -1411,7 +1411,7 @@ static PyObject *pytealet_switch(PyObject *self, PyTypeObject *defining_class, P
         return NULL;
 
     if (!PYTEALET_STATE_IS_SWITCHABLE(target->state)) {
-        PyErr_SetString(mstate->state_error, "must be active or prepared");
+        PyErr_SetString(mstate->state_error, "must be active or primed");
         return NULL;
     }
     assert(target->tealet);
@@ -1532,7 +1532,7 @@ static int pytealet_set_pending_exception_inner(PyTealetMainData *mdata, PyTeale
             return -1;
         }
     } else if (target->state != STATE_NEW && target->state != STATE_STUB) {
-        PyErr_SetString(mstate->state_error, "target tealet must be active, prepared, new, or stub");
+        PyErr_SetString(mstate->state_error, "target tealet must be active, primed, new, or stub");
         return -1;
     }
     if (CheckTarget(mstate, target, current, "set_pending_exception()"))
@@ -1556,7 +1556,7 @@ static int pytealet_set_pending_exception_inner(PyTealetMainData *mdata, PyTeale
         }
         fallback_t = (PyTealetObject *)fallback;
         if (!PYTEALET_STATE_IS_SWITCHABLE(fallback_t->state) || !fallback_t->tealet) {
-            PyErr_SetString(mstate->state_error, "fallback tealet must be active or prepared");
+            PyErr_SetString(mstate->state_error, "fallback tealet must be active or primed");
             return -1;
         }
         if (CheckTarget(mstate, fallback_t, target, "set_pending_exception(fallback)"))
@@ -1804,7 +1804,7 @@ PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, P
     }
 
     if (target->state == STATE_NEW || target->state == STATE_STUB) {
-        PyObject *prepared_func = target->prepared_func;
+        PyObject *primed_func = target->primed_func;
         PyObject *run_result;
 
         if (flags & PYTEALET_THROW_PANIC) {
@@ -1815,17 +1815,17 @@ PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, P
         if (pytealet_set_pending_exception_inner(mdata, target, current, exc, fallback) < 0)
             return NULL;
 
-        /* consume the prepared func.  We don't actually need it because the
+        /* consume the primed func.  We don't actually need it because the
          * exception gets raised even before running it.
          */
-        target->prepared_func = NULL;
-        target->prepared_cfunc = NULL;
+        target->primed_func = NULL;
+        target->primed_cfunc = NULL;
         run_result = pytealet_run(target_obj, mstate->tealet_type, NULL, 0, NULL);
-        Py_XDECREF(prepared_func);
+        Py_XDECREF(primed_func);
         return run_result;
     }
 
-    PyErr_SetString(mstate->state_error, "throw() target must be active, prepared, new, or stub");
+    PyErr_SetString(mstate->state_error, "throw() target must be active, primed, new, or stub");
     return NULL;
 }
 
@@ -2378,7 +2378,7 @@ static int pytealet_collect_active_wrappers(PyTealetMainData *mdata, PyObject *a
                 continue;
             }
 
-            if (wrapper->tealet && wrapper->state != STATE_STUB && wrapper->state != STATE_PREPARED)
+            if (wrapper->tealet && wrapper->state != STATE_STUB && wrapper->state != STATE_PRIMED)
                 add_to_list = (tealet_status(wrapper->tealet) == TEALET_STATUS_ACTIVE);
 
             if (add_to_list && PyList_Append(active_out, obj) < 0) {
@@ -2901,7 +2901,7 @@ static void pytealet_apply_resolve_target(PyTealetMainData *mdata, PyTealetObjec
         goto err;
 
     if (!PYTEALET_STATE_IS_SWITCHABLE(new_return_to->state)) {
-        PyErr_SetString(mstate->state_error, "must be 'run' or 'prepared'");
+        PyErr_SetString(mstate->state_error, "must be 'run' or 'primed'");
         goto err;
     }
     if (new_return_to == current) {
@@ -2957,20 +2957,20 @@ static tealet_t *pytealet_primed_main(tealet_t *t_current, void *arg) {
     PyTealetNewArg targ;
 
     assert(tealet);
-    /* Default start for spawned STUB tealets. They may be unprepared stubs,
-     * where arg is already a PyTealetNewArg from run(), or prepared tealets,
+    /* Default start for spawned STUB tealets. They may be unprimed stubs,
+     * where arg is already a PyTealetNewArg from run(), or primed tealets,
      * where arg is the first switch() payload and the callable lives on the wrapper.
      */
-    if (!tealet->prepared_func && !tealet->prepared_cfunc)
+    if (!tealet->primed_func && !tealet->primed_cfunc)
         return pytealet_main(t_current, arg);
 
     targ.dest = tealet;
-    targ.func = tealet->prepared_func;
-    targ.cfunc = tealet->prepared_cfunc;
+    targ.func = tealet->primed_func;
+    targ.cfunc = tealet->primed_cfunc;
     targ.arg = arg ? (PyObject *)arg : Py_NewRef(Py_None);
 
-    tealet->prepared_func = NULL;
-    tealet->prepared_cfunc = NULL;
+    tealet->primed_func = NULL;
+    tealet->primed_cfunc = NULL;
 
     return pytealet_main(t_current, &targ);
 }
@@ -3005,7 +3005,7 @@ static tealet_t *pytealet_main(tealet_t *t_current, void *arg) {
 
         /* Restore the saved stub tstate; stub snapshots do not inherit context. */
         PyTealetTstate_Restore(&tealet->tstate, tstate);
-    } else if (tealet->state == STATE_RUN || tealet->state == STATE_PREPARED) {
+    } else if (tealet->state == STATE_RUN || tealet->state == STATE_PRIMED) {
         assert(t_current == tealet->tealet);
         assert(TEALET_PYOBJECT(t_current) == tealet);
 
