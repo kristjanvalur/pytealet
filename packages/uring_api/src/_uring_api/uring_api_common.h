@@ -117,6 +117,8 @@ typedef struct UringApiCompletion {
     PyObject *result;
     unsigned long long sequence;
     bool multishot;
+    int aux_refcount;
+    bool aux_decref;
     void *state;
 } UringApiCompletion;
 
@@ -143,6 +145,7 @@ struct UringApiRing {
     PyThread_type_lock ring_lock;
 #endif
     PyThread_type_lock cqe_drain_lock;
+    UringApiMutex refcount_mutex;
     unsigned int delivery_active_workers;
     unsigned int receive_state;
     unsigned short next_buf_group;

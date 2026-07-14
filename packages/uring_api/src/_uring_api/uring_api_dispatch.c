@@ -29,25 +29,45 @@ static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_ti
 static PyObject *build_completion_result(UringApiCompletion *completion, int res, unsigned int flags,
                                          unsigned long long leg_index);
 
-static int append_ready_completion(UringApiCompletion *completion, int res, unsigned int flags,
+static int append_ready_completion(UringApiRing *ring, UringApiCompletion *completion, int res, unsigned int flags,
                                    unsigned long long leg_index, PyObject *ready) {
-    PyObject *result = build_completion_result(completion, res, flags, leg_index);
+    PyObject *result;
+    bool drop_in_flight_ref;
+
+    /* finish before build: last staged leg to enter append gets drop_in_flight_ref when the
+     * prep counter reaches zero (see completion_finish_in_flight_ref). */
+    drop_in_flight_ref = completion_finish_in_flight_ref(ring, completion);
+
+    result = build_completion_result(completion, res, flags, leg_index);
+    /* result is always a delivery ref owned here, separate from the in-flight ref on completion. */
     if (!result) {
-        return -1;
+        goto fail;
     }
+
     if (result == Py_None) {
+        if (drop_in_flight_ref) {
+            Py_DECREF(completion);
+        }
         Py_DECREF(result);
         return 0;
     }
     if (PyList_Append(ready, result) < 0) {
         Py_DECREF(result);
-        return -1;
+        goto fail;
     }
     Py_DECREF(result);
+    if (drop_in_flight_ref) {
+        Py_DECREF(completion);
+    }
     return 0;
+fail:
+    if (drop_in_flight_ref) {
+        Py_DECREF(completion);
+    }
+    return -1;
 }
 
-static PyObject *staging_build_ready_list(UringApiStagingBuffer *staging) {
+static PyObject *staging_build_ready_list(UringApiRing *ring, UringApiStagingBuffer *staging) {
     PyObject *ready;
     size_t index;
 
@@ -60,7 +80,7 @@ static PyObject *staging_build_ready_list(UringApiStagingBuffer *staging) {
     }
     for (index = 0; index < staging->count; index++) {
         UringApiStagedCQE *staged = &staging->entries[index];
-        if (append_ready_completion(staged->completion, staged->res, staged->flags, staged->leg_index, ready) <
+        if (append_ready_completion(ring, staged->completion, staged->res, staged->flags, staged->leg_index, ready) <
             0) {
             Py_DECREF(ready);
             return NULL;
@@ -189,11 +209,6 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
     PyObject *delivered;
     int completion_result;
 
-    /* the zc notification is not a user-visible result; drop the in-flight ref retained since submit. */
-    if (is_zero_copy_send_kind(completion->kind) && (flags & IORING_CQE_F_NOTIF)) {
-        Py_DECREF(completion);
-        Py_RETURN_NONE;
-    }
     /* multishot CQEs with MORE are intermediate results: complete a fresh shell so the armed
      * pending handle is left untouched for the next kernel leg. */
     if (completion->multishot && (flags & IORING_CQE_F_MORE)) {
@@ -212,32 +227,26 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
         }
         return delivered;
     }
+    /* terminal multishot legs deliver the armed handle; sequence was already
+     * bumped while staging this leg, so restore the leg index for Python. */
+    if (completion->multishot) {
+        completion->sequence = leg_index;
+    }
     completion_result = UringApiCompletion_complete(completion, res, flags);
     /* negative means we failed while converting the CQE into Python-visible completion state. */
     if (completion_result < 0) {
-        Py_DECREF(completion);
         return NULL;
     }
     /* positive means the CQE was handled internally, such as a wake completion for break_wait(). */
     if (completion_result > 0) {
-        Py_DECREF(completion);
         Py_RETURN_NONE;
     }
-    /* the zc operation CQE is the real result. Successful sends keep the internal ref until the NOTIF CQE. */
-    if (is_zero_copy_send_kind(completion->kind)) {
-        if (res >= 0) {
-            return Py_NewRef(completion);
-        }
-        return (PyObject *)completion;
-    }
-    if (completion->multishot) {
-        completion->sequence = leg_index;
-    }
-    return (PyObject *)completion;
+
+    return Py_NewRef((PyObject *)completion);
 }
 
 static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
-                                          struct __kernel_timespec *timeout, bool from_delivery_thread) {
+                                         struct __kernel_timespec *timeout, bool from_delivery_thread) {
     struct io_uring_cqe *cqe = NULL;
     int reap_ret = 0;
     int peek_ret;
@@ -297,7 +306,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     if (staging->count == 0) {
         return PyList_New(0);
     }
-    return staging_build_ready_list(staging);
+    return staging_build_ready_list(self, staging);
 }
 
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,

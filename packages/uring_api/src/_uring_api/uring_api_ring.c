@@ -37,6 +37,20 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         PyObject_GC_Del(self);
         return NULL;
     }
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+    self->refcount_mutex = PyThread_allocate_lock();
+    if (!self->refcount_mutex) {
+        PyThread_free_lock(self->cqe_drain_lock);
+        self->cqe_drain_lock = NULL;
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+        PyThread_free_lock(self->ring_lock);
+        self->ring_lock = NULL;
+#endif
+        PyErr_NoMemory();
+        PyObject_GC_Del(self);
+        return NULL;
+    }
+#endif
     return (PyObject *)self;
 }
 
@@ -105,6 +119,12 @@ void UringApiRing_dealloc(UringApiRing *self) {
         PyThread_free_lock(self->cqe_drain_lock);
         self->cqe_drain_lock = NULL;
     }
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+    if (self->refcount_mutex) {
+        PyThread_free_lock(self->refcount_mutex);
+        self->refcount_mutex = NULL;
+    }
+#endif
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
     if (self->ring_lock) {
         PyThread_free_lock(self->ring_lock);
@@ -339,7 +359,8 @@ static PyMethodDef UringApiRing_methods[] = {
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Interrupt a thread blocked in wait without producing a user completion."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
-     "Wait for ready completions and return a list. Drains additional ready CQEs into the same batch. Returns [] on timeout or break_wait."},
+     "Wait for ready completions and return a list. Drains additional ready CQEs into the same batch. Returns [] on "
+     "timeout or break_wait."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};
@@ -352,8 +373,8 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"closed", (getter)UringApiRing_get_closed, NULL, NULL, NULL},
     {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
-    {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler,
-     NULL, NULL},
+    {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,
+     NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 
 PyTypeObject UringApiRing_Type = {

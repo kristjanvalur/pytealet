@@ -295,9 +295,71 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->result = NULL;
     completion->sequence = 0;
     completion->multishot = false;
+    completion->aux_refcount = 0;
+    completion->aux_decref = false;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;
+}
+
+static bool is_zero_copy_send_kind(UringApiPendingKind kind) {
+    return kind == URING_API_PENDING_SEND_ZC || kind == URING_API_PENDING_SENDMSG_ZC;
+}
+
+/* bump the outstanding-CQE count for a multi-step armed Completion; sticky aux_decref
+ * records that a terminal leg was staged and the in-flight ref should drop once the
+ * count returns to zero. */
+static void completion_aux_stage_cqe(UringApiRing *ring, UringApiCompletion *completion, bool want_to_decref) {
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&ring->refcount_mutex);
+    completion->aux_refcount++;
+    if (want_to_decref) {
+        completion->aux_decref = true;
+    }
+    Py_END_CRITICAL_SECTION_MUTEX();
+}
+
+/* drop the outstanding-CQE count after build; return whether the in-flight ref may
+ * leave now (count reached zero and a terminal leg had been staged). */
+static bool completion_aux_finish_cqe(UringApiRing *ring, UringApiCompletion *completion) {
+    bool decref = false;
+
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&ring->refcount_mutex);
+    completion->aux_refcount--;
+    if (completion->aux_refcount == 0 && completion->aux_decref) {
+        decref = true;
+        completion->aux_decref = false;
+    }
+    Py_END_CRITICAL_SECTION_MUTEX();
+    return decref;
+}
+
+/* called while draining CQEs outside the GIL: track multi-step armed Completions
+ * whose in-flight ref must not drop until every staged leg has been built. */
+void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion, unsigned int flags) {
+    bool multi_step = false;
+    bool want_to_decref = true;
+
+    if (completion->multishot) {
+        multi_step = true;
+        want_to_decref = !(flags & IORING_CQE_F_MORE);
+    } else if (is_zero_copy_send_kind(completion->kind)) {
+        multi_step = true;
+        want_to_decref = (flags & IORING_CQE_F_NOTIF) != 0;
+    }
+    if (multi_step) {
+        completion_aux_stage_cqe(ring, completion, want_to_decref);
+    }
+}
+
+/* called under the GIL after build: finish the staged leg and report whether the
+ * armed Completion's in-flight ref should drop now. one-shot ops always return
+ * true; multi-step ops may return false when a terminal leg was built before an
+ * earlier F_MORE leg on another completion thread. */
+bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion) {
+    if (completion->multishot || is_zero_copy_send_kind(completion->kind)) {
+        return completion_aux_finish_cqe(ring, completion);
+    }
+    return true;
 }
 
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data) {
@@ -526,10 +588,6 @@ PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObj
     return (PyObject *)completion;
 }
 
-bool is_zero_copy_send_kind(UringApiPendingKind kind) {
-    return kind == URING_API_PENDING_SEND_ZC || kind == URING_API_PENDING_SENDMSG_ZC;
-}
-
 PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index) {
     UringApiCompletion *completion;
     UringApiCompletionBufGroupState *source_buf_group_state;
@@ -626,11 +684,14 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
     UringApiCompletionMsgState *msg_state;
     UringApiCompletionSockaddrState *sockaddr_state;
 
-    self->res = res;
-    self->flags = flags;
+    if (is_zero_copy_send_kind(self->kind) && (flags & IORING_CQE_F_NOTIF)) {
+        return 1;
+    }
     if (self->kind == URING_API_PENDING_WAKE) {
         return 1;
     }
+    self->res = res;
+    self->flags = flags;
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT || self->kind == URING_API_PENDING_RECV_BUF) {
         payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags);
     } else if (res >= 0 && self->kind == URING_API_PENDING_STATX_FDSIZE) {
@@ -639,8 +700,8 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
             PyErr_SetString(PyExc_RuntimeError, "statx_fdsize completion is missing buffer state");
             return -1;
         }
-        payload = statx_fdsize_completion_size_payload(statx_fdsize_state->buf,
-                                                         (Py_ssize_t)sizeof(statx_fdsize_state->buf));
+        payload =
+            statx_fdsize_completion_size_payload(statx_fdsize_state->buf, (Py_ssize_t)sizeof(statx_fdsize_state->buf));
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
                             self->kind == URING_API_PENDING_READ || self->kind == URING_API_PENDING_WRITE ||
                             is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||

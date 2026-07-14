@@ -3,6 +3,7 @@
  */
 
 #include "uring_api_staging.h"
+#include "uring_api_completion.h"
 #include "uring_api_core.h"
 
 #include <assert.h>
@@ -60,6 +61,9 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
         staged->leg_index = completion->sequence;
         completion->sequence++;
     }
+    /* track multi-step in-flight refs while the drain lock is held (no GIL). */
+    completion_prep_in_flight_ref(self, completion, cqe->flags);
+
     /* consume the kernel CQE while draining. packaging or delivery failure later
      * (OOM, conversion error, callback error, etc.) is just failure — same as any
      * other unrecoverable error path; the ring slot cannot be un-seen. */
