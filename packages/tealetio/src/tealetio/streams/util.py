@@ -1,4 +1,4 @@
-"""Coroutine and socket helpers without scheduler or IO manager imports."""
+"""Shared stream helpers without scheduler or IO manager imports."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from typing import Any, TypeVar
 from asynkit import coro_drive
 
 T = TypeVar("T")
+
+DEFAULT_LIMIT = 2**16
 
 
 def run_coro(coro: Coroutine[Any, Any, T]) -> T:
@@ -36,4 +38,4 @@ def writer_extra_info(sock: socket.socket, name: str, default: Any = None) -> An
     return default
 
 
-__all__ = ["run_coro", "writer_extra_info"]
+__all__ = ["DEFAULT_LIMIT", "run_coro", "writer_extra_info"]

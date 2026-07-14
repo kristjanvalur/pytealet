@@ -6,7 +6,7 @@ import asyncio
 from typing import Any
 
 from ..io_buffers import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer
-from .constants import DEFAULT_LIMIT
+from .util import DEFAULT_LIMIT
 
 
 class ReaderCore:

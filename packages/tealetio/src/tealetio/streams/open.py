@@ -11,7 +11,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from ..io_buffers import RecvIterBuffer, SendBuffer
-from .constants import DEFAULT_LIMIT
+from .util import DEFAULT_LIMIT
 from .protocols import StreamOpenIO, StreamWriterIO
 from .reader import AsyncStreamReader, StreamReader
 from .writer import AsyncStreamWriter, StreamWriter

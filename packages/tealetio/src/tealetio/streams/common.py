@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from ..io_manager import IO_UNSUPPORTED_ERROR, SELECTOR_IO_UNSUPPORTED_ERROR, ProactorIOManager, SupportsProactorIO
 from ..scheduler import BaseScheduler
-from .constants import DEFAULT_LIMIT
-from .util import run_coro, writer_extra_info
+from .util import DEFAULT_LIMIT, run_coro, writer_extra_info
 
 __all__ = [
     "DEFAULT_LIMIT",
