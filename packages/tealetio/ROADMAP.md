@@ -20,17 +20,9 @@ Shutdown would cancel the continuous op and join handler tealets only. Mostly an
 architectural simplification — behaviour should stay the same for callers of
 `start_server()` / `serve_forever()`.
 
-### Consolidate stream reader/writer modules
-
-`RecvIterBuffer` and `SendBuffer` now live together in `io_buffers.py` under the
-`scheduler.io` bridge layer (`open_recv_iter_buffer` / `open_send_buffer`;
-`ProactorIOManager` delegates through `_open_sock_recv_iter` /
-`_open_send_buffer`). A later refactor could still split `streams.py` into a
-small `streams/` package when reader/writer cores outgrow a single module.
-
 ## References
 
-- `packages/tealetio/src/tealetio/streams.py` — `StreamServer`, `StreamWriter`
+- `packages/tealetio/src/tealetio/streams/` — `StreamServer`, `StreamReader`, `StreamWriter`
 - `packages/tealetio/src/tealetio/io_buffers.py` — `RecvIterBuffer`, `SendBuffer`
 - `packages/tealetio/docs/IO_MANAGER_DESIGN.md` — io_manager layout and consolidation note
 - `packages/tealetio/docs/OPERATION_CALLBACKS.md` — continuous delivery disposition

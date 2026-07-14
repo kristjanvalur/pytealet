@@ -701,7 +701,7 @@ class ProactorIOManager:
         accept callback).
         """
 
-        from .streams import _open_streams
+        from .streams.factories import open_streams as _open_streams
 
         def deliver_accept(accepted: AcceptReadResult) -> None:
             conn, _initial_data, _recv_error = accepted
@@ -761,7 +761,7 @@ class ProactorIOManager:
         ``initial_data`` is sent on the wire after connect, before streams open.
         """
 
-        from .streams import _open_streams
+        from .streams.factories import open_streams as _open_streams
 
         group = IOWaitGroup(self)
         payload = memoryview(initial_data) if initial_data is not None else None

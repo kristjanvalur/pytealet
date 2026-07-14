@@ -420,10 +420,9 @@ drop waiter only”.
   must `wait_closed()` to flush queued sends and release the socket via
   `sock_shutdown` / `sock_close`. `StreamServer` handler cleanup calls
   `wait_closed()` after `close()`.
-- **Consolidate stream reader/writer modules** — `RecvIterBuffer` and
-  `SendBuffer` live in `io_buffers.py` with `open_recv_iter_buffer` /
-  `open_send_buffer`; `ProactorIOManager` keeps thin `_open_*` delegates.
-  Further `streams.py` splitting is tracked in `packages/tealetio/ROADMAP.md`.
+- Stream endpoints live under `packages/tealetio/src/tealetio/streams/`
+  (`reader`, `writer`, `factories`, `connect`, `server`); IO bridge buffers
+  remain in `io_buffers.py`.
 
 ## References
 
@@ -432,7 +431,7 @@ drop waiter only”.
 - `packages/tealetio/src/tealetio/continuous_callbacks.py` — helpers for io_manager accept paths
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`
-- `packages/tealetio/src/tealetio/streams.py` — streams API
+- `packages/tealetio/src/tealetio/streams/` — streams API
 - `packages/tealetio/src/tealetio/io_buffers.py` — `RecvIterBuffer`, `SendBuffer`
 - `packages/tealetio/docs/PYTHON_API.md` — user-facing API
 - `packages/tealetio/docs/OPERATION_CALLBACKS.md` — io_manager continuous composition and delivery disposition

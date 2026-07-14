@@ -1518,16 +1518,16 @@ class TestStartServerListenOptions:
     def test_start_server_honours_reuse_address_flag(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import tealetio.streams as streams_module
+        from tealetio.streams import server as streams_server
 
         captured: list[bool | None] = []
-        real_bind = streams_module._bind_tcp_socket
+        real_bind = streams_server.bind_tcp_socket
 
         def capture_bind(io, addr, **kwargs):
             captured.append(kwargs.get("reuse_address"))
             return real_bind(io, addr, **kwargs)
 
-        monkeypatch.setattr(streams_module, "_bind_tcp_socket", capture_bind)
+        monkeypatch.setattr(streams_server, "bind_tcp_socket", capture_bind)
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()

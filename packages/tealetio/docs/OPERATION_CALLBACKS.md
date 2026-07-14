@@ -150,5 +150,5 @@ For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 - `packages/tealetio/src/tealetio/io_waiter.py`
 - `packages/tealetio/src/tealetio/continuous_callbacks.py`
 - `packages/tealetio/src/tealetio/operations.py`
-- `packages/tealetio/src/tealetio/streams.py` — `StreamServer` late-delivery discard
+- `packages/tealetio/src/tealetio/streams/server.py` — `StreamServer` late-delivery discard
 - `packages/tealetio/docs/IO_MANAGER_DESIGN.md`
