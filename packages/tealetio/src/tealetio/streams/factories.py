@@ -45,18 +45,14 @@ class AsyncStreamFactory(Protocol):
 
 
 def open_recv_buffer(
-    io: SocketIO,
+    io: ProactorIOManager,
     sock: socket.socket,
     recv_buffer_pool: Any | None,
 ) -> RecvIterBuffer:
-    if not isinstance(io, ProactorIOManager):
-        raise RuntimeError("stream readers require a proactor IO manager")
     return io._open_sock_recv_iter(sock, recv_buffer_pool)
 
 
-def open_send_buffer(io: SocketIO, sock: socket.socket) -> SendBuffer:
-    if not isinstance(io, ProactorIOManager):
-        raise RuntimeError("stream writers require a proactor IO manager")
+def open_send_buffer(io: ProactorIOManager, sock: socket.socket) -> SendBuffer:
     return io._open_send_buffer(sock)
 
 
@@ -70,8 +66,8 @@ def default_stream_factory(
     """Construct the default native stream pair for a connected socket."""
 
     proactor_io = cast(ProactorIOManager, io)
-    recv_buffer = open_recv_buffer(io, sock, recv_buffer_pool)
-    send_buffer = open_send_buffer(io, sock)
+    recv_buffer = open_recv_buffer(proactor_io, sock, recv_buffer_pool)
+    send_buffer = open_send_buffer(proactor_io, sock)
     reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
     writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=proactor_io, reader=reader)
     return reader, writer
@@ -87,8 +83,8 @@ def default_async_stream_factory(
     """Construct the default asyncio-shaped stream pair for a connected socket."""
 
     proactor_io = cast(ProactorIOManager, io)
-    recv_buffer = open_recv_buffer(io, sock, recv_buffer_pool)
-    send_buffer = open_send_buffer(io, sock)
+    recv_buffer = open_recv_buffer(proactor_io, sock, recv_buffer_pool)
+    send_buffer = open_send_buffer(proactor_io, sock)
     reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
     writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, io=proactor_io, reader=reader)
     return reader, writer

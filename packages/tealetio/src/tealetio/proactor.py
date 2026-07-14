@@ -2955,8 +2955,7 @@ class UringProactor(ProactorBase):
                 multishot_leg.pending_final = None
                 delivery = _recv_many_enobufs_delivery(index=index)
                 multishot_leg.enobufs_index = index
-                assert isinstance(delivery.exception, OSError)
-                multishot_leg.enobufs_exception = delivery.exception
+                multishot_leg.enobufs_exception = cast(OSError, delivery.exception)
                 operation._emit_delivery(delivery)
                 self._maybe_finish_recv_many_enobufs_leg(entry, multishot_leg, operation)
                 return operation

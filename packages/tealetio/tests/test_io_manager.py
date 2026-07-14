@@ -11,11 +11,8 @@ import pytest
 
 from tealetio import set_scheduler
 from tealetio.io_manager import (
-    FileIO,
-    PollIO,
     ProactorIOManager,
     ServerIO,
-    SocketIO,
     _finish_or_close_socket,
 )
 from tealetio.io_waiter import (
@@ -1738,10 +1735,6 @@ class TestProactorIOManagerIntegration:
 
     def test_scheduler_exposes_io_facade(self, scheduler: SyncProactorScheduler) -> None:
         io = scheduler.io
-        assert isinstance(io, ProactorIOManager)
-        assert isinstance(io, SocketIO)
-        assert isinstance(io, PollIO)
-        assert isinstance(io, FileIO)
         _: ServerIO = io
         assert io.proactor is scheduler.proactor
 

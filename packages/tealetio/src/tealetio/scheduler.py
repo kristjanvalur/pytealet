@@ -320,7 +320,6 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
         )
 
     def _active_priority(self, task: tealet.tealet) -> Any:
-        assert isinstance(task, _tasks.Task)
         try:
             return cast(Any, task).get_effective_priority()
         except AttributeError:
@@ -1893,8 +1892,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _make_runnable(self, t: tealet.tealet) -> None:
         if t in self._runnable:
             return
-        assert isinstance(t, _tasks.Task)
-        t._scheduler = self
+        cast(_tasks.Task, t)._scheduler = self
         self._runnable.add(t)
         self._break_wait()
 
@@ -1921,24 +1919,22 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _target_run(self, target: tealet.tealet) -> None:
         if target is tealet.current():
             return
-        assert isinstance(target, _tasks.Task)
-        target._unlink()
+        cast(_tasks.Task, target)._unlink()
         self._make_runnable(tealet.current())
         target.switch()
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
         if target is tealet.current():
             raise exc
-        assert isinstance(target, _tasks.Task)
-        target._unlink()
+        task = cast(_tasks.Task, target)
+        task._unlink()
         self._make_runnable(tealet.current())
-        target._throw_from_scheduler(exc)
+        task._throw_from_scheduler(exc)
 
     def _find_target(self, task_exit=False) -> tealet.tealet:
         count_transfer = True
         if self._runner is not None and self._target_count is not None and self._n_scheduled >= self._target_count:
-            result = self._runner
-            assert isinstance(result, _tasks.Task)
+            result = cast(_tasks.Task, self._runner)
             result._unlink()
             count_transfer = False
         elif self._has_runnable_work():
@@ -1949,7 +1945,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             result = tealet.main()
         if count_transfer:
             self._n_scheduled += 1
-        assert isinstance(result, _tasks.Task)
         result.link = None
         return result
 
