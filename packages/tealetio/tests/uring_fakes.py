@@ -79,6 +79,12 @@ def make_selector_proactor():
     return SelectorProactor()
 
 
+def make_threaded_selector_proactor():
+    from tealetio.proactor import ThreadedSelectorProactor
+
+    return ThreadedSelectorProactor()
+
+
 def make_fake_uring_proactor():
     from tealetio.proactor import UringProactor
 
@@ -87,6 +93,7 @@ def make_fake_uring_proactor():
 
 PROACTOR_UNIT_TEST_FACTORIES = (
     pytest.param(make_selector_proactor, id="selector"),
+    pytest.param(make_threaded_selector_proactor, id="threaded-selector"),
     pytest.param(make_fake_uring_proactor, id="uring-fake"),
 )
 
@@ -99,6 +106,7 @@ def make_native_uring_proactor():
 
 PROACTOR_CONTRACT_FACTORIES: list[Any] = [
     pytest.param(make_selector_proactor, id="selector"),
+    pytest.param(make_threaded_selector_proactor, id="threaded-selector"),
 ]
 if uring_api.is_available():
     PROACTOR_CONTRACT_FACTORIES.append(pytest.param(make_native_uring_proactor, id="uring"))
@@ -110,6 +118,12 @@ def make_selector_scheduler():
     return SyncProactorScheduler(SelectorProactor)
 
 
+def make_threaded_selector_scheduler():
+    from tealetio.proactor import SyncProactorScheduler, ThreadedSelectorProactor
+
+    return SyncProactorScheduler(ThreadedSelectorProactor)
+
+
 def make_default_uring_scheduler():
     from tealetio.proactor import SyncProactorScheduler
 
@@ -118,6 +132,7 @@ def make_default_uring_scheduler():
 
 SCHEDULER_INTEGRATION_FACTORIES: list[Any] = [
     pytest.param(make_selector_scheduler, id="selector"),
+    pytest.param(make_threaded_selector_scheduler, id="threaded-selector"),
 ]
 if uring_api.is_available():
     SCHEDULER_INTEGRATION_FACTORIES.append(pytest.param(make_default_uring_scheduler, id="uring"))
