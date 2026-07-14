@@ -421,9 +421,8 @@ drop waiter only”.
   `sock_shutdown` / `sock_close`. `StreamServer` handler cleanup calls
   `wait_closed()` after `close()`.
 - Stream endpoints live under `packages/tealetio/src/tealetio/streams/`
-  (`reader`, `writer`, `connect`, `server`); shared open logic is in
-  `stream_open.py` so `io_manager` does not import the streams package.
-  IO bridge buffers remain in `io_buffers.py`.
+  (`reader`, `writer`, `factories`, `connect`, `server`); IO bridge buffers
+  remain in `io_buffers.py`.
 
 ## References
 
@@ -432,7 +431,6 @@ drop waiter only”.
 - `packages/tealetio/src/tealetio/continuous_callbacks.py` — helpers for io_manager accept paths
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`
-- `packages/tealetio/src/tealetio/stream_open.py` — open connected sockets as stream pairs
 - `packages/tealetio/src/tealetio/streams/` — streams API
 - `packages/tealetio/src/tealetio/io_buffers.py` — `RecvIterBuffer`, `SendBuffer`
 - `packages/tealetio/docs/PYTHON_API.md` — user-facing API

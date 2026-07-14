@@ -7,8 +7,6 @@ import socket
 import sys
 from typing import Any, Literal, cast, overload
 
-from ..stream_open import StreamOpenIO
-
 from ..continuous_callbacks import AcceptStreamsDelivery as AcceptedStreams
 from ..io_manager import ServerIO, SocketIO
 from ..scheduler import BaseScheduler
@@ -275,7 +273,7 @@ class StreamServer:
             return
 
         reader, writer = build_streams(
-            cast(StreamOpenIO, self._io),
+            self._io,
             conn,
             limit=limit,
             stream_factory=stream_factory,
