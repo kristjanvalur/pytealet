@@ -555,65 +555,6 @@ PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *s
     return (PyObject *)completion;
 }
 
-void UringApiCompletion_clear_pending_state(UringApiCompletion *self) {
-    UringApiCompletionBufGroupState *buf_group_state;
-    UringApiCompletionViewState *view_state;
-    UringApiCompletionViewSockaddrState *view_sockaddr_state;
-    UringApiCompletionMsgState *msg_state;
-
-    switch (UringApiCompletion_state_tag(self)) {
-    case URING_API_COMPLETION_STATE_VIEW:
-        view_state = (UringApiCompletionViewState *)self->state;
-        UringApiCompletion_release_view_state(view_state);
-        UringApiCompletion_free_state(self);
-        break;
-    case URING_API_COMPLETION_STATE_VIEW_SOCKADDR:
-        view_sockaddr_state = (UringApiCompletionViewSockaddrState *)self->state;
-        UringApiCompletion_release_view_sockaddr_state(view_sockaddr_state);
-        UringApiCompletion_free_state(self);
-        break;
-    case URING_API_COMPLETION_STATE_BUF_GROUP:
-        if (self->state) {
-            buf_group_state = (UringApiCompletionBufGroupState *)self->state;
-            Py_CLEAR(buf_group_state->buf_group);
-        }
-        UringApiCompletion_free_state(self);
-        break;
-    case URING_API_COMPLETION_STATE_SOCKADDR:
-        UringApiCompletion_free_state(self);
-        break;
-    case URING_API_COMPLETION_STATE_MSG:
-        msg_state = (UringApiCompletionMsgState *)self->state;
-        UringApiCompletion_release_msg_view(msg_state);
-        UringApiCompletion_free_state(self);
-        break;
-    case URING_API_COMPLETION_STATE_PATH:
-        UringApiCompletion_free_state(self);
-        break;
-    case URING_API_COMPLETION_STATE_STATX: {
-        UringApiCompletionStatxState *statx_state = (UringApiCompletionStatxState *)self->state;
-        if (statx_state->has_view) {
-            PyBuffer_Release(&statx_state->view);
-            statx_state->has_view = false;
-        }
-        UringApiCompletion_free_state(self);
-        break;
-    }
-    case URING_API_COMPLETION_STATE_STATX_FDSIZE:
-        UringApiCompletion_free_state(self);
-        break;
-    case URING_API_COMPLETION_STATE_NONE:
-        break;
-    }
-}
-
-static bool UringApiCompletion_should_clear_pending_state(UringApiCompletion *self, int res, unsigned int flags) {
-    if (is_zero_copy_send_kind(self->kind) && res >= 0 && !(flags & IORING_CQE_F_NOTIF)) {
-        return false;
-    }
-    return !(flags & IORING_CQE_F_MORE);
-}
-
 static void UringApiCompletion_recycle_selected_buffer(UringApiCompletion *self, unsigned int flags) {
     UringApiBufGroup *buf_group;
     PyObject *buf_group_obj;
@@ -688,7 +629,6 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
     self->res = res;
     self->flags = flags;
     if (self->kind == URING_API_PENDING_WAKE) {
-        UringApiCompletion_clear_pending_state(self);
         return 1;
     }
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT || self->kind == URING_API_PENDING_RECV_BUF) {
@@ -733,9 +673,6 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
         return -1;
     }
     Py_XSETREF(self->result, payload);
-    if (UringApiCompletion_should_clear_pending_state(self, res, flags)) {
-        UringApiCompletion_clear_pending_state(self);
-    }
     return 0;
 }
 

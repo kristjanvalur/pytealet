@@ -189,9 +189,8 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
     PyObject *delivered;
     int completion_result;
 
-    /* the zc notification is not a user-visible result; it only releases resources retained for the send. */
+    /* the zc notification is not a user-visible result; drop the in-flight ref retained since submit. */
     if (is_zero_copy_send_kind(completion->kind) && (flags & IORING_CQE_F_NOTIF)) {
-        UringApiCompletion_clear_pending_state(completion);
         Py_DECREF(completion);
         Py_RETURN_NONE;
     }
