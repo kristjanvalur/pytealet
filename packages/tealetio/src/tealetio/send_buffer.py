@@ -5,7 +5,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from .io_waiter import IOWaiter
-from .locks import ThreadsafeCondition
+from .locks import CrossThreadCondition
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -19,7 +19,7 @@ class SendBuffer:
 
     At most one send operation is active per buffer. Completions may arrive on a
     proactor worker thread; ``drain()`` and ``flush()`` block on the scheduler
-    thread via ``ThreadsafeCondition``.
+    thread via ``CrossThreadCondition``.
 
     ``drain()`` follows asyncio transport semantics: return immediately while
     ``pending_bytes <= high_water``; otherwise block until ``pending_bytes <=
@@ -37,7 +37,7 @@ class SendBuffer:
     ) -> None:
         self._sock = sock
         self._io = io
-        self._cond = ThreadsafeCondition(scheduler=scheduler)
+        self._cond = CrossThreadCondition(scheduler=scheduler)
         self._pending: deque[bytes] = deque()
         self._pending_bytes = 0
         self._in_flight_bytes = 0
@@ -93,7 +93,8 @@ class SendBuffer:
             chunk_to_send = self._pending.popleft()
             self._pending_bytes -= len(chunk_to_send)
             self._in_flight_bytes = len(chunk_to_send)
-        self._submit_leg(chunk_to_send, restore_on_failure=True)
+        # Safe outside the lock: this path only runs when no send leg is active.
+        self._submit_leg(chunk_to_send)
 
     def drain(self) -> None:
         """Block only when ``pending_bytes`` exceeds ``high_water``.
@@ -193,14 +194,27 @@ class SendBuffer:
         self._active_waiter = waiter
         waiter.add_done_callback(self._on_leg_complete)
 
-    def _submit_leg(self, chunk: bytes, *, restore_on_failure: bool) -> None:
+    def _submit_leg(self, chunk: bytes) -> None:
+        """Submit one ``sock_sendall`` leg; caller must hold no active leg.
+
+        Called outside ``self._cond`` only after the caller has reserved this
+        chunk as the sole in-flight leg (``write()`` or ``_on_leg_complete``
+        chaining). At most one leg is active, so failure handling here cannot
+        race another submit.
+
+        Submit-time failures (``sock_sendall`` or ``add_done_callback``) restore
+        the chunk to ``_pending`` so bytes are not lost. Leg completion failures
+        are handled in ``_on_leg_complete`` instead; partially sent data is not
+        restored. Both paths record a sticky ``_send_error``; the buffer does not
+        retry automatically.
+        """
+
         try:
             self._submit(chunk)
         except BaseException as exc:
             with self._cond:
-                if restore_on_failure:
-                    self._pending.appendleft(chunk)
-                    self._pending_bytes += len(chunk)
+                self._pending.appendleft(chunk)
+                self._pending_bytes += len(chunk)
                 self._active = False
                 self._in_flight_bytes = 0
                 self._send_error = exc
@@ -228,4 +242,5 @@ class SendBuffer:
                 self._maybe_shutdown()
             self._cond.notify_all()
         if next_chunk is not None:
-            self._submit_leg(next_chunk, restore_on_failure=True)
+            # Safe outside the lock: chaining reserved this chunk as the only leg.
+            self._submit_leg(next_chunk)

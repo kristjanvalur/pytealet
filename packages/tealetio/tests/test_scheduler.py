@@ -1271,7 +1271,7 @@ class TestSchedulerAccessors:
 
         assert seen == ["resumed"]
 
-    def test_threadsafe_event_swait_uses_bound_scheduler(self, monkeypatch):
+    def test_cross_thread_event_swait_uses_bound_scheduler(self, monkeypatch):
         class DummyScheduler:
             def __init__(self) -> None:
                 self.scheduled = 0
@@ -1288,7 +1288,7 @@ class TestSchedulerAccessors:
         current = DummyTealet()
 
         monkeypatch.setattr(locks_module, "_get_current_scheduler", lambda: owner)
-        event = locks_module.ThreadsafeEvent()
+        event = locks_module.CrossThreadEvent()
         monkeypatch.setattr(locks_module, "_get_current_scheduler", lambda: other)
         monkeypatch.setattr(locks_module.tealet, "current", lambda: current)
 

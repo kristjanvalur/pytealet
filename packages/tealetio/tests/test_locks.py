@@ -18,7 +18,7 @@ from tealetio import (
     TASK_PRIORITY_DEFAULT,
     TASK_PRIORITY_HIGH,
     TASK_PRIORITY_LOW,
-    ThreadsafeCondition,
+    CrossThreadCondition,
     set_scheduler,
 )
 from helpers import new_scheduler as _new_scheduler
@@ -403,9 +403,9 @@ class TestLockExamples:
         with pytest.raises(RuntimeError, match="un-acquired lock"):
             cond.notify()
 
-    def test_threadsafe_condition_wait_notify(self):
+    def test_cross_thread_condition_wait_notify(self):
         s = _new_scheduler()
-        cond = ThreadsafeCondition(scheduler=s)
+        cond = CrossThreadCondition(scheduler=s)
         seen: list[str] = []
 
         def waiter(name: str) -> None:
@@ -438,9 +438,9 @@ class TestLockExamples:
             "b:resumed",
         ]
 
-    def test_threadsafe_condition_wait_for_predicate(self):
+    def test_cross_thread_condition_wait_for_predicate(self):
         s = _new_scheduler()
-        cond = ThreadsafeCondition(scheduler=s)
+        cond = CrossThreadCondition(scheduler=s)
         state = {"ready": False}
         seen: list[str] = []
 
@@ -481,9 +481,9 @@ class TestLockExamples:
         s.run()
         assert task.result() == (None,)
 
-    def test_threadsafe_condition_cross_thread_notify(self, monkeypatch):
+    def test_cross_thread_condition_cross_thread_notify(self, monkeypatch):
         s = _new_scheduler()
-        cond = ThreadsafeCondition(scheduler=s)
+        cond = CrossThreadCondition(scheduler=s)
         state = {"ready": False}
         seen: list[str] = []
         waiter_blocked = threading.Event()
@@ -512,9 +512,9 @@ class TestLockExamples:
 
         assert seen == ["waiting", "resumed"]
 
-    def test_threadsafe_condition_wait_and_notify_require_lock(self):
+    def test_cross_thread_condition_wait_and_notify_require_lock(self):
         s = _new_scheduler()
-        cond = ThreadsafeCondition(scheduler=s)
+        cond = CrossThreadCondition(scheduler=s)
 
         with pytest.raises(RuntimeError, match="un-acquired lock"):
             cond.swait()

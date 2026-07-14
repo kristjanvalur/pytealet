@@ -5085,7 +5085,7 @@ class TestProactorScheduler:
         import tealetio.io_waiter as io_waiter_module
 
         event_set_threads: list[int] = []
-        original_event = io_waiter_module.ThreadsafeEvent
+        original_event = io_waiter_module.CrossThreadEvent
 
         class TrackingEvent(original_event):
             def _set(self) -> None:
@@ -5102,7 +5102,7 @@ class TestProactorScheduler:
         def proactor_factory() -> UringProactor:
             return UringProactor(ring_factory=ring_factory)
 
-        monkeypatch.setattr(io_waiter_module, "ThreadsafeEvent", TrackingEvent)
+        monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", TrackingEvent)
         scheduler = SyncProactorScheduler(proactor_factory)
         set_scheduler(scheduler)
         scheduler_thread = threading.get_ident()

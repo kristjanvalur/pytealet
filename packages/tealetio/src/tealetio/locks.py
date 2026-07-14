@@ -35,8 +35,8 @@ __all__ = [
     "QueueFull",
     "QueueShutDown",
     "Semaphore",
-    "ThreadsafeCondition",
-    "ThreadsafeEvent",
+    "CrossThreadCondition",
+    "CrossThreadEvent",
     "Timeout",
     "TimeoutError",
     "timeout",
@@ -218,8 +218,19 @@ class Event:
         return self._is_set
 
 
-class ThreadsafeEvent:
-    """Synchronous event whose `set` method is safe from another thread."""
+class CrossThreadEvent:
+    """Directional signal from a producer to a consumer tealet.
+
+    Intended for producer→consumer handoff (or consumer→consumer relay): one
+    side publishes readiness and calls ``set()``; the waiting side is usually a
+    scheduler tealet that calls ``swait()``. The producer — which may or may
+    not itself be a tealet — must **never** wait on this primitive.
+
+    ``set()`` routes the wakeup through ``call_soon_threadsafe``, so it is safe
+    from any OS thread and from same-thread proactor callbacks (for example
+    ``SelectorProactor`` completion on the scheduler thread). This is not a
+    thread-safe drop-in for ``Event``.
+    """
 
     def __init__(self, scheduler: BaseScheduler | None = None) -> None:
         self._waiters: list[tealet.tealet] = []
@@ -640,24 +651,31 @@ class Condition(_ConditionBase[Event]):
         self.release()
 
 
-class ThreadsafeCondition(_ConditionBase[ThreadsafeEvent]):
-    """Cross-thread condition for worker threads waking scheduler tealets.
+class CrossThreadCondition(_ConditionBase[CrossThreadEvent]):
+    """Directional condition variable for producer→consumer signalling.
 
-    IO and proactor worker threads finish operations asynchronously and must
-    notify tealets blocked on the scheduler thread. ``ThreadsafeCondition``
-    mirrors ``Condition`` (per-wait events, ``with cond:``, ``swait_for``
-    predicates) but uses a ``threading.Lock`` and ``ThreadsafeEvent`` so
-    ``notify()`` is safe from any thread.
+    Mirrors ``Condition`` (per-wait events, ``with cond:``, ``swait_for``
+    predicates) but uses a ``threading.Lock`` and ``CrossThreadEvent`` so
+    ``notify()`` is safe from any OS thread or same-thread proactor callback.
 
-    Typical use: hold the condition lock while checking or updating shared
-    buffer state, park with ``swait()`` or ``swait_for()`` when nothing is
-    ready, and call ``notify()`` or ``notify_all()`` from completion callbacks
-    after publishing new state under the same lock. Each wait allocates a
-    fresh event, so there is no lost-wakeup race from ``clear()`` on a reused
-    event.
+    **Roles.** The producer publishes shared state under the lock and calls
+    ``notify()`` or ``notify_all()``; it must **never** call ``swait()`` or
+    ``swait_for()``. The consumer is typically a scheduler tealet that waits
+    when nothing is ready; a consumer tealet may also ``notify()`` when relaying
+    to another consumer. The producer need not be a tealet (for example an IO
+    completion callback).
 
-    Wakeups are one-way: only the scheduler bound at construction runs
-    ``swait()``; worker threads call ``notify()`` only.
+    **Lock discipline.** The underlying lock is a ``threading.Lock``, not the
+    tealet ``Lock``. While holding it, the current tealet must not perform any
+    other tealet-blocking operation — for example ``IOWaiter.wait()``,
+    ``Lock.sacquire()``, or ``Event.swait()`` on a different primitive. Those
+    calls park the tealet without releasing this OS lock, so another tealet that
+    needs the same lock will block the thread and the scheduler deadlocks. The
+    only safe way to block while logically "in" the condition is ``swait()`` or
+    ``swait_for()``, which release the ``threading.Lock`` before parking.
+
+    Each wait allocates a fresh event, so there is no lost-wakeup race from
+    ``clear()`` on a reused event.
     """
 
     def __init__(
@@ -668,10 +686,10 @@ class ThreadsafeCondition(_ConditionBase[ThreadsafeEvent]):
     ) -> None:
         self._lock = lock if lock is not None else threading.Lock()
         self._scheduler = _get_current_scheduler() if scheduler is None else scheduler
-        self._waiters: deque[ThreadsafeEvent] = deque()
+        self._waiters: deque[CrossThreadEvent] = deque()
 
-    def _make_waiter(self) -> ThreadsafeEvent:
-        return ThreadsafeEvent(self._scheduler)
+    def _make_waiter(self) -> CrossThreadEvent:
+        return CrossThreadEvent(self._scheduler)
 
     def _lock_acquire_sync(self) -> None:
         self._lock.acquire()
@@ -684,7 +702,7 @@ class ThreadsafeCondition(_ConditionBase[ThreadsafeEvent]):
 
         self._lock_acquire_sync()
 
-    def __enter__(self) -> "ThreadsafeCondition":
+    def __enter__(self) -> "CrossThreadCondition":
         self._lock_acquire_sync()
         return self
 

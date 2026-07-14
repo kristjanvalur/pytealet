@@ -4,7 +4,7 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
-from .locks import ThreadsafeEvent
+from .locks import CrossThreadEvent
 from .operations import InvalidStateError, Operation
 
 _VoidDoneCallback = Callable[[], object]
@@ -174,7 +174,7 @@ class IOWaiter(Generic[T]):
             return
         if operation.done():
             return
-        ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
+        ready = CrossThreadEvent(self._io._scheduler)  # type: ignore[arg-type]
 
         def wake(_op: Operation[Any]) -> None:
             ready.set()
@@ -285,7 +285,7 @@ class IOWaitGroupChild(Generic[T]):
 
 
 class IOWaitGroup(Generic[T]):
-    """Grouped IO wait with a single ``ThreadsafeEvent`` park for the composition.
+    """Grouped IO wait with a single ``CrossThreadEvent`` park for the composition.
 
     Active work is tracked as ``IOWaitGroupChild`` legs and/or bare ``Operation``
     objects. Leg completion runs on worker threads; ``finish()`` unblocks one
@@ -307,7 +307,7 @@ class IOWaitGroup(Generic[T]):
         self._lock = threading.Lock()
         self._closed = False
         self._completion: tuple[bool, Any] | None = None
-        self._ready: ThreadsafeEvent | None = None
+        self._ready: CrossThreadEvent | None = None
         self._members: set[IOWaitGroupChild[Any]] = set()
         self._done_callbacks: list[_VoidDoneCallback] = []
 
@@ -360,7 +360,7 @@ class IOWaitGroup(Generic[T]):
             member._cleanup_unresolved_value()
 
     def _complete(self, *, ok: bool, value: Any) -> bool:
-        ready: ThreadsafeEvent | None
+        ready: CrossThreadEvent | None
         cancel_members: tuple[IOWaitGroupChild[Any], ...] = ()
         callbacks: list[_VoidDoneCallback]
         with self._lock:
@@ -436,7 +436,7 @@ class IOWaitGroup(Generic[T]):
                 raise value
             return cast(T, value)
 
-        ready = ThreadsafeEvent(self._io._scheduler)  # type: ignore[arg-type]
+        ready = CrossThreadEvent(self._io._scheduler)  # type: ignore[arg-type]
         # lazy ready: publish _ready under lock and re-check completion so a
         # racing finish() cannot complete before the waiter is armed
         with self._lock:

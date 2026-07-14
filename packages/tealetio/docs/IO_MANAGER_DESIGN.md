@@ -162,7 +162,7 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 Multi-leg socket work (create → connect → send, connect → send) is composed in
 `ProactorIOManager` with `IOWaitGroup`, not inside the proactor. Each leg is a
 normal proactor `Operation`; the group wires advance handlers and a single
-`ThreadsafeEvent` park for the caller's `.wait()`.
+`CrossThreadEvent` park for the caller's `.wait()`.
 
 ```text
 ProactorIOManager.sock_create(connect_to=…, initial_data=…)
@@ -345,7 +345,7 @@ no public `cancel()` on `IOWaiter` — cancellation is an internal concern at th
 operation / proactor layer, not a third blocking-IO disposition.
 
 If `wait()` exits exceptionally (for example `timeout()` throwing into the
-blocked tealet while `ThreadsafeEvent.swait()` is parked), the waiter cancels
+blocked tealet while `CrossThreadEvent.swait()` is parked), the waiter cancels
 pending backend work and re-raises — unless delivery already completed, in
 which case the interrupt is swallowed and the result (or completion exception)
 is returned. ``IOWaiter`` checks the underlying ``Operation``; ``IOWaitGroup``
@@ -371,7 +371,7 @@ internal uses on non-resource one-shot ops.
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
 group. Each leg is registered with ``attach()``;
 advance handlers run on worker threads and submit the next leg. The group parks
-once on a single ``ThreadsafeEvent`` until ``finish()`` or an error.
+once on a single ``CrossThreadEvent`` until ``finish()`` or an error.
 ``IOWaitGroupChild.value()`` is one-shot and hands a leg result into the next
 advance handler. An optional ``on_cleanup`` hook on each leg receives failures
 (``fail=True``) or unreleased success values when ``wait()`` exits exceptionally

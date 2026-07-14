@@ -6,7 +6,7 @@ import socket
 from collections import deque
 from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast
 
-from .locks import ThreadsafeCondition
+from .locks import CrossThreadCondition
 from .tasks import CancelledError
 from .operations import ContinuousOperation, MultishotDelivery, Operation
 
@@ -124,7 +124,7 @@ class RecvIterBuffer:
         self._sock = sock
         self._buf_group = buf_group
         self._proactor = proactor
-        self._cond = ThreadsafeCondition(scheduler=scheduler)
+        self._cond = CrossThreadCondition(scheduler=scheduler)
         self._reorder = _OrderedIngestBuffer[memoryview]()
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False

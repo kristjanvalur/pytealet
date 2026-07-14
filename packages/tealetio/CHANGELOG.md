@@ -205,7 +205,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ProactorBase._sync_unix_connect()`` because uring ``submit_connect()`` is
   inet-only today.
 - `ProactorIOManager` holds a direct scheduler reference; ``wait_operation()``
-  always parks the current tealet through ``ThreadsafeEvent`` and is torn down
+  always parks the current tealet through ``CrossThreadEvent`` and is torn down
   from ``ProactorScheduler.close()``.
 - `UringProactor.connect()` and ``recv(..., 0)`` use stdlib fast paths for
   ``AF_UNIX`` and zero-length reads respectively on the uring backend.
