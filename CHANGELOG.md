@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Renamed `prepare()` to `prime()` on the Python API and capsule C API.
 - Extended `switch()`, `throw()`, `set_pending_exception()`, and
   `resolve_target()` to accept `STATE_PRIMED` targets and fallbacks.
-- Bumped the public C API ABI to version 6 and added `PYTEALET_STATE_PRIMED`.
+- Added `PYTEALET_STATE_PRIMED` to the capsule C API state enum. While tealet
+  remains pre-release, `PYTEALET_CAPI_ABI_VERSION` stays at `1`.
 
 ### tealet-greenlet
 - Treat `STATE_PRIMED` as a suspended runnable tealet for `__bool__`,
