@@ -97,8 +97,10 @@ have lost interest:
 
 - `on_accept` checks `_closed`; if set, it closes the writer and returns without
   spawning a handler.
-- `_dispatch_client` and `_dispatch_streams` perform the same check before
-  tracking handler ``Task``s.
+- ``StreamServer._on_accept`` discards late deliveries when ``_closed`` and spawns
+  the handler tealet directly (no deferred ``call_soon``). ``handler_eager_start``
+  (default true) passes ``eager_start`` through to ``spawn()`` so the handler can
+  begin on the same scheduler turn when the runtime allows it.
 - `close()` synchronously cancels the accept-loop tealet; it does not close
   listening sockets. The accept-loop tealet wraps its main loop in ``try``/``finally``
   so ``CancelledError`` runs cleanup that sets `_closed` and closes listeners.

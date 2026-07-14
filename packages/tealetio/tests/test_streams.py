@@ -47,6 +47,23 @@ def _scheduler_with_deferred_ring() -> SyncProactorScheduler:
     return SyncProactorScheduler(lambda: UringProactor(ring_factory=_DeferredUringRing))
 
 
+def _capture_accept_callback(
+    scheduler: SyncProactorScheduler,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list:
+    """Record the first ``accept_many_streams`` callback registered by ``start_server``."""
+
+    captured: list = []
+    real_accept_many_streams = scheduler.io.accept_many_streams
+
+    def accept_many_streams(sock: socket.socket, callback, **kwargs):
+        captured.append(callback)
+        return real_accept_many_streams(sock, callback, **kwargs)
+
+    monkeypatch.setattr(scheduler.io, "accept_many_streams", accept_many_streams)
+    return captured
+
+
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 class TestStreamsPoC:
     @pytest.fixture
@@ -638,6 +655,7 @@ class TestStreamsPoC:
 
         monkeypatch.setattr(scheduler, "spawn", failing_spawn)
         scheduler.set_exception_handler(lambda context: callback_errors.append(context["exception"]))
+        on_accept = _capture_accept_callback(scheduler, monkeypatch)
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
@@ -649,13 +667,9 @@ class TestStreamsPoC:
             def exercise() -> None:
                 server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
                 try:
-                    server._dispatch_client(
-                        accepted,
-                        limit=2**16,
-                        stream_factory=None,
-                        client_handler=client_handler,
-                        async_=False,
-                    )
+                    scheduler.yield_()
+                    streams = open_streams(accepted, scheduler=scheduler)
+                    scheduler.call_soon_threadsafe(on_accept[0], streams)
                     scheduler.yield_()
                     server.close()
                     server.wait_closed()
@@ -669,26 +683,25 @@ class TestStreamsPoC:
         finally:
             _client.close()
 
-    def test_stream_server_dispatch_client_on_closed_server_closes_connection(
-        self, scheduler: SyncProactorScheduler
+    def test_stream_server_marshalled_accept_on_closed_server_closes_connection(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
 
         def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             writer.close()
 
+        on_accept = _capture_accept_callback(scheduler, monkeypatch)
         _client, accepted = socket.socketpair()
         try:
+            accepted.setblocking(False)
 
             def exercise() -> None:
                 server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+                scheduler.yield_()
                 server.close()
-                server._dispatch_client(
-                    accepted,
-                    limit=2**16,
-                    stream_factory=None,
-                    client_handler=client_handler,
-                    async_=False,
-                )
+                streams = open_streams(accepted, scheduler=scheduler)
+                scheduler.call_soon_threadsafe(on_accept[0], streams)
+                scheduler.yield_()
                 server.wait_closed()
                 assert not server._handler_tasks
                 assert accepted.fileno() == -1
