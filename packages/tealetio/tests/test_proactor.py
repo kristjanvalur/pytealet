@@ -40,7 +40,7 @@ from uring_fakes import (
 
 import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
-import tealetio.recv_iter as recv_iter_module
+import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.io_waiter import IOWaiter
 from tealetio.operations import InvalidStateError, MultishotDelivery
@@ -55,7 +55,7 @@ from tealetio.proactor import (
     UringProactor,
     UringSubmissionStats,
 )
-from tealetio.recv_iter import RECV_MANY_BUFFER_PRESSURE
+from tealetio.io_buffers import RECV_MANY_BUFFER_PRESSURE
 
 
 _RecvManySeen = MultishotDelivery
@@ -209,8 +209,8 @@ def _recviter_test_proactor() -> _RecvIterTestProactor:
     return _RecvIterTestProactor()
 
 
-def _recviter_buffer(*, proactor: _RecvIterTestProactor, buf_group: Any) -> recv_iter_module.RecvIterBuffer:
-    return recv_iter_module.RecvIterBuffer(sock=_RECVITER_TEST_SOCK, proactor=proactor, buf_group=buf_group)
+def _recviter_buffer(*, proactor: _RecvIterTestProactor, buf_group: Any) -> io_buffers_module.RecvIterBuffer:
+    return io_buffers_module.RecvIterBuffer(sock=_RECVITER_TEST_SOCK, proactor=proactor, buf_group=buf_group)
 
 
 def _iter_recv_stream(stream: Any):
@@ -296,7 +296,7 @@ def test_completions_to_process_flushes_stored_termination():
     assert entry.completions_to_process(second) == (second, terminal)
 
 
-def _drain_ordered_ingest_buffer(buffer: recv_iter_module._OrderedIngestBuffer[str]) -> list[tuple[int, str]]:
+def _drain_ordered_ingest_buffer(buffer: io_buffers_module._OrderedIngestBuffer[str]) -> list[tuple[int, str]]:
     ready: list[tuple[int, str]] = []
     while True:
         item = buffer.pop()
@@ -307,7 +307,7 @@ def _drain_ordered_ingest_buffer(buffer: recv_iter_module._OrderedIngestBuffer[s
 
 
 def test_ordered_ingest_buffer_push_defers_out_of_order_items():
-    buffer = recv_iter_module._OrderedIngestBuffer[str]()
+    buffer = io_buffers_module._OrderedIngestBuffer[str]()
     buffer.push((1, "b"))
     assert len(buffer) == 1
     assert not buffer
@@ -318,13 +318,13 @@ def test_ordered_ingest_buffer_push_defers_out_of_order_items():
 
 
 def test_ordered_ingest_buffer_pushpop_returns_next_ready_item():
-    buffer = recv_iter_module._OrderedIngestBuffer[str]()
+    buffer = io_buffers_module._OrderedIngestBuffer[str]()
     assert buffer.pushpop((0, "a")) == (0, "a")
     assert not buffer
 
 
 def test_ordered_ingest_buffer_unclogs_pending_items():
-    buffer = recv_iter_module._OrderedIngestBuffer[str]()
+    buffer = io_buffers_module._OrderedIngestBuffer[str]()
     buffer.push((1, "b"))
     buffer.push((2, "c"))
     ready = [buffer.pushpop((0, "a")), *_drain_ordered_ingest_buffer(buffer)]
@@ -332,7 +332,7 @@ def test_ordered_ingest_buffer_unclogs_pending_items():
 
 
 def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
-    buffer = recv_iter_module._OrderedIngestBuffer[str]()
+    buffer = io_buffers_module._OrderedIngestBuffer[str]()
     buffer.push((2, "c"))
     buffer.push((1, "b"))
     assert len(buffer) == 2
@@ -342,7 +342,7 @@ def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
     assert ready == [(0, "a"), (1, "b"), (2, "c")]
     assert not buffer
 
-    waiting = recv_iter_module._OrderedIngestBuffer[str]()
+    waiting = io_buffers_module._OrderedIngestBuffer[str]()
     waiting.pushpop((0, "a"))
     waiting.push((1, "b"))
     assert waiting
@@ -350,7 +350,7 @@ def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
 
 
 def test_ordered_ingest_buffer_reset_restores_next_index():
-    buffer = recv_iter_module._OrderedIngestBuffer[str](start=5)
+    buffer = io_buffers_module._OrderedIngestBuffer[str](start=5)
     buffer.pushpop((5, "a"))
     buffer.push((7, "c"))
     buffer.reset()
@@ -491,7 +491,7 @@ def test_synthetic_buf_group_pressure_threshold_matches_recviter_policy():
 
 def test_recviter_buffer_reorders_out_of_order_chunks():
     def exercise() -> list[tuple[int, memoryview | None]]:
-        buffer = recv_iter_module.RecvIterBuffer(
+        buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(1, b"b"))
@@ -542,7 +542,7 @@ def test_recviter_buffer_resume_waits_until_low_water_mark():
 
 def test_recviter_buffer_ignores_late_callbacks_after_close():
     def exercise() -> tuple[int, bool]:
-        buffer = recv_iter_module.RecvIterBuffer(
+        buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
@@ -594,7 +594,7 @@ def test_recviter_buffer_start_recv_many_after_close_is_noop():
 
 def test_recviter_buffer_pressure_token_precedes_queued_views():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = recv_iter_module.RecvIterBuffer(
+        buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
@@ -610,7 +610,7 @@ def test_recviter_buffer_pressure_token_precedes_queued_views():
 
 def test_recviter_buffer_eof_stops_iteration():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = recv_iter_module.RecvIterBuffer(
+        buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"done"))
@@ -624,7 +624,7 @@ def test_recviter_buffer_eof_stops_iteration():
 
 def test_recviter_buffer_ordered_eof_wins_cancel_race():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = recv_iter_module.RecvIterBuffer(
+        buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"done"))
@@ -641,7 +641,7 @@ def test_recviter_buffer_ordered_eof_wins_cancel_race():
 
 def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
     def exercise() -> list[object]:
-        buffer = recv_iter_module.RecvIterBuffer(
+        buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
@@ -667,7 +667,7 @@ def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
 
 def test_recviter_buffer_yields_memoryviews():
     def exercise() -> tuple[int, memoryview | None] | None:
-        buffer = recv_iter_module.RecvIterBuffer(
+        buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
@@ -687,7 +687,7 @@ def test_recviter_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
     ready_to_wait = threading.Event()
 
     def exercise() -> tuple[int, memoryview]:
-        buffer = recv_iter_module.RecvIterBuffer(
+        buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         real_swait = buffer._cond.swait
@@ -933,7 +933,7 @@ def test_recviter_buffer_pressure_when_initial_recv_many_hits_full_synthetic_poo
         pool.leased_count = 2
         try:
             reader.setblocking(False)
-            buffer = recv_iter_module.RecvIterBuffer(sock=reader, buf_group=pool, proactor=proactor)
+            buffer = io_buffers_module.RecvIterBuffer(sock=reader, buf_group=pool, proactor=proactor)
             _assert_recviter_pressure(buffer.take_next())
             return True
         finally:

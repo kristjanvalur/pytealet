@@ -802,7 +802,7 @@ class TestStreamsPoC:
         run_scheduler_task(scheduler, exercise)
 
     def test_default_stream_reader_uses_recv_iter_buffer(self, scheduler: SyncProactorScheduler) -> None:
-        from tealetio.recv_iter import RecvIterBuffer
+        from tealetio.io_buffers import RecvIterBuffer
 
         reader, writer = socket.socketpair()
         try:
@@ -835,7 +835,7 @@ class TestStreamsPoC:
             peer.close()
 
     def test_default_stream_writer_uses_send_buffer(self, scheduler: SyncProactorScheduler) -> None:
-        from tealetio.send_buffer import SendBuffer
+        from tealetio.io_buffers import SendBuffer
 
         reader, writer = socket.socketpair()
         try:

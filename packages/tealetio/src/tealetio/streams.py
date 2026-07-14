@@ -21,8 +21,7 @@ from .io_manager import (
     SocketSendBuffer,
     SupportsProactorIO,
 )
-from .recv_iter import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer
-from .send_buffer import SendBuffer
+from .io_buffers import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer, SendBuffer
 from .continuous_callbacks import AcceptStreamsDelivery as _AcceptedStreams
 
 from .scheduler import BaseScheduler

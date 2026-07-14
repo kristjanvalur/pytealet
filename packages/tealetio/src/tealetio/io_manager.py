@@ -24,6 +24,7 @@ from .io_waiter import (
     IOWaitable,
 )
 
+from .io_buffers import RecvIterBuffer, SendBuffer, _RecvIterProactor, open_recv_iter_buffer, open_send_buffer
 from .operations import MultishotDelivery, Operation
 from .tasks import CancelledError
 from .socket_helpers import abortive_close
@@ -304,12 +305,15 @@ class ProactorIOManager:
             return self._proactor.shared_recv_buffer_pool()
         return buffer_pool
 
-    def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None):
-        from .recv_iter import RecvIterBuffer, _RecvIterProactor
-
+    def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None) -> RecvIterBuffer:
         pool = self._resolve_recv_buffer_pool(buffer_pool)
         proactor = cast(_RecvIterProactor, self._proactor)
-        return RecvIterBuffer(sock=sock, buf_group=pool, proactor=proactor, scheduler=self._scheduler)
+        return open_recv_iter_buffer(
+            sock,
+            proactor=proactor,
+            buf_group=pool,
+            scheduler=self._scheduler,
+        )
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None
@@ -355,10 +359,8 @@ class ProactorIOManager:
     def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> IOWaiter[None]:
         return IOWaiter(self, self._proactor.send(sock, data, progress))
 
-    def _open_send_buffer(self, sock: socket.socket):
-        from .send_buffer import SendBuffer
-
-        return SendBuffer(sock=sock, io=self, scheduler=self._scheduler)
+    def _open_send_buffer(self, sock: socket.socket) -> SendBuffer:
+        return open_send_buffer(sock, io=self, scheduler=self._scheduler)
 
     def sock_send_iter(
         self,
