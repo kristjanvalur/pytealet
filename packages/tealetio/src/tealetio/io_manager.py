@@ -74,6 +74,8 @@ __all__ = [
     "SocketAddress",
     "SocketSendBuffer",
     "SocketIO",
+    "StreamOpenIO",
+    "StreamWriterIO",
     "SupportsProactorIO",
 ]
 
@@ -173,6 +175,11 @@ class SocketIO(Protocol):
     def set_shared_recv_buffer_pool(self, pool: "RecvBufferPool") -> None: ...
 
 
+# Stream-facing protocol slices live in ``streams.open`` / ``streams.writer`` as
+# ``StreamOpenIO`` and ``StreamWriterIO``. ``ProactorIOManager`` satisfies both
+# structurally without inheriting those protocols.
+
+
 @runtime_checkable
 class PollIO(Protocol):
     """Poll helpers over a scheduler IO backend."""
@@ -248,6 +255,9 @@ class ProactorIOManager:
     ``IOWaitable[None]``; call ``wait()`` to block until the stream ends.
     ``sock_recv_iter`` remains a blocking iterator over ``recv_many`` chunks.
     Always owned by a proactor scheduler.
+
+    Structurally implements ``StreamOpenIO`` and ``StreamWriterIO`` (re-exported
+    from ``streams.open`` / ``streams.writer``) for stream-pair construction.
     """
 
     def __init__(self, scheduler: BaseScheduler, proactor: Proactor) -> None:
@@ -830,4 +840,5 @@ class ProactorIOManager:
         return IOWaiter(self, operation, map_result=make_file)
 
 
-from .streams.open import open_streams  # noqa: E402
+from .streams.open import StreamOpenIO, open_streams  # noqa: E402
+from .streams.writer import StreamWriterIO  # noqa: E402

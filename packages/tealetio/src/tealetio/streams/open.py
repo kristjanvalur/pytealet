@@ -12,11 +12,11 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from ..io_buffers import RecvIterBuffer, SendBuffer
 from .util import DEFAULT_LIMIT
-from .protocols import StreamOpenIO, StreamWriterIO
 from .reader import AsyncStreamReader, StreamReader
-from .writer import AsyncStreamWriter, StreamWriter
+from .writer import AsyncStreamWriter, StreamWriter, StreamWriterIO
 
 __all__ = [
+    "StreamOpenIO",
     "AsyncClientHandler",
     "AsyncStreamFactory",
     "AsyncStreamPair",
@@ -40,6 +40,24 @@ StreamFactoryArg: TypeAlias = "StreamFactory | AsyncStreamFactory | None"
 NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
 AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 ClientHandler: TypeAlias = NativeClientHandler | AsyncClientHandler
+
+
+class StreamOpenIO(Protocol):
+    """IO manager slice needed to open stream buffers on a connected socket.
+
+    ``ProactorIOManager`` satisfies this structurally; see also ``SocketIO`` in
+    ``io_manager`` for the wider socket helper surface.
+    """
+
+    def _open_sock_recv_iter(
+        self,
+        sock: socket.socket,
+        buffer_pool: Any | None,
+    ) -> RecvIterBuffer: ...
+
+    def _open_send_buffer(self, sock: socket.socket) -> SendBuffer: ...
+
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> Any: ...
 
 
 class StreamFactory(Protocol):

@@ -11,7 +11,7 @@ from ..continuous_callbacks import AcceptStreamsDelivery as AcceptedStreams
 from ..io_manager import ServerIO, SocketIO
 from ..scheduler import BaseScheduler
 from ..tasks import CancelledError, Task, get_current
-from .common import require_proactor_io, resolve_scheduler, run_coro
+from .common import require_proactor_io, resolve_scheduler
 from .open import (
     AsyncClientHandler,
     AsyncStreamFactory,
@@ -19,10 +19,11 @@ from .open import (
     NativeClientHandler,
     StreamFactory,
     StreamFactoryArg,
+    StreamOpenIO,
     default_server_stream_factory,
     open_streams as build_streams,
 )
-from .protocols import StreamOpenIO
+from .util import run_coro
 from .reader import AsyncStreamReader, StreamReader
 from .writer import AsyncStreamWriter, StreamWriter, shutdown_stream_writer
 

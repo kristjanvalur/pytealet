@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Protocol
 
 from ..io_buffers import SendBuffer
-from .protocols import StreamWriterIO
+from ..io_waiter import IOWaiter
 from .util import run_coro, writer_extra_info
 from .reader import AsyncStreamReader, StreamReader
+
+
+class StreamWriterIO(Protocol):
+    """IO manager slice needed to shut down and close a stream writer socket.
+
+    A subset of ``SocketIO``; ``ProactorIOManager`` satisfies this structurally.
+    """
+
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
+
+    def sock_close(self, sock: socket.socket) -> IOWaiter[None]: ...
 
 
 class WriterCore:

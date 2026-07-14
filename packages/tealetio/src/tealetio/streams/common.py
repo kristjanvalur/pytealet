@@ -1,17 +1,13 @@
-"""Shared stream helpers and scheduler IO resolution."""
+"""Scheduler resolution and proactor IO access for stream entry points."""
 
 from __future__ import annotations
 
 from ..io_manager import IO_UNSUPPORTED_ERROR, SELECTOR_IO_UNSUPPORTED_ERROR, ProactorIOManager, SupportsProactorIO
 from ..scheduler import BaseScheduler
-from .util import DEFAULT_LIMIT, run_coro, writer_extra_info
 
 __all__ = [
-    "DEFAULT_LIMIT",
     "require_proactor_io",
     "resolve_scheduler",
-    "run_coro",
-    "writer_extra_info",
 ]
 
 

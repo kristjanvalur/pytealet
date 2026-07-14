@@ -7,7 +7,7 @@ from typing import Literal, cast, overload
 
 from ..io_manager import ServerIO, SocketSendBuffer
 from ..scheduler import BaseScheduler
-from .common import DEFAULT_LIMIT, require_proactor_io, resolve_scheduler
+from .common import require_proactor_io, resolve_scheduler
 from .open import (
     AsyncStreamFactory,
     AsyncStreamPair,
@@ -16,6 +16,7 @@ from .open import (
     StreamFactoryArg,
     open_streams as build_streams,
 )
+from .util import DEFAULT_LIMIT
 from .reader import AsyncStreamReader, StreamReader
 from .writer import AsyncStreamWriter, StreamWriter
 
