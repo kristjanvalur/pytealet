@@ -8,7 +8,7 @@ from typing import Literal, cast, overload
 from ..io_manager import ServerIO, SocketSendBuffer
 from ..scheduler import BaseScheduler
 from .common import DEFAULT_LIMIT, require_proactor_io, resolve_scheduler
-from .factories import (
+from .open import (
     AsyncStreamFactory,
     AsyncStreamPair,
     NativeStreamPair,

@@ -1,28 +1,8 @@
 """Tealet-native stream helpers with optional asyncio-compatible facades."""
 
-from .common import run_coro
-from .connect import open_connection, open_streams
-from .factories import (
-    AsyncStreamFactory,
-    StreamFactory,
-    default_async_stream_factory,
-    default_stream_factory,
-    open_recv_buffer,
-    open_send_buffer,
-    open_streams as open_streams_internal,
-    pooled_default_stream_factory,
-)
-from .reader import AsyncStreamReader, StreamReader
-from .server import StreamServer, bind_tcp_socket, default_reuse_address, start_server
-from .writer import AsyncStreamWriter, StreamWriter, shutdown_stream_writer
+from __future__ import annotations
 
-# Backward-compatible private aliases used by tests and ``io_manager``.
-_open_streams = open_streams_internal
-_open_recv_buffer = open_recv_buffer
-_open_send_buffer = open_send_buffer
-_default_reuse_address = default_reuse_address
-_shutdown_stream_writer = shutdown_stream_writer
-_bind_tcp_socket = bind_tcp_socket
+from typing import Any
 
 __all__ = [
     "StreamReader",
@@ -40,3 +20,46 @@ __all__ = [
     "start_server",
     "run_coro",
 ]
+
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    "run_coro": (".util", "run_coro"),
+    "open_connection": (".connect", "open_connection"),
+    "open_streams": (".connect", "open_streams"),
+    "StreamReader": (".reader", "StreamReader"),
+    "StreamWriter": (".writer", "StreamWriter"),
+    "AsyncStreamReader": (".reader", "AsyncStreamReader"),
+    "AsyncStreamWriter": (".writer", "AsyncStreamWriter"),
+    "StreamFactory": (".open", "StreamFactory"),
+    "AsyncStreamFactory": (".open", "AsyncStreamFactory"),
+    "default_stream_factory": (".open", "default_stream_factory"),
+    "default_async_stream_factory": (".open", "default_async_stream_factory"),
+    "pooled_default_stream_factory": (".open", "pooled_default_stream_factory"),
+    "StreamServer": (".server", "StreamServer"),
+    "start_server": (".server", "start_server"),
+}
+
+_LAZY_PRIVATE_EXPORTS: dict[str, tuple[str, str]] = {
+    "_open_streams": (".open", "open_streams"),
+    "_open_recv_buffer": (".open", "open_recv_buffer"),
+    "_open_send_buffer": (".open", "open_send_buffer"),
+    "_default_reuse_address": (".server", "default_reuse_address"),
+    "_shutdown_stream_writer": (".writer", "shutdown_stream_writer"),
+    "_bind_tcp_socket": (".server", "bind_tcp_socket"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    spec = _LAZY_EXPORTS.get(name) or _LAZY_PRIVATE_EXPORTS.get(name)
+    if spec is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = spec
+    from importlib import import_module
+
+    module = import_module(module_name, __name__)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted([*__all__, *_LAZY_PRIVATE_EXPORTS])

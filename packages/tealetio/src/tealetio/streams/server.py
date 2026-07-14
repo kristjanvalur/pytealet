@@ -12,7 +12,7 @@ from ..io_manager import ServerIO, SocketIO
 from ..scheduler import BaseScheduler
 from ..tasks import CancelledError, Task, get_current
 from .common import require_proactor_io, resolve_scheduler, run_coro
-from .factories import (
+from .open import (
     AsyncClientHandler,
     AsyncStreamFactory,
     ClientHandler,
@@ -22,6 +22,7 @@ from .factories import (
     default_server_stream_factory,
     open_streams as build_streams,
 )
+from .protocols import StreamOpenIO
 from .reader import AsyncStreamReader, StreamReader
 from .writer import AsyncStreamWriter, StreamWriter, shutdown_stream_writer
 
@@ -273,7 +274,7 @@ class StreamServer:
             return
 
         reader, writer = build_streams(
-            self._io,
+            cast(StreamOpenIO, self._io),
             conn,
             limit=limit,
             stream_factory=stream_factory,

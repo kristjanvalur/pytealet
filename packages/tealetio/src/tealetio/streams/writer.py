@@ -7,8 +7,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from ..io_buffers import SendBuffer
-from ..io_manager import ProactorIOManager
-from .common import run_coro, writer_extra_info
+from .protocols import StreamWriterIO
+from .util import run_coro, writer_extra_info
 from .reader import AsyncStreamReader, StreamReader
 
 
@@ -18,7 +18,7 @@ class WriterCore:
         *,
         send_buffer: SendBuffer,
         sock: socket.socket,
-        io: ProactorIOManager,
+        io: StreamWriterIO,
     ) -> None:
         self._send_buffer = send_buffer
         self._sock = sock
@@ -101,7 +101,7 @@ class StreamWriter:
         *,
         send_buffer: SendBuffer,
         sock: socket.socket,
-        io: ProactorIOManager,
+        io: StreamWriterIO,
         reader: StreamReader | None = None,
     ) -> None:
         self._send_buffer = send_buffer
@@ -154,7 +154,7 @@ class AsyncStreamWriter:
         *,
         send_buffer: SendBuffer,
         sock: socket.socket,
-        io: ProactorIOManager,
+        io: StreamWriterIO,
         reader: AsyncStreamReader | None = None,
     ) -> None:
         self._send_buffer = send_buffer
