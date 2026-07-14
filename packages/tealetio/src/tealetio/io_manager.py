@@ -701,14 +701,12 @@ class ProactorIOManager:
         accept callback).
         """
 
-        from .streams.factories import open_streams as _open_streams
-
         def deliver_accept(accepted: AcceptReadResult) -> None:
             conn, _initial_data, _recv_error = accepted
 
             writer: Any = None
             try:
-                reader, writer = _open_streams(
+                reader, writer = open_streams(
                     self,
                     conn,
                     limit=limit,
@@ -761,14 +759,12 @@ class ProactorIOManager:
         ``initial_data`` is sent on the wire after connect, before streams open.
         """
 
-        from .streams.factories import open_streams as _open_streams
-
         group = IOWaitGroup(self)
         payload = memoryview(initial_data) if initial_data is not None else None
 
         def open_and_finish(sock: socket.socket) -> None:
             try:
-                streams = _open_streams(
+                streams = open_streams(
                     self,
                     sock,
                     limit=limit,
@@ -832,3 +828,6 @@ class ProactorIOManager:
                 raise
 
         return IOWaiter(self, operation, map_result=make_file)
+
+
+from .stream_open import open_streams  # noqa: E402

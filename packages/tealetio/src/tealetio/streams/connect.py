@@ -7,6 +7,7 @@ from typing import Literal, cast, overload
 
 from ..io_manager import ServerIO, SocketSendBuffer
 from ..scheduler import BaseScheduler
+from ..stream_open import StreamOpenIO
 from .common import DEFAULT_LIMIT, require_proactor_io, resolve_scheduler
 from .factories import (
     AsyncStreamFactory,
@@ -61,7 +62,7 @@ def open_streams(
     """
 
     return build_streams(
-        require_proactor_io(resolve_scheduler(scheduler)),
+        cast(StreamOpenIO, require_proactor_io(resolve_scheduler(scheduler))),
         sock,
         limit=limit,
         stream_factory=stream_factory,

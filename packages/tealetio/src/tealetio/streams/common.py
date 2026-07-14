@@ -2,50 +2,22 @@
 
 from __future__ import annotations
 
-import socket
-from collections.abc import Coroutine
-from typing import Any, TypeVar
-
-from asynkit import coro_drive
+from typing import TypeVar
 
 from ..io_manager import IO_UNSUPPORTED_ERROR, SELECTOR_IO_UNSUPPORTED_ERROR, ProactorIOManager, SupportsProactorIO
 from ..scheduler import BaseScheduler
+from ..stream_util import run_coro, writer_extra_info
+from .constants import DEFAULT_LIMIT
 
 T = TypeVar("T")
 
-DEFAULT_LIMIT = 2**16
-
-
-def run_coro(coro: Coroutine[Any, Any, T]) -> T:
-    """Drive an async-stream coroutine without an asyncio event loop.
-
-    ``AsyncStream*`` methods are ``async def`` for handler compatibility, but
-    they ultimately block through the scheduler-owned IO manager's
-    ``IOWaiter.wait()``
-    path rather than yielding asyncio futures. Public stream and factory APIs
-    depend on ``SocketIO`` only. Unexpected yields surface as ``RuntimeError``.
-    """
-
-    def on_yield(value: object) -> object:
-        raise RuntimeError(f"tealetio stream coroutine yielded unexpectedly: {value!r}")
-
-    return coro_drive(coro, on_yield)
-
-
-def writer_extra_info(sock: socket.socket, name: str, default: Any = None) -> Any:
-    if name == "socket":
-        return sock
-    if name == "peername":
-        try:
-            return sock.getpeername()
-        except OSError:
-            return default
-    if name == "sockname":
-        try:
-            return sock.getsockname()
-        except OSError:
-            return default
-    return default
+__all__ = [
+    "DEFAULT_LIMIT",
+    "require_proactor_io",
+    "resolve_scheduler",
+    "run_coro",
+    "writer_extra_info",
+]
 
 
 def resolve_scheduler(scheduler: BaseScheduler | None) -> BaseScheduler:

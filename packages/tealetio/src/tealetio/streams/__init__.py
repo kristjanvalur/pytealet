@@ -2,7 +2,7 @@
 
 from .common import run_coro
 from .connect import open_connection, open_streams
-from .factories import (
+from ..stream_open import (
     AsyncStreamFactory,
     StreamFactory,
     default_async_stream_factory,
