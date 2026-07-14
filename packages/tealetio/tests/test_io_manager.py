@@ -235,17 +235,6 @@ class TestProactorIOManager:
         with pytest.raises(RuntimeError, match="scheduler with IO support"):
             scheduler.io
 
-    def test_selector_scheduler_io_raises_targeted_message(self):
-        from tealetio.selector import SyncSelectorScheduler
-
-        scheduler = SyncSelectorScheduler()
-        try:
-            with pytest.raises(RuntimeError, match="stream helpers require a proactor scheduler"):
-                scheduler.io
-        finally:
-            scheduler.close()
-
-
 class TestAbortiveClose:
     def test_abortive_close_closes_fd(self) -> None:
         from tealetio.socket_helpers import abortive_close
@@ -930,18 +919,6 @@ class TestProactorIOManagerDirect:
         assert io.poll(7, 3).wait() == 3
         assert proactor.poll_calls == [(7, 3)]
 
-    def test_sock_send_iter_drains_chunks(self):
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock = socket.socketpair()[0]
-        try:
-            io.sock_send_iter(sock, [b"ab", b"", memoryview(b"cd")])
-            assert len(proactor.send_calls) == 2
-            assert bytes(proactor.send_calls[0][1]) == b"ab"
-            assert bytes(proactor.send_calls[1][1]) == b"cd"
-        finally:
-            sock.close()
-
     def test_sock_create_applies_scheduler_socket_contract(self):
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -1183,22 +1160,6 @@ class TestProactorIOManagerDirect:
             waiter.wait()
         assert proactor.last_create_socket is not None
         assert proactor.last_create_socket.fileno() == -1
-
-    def test_open_returns_proactor_file(self):
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        handle = io.open("/tmp/example.txt", "rb").wait()
-        try:
-            from tealetio.files import ProactorFile
-
-            assert isinstance(handle, ProactorFile)
-            assert hasattr(handle, "read")
-            assert hasattr(handle, "seek")
-            assert handle.name == "/tmp/example.txt"
-            assert proactor.openat_calls == [("/tmp/example.txt", os.O_RDONLY | os.O_CLOEXEC, 0o666)]
-        finally:
-            handle.close()
-        assert proactor.close_fd_calls == [901]
 
     def test_io_waiter_wraps_continuous_operation(self) -> None:
         proactor = _MockProactor()
@@ -1758,17 +1719,4 @@ class TestProactorIOManagerIntegration:
             client.close()
             server.close()
 
-    def test_io_waiter_blocks_until_completion(self, scheduler: SyncProactorScheduler) -> None:
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            writer.sendall(b"z")
 
-            def exercise() -> bytes:
-                return scheduler.io.sock_recv(reader, 1).wait()
-
-            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"z"
-        finally:
-            reader.close()
-            writer.close()

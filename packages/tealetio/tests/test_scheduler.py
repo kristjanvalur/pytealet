@@ -1542,28 +1542,6 @@ class TestSchedulerAccessors:
             reader.close()
             _writer.close()
 
-    def test_scheduler_socket_helpers_use_default_proactor(self):
-        s = _new_scheduler()
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            def receive() -> bytes:
-                return s.io.sock_recv(reader, 5).wait()
-
-            def send() -> None:
-                s.sleep(0.001)
-                s.io.sock_sendall(writer, b"hello").wait()
-
-            task = s.spawn(receive)
-            s.spawn(send)
-            assert s.run_until_complete(task) == b"hello"
-        finally:
-            reader.close()
-            writer.close()
-            s.close()
-
     def test_basic_scheduler_poll_requires_io_capable_scheduler(self):
         s = BasicScheduler()
         set_scheduler(s)

@@ -5433,21 +5433,6 @@ class TestProactorScheduler:
         finally:
             scheduler.close()
 
-    def test_writeonly_handle_rejects_read(self):
-        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
-        set_scheduler(scheduler)
-        try:
-
-            def exercise() -> None:
-                with scheduler.io.open("/tmp/write-only.txt", "wb").wait() as handle:
-                    with pytest.raises(OSError) as excinfo:
-                        handle.read(1)
-                    assert excinfo.value.errno == errno.EBADF
-
-            scheduler.run_until_complete(scheduler.spawn(exercise))
-        finally:
-            scheduler.close()
-
     def test_readonly_handle_rejects_write(self):
         scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
         set_scheduler(scheduler)

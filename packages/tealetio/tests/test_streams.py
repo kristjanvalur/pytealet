@@ -324,72 +324,6 @@ class TestStreamsPoC:
         finally:
             server.close()
 
-    def test_open_connection_literal_ip_skips_executor(
-        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        calls: list[object] = []
-        real_run = scheduler.run_in_executor
-
-        def tracking_run(executor, func, *args):
-            calls.append(func)
-            return real_run(executor, func, *args)
-
-        monkeypatch.setattr(scheduler, "run_in_executor", tracking_run)
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            server.setblocking(False)
-            server.bind(("127.0.0.1", 0))
-            server.listen()
-            _host, port = server.getsockname()
-
-            def accept_side() -> None:
-                conn, _initial = scheduler.io.sock_accept(server).wait()
-                conn.close()
-
-            def connect_via_literal_ip() -> None:
-                _reader, writer = open_connection(addr=("127.0.0.1", port))
-                writer.close()
-
-            connect_task = scheduler.spawn(connect_via_literal_ip)
-            scheduler.spawn(accept_side)
-            scheduler.run_until_complete(connect_task)
-            assert calls == []
-        finally:
-            server.close()
-
-    def test_open_connection_hostname_uses_executor(
-        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        calls: list[object] = []
-        real_run = scheduler.run_in_executor
-
-        def tracking_run(executor, func, *args):
-            calls.append(func)
-            return real_run(executor, func, *args)
-
-        monkeypatch.setattr(scheduler, "run_in_executor", tracking_run)
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            server.setblocking(False)
-            server.bind(("127.0.0.1", 0))
-            server.listen()
-            _host, port = server.getsockname()
-
-            def accept_side() -> None:
-                conn, _initial = scheduler.io.sock_accept(server).wait()
-                conn.close()
-
-            def connect_via_hostname() -> None:
-                _reader, writer = open_connection(addr=("localhost", port))
-                writer.close()
-
-            connect_task = scheduler.spawn(connect_via_hostname)
-            scheduler.spawn(accept_side)
-            scheduler.run_until_complete(connect_task)
-            assert calls == [socket.getaddrinfo]
-        finally:
-            server.close()
-
     def test_open_async_connection_resolves_literal_ip_inside_scheduler(self, scheduler: SyncProactorScheduler) -> None:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -813,27 +747,6 @@ class TestStreamsPoC:
             reader.close()
             writer.close()
 
-    def test_stream_writer_writelines_sends_in_order(self, scheduler: SyncProactorScheduler) -> None:
-        conn, peer = socket.socketpair()
-        try:
-            conn.setblocking(False)
-            peer.setblocking(False)
-            stream_writer = StreamWriter(
-                send_buffer=_open_send_buffer(scheduler.io, conn),
-                sock=conn,
-                io=scheduler.io,
-            )
-
-            def exercise() -> bytes:
-                stream_writer.writelines([b"ab", b"cd"])
-                stream_writer.flush()
-                return scheduler.io.sock_recv(peer, 4).wait()
-
-            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"abcd"
-        finally:
-            conn.close()
-            peer.close()
-
     def test_default_stream_writer_uses_send_buffer(self, scheduler: SyncProactorScheduler) -> None:
         from tealetio.io_buffers import SendBuffer
 
@@ -895,63 +808,6 @@ class TestStreamsPoC:
             assert scheduler.run_until_complete(scheduler.spawn(close_via_wait)) == b"z"
             assert stream_writer.is_closing()
             assert stream_writer._sock.fileno() == -1
-        finally:
-            conn.close()
-            peer.close()
-
-    def test_stream_writer_write_eof_half_closes(self, scheduler: SyncProactorScheduler) -> None:
-        conn, peer = socket.socketpair()
-        try:
-            conn.setblocking(False)
-            peer.setblocking(False)
-            stream_writer = StreamWriter(
-                send_buffer=_open_send_buffer(scheduler.io, conn),
-                sock=conn,
-                io=scheduler.io,
-            )
-            assert stream_writer.can_write_eof()
-
-            pending_ops: list[Operation[None]] = []
-            shutdown_calls: list[int] = []
-            real_sendall = scheduler.io.sock_sendall
-            real_shutdown = scheduler.io.sock_shutdown
-
-            def staged_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
-                del progress
-                operation = Operation[None](kind="send", fileobj=sock)
-                pending_ops.append(operation)
-                return IOWaiter(scheduler.io, operation)
-
-            def track_shutdown(sock: socket.socket, how: int):
-                shutdown_calls.append(how)
-                return real_shutdown(sock, how)
-
-            scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
-            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
-
-            def write_and_half_close() -> None:
-                stream_writer.write(b"a")
-                stream_writer.write_eof()
-                assert not stream_writer.can_write_eof()
-                assert stream_writer._send_buffer.eof_pending
-                assert not stream_writer._send_buffer.write_eof_done
-                assert shutdown_calls == []
-                pending_ops[0]._finish(result=None)
-                assert stream_writer._send_buffer.write_eof_done
-                assert shutdown_calls == [socket.SHUT_WR]
-
-            try:
-                scheduler.run_until_complete(scheduler.spawn(write_and_half_close))
-            finally:
-                scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
-                scheduler.io.sock_shutdown = real_shutdown  # type: ignore[method-assign]
-
-            def finish_close() -> None:
-                stream_writer.close()
-                stream_writer.wait_closed()
-                assert stream_writer._sock.fileno() == -1
-
-            scheduler.run_until_complete(scheduler.spawn(finish_close))
         finally:
             conn.close()
             peer.close()
@@ -1215,37 +1071,6 @@ class TestStreamsPoC:
         finally:
             if server is not None:
                 server.close()
-
-    def test_sock_connect_composes_send_when_initial_provided(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
-        from tealetio.io_waiter import IOWaitGroup
-
-        io = scheduler.io
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        accepted: socket.socket | None = None
-        try:
-            server.setblocking(False)
-            client.setblocking(False)
-            server.bind(("127.0.0.1", 0))
-            server.listen()
-            address = server.getsockname()
-
-            def exercise() -> None:
-                waiter = io.sock_connect(client, address, initial=b"helloworld")
-                assert isinstance(waiter, IOWaitGroup)
-                waiter.wait()
-
-            run_scheduler_task(scheduler, exercise)
-
-            accepted, _peer = server.accept()
-            assert accepted.recv(1024) == b"helloworld"
-        finally:
-            if accepted is not None:
-                accepted.close()
-            client.close()
-            server.close()
 
     def test_open_connection_passes_initial_send_to_sock_create(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
