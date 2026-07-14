@@ -281,6 +281,57 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
+    def test_write_submit_failure_restores_pending_chunk(self, scheduler: SyncProactorScheduler) -> None:
+        _reader, writer = socket.socketpair()
+        try:
+            real_sendall = scheduler.io.sock_sendall
+
+            def raising_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del sock, data, progress
+                raise OSError("submit failed")
+
+            scheduler.io.sock_sendall = raising_sendall  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+
+            with pytest.raises(OSError, match="submit failed"):
+                send_buffer.write(b"ab")
+            assert send_buffer.pending_bytes == 2
+            assert not send_buffer._active
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            writer.close()
+
+    def test_chained_submit_failure_restores_pending_and_sticks_error(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        _reader, writer = socket.socketpair()
+        try:
+            pending_ops: list[Operation[None]] = []
+            submit_calls = 0
+            real_sendall = scheduler.io.sock_sendall
+
+            def staged_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                nonlocal submit_calls
+                submit_calls += 1
+                if submit_calls == 1:
+                    operation = Operation[None](kind="send", fileobj=sock)
+                    pending_ops.append(operation)
+                    return IOWaiter(scheduler.io, operation)
+                raise OSError("chained submit failed")
+
+            scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            send_buffer.write(b"ab")
+            send_buffer.write(b"cd")
+            with pytest.raises(OSError, match="chained submit failed"):
+                pending_ops[0]._finish(result=None)
+            assert send_buffer.pending_bytes == 2
+            with pytest.raises(OSError, match="chained submit failed"):
+                send_buffer.flush()
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            writer.close()
+
     def test_close_drains_pending_after_in_flight_leg(self, scheduler: SyncProactorScheduler) -> None:
         _reader, writer = socket.socketpair()
         try:

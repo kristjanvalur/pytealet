@@ -304,10 +304,11 @@ class _WriterCore:
             return
         if not self._closing:
             self.close()
+        flush_error: BaseException | None = None
         try:
             self._send_buffer.flush()
-        except BaseException:
-            pass
+        except BaseException as exc:
+            flush_error = exc
         if self._sock.fileno() != -1:
             if not self._send_buffer.write_eof_done:
                 self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
@@ -316,6 +317,8 @@ class _WriterCore:
             except OSError:
                 pass
         self._closed = True
+        if flush_error is not None:
+            raise flush_error
 
     def is_closing(self) -> bool:
         return self._closing or self._closed
@@ -489,15 +492,29 @@ class AsyncStreamWriter:
         self._core.wait_closed()
 
 
-def _shutdown_stream_writer(writer: StreamWriter | AsyncStreamWriter) -> None:
+def _shutdown_stream_writer(
+    writer: StreamWriter | AsyncStreamWriter,
+    *,
+    best_effort: bool = False,
+) -> None:
+    """Close a stream writer and wait for queued sends and socket teardown.
+
+    When ``best_effort`` is false (normal handler cleanup), flush and transport
+    errors propagate after best-effort socket close. When true (discarded
+    accepts or failed handler spawn), all shutdown errors are suppressed.
+    """
+
     try:
         writer.close()
         if isinstance(writer, AsyncStreamWriter):
             run_coro(writer.wait_closed())
         else:
             writer.wait_closed()
-    except BaseException:
+    except OSError:
         pass
+    except BaseException:
+        if not best_effort:
+            raise
 
 
 _NativeStreamPair: TypeAlias = tuple[StreamReader, StreamWriter]
@@ -1048,7 +1065,7 @@ class StreamServer:
                     def on_accept(streams: _AcceptedStreams) -> None:
                         if self._closed:
                             _reader, writer = streams
-                            _shutdown_stream_writer(writer)
+                            _shutdown_stream_writer(writer, best_effort=True)
                             return
                         reader, writer = streams
                         self._dispatch_streams(
@@ -1139,7 +1156,7 @@ class StreamServer:
     ) -> None:
         def dispatch() -> None:
             if self._closed:
-                _shutdown_stream_writer(writer)
+                _shutdown_stream_writer(writer, best_effort=True)
                 return
 
             def serve() -> None:
@@ -1163,9 +1180,9 @@ class StreamServer:
 
             try:
                 handler_task = self._scheduler.spawn(serve)
-            except Exception:
-                _shutdown_stream_writer(writer)
-                raise
+            except Exception as spawn_exc:
+                _shutdown_stream_writer(writer, best_effort=True)
+                raise spawn_exc
 
             self._handler_tasks.add(handler_task)
 

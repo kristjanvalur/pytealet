@@ -956,6 +956,39 @@ class TestStreamsPoC:
             conn.close()
             peer.close()
 
+    def test_stream_writer_wait_closed_propagates_flush_error(self, scheduler: SyncProactorScheduler) -> None:
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            pending = Operation[None](kind="send", fileobj=conn)
+            real_sendall = scheduler.io.sock_sendall
+
+            def pending_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del data, progress
+                return IOWaiter(scheduler.io, pending)
+
+            scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
+            stream_writer = StreamWriter(
+                send_buffer=_open_send_buffer(scheduler.io, conn),
+                sock=conn,
+                io=scheduler.io,
+            )
+
+            def exercise() -> None:
+                stream_writer.write(b"x")
+                stream_writer.close()
+                pending._finish(exception=OSError("send failed"))
+                with pytest.raises(OSError, match="send failed"):
+                    stream_writer.wait_closed()
+                assert stream_writer._core._closed
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            conn.close()
+            peer.close()
+
     def test_stream_writer_wait_closed_uses_proactor_shutdown_and_close(
         self, scheduler: SyncProactorScheduler
     ) -> None:

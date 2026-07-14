@@ -51,7 +51,11 @@ class SendBuffer:
 
     @property
     def pending_bytes(self) -> int:
-        """Approximate bytes queued or in the active ``sock_sendall`` leg."""
+        """Approximate bytes queued or in the active ``sock_sendall`` leg.
+
+        The counters may be read without the buffer lock, so concurrent
+        completion callbacks can yield a briefly stale snapshot.
+        """
 
         return self._pending_bytes + self._in_flight_bytes
 
@@ -89,15 +93,7 @@ class SendBuffer:
             chunk_to_send = self._pending.popleft()
             self._pending_bytes -= len(chunk_to_send)
             self._in_flight_bytes = len(chunk_to_send)
-        try:
-            self._submit(chunk_to_send)
-        except BaseException as exc:
-            with self._cond:
-                self._active = False
-                self._in_flight_bytes = 0
-                self._send_error = exc
-                self._cond.notify_all()
-            raise
+        self._submit_leg(chunk_to_send, restore_on_failure=True)
 
     def drain(self) -> None:
         """Block only when ``pending_bytes`` exceeds ``high_water``.
@@ -197,6 +193,20 @@ class SendBuffer:
         self._active_waiter = waiter
         waiter.add_done_callback(self._on_leg_complete)
 
+    def _submit_leg(self, chunk: bytes, *, restore_on_failure: bool) -> None:
+        try:
+            self._submit(chunk)
+        except BaseException as exc:
+            with self._cond:
+                if restore_on_failure:
+                    self._pending.appendleft(chunk)
+                    self._pending_bytes += len(chunk)
+                self._active = False
+                self._in_flight_bytes = 0
+                self._send_error = exc
+                self._cond.notify_all()
+            raise
+
     def _on_leg_complete(self) -> None:
         next_chunk: bytes | None = None
         waiter = self._active_waiter
@@ -204,6 +214,7 @@ class SendBuffer:
         self._active_waiter = None
         assert waiter.poll()
         leg_error = waiter.exception()
+        waiter.forget()
         with self._cond:
             self._in_flight_bytes = 0
             if leg_error is not None:
@@ -217,4 +228,4 @@ class SendBuffer:
                 self._maybe_shutdown()
             self._cond.notify_all()
         if next_chunk is not None:
-            self._submit(next_chunk)
+            self._submit_leg(next_chunk, restore_on_failure=True)
