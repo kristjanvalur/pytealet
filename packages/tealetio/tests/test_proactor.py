@@ -1673,6 +1673,37 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_poll_many_probe_oserror_emits_terminal_delivery(self, monkeypatch) -> None:
+        import tealetio.proactor as proactor_module
+        from tealetio.continuous_callbacks import finish_continuous_delivery
+
+        error = OSError("poll probe failed")
+        seen: list[MultishotDelivery] = []
+
+        def on_poll(delivery: MultishotDelivery) -> None:
+            seen.append(delivery)
+            finish_continuous_delivery(delivery)
+
+        monkeypatch.setattr(
+            proactor_module,
+            "_probe_poll_fd_now",
+            lambda _fd, _mask: (_ for _ in ()).throw(error),
+        )
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
+            assert operation.done()
+            assert operation.exception() is error
+            assert len(seen) == 1
+            assert seen[0].exception is error
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     @pytest.mark.skipif(not hasattr(select, "POLLRDHUP"), reason="POLLRDHUP is not defined on this platform")
     def test_poll_mask_accepts_pollrdhup(self):
         assert poll_helpers_module.poll_mask_to_selector_events(select.POLLRDHUP) == selectors.EVENT_READ

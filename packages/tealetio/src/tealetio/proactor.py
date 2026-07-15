@@ -1416,8 +1416,9 @@ class SelectorProactor(ProactorBase):
             step_result = step()
         except (BlockingIOError, InterruptedError):
             return False
-        except BaseException:
+        except BaseException as exc:
             self._remove_operation(operation)
+            operation._finish_with_terminal_delivery(_continuous_error_delivery(exc))
             return True
         if step_result.done:
             self._remove_operation(operation)
@@ -1599,8 +1600,9 @@ class SelectorProactor(ProactorBase):
         except (BlockingIOError, InterruptedError):
             self._update_selector_registration(fd)
             return
-        except BaseException:
+        except BaseException as exc:
             self._remove_operation(operation)
+            operation._finish_with_terminal_delivery(_continuous_error_delivery(exc))
             completed.append(operation)
             return
         if step_result.done:
