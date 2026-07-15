@@ -613,47 +613,40 @@ class ProactorIOManager:
 
         self._marshal_on_scheduler(cancel)
 
-    def _accept_many_read_on_conn(
+    def _accept_preread_on_worker(
         self,
-        deliver: Callable[[AcceptReadResult], object],
+        delivery: MultishotDelivery,
+        on_thread_delivery: Callable[[MultishotDelivery], None],
         *,
         recv_size: int,
         recv_timeout: float | None = None,
-    ) -> Callable[[MultishotDelivery], None]:
-        """Return a proactor ``accept_many`` callback that pre-reads each accept."""
+    ) -> None:
+        """Schedule accept-time ``recv`` on the worker thread and post the merged leg."""
 
-        def on_conn(delivery: MultishotDelivery) -> None:
-            if is_cancellation_delivery(delivery):
-                return
-            if delivery.exception is not None:
-                raise delivery.exception
-            conn = delivery.value
-            if conn is None:
-                return
-            recv_op = self._proactor.recv(conn, recv_size)
-            timer_box: list[TimerHandle | None] = [None]
+        conn = delivery.value
+        assert isinstance(conn, socket.socket)
+        recv_op = self._proactor.recv(conn, recv_size)
+        timer_box: list[TimerHandle | None] = [None]
 
-            if recv_timeout is not None:
-                self._schedule_accept_recv_timeout(
-                    recv_op,
-                    timer_box,
-                    timeout=recv_timeout,
-                )
+        if recv_timeout is not None:
+            self._schedule_accept_recv_timeout(
+                recv_op,
+                timer_box,
+                timeout=recv_timeout,
+            )
 
-            def on_recv_complete(op: Operation[bytes]) -> None:
-                self._cancel_accept_recv_timeout(timer_box)
-                exc = op.exception()
-                if exc is not None:
-                    if isinstance(exc, CancelledError):
-                        abortive_close(conn)
-                        return
-                    deliver((conn, None, exc))
+        def on_recv_complete(op: Operation[bytes]) -> None:
+            self._cancel_accept_recv_timeout(timer_box)
+            exc = op.exception()
+            if exc is not None:
+                if isinstance(exc, CancelledError):
+                    abortive_close(conn)
                     return
-                deliver((conn, op.result(), None))
+                on_thread_delivery(delivery._replace(value=(conn, None, exc)))
+                return
+            on_thread_delivery(delivery._replace(value=(conn, op.result(), None)))
 
-            recv_op.add_done_callback(on_recv_complete)
-
-        return on_conn
+        recv_op.add_done_callback(on_recv_complete)
 
     def accept_many(
         self,
@@ -710,18 +703,6 @@ class ProactorIOManager:
                 abortive_close(conn)
                 raise
 
-        read_on_conn: Callable[[MultishotDelivery], None] | None = None
-        if normalized_recv_size is not None:
-
-            def deliver_from_recv(result: AcceptReadResult) -> None:
-                self._marshal_on_scheduler(lambda: deliver_wrapped(result))
-
-            read_on_conn = self._accept_many_read_on_conn(
-                deliver_from_recv,
-                recv_size=normalized_recv_size,
-                recv_timeout=recv_timeout,
-            )
-
         def on_ordered_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
                 finish_continuous_delivery(delivery)
@@ -731,16 +712,31 @@ class ProactorIOManager:
             if delivery.value is None:
                 finish_continuous_delivery(delivery)
                 return
-            if read_on_conn is not None:
-                read_on_conn(delivery)
-            else:
-                deliver_wrapped((delivery.value, None, None))
+            deliver_wrapped(delivery.value)
             finish_continuous_delivery(delivery)
 
-        operation = self._proactor.accept_many(
-            sock,
-            self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer),
-        )
+        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer)
+
+        def on_worker_delivery(delivery: MultishotDelivery) -> None:
+            if is_cancellation_delivery(delivery):
+                on_thread_delivery(delivery)
+                return
+            if delivery.exception is not None:
+                raise delivery.exception
+            if delivery.value is None:
+                on_thread_delivery(delivery)
+                return
+            if normalized_recv_size is not None:
+                self._accept_preread_on_worker(
+                    delivery,
+                    on_thread_delivery,
+                    recv_size=normalized_recv_size,
+                    recv_timeout=recv_timeout,
+                )
+                return
+            on_thread_delivery(delivery._replace(value=(delivery.value, None, None)))
+
+        operation = self._proactor.accept_many(sock, on_worker_delivery)
         return IOWaiter(self, operation)
 
     def accept_many_streams(
@@ -773,9 +769,32 @@ class ProactorIOManager:
                 return
             if delivery.exception is not None:
                 raise delivery.exception
+            if delivery.value is None:
+                finish_continuous_delivery(delivery)
+                return
+
+            reader, writer = delivery.value
+            try:
+                callback((reader, writer))
+            except BaseException:
+                try:
+                    writer.close()
+                except BaseException:
+                    abortive_close(writer.get_extra_info("socket"))
+                raise
+            finish_continuous_delivery(delivery)
+
+        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer)
+
+        def on_worker_delivery(delivery: MultishotDelivery) -> None:
+            if is_cancellation_delivery(delivery):
+                on_thread_delivery(delivery)
+                return
+            if delivery.exception is not None:
+                raise delivery.exception
             conn = delivery.value
             if conn is None:
-                finish_continuous_delivery(delivery)
+                on_thread_delivery(delivery)
                 return
 
             try:
@@ -790,20 +809,9 @@ class ProactorIOManager:
                 abortive_close(conn)
                 raise
 
-            try:
-                callback((reader, writer))
-            except BaseException:
-                try:
-                    writer.close()
-                except BaseException:
-                    abortive_close(conn)
-                raise
-            finish_continuous_delivery(delivery)
+            on_thread_delivery(delivery._replace(value=(reader, writer)))
 
-        operation = self._proactor.accept_many(
-            sock,
-            self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer),
-        )
+        operation = self._proactor.accept_many(sock, on_worker_delivery)
         return IOWaiter(self, operation)
 
     def sock_create_streams(
