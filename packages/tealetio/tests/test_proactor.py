@@ -41,6 +41,7 @@ import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
 import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
+from tealetio.scheduler import get_running_scheduler
 from tealetio.io_waiter import IOWaiter
 from tealetio.operations import InvalidStateError, MultishotDelivery
 from tealetio.proactor import (
@@ -359,73 +360,6 @@ def test_completions_to_process_flushes_stored_termination():
     assert entry.completions_to_process(second) == (second, terminal)
 
 
-def _drain_ordered_ingest_buffer(buffer: io_buffers_module._OrderedIngestBuffer[str]) -> list[tuple[int, str]]:
-    ready: list[tuple[int, str]] = []
-    while True:
-        item = buffer.pop()
-        if item is None:
-            break
-        ready.append(item)
-    return ready
-
-
-def test_ordered_ingest_buffer_push_defers_out_of_order_items():
-    buffer = io_buffers_module._OrderedIngestBuffer[str]()
-    buffer.push((1, "b"))
-    assert len(buffer) == 1
-    assert not buffer
-    assert buffer.pop() is None
-    assert buffer.pushpop((2, "c")) is None
-    assert len(buffer) == 2
-    assert not buffer
-
-
-def test_ordered_ingest_buffer_pushpop_returns_next_ready_item():
-    buffer = io_buffers_module._OrderedIngestBuffer[str]()
-    assert buffer.pushpop((0, "a")) == (0, "a")
-    assert not buffer
-
-
-def test_ordered_ingest_buffer_unclogs_pending_items():
-    buffer = io_buffers_module._OrderedIngestBuffer[str]()
-    buffer.push((1, "b"))
-    buffer.push((2, "c"))
-    ready = [buffer.pushpop((0, "a")), *_drain_ordered_ingest_buffer(buffer)]
-    assert ready == [(0, "a"), (1, "b"), (2, "c")]
-
-
-def test_ordered_ingest_buffer_bool_only_when_next_index_is_on_heap():
-    buffer = io_buffers_module._OrderedIngestBuffer[str]()
-    buffer.push((2, "c"))
-    buffer.push((1, "b"))
-    assert len(buffer) == 2
-    assert not buffer
-
-    ready = [buffer.pushpop((0, "a")), *_drain_ordered_ingest_buffer(buffer)]
-    assert ready == [(0, "a"), (1, "b"), (2, "c")]
-    assert not buffer
-
-    waiting = io_buffers_module._OrderedIngestBuffer[str]()
-    waiting.pushpop((0, "a"))
-    waiting.push((1, "b"))
-    assert waiting
-    assert waiting.pop() == (1, "b")
-
-
-def test_ordered_ingest_buffer_reset_restores_next_index():
-    buffer = io_buffers_module._OrderedIngestBuffer[str](start=5)
-    buffer.pushpop((5, "a"))
-    buffer.push((7, "c"))
-    buffer.reset()
-    assert buffer.next_index == 0
-    assert not buffer
-    assert buffer.pushpop((0, "z")) == (0, "z")
-
-    buffer.reset(start=10)
-    assert buffer.next_index == 10
-    assert buffer.pushpop((10, "x")) == (10, "x")
-
-
 @pytest.mark.skipif(
     not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
 )
@@ -612,7 +546,7 @@ def test_recviter_buffer_ignores_late_callbacks_after_close():
         buffer.close()
         buffer.on_result(_recv_chunk(1, b"b"))
         buffer.on_result(_enobufs_chunk())
-        return len(buffer._ready), bool(buffer._reorder)
+        return len(buffer._ready), buffer._reorder_buffer.pending
 
     ready_len, reorder_pending = _exercise_recviter_buffer(exercise)
     assert ready_len == 0
@@ -662,7 +596,7 @@ def test_recviter_buffer_pressure_token_precedes_queued_views():
         )
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_enobufs_chunk())
+        buffer.on_result(_enobufs_chunk(2))
         return [buffer.take_next(), buffer.take_next(), buffer.take_next()]
 
     token, first, second = _exercise_recviter_buffer(exercise)
@@ -687,14 +621,17 @@ def test_recviter_buffer_eof_stops_iteration():
 
 def test_recviter_buffer_ordered_eof_wins_cancel_race():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
+        scheduler = get_running_scheduler()
         buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"done"))
+        scheduler.yield_()
         with buffer._cond:
             buffer._stream_done = True
             buffer._stream_error = CancelledError()
         buffer.on_result(_recv_chunk(1, b"", more=False))
+        scheduler.yield_()
         return [buffer.take_next(), buffer.take_next()]
 
     first, second = _exercise_recviter_buffer(exercise)
@@ -704,11 +641,13 @@ def test_recviter_buffer_ordered_eof_wins_cancel_race():
 
 def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
     def exercise() -> list[object]:
+        scheduler = get_running_scheduler()
         buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
+        scheduler.yield_()
         with buffer._cond:
             buffer._stream_done = True
             buffer._stream_error = OSError("recv failed")
@@ -1054,9 +993,9 @@ def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
         buffer.on_result(_recv_chunk(1, b"b"))
         buffer.on_result(_recv_chunk(2, b"c"))
         buffer.on_result(_enobufs_chunk(3))
+        buffer.on_result(_recv_chunk(0, b"a"))
         _assert_recviter_pressure(buffer.take_next())
         assert proactor.recv_many_bases == [0]
-        buffer.on_result(_recv_chunk(0, b"a"))
         first = buffer.take_next()
         assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
         assert proactor.recv_many_bases == [0]

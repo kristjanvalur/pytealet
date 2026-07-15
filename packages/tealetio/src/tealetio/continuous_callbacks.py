@@ -94,6 +94,23 @@ class ReorderBuffer:
             self._callback(pending)
             self._delivered += 1
 
+    @property
+    def pending(self) -> bool:
+        return bool(self._heap)
+
+    def reset(self, *, start: int = 0) -> None:
+        self._heap.clear()
+        self._delivered = start
+
+    def arm_next_index(self, index: int) -> None:
+        """Prepare for the next leg whose first delivery uses ``index``.
+
+        ``deliver`` increments ``_delivered`` after each callback; arm one below
+        the next leg's first index so the increment lands on ``index``.
+        """
+
+        self._delivered = index - 1
+
 
 class TerminalReorderBuffer:
     """Invoke per-delivery callbacks in leg order; defer early terminals.

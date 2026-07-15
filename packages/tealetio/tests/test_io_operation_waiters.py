@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import socket
 import threading
 
@@ -91,6 +92,42 @@ def test_reorder_buffer_delivers_none_index_immediately() -> None:
     reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
 
     assert order == [None, 0, 1]
+
+
+def test_reorder_buffer_arm_next_index_reuses_leg_start_index() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    order: list[int] = []
+
+    def record(delivery: MultishotDelivery) -> None:
+        order.append(delivery.index)
+        if delivery.index == 2:
+            reorder_buffer.arm_next_index(2)
+
+    reorder_buffer = ReorderBuffer(record)
+    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
+    reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True))
+    reorder_buffer.deliver(MultishotDelivery(index=2, exception=OSError(errno.ENOBUFS, "x"), more=False))
+    reorder_buffer.deliver(MultishotDelivery(index=2, value="", more=False))
+
+    assert order == [0, 1, 2, 2]
+
+
+def test_reorder_buffer_reset_clears_pending_heap() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    order: list[int] = []
+
+    def record(delivery: MultishotDelivery) -> None:
+        order.append(delivery.index)
+
+    reorder_buffer = ReorderBuffer(record, start=5)
+    reorder_buffer.deliver(MultishotDelivery(index=7, value="c", more=True))
+    assert reorder_buffer.pending
+    reorder_buffer.reset()
+    assert not reorder_buffer.pending
+    reorder_buffer.deliver(MultishotDelivery(index=0, value="z", more=True))
+    assert order == [0]
 
 
 def test_reorder_buffer_delivers_callbacks_in_index_order() -> None:
