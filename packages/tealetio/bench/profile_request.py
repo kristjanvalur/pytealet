@@ -8,7 +8,6 @@ import json
 import re
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -96,12 +95,8 @@ def _phase_table(profile: dict[str, Any]) -> str:
         extra = ""
         if phase.get("pre_handler_ms") is not None:
             extra = f" pre_handler={phase['pre_handler_ms']:.2f}ms"
-        lines.append(
-            f"    {phase['phase']:16s}  +{phase['delta_ms']:7.2f}ms  @{phase['since_start_ms']:7.2f}ms{extra}"
-        )
-    lines.append(
-        f"    readline sum     {profile['readline_wait_ms']:7.2f}ms  ({profile['readline_bytes']} bytes)"
-    )
+        lines.append(f"    {phase['phase']:16s}  +{phase['delta_ms']:7.2f}ms  @{phase['since_start_ms']:7.2f}ms{extra}")
+    lines.append(f"    readline sum     {profile['readline_wait_ms']:7.2f}ms  ({profile['readline_bytes']} bytes)")
     return "\n".join(lines)
 
 
@@ -129,15 +124,15 @@ def _run_case(label: str, server: str, host: str, port: int, extra_args: list[st
             curl_rows.append(row)
             kind = "warmup" if n == 0 else "measure"
             print(
-                f"  curl {kind}: total={float(row['total'])*1000:.2f}ms "
-                f"connect={float(row['connect'])*1000:.2f}ms "
-                f"ttfb={float(row['ttfb'])*1000:.2f}ms"
+                f"  curl {kind}: total={float(row['total']) * 1000:.2f}ms "
+                f"connect={float(row['connect']) * 1000:.2f}ms "
+                f"ttfb={float(row['ttfb']) * 1000:.2f}ms"
             )
         if concurrent > 1:
             totals = _run_concurrent(url, concurrent)
             print(
                 f"  concurrent x{concurrent}: "
-                f"min={min(totals):.2f}ms max={max(totals):.2f}ms avg={sum(totals)/len(totals):.2f}ms"
+                f"min={min(totals):.2f}ms max={max(totals):.2f}ms avg={sum(totals) / len(totals):.2f}ms"
             )
     finally:
         proc.terminate()
@@ -155,19 +150,19 @@ def _run_case(label: str, server: str, host: str, port: int, extra_args: list[st
 
     if len(measured) == 2:
         avg_total = sum(p["total_ms"] for p in measured) / 2
-        avg_drain = sum(
-            next((ph["delta_ms"] for ph in p["phases"] if ph["phase"] == "drain"), 0.0) for p in measured
-        ) / 2
-        avg_write = sum(
-            next((ph["delta_ms"] for ph in p["phases"] if ph["phase"] == "write"), 0.0) for p in measured
-        ) / 2
+        avg_drain = (
+            sum(next((ph["delta_ms"] for ph in p["phases"] if ph["phase"] == "drain"), 0.0) for p in measured) / 2
+        )
+        avg_write = (
+            sum(next((ph["delta_ms"] for ph in p["phases"] if ph["phase"] == "write"), 0.0) for p in measured) / 2
+        )
         avg_pre = [
             ph.get("pre_handler_ms")
             for p in measured
             for ph in p["phases"]
             if ph["phase"] == "handler_start" and ph.get("pre_handler_ms") is not None
         ]
-        pre_s = f" pre_handler={sum(avg_pre)/len(avg_pre):.2f}ms" if avg_pre else ""
+        pre_s = f" pre_handler={sum(avg_pre) / len(avg_pre):.2f}ms" if avg_pre else ""
         print(f"  avg measured: server={avg_total:.2f}ms drain={avg_drain:.2f}ms write={avg_write:.2f}ms{pre_s}")
 
 

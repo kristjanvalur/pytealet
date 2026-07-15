@@ -61,6 +61,8 @@ def add_tealetio_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="enable SO_REUSEPORT when binding (default off, like asyncio)",
     )
+
+
 def drain_request(reader: StreamReader) -> None:
     """Discard HTTP request headers (through the blank line)."""
 

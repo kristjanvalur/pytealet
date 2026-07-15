@@ -12,6 +12,7 @@ import threading
 import time
 from collections import Counter
 
+
 def enabled() -> bool:
     return os.environ.get("TEALETIO_STREAM_DIAG", "").lower() in ("1", "true", "yes")
 
@@ -91,8 +92,7 @@ class _StreamDiag:
             idle = now - self._last_event
             counters = dict(self._counters)
             blocking = [
-                (ident, site, now - started, detail)
-                for ident, (site, started, detail) in self._blocking.items()
+                (ident, site, now - started, detail) for ident, (site, started, detail) in self._blocking.items()
             ]
         return idle, counters, blocking
 
@@ -102,6 +102,7 @@ class _StreamDiag:
 
 
 _diag = _StreamDiag()
+
 
 def uring_accept_cqe(**fields: object) -> None:
     """Log one multishot-accept completion (terminal CQEs, errors)."""
