@@ -29,8 +29,9 @@ class MultishotDelivery(NamedTuple):
     (for example emulated-path cancel terminals). ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
-    Terminal failures finish the ``Operation`` with the same exception, then
-    invoke the result callback. ``more``
+    Terminal failures are emitted through the result callback; consumers such as
+    ``ProactorIOManager`` and ``RecvIterBuffer`` call ``finish_operation()`` on
+    terminal deliveries. ``more``
     mirrors ``IORING_CQE_F_MORE`` on uring backends. For ``recv_many``,
     ``more=False`` with empty data signals EOF; ``more=False`` with non-empty
     data means the leg stopped before EOF and consumers should start a fresh

@@ -708,6 +708,7 @@ class ProactorIOManager:
                 finish_continuous_delivery(delivery)
                 return
             if delivery.exception is not None:
+                finish_continuous_delivery(delivery)
                 raise delivery.exception
             if delivery.value is None:
                 finish_continuous_delivery(delivery)
@@ -722,7 +723,8 @@ class ProactorIOManager:
                 on_thread_delivery(delivery)
                 return
             if delivery.exception is not None:
-                raise delivery.exception
+                on_thread_delivery(delivery)
+                return
             if delivery.value is None:
                 on_thread_delivery(delivery)
                 return
@@ -768,6 +770,7 @@ class ProactorIOManager:
                 finish_continuous_delivery(delivery)
                 return
             if delivery.exception is not None:
+                finish_continuous_delivery(delivery)
                 raise delivery.exception
             if delivery.value is None:
                 finish_continuous_delivery(delivery)
@@ -791,7 +794,8 @@ class ProactorIOManager:
                 on_thread_delivery(delivery)
                 return
             if delivery.exception is not None:
-                raise delivery.exception
+                on_thread_delivery(delivery)
+                return
             conn = delivery.value
             if conn is None:
                 on_thread_delivery(delivery)
@@ -805,9 +809,10 @@ class ProactorIOManager:
                     stream_factory=stream_factory,
                     async_=async_,
                 )
-            except BaseException:
+            except BaseException as exc:
                 abortive_close(conn)
-                raise
+                on_thread_delivery(delivery._replace(value=None, exception=exc))
+                return
 
             on_thread_delivery(delivery._replace(value=(reader, writer)))
 

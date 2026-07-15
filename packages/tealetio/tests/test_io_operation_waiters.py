@@ -236,6 +236,56 @@ def test_poll_many_marshals_callback_and_sets_ready_on_terminal() -> None:
     assert waiter.operation.done()
 
 
+def test_accept_many_terminal_error_finishes_operation() -> None:
+    error = OSError("accept failed")
+    handler_errors: list[BaseException] = []
+
+    class _AcceptProactor:
+        def accept_many(self, sock, callback=None):
+            operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+            operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
+            return operation
+
+    scheduler = StubScheduler()
+    scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+    io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
+    server = socket.socket()
+    try:
+        waiter = io.accept_many(server, lambda _: None)
+        operation = waiter.operation
+        assert operation is not None
+        assert handler_errors == [error]
+        assert operation.done()
+        assert operation.exception() is error
+    finally:
+        server.close()
+
+
+def test_accept_many_streams_terminal_error_finishes_operation() -> None:
+    error = OSError("accept failed")
+    handler_errors: list[BaseException] = []
+
+    class _AcceptProactor:
+        def accept_many(self, sock, callback=None):
+            operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+            operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
+            return operation
+
+    scheduler = StubScheduler()
+    scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+    io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
+    server = socket.socket()
+    try:
+        waiter = io.accept_many_streams(server, lambda _: None)
+        operation = waiter.operation
+        assert operation is not None
+        assert handler_errors == [error]
+        assert operation.done()
+        assert operation.exception() is error
+    finally:
+        server.close()
+
+
 def test_poll_many_wait_raises_operation_exception_on_terminal_error() -> None:
     error = OSError("poll failed")
 

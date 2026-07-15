@@ -537,6 +537,18 @@ def test_recviter_buffer_resume_waits_until_low_water_mark():
     assert _exercise_recviter_buffer(exercise) == [0, 2]
 
 
+def test_recviter_buffer_enobufs_finishes_recv_many_leg():
+    def exercise() -> bool:
+        proactor = _recviter_test_proactor()
+        buffer = _recviter_buffer(proactor=proactor, buf_group=_recviter_test_pool())
+        operation = buffer._current_operation
+        assert operation is not None
+        buffer.on_result(_enobufs_chunk(0)._replace(operation=operation))
+        return operation.done()
+
+    assert _exercise_recviter_buffer(exercise)
+
+
 def test_recviter_buffer_ignores_late_callbacks_after_close():
     def exercise() -> tuple[int, bool]:
         buffer = io_buffers_module.RecvIterBuffer(

@@ -163,6 +163,7 @@ class RecvIterBuffer:
                 self._schedule_resubmit(base_sequence=index)
                 if self._signal_pressure_if_pending():
                     notify = True
+                finish_leg = True
             elif delivery.exception is not None:
                 self._stream_error = delivery.exception
                 self._stream_done = True
