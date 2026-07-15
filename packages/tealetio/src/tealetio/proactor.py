@@ -220,11 +220,6 @@ def _enobufs_error() -> OSError:
     return OSError(errno.ENOBUFS, errno.errorcode.get(errno.ENOBUFS, "no buffer space"))
 
 
-def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
-    exc = delivery.exception
-    return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
-
-
 def _synthetic_recv_pool_is_full(buf_group: RecvBufferPool) -> bool:
     if not _is_synthetic_recv_buffer_pool(buf_group):
         return False
@@ -236,10 +231,7 @@ def _complete_recv_many_enobufs(
     *,
     index: int,
 ) -> ContinuousOperation[_RecvManyValue]:
-    delivery = _recv_many_enobufs_delivery(index=index)
-    operation._finish_with_terminal_delivery(delivery)
-    if not operation.done():
-        operation.finish_operation(delivery)
+    operation._finish_with_terminal_delivery(_recv_many_enobufs_delivery(index=index))
     return operation
 
 
@@ -600,6 +592,7 @@ class ProactorBase:
             return None
 
         def guarded(delivery: MultishotDelivery) -> None:
+            # Delivery callbacks own ``finish_operation``; the guard only routes failures.
             try:
                 callback(delivery)
             except BaseException as exc:
@@ -613,13 +606,6 @@ class ProactorBase:
                         "delivery": delivery,
                     }
                 )
-                return
-            if getattr(callback, "finishes_on_owner", False):
-                return
-            if not delivery.more and not _is_enobufs_delivery(delivery):
-                operation = delivery.operation
-                if operation is not None:
-                    operation.finish_operation(delivery)
 
         return guarded
 
@@ -836,8 +822,6 @@ class _MultishotLegState:
 
     nonterminal_seen: int = 0
     pending_final: _UringCompletion | None = None
-    enobufs_index: int | None = None
-    enobufs_exception: OSError | None = None
     leg_base: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -1422,20 +1406,17 @@ class SelectorProactor(ProactorBase):
         operation: ContinuousOperation[T],
         step: Callable[[], ContinuousStepResult],
     ) -> bool:
-        """Run one continuous step synchronously. Return True if the operation finished."""
+        """Run one continuous step synchronously. Return True when the leg ended."""
 
         try:
             step_result = step()
         except (BlockingIOError, InterruptedError):
             return False
-        except BaseException as exc:
+        except BaseException:
             self._remove_operation(operation)
-            operation._finish(exception=exc)
             return True
         if step_result.done:
             self._remove_operation(operation)
-            if not operation.done():
-                operation._finish(result=None)
             return True
         if step_result.progressed:
             self._update_selector_registration(fd)
@@ -1614,15 +1595,12 @@ class SelectorProactor(ProactorBase):
         except (BlockingIOError, InterruptedError):
             self._update_selector_registration(fd)
             return
-        except BaseException as exc:
+        except BaseException:
             self._remove_operation(operation)
-            operation._finish(exception=exc)
             completed.append(operation)
             return
         if step_result.done:
             self._remove_operation(operation)
-            if not operation.done():
-                operation._finish(result=None)
         else:
             self._update_selector_registration(fd)
         if step_result.progressed or step_result.done:
@@ -2726,8 +2704,6 @@ class UringProactor(ProactorBase):
                 leg.leg_base = leg_base
                 leg.nonterminal_seen = 0
                 leg.pending_final = None
-                leg.enobufs_index = None
-                leg.enobufs_exception = None
                 return self._ring.submit_recv_multishot(
                     sock.fileno(),
                     uring_group,
@@ -2921,30 +2897,6 @@ class UringProactor(ProactorBase):
             self._deactivate_uring_entry(entry)
         return operation
 
-    def _maybe_finish_recv_many_enobufs_leg(
-        self,
-        entry: _UringEntry,
-        multishot_leg: _MultishotLegState,
-        operation: ContinuousOperation[_RecvManyValue],
-    ) -> None:
-        enobufs_index = multishot_leg.enobufs_index
-        if enobufs_index is None:
-            return
-        if multishot_leg.nonterminal_seen >= enobufs_index - multishot_leg.leg_base:
-            exc = multishot_leg.enobufs_exception
-            multishot_leg.enobufs_index = None
-            multishot_leg.enobufs_exception = None
-            if not operation.done():
-                operation.finish_operation(
-                    MultishotDelivery(
-                        index=enobufs_index,
-                        value=memoryview(b""),
-                        exception=cast(OSError, exc),
-                        more=False,
-                    )
-                )
-            self._deactivate_uring_entry(entry)
-
     def _deliver_uring_recv_many(
         self,
         entry: _UringEntry,
@@ -2959,11 +2911,8 @@ class UringProactor(ProactorBase):
         if res < 0:
             if res == -errno.ENOBUFS:
                 multishot_leg.pending_final = None
-                delivery = _recv_many_enobufs_delivery(index=index)
-                multishot_leg.enobufs_index = index
-                multishot_leg.enobufs_exception = cast(OSError, delivery.exception)
-                operation._emit_delivery(delivery)
-                self._maybe_finish_recv_many_enobufs_leg(entry, multishot_leg, operation)
+                operation._emit_delivery(_recv_many_enobufs_delivery(index=index))
+                self._deactivate_uring_entry(entry)
                 return operation
             self._deactivate_uring_entry(entry)
             operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=index, res=res))
@@ -2979,7 +2928,6 @@ class UringProactor(ProactorBase):
                 more=more,
             )
 
-        self._maybe_finish_recv_many_enobufs_leg(entry, multishot_leg, operation)
         if operation.done():
             return operation
         if not more:

@@ -65,6 +65,83 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
 
+def _append_recv_many_seen(seen: list[_RecvManySeen]) -> Callable[[_RecvManySeen], None]:
+    def on_result(delivery: _RecvManySeen) -> None:
+        seen.append(delivery)
+        if not delivery.more:
+            from tealetio.continuous_callbacks import finish_continuous_delivery
+
+            finish_continuous_delivery(delivery)
+
+    return on_result
+
+
+def _recv_many_finish_after_stragglers(
+    seen: list[_RecvManySeen],
+    resume_base: list[int | None] | None = None,
+) -> Callable[[_RecvManySeen], None]:
+    enobufs_delivery: list[_RecvManySeen | None] = [None]
+    terminal_delivery: list[_RecvManySeen | None] = [None]
+    data_indices: set[int] = set()
+
+    def maybe_finish_enobufs() -> None:
+        delivery = enobufs_delivery[0]
+        if delivery is None:
+            return
+        index = delivery.index
+        if all(i in data_indices for i in range(index)):
+            from tealetio.continuous_callbacks import finish_continuous_delivery
+
+            finish_continuous_delivery(delivery)
+
+    def maybe_finish_terminal() -> None:
+        delivery = terminal_delivery[0]
+        if delivery is None:
+            return
+        index = delivery.index
+        if all(i in data_indices for i in range(index)):
+            from tealetio.continuous_callbacks import finish_continuous_delivery
+
+            finish_continuous_delivery(delivery)
+
+    def on_result(delivery: _RecvManySeen) -> None:
+        seen.append(delivery)
+        if _is_enobufs_delivery(delivery):
+            enobufs_delivery[0] = delivery
+            if resume_base is not None:
+                resume_base[0] = delivery.index
+            maybe_finish_enobufs()
+        elif not delivery.more:
+            terminal_delivery[0] = delivery
+            maybe_finish_terminal()
+        elif delivery.exception is None and delivery.value is not None:
+            data_indices.add(delivery.index)
+            maybe_finish_enobufs()
+            maybe_finish_terminal()
+
+    return on_result
+
+
+def _poll_many_finishes_cancel() -> Callable[[MultishotDelivery], None]:
+    from tealetio.continuous_callbacks import finish_continuous_delivery, is_cancellation_delivery
+
+    def on_poll(delivery: MultishotDelivery) -> None:
+        if is_cancellation_delivery(delivery):
+            finish_continuous_delivery(delivery)
+
+    return on_poll
+
+
+def _recv_many_finishes_terminal() -> Callable[[_RecvManySeen], None]:
+    def on_result(delivery: _RecvManySeen) -> None:
+        if not delivery.more:
+            from tealetio.continuous_callbacks import finish_continuous_delivery
+
+            finish_continuous_delivery(delivery)
+
+    return on_result
+
+
 def _assert_scheduler_socket_fd(sock: socket.socket) -> None:
     """Uring socket fds are non-blocking and close-on-exec; wrapper state must match."""
 
@@ -422,7 +499,7 @@ def test_selector_recv_many_transport_error_sets_operation_exception() -> None:
         failing_reader.setblocking(False)
         writer.setblocking(False)
         pool = proactor.create_recv_buffer_pool(4096, 4)
-        operation = proactor.recv_many(failing_reader, seen.append, buf_group=pool)
+        operation = proactor.recv_many(failing_reader, _append_recv_many_seen(seen), buf_group=pool)
         writer.send(b"x")
         _pump_until(proactor, lambda: operation.done())
 
@@ -444,7 +521,7 @@ def test_selector_recv_many_leases_synthetic_pool_chunk() -> None:
     seen: list[_RecvManySeen] = []
     try:
         reader.setblocking(False)
-        operation = proactor.recv_many(reader, seen.append, buf_group=pool)
+        operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool)
         writer.send(b"hi")
         _pump_until(proactor, lambda: bool(seen))
 
@@ -466,7 +543,7 @@ def test_selector_recv_many_emits_enobufs_when_synthetic_pool_is_full() -> None:
     seen: list[_RecvManySeen] = []
     try:
         reader.setblocking(False)
-        operation = proactor.recv_many(reader, seen.append, buf_group=pool, base_sequence=3)
+        operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool, base_sequence=3)
         assert operation.done() is True
         assert len(seen) == 1
         assert _is_enobufs_delivery(seen[0])
@@ -1476,7 +1553,9 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.recv_many(reader, seen.append, buf_group=proactor.shared_recv_buffer_pool())
+            operation = proactor.recv_many(
+                reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
+            )
             writer.send(b"hello")
             while not seen:
                 proactor.wait(proactor.get_time() + 1.0)
@@ -1485,7 +1564,10 @@ class TestSelectorProactor:
             assert seen[-1].more is False
 
             operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool(), base_sequence=1
+                reader,
+                _append_recv_many_seen(seen),
+                buf_group=proactor.shared_recv_buffer_pool(),
+                base_sequence=1,
             )
             writer.send(b"world")
             while len(seen) < 2:
@@ -1494,7 +1576,10 @@ class TestSelectorProactor:
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world")]
 
             operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool(), base_sequence=2
+                reader,
+                _append_recv_many_seen(seen),
+                buf_group=proactor.shared_recv_buffer_pool(),
+                base_sequence=2,
             )
             writer.shutdown(socket.SHUT_WR)
             while len(seen) < 3:
@@ -1562,7 +1647,7 @@ class TestSelectorProactor:
 
             assert len(handler_errors) == 1
             assert str(handler_errors[0]) == "delivery failed"
-            assert operation.done()
+            assert operation.done() is False
         finally:
             reader.close()
             writer.close()
@@ -1588,7 +1673,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             fd = reader.fileno()
-            operation = proactor.poll_many(fd, select.POLLIN, lambda _mask: None)
+            operation = proactor.poll_many(fd, select.POLLIN, _poll_many_finishes_cancel())
             with proactor._lock:
                 entry = proactor._fd_operations[fd]
                 assert entry.reader is not None
@@ -2246,7 +2331,7 @@ class TestThreadedSelectorProactor:
             assert str(handler_errors[0]) == "delivery failed"
             assert handler_threads
             assert handler_threads[0] != main_thread
-            assert operation.done()
+            assert operation.done() is False
         finally:
             reader.close()
             writer.close()
@@ -3134,7 +3219,9 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(reader, lambda _chunk: None, buf_group=proactor.shared_recv_buffer_pool())
+            operation = proactor.recv_many(
+                reader, _recv_many_finishes_terminal(), buf_group=proactor.shared_recv_buffer_pool()
+            )
             _fd, _group, entry, _base = proactor.ring.submitted_recv_multishot[-1]
             assert entry.completion is not None
 
@@ -3647,7 +3734,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
             handle = proactor.ring.pending_poll_multishot[-1]
             proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: proactor.ring.submitted_poll_remove == [handle])
@@ -3736,7 +3823,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
             pending = proactor.ring.pending_poll_oneshot[-1]
             teardown = proactor.cancel(operation)
             _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
@@ -3904,7 +3991,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             pool = proactor.shared_recv_buffer_pool()
-            operation = proactor.recv_many(reader, seen.append, buf_group=pool)
+            operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool)
             assert proactor.ring.submitted_recv_multishot == []
             assert proactor.ring.submitted_recv == []
             assert len(proactor.ring.submitted_recv_buf) == 1
@@ -3914,7 +4001,7 @@ class TestUringProactor:
             assert seen[-1].more is False
             assert pool.leased_count == 1
 
-            operation = proactor.recv_many(reader, seen.append, buf_group=pool, base_sequence=1)
+            operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool, base_sequence=1)
             assert len(proactor.ring.submitted_recv_buf) == 2
             proactor.ring.complete_recv_buf(b"")
             _wait_for_uring(proactor, lambda: operation.done())
@@ -3933,7 +4020,7 @@ class TestUringProactor:
         seen: list[_RecvManySeen] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(reader, seen.append, buf_group=pool, base_sequence=4)
+            operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool, base_sequence=4)
             assert operation.done() is True
             assert proactor.ring.submitted_recv == []
             assert len(seen) == 1
@@ -3957,7 +4044,7 @@ class TestUringProactor:
         pool = proactor_module.SyntheticRecvBufferPool(8192, 4)
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(reader, seen.append, buf_group=pool)
+            operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool)
             assert proactor.ring.submitted_recv_multishot == []
             assert proactor.ring.submitted_recv_buf == []
             assert len(proactor.ring.submitted_recv) == 1
@@ -3991,7 +4078,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool()
+                reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_recv_multishot[0]
@@ -4019,7 +4106,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool()
+                reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
             proactor.ring.complete_recv_multishot_error(-errno.EIO, sequence=2)
             _wait_for_uring(proactor, lambda: operation.done())
@@ -4040,7 +4127,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool()
+                reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
             proactor.ring.complete_recv_multishot_enobufs(sequence=0)
             _wait_for_uring(proactor, lambda: operation.done())
@@ -4154,7 +4241,9 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool()
+                reader,
+                _recv_many_finish_after_stragglers(seen),
+                buf_group=proactor.shared_recv_buffer_pool(),
             )
             ring = proactor.ring
             ring.complete_recv_multishot(b"", more=False, sequence=2)
@@ -4176,12 +4265,9 @@ class TestUringProactor:
             reader.setblocking(False)
             pool = proactor.shared_recv_buffer_pool()
 
-            def on_result(delivery: _RecvManySeen) -> None:
-                seen.append(delivery)
-                if _is_enobufs_delivery(delivery):
-                    resume_base[0] = delivery.index
-
-            operation = proactor.recv_many(reader, on_result, buf_group=pool)
+            operation = proactor.recv_many(
+                reader, _recv_many_finish_after_stragglers(seen, resume_base), buf_group=pool
+            )
             ring = proactor.ring
             ring.complete_recv_multishot_enobufs(sequence=2)
             assert any(_is_enobufs_delivery(item) for item in seen)
@@ -4190,7 +4276,10 @@ class TestUringProactor:
             assert operation.done() is True
             assert resume_base[0] == 2
             operation = proactor.recv_many(
-                reader, on_result, buf_group=pool, base_sequence=resume_base[0]
+                reader,
+                _recv_many_finish_after_stragglers(seen, resume_base),
+                buf_group=pool,
+                base_sequence=resume_base[0],
             )
             ring.complete_recv_multishot(b"c", more=True, sequence=0)
             ring.complete_recv_multishot(b"", more=False, sequence=1)
@@ -4209,12 +4298,9 @@ class TestUringProactor:
             reader.setblocking(False)
             pool = proactor.shared_recv_buffer_pool()
 
-            def on_result(delivery: _RecvManySeen) -> None:
-                seen.append(delivery)
-                if _is_enobufs_delivery(delivery):
-                    resume_base[0] = delivery.index
-
-            operation = proactor.recv_many(reader, on_result, buf_group=pool)
+            operation = proactor.recv_many(
+                reader, _recv_many_finish_after_stragglers(seen, resume_base), buf_group=pool
+            )
             ring = proactor.ring
             ring.complete_recv_multishot(b"a", more=True, sequence=0)
             ring.complete_recv_multishot(b"b", more=True, sequence=1)
@@ -4225,7 +4311,10 @@ class TestUringProactor:
             assert operation.done() is True
             assert resume_base[0] == 4
             operation = proactor.recv_many(
-                reader, on_result, buf_group=pool, base_sequence=resume_base[0]
+                reader,
+                _recv_many_finish_after_stragglers(seen, resume_base),
+                buf_group=pool,
+                base_sequence=resume_base[0],
             )
             ring.complete_recv_multishot(b"d", more=True, sequence=0)
             ring.complete_recv_multishot(b"e", more=True, sequence=1)
@@ -4545,7 +4634,7 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.recv_many(
-                reader, seen.append, buf_group=proactor.shared_recv_buffer_pool()
+                reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
 
             writer.send(b"hello")
