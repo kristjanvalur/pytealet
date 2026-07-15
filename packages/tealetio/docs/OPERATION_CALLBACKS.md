@@ -179,7 +179,9 @@ Late multishot CQEs after the target is already `done()` are dropped in
 `_deliver_uring_completion`.
 
 Callers waiting on `IOWaiter.wait()` observe either a normal result or
-`CancelledError`. Exceptional `wait()` exit routes through
+``OSError(errno.ECANCELED)`` from proactor cancel (compare with
+``is_io_cancellation()``; ``CancelledError`` remains for ``Task.cancel()``
+only). Exceptional `wait()` exit routes through
 `ProactorIOManager._cancel_operation(...).forget()` so teardown legs are not
 blocked on.
 

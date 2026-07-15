@@ -17,7 +17,10 @@ class InvalidStateError(Exception):
 def io_cancellation_error() -> OSError:
     """Return the standard exception for proactor-requested IO cancellation."""
 
-    return OSError(errno.ECANCELED, errno.errorcode.get(errno.ECANCELED, "Operation cancelled"))
+    return OSError(
+        errno.ECANCELED,
+        errno.errorcode.get(errno.ECANCELED, "io_uring operation failed"),
+    )
 
 
 def is_io_cancellation(exc: BaseException | None) -> bool:

@@ -1891,16 +1891,17 @@ class UringProactor(ProactorBase):
         operation._uring_entry = entry
         return entry
 
-    def _terminalise_uring_cancel_target(self, cancel_target: object | None) -> None:
+    def _complete_uring_cancel_target(self, cancel_target: object | None) -> None:
         if cancel_target is None:
             return
         target_entry = getattr(cancel_target, "user_data", None)
         if not isinstance(target_entry, _UringEntry):
             return
         operation = target_entry.operation
-        if operation.done():
-            return
-        self._terminalise_cancelled(operation)
+        if not operation.done():
+            self._terminalise_cancelled(operation)
+        if target_entry.active:
+            self._deactivate_uring_entry(target_entry)
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         if operation.done():
@@ -2988,23 +2989,13 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         completed_operation: Operation[Any] | None = None
+        teardown_completions: list[_UringCompletion] = []
         for completion in completions:
-            if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
-                result = self._complete_uring_operation(completion)
-                if result is not None:
-                    completed_operation = result
-                poll_target = completion.cancel_target
-                if poll_target is not None:
-                    poll_entry = getattr(poll_target, "user_data", None)
-                    self._terminalise_uring_cancel_target(poll_target)
-                    if isinstance(poll_entry, _UringEntry):
-                        self._deactivate_uring_entry(poll_entry)
-                continue
-            if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
-                result = self._complete_uring_operation(completion)
-                if result is not None:
-                    completed_operation = result
-                self._terminalise_uring_cancel_target(completion.cancel_target)
+            if completion.kind in (
+                uring_api.COMPLETION_KIND_POLL_REMOVE,
+                uring_api.COMPLETION_KIND_CANCEL,
+            ):
+                teardown_completions.append(completion)
                 continue
             entry = cast(_UringEntry, completion.user_data)
             to_process = entry.completions_to_process(completion)
@@ -3018,6 +3009,11 @@ class UringProactor(ProactorBase):
                 result = self._complete_uring_operation(pending)
                 if result is not None:
                     completed_operation = result
+        for completion in teardown_completions:
+            result = self._complete_uring_operation(completion)
+            if result is not None:
+                completed_operation = result
+            self._complete_uring_cancel_target(completion.cancel_target)
         self._retry_deferred_submissions()
         if completed_operation is not None:
             self._notify_completed()

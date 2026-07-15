@@ -274,8 +274,9 @@ to the scheduler. The proactor emits bare `socket` connections.
 Each accept-time `recv` is a separate one-shot `Operation` registered with
 `add_done_callback`. It is not linked to the parent `ContinuousOperation`;
 cancelling the accept stream does not automatically cancel in-flight recvs. A
-recv that completes with `CancelledError` is closed in the io_manager without
-calling the user accept callback.
+recv that completes with ``OSError(errno.ECANCELED)`` (see
+``is_io_cancellation()``) is closed in the io_manager without calling the user
+accept callback.
 
 When multishot accept ends (`IORING_CQE_F_MORE` clears), the parent may finish
 while a nested recv from the last accept is still in flight. That is expected:
@@ -290,7 +291,8 @@ policy**, not enforced by `Operation` or the proactor.
 the accept-loop tealet, `on_accept` still runs for accepts (and accept-time
 recvs) already in flight. The server checks `_closed` and **discards** those
 deliveries by closing the writer and returning without spawning a handler. The
-accept-loop tealet wraps its main loop in ``try``/``finally`` so ``CancelledError``
+accept-loop tealet wraps its main loop in ``try``/``finally`` so task
+``CancelledError`` or IO ``OSError(ECANCELED)`` from ``accept_many().wait()``
 sets `_closed` and closes listening sockets; `close()` does not close listeners
 itself. In-flight handler tealets started before shutdown keep running
 until they exit; `wait_closed()` blocks on the accept-loop ``Task`` and each

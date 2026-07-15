@@ -3224,6 +3224,47 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_cancel_teardown_after_success_cqe_in_same_batch_leaves_success(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.send(b"hello")
+            operation = proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _DeferredUringRing)
+            target_completion = proactor.ring.pending_recv[-1]
+            entry = cast(proactor_module._UringEntry, target_completion.user_data)
+            _fd, buf, _entry = proactor.ring.submitted_recv[-1]
+            memoryview(buf)[:5] = b"hello"
+
+            success_completion = SimpleNamespace(
+                user_data=entry,
+                kind=uring_api.COMPLETION_KIND_RECV,
+                res=5,
+                flags=0,
+                result=5,
+                multishot=False,
+            )
+            cancel_completion = SimpleNamespace(
+                user_data=entry,
+                kind=uring_api.COMPLETION_KIND_CANCEL,
+                res=0,
+                flags=0,
+                result=None,
+                multishot=False,
+                cancel_target=target_completion,
+            )
+
+            proactor._deliver_uring_completion([cancel_completion, success_completion])
+
+            assert operation.result() == b"hello"
+            assert operation.cancelled() is False
+            assert proactor.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_cancelled_operation_consumes_pending_token_on_ring_completion(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()
@@ -3237,20 +3278,10 @@ class TestUringProactor:
             assert teardown.done() is True
             assert operation.cancelled() is True
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
-            assert proactor.has_pending_operations() is True
-            proactor.wait(proactor.get_time() + 1.0)
-
-            released = threading.Event()
-            thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
-            thread.start()
-            thread.join(0.05)
-            assert thread.is_alive() is True
+            assert proactor.has_pending_operations() is False
 
             assert isinstance(proactor.ring, _DeferredUringRing)
             proactor.ring.complete_recv()
-            thread.join(1.0)
-            assert thread.is_alive() is False
-            assert released.is_set()
             assert proactor.has_pending_operations() is False
             _assert_io_cancelled(operation)
         finally:
