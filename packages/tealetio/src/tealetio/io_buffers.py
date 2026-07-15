@@ -9,19 +9,21 @@ and other callers open them through ``ProactorIOManager`` factories.
 from __future__ import annotations
 
 import errno
-import heapq
 import socket
 from collections import deque
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
+from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
 from .io_waiter import IOWaiter
-from .locks import CrossThreadCondition
+from .locks import Condition, CrossThreadCondition
 from .operations import ContinuousOperation, MultishotDelivery, Operation
+from .scheduler import get_running_scheduler
 from .tasks import CancelledError
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
     from .io_manager import ProactorIOManager
+    from .scheduler import BaseScheduler
 
 __all__ = [
     "RECV_MANY_BUFFER_PRESSURE",
@@ -30,8 +32,6 @@ __all__ = [
     "open_recv_iter_buffer",
     "open_send_buffer",
 ]
-
-T_Cargo = TypeVar("T_Cargo")
 
 # ``sock_recv_iter`` still yields this index for provided-buffer pool pressure.
 RECV_MANY_BUFFER_PRESSURE = -1
@@ -63,59 +63,6 @@ class _RecvIterProactor(Protocol):
     def cancel(self, operation: Operation[Any]) -> Operation[None]: ...
 
 
-class _OrderedIngestBuffer(Generic[T_Cargo]):
-    """Hold out-of-order indexed items and release them in strict sequence."""
-
-    def __init__(self, *, start: int = 0) -> None:
-        self._next_index = start
-        self._heap: list[tuple[int, T_Cargo]] = []
-
-    @property
-    def next_index(self) -> int:
-        return self._next_index
-
-    def push(self, item: tuple[int, T_Cargo]) -> None:
-        """Buffer one out-of-order item.
-
-        Duplicate indices violate the ``recv_many`` transport contract.
-        """
-
-        if __debug__:
-            index = item[0]
-            assert index >= self._next_index, "stale recv_many index"
-            assert all(existing[0] != index for existing in self._heap), "duplicate recv_many index"
-        heapq.heappush(self._heap, item)
-
-    def pushpop(self, item: tuple[int, T_Cargo]) -> tuple[int, T_Cargo] | None:
-        """Fast path when ``item[0]`` equals ``next_index``; else ``push()`` then ``pop()``."""
-
-        if item[0] == self._next_index:
-            self._next_index += 1
-            return item
-        self.push(item)
-        return self.pop()
-
-    def pop(self) -> tuple[int, T_Cargo] | None:
-        """Return the next ready heap item, or ``None`` when it is not ``next_index``."""
-
-        if self._heap and self._heap[0][0] == self._next_index:
-            self._next_index += 1
-            return heapq.heappop(self._heap)
-        return None
-
-    def __bool__(self) -> bool:
-        if self._heap:
-            return self._heap[0][0] == self._next_index
-        return False
-
-    def __len__(self) -> int:
-        return len(self._heap)
-
-    def reset(self, *, start: int = 0) -> None:
-        self._heap.clear()
-        self._next_index = start
-
-
 def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     exc = delivery.exception
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
@@ -123,6 +70,10 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
 
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
+
+    Worker-thread ``recv_many`` deliveries are marshalled onto the scheduler
+    thread, reordered there, and exposed to ``take_next()`` via a tealet
+    ``Condition``.
 
     Resubmit gating uses ``buf_group.leased_count`` against the pool low-water mark
     (``leased_count < buffer_count / 2``). That tracks real uring ``BufGroup`` slots
@@ -142,13 +93,16 @@ class RecvIterBuffer:
         sock: socket.socket,
         buf_group: _BufGroupLike,
         proactor: _RecvIterProactor,
-        scheduler: Any = None,
+        scheduler: BaseScheduler | None = None,
     ) -> None:
+        if scheduler is None:
+            scheduler = get_running_scheduler()
         self._sock = sock
         self._buf_group = buf_group
         self._proactor = proactor
-        self._cond = CrossThreadCondition(scheduler=scheduler)
-        self._reorder = _OrderedIngestBuffer[memoryview]()
+        self._scheduler = scheduler
+        self._cond = Condition()
+        self._reorder_buffer = ReorderBuffer(self._on_ordered_delivery, start=0)
         self._ready: deque[tuple[int, memoryview]] = deque()
         self._pressure_pending = False
         self._next_base = 0
@@ -156,6 +110,7 @@ class RecvIterBuffer:
         self._stream_error: BaseException | None = None
         self._current_operation: ContinuousOperation[_RecvManyValue] | None = None
         self._closed = False
+        self.on_result = marshal_to_scheduler(scheduler, self._deliver)
         self._start_recv_many(base_sequence=0)
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
@@ -178,6 +133,7 @@ class RecvIterBuffer:
         self._next_base = base_sequence
         # leg ended; hold off on a new ``recv_many`` until queues drain and the pool is low.
         self._current_operation = None
+        self._reorder_buffer.arm_next_index(base_sequence)
 
     def _pool_at_low_water(self) -> bool:
         """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``)."""
@@ -191,36 +147,50 @@ class RecvIterBuffer:
         self._pressure_pending = True
         return True
 
-    def on_result(self, delivery: MultishotDelivery) -> None:
+    def _deliver(self, delivery: MultishotDelivery) -> None:
         with self._cond:
             if self._closed:
                 return
+        self._reorder_buffer.deliver(delivery)
+
+    def _on_ordered_delivery(self, delivery: MultishotDelivery) -> None:
+        index = delivery.index
+        finish_leg = False
+        with self._cond:
             notify = False
             if _is_enobufs_delivery(delivery):
-                self._schedule_resubmit(base_sequence=delivery.index)
+                assert index is not None
+                self._schedule_resubmit(base_sequence=index)
                 if self._signal_pressure_if_pending():
                     notify = True
+                finish_leg = True
             elif delivery.exception is not None:
                 self._stream_error = delivery.exception
                 self._stream_done = True
                 notify = True
+                finish_leg = not delivery.more
             elif delivery.value is not None:
+                assert index is not None
                 data = delivery.value
-                ready = self._reorder.pushpop((delivery.index, data))
-                if ready is not None:
-                    self._ready.append(ready)
-                notify = bool(self._ready) or len(self._reorder)
+                self._ready.append((index, data))
+                notify = bool(self._ready) or self._reorder_buffer.pending
                 if not delivery.more:
                     if data:
-                        self._schedule_resubmit(base_sequence=delivery.index + 1)
+                        self._schedule_resubmit(base_sequence=index + 1)
                     else:
                         self._stream_done = True
                         self._stream_error = None
+                    finish_leg = True
             if notify:
                 self._cond.notify_all()
 
+        if finish_leg:
+            operation = delivery.operation
+            if operation is not None:
+                operation.finish_operation(delivery)
+
     def _should_resubmit(self) -> bool:
-        if self._ready or len(self._reorder):
+        if self._ready or self._reorder_buffer.pending:
             return False
         return self._pool_at_low_water()
 
@@ -240,8 +210,6 @@ class RecvIterBuffer:
         ready_item: tuple[int, memoryview] | None = None
         if self._ready:
             ready_item = self._ready.popleft()
-        elif self._reorder:
-            ready_item = self._reorder.pop()
         if ready_item is not None:
             index, chunk = ready_item
             if not chunk:
@@ -282,7 +250,7 @@ class RecvIterBuffer:
             self._current_operation = None
             self._pressure_pending = False
             self._ready.clear()
-            self._reorder.reset()
+            self._reorder_buffer.reset()
             if not self._stream_done:
                 self._stream_error = CancelledError()
                 self._stream_done = True
@@ -296,7 +264,7 @@ def open_recv_iter_buffer(
     *,
     proactor: _RecvIterProactor,
     buf_group: _BufGroupLike,
-    scheduler: Any = None,
+    scheduler: BaseScheduler | None = None,
 ) -> RecvIterBuffer:
     """Construct a receive bridge for ``sock_recv_iter`` and stream readers."""
 

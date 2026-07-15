@@ -46,34 +46,56 @@ disposition (see below).
 
 | Entry point | Composition |
 |-------------|---------------|
-| `accept_many(sock, callback, recv_size=…)` | optional accept-time `recv` via `_accept_many_read_on_conn`; deliveries marshalled with `call_soon_threadsafe` before `callback((conn, initial_data))` |
-| `accept_many_streams(…)` | `_open_streams` on the accept delivery thread (``recv_many`` starts there); user `callback((reader, writer))` marshalled with `call_soon_threadsafe` |
-| `poll_many(fd, mask, callback)` | forwards to `proactor.poll_many` inside an `IOWaiter` |
-| `sock_recv_iter` | blocking iterator over `proactor.recv_many` chunks |
+| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `LenientReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
+| `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; user `callback` and `finish_operation` run on the scheduler thread |
+| `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `LenientReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` (callback exceptions still finish terminal legs in `finally`) |
+| `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer` over `proactor.recv_many` chunks (not composed through `accept_many`) |
+
+Worker-thread accept composition mutates the proactor delivery before the
+scheduler sees it. Reorder, `finish_operation`, and user callbacks always run on
+the scheduler thread via `_thread_reorder_helper` (one `call_soon_threadsafe` hop
+per posted leg, with `immediate=True` when already on the owner thread).
 
 Accept-time pre-read wiring (when `recv_size` is set):
 
 ```text
-proactor.accept_many(sock, on_conn)
+proactor.accept_many(sock, on_worker_delivery)     # worker thread
         │
-        ▼  each accept
-proactor.recv(conn, recv_size)     # independent one-shot Operation
+        ▼  each accept (socket, index, more, …)
+proactor.recv(conn, recv_size)                     # worker; independent one-shot Operation
         │
-        ▼  recv done callback
-marshal → deliver_wrapped → user callback
+        ▼  recv done callback (worker)
+post merged MultishotDelivery(index unchanged,
+    value=(conn, data, None) | (conn, None, recv_error))   # recv_error includes CancelledError
+        │
+        ▼  marshal (one hop)
+LenientReorderBuffer → deliver_wrapped → user callback (if no recv_error)
+        │                                    └─ try/finally: finish_operation on terminal legs
+        └─ finalize_accept_recv_error when recv_error set (scheduler; no user callback)
 ```
 
-`on_conn` registers `recv_op.add_done_callback(on_recv_complete)`; there is no
-parent/child link on `Operation`. A cancelled recv closes the connection with
-`abortive_close` and does not invoke the user callback.
+Without `recv_size`, the worker posts `(conn, None, None)` in `value` after the
+bare socket accept. Stream terminals (cancel, EOF, transport errors on the
+continuous op) post through unchanged; reorder and `finish_continuous_delivery`
+still run on the scheduler. Transport errors finish the operation then re-raise;
+user accept callback exceptions propagate to the scheduler exception handler but
+terminal legs still call `finish_continuous_delivery` in a `finally` block so
+`IOWaiter.wait()` does not hang.
+
+`recv_op.add_done_callback(on_recv_complete)` registers preread completion; there
+is no parent/child link on `Operation`. Preread failures (including timeout
+cancel as `CancelledError`) post `(conn, None, exc)` like other recv errors;
+`finalize_accept_recv_error` closes the socket on the scheduler thread and does
+not invoke the user accept callback unless `on_recv_error` is provided.
 
 Helpers in `continuous_callbacks.py` support this layer:
 
+- `ReorderBuffer` / `LenientReorderBuffer` — scheduler-thread delivery ordering (`RecvIterBuffer` uses strict reorder; accept/poll use lenient reorder that defers only out-of-order terminals)
+- `finish_continuous_delivery` — call `finish_operation` on terminal deliveries
+- `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_reorder_helper` uses the same `immediate=True` marshal internally
 - `normalize_accept_recv_size` — cap and validate `recv_size`
 - `finalize_accept_recv_error` — optional `on_recv_error` hook, then close
 - `wrap_accept_delivery` — adapt tuple delivery to bare-socket proactor callbacks
-- `marshal_to_scheduler` — thread affinity for callbacks that must run on the
-  scheduler thread (used by `start_server` paths via `_marshal_accept_callback`)
 
 ## Delivery disposition (application layer)
 
@@ -106,9 +128,9 @@ have lost interest:
   so ``CancelledError`` runs cleanup that sets `_closed` and closes listeners.
   In-flight handler tealets keep running until they finish.
 
-The io_manager marshals accept deliveries onto the scheduler thread but does not
-enforce server shutdown policy — `StreamServer` (or any custom `accept_many`
-callback) implements that.
+The io_manager posts merged accept legs onto the scheduler thread (after worker
+mutation when applicable) but does not enforce server shutdown policy —
+`StreamServer` (or any custom `accept_many` callback) implements that.
 
 Similarly, `IOWaitGroup` discards late `finish()` results after an interrupted
 `wait()` sets `_closed` (for example `abortive_close` on a socket). That is
@@ -120,21 +142,52 @@ waiter-level disposition for one-shot composition, not continuous accept policy.
 arrive asynchronously; a waiter or scheduler task may cancel the same operation
 while a CQE is already in flight.
 
-Cancellation is backend-specific teardown only (drop deferred resubmits, submit
-async ring cancel or poll_remove, deregister selector interest, `break_wait()`,
-and similar). The proactor terminalises the target operation immediately after
-submitting teardown; it does not wait for the ring cancel CQE before marking the
-target cancelled.
+### Current behaviour
 
-A late `deliver()` may therefore still succeed after cancel is submitted. That is
-expected: whichever path reaches `_finish` first wins. Callers waiting on
-`IOWaiter.wait()` observe either a normal result or `CancelledError`, not an
-ambiguous in-between state. Exceptional `wait()` exit routes through
+Cancellation is backend-specific teardown (drop deferred resubmits, submit async
+ring cancel or `poll_remove`, deregister selector interest, `break_wait()`, and
+similar).
+
+On **selector / emulated** paths, `ProactorBase._terminalise_cancelled()` runs
+immediately after teardown is requested. Continuous ops emit a terminal
+`MultishotDelivery` with `CancelledError` and `index=None` (best-effort: the
+reorder buffer may deliver cancel before straggler legs still in flight).
+
+On **uring** today, `UringProactor.cancel()` submits `submit_cancel` or
+`poll_remove`, then calls the same synchronous `_terminalise_cancelled()` on
+the target. The ring cancel completion only finishes the separate cancel
+`Operation[None]`; it does not drive the continuous result callback. Late
+multishot CQEs after the target is already `done()` are dropped in
+`_deliver_uring_completion`.
+
+Callers waiting on `IOWaiter.wait()` observe either a normal result or
+`CancelledError`. Exceptional `wait()` exit routes through
 `ProactorIOManager._cancel_operation(...).forget()` so teardown legs are not
 blocked on.
 
 For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 `IO_MANAGER_DESIGN.md`.
+
+### Planned: uring completion-driven cancel
+
+Defer continuous-op terminalisation on the uring path: `cancel()` should submit
+teardown and return, but **not** call `_terminalise_cancelled()` on the target
+immediately.
+
+Instead, emit the cancel terminal from ring completions:
+
+- target multishot handle: terminal CQE with `res < 0` (often `ECANCELED`),
+  mapped to `CancelledError` with `index=None`;
+- `poll_remove` completion for multishot `poll_many`;
+- cancel-op completion as a fallback when the target is still active but no
+  further target CQE arrives.
+
+This matches io_uring semantics (cancel and success can race) and should
+simplify `UringProactor.cancel()` by removing the synchronous front-run. Selector
+and emulated backends keep immediate `_terminalise_cancelled()`.
+
+Deferred resubmits and never-submitted legs still need a local terminal path
+when the ring has nothing to complete.
 
 ## Module layout
 

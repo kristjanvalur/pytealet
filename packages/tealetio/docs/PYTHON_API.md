@@ -678,10 +678,11 @@ semantics). When ``stream_factory`` is omitted, ``start_server()`` uses
 a shared pool across clients). Close listeners and
 discard late deliveries in the accept callback after shutdown (``StreamServer``
 uses ``_closed``).
-Each accept arms `proactor.accept_many()`. On the accept delivery thread,
+Each accept arms `proactor.accept_many()`. On the worker delivery thread,
 ``accept_many_streams()`` wraps the connection as streams and starts
-``recv_many`` before the accept callback is marshalled onto the scheduler with
-`call_soon_threadsafe()`, so data can arrive while the handler is still queued.
+``recv_many`` before the stream pair is posted onto the scheduler reorder buffer
+(one `call_soon_threadsafe()` hop per leg, with `immediate=True` when already on
+the owner thread), so data can arrive while the handler is still queued.
 A peer that connects without sending leaves ``recv_many`` pending; the handler
 still receives the stream pair and can apply read timeouts or idle close policy.
 The handler runs in a spawned tealet.
