@@ -46,9 +46,9 @@ disposition (see below).
 
 | Entry point | Composition |
 |-------------|---------------|
-| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `TerminalReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
+| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `LenientReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
 | `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; user `callback` and `finish_operation` run on the scheduler thread |
-| `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `TerminalReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` (callback exceptions still finish terminal legs in `finally`) |
+| `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `LenientReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` (callback exceptions still finish terminal legs in `finally`) |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer` over `proactor.recv_many` chunks (not composed through `accept_many`) |
 
 Worker-thread accept composition mutates the proactor delivery before the
@@ -69,7 +69,7 @@ post merged MultishotDelivery(index unchanged,
     value=(conn, data, None) | (conn, None, recv_error))   # recv_error includes CancelledError
         │
         ▼  marshal (one hop)
-TerminalReorderBuffer → deliver_wrapped → user callback (if no recv_error)
+LenientReorderBuffer → deliver_wrapped → user callback (if no recv_error)
         │                                    └─ try/finally: finish_operation on terminal legs
         └─ finalize_accept_recv_error when recv_error set (scheduler; no user callback)
 ```
@@ -90,7 +90,7 @@ not invoke the user accept callback unless `on_recv_error` is provided.
 
 Helpers in `continuous_callbacks.py` support this layer:
 
-- `ReorderBuffer` / `TerminalReorderBuffer` — index-ordered delivery on the scheduler thread (`RecvIterBuffer` uses full reorder; accept/poll defer only out-of-order terminals)
+- `ReorderBuffer` / `LenientReorderBuffer` — scheduler-thread delivery ordering (`RecvIterBuffer` uses strict reorder; accept/poll use lenient reorder that defers only out-of-order terminals)
 - `finish_continuous_delivery` — call `finish_operation` on terminal deliveries
 - `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_reorder_helper` uses the same `immediate=True` marshal internally
 - `normalize_accept_recv_size` — cap and validate `recv_size`

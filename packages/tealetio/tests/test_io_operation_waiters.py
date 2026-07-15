@@ -146,11 +146,11 @@ def test_reorder_buffer_delivers_callbacks_in_index_order() -> None:
     assert order == [0, 1, 2]
 
 
-def test_terminal_reorder_buffer_defers_terminal_until_stragglers() -> None:
-    from tealetio.continuous_callbacks import TerminalReorderBuffer, finish_continuous_delivery
+def test_lenient_reorder_buffer_defers_terminal_until_stragglers() -> None:
+    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
 
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = TerminalReorderBuffer(finish_continuous_delivery)
+    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery)
 
     reorder_buffer.deliver(MultishotDelivery(index=2, value="terminal", more=False, operation=operation))
     assert not operation.done()
@@ -162,11 +162,11 @@ def test_terminal_reorder_buffer_defers_terminal_until_stragglers() -> None:
     assert operation.done()
 
 
-def test_terminal_reorder_buffer_honours_start_index() -> None:
-    from tealetio.continuous_callbacks import TerminalReorderBuffer, finish_continuous_delivery
+def test_lenient_reorder_buffer_honours_start_index() -> None:
+    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
 
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = TerminalReorderBuffer(finish_continuous_delivery, start=10)
+    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery, start=10)
 
     reorder_buffer.deliver(MultishotDelivery(index=12, value="terminal", more=False, operation=operation))
     assert not operation.done()

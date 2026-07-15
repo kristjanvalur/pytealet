@@ -81,9 +81,9 @@ def _recv_many_finish_after_stragglers(
     seen: list[_RecvManySeen],
     resume_base: list[int | None] | None = None,
 ) -> Callable[[_RecvManySeen], None]:
-    from tealetio.continuous_callbacks import TerminalReorderBuffer, finish_continuous_delivery
+    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
 
-    reorder_buffer = TerminalReorderBuffer(finish_continuous_delivery)
+    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery)
 
     def on_result(delivery: _RecvManySeen) -> None:
         seen.append(delivery)
@@ -227,9 +227,9 @@ def _append_poll_value(seen: list[int]) -> Callable[[MultishotDelivery], None]:
 
 
 def _append_accept_socket(accepted: list[socket.socket]) -> Callable[[MultishotDelivery], None]:
-    from tealetio.continuous_callbacks import TerminalReorderBuffer, finish_continuous_delivery
+    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
 
-    reorder_buffer = TerminalReorderBuffer(finish_continuous_delivery)
+    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery)
 
     def collect(delivery: MultishotDelivery) -> None:
         if delivery.value is not None:

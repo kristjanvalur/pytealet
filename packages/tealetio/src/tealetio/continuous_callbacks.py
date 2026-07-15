@@ -112,13 +112,21 @@ class ReorderBuffer:
         self._delivered = index - 1
 
 
-class TerminalReorderBuffer:
-    """Invoke per-delivery callbacks in leg order; defer early terminals.
+class LenientReorderBuffer:
+    """Deliver continuous-operation callbacks with lenient leg ordering.
 
-    ``_counter`` is the next leg index to hand off (from ``start``). In-order
-    deliveries run the constructor callback immediately; an out-of-order
-    terminal is held on the heap until a later in-order non-terminal advances
-    the counter, then its callback runs after that delivery's callback.
+    Non-terminal deliveries (``more=True``) may arrive in any order and run
+    immediately. Only terminal deliveries (``more=False``) that arrive before
+    their leg index is due are deferred on a min-heap until ``_counter``
+    catches up.
+
+    ``_counter`` is the next leg index whose terminal may run (from ``start``).
+    An in-order non-terminal advances ``_counter`` and then flushes any deferred
+    terminal whose index matches. Out-of-order non-terminals and in-order
+    terminals run the constructor callback without advancing ``_counter``.
+
+    Use ``ReorderBuffer`` when every delivery must run in strict index order
+    (for example ``RecvIterBuffer`` over ``recv_many`` chunks).
     """
 
     def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
