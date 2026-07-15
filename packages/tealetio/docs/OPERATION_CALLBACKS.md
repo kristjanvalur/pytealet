@@ -164,9 +164,22 @@ On **uring**, armed recv/accept (and similar) legs use `submit_cancel`; the
 target finishes only from its own CQE, usually ``OSError(ECANCELED)``. The
 cancel-op CQE completes only the teardown ``Operation[None]`` so callers can
 ``iomanager.cancel(...).wait()`` if they want; it does not terminalise or
-otherwise complete the target. Cancel may lose the race to an in-flight success
-CQE; the target may never surface ``ECANCELED`` if the kernel already completed
-it.
+otherwise complete the target. A successful cancel SQE post is trusted: there is
+no synthetic target fallback if the ack arrives before the target CQE. Cancel may
+lose the race to an in-flight success CQE; the target may never surface
+``ECANCELED`` if the kernel already completed it.
+
+The teardown ``wait()`` can surface cancel-ack outcome: ``res == 0`` on the
+cancel CQE completes with ``None``; a negative ``res`` delivers ``OSError`` on
+the teardown op (for example when the target already finished). That reports
+whether the cancel *request* was accepted, not whether the target IO has stopped
+yet — the target CQE remains authoritative for the original operation.
+
+On uring multishot ``recv_many`` / ``accept_many``, a target ``-ECANCELED`` CQE
+uses the leg index from ``completion.sequence``. Unlike selector/emulated
+``index=None`` cancel terminals, uring cancel does not jump ahead of multileg
+segments already in the reorder buffer; cancel is best-effort and may trail
+straggler legs.
 
 Multishot ``poll_many`` uses ``submit_poll_remove()`` (not ``submit_cancel``).
 The ``COMPLETION_KIND_POLL_REMOVE`` completion ends the continuous poll op.

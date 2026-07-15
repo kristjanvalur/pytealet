@@ -1092,7 +1092,7 @@ class TestOperation:
 
         assert seen == [42, 43]
 
-    def test_proactor_cancel_completes_operation_with_cancelled_error(self):
+    def test_proactor_cancel_completes_operation_with_ecanceled(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
@@ -3449,16 +3449,21 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _BackpressuredUringRing)
 
             proactor.ring.fail_next_cancel = True
-            proactor.cancel(operation)
+            teardown = proactor.cancel(operation)
 
+            assert teardown.done() is False
             assert operation.cancelled() is False
             assert operation.done() is False
             assert proactor.ring.submitted_cancel == []
             assert proactor.has_pending_operations() is True
 
-            proactor.ring.complete_recv_error(-errno.ECANCELED)
+            proactor._retry_deferred_submissions()
+            assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
+            assert teardown.done() is True
+            assert operation.done() is False
+            assert proactor.has_pending_operations() is True
 
-            assert operation.cancelled() is True
+            proactor.ring.complete_cancel_target()
             assert proactor.has_pending_operations() is False
             _assert_io_cancelled(operation)
         finally:
