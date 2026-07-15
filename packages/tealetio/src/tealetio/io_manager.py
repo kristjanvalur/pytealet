@@ -282,9 +282,8 @@ class ProactorIOManager:
             raise RuntimeError("IO manager is closed")
 
     def _marshal_on_scheduler(self, thunk: Callable[[], object]) -> None:
-        self._check_open()
         assert self._scheduler is not None
-        self._scheduler.call_soon_threadsafe(thunk)
+        self._scheduler.call_soon_threadsafe(thunk, immediate=True)
 
     def _thread_reorder_helper(
         self,
@@ -294,7 +293,8 @@ class ProactorIOManager:
         buffer = reorder_buffer_class(delivery_callback)
 
         def on_thread_delivery(delivery: MultishotDelivery) -> None:
-            self._marshal_on_scheduler(lambda: buffer.deliver(delivery))
+            assert self._scheduler is not None
+            self._scheduler.call_soon_threadsafe(lambda: buffer.deliver(delivery), immediate=True)
 
         return on_thread_delivery
 
