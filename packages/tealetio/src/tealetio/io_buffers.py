@@ -154,11 +154,13 @@ class RecvIterBuffer:
         self._reorder_buffer.deliver(delivery)
 
     def _on_ordered_delivery(self, delivery: MultishotDelivery) -> None:
+        index = delivery.index
         finish_leg = False
         with self._cond:
             notify = False
             if _is_enobufs_delivery(delivery):
-                self._schedule_resubmit(base_sequence=delivery.index)
+                assert index is not None
+                self._schedule_resubmit(base_sequence=index)
                 if self._signal_pressure_if_pending():
                     notify = True
             elif delivery.exception is not None:
@@ -167,12 +169,13 @@ class RecvIterBuffer:
                 notify = True
                 finish_leg = not delivery.more
             elif delivery.value is not None:
+                assert index is not None
                 data = delivery.value
-                self._ready.append((delivery.index, data))
+                self._ready.append((index, data))
                 notify = bool(self._ready) or self._reorder_buffer.pending
                 if not delivery.more:
                     if data:
-                        self._schedule_resubmit(base_sequence=delivery.index + 1)
+                        self._schedule_resubmit(base_sequence=index + 1)
                     else:
                         self._stream_done = True
                         self._stream_error = None

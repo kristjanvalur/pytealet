@@ -2855,9 +2855,7 @@ class UringProactor(ProactorBase):
         next_index = [0]
         entry = self._uring_entry(
             operation,
-            lambda entry, completion: self._deliver_uring_poll_many_oneshot(
-                entry, completion, submit_box, next_index
-            ),
+            lambda entry, completion: self._deliver_uring_poll_many_oneshot(entry, completion, submit_box, next_index),
         )
 
         def submit_poll() -> _UringCompletion:

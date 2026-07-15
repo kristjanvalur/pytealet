@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .locks import CrossThreadEvent
-from .operations import ContinuousOperation, InvalidStateError, Operation
+from .operations import InvalidStateError, Operation
 
 _VoidDoneCallback = Callable[[], object]
 

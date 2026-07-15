@@ -8,7 +8,7 @@ import sys
 from typing import Any, Literal, cast, overload
 
 from ..continuous_callbacks import AcceptStreamsDelivery as AcceptedStreams
-from ..io_manager import ServerIO, SocketIO
+from ..io_manager import ProactorIOManager, ServerIO, SocketIO
 from ..scheduler import BaseScheduler
 from ..tasks import CancelledError, Task, get_current
 from .common import require_proactor_io, resolve_scheduler
@@ -20,7 +20,6 @@ from .open import (
     StreamFactory,
     StreamFactoryArg,
     default_server_stream_factory,
-
 )
 from .util import run_coro
 from .reader import AsyncStreamReader, StreamReader
@@ -123,7 +122,7 @@ class StreamServer:
     to drain in-flight handlers.
     """
 
-    _io: SocketIO
+    _io: ProactorIOManager
 
     def __init__(
         self,
@@ -327,6 +326,7 @@ class StreamServer:
             self._accept_task.wait()
         except CancelledError:
             pass
+
 
 def start_stream_server(
     scheduler: BaseScheduler,
