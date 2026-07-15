@@ -46,10 +46,10 @@ disposition (see below).
 
 | Entry point | Composition |
 |-------------|---------------|
-| `accept_many(sock, callback, recv_size=…)` | optional accept-time `recv` via `_accept_many_read_on_conn`; deliveries marshalled with `call_soon_threadsafe` before `callback((conn, initial_data))` |
-| `accept_many_streams(…)` | `_open_streams` on the accept delivery thread (``recv_many`` starts there); user `callback((reader, writer))` marshalled with `call_soon_threadsafe` |
-| `poll_many(fd, mask, callback)` | forwards to `proactor.poll_many` inside an `IOWaiter` |
-| `sock_recv_iter` | blocking iterator over `proactor.recv_many` chunks |
+| `accept_many(sock, callback, recv_size=…)` | worker-thread deliveries marshalled once onto the scheduler via `marshal_to_scheduler`, reordered with `TerminalReorderBuffer`, then optional accept-time `recv` and `callback((conn, initial_data))` |
+| `accept_many_streams(…)` | same marshal + `TerminalReorderBuffer` path; `_open_streams` / ``recv_many`` arm and user `callback((reader, writer))` all run on the scheduler thread |
+| `poll_many(fd, mask, callback)` | same marshal + `TerminalReorderBuffer` path; user `callback` and `finish_operation` on the scheduler thread inside an `IOWaiter` |
+| `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer` over `proactor.recv_many` chunks |
 
 Accept-time pre-read wiring (when `recv_size` is set):
 
@@ -69,11 +69,12 @@ parent/child link on `Operation`. A cancelled recv closes the connection with
 
 Helpers in `continuous_callbacks.py` support this layer:
 
+- `ReorderBuffer` / `TerminalReorderBuffer` — index-ordered delivery before owner-thread handlers (`RecvIterBuffer` uses full reorder; accept/poll defer only out-of-order terminals)
+- `finish_continuous_delivery` — call `finish_operation` on terminal deliveries
+- `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (used by `ProactorIOManager._thread_reorder_helper`, `RecvIterBuffer`, and `start_server` paths)
 - `normalize_accept_recv_size` — cap and validate `recv_size`
 - `finalize_accept_recv_error` — optional `on_recv_error` hook, then close
 - `wrap_accept_delivery` — adapt tuple delivery to bare-socket proactor callbacks
-- `marshal_to_scheduler` — thread affinity for callbacks that must run on the
-  scheduler thread (used by `start_server` paths via `_marshal_accept_callback`)
 
 ## Delivery disposition (application layer)
 
