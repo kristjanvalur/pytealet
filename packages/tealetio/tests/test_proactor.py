@@ -3224,6 +3224,58 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_cancel_ack_before_target_ecanceled_in_split_batches(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _DeferredUringRing)
+            target_completion = proactor.ring.pending_recv[-1]
+            entry = cast(proactor_module._UringEntry, target_completion.user_data)
+
+            proactor._complete_uring_cancel_target(target_completion)
+            _assert_io_cancelled(operation)
+            assert proactor.has_pending_operations() is False
+
+            canceled_completion = SimpleNamespace(
+                user_data=entry,
+                kind=uring_api.COMPLETION_KIND_RECV,
+                res=-errno.ECANCELED,
+                flags=0,
+                result=None,
+                multishot=False,
+            )
+            proactor._deliver_uring_completion([canceled_completion])
+            _assert_io_cancelled(operation)
+            assert proactor.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_ack_before_target_ecanceled_via_deferred_ring(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            teardown = proactor.cancel(operation)
+            assert isinstance(proactor.ring, _DeferredUringRing)
+            assert teardown is not None
+            assert teardown.done() is True
+            _assert_io_cancelled(operation)
+            assert proactor.has_pending_operations() is False
+            assert proactor.ring.pending_cancel_target
+
+            proactor.ring.complete_cancel_target()
+            _assert_io_cancelled(operation)
+            assert proactor.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_cancel_teardown_after_success_cqe_in_same_batch_leaves_success(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()

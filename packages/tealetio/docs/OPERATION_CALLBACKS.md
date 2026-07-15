@@ -125,8 +125,9 @@ have lost interest:
   begin on the same scheduler turn when the runtime allows it.
 - `close()` synchronously cancels the accept-loop tealet; it does not close
   listening sockets. The accept-loop tealet wraps its main loop in ``try``/``finally``
-  so ``CancelledError`` runs cleanup that sets `_closed` and closes listeners.
-  In-flight handler tealets keep running until they finish.
+  so ``CancelledError`` or ``OSError(errno.ECANCELED)`` from IO cancel runs cleanup
+  that sets `_closed` and closes listeners. In-flight handler tealets keep running
+  until they finish.
 
 The io_manager posts merged accept legs onto the scheduler thread (after worker
 mutation when applicable) but does not enforce server shutdown policy —
@@ -160,9 +161,12 @@ immediately after teardown is requested. Continuous ops emit a terminal
 the reorder buffer may deliver cancel before straggler legs still in flight).
 
 On **uring**, armed recv/accept (and similar) legs use `submit_cancel`; the
-target finishes from its own CQE, usually ``OSError(ECANCELED)``. The cancel-op
-CQE only completes the teardown ``Operation[None]`` and drops the target leg
-state — it does not synthetic-terminalise the target.
+target normally finishes from its own CQE with ``OSError(ECANCELED)``. The
+cancel-op CQE completes the teardown ``Operation[None]``; if the target is still
+pending when the ack arrives (for example the ack batch precedes the target
+``-ECANCELED`` CQE, or the kernel never delivers one), ``_complete_uring_cancel_target``
+falls back to ``_terminalise_cancelled()`` before dropping leg state — same pattern
+as ``poll_remove``.
 
 Multishot ``poll_many`` uses ``submit_poll_remove()`` (not ``submit_cancel``).
 The ``COMPLETION_KIND_POLL_REMOVE`` completion ends the continuous poll op.

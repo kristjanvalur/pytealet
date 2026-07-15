@@ -109,7 +109,8 @@ class StreamServer:
     leg until cancel/error). ``close()`` cancels that accept-loop tealet
     synchronously; it does not close listening socket(s) itself. The accept-loop
     tealet wraps its main loop in ``try``/``finally`` so ``CancelledError`` from
-    ``cancel()`` runs cleanup that sets ``_closed`` and closes listeners. Handler
+    ``cancel()`` or ``OSError(errno.ECANCELED)`` from IO cancel runs cleanup that
+    sets ``_closed`` and closes listeners. Handler
     tealets already spawned for accepted connections keep running until they
     finish on their own. Late accepts delivered while shutting down see
     ``_closed`` and are discarded. ``wait_closed()`` blocks until the accept-loop
