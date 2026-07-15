@@ -578,6 +578,8 @@ class ProactorIOManager:
 
             self._marshal_on_scheduler(on_owner)
 
+        _poll_many_delivery.finishes_on_owner = True  # type: ignore[attr-defined]
+
         operation = self._proactor.poll_many(fd, mask, _poll_many_delivery)
         return IOWaiter(self, operation)
 
@@ -711,6 +713,7 @@ class ProactorIOManager:
 
         def on_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
+                self._deliver_continuous(_continuous_operation(delivery), delivery, lambda: None)
                 return
             if delivery.exception is not None:
                 raise delivery.exception
@@ -722,6 +725,8 @@ class ProactorIOManager:
                 delivery,
                 lambda: deliver_wrapped((conn, None, None)),
             )
+
+        on_delivery.finishes_on_owner = True  # type: ignore[attr-defined]
 
         if normalized_recv_size is not None:
 
@@ -738,6 +743,8 @@ class ProactorIOManager:
                 inner(delivery)
                 if not delivery.more:
                     self._deliver_continuous(_continuous_operation(delivery), delivery, lambda: None)
+
+            on_delivery_with_recv.finishes_on_owner = True  # type: ignore[attr-defined]
 
             operation = self._proactor.accept_many(sock, on_delivery_with_recv)
             return IOWaiter(self, operation)
@@ -771,6 +778,7 @@ class ProactorIOManager:
 
         def on_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
+                self._deliver_continuous(_continuous_operation(delivery), delivery, lambda: None)
                 return
             if delivery.exception is not None:
                 raise delivery.exception
@@ -811,6 +819,8 @@ class ProactorIOManager:
                 except BaseException:
                     pass
                 raise
+
+        on_delivery.finishes_on_owner = True  # type: ignore[attr-defined]
 
         operation = self._proactor.accept_many(sock, on_delivery)
         return IOWaiter(self, operation)

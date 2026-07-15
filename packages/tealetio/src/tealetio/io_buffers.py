@@ -192,6 +192,7 @@ class RecvIterBuffer:
         return True
 
     def on_result(self, delivery: MultishotDelivery) -> None:
+        finish_leg = False
         with self._cond:
             if self._closed:
                 return
@@ -204,6 +205,7 @@ class RecvIterBuffer:
                 self._stream_error = delivery.exception
                 self._stream_done = True
                 notify = True
+                finish_leg = not delivery.more
             elif delivery.value is not None:
                 data = delivery.value
                 ready = self._reorder.pushpop((delivery.index, data))
@@ -216,8 +218,14 @@ class RecvIterBuffer:
                     else:
                         self._stream_done = True
                         self._stream_error = None
+                    finish_leg = True
             if notify:
                 self._cond.notify_all()
+
+        if finish_leg:
+            operation = delivery.operation
+            if operation is not None:
+                operation.finish_operation(delivery)
 
     def _should_resubmit(self) -> bool:
         if self._ready or len(self._reorder):

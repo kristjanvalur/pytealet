@@ -50,6 +50,15 @@ def finalize_accept_recv_error(
         raise hook_error
 
 
+def finish_continuous_delivery(delivery: MultishotDelivery) -> None:
+    """Finish a continuous operation from one terminal owner-thread delivery."""
+
+    if not delivery.more:
+        operation = delivery.operation
+        assert operation is not None
+        operation.finish_operation(delivery)
+
+
 def is_cancellation_delivery(delivery: MultishotDelivery) -> bool:
     """Return True when ``delivery`` ends a continuous op by cancellation.
 

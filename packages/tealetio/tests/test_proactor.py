@@ -112,7 +112,14 @@ def _recv_many_resume_on_enobufs(
     def on_result(delivery: _RecvManySeen) -> None:
         seen.append(delivery)
         if _is_enobufs_delivery(delivery):
+            from tealetio.continuous_callbacks import finish_continuous_delivery
+
+            finish_continuous_delivery(delivery)
             proactor.recv_many(sock, on_result, buf_group=buf_group, base_sequence=delivery.index)
+        elif not delivery.more:
+            from tealetio.continuous_callbacks import finish_continuous_delivery
+
+            finish_continuous_delivery(delivery)
 
     return on_result
 
@@ -162,6 +169,10 @@ def _append_poll_value(seen: list[int]) -> Callable[[MultishotDelivery], None]:
     def collect(delivery: MultishotDelivery) -> None:
         if delivery.value is not None:
             seen.append(delivery.value)
+        if not delivery.more:
+            from tealetio.continuous_callbacks import finish_continuous_delivery
+
+            finish_continuous_delivery(delivery)
 
     return collect
 
@@ -170,6 +181,10 @@ def _append_accept_socket(accepted: list[socket.socket]) -> Callable[[MultishotD
     def collect(delivery: MultishotDelivery) -> None:
         if delivery.value is not None:
             accepted.append(delivery.value)
+        if not delivery.more:
+            from tealetio.continuous_callbacks import finish_continuous_delivery
+
+            finish_continuous_delivery(delivery)
 
     return collect
 

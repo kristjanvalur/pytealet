@@ -220,6 +220,11 @@ def _enobufs_error() -> OSError:
     return OSError(errno.ENOBUFS, errno.errorcode.get(errno.ENOBUFS, "no buffer space"))
 
 
+def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
+    exc = delivery.exception
+    return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
+
+
 def _synthetic_recv_pool_is_full(buf_group: RecvBufferPool) -> bool:
     if not _is_synthetic_recv_buffer_pool(buf_group):
         return False
@@ -231,7 +236,10 @@ def _complete_recv_many_enobufs(
     *,
     index: int,
 ) -> ContinuousOperation[_RecvManyValue]:
-    operation._finish_with_terminal_delivery(_recv_many_enobufs_delivery(index=index))
+    delivery = _recv_many_enobufs_delivery(index=index)
+    operation._finish_with_terminal_delivery(delivery)
+    if not operation.done():
+        operation.finish_operation(delivery)
     return operation
 
 
@@ -605,6 +613,13 @@ class ProactorBase:
                         "delivery": delivery,
                     }
                 )
+                return
+            if getattr(callback, "finishes_on_owner", False):
+                return
+            if not delivery.more and not _is_enobufs_delivery(delivery):
+                operation = delivery.operation
+                if operation is not None:
+                    operation.finish_operation(delivery)
 
         return guarded
 
@@ -1201,7 +1216,7 @@ class SelectorProactor(ProactorBase):
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
             configure_scheduler_socket(conn)
-            _handoff_accept_many(operation, conn)
+            _handoff_accept_many(operation, conn, more=False)
             return ContinuousStepResult(progressed=True, done=True)
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
@@ -1419,7 +1434,8 @@ class SelectorProactor(ProactorBase):
             return True
         if step_result.done:
             self._remove_operation(operation)
-            operation._finish(result=None)
+            if not operation.done():
+                operation._finish(result=None)
             return True
         if step_result.progressed:
             self._update_selector_registration(fd)
@@ -1823,18 +1839,6 @@ class UringProactor(ProactorBase):
 
         super().set_delivery_exception_handler(handler)
         self._ring.exception_handler = handler
-
-    def _uring_continuous_callback(
-        self,
-        callback: Callable[[MultishotDelivery], object],
-        *,
-        native_multishot: bool,
-    ) -> Callable[[MultishotDelivery], object]:
-        """Return ``callback`` for kernel multishot; guard emulated fallbacks in tealetio."""
-
-        if native_multishot:
-            return callback
-        return self._guard_delivery_callback(callback)
 
     @property
     def ring(self) -> _UringRing:
@@ -2343,7 +2347,7 @@ class UringProactor(ProactorBase):
         operation = UringContinuousOperation[AcceptManyResult](
             "accept_many",
             sock,
-            self._uring_continuous_callback(callback, native_multishot=native_multishot),
+            self._guard_delivery_callback(callback),
         )
         accept_entry_ref: list[_UringEntry | None] = [None]
         if native_multishot:
@@ -2417,7 +2421,6 @@ class UringProactor(ProactorBase):
         conn = socket_from_uring_fd(completion.res)
         _handoff_accept_many(operation, conn, more=False)
         self._deactivate_uring_entry(entry)
-        operation._finish(result=None)
         return operation
 
     def _deliver_uring_accept_many(
@@ -2446,8 +2449,6 @@ class UringProactor(ProactorBase):
         if not more:
             self._deactivate_uring_entry(entry)
             accept_entry_ref[0] = None
-            if not operation.done():
-                operation._finish(result=None)
         return operation
 
     def create_socket(
@@ -2708,7 +2709,7 @@ class UringProactor(ProactorBase):
         operation = UringContinuousOperation[_RecvManyValue](
             "recv_many",
             sock,
-            self._uring_continuous_callback(callback, native_multishot=native_multishot),
+            self._guard_delivery_callback(callback),
         )
         if native_multishot:
             uring_group = cast(_UringBufGroup, buf_group)
@@ -2797,7 +2798,6 @@ class UringProactor(ProactorBase):
             index=base_sequence,
             more=False,
         )
-        operation._finish(result=None)
         self._deactivate_uring_entry(entry)
         return operation
 
@@ -2819,7 +2819,6 @@ class UringProactor(ProactorBase):
         else:
             chunk = memoryview(cast(Any, completion.result))
         operation._emit_result(chunk, index=base_sequence, more=False)
-        operation._finish(result=None)
         self._deactivate_uring_entry(entry)
         return operation
 
@@ -2858,7 +2857,7 @@ class UringProactor(ProactorBase):
         operation = UringContinuousOperation[int](
             "poll_many",
             fd,
-            callback,
+            self._guard_delivery_callback(callback),
         )
         if self._capabilities.get("IORING_POLL_MULTISHOT", False):
             # kernel keeps the poll armed; cancel via submit_poll_remove().
@@ -2919,7 +2918,6 @@ class UringProactor(ProactorBase):
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         operation._emit_result(res, more=more)
         if not more:
-            operation._finish(result=None)
             self._deactivate_uring_entry(entry)
         return operation
 
@@ -2936,7 +2934,15 @@ class UringProactor(ProactorBase):
             exc = multishot_leg.enobufs_exception
             multishot_leg.enobufs_index = None
             multishot_leg.enobufs_exception = None
-            operation._finish(exception=exc)
+            if not operation.done():
+                operation.finish_operation(
+                    MultishotDelivery(
+                        index=enobufs_index,
+                        value=memoryview(b""),
+                        exception=cast(OSError, exc),
+                        more=False,
+                    )
+                )
             self._deactivate_uring_entry(entry)
 
     def _deliver_uring_recv_many(
@@ -2977,7 +2983,6 @@ class UringProactor(ProactorBase):
         if operation.done():
             return operation
         if not more:
-            operation._finish(result=None)
             self._deactivate_uring_entry(entry)
         return operation
 

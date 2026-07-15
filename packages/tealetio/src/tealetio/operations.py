@@ -5,6 +5,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Generic, NamedTuple, TypeVar, cast
 
+from .tasks import CancelledError
+
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 
@@ -208,13 +210,18 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         if not self._done:
             exc = delivery.exception
             if exc is not None:
-                self._finish(exception=exc)
+                self._finish(exception=exc, cancelled=isinstance(exc, CancelledError))
             else:
                 self._finish(result=None)
         assert self._done
 
     def _emit_delivery(self, delivery: MultishotDelivery) -> bool:
-        """Deliver one multishot chunk when the operation is still active."""
+        """Deliver one multishot chunk when the operation is still active.
+
+        Returns ``True`` when the callback ran (or there is no callback).
+        Returns ``False`` when the operation was already done and the delivery
+        was skipped.
+        """
 
         with self._lock:
             if self._done:
@@ -222,8 +229,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             callback = self._result_callback
         if callback is not None:
             callback(delivery._replace(operation=self))
-        with self._lock:
-            return not self._done
+        return True
 
     def _emit_result(
         self,
@@ -243,19 +249,19 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         *,
         cancelled: bool = False,
     ) -> None:
-        """Finish the operation, then deliver one terminal ``MultishotDelivery``.
+        """Emit one terminal ``MultishotDelivery`` for the result callback.
 
-        Used for io_uring delivery failures and cancellation so
-        ``operation.exception()`` and the result callback both observe the same
-        terminal error.
+        The consumer must call ``finish_operation`` on the owner thread when it
+        marshals deliveries (``ProactorIOManager``, ``RecvIterBuffer``, and
+        similar). ``cancelled`` is accepted for call-site compatibility; cancel
+        state is applied in ``finish_operation`` from ``delivery.exception``.
         """
 
+        del cancelled
+        assert not delivery.more
         with self._lock:
+            if self._done:
+                return
             callback = self._result_callback
-        exc = delivery.exception
-        if exc is not None:
-            self._finish(exception=exc, cancelled=cancelled)
-        else:
-            self._finish(result=None, cancelled=cancelled)
         if callback is not None:
             callback(delivery._replace(operation=self))
