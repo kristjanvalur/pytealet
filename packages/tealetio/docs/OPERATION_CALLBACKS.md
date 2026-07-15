@@ -48,7 +48,7 @@ disposition (see below).
 |-------------|---------------|
 | `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `TerminalReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
 | `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; user `callback` and `finish_operation` run on the scheduler thread |
-| `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `TerminalReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` |
+| `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `TerminalReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` (callback exceptions still finish terminal legs in `finally`) |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer` over `proactor.recv_many` chunks (not composed through `accept_many`) |
 
 Worker-thread accept composition mutates the proactor delivery before the
@@ -65,20 +65,28 @@ proactor.accept_many(sock, on_worker_delivery)     # worker thread
 proactor.recv(conn, recv_size)                     # worker; independent one-shot Operation
         │
         ▼  recv done callback (worker)
-post merged MultishotDelivery(index unchanged, value=(conn, data) or recv error)
+post merged MultishotDelivery(index unchanged,
+    value=(conn, data, None) | (conn, None, recv_error))   # recv_error includes CancelledError
         │
         ▼  marshal (one hop)
-TerminalReorderBuffer → deliver_wrapped → user callback → finish_operation   # scheduler
+TerminalReorderBuffer → deliver_wrapped → user callback (if no recv_error)
+        │                                    └─ try/finally: finish_operation on terminal legs
+        └─ finalize_accept_recv_error when recv_error set (scheduler; no user callback)
 ```
 
 Without `recv_size`, the worker posts `(conn, None, None)` in `value` after the
-bare socket accept. Terminals (cancel, EOF, transport errors) post through
-unchanged; reorder and `finish_continuous_delivery` still run on the scheduler.
+bare socket accept. Stream terminals (cancel, EOF, transport errors on the
+continuous op) post through unchanged; reorder and `finish_continuous_delivery`
+still run on the scheduler. Transport errors finish the operation then re-raise;
+user accept callback exceptions propagate to the scheduler exception handler but
+terminal legs still call `finish_continuous_delivery` in a `finally` block so
+`IOWaiter.wait()` does not hang.
 
 `recv_op.add_done_callback(on_recv_complete)` registers preread completion; there
-is no parent/child link on `Operation`. A cancelled recv closes the connection
-with `abortive_close` and does not post to the scheduler or invoke the user
-callback.
+is no parent/child link on `Operation`. Preread failures (including timeout
+cancel as `CancelledError`) post `(conn, None, exc)` like other recv errors;
+`finalize_accept_recv_error` closes the socket on the scheduler thread and does
+not invoke the user accept callback unless `on_recv_error` is provided.
 
 Helpers in `continuous_callbacks.py` support this layer:
 
