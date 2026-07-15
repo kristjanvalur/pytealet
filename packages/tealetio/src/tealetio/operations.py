@@ -22,10 +22,11 @@ _ProactorRef = Any
 class MultishotDelivery(NamedTuple):
     """One multishot leg delivery to a continuous operation callback.
 
-    ``(index, value, exception, more, operation)``. For ``recv_many``, ``index`` is the
-    stream ordinal from the backend (``completion.sequence`` on uring, seeded by
-    ``base_sequence`` at submit); otherwise zero for informational use on
-    ``accept_many`` and ``poll_many``. ``value`` carries successful chunk data
+    ``(index, value, exception, more, operation)``. For ``recv_many``, ``accept_many``,
+    and ``poll_many``, ``index`` is the stream ordinal from the backend
+    (``completion.sequence`` on uring multishot, or a per-operation counter on
+    selector and one-shot fallbacks). ``index=None`` opts out of reordering
+    (for example emulated-path cancel terminals). ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
     Terminal failures finish the ``Operation`` with the same exception, then
@@ -36,7 +37,7 @@ class MultishotDelivery(NamedTuple):
     ``recv_many()``.
     """
 
-    index: int = 0
+    index: int | None = 0
     value: Any = None
     exception: BaseException | None = None
     more: bool = True
@@ -235,7 +236,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         self,
         result: T_co,
         *,
-        index: int = 0,
+        index: int | None = 0,
         exception: BaseException | None = None,
         more: bool = True,
     ) -> bool:

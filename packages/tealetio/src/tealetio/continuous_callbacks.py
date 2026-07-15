@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
@@ -59,37 +60,76 @@ def finish_continuous_delivery(delivery: MultishotDelivery) -> None:
         operation.finish_operation(delivery)
 
 
-class ContinuousLegFinishGate:
-    """Defer ``finish_operation`` until all lower leg indices have been delivered.
+DeliveryCallback = Callable[[MultishotDelivery], object]
 
-    Multishot ``accept_many`` (and similar indexed legs) may deliver a terminal
-    chunk before earlier indices arrive. Call ``note_delivery`` for each
-    ``MultishotDelivery``; the gate finishes only once every index below the
-    pending terminal index has been seen.
+
+class ReorderBuffer:
+    """Deliver ``MultishotDelivery`` callbacks in strict index order.
+
+    ``_delivered`` is the next leg index to hand off. Each ``deliver`` call runs
+    the constructor callback immediately when ``delivery.index`` matches;
+    otherwise the delivery is queued on a min-heap until earlier indices have
+    been delivered.
     """
 
-    def __init__(self) -> None:
-        self._pending_terminal: MultishotDelivery | None = None
-        self._seen_indices: set[int] = set()
+    def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
+        self._callback = callback
+        self._delivered = start
+        self._heap: list[MultishotDelivery] = []
 
-    def note_delivery(self, delivery: MultishotDelivery) -> None:
-        if delivery.more:
-            self._seen_indices.add(delivery.index)
-            self._try_finish()
+    def deliver(self, delivery: MultishotDelivery) -> None:
+        if delivery.index is None:
+            self._callback(delivery)
             return
-        if is_cancellation_delivery(delivery) or delivery.exception is not None:
-            finish_continuous_delivery(delivery)
+        if delivery.index == self._delivered:
+            self._deliver_now(delivery)
             return
-        self._pending_terminal = delivery
-        self._try_finish()
+        heapq.heappush(self._heap, delivery)
 
-    def _try_finish(self) -> None:
-        delivery = self._pending_terminal
-        if delivery is None:
+    def _deliver_now(self, delivery: MultishotDelivery) -> None:
+        self._callback(delivery)
+        self._delivered += 1
+        while self._heap and self._heap[0].index == self._delivered:
+            pending = heapq.heappop(self._heap)
+            self._callback(pending)
+            self._delivered += 1
+
+
+class TerminalReorderBuffer:
+    """Invoke per-delivery callbacks in leg order; defer early terminals.
+
+    ``_counter`` is the next leg index to hand off (from ``start``). In-order
+    deliveries run the constructor callback immediately; an out-of-order
+    terminal is held on the heap until a later in-order non-terminal advances
+    the counter, then its callback runs after that delivery's callback.
+    """
+
+    def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
+        self._callback = callback
+        self._counter = start
+        self._heap: list[MultishotDelivery] = []
+
+    def deliver(self, delivery: MultishotDelivery) -> None:
+        if delivery.index is None:
+            self._callback(delivery)
             return
-        if all(i in self._seen_indices for i in range(delivery.index)):
-            finish_continuous_delivery(delivery)
-            self._pending_terminal = None
+
+        if not delivery.more and delivery.index != self._counter:
+            heapq.heappush(self._heap, delivery)
+            return
+
+        if delivery.more and delivery.index == self._counter:
+            self._counter += 1
+            self._callback(delivery)
+            self._flush_terminals()
+            return
+
+        self._callback(delivery)
+
+    def _flush_terminals(self) -> None:
+        while self._heap and self._heap[0].index == self._counter:
+            pending = heapq.heappop(self._heap)
+            self._callback(pending)
 
 
 def is_cancellation_delivery(delivery: MultishotDelivery) -> bool:

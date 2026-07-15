@@ -132,7 +132,7 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
     )
 
 
-def _continuous_error_delivery(exc: BaseException, *, index: int = 0) -> MultishotDelivery:
+def _continuous_error_delivery(exc: BaseException, *, index: int | None = 0) -> MultishotDelivery:
     return MultishotDelivery(index=index, exception=exc, more=False)
 
 
@@ -694,7 +694,7 @@ class ProactorBase:
             return
         if isinstance(operation, ContinuousOperation):
             operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(CancelledError()),
+                _continuous_error_delivery(CancelledError(), index=None),
                 cancelled=True,
             )
             return
@@ -1347,13 +1347,16 @@ class SelectorProactor(ProactorBase):
             fileobj=fd,
             result_callback=self._guard_delivery_callback(callback),
         )
+        next_index = 0
 
         def step() -> ContinuousStepResult:
+            nonlocal next_index
             try:
                 result = _probe_poll_fd_now(fd, mask)
             except BlockingIOError:
                 return ContinuousStepResult(progressed=False)
-            operation._emit_result(result, more=True)
+            operation._emit_result(result, more=True, index=next_index)
+            next_index += 1
             return ContinuousStepResult(progressed=True)
 
         self._submit_fd_continuous_operation(fd, mask, operation, step)
@@ -2849,9 +2852,12 @@ class UringProactor(ProactorBase):
 
         # fallback: one-shot submit_poll per readiness event.
         submit_box: list[_UringEntrySubmit] = []
+        next_index = [0]
         entry = self._uring_entry(
             operation,
-            lambda entry, completion: self._deliver_uring_poll_many_oneshot(entry, completion, submit_box),
+            lambda entry, completion: self._deliver_uring_poll_many_oneshot(
+                entry, completion, submit_box, next_index
+            ),
         )
 
         def submit_poll() -> _UringCompletion:
@@ -2866,18 +2872,20 @@ class UringProactor(ProactorBase):
         entry: _UringEntry,
         completion: _UringCompletion,
         submit_box: list[_UringEntrySubmit],
+        next_index: list[int],
     ) -> Operation[Any] | None:
         # emit the mask, then queue another submit_poll() unless cancelled.
         operation = cast(ContinuousOperation[int], entry.operation)
         res = completion.res
+        index = next_index[0]
         if res < 0:
             self._deactivate_uring_entry(entry)
             operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(_uring_cqe_oserror(res)),
+                _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return operation
-        more = True
-        operation._emit_result(res, more=more)
+        operation._emit_result(res, more=True, index=index)
+        next_index[0] += 1
         if operation.done():
             return operation
         self._queue_entry_resubmit(entry, submit_box[0])
@@ -2886,14 +2894,15 @@ class UringProactor(ProactorBase):
     def _deliver_uring_poll_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[int], entry.operation)
         res = completion.res
+        index = int(completion.sequence)
         if res < 0:
             self._deactivate_uring_entry(entry)
             operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(_uring_cqe_oserror(res)),
+                _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return operation
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        operation._emit_result(res, more=more)
+        operation._emit_result(res, more=more, index=index)
         if not more:
             self._deactivate_uring_entry(entry)
         return operation

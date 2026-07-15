@@ -10,8 +10,10 @@ from .continuous_callbacks import (
     AcceptReadResult,
     AcceptRecvErrorCallback,
     AcceptStreamsDelivery,
-    ContinuousLegFinishGate,
+    DeliveryCallback,
+    TerminalReorderBuffer,
     finalize_accept_recv_error,
+    finish_continuous_delivery,
     is_cancellation_delivery,
     normalize_accept_recv_size,
 )
@@ -41,12 +43,6 @@ T = TypeVar("T")
 def _finish_or_close_socket(group: IOWaitGroup[Any], sock: socket.socket, result: Any) -> None:
     if not group.finish(result):
         abortive_close(sock)
-
-
-def _continuous_operation(delivery: MultishotDelivery) -> ContinuousOperation[Any]:
-    operation = delivery.operation
-    assert operation is not None
-    return operation
 
 
 _ProgressCallback = Callable[[int], object]
@@ -290,20 +286,17 @@ class ProactorIOManager:
         assert self._scheduler is not None
         self._scheduler.call_soon_threadsafe(thunk)
 
-    def _deliver_continuous(
+    def _thread_reorder_helper(
         self,
-        operation: ContinuousOperation[Any],
-        delivery: MultishotDelivery,
-        on_owner: Callable[[], object],
-        finish_gate: ContinuousLegFinishGate,
-    ) -> None:
-        """Marshal ``on_owner`` for one continuous delivery, then note leg progress."""
+        delivery_callback: DeliveryCallback,
+        reorder_buffer_class: type[TerminalReorderBuffer],
+    ) -> Callable[[MultishotDelivery], None]:
+        buffer = reorder_buffer_class(delivery_callback)
 
-        def batch() -> None:
-            on_owner()
-            finish_gate.note_delivery(delivery._replace(operation=operation))
+        def on_thread_delivery(delivery: MultishotDelivery) -> None:
+            self._marshal_on_scheduler(lambda: buffer.deliver(delivery))
 
-        self._marshal_on_scheduler(batch)
+        return on_thread_delivery
 
     def _wrap_continuous_delivery(
         self,
@@ -312,11 +305,16 @@ class ProactorIOManager:
     ) -> Callable[[MultishotDelivery], None]:
         """Marshal ``deliver`` for tests and paths that hold ``operation`` out-of-band."""
 
-        finish_gate = ContinuousLegFinishGate()
+        def on_ordered_delivery(delivery: MultishotDelivery) -> None:
+            deliver(delivery)
+            finish_continuous_delivery(delivery)
+
+        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer)
 
         def on_delivery(delivery: MultishotDelivery) -> None:
-            routed = delivery.operation if delivery.operation is not None else operation
-            self._deliver_continuous(routed, delivery, lambda: deliver(delivery), finish_gate)
+            if delivery.operation is None:
+                delivery = delivery._replace(operation=operation)
+            on_thread_delivery(delivery)
 
         return on_delivery
 
@@ -573,15 +571,15 @@ class ProactorIOManager:
         mask: int,
         callback: Callable[[MultishotDelivery], object],
     ) -> IOWaitable[None]:
-        def _poll_many_delivery(delivery: MultishotDelivery) -> None:
-            def on_owner() -> None:
-                callback(delivery)
-                if not delivery.more:
-                    _continuous_operation(delivery).finish_operation(delivery)
+        def on_ordered_delivery(delivery: MultishotDelivery) -> None:
+            callback(delivery)
+            finish_continuous_delivery(delivery)
 
-            self._marshal_on_scheduler(on_owner)
-
-        operation = self._proactor.poll_many(fd, mask, _poll_many_delivery)
+        operation = self._proactor.poll_many(
+            fd,
+            mask,
+            self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer),
+        )
         return IOWaiter(self, operation)
 
     def _schedule_accept_recv_timeout(
@@ -701,8 +699,6 @@ class ProactorIOManager:
             if recv_timeout <= 0:
                 raise ValueError("recv_timeout must be positive when provided")
 
-        finish_gate = ContinuousLegFinishGate()
-
         def deliver_wrapped(result: AcceptReadResult) -> None:
             conn, initial_data, recv_error = result
             if recv_error is not None:
@@ -714,54 +710,37 @@ class ProactorIOManager:
                 abortive_close(conn)
                 raise
 
-        def note_delivery(delivery: MultishotDelivery) -> None:
-            routed = _continuous_operation(delivery)
-            self._marshal_on_scheduler(lambda: finish_gate.note_delivery(delivery._replace(operation=routed)))
-
-        def on_delivery(delivery: MultishotDelivery) -> None:
-            if is_cancellation_delivery(delivery):
-                note_delivery(delivery)
-                return
-            if delivery.exception is not None:
-                raise delivery.exception
-            conn = delivery.value
-            if conn is None:
-                note_delivery(delivery)
-                return
-            self._deliver_continuous(
-                _continuous_operation(delivery),
-                delivery,
-                lambda: deliver_wrapped((conn, None, None)),
-                finish_gate,
-            )
-
+        read_on_conn: Callable[[MultishotDelivery], None] | None = None
         if normalized_recv_size is not None:
 
             def deliver_from_recv(result: AcceptReadResult) -> None:
                 self._marshal_on_scheduler(lambda: deliver_wrapped(result))
 
-            inner = self._accept_many_read_on_conn(
+            read_on_conn = self._accept_many_read_on_conn(
                 deliver_from_recv,
                 recv_size=normalized_recv_size,
                 recv_timeout=recv_timeout,
             )
 
-            def on_delivery_with_recv(delivery: MultishotDelivery) -> None:
-                if is_cancellation_delivery(delivery):
-                    note_delivery(delivery)
-                    return
-                if delivery.exception is not None:
-                    raise delivery.exception
-                if delivery.value is None:
-                    note_delivery(delivery)
-                    return
-                inner(delivery)
-                note_delivery(delivery)
+        def on_ordered_delivery(delivery: MultishotDelivery) -> None:
+            if is_cancellation_delivery(delivery):
+                finish_continuous_delivery(delivery)
+                return
+            if delivery.exception is not None:
+                raise delivery.exception
+            if delivery.value is None:
+                finish_continuous_delivery(delivery)
+                return
+            if read_on_conn is not None:
+                read_on_conn(delivery)
+            else:
+                deliver_wrapped((delivery.value, None, None))
+            finish_continuous_delivery(delivery)
 
-            operation = self._proactor.accept_many(sock, on_delivery_with_recv)
-            return IOWaiter(self, operation)
-
-        operation = self._proactor.accept_many(sock, on_delivery)
+        operation = self._proactor.accept_many(
+            sock,
+            self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer),
+        )
         return IOWaiter(self, operation)
 
     def accept_many_streams(
@@ -788,24 +767,17 @@ class ProactorIOManager:
         accept callback).
         """
 
-        finish_gate = ContinuousLegFinishGate()
-
-        def note_delivery(delivery: MultishotDelivery) -> None:
-            routed = _continuous_operation(delivery)
-            self._marshal_on_scheduler(lambda: finish_gate.note_delivery(delivery._replace(operation=routed)))
-
-        def on_delivery(delivery: MultishotDelivery) -> None:
+        def on_ordered_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
-                note_delivery(delivery)
+                finish_continuous_delivery(delivery)
                 return
             if delivery.exception is not None:
                 raise delivery.exception
             conn = delivery.value
             if conn is None:
-                note_delivery(delivery)
+                finish_continuous_delivery(delivery)
                 return
 
-            writer: Any = None
             try:
                 reader, writer = open_streams(
                     self,
@@ -818,33 +790,20 @@ class ProactorIOManager:
                 abortive_close(conn)
                 raise
 
-            def run_on_owner() -> None:
-                try:
-                    callback((reader, writer))
-                except BaseException:
-                    try:
-                        writer.close()
-                    except BaseException:
-                        abortive_close(conn)
-                    raise
-
             try:
-                self._deliver_continuous(
-                    _continuous_operation(delivery),
-                    delivery,
-                    run_on_owner,
-                    finish_gate,
-                )
+                callback((reader, writer))
             except BaseException:
-                abortive_close(conn)
                 try:
-                    if writer is not None:
-                        writer.close()
+                    writer.close()
                 except BaseException:
-                    pass
+                    abortive_close(conn)
                 raise
+            finish_continuous_delivery(delivery)
 
-        operation = self._proactor.accept_many(sock, on_delivery)
+        operation = self._proactor.accept_many(
+            sock,
+            self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer),
+        )
         return IOWaiter(self, operation)
 
     def sock_create_streams(

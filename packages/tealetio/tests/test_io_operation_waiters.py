@@ -66,29 +66,78 @@ def test_wrap_continuous_delivery_finishes_only_on_terminal() -> None:
     wrapped = io._wrap_continuous_delivery(operation, chunks.append)
     operation.add_done_callback(lambda _op: wakes.append("wake"))
 
-    wrapped(MultishotDelivery(value=1, more=True))
+    wrapped(MultishotDelivery(index=0, value=1, more=True))
     assert not operation.done()
 
-    wrapped(MultishotDelivery(value=2, more=False))
+    wrapped(MultishotDelivery(index=1, value=2, more=False))
 
     assert [delivery.value for delivery in chunks] == [1, 2]
     assert operation.done()
     assert wakes == ["wake"]
 
 
-def test_continuous_leg_finish_gate_defers_terminal_until_stragglers() -> None:
-    from tealetio.continuous_callbacks import ContinuousLegFinishGate
+def test_reorder_buffer_delivers_none_index_immediately() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer
+    from tealetio.tasks import CancelledError
+
+    order: list[int | None] = []
+
+    def record(delivery: MultishotDelivery) -> None:
+        order.append(delivery.index)
+
+    reorder_buffer = ReorderBuffer(record)
+    reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True))
+    reorder_buffer.deliver(MultishotDelivery(index=None, exception=CancelledError(), more=False))
+    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
+
+    assert order == [None, 0, 1]
+
+
+def test_reorder_buffer_delivers_callbacks_in_index_order() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    order: list[int] = []
+
+    def record(delivery: MultishotDelivery) -> None:
+        order.append(delivery.index)
+
+    reorder_buffer = ReorderBuffer(record)
+    reorder_buffer.deliver(MultishotDelivery(index=2, value="c", more=True))
+    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
+    reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True))
+
+    assert order == [0, 1, 2]
+
+
+def test_terminal_reorder_buffer_defers_terminal_until_stragglers() -> None:
+    from tealetio.continuous_callbacks import TerminalReorderBuffer, finish_continuous_delivery
 
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    gate = ContinuousLegFinishGate()
+    reorder_buffer = TerminalReorderBuffer(finish_continuous_delivery)
 
-    gate.note_delivery(MultishotDelivery(index=2, value="terminal", more=False, operation=operation))
+    reorder_buffer.deliver(MultishotDelivery(index=2, value="terminal", more=False, operation=operation))
     assert not operation.done()
 
-    gate.note_delivery(MultishotDelivery(index=0, value="a", more=True, operation=operation))
+    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True, operation=operation))
     assert not operation.done()
 
-    gate.note_delivery(MultishotDelivery(index=1, value="b", more=True, operation=operation))
+    reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True, operation=operation))
+    assert operation.done()
+
+
+def test_terminal_reorder_buffer_honours_start_index() -> None:
+    from tealetio.continuous_callbacks import TerminalReorderBuffer, finish_continuous_delivery
+
+    operation = ContinuousOperation(kind="accept_many", fileobj=object())
+    reorder_buffer = TerminalReorderBuffer(finish_continuous_delivery, start=10)
+
+    reorder_buffer.deliver(MultishotDelivery(index=12, value="terminal", more=False, operation=operation))
+    assert not operation.done()
+
+    reorder_buffer.deliver(MultishotDelivery(index=10, value="a", more=True, operation=operation))
+    assert not operation.done()
+
+    reorder_buffer.deliver(MultishotDelivery(index=11, value="b", more=True, operation=operation))
     assert operation.done()
 
 
@@ -138,8 +187,8 @@ def test_poll_many_marshals_callback_and_sets_ready_on_terminal() -> None:
     class _PollProactor:
         def poll_many(self, fd, mask, callback=None):
             operation = ContinuousOperation(kind="poll_many", fileobj=fd, result_callback=callback)
-            operation._emit_result(3, more=True)
-            operation._finish_with_terminal_delivery(MultishotDelivery(value=0, more=False))
+            operation._emit_result(3, more=True, index=0)
+            operation._finish_with_terminal_delivery(MultishotDelivery(index=1, value=0, more=False))
             return operation
 
     io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]

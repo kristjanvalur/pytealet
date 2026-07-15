@@ -80,44 +80,15 @@ def _recv_many_finish_after_stragglers(
     seen: list[_RecvManySeen],
     resume_base: list[int | None] | None = None,
 ) -> Callable[[_RecvManySeen], None]:
-    enobufs_delivery: list[_RecvManySeen | None] = [None]
-    terminal_delivery: list[_RecvManySeen | None] = [None]
-    data_indices: set[int] = set()
+    from tealetio.continuous_callbacks import TerminalReorderBuffer, finish_continuous_delivery
 
-    def maybe_finish_enobufs() -> None:
-        delivery = enobufs_delivery[0]
-        if delivery is None:
-            return
-        index = delivery.index
-        if all(i in data_indices for i in range(index)):
-            from tealetio.continuous_callbacks import finish_continuous_delivery
-
-            finish_continuous_delivery(delivery)
-
-    def maybe_finish_terminal() -> None:
-        delivery = terminal_delivery[0]
-        if delivery is None:
-            return
-        index = delivery.index
-        if all(i in data_indices for i in range(index)):
-            from tealetio.continuous_callbacks import finish_continuous_delivery
-
-            finish_continuous_delivery(delivery)
+    reorder_buffer = TerminalReorderBuffer(finish_continuous_delivery)
 
     def on_result(delivery: _RecvManySeen) -> None:
         seen.append(delivery)
-        if _is_enobufs_delivery(delivery):
-            enobufs_delivery[0] = delivery
-            if resume_base is not None:
-                resume_base[0] = delivery.index
-            maybe_finish_enobufs()
-        elif not delivery.more:
-            terminal_delivery[0] = delivery
-            maybe_finish_terminal()
-        elif delivery.exception is None and delivery.value is not None:
-            data_indices.add(delivery.index)
-            maybe_finish_enobufs()
-            maybe_finish_terminal()
+        if _is_enobufs_delivery(delivery) and resume_base is not None:
+            resume_base[0] = delivery.index
+        reorder_buffer.deliver(delivery)
 
     return on_result
 
@@ -255,14 +226,14 @@ def _append_poll_value(seen: list[int]) -> Callable[[MultishotDelivery], None]:
 
 
 def _append_accept_socket(accepted: list[socket.socket]) -> Callable[[MultishotDelivery], None]:
-    from tealetio.continuous_callbacks import ContinuousLegFinishGate
+    from tealetio.continuous_callbacks import TerminalReorderBuffer, finish_continuous_delivery
 
-    finish_gate = ContinuousLegFinishGate()
+    reorder_buffer = TerminalReorderBuffer(finish_continuous_delivery)
 
     def collect(delivery: MultishotDelivery) -> None:
         if delivery.value is not None:
             accepted.append(delivery.value)
-        finish_gate.note_delivery(delivery)
+        reorder_buffer.deliver(delivery)
 
     return collect
 

@@ -400,15 +400,17 @@ class TestProactorIOManagerAcceptMany:
                 recv_size=8,
                 recv_timeout=0.5,
             )
-            assert not scheduler.timer_handles
-            arm_callbacks = [
-                callback
-                for callback, _args in scheduler.deferred
-                if callback.__name__ == "arm"
-            ]
+            arm_callbacks: list[Any] = []
+
+            def drain_deferred() -> None:
+                while scheduler.deferred:
+                    callback, args = scheduler.deferred.pop(0)
+                    if callback.__name__ == "arm":
+                        arm_callbacks.append(callback)
+                    callback(*args)
+
+            drain_deferred()
             assert len(arm_callbacks) == 1
-            for callback, args in list(scheduler.deferred):
-                callback(*args)
             assert not scheduler.timer_handles
             scheduler.fire_timers()
             assert len(delivered) == 1
@@ -593,9 +595,9 @@ class TestProactorIOManagerAcceptMany:
         handled: list[object] = []
         try:
             io.accept_many_streams(server, lambda streams: handled.append(streams))
-            assert proactor.recv_many_calls
             assert len(scheduler.queued) == 1
             scheduler.queued[0][0]()
+            assert proactor.recv_many_calls
             assert handled
             _reader, writer = handled[0]
             writer.close()
@@ -624,7 +626,7 @@ class TestProactorIOManagerAcceptMany:
         finally:
             server.close()
 
-    def test_accept_many_streams_closes_streams_when_marshal_fails(self) -> None:
+    def test_accept_many_streams_propagates_marshal_failure_without_closing_socket(self) -> None:
         accepted: list[socket.socket] = []
 
         class _ShutdownScheduler(StubScheduler):
@@ -644,7 +646,8 @@ class TestProactorIOManagerAcceptMany:
             with pytest.raises(RuntimeError, match="scheduler shut down"):
                 io.accept_many_streams(server, lambda _: None)
             assert len(accepted) == 1
-            assert accepted[0].fileno() == -1
+            assert accepted[0].fileno() != -1
+            accepted[0].close()
         finally:
             server.close()
 
