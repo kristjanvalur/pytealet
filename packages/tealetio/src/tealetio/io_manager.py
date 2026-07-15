@@ -305,8 +305,10 @@ class ProactorIOManager:
         """Marshal ``deliver`` for tests and paths that hold ``operation`` out-of-band."""
 
         def on_ordered_delivery(delivery: MultishotDelivery) -> None:
-            deliver(delivery)
-            finish_continuous_delivery(delivery)
+            try:
+                deliver(delivery)
+            finally:
+                finish_continuous_delivery(delivery)
 
         on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer)
 
@@ -571,8 +573,10 @@ class ProactorIOManager:
         callback: Callable[[MultishotDelivery], object],
     ) -> IOWaitable[None]:
         def on_ordered_delivery(delivery: MultishotDelivery) -> None:
-            callback(delivery)
-            finish_continuous_delivery(delivery)
+            try:
+                callback(delivery)
+            finally:
+                finish_continuous_delivery(delivery)
 
         operation = self._proactor.poll_many(
             fd,
@@ -710,8 +714,10 @@ class ProactorIOManager:
             if delivery.value is None:
                 finish_continuous_delivery(delivery)
                 return
-            deliver_wrapped(delivery.value)
-            finish_continuous_delivery(delivery)
+            try:
+                deliver_wrapped(delivery.value)
+            finally:
+                finish_continuous_delivery(delivery)
 
         on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer)
 
@@ -775,14 +781,16 @@ class ProactorIOManager:
 
             reader, writer = delivery.value
             try:
-                callback((reader, writer))
-            except BaseException:
                 try:
-                    writer.close()
+                    callback((reader, writer))
                 except BaseException:
-                    abortive_close(writer.get_extra_info("socket"))
-                raise
-            finish_continuous_delivery(delivery)
+                    try:
+                        writer.close()
+                    except BaseException:
+                        abortive_close(writer.get_extra_info("socket"))
+                    raise
+            finally:
+                finish_continuous_delivery(delivery)
 
         on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery, TerminalReorderBuffer)
 

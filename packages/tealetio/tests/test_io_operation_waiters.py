@@ -261,6 +261,33 @@ def test_accept_many_terminal_error_finishes_operation() -> None:
         server.close()
 
 
+def test_accept_many_callback_exception_finishes_terminal_leg() -> None:
+    handler_errors: list[BaseException] = []
+
+    class _AcceptProactor:
+        def accept_many(self, sock, callback=None):
+            conn, peer = socket.socketpair()
+            peer.close()
+            operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+            operation._emit_result(conn, more=False)
+            return operation
+
+    scheduler = StubScheduler()
+    scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+    io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
+    server = socket.socket()
+    try:
+        waiter = io.accept_many(server, lambda _: (_ for _ in ()).throw(ValueError("accept failed")))
+        operation = waiter.operation
+        assert operation is not None
+        assert len(handler_errors) == 1
+        assert str(handler_errors[0]) == "accept failed"
+        assert operation.done()
+        assert operation.exception() is None
+    finally:
+        server.close()
+
+
 def test_accept_many_streams_terminal_error_finishes_operation() -> None:
     error = OSError("accept failed")
     handler_errors: list[BaseException] = []
