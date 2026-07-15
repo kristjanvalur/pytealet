@@ -79,7 +79,7 @@ def test_wrap_continuous_delivery_finishes_only_on_terminal() -> None:
 
 def test_reorder_buffer_delivers_none_index_immediately() -> None:
     from tealetio.continuous_callbacks import ReorderBuffer
-    from tealetio.tasks import CancelledError
+    from tealetio.operations import io_cancellation_error
 
     order: list[int | None] = []
 
@@ -88,7 +88,7 @@ def test_reorder_buffer_delivers_none_index_immediately() -> None:
 
     reorder_buffer = ReorderBuffer(record)
     reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True))
-    reorder_buffer.deliver(MultishotDelivery(index=None, exception=CancelledError(), more=False))
+    reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
     reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
 
     assert order == [None, 0, 1]

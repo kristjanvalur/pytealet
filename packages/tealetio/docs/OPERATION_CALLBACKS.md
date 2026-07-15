@@ -66,7 +66,7 @@ proactor.recv(conn, recv_size)                     # worker; independent one-sho
         │
         ▼  recv done callback (worker)
 post merged MultishotDelivery(index unchanged,
-    value=(conn, data, None) | (conn, None, recv_error))   # recv_error includes CancelledError
+    value=(conn, data, None) | (conn, None, recv_error))   # recv_error may be ECANCELED on timeout cancel
         │
         ▼  marshal (one hop)
 LenientReorderBuffer → deliver_wrapped → user callback (if no recv_error)
@@ -84,7 +84,7 @@ terminal legs still call `finish_continuous_delivery` in a `finally` block so
 
 `recv_op.add_done_callback(on_recv_complete)` registers preread completion; there
 is no parent/child link on `Operation`. Preread failures (including timeout
-cancel as `CancelledError`) post `(conn, None, exc)` like other recv errors;
+timeout cancel as ``OSError(ECANCELED)``) post `(conn, None, exc)` like other recv errors;
 `finalize_accept_recv_error` closes the socket on the scheduler thread and does
 not invoke the user accept callback unless `on_recv_error` is provided.
 
@@ -148,18 +148,23 @@ Cancellation is backend-specific teardown (drop deferred resubmits, submit async
 ring cancel or `poll_remove`, deregister selector interest, `break_wait()`, and
 similar).
 
+IO cancellation is distinct from task cancellation. Proactor cancel completes
+operations with ``OSError(errno.ECANCELED)`` (see ``io_cancellation_error()``).
+``is_cancellation_delivery()`` / ``is_io_cancellation()`` let ``io_manager``
+treat that terminal as "no further chunks" rather than a transport failure to
+surface to callers. ``CancelledError`` remains for ``Task.cancel()`` only.
+
 On **selector / emulated** paths, `ProactorBase._terminalise_cancelled()` runs
 immediately after teardown is requested. Continuous ops emit a terminal
-`MultishotDelivery` with `CancelledError` and `index=None` (best-effort: the
-reorder buffer may deliver cancel before straggler legs still in flight).
+`MultishotDelivery` with ``OSError(ECANCELED)`` and `index=None` (best-effort:
+the reorder buffer may deliver cancel before straggler legs still in flight).
 
 On **uring**, `UringProactor.cancel()` submits `submit_cancel` or
-`poll_remove` when the target leg is already armed, sets `cancel_requested` on
-the entry, and returns without synchronously terminalising the target. The cancel
-terminal is delivered from ring completions instead:
+`poll_remove` when the target leg is already armed and returns without
+synchronously terminalising the target. The cancel terminal is delivered from
+ring completions instead:
 
-- target handle: terminal CQE with `res < 0` (often `ECANCELED`), mapped to
-  `CancelledError` (continuous ops use `index=None`);
+- target handle: terminal CQE with `res < 0` (often `ECANCELED`) as ``OSError``;
 - `poll_remove` completion for multishot `poll_many`;
 - cancel-op completion as a fallback when the target is still active but no
   further target CQE arrives.

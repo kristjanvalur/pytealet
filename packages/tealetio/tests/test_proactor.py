@@ -37,13 +37,22 @@ from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
 )
 
+
+def _assert_io_cancelled(operation: Operation[Any]) -> None:
+    assert operation.cancelled()
+    assert is_io_cancellation(operation.exception())
+    with pytest.raises(OSError) as exc_info:
+        operation.result()
+    assert exc_info.value.errno == errno.ECANCELED
+
+
 import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
 import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.scheduler import get_running_scheduler
 from tealetio.io_waiter import IOWaiter
-from tealetio.operations import InvalidStateError, MultishotDelivery
+from tealetio.operations import InvalidStateError, MultishotDelivery, io_cancellation_error, is_io_cancellation
 from tealetio.proactor import (
     AsyncProactorScheduler,
     ContinuousOperation,
@@ -641,7 +650,7 @@ def test_recviter_buffer_ordered_eof_wins_cancel_race():
         scheduler.yield_()
         with buffer._cond:
             buffer._stream_done = True
-            buffer._stream_error = CancelledError()
+            buffer._stream_error = io_cancellation_error()
         buffer.on_result(_recv_chunk(1, b"", more=False))
         scheduler.yield_()
         return [buffer.take_next(), buffer.take_next()]
@@ -1051,7 +1060,9 @@ def _pump_proactor(proactor: SelectorProactor | UringProactor, *operations: Oper
     return _wait_until_done(proactor, *operations)
 
 
-def _pump_until(proactor: SelectorProactor | UringProactor, predicate: Callable[[], bool], timeout: float = 1.0) -> None:
+def _pump_until(
+    proactor: SelectorProactor | UringProactor, predicate: Callable[[], bool], timeout: float = 1.0
+) -> None:
     if isinstance(proactor, UringProactor):
         _wait_for_uring(proactor, predicate, timeout)
         return
@@ -1092,8 +1103,7 @@ class TestOperation:
             assert operation.cancelled() is True
             assert operation.exception()
 
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -1129,20 +1139,20 @@ class TestOperation:
         seen: list[_RecvManySeen] = []
         operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
         assert operation._emit_result(1) is True
-        operation._finish(exception=CancelledError(), cancelled=True)
+        operation._finish(exception=io_cancellation_error(), cancelled=True)
         assert operation._emit_result(2) is False
         assert [delivery.value for delivery in seen] == [1]
 
     def test_operation_deliver_ignored_after_cancel(self) -> None:
         operation = Operation(kind="test")
-        operation._finish(exception=CancelledError(), cancelled=True)
+        operation._finish(exception=io_cancellation_error(), cancelled=True)
         operation.deliver(object(), result=None)
         assert operation.cancelled()
 
     def test_continuous_operation_emit_result_false_after_cancel(self) -> None:
         seen: list[_RecvManySeen] = []
         parent = ContinuousOperation(kind="test", result_callback=seen.append)
-        parent._finish(exception=CancelledError(), cancelled=True)
+        parent._finish(exception=io_cancellation_error(), cancelled=True)
         assert parent._emit_result(1) is False
         assert seen == []
 
@@ -1225,7 +1235,9 @@ class TestProactorContract:
             writer.close()
             proactor.close()
 
-    def test_send_can_complete_immediately(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+    def test_send_can_complete_immediately(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
         proactor = proactor_factory()
         reader, writer = socket.socketpair()
         try:
@@ -1310,7 +1322,9 @@ class TestProactorContract:
             receiver.close()
             proactor.close()
 
-    def test_operations_reject_closed_proactor(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+    def test_operations_reject_closed_proactor(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
         proactor = proactor_factory()
         reader, writer = socket.socketpair()
         try:
@@ -1324,6 +1338,7 @@ class TestProactorContract:
         finally:
             reader.close()
             writer.close()
+
 
 class TestSelectorProactor:
     def test_stat_completes_immediately_with_blocking_fstat(self):
@@ -1948,8 +1963,7 @@ class TestSelectorProactor:
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
             assert operation.cancelled() is True
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -3238,8 +3252,7 @@ class TestUringProactor:
             assert thread.is_alive() is False
             assert released.is_set()
             assert proactor.has_pending_operations() is False
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -3367,8 +3380,7 @@ class TestUringProactor:
             assert first.result() == b"first"
             assert len(proactor.ring.submitted_recv) == 1
             assert proactor.has_pending_operations() is False
-            with pytest.raises(CancelledError):
-                second.result()
+            _assert_io_cancelled(second)
         finally:
             reader.close()
             writer.close()
@@ -3394,8 +3406,7 @@ class TestUringProactor:
 
             assert operation.cancelled() is True
             assert proactor.has_pending_operations() is False
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -3903,7 +3914,7 @@ class TestUringProactor:
 
     def test_handoff_accept_many_closes_socket_when_parent_done(self) -> None:
         parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=object())
-        parent._finish(exception=CancelledError(), cancelled=True)
+        parent._finish(exception=io_cancellation_error(), cancelled=True)
         client, server = socket.socketpair()
         try:
             assert proactor_module._handoff_accept_many(parent, client) is False
@@ -4620,8 +4631,7 @@ class TestUringProactor:
 
             assert operation.cancelled() is True
             assert _recv_many_bytes(seen) == [(0, b"hello")]
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -4748,6 +4758,7 @@ class TestUringProactor:
                 os.fstat(leaked_fd)
         finally:
             proactor.close()
+
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 class TestProactorSchedulerIntegration:
@@ -4983,9 +4994,7 @@ class TestProactorScheduler:
         with pytest.raises(TypeError, match="abstract"):
             ProactorScheduler()
 
-    def test_default_proactor_factory_uses_uring_when_available(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_proactor_factory_uses_uring_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(uring_api, "is_available", lambda: True)
         monkeypatch.setattr(proactor_module, "_default_uring_ring_factory", _FakeUringRing)
         scheduler = SyncProactorScheduler()
@@ -5013,8 +5022,8 @@ class TestProactorScheduler:
             try:
                 assert len(proactor.ring.submitted_socket) == 1
                 _domain, submit_type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
-                expected_type = socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(
-                    socket, "SOCK_CLOEXEC", 0
+                expected_type = (
+                    socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
                 )
                 assert submit_type == expected_type
                 assert submit_flags == 0
@@ -5035,8 +5044,8 @@ class TestProactorScheduler:
                 assert len(proactor.ring.submitted_socket) == 1
                 domain, submit_type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
                 assert domain == socket.AF_UNIX
-                expected_type = socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(
-                    socket, "SOCK_CLOEXEC", 0
+                expected_type = (
+                    socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
                 )
                 assert submit_type == expected_type
                 assert submit_flags == 0

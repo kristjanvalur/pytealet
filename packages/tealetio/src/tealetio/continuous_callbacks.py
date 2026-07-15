@@ -7,9 +7,8 @@ import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
-from .operations import MultishotDelivery
+from .operations import MultishotDelivery, is_io_cancellation
 from .socket_helpers import abortive_close
-from .tasks import CancelledError
 
 T = TypeVar("T")
 
@@ -158,14 +157,14 @@ class LenientReorderBuffer:
 
 
 def is_cancellation_delivery(delivery: MultishotDelivery) -> bool:
-    """Return True when ``delivery`` ends a continuous op by cancellation.
+    """Return True when ``delivery`` ends a continuous op by IO cancellation.
 
-    Proactor cancel currently surfaces ``CancelledError``; backends may use
-    other terminal exceptions later. Accept and receive callbacks should treat
-    this as "no further chunks" rather than a transport failure.
+    Proactor cancel surfaces ``OSError(errno.ECANCELED)``. Accept and receive
+    callbacks should treat this as "no further chunks" rather than a transport
+    failure to surface to callers.
     """
 
-    return isinstance(delivery.exception, CancelledError)
+    return is_io_cancellation(delivery.exception)
 
 
 def wrap_accept_delivery(

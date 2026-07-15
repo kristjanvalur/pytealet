@@ -28,8 +28,14 @@ from .io_manager import (
     SupportsProactorIO,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket, socket_from_uring_fd
-from .operations import ContinuousOperation, ContinuousStepResult, MultishotDelivery, Operation, T_co
-from .tasks import CancelledError
+from .operations import (
+    ContinuousOperation,
+    ContinuousStepResult,
+    MultishotDelivery,
+    Operation,
+    T_co,
+    io_cancellation_error,
+)
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -692,13 +698,13 @@ class ProactorBase:
     def _terminalise_cancelled(self, operation: Operation[Any]) -> None:
         if operation.done():
             return
+        cancel_exc = io_cancellation_error()
         if isinstance(operation, ContinuousOperation):
             operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(CancelledError(), index=None),
-                cancelled=True,
+                _continuous_error_delivery(cancel_exc, index=None),
             )
             return
-        operation._finish(exception=CancelledError(), cancelled=True)
+        operation._finish(exception=cancel_exc, cancelled=True)
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         raise NotImplementedError
@@ -844,7 +850,6 @@ class _UringEntry:
         "active",
         "multishot_leg",
         "poll_remove",
-        "cancel_requested",
     )
 
     def __init__(
@@ -861,7 +866,6 @@ class _UringEntry:
         self.active = False
         self.multishot_leg = _MultishotLegState() if multishot else None
         self.poll_remove = poll_remove
-        self.cancel_requested = False
 
     def completions_to_process(
         self,
@@ -1887,27 +1891,6 @@ class UringProactor(ProactorBase):
         operation._uring_entry = entry
         return entry
 
-    def _uring_negative_completion_exception(self, entry: _UringEntry, res: int) -> BaseException:
-        if entry.cancel_requested and res < 0:
-            return CancelledError()
-        return _uring_cqe_oserror(res)
-
-    def _continuous_uring_terminal_delivery(
-        self,
-        entry: _UringEntry,
-        res: int,
-        *,
-        index: int | None,
-    ) -> MultishotDelivery:
-        if entry.cancel_requested and res < 0:
-            return _continuous_error_delivery(CancelledError(), index=None)
-        return _continuous_error_delivery(_uring_cqe_oserror(res), index=index)
-
-    def _recv_many_uring_terminal_delivery(self, entry: _UringEntry, *, index: int, res: int) -> MultishotDelivery:
-        if entry.cancel_requested and res < 0:
-            return _continuous_error_delivery(CancelledError(), index=None)
-        return _recv_many_error_delivery(index=index, res=res)
-
     def _terminalise_uring_cancel_target(self, cancel_target: object | None) -> None:
         if cancel_target is None:
             return
@@ -1932,7 +1915,6 @@ class UringProactor(ProactorBase):
                 self._deactivate_uring_entry(entry)
                 cancel_op = self._completed_cancel_operation("cancel", operation)
             elif entry.poll_remove:
-                entry.cancel_requested = True
                 immediate_terminalise = False
                 cancel_op = self._submit_cancel_op(
                     completion,
@@ -1940,7 +1922,6 @@ class UringProactor(ProactorBase):
                     submit=self._ring.submit_poll_remove,
                 )
             else:
-                entry.cancel_requested = True
                 immediate_terminalise = False
                 cancel_op = self._submit_cancel_op(
                     completion,
@@ -2342,7 +2323,10 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation.deliver(self, exception=self._uring_negative_completion_exception(entry, res))
+            operation.deliver(
+                self,
+                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
             return operation
         operation.deliver(self, result=None)
         return operation
@@ -2435,7 +2419,9 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._finish_with_terminal_delivery(self._continuous_uring_terminal_delivery(entry, res, index=0))
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(_uring_cqe_oserror(res)),
+            )
             return operation
         conn = socket_from_uring_fd(completion.res)
         _handoff_accept_many(operation, conn, more=False)
@@ -2808,9 +2794,7 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._finish_with_terminal_delivery(
-                self._recv_many_uring_terminal_delivery(entry, index=base_sequence, res=res)
-            )
+            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
             return operation
         operation._emit_result(
             self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
@@ -2830,9 +2814,7 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._finish_with_terminal_delivery(
-                self._recv_many_uring_terminal_delivery(entry, index=base_sequence, res=res)
-            )
+            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
             return operation
         if res == 0:
             payload = completion.result
@@ -2919,7 +2901,9 @@ class UringProactor(ProactorBase):
         index = next_index[0]
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._finish_with_terminal_delivery(self._continuous_uring_terminal_delivery(entry, res, index=index))
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
+            )
             return operation
         operation._emit_result(res, more=True, index=index)
         next_index[0] += 1
@@ -2934,7 +2918,9 @@ class UringProactor(ProactorBase):
         index = int(completion.sequence)
         if res < 0:
             self._deactivate_uring_entry(entry)
-            operation._finish_with_terminal_delivery(self._continuous_uring_terminal_delivery(entry, res, index=index))
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
+            )
             return operation
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         operation._emit_result(res, more=more, index=index)
@@ -2960,9 +2946,7 @@ class UringProactor(ProactorBase):
                 self._deactivate_uring_entry(entry)
                 return operation
             self._deactivate_uring_entry(entry)
-            operation._finish_with_terminal_delivery(
-                self._recv_many_uring_terminal_delivery(entry, index=index, res=res)
-            )
+            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=index, res=res))
             return operation
 
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
@@ -3174,7 +3158,10 @@ class UringProactor(ProactorBase):
         if entry.operation.done():
             return entry.operation
         if res < 0:
-            entry.operation.deliver(self, exception=self._uring_negative_completion_exception(entry, res))
+            entry.operation.deliver(
+                self,
+                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
             return entry.operation
         return entry.complete(entry, completion)
 

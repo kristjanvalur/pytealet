@@ -10,6 +10,7 @@ from typing import Any, Literal, cast, overload
 from ..continuous_callbacks import AcceptStreamsDelivery as AcceptedStreams
 from ..io_manager import ProactorIOManager, ServerIO, SocketIO
 from ..scheduler import BaseScheduler
+from ..operations import is_io_cancellation
 from ..tasks import CancelledError, Task, get_current
 from .common import require_proactor_io, resolve_scheduler
 from .open import (
@@ -235,7 +236,13 @@ class StreamServer:
                     ).wait()
                 except CancelledError:
                     return
-                except (OSError, RuntimeError):
+                except OSError as exc:
+                    if is_io_cancellation(exc):
+                        return
+                    if self._closed:
+                        return
+                    raise
+                except RuntimeError:
                     if self._closed:
                         return
                     raise

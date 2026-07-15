@@ -10,7 +10,9 @@ from tealetio.operations import Operation
 from tealetio.proactor import SyncProactorScheduler
 from tealetio.scheduler import set_scheduler
 from tealetio.io_buffers import SendBuffer
-from tealetio.tasks import CancelledError
+import errno
+
+from tealetio.operations import io_cancellation_error, is_io_cancellation
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 
 
@@ -390,13 +392,15 @@ class TestSendBuffer:
 
             def sender() -> None:
                 send_buffer.write(b"hello")
-                pending._finish(exception=CancelledError(), cancelled=True)
+                pending._finish(exception=io_cancellation_error(), cancelled=True)
                 send_buffer.flush()
 
-            with pytest.raises(CancelledError):
+            with pytest.raises(OSError) as exc_info:
                 scheduler.run_until_complete(scheduler.spawn(sender))
-            with pytest.raises(CancelledError):
+            assert exc_info.value.errno == errno.ECANCELED
+            with pytest.raises(OSError) as exc_info:
                 send_buffer.write(b"again")
+            assert exc_info.value.errno == errno.ECANCELED
         finally:
             scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
             reader.close()

@@ -12,7 +12,7 @@ from typing import Any, Callable, NoReturn, cast
 
 from .locks import Event
 from .operations import ContinuousOperation, MultishotDelivery, Operation
-from .tasks import CancelledError
+from .operations import io_cancellation_error
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
@@ -323,7 +323,7 @@ class SelectorMixin:
             teardown._finish(result=None)
 
         if not operation.done():
-            operation._finish(exception=CancelledError(), cancelled=True)
+            operation._finish(exception=io_cancellation_error(), cancelled=True)
         return teardown
 
     def poll(self, fd: int, mask: int) -> int:
