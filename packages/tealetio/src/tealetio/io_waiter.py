@@ -75,11 +75,12 @@ class IOWaiter(Generic[T]):
 
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
     parking timeout) routes cancellation through
-    ``ProactorIOManager._cancel_operation(...).forget()``: the target is
-    terminalised immediately, but any async ring cancel / poll_remove teardown leg
-    is not awaited. ``has_pending_operations()`` may stay true briefly on
-    ``UringProactor`` until those CQEs complete; pump the proactor or ``wait()``
-    on the teardown operation when ring quiescence matters.
+    ``ProactorIOManager._cancel_operation(...).forget()``: selector backends
+    terminalise the target immediately; on ``UringProactor`` the target usually
+    finishes from ring CQEs (target ``ECANCELED``, ``poll_remove``, or cancel-op
+    fallback) while the teardown leg is not awaited. ``has_pending_operations()``
+    may stay true briefly until those CQEs complete; pump the proactor or
+    ``wait()`` on the teardown operation when ring quiescence matters.
 
     For ``accept_many`` / ``poll_many``, ``wait()`` ends when the underlying
     accept or poll **stream** finishes, not when accept-time ``recv`` legs or

@@ -3385,13 +3385,14 @@ class TestUringProactor:
             proactor.ring.fail_next_cancel = True
             proactor.cancel(operation)
 
-            assert operation.cancelled() is True
+            assert operation.cancelled() is False
+            assert operation.done() is False
             assert proactor.ring.submitted_cancel == []
             assert proactor.has_pending_operations() is True
 
-            proactor.ring.complete_recv(b"hello")
+            proactor.ring.complete_recv_error(-errno.ECANCELED)
 
-            assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
+            assert operation.cancelled() is True
             assert proactor.has_pending_operations() is False
             with pytest.raises(CancelledError):
                 operation.result()

@@ -142,7 +142,7 @@ class Operation(Generic[T]):
             if self._done:
                 return
         if exception is not None:
-            self._finish(exception=exception)
+            self._finish(exception=exception, cancelled=isinstance(exception, CancelledError))
         else:
             self._finish(result=cast(T, result))
 
