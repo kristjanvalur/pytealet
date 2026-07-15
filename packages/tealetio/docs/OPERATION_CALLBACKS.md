@@ -161,12 +161,12 @@ immediately after teardown is requested. Continuous ops emit a terminal
 the reorder buffer may deliver cancel before straggler legs still in flight).
 
 On **uring**, armed recv/accept (and similar) legs use `submit_cancel`; the
-target normally finishes from its own CQE with ``OSError(ECANCELED)``. The
-cancel-op CQE completes the teardown ``Operation[None]``; if the target is still
-pending when the ack arrives (for example the ack batch precedes the target
-``-ECANCELED`` CQE, or the kernel never delivers one), ``_complete_uring_cancel_target``
-falls back to ``_terminalise_cancelled()`` before dropping leg state — same pattern
-as ``poll_remove``.
+target finishes only from its own CQE, usually ``OSError(ECANCELED)``. The
+cancel-op CQE completes only the teardown ``Operation[None]`` so callers can
+``iomanager.cancel(...).wait()`` if they want; it does not terminalise or
+otherwise complete the target. Cancel may lose the race to an in-flight success
+CQE; the target may never surface ``ECANCELED`` if the kernel already completed
+it.
 
 Multishot ``poll_many`` uses ``submit_poll_remove()`` (not ``submit_cancel``).
 The ``COMPLETION_KIND_POLL_REMOVE`` completion ends the continuous poll op.

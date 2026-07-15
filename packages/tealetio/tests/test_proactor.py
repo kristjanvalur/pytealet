@@ -3224,37 +3224,7 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_cancel_ack_before_target_ecanceled_in_split_batches(self):
-        proactor = UringProactor(ring_factory=_DeferredUringRing)
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
-            assert isinstance(proactor.ring, _DeferredUringRing)
-            target_completion = proactor.ring.pending_recv[-1]
-            entry = cast(proactor_module._UringEntry, target_completion.user_data)
-
-            proactor._complete_uring_cancel_target(target_completion)
-            _assert_io_cancelled(operation)
-            assert proactor.has_pending_operations() is False
-
-            canceled_completion = SimpleNamespace(
-                user_data=entry,
-                kind=uring_api.COMPLETION_KIND_RECV,
-                res=-errno.ECANCELED,
-                flags=0,
-                result=None,
-                multishot=False,
-            )
-            proactor._deliver_uring_completion([canceled_completion])
-            _assert_io_cancelled(operation)
-            assert proactor.has_pending_operations() is False
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_cancel_ack_before_target_ecanceled_via_deferred_ring(self):
+    def test_cancel_ack_only_completes_teardown_target_waits_for_ecanceled(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -3264,8 +3234,9 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _DeferredUringRing)
             assert teardown is not None
             assert teardown.done() is True
-            _assert_io_cancelled(operation)
-            assert proactor.has_pending_operations() is False
+            assert operation.done() is False
+            assert operation.cancelled() is False
+            assert proactor.has_pending_operations() is True
             assert proactor.ring.pending_cancel_target
 
             proactor.ring.complete_cancel_target()
@@ -3328,12 +3299,12 @@ class TestUringProactor:
             assert teardown is not None
             assert teardown.kind == "cancel"
             assert teardown.done() is True
-            assert operation.cancelled() is True
+            assert operation.done() is False
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
-            assert proactor.has_pending_operations() is False
+            assert proactor.has_pending_operations() is True
 
             assert isinstance(proactor.ring, _DeferredUringRing)
-            proactor.ring.complete_recv()
+            proactor.ring.complete_cancel_target()
             assert proactor.has_pending_operations() is False
             _assert_io_cancelled(operation)
         finally:
