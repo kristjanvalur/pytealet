@@ -46,32 +46,45 @@ disposition (see below).
 
 | Entry point | Composition |
 |-------------|---------------|
-| `accept_many(sock, callback, recv_size=…)` | worker-thread deliveries marshalled once onto the scheduler via `marshal_to_scheduler`, reordered with `TerminalReorderBuffer`, then optional accept-time `recv` and `callback((conn, initial_data))` |
-| `accept_many_streams(…)` | same marshal + `TerminalReorderBuffer` path; `_open_streams` / ``recv_many`` arm and user `callback((reader, writer))` all run on the scheduler thread |
-| `poll_many(fd, mask, callback)` | same marshal + `TerminalReorderBuffer` path; user `callback` and `finish_operation` on the scheduler thread inside an `IOWaiter` |
-| `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer` over `proactor.recv_many` chunks |
+| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `TerminalReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
+| `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; user `callback` and `finish_operation` run on the scheduler thread |
+| `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `TerminalReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` |
+| `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer` over `proactor.recv_many` chunks (not composed through `accept_many`) |
+
+Worker-thread accept composition mutates the proactor delivery before the
+scheduler sees it. Reorder, `finish_operation`, and user callbacks always run on
+the scheduler thread via `_thread_reorder_helper` (one `call_soon_threadsafe` hop
+per posted leg, with `immediate=True` when already on the owner thread).
 
 Accept-time pre-read wiring (when `recv_size` is set):
 
 ```text
-proactor.accept_many(sock, on_conn)
+proactor.accept_many(sock, on_worker_delivery)     # worker thread
         │
-        ▼  each accept
-proactor.recv(conn, recv_size)     # independent one-shot Operation
+        ▼  each accept (socket, index, more, …)
+proactor.recv(conn, recv_size)                     # worker; independent one-shot Operation
         │
-        ▼  recv done callback
-marshal → deliver_wrapped → user callback
+        ▼  recv done callback (worker)
+post merged MultishotDelivery(index unchanged, value=(conn, data) or recv error)
+        │
+        ▼  marshal (one hop)
+TerminalReorderBuffer → deliver_wrapped → user callback → finish_operation   # scheduler
 ```
 
-`on_conn` registers `recv_op.add_done_callback(on_recv_complete)`; there is no
-parent/child link on `Operation`. A cancelled recv closes the connection with
-`abortive_close` and does not invoke the user callback.
+Without `recv_size`, the worker posts `(conn, None, None)` in `value` after the
+bare socket accept. Terminals (cancel, EOF, transport errors) post through
+unchanged; reorder and `finish_continuous_delivery` still run on the scheduler.
+
+`recv_op.add_done_callback(on_recv_complete)` registers preread completion; there
+is no parent/child link on `Operation`. A cancelled recv closes the connection
+with `abortive_close` and does not post to the scheduler or invoke the user
+callback.
 
 Helpers in `continuous_callbacks.py` support this layer:
 
-- `ReorderBuffer` / `TerminalReorderBuffer` — index-ordered delivery before owner-thread handlers (`RecvIterBuffer` uses full reorder; accept/poll defer only out-of-order terminals)
+- `ReorderBuffer` / `TerminalReorderBuffer` — index-ordered delivery on the scheduler thread (`RecvIterBuffer` uses full reorder; accept/poll defer only out-of-order terminals)
 - `finish_continuous_delivery` — call `finish_operation` on terminal deliveries
-- `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (used by `ProactorIOManager._thread_reorder_helper`, `RecvIterBuffer`, and `start_server` paths)
+- `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_reorder_helper` uses the same `immediate=True` marshal internally
 - `normalize_accept_recv_size` — cap and validate `recv_size`
 - `finalize_accept_recv_error` — optional `on_recv_error` hook, then close
 - `wrap_accept_delivery` — adapt tuple delivery to bare-socket proactor callbacks
@@ -107,9 +120,9 @@ have lost interest:
   so ``CancelledError`` runs cleanup that sets `_closed` and closes listeners.
   In-flight handler tealets keep running until they finish.
 
-The io_manager marshals accept deliveries onto the scheduler thread but does not
-enforce server shutdown policy — `StreamServer` (or any custom `accept_many`
-callback) implements that.
+The io_manager posts merged accept legs onto the scheduler thread (after worker
+mutation when applicable) but does not enforce server shutdown policy —
+`StreamServer` (or any custom `accept_many` callback) implements that.
 
 Similarly, `IOWaitGroup` discards late `finish()` results after an interrupted
 `wait()` sets `_closed` (for example `abortive_close` on a socket). That is
