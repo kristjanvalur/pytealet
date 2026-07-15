@@ -37,6 +37,7 @@ from asynkit import syncmethod as _syncmethod
 import _tealet
 import tealet
 
+from .wakeup import yield_after_break_wait_wakeup
 from .locks import (
     Event,
     Queue,
@@ -2040,9 +2041,11 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
 
     def _break_wait_threadsafe(self) -> None:
         self._wakeup.set()
+        yield_after_break_wait_wakeup()
 
     def _break_wait(self) -> None:
         self._wakeup.set()
+        yield_after_break_wait_wakeup()
 
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()

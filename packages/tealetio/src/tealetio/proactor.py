@@ -33,6 +33,7 @@ from .socket_helpers import (
     is_soft_accept_error as _is_soft_accept_error,
     socket_from_uring_fd,
 )
+from .wakeup import yield_after_break_wait_wakeup
 from .operations import (
     ContinuousOperation,
     ContinuousStepResult,
@@ -1414,6 +1415,7 @@ class SelectorProactor(ProactorBase):
 
         self._wake_selector()
         self._run_async_break()
+        yield_after_break_wait_wakeup()
 
     def _wake_selector(self) -> None:
         """Wake a thread blocked in the selector."""
@@ -2128,6 +2130,7 @@ class ThreadedSelectorProactor(SelectorProactor):
         """Wake a thread blocked in `wait`."""
 
         self._completed_wait.wakeup()
+        yield_after_break_wait_wakeup()
 
     def _after_selector_registration_changed(self) -> None:
         self._wake_selector()
@@ -2580,6 +2583,7 @@ class UringProactor(ProactorBase):
             self._ring.break_wait()
         except (OSError, RuntimeError, ValueError):
             pass
+        yield_after_break_wait_wakeup()
 
     def _wait_inline(self, deadline: float | None = None) -> None:
         """Block in ``ring.wait``; delivery runs via the registered ring callback.
