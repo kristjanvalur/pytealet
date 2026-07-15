@@ -59,6 +59,39 @@ def finish_continuous_delivery(delivery: MultishotDelivery) -> None:
         operation.finish_operation(delivery)
 
 
+class ContinuousLegFinishGate:
+    """Defer ``finish_operation`` until all lower leg indices have been delivered.
+
+    Multishot ``accept_many`` (and similar indexed legs) may deliver a terminal
+    chunk before earlier indices arrive. Call ``note_delivery`` for each
+    ``MultishotDelivery``; the gate finishes only once every index below the
+    pending terminal index has been seen.
+    """
+
+    def __init__(self) -> None:
+        self._pending_terminal: MultishotDelivery | None = None
+        self._seen_indices: set[int] = set()
+
+    def note_delivery(self, delivery: MultishotDelivery) -> None:
+        if delivery.more:
+            self._seen_indices.add(delivery.index)
+            self._try_finish()
+            return
+        if is_cancellation_delivery(delivery) or delivery.exception is not None:
+            finish_continuous_delivery(delivery)
+            return
+        self._pending_terminal = delivery
+        self._try_finish()
+
+    def _try_finish(self) -> None:
+        delivery = self._pending_terminal
+        if delivery is None:
+            return
+        if all(i in self._seen_indices for i in range(delivery.index)):
+            finish_continuous_delivery(delivery)
+            self._pending_terminal = None
+
+
 def is_cancellation_delivery(delivery: MultishotDelivery) -> bool:
     """Return True when ``delivery`` ends a continuous op by cancellation.
 

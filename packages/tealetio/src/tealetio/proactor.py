@@ -132,8 +132,8 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
     )
 
 
-def _continuous_error_delivery(exc: BaseException) -> MultishotDelivery:
-    return MultishotDelivery(exception=exc, more=False)
+def _continuous_error_delivery(exc: BaseException, *, index: int = 0) -> MultishotDelivery:
+    return MultishotDelivery(index=index, exception=exc, more=False)
 
 
 def _spawn_accept_many_operation(
@@ -207,10 +207,11 @@ def _handoff_accept_many(
     conn: socket.socket,
     *,
     more: bool = True,
+    index: int = 0,
 ) -> bool:
     """Emit one accepted connection or close the socket when the parent is done."""
 
-    if parent._emit_result(conn, more=more):
+    if parent._emit_result(conn, more=more, index=index):
         return True
     abortive_close(conn)
     return False
@@ -2423,7 +2424,7 @@ class UringProactor(ProactorBase):
         if operation.done():
             abortive_close(conn)
         else:
-            _handoff_accept_many(operation, conn, more=more)
+            _handoff_accept_many(operation, conn, more=more, index=int(completion.sequence))
         if not more:
             self._deactivate_uring_entry(entry)
             accept_entry_ref[0] = None

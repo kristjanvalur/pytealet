@@ -76,6 +76,22 @@ def test_wrap_continuous_delivery_finishes_only_on_terminal() -> None:
     assert wakes == ["wake"]
 
 
+def test_continuous_leg_finish_gate_defers_terminal_until_stragglers() -> None:
+    from tealetio.continuous_callbacks import ContinuousLegFinishGate
+
+    operation = ContinuousOperation(kind="accept_many", fileobj=object())
+    gate = ContinuousLegFinishGate()
+
+    gate.note_delivery(MultishotDelivery(index=2, value="terminal", more=False, operation=operation))
+    assert not operation.done()
+
+    gate.note_delivery(MultishotDelivery(index=0, value="a", more=True, operation=operation))
+    assert not operation.done()
+
+    gate.note_delivery(MultishotDelivery(index=1, value="b", more=True, operation=operation))
+    assert operation.done()
+
+
 def test_finish_operation_is_idempotent_when_already_done() -> None:
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
     wakes: list[str] = []

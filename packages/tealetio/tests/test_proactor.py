@@ -255,13 +255,14 @@ def _append_poll_value(seen: list[int]) -> Callable[[MultishotDelivery], None]:
 
 
 def _append_accept_socket(accepted: list[socket.socket]) -> Callable[[MultishotDelivery], None]:
+    from tealetio.continuous_callbacks import ContinuousLegFinishGate
+
+    finish_gate = ContinuousLegFinishGate()
+
     def collect(delivery: MultishotDelivery) -> None:
         if delivery.value is not None:
             accepted.append(delivery.value)
-        if not delivery.more:
-            from tealetio.continuous_callbacks import finish_continuous_delivery
-
-            finish_continuous_delivery(delivery)
+        finish_gate.note_delivery(delivery)
 
     return collect
 
@@ -3920,6 +3921,26 @@ class TestUringProactor:
 
             assert accepted[0].getblocking() is False
             assert os.get_inheritable(accepted[0].fileno()) is False
+        finally:
+            for conn in accepted:
+                conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_delivers_terminal_before_stragglers(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[socket.socket] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            ring = proactor.ring
+            ring.complete_accept_multishot("peer-terminal", more=False, sequence=2)
+            assert operation.done() is False
+            ring.complete_accept_multishot("peer-0", more=True, sequence=0)
+            ring.complete_accept_multishot("peer-1", more=True, sequence=1)
+            assert operation.done() is True
+            assert len(accepted) == 3
         finally:
             for conn in accepted:
                 conn.close()
