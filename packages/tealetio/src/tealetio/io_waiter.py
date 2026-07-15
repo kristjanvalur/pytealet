@@ -77,8 +77,9 @@ class IOWaiter(Generic[T]):
     parking timeout) routes cancellation through
     ``ProactorIOManager._cancel_operation(...).forget()``: selector backends
     terminalise the target immediately; on ``UringProactor`` the target usually
-    finishes from ring CQEs (target ``ECANCELED``, ``poll_remove``, or cancel-op
-    fallback) while the teardown leg is not awaited. ``has_pending_operations()``
+    finishes from ring CQEs (target ``ECANCELED`` on recv/accept, or
+    ``poll_remove`` for multishot ``poll_many``) while the teardown leg is not
+    awaited. ``has_pending_operations()``
     may stay true briefly until those CQEs complete; pump the proactor or
     ``wait()`` on the teardown operation when ring quiescence matters.
 

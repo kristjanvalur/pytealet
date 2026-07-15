@@ -661,6 +661,17 @@ class _FakeUringRing:
             user_data = completion
         cancel_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
         cancel_completion.cancel_target = completion
+        target_entry = completion.user_data
+        if not getattr(target_entry, "poll_remove", False) and getattr(
+            getattr(target_entry, "operation", None), "kind", None
+        ) != "poll_many":
+            canceled = self._completion(
+                target_entry,
+                kind=getattr(completion, "kind", uring_api.COMPLETION_KIND_RECV),
+                res=-errno.ECANCELED,
+                result=None,
+            )
+            self._deliver(canceled)
         self._deliver(cancel_completion)
         return cancel_completion
 

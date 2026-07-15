@@ -159,15 +159,15 @@ immediately after teardown is requested. Continuous ops emit a terminal
 `MultishotDelivery` with ``OSError(ECANCELED)`` and `index=None` (best-effort:
 the reorder buffer may deliver cancel before straggler legs still in flight).
 
-On **uring**, `UringProactor.cancel()` submits `submit_cancel` or
-`poll_remove` when the target leg is already armed and returns without
-synchronously terminalising the target. The cancel terminal is delivered from
-ring completions instead:
+On **uring**, armed recv/accept (and similar) legs use `submit_cancel`; the
+target finishes from its own CQE, usually ``OSError(ECANCELED)``. The cancel-op
+CQE only completes the teardown ``Operation[None]`` and drops the target leg
+state — it does not synthetic-terminalise the target.
 
-- target handle: terminal CQE with `res < 0` (often `ECANCELED`) as ``OSError``;
-- `poll_remove` completion for multishot `poll_many`;
-- cancel-op completion as a fallback when the target is still active but no
-  further target CQE arrives.
+Multishot ``poll_many`` uses ``submit_poll_remove()`` (not ``submit_cancel``).
+The ``COMPLETION_KIND_POLL_REMOVE`` completion ends the continuous poll op.
+One-shot ``poll_many`` fallback stops locally without ring cancel on the pending
+poll SQE.
 
 This matches io_uring semantics: cancel and success can race; a successful target
 CQE that arrives before teardown settles completes normally. Selector and emulated

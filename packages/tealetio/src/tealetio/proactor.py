@@ -1891,17 +1891,39 @@ class UringProactor(ProactorBase):
         operation._uring_entry = entry
         return entry
 
-    def _complete_uring_cancel_target(self, cancel_target: object | None) -> None:
+    def _complete_uring_poll_remove(self, poll_target: object | None) -> None:
+        """Finish a multishot ``poll_many`` op when ``submit_poll_remove`` completes."""
+
+        if poll_target is None:
+            return
+        poll_entry = getattr(poll_target, "user_data", None)
+        if not isinstance(poll_entry, _UringEntry):
+            return
+        operation = poll_entry.operation
+        if not operation.done():
+            self._terminalise_cancelled(operation)
+        if poll_entry.active:
+            self._deactivate_uring_entry(poll_entry)
+
+    def _deactivate_uring_cancel_target(self, cancel_target: object | None) -> None:
+        """Drop a cancelled target leg once the ring cancel ack completes."""
+
         if cancel_target is None:
             return
         target_entry = getattr(cancel_target, "user_data", None)
-        if not isinstance(target_entry, _UringEntry):
-            return
-        operation = target_entry.operation
-        if not operation.done():
-            self._terminalise_cancelled(operation)
-        if target_entry.active:
+        if isinstance(target_entry, _UringEntry) and target_entry.active:
             self._deactivate_uring_entry(target_entry)
+
+    def _stop_uring_poll_many_oneshot(self, entry: _UringEntry) -> None:
+        """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll."""
+
+        self._cancel_deferred_operation(entry.operation)
+        if entry.active:
+            self._deactivate_uring_entry(entry)
+        else:
+            entry.completion = None
+            if entry.operation._uring_entry is entry:
+                entry.operation._uring_entry = None
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         if operation.done():
@@ -1922,6 +1944,9 @@ class UringProactor(ProactorBase):
                     kind="poll_remove",
                     submit=self._ring.submit_poll_remove,
                 )
+            elif operation.kind == "poll_many":
+                self._stop_uring_poll_many_oneshot(entry)
+                cancel_op = self._completed_cancel_operation("poll_remove", operation)
             else:
                 immediate_terminalise = False
                 cancel_op = self._submit_cancel_op(
@@ -3013,7 +3038,10 @@ class UringProactor(ProactorBase):
             result = self._complete_uring_operation(completion)
             if result is not None:
                 completed_operation = result
-            self._complete_uring_cancel_target(completion.cancel_target)
+            if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
+                self._complete_uring_poll_remove(completion.cancel_target)
+            else:
+                self._deactivate_uring_cancel_target(completion.cancel_target)
         self._retry_deferred_submissions()
         if completed_operation is not None:
             self._notify_completed()

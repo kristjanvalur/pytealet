@@ -3803,17 +3803,16 @@ class TestUringProactor:
             assert operation._uring_entry is not None
             assert operation._uring_entry.operation is operation
 
-            pending = proactor.ring.pending_poll_oneshot[-1]
             teardown = proactor.cancel(operation)
-            _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
+            assert proactor.ring.submitted_cancel == []
             assert operation.cancelled() is True
-            assert teardown.kind == "cancel"
+            assert teardown.kind == "poll_remove"
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_cancel_uses_cancel_in_oneshot_fallback(self, monkeypatch):
+    def test_poll_many_oneshot_stop_does_not_submit_ring_cancel(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -3821,13 +3820,12 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
-            pending = proactor.ring.pending_poll_oneshot[-1]
             teardown = proactor.cancel(operation)
-            _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
+            assert proactor.ring.submitted_cancel == []
             assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
             assert teardown is not None
-            assert teardown.kind == "cancel"
+            assert teardown.kind == "poll_remove"
             assert teardown.done() is True
         finally:
             reader.close()

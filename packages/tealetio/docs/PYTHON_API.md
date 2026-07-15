@@ -200,8 +200,8 @@ started from accept callbacks; discard late deliveries after shutdown (as
 
 When `IORING_POLL_MULTISHOT` is unavailable, `UringProactor.poll_many()` falls
 back to repeated one-shot `submit_poll()` after each readiness event.
-Multishot cancel uses `submit_poll_remove()`; the oneshot fallback cancels the
-pending SQE like other degraded `*many` paths.
+Multishot stop uses `submit_poll_remove()`; the oneshot fallback stops locally
+without `submit_cancel()` on the pending poll SQE.
 
 `UringProactor.capabilities` exposes the `uring_api.probe(entries=...,
 flags=...)` result captured once at construction, so callers and the proactor
