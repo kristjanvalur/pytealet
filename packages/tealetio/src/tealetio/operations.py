@@ -20,7 +20,7 @@ _ProactorRef = Any
 class MultishotDelivery(NamedTuple):
     """One multishot leg delivery to a continuous operation callback.
 
-    ``(index, value, exception, more)``. For ``recv_many``, ``index`` is the
+    ``(index, value, exception, more, operation)``. For ``recv_many``, ``index`` is the
     stream ordinal from the backend (``completion.sequence`` on uring, seeded by
     ``base_sequence`` at submit); otherwise zero for informational use on
     ``accept_many`` and ``poll_many``. ``value`` carries successful chunk data
@@ -38,6 +38,7 @@ class MultishotDelivery(NamedTuple):
     value: Any = None
     exception: BaseException | None = None
     more: bool = True
+    operation: "ContinuousOperation[Any] | None" = None
 
 
 @dataclass
@@ -176,6 +177,11 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     thread affinity must marshal from the callback into the desired thread or
     event loop themselves.
 
+    Owner-thread multishot delivery handlers (for example ``poll_many`` and
+    ``accept_many`` in ``ProactorIOManager``) must call ``finish_operation`` on
+    terminal deliveries (``not delivery.more``) so ``add_done_callback``
+    waiters observe completion on the scheduler thread.
+
     Callbacks that submit nested ``Operation`` objects must not block waiting on
     them. Delivery-spawned work is independent of the parent continuous op.
     """
@@ -189,6 +195,24 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         super().__init__(kind, fileobj)
         self._result_callback = result_callback
 
+    def finish_operation(self, delivery: MultishotDelivery) -> None:
+        """Finish the operation from one terminal owner-thread delivery.
+
+        Multishot delivery callbacks that marshal onto the scheduler must call
+        this when ``not delivery.more``. When the proactor already finished
+        the operation (for example via ``_finish_with_terminal_delivery`` on a
+        worker thread), this only asserts terminal state and completion.
+        """
+
+        assert not delivery.more
+        if not self._done:
+            exc = delivery.exception
+            if exc is not None:
+                self._finish(exception=exc)
+            else:
+                self._finish(result=None)
+        assert self._done
+
     def _emit_delivery(self, delivery: MultishotDelivery) -> bool:
         """Deliver one multishot chunk when the operation is still active."""
 
@@ -197,7 +221,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
                 return False
             callback = self._result_callback
         if callback is not None:
-            callback(delivery)
+            callback(delivery._replace(operation=self))
         with self._lock:
             return not self._done
 
@@ -234,4 +258,4 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         else:
             self._finish(result=None, cancelled=cancelled)
         if callback is not None:
-            callback(delivery)
+            callback(delivery._replace(operation=self))

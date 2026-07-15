@@ -47,6 +47,18 @@ def _eager_accept_conn() -> socket.socket:
     return conn
 
 
+def _eager_accept_arm(
+    sock: socket.socket,
+    callback: Any,
+    conn: socket.socket | None = None,
+    *,
+    more: bool = True,
+) -> ContinuousOperation[Any]:
+    operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+    operation._emit_result(conn if conn is not None else _eager_accept_conn(), more=more)
+    return operation
+
+
 class _MockProactor:
     def __init__(self, *, recv_result: bytes = b"mock") -> None:
         self._recv_result = recv_result
@@ -256,11 +268,9 @@ class TestProactorIOManagerAcceptMany:
     def test_accept_many_recv_size_submits_recv_from_io_manager_callback(self) -> None:
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                conn, peer = socket.socketpair()
+                peer.close()
+                return _eager_accept_arm(sock, callback, conn)
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
         proactor = _EagerAcceptProactor(recv_result=b"peek")
@@ -334,11 +344,9 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_PendingRecvProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                conn, peer = socket.socketpair()
+                peer.close()
+                return _eager_accept_arm(sock, callback, conn)
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
         proactor = _EagerAcceptProactor()
@@ -376,11 +384,9 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                conn, peer = socket.socketpair()
+                peer.close()
+                return _eager_accept_arm(sock, callback, conn)
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
         proactor = _EagerAcceptProactor(recv_result=b"peek")
@@ -415,11 +421,9 @@ class TestProactorIOManagerAcceptMany:
     def test_accept_many_recv_timeout_cancelled_when_recv_completes(self) -> None:
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                conn, peer = socket.socketpair()
+                peer.close()
+                return _eager_accept_arm(sock, callback, conn)
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
         proactor = _EagerAcceptProactor(recv_result=b"peek")
@@ -447,11 +451,9 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                conn, peer = socket.socketpair()
+                peer.close()
+                return _eager_accept_arm(sock, callback, conn)
 
             def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
                 operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
@@ -480,12 +482,10 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn, peer = socket.socketpair()
-                    peer.close()
-                    closed.append(conn)
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                conn, peer = socket.socketpair()
+                peer.close()
+                closed.append(conn)
+                return _eager_accept_arm(sock, callback, conn)
 
             def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
                 operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
@@ -510,9 +510,7 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    callback(MultishotDelivery(value=_eager_accept_conn()))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                return _eager_accept_arm(sock, callback)
 
         scheduler = StubScheduler()
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
@@ -530,9 +528,7 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    callback(MultishotDelivery(value=_eager_accept_conn()))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                return _eager_accept_arm(sock, callback)
 
         scheduler = StubScheduler()
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
@@ -553,9 +549,7 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    callback(MultishotDelivery(value=_eager_accept_conn()))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                return _eager_accept_arm(sock, callback)
 
             def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
                 operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
@@ -590,9 +584,7 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    callback(MultishotDelivery(value=_eager_accept_conn()))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                return _eager_accept_arm(sock, callback)
 
         proactor = _EagerAcceptProactor()
         scheduler = _QueueingScheduler()
@@ -615,11 +607,9 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn = _eager_accept_conn()
-                    accepted.append(conn)
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                conn = _eager_accept_conn()
+                accepted.append(conn)
+                return _eager_accept_arm(sock, callback, conn)
 
         def boom(_io: Any, _sock: socket.socket, **kwargs: Any) -> tuple[Any, Any]:
             raise ValueError("stream failed")
@@ -644,11 +634,9 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None):
-                if callback is not None:
-                    conn = _eager_accept_conn()
-                    accepted.append(conn)
-                    callback(MultishotDelivery(value=conn))
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                conn = _eager_accept_conn()
+                accepted.append(conn)
+                return _eager_accept_arm(sock, callback, conn)
 
         io = ProactorIOManager(_ShutdownScheduler(), _EagerAcceptProactor())  # type: ignore[arg-type]
         server = socket.socket()
