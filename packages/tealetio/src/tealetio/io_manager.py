@@ -38,6 +38,7 @@ from .operations import (
     SupportsOperation,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket
+from .stream_diag import accept_marshal, accept_scheduler, accept_streams_opened, accept_worker_conn
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -1397,6 +1398,10 @@ class ProactorIOManager:
                 finish_continuous_delivery(delivery)
                 return
 
+            reader, writer = delivery.value
+            sock = writer.get_extra_info("socket")
+            if sock is not None:
+                accept_scheduler(sock.fileno())
             try:
                 deliver_streams(delivery.value)
             finally:
@@ -1419,12 +1424,16 @@ class ProactorIOManager:
                 on_thread_delivery(delivery)
                 return
 
+            fd = conn.fileno()
+            accept_worker_conn(fd)
             try:
                 streams = open_and_deliver(conn)
             except BaseException as exc:
                 on_thread_delivery(delivery._replace(value=None, exception=exc))
                 return
 
+            accept_streams_opened(fd)
+            accept_marshal(fd)
             on_thread_delivery(delivery._replace(value=streams))
 
         # Happy path drain only; OSError → arm continuous (same as accept_many).

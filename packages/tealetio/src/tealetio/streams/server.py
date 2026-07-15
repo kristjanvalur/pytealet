@@ -11,6 +11,7 @@ from ..continuous_callbacks import AcceptStreamsDelivery as AcceptedStreams
 from ..io_manager import ProactorIOManager, ServerIO, SocketIO
 from ..scheduler import BaseScheduler
 from ..operations import is_io_cancellation
+from ..stream_diag import accept_spawn
 from ..tasks import CancelledError, Task, get_current
 from .common import require_proactor_io, resolve_scheduler
 from .open import (
@@ -263,6 +264,9 @@ class StreamServer:
             return
 
         reader, writer = streams
+        sock = writer.get_extra_info("socket")
+        if sock is not None:
+            accept_spawn(sock.fileno())
         client_handler = self._client_handler
         assert client_handler is not None
         async_ = self._accept_async

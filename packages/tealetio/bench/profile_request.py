@@ -23,6 +23,9 @@ CURL_FMT = (
 )
 
 PROFILE_RE = re.compile(r"^PROFILE (.+)$")
+ACCEPT_DIAG_RE = re.compile(
+    r"\[stream-diag [\d.]+ [^\]]+\] (accept_\w+) #\d+ (.*)$"
+)
 
 
 def _wait_listen(host: str, port: int, proc: subprocess.Popen[bytes], timeout: float = 10.0) -> None:
@@ -46,7 +49,14 @@ def _curl(url: str) -> dict[str, str]:
     return dict(item.split("=", 1) for item in out.strip().split())
 
 
-def _start_server(name: str, host: str, port: int, extra_args: list[str]) -> subprocess.Popen[bytes]:
+def _start_server(
+    name: str,
+    host: str,
+    port: int,
+    extra_args: list[str],
+    *,
+    diag: bool,
+) -> subprocess.Popen[bytes]:
     script = _BENCH_DIR / "servers" / f"{name}.py"
     cmd = [
         "uv",
@@ -63,19 +73,75 @@ def _start_server(name: str, host: str, port: int, extra_args: list[str]) -> sub
         "--profile",
         *extra_args,
     ]
+    if diag and name.startswith("tealetio"):
+        cmd.append("--diag")
+    env = None
+    if diag:
+        import os
+
+        env = os.environ.copy()
+        env["TEALETIO_STREAM_DIAG"] = "1"
+        env["TEALETIO_URING_ACCEPT_LOG"] = "1"
     return subprocess.Popen(
         cmd,
         cwd=_REPO_ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
+        env=env,
     )
 
 
-def _collect_profiles(proc: subprocess.Popen[bytes]) -> list[dict[str, Any]]:
-    profiles: list[dict[str, Any]] = []
+def _read_stderr_lines(proc: subprocess.Popen[bytes]) -> list[str]:
     assert proc.stderr is not None
-    for raw in proc.stderr:
-        line = raw.decode(errors="replace").rstrip("\n")
+    data = proc.stderr.read()
+    if not data:
+        return []
+    return [line for line in data.decode(errors="replace").splitlines()]
+
+
+def _summarize_accept_diag(lines: list[str]) -> None:
+    rows: list[dict[str, float]] = []
+    current: dict[str, float] = {}
+    for line in lines:
+        match = ACCEPT_DIAG_RE.match(line)
+        if not match:
+            continue
+        name, tail = match.group(1), match.group(2)
+        fields = dict(item.split("=", 1) for item in tail.split() if "=" in item)
+        if name == "accept_worker":
+            if current:
+                rows.append(current)
+            current = {}
+            continue
+        for key in ("open_streams_ms", "since_open_ms", "marshal_queue_ms"):
+            if key in fields:
+                current[key] = float(fields[key])
+    if current:
+        rows.append(current)
+
+    if not rows:
+        return
+
+    def _avg(key: str) -> float | None:
+        vals = [row[key] for row in rows if key in row]
+        return sum(vals) / len(vals) if vals else None
+
+    parts: list[str] = []
+    for key, label in (
+        ("open_streams_ms", "open_streams"),
+        ("since_open_ms", "pre_marshal"),
+        ("marshal_queue_ms", "marshal_queue"),
+    ):
+        avg = _avg(key)
+        if avg is not None:
+            parts.append(f"{label}={avg:.3f}ms")
+    if parts:
+        print(f"  accept delivery avg ({len(rows)} accepts): " + " ".join(parts))
+
+
+def _collect_profiles(lines: list[str]) -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    for line in lines:
         match = PROFILE_RE.match(line)
         if match:
             profiles.append(json.loads(match.group(1)))
@@ -111,9 +177,18 @@ def _run_concurrent(url: str, count: int) -> list[float]:
         return list(pool.map(lambda _: one(), range(count)))
 
 
-def _run_case(label: str, server: str, host: str, port: int, extra_args: list[str], *, concurrent: int) -> None:
+def _run_case(
+    label: str,
+    server: str,
+    host: str,
+    port: int,
+    extra_args: list[str],
+    *,
+    concurrent: int,
+    diag: bool,
+) -> None:
     url = f"http://{host}:{port}/"
-    proc = _start_server(server, host, port, extra_args)
+    proc = _start_server(server, host, port, extra_args, diag=diag)
     try:
         _wait_listen(host, port, proc)
         print(f"\n=== {label} ===")
@@ -141,7 +216,10 @@ def _run_case(label: str, server: str, host: str, port: int, extra_args: list[st
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=3)
-        profiles = _collect_profiles(proc)
+        stderr_lines = _read_stderr_lines(proc)
+        if diag:
+            _summarize_accept_diag(stderr_lines)
+        profiles = _collect_profiles(stderr_lines)
 
     measured = [p for p in profiles if p["req"] in (1, 2)]
     for profile in measured:
@@ -182,6 +260,11 @@ def main() -> None:
         default=32,
         help="after sequential curls, fire this many parallel curls (0 disables)",
     )
+    parser.add_argument(
+        "--diag",
+        action="store_true",
+        help="enable TEALETIO_STREAM_DIAG accept-delivery breakdown on tealetio servers",
+    )
     args = parser.parse_args()
 
     cases: dict[str, tuple[str, list[str]]] = {
@@ -194,7 +277,7 @@ def main() -> None:
     for index, case in enumerate(args.cases):
         server, extra = cases[case]
         port = args.port + index
-        _run_case(case, server, args.host, port, extra, concurrent=args.concurrent)
+        _run_case(case, server, args.host, port, extra, concurrent=args.concurrent, diag=args.diag)
 
 
 if __name__ == "__main__":
