@@ -18,7 +18,7 @@ from .io_waiter import IOWaiter
 from .locks import Condition, CrossThreadCondition
 from .operations import ContinuousOperation, MultishotDelivery, Operation
 from .scheduler import get_running_scheduler
-from .tasks import CancelledError
+from .operations import io_cancellation_error
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -252,7 +252,7 @@ class RecvIterBuffer:
             self._ready.clear()
             self._reorder_buffer.reset()
             if not self._stream_done:
-                self._stream_error = CancelledError()
+                self._stream_error = io_cancellation_error()
                 self._stream_done = True
             self._cond.notify_all()
         if operation is not None and not operation.done():

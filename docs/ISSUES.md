@@ -388,13 +388,4 @@ sections. Current pass counts should come from the test commands above or CI.
 
 The code architecture is sound. Current open items are primarily hardening and modernization tasks rather than release-blocking runtime failures.
 
-### tealetio: uring completion-driven cancel (planned)
 
-`UringProactor.cancel()` currently submits `submit_cancel` / `poll_remove` and
-then synchronously terminalises the target via `_terminalise_cancelled()`. A
-follow-up is to let continuous-op cancellation flow from ring CQEs instead
-(target terminal `ECANCELED`, `poll_remove`, or cancel-op fallback), keeping
-immediate cancel only on selector/emulated paths. Continuous cancel terminals
-use `index=None` (best-effort skip of straggler legs). See
-`packages/tealetio/docs/OPERATION_CALLBACKS.md` § “Planned: uring
-completion-driven cancel”.

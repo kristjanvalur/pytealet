@@ -21,8 +21,14 @@ from tealetio.io_waiter import (
     IOWaitGroupChild,
     IOWaitGroupChildProtocol,
 )
-from tealetio.operations import ContinuousOperation, InvalidStateError, MultishotDelivery, Operation
-from tealetio.tasks import CancelledError
+from tealetio.operations import (
+    ContinuousOperation,
+    InvalidStateError,
+    MultishotDelivery,
+    Operation,
+    io_cancellation_error,
+    is_io_cancellation,
+)
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from io_fakes import StubScheduler
 from uring_fakes import (
@@ -186,7 +192,7 @@ class _MockProactor:
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         if not operation.done():
-            operation._finish(exception=CancelledError(), cancelled=True)
+            operation._finish(exception=io_cancellation_error(), cancelled=True)
         teardown = Operation[None](kind="cancel", fileobj=operation)
         teardown._finish(result=None)
         return teardown
@@ -297,11 +303,9 @@ class TestProactorIOManagerAcceptMany:
     def test_wrap_accept_delivery_swallows_cancellation_terminal(self) -> None:
         from tealetio.continuous_callbacks import wrap_accept_delivery
         from tealetio.operations import MultishotDelivery
-        from tealetio.tasks import CancelledError
-
         seen: list[object] = []
         wrapped = wrap_accept_delivery(lambda item: seen.append(item))
-        wrapped(MultishotDelivery(exception=CancelledError()))
+        wrapped(MultishotDelivery(exception=io_cancellation_error()))
         assert seen == []
 
     @pytest.mark.parametrize("recv_timeout", [0, -1])
@@ -365,7 +369,7 @@ class TestProactorIOManagerAcceptMany:
             scheduler.fire_timers()
             assert recv_op.cancelled()
             assert len(recv_errors) == 1
-            assert isinstance(recv_errors[0][1], CancelledError)
+            assert is_io_cancellation(recv_errors[0][1])
             assert recv_errors[0][0].fileno() == -1
         finally:
             server.close()

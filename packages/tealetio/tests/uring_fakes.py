@@ -661,6 +661,17 @@ class _FakeUringRing:
             user_data = completion
         cancel_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
         cancel_completion.cancel_target = completion
+        target_entry = completion.user_data
+        if not getattr(target_entry, "poll_remove", False) and getattr(
+            getattr(target_entry, "operation", None), "kind", None
+        ) != "poll_many":
+            canceled = self._completion(
+                target_entry,
+                kind=getattr(completion, "kind", uring_api.COMPLETION_KIND_RECV),
+                res=-errno.ECANCELED,
+                result=None,
+            )
+            self._deliver(canceled)
         self._deliver(cancel_completion)
         return cancel_completion
 
@@ -1025,6 +1036,10 @@ def _ensure_deferred_connect_completed(ring: _DeferredCreateSocketUringRing) -> 
 
 
 class _DeferredUringRing(_FakeUringRing):
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self.pending_cancel_target: list[SimpleNamespace] = []
+
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -1048,6 +1063,38 @@ class _DeferredUringRing(_FakeUringRing):
         completion.result = err
         completion.flags = 0
         self._deliver(completion)
+
+    def submit_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_cancel.append(completion)
+        if user_data is None:
+            user_data = completion
+        cancel_completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_CANCEL,
+            res=0,
+            result=None,
+        )
+        cancel_completion.cancel_target = completion
+        target_entry = completion.user_data
+        if not getattr(target_entry, "poll_remove", False) and getattr(
+            getattr(target_entry, "operation", None), "kind", None
+        ) != "poll_many":
+            self.pending_cancel_target.append(completion)
+        self._deliver(cancel_completion)
+        return cancel_completion
+
+    def complete_cancel_target(self) -> None:
+        completion = self.pending_cancel_target.pop(-1)
+        target_entry = completion.user_data
+        canceled = self._completion(
+            target_entry,
+            kind=getattr(completion, "kind", uring_api.COMPLETION_KIND_RECV),
+            res=-errno.ECANCELED,
+            result=None,
+        )
+        self._deliver(canceled)
 
 
 class _FailingSubmitUringRing(_DeferredUringRing):

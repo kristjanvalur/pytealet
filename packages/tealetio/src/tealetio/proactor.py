@@ -28,8 +28,14 @@ from .io_manager import (
     SupportsProactorIO,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket, socket_from_uring_fd
-from .operations import ContinuousOperation, ContinuousStepResult, MultishotDelivery, Operation, T_co
-from .tasks import CancelledError
+from .operations import (
+    ContinuousOperation,
+    ContinuousStepResult,
+    MultishotDelivery,
+    Operation,
+    T_co,
+    io_cancellation_error,
+)
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -692,13 +698,13 @@ class ProactorBase:
     def _terminalise_cancelled(self, operation: Operation[Any]) -> None:
         if operation.done():
             return
+        cancel_exc = io_cancellation_error()
         if isinstance(operation, ContinuousOperation):
             operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(CancelledError(), index=None),
-                cancelled=True,
+                _continuous_error_delivery(cancel_exc, index=None),
             )
             return
-        operation._finish(exception=CancelledError(), cancelled=True)
+        operation._finish(exception=cancel_exc, cancelled=True)
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         raise NotImplementedError
@@ -1885,10 +1891,36 @@ class UringProactor(ProactorBase):
         operation._uring_entry = entry
         return entry
 
+    def _complete_uring_poll_remove(self, poll_target: object | None) -> None:
+        """Finish a multishot ``poll_many`` op when ``submit_poll_remove`` completes."""
+
+        if poll_target is None:
+            return
+        poll_entry = getattr(poll_target, "user_data", None)
+        if not isinstance(poll_entry, _UringEntry):
+            return
+        operation = poll_entry.operation
+        if not operation.done():
+            self._terminalise_cancelled(operation)
+        if poll_entry.active:
+            self._deactivate_uring_entry(poll_entry)
+
+    def _stop_uring_poll_many_oneshot(self, entry: _UringEntry) -> None:
+        """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll."""
+
+        self._cancel_deferred_operation(entry.operation)
+        if entry.active:
+            self._deactivate_uring_entry(entry)
+        else:
+            entry.completion = None
+            if entry.operation._uring_entry is entry:
+                entry.operation._uring_entry = None
+
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         if operation.done():
             return self._completed_cancel_operation("cancel", operation)
 
+        immediate_terminalise = True
         entry = _uring_entry_of(operation)
         if entry is not None:
             completion = entry.completion
@@ -1897,12 +1929,17 @@ class UringProactor(ProactorBase):
                 self._deactivate_uring_entry(entry)
                 cancel_op = self._completed_cancel_operation("cancel", operation)
             elif entry.poll_remove:
+                immediate_terminalise = False
                 cancel_op = self._submit_cancel_op(
                     completion,
                     kind="poll_remove",
                     submit=self._ring.submit_poll_remove,
                 )
+            elif operation.kind == "poll_many":
+                self._stop_uring_poll_many_oneshot(entry)
+                cancel_op = self._completed_cancel_operation("poll_remove", operation)
             else:
+                immediate_terminalise = False
                 cancel_op = self._submit_cancel_op(
                     completion,
                     kind="cancel",
@@ -1915,7 +1952,8 @@ class UringProactor(ProactorBase):
         else:
             cancel_op = self._completed_cancel_operation("cancel", operation)
 
-        self._terminalise_cancelled(operation)
+        if immediate_terminalise:
+            self._terminalise_cancelled(operation)
         return cancel_op
 
     def _submit_cancel_op(
@@ -2967,21 +3005,13 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         completed_operation: Operation[Any] | None = None
+        teardown_completions: list[_UringCompletion] = []
         for completion in completions:
-            if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
-                result = self._complete_uring_operation(completion)
-                if result is not None:
-                    completed_operation = result
-                poll_target = completion.cancel_target
-                if poll_target is not None:
-                    poll_entry = cast(_UringCompletion, poll_target).user_data
-                    if isinstance(poll_entry, _UringEntry):
-                        self._deactivate_uring_entry(poll_entry)
-                continue
-            if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
-                result = self._complete_uring_operation(completion)
-                if result is not None:
-                    completed_operation = result
+            if completion.kind in (
+                uring_api.COMPLETION_KIND_POLL_REMOVE,
+                uring_api.COMPLETION_KIND_CANCEL,
+            ):
+                teardown_completions.append(completion)
                 continue
             entry = cast(_UringEntry, completion.user_data)
             to_process = entry.completions_to_process(completion)
@@ -2995,6 +3025,12 @@ class UringProactor(ProactorBase):
                 result = self._complete_uring_operation(pending)
                 if result is not None:
                     completed_operation = result
+        for completion in teardown_completions:
+            result = self._complete_uring_operation(completion)
+            if result is not None:
+                completed_operation = result
+            if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
+                self._complete_uring_poll_remove(completion.cancel_target)
         self._retry_deferred_submissions()
         if completed_operation is not None:
             self._notify_completed()

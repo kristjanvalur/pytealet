@@ -66,7 +66,7 @@ proactor.recv(conn, recv_size)                     # worker; independent one-sho
         │
         ▼  recv done callback (worker)
 post merged MultishotDelivery(index unchanged,
-    value=(conn, data, None) | (conn, None, recv_error))   # recv_error includes CancelledError
+    value=(conn, data, None) | (conn, None, recv_error))   # recv_error may be ECANCELED on timeout cancel
         │
         ▼  marshal (one hop)
 LenientReorderBuffer → deliver_wrapped → user callback (if no recv_error)
@@ -84,7 +84,7 @@ terminal legs still call `finish_continuous_delivery` in a `finally` block so
 
 `recv_op.add_done_callback(on_recv_complete)` registers preread completion; there
 is no parent/child link on `Operation`. Preread failures (including timeout
-cancel as `CancelledError`) post `(conn, None, exc)` like other recv errors;
+timeout cancel as ``OSError(ECANCELED)``) post `(conn, None, exc)` like other recv errors;
 `finalize_accept_recv_error` closes the socket on the scheduler thread and does
 not invoke the user accept callback unless `on_recv_error` is provided.
 
@@ -125,8 +125,9 @@ have lost interest:
   begin on the same scheduler turn when the runtime allows it.
 - `close()` synchronously cancels the accept-loop tealet; it does not close
   listening sockets. The accept-loop tealet wraps its main loop in ``try``/``finally``
-  so ``CancelledError`` runs cleanup that sets `_closed` and closes listeners.
-  In-flight handler tealets keep running until they finish.
+  so ``CancelledError`` or ``OSError(errno.ECANCELED)`` from IO cancel runs cleanup
+  that sets `_closed` and closes listeners. In-flight handler tealets keep running
+  until they finish.
 
 The io_manager posts merged accept legs onto the scheduler thread (after worker
 mutation when applicable) but does not enforce server shutdown policy —
@@ -148,46 +149,61 @@ Cancellation is backend-specific teardown (drop deferred resubmits, submit async
 ring cancel or `poll_remove`, deregister selector interest, `break_wait()`, and
 similar).
 
+IO cancellation is distinct from task cancellation. Proactor cancel completes
+operations with ``OSError(errno.ECANCELED)`` (see ``io_cancellation_error()``).
+``is_cancellation_delivery()`` / ``is_io_cancellation()`` let ``io_manager``
+treat that terminal as "no further chunks" rather than a transport failure to
+surface to callers. ``CancelledError`` remains for ``Task.cancel()`` only.
+
 On **selector / emulated** paths, `ProactorBase._terminalise_cancelled()` runs
 immediately after teardown is requested. Continuous ops emit a terminal
-`MultishotDelivery` with `CancelledError` and `index=None` (best-effort: the
-reorder buffer may deliver cancel before straggler legs still in flight).
+`MultishotDelivery` with ``OSError(ECANCELED)`` and `index=None` (best-effort:
+the reorder buffer may deliver cancel before straggler legs still in flight).
 
-On **uring** today, `UringProactor.cancel()` submits `submit_cancel` or
-`poll_remove`, then calls the same synchronous `_terminalise_cancelled()` on
-the target. The ring cancel completion only finishes the separate cancel
-`Operation[None]`; it does not drive the continuous result callback. Late
-multishot CQEs after the target is already `done()` are dropped in
+On **uring**, armed recv/accept (and similar) legs use `submit_cancel`; the
+target finishes only from its own CQE, usually ``OSError(ECANCELED)``. The
+cancel-op CQE completes only the teardown ``Operation[None]`` so callers can
+``iomanager.cancel(...).wait()`` if they want; it does not terminalise or
+otherwise complete the target. A successful cancel SQE post is trusted: there is
+no synthetic target fallback if the ack arrives before the target CQE. Cancel may
+lose the race to an in-flight success CQE; the target may never surface
+``ECANCELED`` if the kernel already completed it.
+
+The teardown ``wait()`` can surface cancel-ack outcome: ``res == 0`` on the
+cancel CQE completes with ``None``; a negative ``res`` delivers ``OSError`` on
+the teardown op (for example when the target already finished). That reports
+whether the cancel *request* was accepted, not whether the target IO has stopped
+yet — the target CQE remains authoritative for the original operation.
+
+On uring multishot ``recv_many`` / ``accept_many``, a target ``-ECANCELED`` CQE
+uses the leg index from ``completion.sequence``. Unlike selector/emulated
+``index=None`` cancel terminals, uring cancel does not jump ahead of multileg
+segments already in the reorder buffer; cancel is best-effort and may trail
+straggler legs.
+
+Multishot ``poll_many`` uses ``submit_poll_remove()`` (not ``submit_cancel``).
+The ``COMPLETION_KIND_POLL_REMOVE`` completion ends the continuous poll op.
+One-shot ``poll_many`` fallback stops locally without ring cancel on the pending
+poll SQE.
+
+This matches io_uring semantics: cancel and success can race; a successful target
+CQE that arrives before teardown settles completes normally. Selector and emulated
+backends keep immediate `_terminalise_cancelled()`. Deferred resubmits and
+never-submitted legs still terminalise locally when the ring has nothing to
+complete.
+
+Late multishot CQEs after the target is already `done()` are dropped in
 `_deliver_uring_completion`.
 
 Callers waiting on `IOWaiter.wait()` observe either a normal result or
-`CancelledError`. Exceptional `wait()` exit routes through
+``OSError(errno.ECANCELED)`` from proactor cancel (compare with
+``is_io_cancellation()``; ``CancelledError`` remains for ``Task.cancel()``
+only). Exceptional `wait()` exit routes through
 `ProactorIOManager._cancel_operation(...).forget()` so teardown legs are not
 blocked on.
 
 For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 `IO_MANAGER_DESIGN.md`.
-
-### Planned: uring completion-driven cancel
-
-Defer continuous-op terminalisation on the uring path: `cancel()` should submit
-teardown and return, but **not** call `_terminalise_cancelled()` on the target
-immediately.
-
-Instead, emit the cancel terminal from ring completions:
-
-- target multishot handle: terminal CQE with `res < 0` (often `ECANCELED`),
-  mapped to `CancelledError` with `index=None`;
-- `poll_remove` completion for multishot `poll_many`;
-- cancel-op completion as a fallback when the target is still active but no
-  further target CQE arrives.
-
-This matches io_uring semantics (cancel and success can race) and should
-simplify `UringProactor.cancel()` by removing the synchronous front-run. Selector
-and emulated backends keep immediate `_terminalise_cancelled()`.
-
-Deferred resubmits and never-submitted legs still need a local terminal path
-when the ring has nothing to complete.
 
 ## Module layout
 

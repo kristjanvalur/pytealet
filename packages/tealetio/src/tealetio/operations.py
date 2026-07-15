@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import errno
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Generic, NamedTuple, TypeVar, cast
-
-from .tasks import CancelledError
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -13,6 +12,25 @@ T_co = TypeVar("T_co", covariant=True)
 
 class InvalidStateError(Exception):
     """Raised when an operation result is requested before completion."""
+
+
+def io_cancellation_error() -> OSError:
+    """Return the standard exception for proactor-requested IO cancellation."""
+
+    return OSError(
+        errno.ECANCELED,
+        errno.errorcode.get(errno.ECANCELED, "io_uring operation failed"),
+    )
+
+
+def is_io_cancellation(exc: BaseException | None) -> bool:
+    """Return True when ``exc`` represents IO cancellation (not task cancellation)."""
+
+    return isinstance(exc, OSError) and exc.errno == errno.ECANCELED
+
+
+def _operation_cancelled(exception: BaseException | None) -> bool:
+    return is_io_cancellation(exception)
 
 
 _DoneCallback = Callable[["Operation[Any]"], object]
@@ -142,7 +160,7 @@ class Operation(Generic[T]):
             if self._done:
                 return
         if exception is not None:
-            self._finish(exception=exception)
+            self._finish(exception=exception, cancelled=_operation_cancelled(exception))
         else:
             self._finish(result=cast(T, result))
 
@@ -212,7 +230,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         if not self._done:
             exc = delivery.exception
             if exc is not None:
-                self._finish(exception=exc, cancelled=isinstance(exc, CancelledError))
+                self._finish(exception=exc, cancelled=_operation_cancelled(exc))
             else:
                 self._finish(result=None)
         assert self._done

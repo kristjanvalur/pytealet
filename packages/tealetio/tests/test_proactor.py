@@ -37,13 +37,22 @@ from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
 )
 
+
+def _assert_io_cancelled(operation: Operation[Any]) -> None:
+    assert operation.cancelled()
+    assert is_io_cancellation(operation.exception())
+    with pytest.raises(OSError) as exc_info:
+        operation.result()
+    assert exc_info.value.errno == errno.ECANCELED
+
+
 import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
 import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.scheduler import get_running_scheduler
 from tealetio.io_waiter import IOWaiter
-from tealetio.operations import InvalidStateError, MultishotDelivery
+from tealetio.operations import InvalidStateError, MultishotDelivery, io_cancellation_error, is_io_cancellation
 from tealetio.proactor import (
     AsyncProactorScheduler,
     ContinuousOperation,
@@ -641,7 +650,7 @@ def test_recviter_buffer_ordered_eof_wins_cancel_race():
         scheduler.yield_()
         with buffer._cond:
             buffer._stream_done = True
-            buffer._stream_error = CancelledError()
+            buffer._stream_error = io_cancellation_error()
         buffer.on_result(_recv_chunk(1, b"", more=False))
         scheduler.yield_()
         return [buffer.take_next(), buffer.take_next()]
@@ -1051,7 +1060,9 @@ def _pump_proactor(proactor: SelectorProactor | UringProactor, *operations: Oper
     return _wait_until_done(proactor, *operations)
 
 
-def _pump_until(proactor: SelectorProactor | UringProactor, predicate: Callable[[], bool], timeout: float = 1.0) -> None:
+def _pump_until(
+    proactor: SelectorProactor | UringProactor, predicate: Callable[[], bool], timeout: float = 1.0
+) -> None:
     if isinstance(proactor, UringProactor):
         _wait_for_uring(proactor, predicate, timeout)
         return
@@ -1081,7 +1092,7 @@ class TestOperation:
 
         assert seen == [42, 43]
 
-    def test_proactor_cancel_completes_operation_with_cancelled_error(self):
+    def test_proactor_cancel_completes_operation_with_ecanceled(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
@@ -1092,8 +1103,7 @@ class TestOperation:
             assert operation.cancelled() is True
             assert operation.exception()
 
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -1129,20 +1139,20 @@ class TestOperation:
         seen: list[_RecvManySeen] = []
         operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
         assert operation._emit_result(1) is True
-        operation._finish(exception=CancelledError(), cancelled=True)
+        operation._finish(exception=io_cancellation_error(), cancelled=True)
         assert operation._emit_result(2) is False
         assert [delivery.value for delivery in seen] == [1]
 
     def test_operation_deliver_ignored_after_cancel(self) -> None:
         operation = Operation(kind="test")
-        operation._finish(exception=CancelledError(), cancelled=True)
+        operation._finish(exception=io_cancellation_error(), cancelled=True)
         operation.deliver(object(), result=None)
         assert operation.cancelled()
 
     def test_continuous_operation_emit_result_false_after_cancel(self) -> None:
         seen: list[_RecvManySeen] = []
         parent = ContinuousOperation(kind="test", result_callback=seen.append)
-        parent._finish(exception=CancelledError(), cancelled=True)
+        parent._finish(exception=io_cancellation_error(), cancelled=True)
         assert parent._emit_result(1) is False
         assert seen == []
 
@@ -1225,7 +1235,9 @@ class TestProactorContract:
             writer.close()
             proactor.close()
 
-    def test_send_can_complete_immediately(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+    def test_send_can_complete_immediately(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
         proactor = proactor_factory()
         reader, writer = socket.socketpair()
         try:
@@ -1310,7 +1322,9 @@ class TestProactorContract:
             receiver.close()
             proactor.close()
 
-    def test_operations_reject_closed_proactor(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
+    def test_operations_reject_closed_proactor(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
         proactor = proactor_factory()
         reader, writer = socket.socketpair()
         try:
@@ -1324,6 +1338,7 @@ class TestProactorContract:
         finally:
             reader.close()
             writer.close()
+
 
 class TestSelectorProactor:
     def test_stat_completes_immediately_with_blocking_fstat(self):
@@ -1948,8 +1963,7 @@ class TestSelectorProactor:
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
             assert operation.cancelled() is True
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -3210,6 +3224,70 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_cancel_ack_only_completes_teardown_target_waits_for_ecanceled(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            teardown = proactor.cancel(operation)
+            assert isinstance(proactor.ring, _DeferredUringRing)
+            assert teardown is not None
+            assert teardown.done() is True
+            assert operation.done() is False
+            assert operation.cancelled() is False
+            assert proactor.has_pending_operations() is True
+            assert proactor.ring.pending_cancel_target
+
+            proactor.ring.complete_cancel_target()
+            _assert_io_cancelled(operation)
+            assert proactor.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_teardown_after_success_cqe_in_same_batch_leaves_success(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.send(b"hello")
+            operation = proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _DeferredUringRing)
+            target_completion = proactor.ring.pending_recv[-1]
+            entry = cast(proactor_module._UringEntry, target_completion.user_data)
+            _fd, buf, _entry = proactor.ring.submitted_recv[-1]
+            memoryview(buf)[:5] = b"hello"
+
+            success_completion = SimpleNamespace(
+                user_data=entry,
+                kind=uring_api.COMPLETION_KIND_RECV,
+                res=5,
+                flags=0,
+                result=5,
+                multishot=False,
+            )
+            cancel_completion = SimpleNamespace(
+                user_data=entry,
+                kind=uring_api.COMPLETION_KIND_CANCEL,
+                res=0,
+                flags=0,
+                result=None,
+                multishot=False,
+                cancel_target=target_completion,
+            )
+
+            proactor._deliver_uring_completion([cancel_completion, success_completion])
+
+            assert operation.result() == b"hello"
+            assert operation.cancelled() is False
+            assert proactor.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_cancelled_operation_consumes_pending_token_on_ring_completion(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()
@@ -3221,25 +3299,14 @@ class TestUringProactor:
             assert teardown is not None
             assert teardown.kind == "cancel"
             assert teardown.done() is True
-            assert operation.cancelled() is True
+            assert operation.done() is False
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
             assert proactor.has_pending_operations() is True
-            proactor.wait(proactor.get_time() + 1.0)
-
-            released = threading.Event()
-            thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
-            thread.start()
-            thread.join(0.05)
-            assert thread.is_alive() is True
 
             assert isinstance(proactor.ring, _DeferredUringRing)
-            proactor.ring.complete_recv()
-            thread.join(1.0)
-            assert thread.is_alive() is False
-            assert released.is_set()
+            proactor.ring.complete_cancel_target()
             assert proactor.has_pending_operations() is False
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -3367,8 +3434,7 @@ class TestUringProactor:
             assert first.result() == b"first"
             assert len(proactor.ring.submitted_recv) == 1
             assert proactor.has_pending_operations() is False
-            with pytest.raises(CancelledError):
-                second.result()
+            _assert_io_cancelled(second)
         finally:
             reader.close()
             writer.close()
@@ -3383,18 +3449,23 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _BackpressuredUringRing)
 
             proactor.ring.fail_next_cancel = True
-            proactor.cancel(operation)
+            teardown = proactor.cancel(operation)
 
-            assert operation.cancelled() is True
+            assert teardown.done() is False
+            assert operation.cancelled() is False
+            assert operation.done() is False
             assert proactor.ring.submitted_cancel == []
             assert proactor.has_pending_operations() is True
 
-            proactor.ring.complete_recv(b"hello")
-
+            proactor._retry_deferred_submissions()
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
+            assert teardown.done() is True
+            assert operation.done() is False
+            assert proactor.has_pending_operations() is True
+
+            proactor.ring.complete_cancel_target()
             assert proactor.has_pending_operations() is False
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -3760,17 +3831,16 @@ class TestUringProactor:
             assert operation._uring_entry is not None
             assert operation._uring_entry.operation is operation
 
-            pending = proactor.ring.pending_poll_oneshot[-1]
             teardown = proactor.cancel(operation)
-            _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
+            assert proactor.ring.submitted_cancel == []
             assert operation.cancelled() is True
-            assert teardown.kind == "cancel"
+            assert teardown.kind == "poll_remove"
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_cancel_uses_cancel_in_oneshot_fallback(self, monkeypatch):
+    def test_poll_many_oneshot_stop_does_not_submit_ring_cancel(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -3778,13 +3848,12 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
-            pending = proactor.ring.pending_poll_oneshot[-1]
             teardown = proactor.cancel(operation)
-            _wait_for_uring(proactor, lambda: pending in proactor.ring.submitted_cancel)
+            assert proactor.ring.submitted_cancel == []
             assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
             assert teardown is not None
-            assert teardown.kind == "cancel"
+            assert teardown.kind == "poll_remove"
             assert teardown.done() is True
         finally:
             reader.close()
@@ -3902,7 +3971,7 @@ class TestUringProactor:
 
     def test_handoff_accept_many_closes_socket_when_parent_done(self) -> None:
         parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=object())
-        parent._finish(exception=CancelledError(), cancelled=True)
+        parent._finish(exception=io_cancellation_error(), cancelled=True)
         client, server = socket.socketpair()
         try:
             assert proactor_module._handoff_accept_many(parent, client) is False
@@ -4619,8 +4688,7 @@ class TestUringProactor:
 
             assert operation.cancelled() is True
             assert _recv_many_bytes(seen) == [(0, b"hello")]
-            with pytest.raises(CancelledError):
-                operation.result()
+            _assert_io_cancelled(operation)
         finally:
             reader.close()
             writer.close()
@@ -4747,6 +4815,7 @@ class TestUringProactor:
                 os.fstat(leaked_fd)
         finally:
             proactor.close()
+
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 class TestProactorSchedulerIntegration:
@@ -4982,9 +5051,7 @@ class TestProactorScheduler:
         with pytest.raises(TypeError, match="abstract"):
             ProactorScheduler()
 
-    def test_default_proactor_factory_uses_uring_when_available(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_proactor_factory_uses_uring_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(uring_api, "is_available", lambda: True)
         monkeypatch.setattr(proactor_module, "_default_uring_ring_factory", _FakeUringRing)
         scheduler = SyncProactorScheduler()
@@ -5012,8 +5079,8 @@ class TestProactorScheduler:
             try:
                 assert len(proactor.ring.submitted_socket) == 1
                 _domain, submit_type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
-                expected_type = socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(
-                    socket, "SOCK_CLOEXEC", 0
+                expected_type = (
+                    socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
                 )
                 assert submit_type == expected_type
                 assert submit_flags == 0
@@ -5034,8 +5101,8 @@ class TestProactorScheduler:
                 assert len(proactor.ring.submitted_socket) == 1
                 domain, submit_type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
                 assert domain == socket.AF_UNIX
-                expected_type = socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(
-                    socket, "SOCK_CLOEXEC", 0
+                expected_type = (
+                    socket.SOCK_STREAM | getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
                 )
                 assert submit_type == expected_type
                 assert submit_flags == 0
