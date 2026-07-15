@@ -330,6 +330,46 @@ class TestProactorIOManagerAcceptMany:
         finally:
             server.close()
 
+    def test_accept_many_recv_timeout_posts_cancelled_error_to_scheduler(self) -> None:
+        class _PendingRecvProactor(_MockProactor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.pending_recvs: list[Operation[bytes]] = []
+
+            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+                self.recv_calls.append((sock, n))
+                operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
+                self.pending_recvs.append(operation)
+                return operation
+
+        class _EagerAcceptProactor(_PendingRecvProactor):
+            def accept_many(self, sock: socket.socket, callback=None):
+                conn, peer = socket.socketpair()
+                peer.close()
+                return _eager_accept_arm(sock, callback, conn)
+
+        recv_errors: list[tuple[socket.socket, BaseException]] = []
+        proactor = _EagerAcceptProactor()
+        scheduler = StubScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = socket.socket()
+        try:
+            io.accept_many(
+                server,
+                lambda _: (_ for _ in ()).throw(AssertionError("accept callback")),
+                recv_size=8,
+                recv_timeout=0.5,
+                on_recv_error=lambda conn, exc: recv_errors.append((conn, exc)),
+            )
+            recv_op = proactor.pending_recvs[0]
+            scheduler.fire_timers()
+            assert recv_op.cancelled()
+            assert len(recv_errors) == 1
+            assert isinstance(recv_errors[0][1], CancelledError)
+            assert recv_errors[0][0].fileno() == -1
+        finally:
+            server.close()
+
     def test_accept_many_recv_timeout_cancels_pending_recv(self) -> None:
         class _PendingRecvProactor(_MockProactor):
             def __init__(self) -> None:

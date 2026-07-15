@@ -29,7 +29,6 @@ from .io_waiter import (
 
 from .io_buffers import RecvIterBuffer, SendBuffer, _RecvIterProactor, open_recv_iter_buffer, open_send_buffer
 from .operations import ContinuousOperation, MultishotDelivery, Operation
-from .tasks import CancelledError
 from .socket_helpers import abortive_close
 from .types import SocketSendBuffer
 
@@ -639,9 +638,6 @@ class ProactorIOManager:
             self._cancel_accept_recv_timeout(timer_box)
             exc = op.exception()
             if exc is not None:
-                if isinstance(exc, CancelledError):
-                    abortive_close(conn)
-                    return
                 on_thread_delivery(delivery._replace(value=(conn, None, exc)))
                 return
             on_thread_delivery(delivery._replace(value=(conn, op.result(), None)))
@@ -676,8 +672,9 @@ class ProactorIOManager:
 
         When ``recv_timeout`` is set, each accept-time ``recv`` is cancelled if
         it has not completed by then. Timeout cancel is cooperative/best-effort
-        like other cancel paths: teardown legs are not awaited before the socket
-        is closed in the recv done callback.
+        like other cancel paths: the merged ``(conn, recv_error)`` leg is posted
+        to the scheduler reorder buffer and disposition runs there via
+        ``finalize_accept_recv_error`` (or the user accept callback is skipped).
 
         ``wait()`` on the returned ``IOWaitable`` ends the accept **stream leg**
         only. On non-multishot backends the stream finishes after each accept;
