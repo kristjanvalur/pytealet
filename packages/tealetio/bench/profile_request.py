@@ -26,6 +26,9 @@ PROFILE_RE = re.compile(r"^PROFILE (.+)$")
 ACCEPT_DIAG_RE = re.compile(
     r"\[stream-diag [\d.]+ [^\]]+\] (accept_\w+) #\d+ (.*)$"
 )
+BREAK_WAIT_TIMING_RE = re.compile(
+    r"\[break-wait-timing\] (\w+) (.*)$"
+)
 
 
 def _wait_listen(host: str, port: int, proc: subprocess.Popen[bytes], timeout: float = 10.0) -> None:
@@ -75,11 +78,10 @@ def _start_server(
     ]
     if diag and name.startswith("tealetio"):
         cmd.append("--diag")
-    env = None
-    if diag:
-        import os
+    import os
 
-        env = os.environ.copy()
+    env = os.environ.copy()
+    if diag:
         env["TEALETIO_STREAM_DIAG"] = "1"
         env["TEALETIO_URING_ACCEPT_LOG"] = "1"
     return subprocess.Popen(
@@ -97,6 +99,28 @@ def _read_stderr_lines(proc: subprocess.Popen[bytes]) -> list[str]:
     if not data:
         return []
     return [line for line in data.decode(errors="replace").splitlines()]
+
+
+def _summarize_break_wait_timing(lines: list[str]) -> None:
+    waits: list[float] = []
+    sleeps: list[float] = []
+    for line in lines:
+        match = BREAK_WAIT_TIMING_RE.match(line)
+        if not match:
+            continue
+        event, tail = match.group(1), match.group(2)
+        fields = dict(item.split("=", 1) for item in tail.split() if "=" in item)
+        if event == "wait_return" and fields.get("woke") == "1" and "since_signal_us" in fields:
+            waits.append(float(fields["since_signal_us"]))
+        if event == "sleep0_done" and "sleep_us" in fields:
+            sleeps.append(float(fields["sleep_us"]))
+    parts: list[str] = []
+    if waits:
+        parts.append(f"wait_since_signal avg={sum(waits) / len(waits):.1f}us n={len(waits)}")
+    if sleeps:
+        parts.append(f"sleep0 avg={sum(sleeps) / len(sleeps):.1f}us n={len(sleeps)}")
+    if parts:
+        print("  break-wait timing: " + " ".join(parts))
 
 
 def _summarize_accept_diag(lines: list[str]) -> None:
@@ -217,6 +241,7 @@ def _run_case(
             proc.kill()
             proc.wait(timeout=3)
         stderr_lines = _read_stderr_lines(proc)
+        _summarize_break_wait_timing(stderr_lines)
         if diag:
             _summarize_accept_diag(stderr_lines)
         profiles = _collect_profiles(stderr_lines)

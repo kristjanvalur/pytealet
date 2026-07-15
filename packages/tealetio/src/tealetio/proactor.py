@@ -33,7 +33,7 @@ from .socket_helpers import (
     is_soft_accept_error as _is_soft_accept_error,
     socket_from_uring_fd,
 )
-from .wakeup import yield_after_break_wait_wakeup
+from .wakeup import note_break_wait_signal, note_break_wait_wake, yield_after_break_wait_wakeup
 from .operations import (
     ContinuousOperation,
     ContinuousStepResult,
@@ -1414,8 +1414,9 @@ class SelectorProactor(ProactorBase):
         """Wake a thread blocked in `wait`."""
 
         self._wake_selector()
+        note_break_wait_signal("selector")
         self._run_async_break()
-        yield_after_break_wait_wakeup()
+        yield_after_break_wait_wakeup("selector")
 
     def _wake_selector(self) -> None:
         """Wake a thread blocked in the selector."""
@@ -2130,7 +2131,8 @@ class ThreadedSelectorProactor(SelectorProactor):
         """Wake a thread blocked in `wait`."""
 
         self._completed_wait.wakeup()
-        yield_after_break_wait_wakeup()
+        note_break_wait_signal("threaded_selector")
+        yield_after_break_wait_wakeup("threaded_selector")
 
     def _after_selector_registration_changed(self) -> None:
         self._wake_selector()
@@ -2183,7 +2185,8 @@ class ThreadedSelectorProactor(SelectorProactor):
                 pass
 
     def _wait_for_completed(self, timeout: float | None) -> None:
-        self._completed_wait.wait(timeout=timeout)
+        woke = self._completed_wait.wait(timeout=timeout)
+        note_break_wait_wake("threaded_selector", woke)
 
 
 class UringProactor(ProactorBase):
@@ -2583,7 +2586,8 @@ class UringProactor(ProactorBase):
             self._ring.break_wait()
         except (OSError, RuntimeError, ValueError):
             pass
-        yield_after_break_wait_wakeup()
+        note_break_wait_signal("uring")
+        yield_after_break_wait_wakeup("uring")
 
     def _wait_inline(self, deadline: float | None = None) -> None:
         """Block in ``ring.wait``; delivery runs via the registered ring callback.
@@ -2594,7 +2598,8 @@ class UringProactor(ProactorBase):
 
         # deadline==0: one non-blocking harvest (selector wait(0) analogue)
         # callback mode: wait delivers non-empty batches and returns None
-        self._ring.wait(self._timeout_until_deadline(deadline))
+        result = self._ring.wait(self._timeout_until_deadline(deadline))
+        note_break_wait_wake("uring_inline", result is not None)
 
     def _wait_workers(self, deadline: float | None = None) -> None:
         """Park on ``ring.wait_idle`` while completion workers own CQ reaping.
@@ -2612,7 +2617,8 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        self._ring.wait_idle(timeout)
+        woke = self._ring.wait_idle(timeout)
+        note_break_wait_wake("uring", woke)
 
     async def wait_async(self, deadline: float | None = None) -> None:
         """Wait asynchronously until completed operations are signalled.
