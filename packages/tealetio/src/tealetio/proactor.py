@@ -103,8 +103,11 @@ _PollManyCallback = Callable[[MultishotDelivery], object]
 class WakeupManager(Protocol):
     """Cross-thread wakeup primitive for proactor ``wait`` / ``wait_async``."""
 
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Bind the asyncio loop used by ``wait_async``."""
+
     def wakeup(self) -> None:
-        """Wake a sleeping waiter or latch until ``wait()`` / ``poll()``."""
+        """Wake sync and async waiters, or latch until ``wait()`` / ``poll()``."""
 
     def wait(self, timeout: float | None = None) -> bool:
         """Block until ``wakeup()`` or ``timeout`` elapses."""
@@ -112,17 +115,24 @@ class WakeupManager(Protocol):
     def poll(self) -> bool:
         """Return whether a wakeup is pending, consuming it when true."""
 
+    async def wait_async(self, timeout: float | None = None) -> None:
+        """Await ``wakeup()`` or ``timeout`` on the bound event loop."""
+
 
 class EventWakeupManager:
-    """``threading.Event``-backed wakeup for proactor wait hosts.
-
-    ``wait_async`` currently blocks a thread-pool thread on this primitive.
-    A later optimisation may fold async-loop unpark (today ``set_async_break``)
-    into the wait host so one manager owns both threading and asyncio wakeups.
-    """
+    """Threading and asyncio event pair for proactor wait hosts."""
 
     def __init__(self) -> None:
         self._event = threading.Event()
+        self._async_loop: _asyncio.AbstractEventLoop | None = None
+        self._async_waiter: _asyncio.Event | None = None
+
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        if self._async_loop is None:
+            self._async_loop = loop
+            return
+        if self._async_loop is not loop:
+            raise RuntimeError("EventWakeupManager is already bound to a different event loop")
 
     def wait(self, timeout: float | None = None) -> bool:
         woke = self._event.wait(timeout=timeout)
@@ -132,12 +142,43 @@ class EventWakeupManager:
 
     def wakeup(self) -> None:
         self._event.set()
+        loop = self._async_loop
+        waiter = self._async_waiter
+        if loop is not None and waiter is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(waiter.set)
 
     def poll(self) -> bool:
         result = self._event.is_set()
         if result:
             self._event.clear()
         return result
+
+    async def wait_async(self, timeout: float | None = None) -> None:
+        if self.poll():
+            return
+
+        loop = self._async_loop
+        if loop is None:
+            raise RuntimeError("EventWakeupManager requires bind_loop before wait_async")
+        if _asyncio.get_running_loop() is not loop:
+            raise RuntimeError("wait_async must run on the bound event loop")
+
+        waiter = self._async_waiter
+        if waiter is None:
+            waiter = _asyncio.Event()
+            self._async_waiter = waiter
+
+        waiter.clear()
+        try:
+            if timeout is None:
+                await waiter.wait()
+            else:
+                try:
+                    await _asyncio.wait_for(waiter.wait(), timeout=timeout)
+                except _asyncio.TimeoutError:
+                    pass
+        finally:
+            waiter.clear()
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
@@ -668,9 +709,12 @@ class ProactorBase:
 
         if self._async_wait_loop is None:
             self._async_wait_loop = loop
-            return
-        if self._async_wait_loop is not loop:
+        elif self._async_wait_loop is not loop:
             raise RuntimeError(f"{type(self).__name__} is already bound to a different event loop")
+        self._bind_wakeup_loop(loop)
+
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        return None
 
     def get_time(self) -> float:
         """Return the proactor clock value."""
@@ -1679,7 +1723,9 @@ class ThreadedSelectorProactor(SelectorProactor):
         """Wake a thread blocked in `wait`."""
 
         self._completed_wait.wakeup()
-        self._run_async_break()
+
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        self._completed_wait.bind_loop(loop)
 
     def _after_selector_registration_changed(self) -> None:
         self._wake_selector()
@@ -1710,7 +1756,9 @@ class ThreadedSelectorProactor(SelectorProactor):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        await loop.run_in_executor(None, self._wait_for_completed, timeout)
+        if self._completed_wait.poll():
+            return
+        await self._completed_wait.wait_async(timeout)
 
     def _ensure_worker_started(self) -> None:
         with self._lock:
@@ -2008,12 +2056,9 @@ class UringProactor(ProactorBase):
         """Wake threads blocked in sync or async `wait`."""
 
         self._wait_ready.wakeup()
-        self._run_async_break()
 
-    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        """Bind this proactor to an asyncio event loop for async waits."""
-
-        super().bind_loop(loop)
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        self._wait_ready.bind_loop(loop)
 
     def wait(self, deadline: float | None = None) -> None:
         """Wait until completed operations are signalled."""
@@ -2025,7 +2070,7 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        self._wait_for_completed(timeout)
+        self._wait_ready.wait(timeout=timeout)
 
     async def wait_async(self, deadline: float | None = None) -> None:
         """Wait asynchronously until completed operations are signalled."""
@@ -2039,12 +2084,8 @@ class UringProactor(ProactorBase):
             return
         if self._wait_ready.poll():
             return
-        loop = self._async_wait_loop
-        assert loop is not None
-        await loop.run_in_executor(None, self._wait_for_completed, timeout)
-
-    def _wait_for_completed(self, timeout: float | None) -> None:
-        self._wait_ready.wait(timeout=timeout)
+        assert self._async_wait_loop is not None
+        await self._wait_ready.wait_async(timeout)
 
     def recv(
         self,
@@ -3169,8 +3210,6 @@ class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedule
         self._time = loop.time
         self._proactor.bind_loop(loop)
 
-        self._proactor.set_async_break(lambda: loop.call_soon_threadsafe(lambda: None))
-
     def _lazy_bind_running_loop(self) -> None:
         if self._wakeup_loop is None:
             self.bind_loop(_asyncio.get_running_loop())
@@ -3181,7 +3220,6 @@ class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedule
     def close(self) -> None:
         """Close proactor and scheduler-owned resources."""
 
-        self._proactor.set_async_break(None)
         super().close()
 
     async def _driver_wait(self) -> None:

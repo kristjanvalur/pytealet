@@ -5206,43 +5206,19 @@ class TestProactorScheduler:
 
         assert asyncio.run(run()) == b"hello"
 
-    def test_async_proactor_scheduler_installs_async_break_hook(self, monkeypatch):
-        async def run() -> bool:
-            stored_callback = None
-            bound_loops = []
-
-            class TrackingProactor(SelectorProactor):
-                def bind_loop(self, loop):
-                    bound_loops.append(loop)
-                    super().bind_loop(loop)
-
-                def set_async_break(self, callback):
-                    nonlocal stored_callback
-                    stored_callback = callback
-                    super().set_async_break(callback)
-
-            scheduler = AsyncProactorScheduler(TrackingProactor)
+    def test_async_proactor_scheduler_wake_wait_unparks_wait_async(self):
+        async def run() -> None:
+            scheduler = AsyncProactorScheduler(ThreadedSelectorProactor)
             try:
-                loop = asyncio.get_running_loop()
-                calls = 0
-                original_call_soon_threadsafe = loop.call_soon_threadsafe
-
-                def call_soon_threadsafe(callback, *args, context=None):
-                    nonlocal calls
-                    calls += 1
-                    return original_call_soon_threadsafe(callback, *args, context=context)
-
-                monkeypatch.setattr(loop, "call_soon_threadsafe", call_soon_threadsafe)
-                scheduler.bind_loop(loop)
-                assert bound_loops == [loop]
-                assert stored_callback is not None
-                scheduler.proactor.wake_wait()
+                scheduler.bind_loop(asyncio.get_running_loop())
+                waiter = asyncio.create_task(scheduler.proactor.wait_async(scheduler.proactor.get_time() + 10.0))
                 await asyncio.sleep(0)
-                return calls == 1
+                scheduler.proactor.wake_wait()
+                await asyncio.wait_for(waiter, 1.0)
             finally:
                 scheduler.close()
 
-        assert asyncio.run(run()) is True
+        asyncio.run(run())
 
     def test_open_returns_raw_io_file_from_fake_ring(self):
         scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing))
