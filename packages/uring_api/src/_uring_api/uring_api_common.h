@@ -59,6 +59,34 @@ typedef PyMutex UringApiMutex;
 #define Py_END_CRITICAL_SECTION_MUTEX() Py_END_CRITICAL_SECTION()
 #endif
 
+/* refcount_mutex may be touched from Py_BEGIN_ALLOW_THREADS drain paths where the
+ * thread is detached and PyCriticalSection_* cannot run (free-threaded builds). */
+#if defined(URING_API_USE_PYTHREAD_MUTEX)
+static inline void
+uring_api_refcount_mutex_lock(UringApiMutex *mutex)
+{
+    PyThread_acquire_lock(*mutex, WAIT_LOCK);
+}
+
+static inline void
+uring_api_refcount_mutex_unlock(UringApiMutex *mutex)
+{
+    PyThread_release_lock(*mutex);
+}
+#else
+static inline void
+uring_api_refcount_mutex_lock(UringApiMutex *mutex)
+{
+    PyMutex_Lock(mutex);
+}
+
+static inline void
+uring_api_refcount_mutex_unlock(UringApiMutex *mutex)
+{
+    PyMutex_Unlock(mutex);
+}
+#endif
+
 #ifndef _PyCFunction_CAST
 #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
 #endif

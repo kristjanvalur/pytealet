@@ -59,6 +59,39 @@ def test_ring_wait_batches_multiple_ready_completions_when_available():
         right.close()
 
 
+def test_ring_recv_multishot_wait_from_allow_threads_path():
+    """Multishot CQE drain updates refcount_mutex from Py_BEGIN_ALLOW_THREADS.
+
+    Free-threaded builds must not use PyCriticalSection on that path (see
+    uring_api_refcount_mutex_lock in uring_api_common.h).
+    """
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            try:
+                buf_group = ring.create_buf_group(8, 4)
+                ring.submit_recv_multishot(reader.fileno(), buf_group, 99)
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
+                raise
+
+            writer.send(b"x")
+            batch = ring.wait(1.0)
+
+        assert len(batch) == 1
+        assert batch[0].multishot is True
+        assert batch[0].res == 1
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_ring_break_wait_interrupts_wait_when_available():
     require_uring()
 

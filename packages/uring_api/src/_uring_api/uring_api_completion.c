@@ -310,12 +310,12 @@ static bool is_zero_copy_send_kind(UringApiPendingKind kind) {
  * records that a terminal leg was staged and the in-flight ref should drop once the
  * count returns to zero. */
 static void completion_aux_stage_cqe(UringApiRing *ring, UringApiCompletion *completion, bool want_to_decref) {
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&ring->refcount_mutex);
+    uring_api_refcount_mutex_lock(&ring->refcount_mutex);
     completion->aux_refcount++;
     if (want_to_decref) {
         completion->aux_decref = true;
     }
-    Py_END_CRITICAL_SECTION_MUTEX();
+    uring_api_refcount_mutex_unlock(&ring->refcount_mutex);
 }
 
 /* drop the outstanding-CQE count after build; return whether the in-flight ref may
@@ -323,13 +323,13 @@ static void completion_aux_stage_cqe(UringApiRing *ring, UringApiCompletion *com
 static bool completion_aux_finish_cqe(UringApiRing *ring, UringApiCompletion *completion) {
     bool decref = false;
 
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&ring->refcount_mutex);
+    uring_api_refcount_mutex_lock(&ring->refcount_mutex);
     completion->aux_refcount--;
     if (completion->aux_refcount == 0 && completion->aux_decref) {
         decref = true;
         completion->aux_decref = false;
     }
-    Py_END_CRITICAL_SECTION_MUTEX();
+    uring_api_refcount_mutex_unlock(&ring->refcount_mutex);
     return decref;
 }
 
