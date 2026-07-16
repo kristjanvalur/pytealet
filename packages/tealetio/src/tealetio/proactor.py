@@ -95,6 +95,7 @@ _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyValue = memoryview
 _RecvManyCallback = Callable[[MultishotDelivery], object]
+_RecvMultishotImpl = Callable[..., ContinuousOperation[_RecvManyValue]]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _PollManyCallback = Callable[[MultishotDelivery], object]
@@ -1793,6 +1794,10 @@ class UringProactor(ProactorBase):
             self._capabilities = {}
         self._send_zc_supported = self._capabilities.get("IORING_OP_SEND_ZC", False)
         self._sendmsg_zc_supported = self._capabilities.get("IORING_OP_SENDMSG_ZC", False)
+        if self._capabilities.get("IORING_RECV_MULTISHOT", False):
+            self.recv_multishot: _RecvMultishotImpl = self._recv_multishot
+        else:
+            self.recv_multishot = self._recv_multishot_fallback
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by resubmitting the matching one-shot opcode after
         # each completion (see the *_oneshot delivery handlers below).
@@ -2670,35 +2675,57 @@ class UringProactor(ProactorBase):
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
         """
 
-        if self._capabilities.get("IORING_RECV_MULTISHOT", False):
-            assert not _is_synthetic_recv_buffer_pool(buf_group)
-        native_multishot = self._capabilities.get(
-            "IORING_RECV_MULTISHOT", False
-        ) and not _is_synthetic_recv_buffer_pool(buf_group)
+        return self.recv_multishot(
+            sock,
+            callback,
+            buf_group=buf_group,
+            base_sequence=base_sequence,
+        )
+
+    def _recv_multishot(
+        self,
+        sock: socket.socket,
+        callback: _RecvManyCallback,
+        *,
+        buf_group: RecvBufferPool,
+        base_sequence: int = 0,
+    ) -> ContinuousOperation[_RecvManyValue]:
+        operation = UringContinuousOperation[_RecvManyValue](
+            "recv_many",
+            sock,
+            callback,
+        )
+        uring_group = cast(_UringBufGroup, buf_group)
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._deliver_uring_recv_many(entry, completion),
+        )
+
+        def submit_recv_many() -> _UringCompletion:
+            return self._ring.submit_recv_multishot(
+                sock.fileno(),
+                uring_group,
+                entry,
+                0,
+                base_sequence,
+            )
+
+        self._submit_uring_entry(entry, submit_recv_many)
+        return operation
+
+    def _recv_multishot_fallback(
+        self,
+        sock: socket.socket,
+        callback: _RecvManyCallback,
+        *,
+        buf_group: RecvBufferPool,
+        base_sequence: int = 0,
+    ) -> ContinuousOperation[_RecvManyValue]:
         operation = UringContinuousOperation[_RecvManyValue](
             "recv_many",
             sock,
             self._guard_delivery_callback(callback),
         )
-        if native_multishot:
-            uring_group = cast(_UringBufGroup, buf_group)
-            leg_base = base_sequence
-            entry = self._uring_entry(
-                operation,
-                lambda entry, completion: self._deliver_uring_recv_many(entry, completion),
-            )
-
-            def submit_recv_many() -> _UringCompletion:
-                return self._ring.submit_recv_multishot(
-                    sock.fileno(),
-                    uring_group,
-                    entry,
-                    base_sequence=leg_base,
-                )
-
-            self._submit_uring_entry(entry, submit_recv_many)
-            return operation
-
         if _is_synthetic_recv_buffer_pool(buf_group):
             if _synthetic_recv_pool_is_full(buf_group):
                 return _complete_recv_many_enobufs(operation, index=base_sequence)

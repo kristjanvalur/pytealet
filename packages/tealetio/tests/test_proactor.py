@@ -2738,6 +2738,7 @@ class TestUringProactor:
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
         proactor = scheduler.proactor
         proactor._capabilities["IORING_RECV_MULTISHOT"] = False
+        proactor.recv_multishot = proactor._recv_multishot_fallback
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -4007,18 +4008,27 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_recv_many_multishot_requires_real_pool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_recv_many_binds_multishot_impl_from_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
+        assert proactor.recv_multishot.__func__ is UringProactor._recv_multishot
         reader, _writer = socket.socketpair()
-        pool = proactor_module.SyntheticRecvBufferPool(8192, 4)
+        pool = proactor.shared_recv_buffer_pool()
         try:
             reader.setblocking(False)
-            with pytest.raises(AssertionError):
-                proactor.recv_many(reader, lambda _result: None, buf_group=pool)
+            proactor.recv_many(reader, lambda _result: None, buf_group=pool)
+            assert proactor.ring.submitted_recv_multishot
         finally:
             reader.close()
             proactor.close()
+
+    def test_recv_many_binds_fallback_impl_when_multishot_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        assert proactor.recv_multishot.__func__ is UringProactor._recv_multishot_fallback
+        proactor.close()
 
     @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")
     def test_recv_many_uses_multishot_recv_and_finishes_on_eof(self):
