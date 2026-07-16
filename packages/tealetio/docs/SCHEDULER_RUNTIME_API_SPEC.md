@@ -766,9 +766,8 @@ Status: Implemented.
   `wake_wait()`, not proactor-internal completion hooks.
 - `AsyncProactorScheduler` delegates `wait_async()` to the proactor backend.
   `UringProactor` and `ThreadedSelectorProactor` unpark through
-  `EventWakeupManager.wait_async()`; binding the proactor loop is still required
-  before `wait_async()`, but the wakeup manager captures the running loop
-  lazily on first async wait.
+  `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter
+  before the first `wait_async()`.
 - Proactors may return an already-done `Operation` when submission itself can
   complete the IO. This is the preferred short-circuit path: callers inspect the
   operation directly, and the backend does not need to queue a completion or wake

@@ -8,16 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- Unified proactor driver wakeup on ``wake_wait()`` (removed ``break_wait()`` and
-  ``set_completion_callback()``). Raw proactor callers register
-  ``operation.add_done_callback(...)`` when blocking in ``wait()`` /
-  ``wait_async()``; scheduler production wakes through ``IOWaiter`` /
-  ``call_soon_threadsafe`` → ``wake_wait()``.
 - Inlined ``WakeupManager`` / ``EventWakeupManager`` into ``proactor.py`` (removed
   standalone ``wakeup.py``). ``wait_async()`` on ``UringProactor`` and
   ``ThreadedSelectorProactor`` parks on ``EventWakeupManager`` instead of a
-  thread-pool executor; the manager captures the running asyncio loop lazily on
-  first async wait.
+  thread-pool executor; ``bind_loop()`` prepares the asyncio waiter.
 - Uring multishot CQEs are delivered without gating on ``operation.done()`` in
   the completion worker; out-of-order terminal ordering defers to scheduler-thread
   ``ReorderBuffer`` / ``LenientReorderBuffer``.
@@ -30,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multiple ``recv_many`` chunks.
 
 ### Breaking Changes
+- Removed ``Proactor.break_wait()`` and ``Proactor.set_completion_callback()``.
+  Register ``operation.add_done_callback(lambda _: proactor.wake_wait())`` when
+  blocking in raw ``wait()`` / ``wait_async()``; scheduler production wakes
+  through ``IOWaiter`` / ``call_soon_threadsafe`` → ``wake_wait()`` unchanged.
 - ``accept_many_streams()`` and ``start_server()`` no longer accept ``recv_size``,
   ``recv_timeout``, or ``on_recv_error``. Stream accepts no longer perform
   accept-time preread or ``feed_initial`` on readers; each connection arms

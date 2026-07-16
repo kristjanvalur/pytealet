@@ -143,18 +143,25 @@ class EventWakeupManager:
             self._event.clear()
         return result
 
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Wire the asyncio loop and waiter used by ``wakeup()`` / ``wait_async()``."""
+
+        if self._async_loop is None:
+            self._async_loop = loop
+        elif self._async_loop is not loop:
+            raise RuntimeError("EventWakeupManager is already bound to a different event loop")
+        if self._async_waiter is None:
+            self._async_waiter = _asyncio.Event()
+
     async def wait_async(self, timeout: float | None = None) -> None:
         if self.poll():
             return
 
-        if self._async_loop is None:
-            loop = _asyncio.get_running_loop()
-            self._async_loop = loop
+        if self._async_waiter is None:
+            self.bind_loop(_asyncio.get_running_loop())
 
         waiter = self._async_waiter
-        if waiter is None:
-            waiter = _asyncio.Event()
-            self._async_waiter = waiter
+        assert waiter is not None
 
         waiter.clear()
         try:
@@ -699,6 +706,10 @@ class ProactorBase:
             self._async_wait_loop = loop
         elif self._async_wait_loop is not loop:
             raise RuntimeError(f"{type(self).__name__} is already bound to a different event loop")
+        self._bind_wakeup_loop(loop)
+
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        return
 
     def get_time(self) -> float:
         """Return the proactor clock value."""
@@ -1691,6 +1702,9 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._worker_stop = threading.Event()
         self._worker = threading.Thread(target=self._worker_main, name="tealetio-selector-proactor", daemon=True)
 
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        self._completed_wait.bind_loop(loop)
+
     def close(self) -> None:
         """Stop the worker thread and close selector resources."""
 
@@ -1797,7 +1811,7 @@ class UringProactor(ProactorBase):
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
         self._provided_buffers_supported: bool | None = None
-        self._wait_ready: WakeupManager = EventWakeupManager()
+        self._wait_ready = EventWakeupManager()
         self._ring.callback = self._deliver_uring_completion
         self._service_threads = [
             threading.Thread(target=self._service_thread_main, name=f"tealetio-uring-{index}")
@@ -1816,6 +1830,9 @@ class UringProactor(ProactorBase):
             self._ring.exception_handler = None
             self._ring.close()
             raise
+
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        self._wait_ready.bind_loop(loop)
 
     def set_delivery_exception_handler(
         self,

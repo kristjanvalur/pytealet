@@ -339,9 +339,9 @@ blocks in `wait()` / `wait_async()`. Scheduler production code wakes through
 `IOWaiter` / `call_soon_threadsafe` → `proactor.wake_wait()` instead.
 
 `UringProactor` and `ThreadedSelectorProactor` use an inlined
-`EventWakeupManager` for sync and async waits. `wait_async()` parks on an
-`asyncio.Event` on the running loop (captured lazily on first use);
-`wake_wait()` notifies both sync and async waiters. `SelectorProactor`
+`EventWakeupManager` for sync and async waits. Call `bind_loop()` before
+`wait_async()`; that prepares the asyncio waiter `wake_wait()` signals.
+`wait_async()` parks on that event. `SelectorProactor`
 `wait_async()` still runs `wait()` in a thread-pool executor; optional
 `set_async_break()` can install a host-loop hook for that path.
 

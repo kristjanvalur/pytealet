@@ -2638,6 +2638,8 @@ class TestUringProactor:
                 proactor.bind_loop(loop)
 
                 assert proactor._async_wait_loop is loop
+                assert proactor._wait_ready._async_loop is loop
+                assert proactor._wait_ready._async_waiter is not None
             finally:
                 proactor.close()
 
