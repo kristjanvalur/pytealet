@@ -44,13 +44,12 @@ def _next_req_num(profile: bool) -> int | None:
 
 
 def _make_profile_stream_factory() -> Callable[..., tuple[StreamReader, StreamWriter]]:
+    from profile_timing import stamp_stream_open
     from tealetio.streams.open import default_server_stream_factory
 
     base = default_server_stream_factory(async_=False)
 
     def factory(io: object, sock: socket.socket, *, limit: int = 2**16) -> tuple[StreamReader, StreamWriter]:
-        from profile_timing import stamp_stream_open
-
         stamp_stream_open(sock)
         return base(io, sock, limit=limit)  # type: ignore[arg-type]
 
