@@ -683,7 +683,7 @@ class ProactorBase:
         return guarded
 
     def set_async_break(self, callback: Callable[[], object] | None) -> None:
-        """Set a hook ``wake_wait()`` invokes after unblocking sync/async waits."""
+        """Optional hook ``SelectorProactor.wake_wait()`` runs after selector wakeup."""
 
         self._async_break = callback
 
