@@ -291,13 +291,10 @@ def _handoff_accept_many(
     *,
     more: bool = True,
     index: int = 0,
-) -> bool:
-    """Emit one accepted connection or close the socket when the parent is done."""
+) -> None:
+    """Emit one accepted connection to the parent result callback."""
 
-    if parent._emit_result(conn, more=more, index=index):
-        return True
-    abortive_close(conn)
-    return False
+    parent._emit_result(conn, more=more, index=index)
 
 
 def _enobufs_error() -> OSError:
@@ -782,7 +779,7 @@ class ProactorBase:
                 _continuous_error_delivery(cancel_exc, index=None),
             )
             return
-        operation._finish(exception=cancel_exc, cancelled=True)
+        operation._finish(exception=cancel_exc)
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         raise NotImplementedError
@@ -2021,7 +2018,7 @@ class UringProactor(ProactorBase):
     def has_pending_operations(self) -> bool:
         """Return True if unfinished operations or deferred ring submissions remain."""
 
-        return Operation.pending_operation_count > 0 or bool(self._deferred_submissions)
+        return bool(Operation.pending_operation_count) or bool(self._deferred_submissions)
 
     def close(self) -> None:
         """Close the owned `io_uring` ring."""
@@ -2374,8 +2371,7 @@ class UringProactor(ProactorBase):
                 )
             self._deactivate_uring_entry(accept_entry)
             accept_entry_ref[0] = None
-        if not operation.done():
-            operation._finish_with_terminal_delivery(_continuous_error_delivery(exc))
+        operation._finish_with_terminal_delivery(_continuous_error_delivery(exc))
 
     def _deliver_uring_accept_many_oneshot(
         self,
@@ -2416,10 +2412,7 @@ class UringProactor(ProactorBase):
             return operation
         conn = socket_from_uring_fd(completion.res)
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        if operation.done():
-            abortive_close(conn)
-        else:
-            _handoff_accept_many(operation, conn, more=more, index=int(completion.sequence))
+        _handoff_accept_many(operation, conn, more=more, index=int(completion.sequence))
         if not more:
             self._deactivate_uring_entry(entry)
             accept_entry_ref[0] = None
@@ -2486,6 +2479,10 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[socket.socket]:
         operation = cast(Operation[socket.socket], entry.operation)
+        if operation.done():
+            if completion.res >= 0:
+                _close_raw_fd(completion.res)
+            return operation
         operation.deliver(self, result=socket_from_uring_fd(completion.res))
         return operation
 
@@ -2955,10 +2952,7 @@ class UringProactor(ProactorBase):
 
     def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
         self._deactivate_uring_entry(entry)
-        operation = entry.operation
-        if operation.done():
-            return
-        operation.deliver(self, exception=exc)
+        entry.operation.deliver(self, exception=exc)
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         completed_operation: Operation[Any] | None = None
@@ -2974,6 +2968,13 @@ class UringProactor(ProactorBase):
             if result is not None:
                 completed_operation = result
         for completion in teardown_completions:
+            entry = cast(_UringEntry, completion.user_data)
+            if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
+                if entry.operation.kind not in ("cancel", "poll_remove"):
+                    continue
+            elif completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
+                if entry.operation.kind != "poll_remove":
+                    continue
             result = self._complete_uring_operation(completion)
             if result is not None:
                 completed_operation = result
@@ -3074,21 +3075,9 @@ class UringProactor(ProactorBase):
         res = completion.res
         if completion.multishot:
             return entry.complete(entry, completion)
-        if entry.operation.done():
-            if entry.completion is not None:
-                self._deactivate_uring_entry(entry)
-            if (
-                entry.operation.kind == "create_socket"
-                and completion.kind == uring_api.COMPLETION_KIND_SOCKET
-                and res >= 0
-            ):
-                _close_raw_fd(res)
-            return None
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         if not has_more:
             self._deactivate_uring_entry(entry)
-        if entry.operation.done():
-            return entry.operation
         if res < 0:
             entry.operation.deliver(
                 self,

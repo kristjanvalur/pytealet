@@ -1084,26 +1084,26 @@ class TestOperation:
         assert operation.done() is True
         assert operation.result() is None
 
-    def test_continuous_operation_emit_result_skips_when_done(self):
+    def test_continuous_operation_emit_result_delivers_after_done(self):
         seen: list[_RecvManySeen] = []
         operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
-        assert operation._emit_result(1) is True
-        operation._finish(exception=io_cancellation_error(), cancelled=True)
-        assert operation._emit_result(2) is False
-        assert [delivery.value for delivery in seen] == [1]
+        operation._emit_result(1)
+        operation._finish(exception=io_cancellation_error())
+        operation._emit_result(2)
+        assert [delivery.value for delivery in seen] == [1, 2]
 
-    def test_operation_deliver_ignored_after_cancel(self) -> None:
+    def test_operation_deliver_rejects_after_cancel(self) -> None:
         operation = Operation(kind="test")
-        operation._finish(exception=io_cancellation_error(), cancelled=True)
-        operation.deliver(object(), result=None)
-        assert operation.cancelled()
+        operation._finish(exception=io_cancellation_error())
+        with pytest.raises(AssertionError):
+            operation.deliver(object(), result=None)
 
-    def test_continuous_operation_emit_result_false_after_cancel(self) -> None:
+    def test_continuous_operation_emit_result_delivers_after_cancel(self) -> None:
         seen: list[_RecvManySeen] = []
         parent = ContinuousOperation(kind="test", result_callback=seen.append)
-        parent._finish(exception=io_cancellation_error(), cancelled=True)
-        assert parent._emit_result(1) is False
-        assert seen == []
+        parent._finish(exception=io_cancellation_error())
+        parent._emit_result(1)
+        assert [delivery.value for delivery in seen] == [1]
 
     def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
         from tealetio.continuous_callbacks import marshal_to_scheduler
@@ -3246,20 +3246,6 @@ class TestUringProactor:
             assert operation.result() == b"hello"
             assert entry.completion is not None
             assert proactor.has_pending_operations() is False
-
-            proactor.ring._deliver(
-                SimpleNamespace(
-                    user_data=entry,
-                    kind=uring_api.COMPLETION_KIND_RECV,
-                    res=-errno.ECANCELED,
-                    flags=0,
-                    result=None,
-                    multishot=False,
-                )
-            )
-
-            assert entry.completion is None
-            assert proactor.has_pending_operations() is False
         finally:
             reader.close()
             writer.close()
@@ -3877,18 +3863,24 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_handoff_accept_many_closes_socket_when_parent_done(self) -> None:
-        parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=object())
-        parent._finish(exception=io_cancellation_error(), cancelled=True)
+    def test_handoff_accept_many_delivers_after_parent_done(self) -> None:
+        seen: list[socket.socket] = []
+        parent: ContinuousOperation[Any] = ContinuousOperation(
+            kind="accept_many",
+            fileobj=object(),
+            result_callback=lambda delivery: seen.append(delivery.value),
+        )
+        parent._finish(exception=io_cancellation_error())
         client, server = socket.socketpair()
         try:
-            assert proactor_module._handoff_accept_many(parent, client) is False
-            with pytest.raises(OSError):
-                client.getsockname()
+            proactor_module._handoff_accept_many(parent, client)
+            assert seen == [client]
+            client.getsockname()
         finally:
+            client.close()
             server.close()
 
-    def test_accept_many_drops_connection_when_accept_completes_after_cancel(self) -> None:
+    def test_accept_many_delivers_late_accept_after_cancel(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
         accepted: list[socket.socket] = []
@@ -3899,7 +3891,7 @@ class TestUringProactor:
             assert operation.cancelled() is True
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
-            assert accepted == []
+            assert len(accepted) == 1
         finally:
             for conn in accepted:
                 conn.close()

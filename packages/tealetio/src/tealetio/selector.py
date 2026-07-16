@@ -323,7 +323,7 @@ class SelectorMixin:
             teardown._finish(result=None)
 
         if not operation.done():
-            operation._finish(exception=io_cancellation_error(), cancelled=True)
+            operation._finish(exception=io_cancellation_error())
         return teardown
 
     def poll(self, fd: int, mask: int) -> int:

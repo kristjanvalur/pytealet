@@ -40,7 +40,7 @@ def _native_uring_recv_multishot_capability() -> tuple[bool, str]:
         from tealetio.operations import Operation
         from tealetio.proactor import UringProactor
 
-        Operation.pending_operation_count = 0
+        Operation.pending_operation_count.clear()
         proactor = UringProactor()
     except (OSError, RuntimeError) as exc:
         _NATIVE_URING_RECV_MULTISHOT = (False, f"native io_uring is not available: {exc}")
@@ -97,7 +97,7 @@ def pytest_collection_modifyitems(config, items):
 def _reset_pending_operation_count():
     from tealetio.operations import Operation
 
-    Operation.pending_operation_count = 0
+    Operation.pending_operation_count.clear()
     yield
 
 
