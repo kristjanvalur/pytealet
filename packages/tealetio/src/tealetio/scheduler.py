@@ -1878,7 +1878,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 return
             state["active"] = False
             self._pending_async_waits.discard(current)
-            self._make_runnable(current)
             done_evt.set()
 
         fut.add_done_callback(_resume_waiter)
