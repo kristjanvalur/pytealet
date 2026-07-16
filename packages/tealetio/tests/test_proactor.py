@@ -369,6 +369,13 @@ def test_completions_to_process_flushes_stored_termination():
     assert entry.completions_to_process(second) == (second, terminal)
 
 
+def test_completions_to_process_still_orders_late_multishot_after_operation_done():
+    entry = _multishot_test_entry()
+    entry.operation._finish(result=None)
+    terminal = _multishot_test_completion(sequence=0, more=False)
+    assert entry.completions_to_process(terminal) == (terminal,)
+
+
 @pytest.mark.skipif(
     not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
 )

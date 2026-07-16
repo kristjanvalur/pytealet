@@ -910,10 +910,10 @@ class _UringEntry:
     ) -> tuple[_UringCompletion, ...]:
         """Return completions ready for ``_complete_uring_operation``.
 
-        Returns an empty tuple when the CQE should be dropped (operation done,
-        or a multishot termination is being deferred). One-shot completions
-        return a single-element tuple. Multishot legs may return two when a
-        deferred termination becomes ready alongside the unblocking CQE.
+        Returns an empty tuple when a multishot termination is being deferred.
+        One-shot completions return a single-element tuple. Multishot legs may
+        return two when a deferred termination becomes ready alongside the
+        unblocking CQE.
         """
 
         if not completion.multishot:
@@ -921,9 +921,6 @@ class _UringEntry:
         leg = self.multishot_leg
         assert leg is not None
         with leg.lock:
-            if self.operation.done():
-                leg.pending_final = None
-                return ()
             is_termination = not bool(completion.flags & uring_api.IORING_CQE_F_MORE)
             if is_termination:
                 res = getattr(completion, "res", 0)
@@ -2912,6 +2909,8 @@ class UringProactor(ProactorBase):
         operation._emit_result(res, more=True, index=index)
         next_index[0] += 1
         if operation.done():
+            if entry.active:
+                self._deactivate_uring_entry(entry)
             return operation
         self._queue_entry_resubmit(entry, submit_box[0])
         return None
@@ -2963,8 +2962,6 @@ class UringProactor(ProactorBase):
                 more=more,
             )
 
-        if operation.done():
-            return operation
         if not more:
             self._deactivate_uring_entry(entry)
         return operation
@@ -2999,12 +2996,6 @@ class UringProactor(ProactorBase):
                 continue
             entry = cast(_UringEntry, completion.user_data)
             to_process = entry.completions_to_process(completion)
-            if not to_process and entry.operation.done():
-                # Late multishot CQEs after cancel/terminal finish: drop the leg
-                # without re-entering delivery (completions_to_process already
-                # discarded them).
-                self._deactivate_uring_entry(entry)
-                continue
             for pending in to_process:
                 result = self._complete_uring_operation(pending)
                 if result is not None:
@@ -3123,6 +3114,8 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
+        if completion.multishot:
+            return entry.complete(entry, completion)
         if entry.operation.done():
             if entry.active:
                 self._deactivate_uring_entry(entry)
@@ -3134,17 +3127,6 @@ class UringProactor(ProactorBase):
                 _close_raw_fd(res)
             return None
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        if completion.multishot:
-            if entry.operation.done():
-                if entry.active:
-                    self._deactivate_uring_entry(entry)
-                return entry.operation
-            multishot_leg = entry.multishot_leg
-            if not entry.active:
-                if multishot_leg is not None and entry.operation.kind == "recv_many":
-                    return entry.complete(entry, completion)
-                return None
-            return entry.complete(entry, completion)
         assert entry.active
         if not has_more:
             self._deactivate_uring_entry(entry)
