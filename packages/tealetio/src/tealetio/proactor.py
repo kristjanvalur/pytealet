@@ -912,7 +912,6 @@ class _UringEntry:
         "operation",
         "complete",
         "completion",
-        "active",
         "poll_remove",
     )
 
@@ -926,7 +925,6 @@ class _UringEntry:
         self.operation = operation
         self.complete = complete
         self.completion = None
-        self.active = False
         self.poll_remove = poll_remove
 
 
@@ -957,14 +955,8 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 
 @dataclass(frozen=True)
 class UringSubmissionStats:
-    """Observed io_uring submission pressure for tuning ring queue depth.
+    """Observed io_uring submission backpressure for tuning ring queue depth."""
 
-    Counters are updated without locking and may be slightly inconsistent
-    under concurrent completion-thread delivery; they are intended for
-    operator tuning, not exact accounting.
-    """
-
-    submit_attempts: int
     submit_queue_full: int
     deferred_queue_peak: int
 
@@ -1805,10 +1797,8 @@ class UringProactor(ProactorBase):
         # emulate the stream by resubmitting the matching one-shot opcode after
         # each completion (see the *_oneshot delivery handlers below).
         self._completion_thread_nice = completion_thread_nice
-        self._pending_tokens: list[None] = []
         self._deferred_submissions: list[_UringSubmission] = []
         self._retrying_deferred_submissions = False
-        self._submit_attempts = 0
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
         self._provided_buffers_supported: bool | None = None
@@ -1861,23 +1851,18 @@ class UringProactor(ProactorBase):
 
     @property
     def submission_stats(self) -> UringSubmissionStats:
-        """Return observed submission-queue pressure counters."""
+        """Return observed submission-queue backpressure counters."""
 
         return UringSubmissionStats(
-            submit_attempts=self._submit_attempts,
             submit_queue_full=self._submit_queue_full,
             deferred_queue_peak=self._deferred_queue_peak,
         )
 
     def reset_submission_stats(self) -> None:
-        """Reset submission pressure counters to zero."""
+        """Reset submission backpressure counters to zero."""
 
-        self._submit_attempts = 0
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
-
-    def _note_submit_attempt(self) -> None:
-        self._submit_attempts += 1
 
     def _note_submit_queue_full(self) -> None:
         self._submit_queue_full += 1
@@ -1914,17 +1899,16 @@ class UringProactor(ProactorBase):
         operation = poll_entry.operation
         if not operation.done():
             self._terminalise_cancelled(operation)
-        if poll_entry.active:
+        if poll_entry.completion is not None:
             self._deactivate_uring_entry(poll_entry)
 
     def _stop_uring_poll_many_oneshot(self, entry: _UringEntry) -> None:
         """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll."""
 
         self._cancel_deferred_operation(entry.operation)
-        if entry.active:
+        if entry.completion is not None:
             self._deactivate_uring_entry(entry)
         else:
-            entry.completion = None
             if entry.operation._uring_entry is entry:
                 entry.operation._uring_entry = None
 
@@ -2030,9 +2014,9 @@ class UringProactor(ProactorBase):
             raise RuntimeError("uring completion service failed to start")
 
     def has_pending_operations(self) -> bool:
-        """Return True if operations are waiting for backend completion."""
+        """Return True if unfinished operations or deferred ring submissions remain."""
 
-        return bool(self._pending_tokens or self._deferred_submissions)
+        return Operation.pending_operation_count > 0 or bool(self._deferred_submissions)
 
     def close(self) -> None:
         """Close the owned `io_uring` ring."""
@@ -2044,7 +2028,6 @@ class UringProactor(ProactorBase):
         self._ring.stop_serving()
         for thread in self._service_threads:
             thread.join()
-        self._pending_tokens.clear()
         self._deferred_submissions.clear()
         self.wake_wait()
         self._ring.callback = None
@@ -2377,15 +2360,14 @@ class UringProactor(ProactorBase):
     ) -> None:
         accept_entry = accept_entry_ref[0]
         if accept_entry is not None:
-            if accept_entry.active:
-                completion = accept_entry.completion
-                if completion is not None:
-                    self._submit_cancel_op(
-                        completion,
-                        kind="cancel",
-                        submit=self._ring.submit_cancel,
-                    )
-                accept_entry.active = False
+            completion = accept_entry.completion
+            if completion is not None:
+                self._submit_cancel_op(
+                    completion,
+                    kind="cancel",
+                    submit=self._ring.submit_cancel,
+                )
+            self._deactivate_uring_entry(accept_entry)
             accept_entry_ref[0] = None
         if not operation.done():
             operation._finish_with_terminal_delivery(_continuous_error_delivery(exc))
@@ -2883,7 +2865,7 @@ class UringProactor(ProactorBase):
         operation._emit_result(res, more=True, index=index)
         next_index[0] += 1
         if operation.done():
-            if entry.active:
+            if entry.completion is not None:
                 self._deactivate_uring_entry(entry)
             return operation
         self._queue_entry_resubmit(entry, submit_box[0])
@@ -2939,11 +2921,7 @@ class UringProactor(ProactorBase):
 
     def _deactivate_uring_entry(self, entry: _UringEntry) -> None:
         # Drop the pending Completion handle so entry <-> completion.user_data
-        # cycles do not linger after this leg is done. Multishot entries keep the
-        # handle only while active (cancel/poll_remove still need it).
-        if entry.active:
-            entry.active = False
-            self._pending_tokens.pop()
+        # cycles do not linger after this leg is done.
         entry.completion = None
         if entry.operation._uring_entry is entry:
             entry.operation._uring_entry = None
@@ -2982,25 +2960,15 @@ class UringProactor(ProactorBase):
         self._enqueue_deferred_submission(_UringSubmission(entry=entry, submit=submit))
 
     def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
-        self._pending_tokens.append(None)
         try:
-            entry.active = True
             entry.operation._uring_entry = entry
-            self._note_submit_attempt()
             entry.completion = submit()
-            # cancel() may have terminalised the target while submit() was in
-            # flight; drop the leg promptly so pending tokens stay accurate.
-            if entry.operation.done():
-                self._deactivate_uring_entry(entry)
         except uring_api.SubmissionQueueFull:
             self._note_submit_queue_full()
-            entry.active = False
-            self._pending_tokens.pop()
             self._enqueue_deferred_submission(_UringSubmission(entry=entry, submit=submit))
             return False
-        except BaseException:
-            self._pending_tokens.pop()
-            entry.active = False
+        except BaseException as exc:
+            self._fail_uring_entry(entry, exc)
             raise
         return True
 
@@ -3014,15 +2982,11 @@ class UringProactor(ProactorBase):
                 entry = submission.entry
                 if entry is None:
                     try:
-                        self._note_submit_attempt()
                         submission.submit()
                     except uring_api.SubmissionQueueFull:
                         self._note_submit_queue_full()
                         self._enqueue_deferred_submission(submission)
                         break
-                    continue
-                if entry.operation.done():
-                    entry.active = False
                     continue
                 try:
                     if not self._submit_uring_entry(entry, submission.submit):
@@ -3037,7 +3001,6 @@ class UringProactor(ProactorBase):
             entry = submission.entry
             if entry is not None and entry.operation is operation:
                 del self._deferred_submissions[index]
-                entry.active = False
                 entry.completion = None
                 uring_operation = cast("UringOperation[Any] | UringContinuousOperation[Any]", operation)
                 if uring_operation._uring_entry is entry:
@@ -3085,7 +3048,7 @@ class UringProactor(ProactorBase):
         if completion.multishot:
             return entry.complete(entry, completion)
         if entry.operation.done():
-            if entry.active:
+            if entry.completion is not None:
                 self._deactivate_uring_entry(entry)
             if (
                 entry.operation.kind == "create_socket"
@@ -3095,7 +3058,6 @@ class UringProactor(ProactorBase):
                 _close_raw_fd(res)
             return None
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        assert entry.active
         if not has_more:
             self._deactivate_uring_entry(entry)
         if entry.operation.done():

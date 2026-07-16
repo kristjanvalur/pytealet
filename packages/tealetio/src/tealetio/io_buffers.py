@@ -149,8 +149,13 @@ class RecvIterBuffer:
 
     def _deliver(self, delivery: MultishotDelivery) -> None:
         with self._cond:
-            if self._closed:
-                return
+            closed = self._closed
+        if closed:
+            if not delivery.more:
+                operation = delivery.operation
+                if operation is not None and not operation.done():
+                    operation.finish_operation(delivery)
+            return
         self._reorder_buffer.deliver(delivery)
 
     def _on_ordered_delivery(self, delivery: MultishotDelivery) -> None:
@@ -257,6 +262,9 @@ class RecvIterBuffer:
             self._cond.notify_all()
         if operation is not None and not operation.done():
             self._proactor.cancel(operation)
+            operation.finish_operation(
+                MultishotDelivery(index=None, exception=io_cancellation_error(), more=False)
+            )
 
 
 def open_recv_iter_buffer(

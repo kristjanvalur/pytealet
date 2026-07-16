@@ -4,7 +4,7 @@ import errno
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Generic, NamedTuple, TypeVar, cast
+from typing import Any, ClassVar, Generic, NamedTuple, TypeVar, cast
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -79,11 +79,16 @@ class Operation(Generic[T]):
     before shutdown, or ``forget()`` when only the target's terminal state matters.
     """
 
+    pending_operation_count: ClassVar[int] = 0
+    _pending_count_lock: ClassVar[threading.Lock] = threading.Lock()
+
     def __init__(
         self,
         kind: str,
         fileobj: object | None = None,
     ) -> None:
+        with Operation._pending_count_lock:
+            Operation.pending_operation_count += 1
         self.kind = kind
         self.fileobj = fileobj
         self._lock = threading.Lock()
@@ -186,6 +191,9 @@ class Operation(Generic[T]):
             self._done = True
             callbacks = self._callbacks
             self._callbacks = []
+
+        with Operation._pending_count_lock:
+            Operation.pending_operation_count -= 1
 
         for callback in callbacks:
             callback(self)

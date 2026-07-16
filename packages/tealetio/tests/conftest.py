@@ -36,8 +36,11 @@ def _native_uring_recv_multishot_capability() -> tuple[bool, str]:
         return _NATIVE_URING_RECV_MULTISHOT
 
     try:
+        from tealetio.continuous_callbacks import finish_continuous_delivery
+        from tealetio.operations import Operation
         from tealetio.proactor import UringProactor
 
+        Operation.pending_operation_count = 0
         proactor = UringProactor()
     except (OSError, RuntimeError) as exc:
         _NATIVE_URING_RECV_MULTISHOT = (False, f"native io_uring is not available: {exc}")
@@ -46,12 +49,20 @@ def _native_uring_recv_multishot_capability() -> tuple[bool, str]:
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
-        operation = proactor.recv_many(reader, lambda _result: None, buf_group=proactor.shared_recv_buffer_pool())
+        def _finish_terminal_delivery(delivery) -> None:
+            if not delivery.more:
+                finish_continuous_delivery(delivery)
+
+        operation = proactor.recv_many(
+            reader,
+            _finish_terminal_delivery,
+            buf_group=proactor.shared_recv_buffer_pool(),
+        )
         proactor.cancel(operation)
         deadline = proactor.get_time() + 1.0
         while proactor.has_pending_operations() and proactor.get_time() < deadline:
             proactor.wait(min(deadline, proactor.get_time() + 0.05))
-        if proactor.has_pending_operations():
+        if proactor.has_pending_operations() or not operation.done():
             _NATIVE_URING_RECV_MULTISHOT = (False, "native io_uring recv multishot cancellation did not settle")
         else:
             _NATIVE_URING_RECV_MULTISHOT = (True, "")
@@ -80,6 +91,14 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "requires_native_uring_recv_multishot" in item.keywords:
             item.add_marker(skip_marker)
+
+
+@pytest.fixture(autouse=True)
+def _reset_pending_operation_count():
+    from tealetio.operations import Operation
+
+    Operation.pending_operation_count = 0
+    yield
 
 
 @pytest.fixture(autouse=True)
