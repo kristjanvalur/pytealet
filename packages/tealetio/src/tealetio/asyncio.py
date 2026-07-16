@@ -258,10 +258,7 @@ class ForwardingProactor:
                 future.set_result(len(payload))
 
         def complete_operation(_operation: Operation[Any]) -> None:
-            try:
-                loop.call_soon_threadsafe(complete_future)
-            except RuntimeError:
-                pass
+            self._marshal_operation_completion(loop, complete_future)
 
         def cancel_operation(asyncio_future: _asyncio.Future[int]) -> None:
             if asyncio_future.cancelled():
@@ -312,10 +309,7 @@ class ForwardingProactor:
                 future.set_result((conn, peername))
 
         def complete_operation(_operation: Operation[Any]) -> None:
-            try:
-                loop.call_soon_threadsafe(complete_future)
-            except RuntimeError:
-                pass
+            self._marshal_operation_completion(loop, complete_future)
 
         def cancel_operation(asyncio_future: _asyncio.Future[tuple[socket.socket, Any]]) -> None:
             if asyncio_future.cancelled():
@@ -345,6 +339,19 @@ class ForwardingProactor:
     def _stop_serving(self, sock: socket.socket) -> None:
         pass
 
+    def _marshal_operation_completion(
+        self,
+        loop: _asyncio.AbstractEventLoop,
+        complete_future: Callable[[], object],
+    ) -> None:
+        """Unblock ``select()`` and schedule the asyncio future on the host loop."""
+
+        self._proactor.wake_wait()
+        try:
+            loop.call_soon_threadsafe(complete_future)
+        except RuntimeError:
+            pass
+
     def _future_from_operation(self, operation: Operation[T]) -> _asyncio.Future[T]:
         loop = self._require_loop()
         future: _asyncio.Future[T] = loop.create_future()
@@ -363,10 +370,7 @@ class ForwardingProactor:
                 future.set_result(result)
 
         def complete_operation(_operation: Operation[Any]) -> None:
-            try:
-                loop.call_soon_threadsafe(complete_future)
-            except RuntimeError:
-                pass
+            self._marshal_operation_completion(loop, complete_future)
 
         def cancel_operation(asyncio_future: _asyncio.Future[T]) -> None:
             if asyncio_future.cancelled():
