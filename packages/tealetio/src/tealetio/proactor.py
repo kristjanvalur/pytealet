@@ -103,9 +103,6 @@ _PollManyCallback = Callable[[MultishotDelivery], object]
 class WakeupManager(Protocol):
     """Cross-thread wakeup primitive for proactor ``wait`` / ``wait_async``."""
 
-    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        """Bind the asyncio loop used by ``wait_async``."""
-
     def wakeup(self) -> None:
         """Wake sync and async waiters, or latch until ``wait()`` / ``poll()``."""
 
@@ -116,7 +113,7 @@ class WakeupManager(Protocol):
         """Return whether a wakeup is pending, consuming it when true."""
 
     async def wait_async(self, timeout: float | None = None) -> None:
-        """Await ``wakeup()`` or ``timeout`` on the bound event loop."""
+        """Await ``wakeup()`` or ``timeout`` on the running event loop."""
 
 
 class EventWakeupManager:
@@ -126,13 +123,6 @@ class EventWakeupManager:
         self._event = threading.Event()
         self._async_loop: _asyncio.AbstractEventLoop | None = None
         self._async_waiter: _asyncio.Event | None = None
-
-    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        if self._async_loop is None:
-            self._async_loop = loop
-            return
-        if self._async_loop is not loop:
-            raise RuntimeError("EventWakeupManager is already bound to a different event loop")
 
     def wait(self, timeout: float | None = None) -> bool:
         woke = self._event.wait(timeout=timeout)
@@ -157,11 +147,9 @@ class EventWakeupManager:
         if self.poll():
             return
 
-        loop = self._async_loop
-        if loop is None:
-            raise RuntimeError("EventWakeupManager requires bind_loop before wait_async")
-        if _asyncio.get_running_loop() is not loop:
-            raise RuntimeError("wait_async must run on the bound event loop")
+        if self._async_loop is None:
+            loop = _asyncio.get_running_loop()
+            self._async_loop = loop
 
         waiter = self._async_waiter
         if waiter is None:
@@ -711,10 +699,6 @@ class ProactorBase:
             self._async_wait_loop = loop
         elif self._async_wait_loop is not loop:
             raise RuntimeError(f"{type(self).__name__} is already bound to a different event loop")
-        self._bind_wakeup_loop(loop)
-
-    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        return None
 
     def get_time(self) -> float:
         """Return the proactor clock value."""
@@ -1724,9 +1708,6 @@ class ThreadedSelectorProactor(SelectorProactor):
 
         self._completed_wait.wakeup()
 
-    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        self._completed_wait.bind_loop(loop)
-
     def _after_selector_registration_changed(self) -> None:
         self._wake_selector()
 
@@ -2056,9 +2037,6 @@ class UringProactor(ProactorBase):
         """Wake threads blocked in sync or async `wait`."""
 
         self._wait_ready.wakeup()
-
-    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        self._wait_ready.bind_loop(loop)
 
     def wait(self, deadline: float | None = None) -> None:
         """Wait until completed operations are signalled."""
