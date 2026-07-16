@@ -1783,9 +1783,15 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _schedule(self, enqueue=None) -> None:
         if enqueue is not None:
             enqueue()
-        self._run_ready_timers()
         target = self._find_target()
         target.switch()
+        # run threadsafe/timer callbacks once this task is back running and
+        # unlinked. callbacks may switch again (throw, eager task start) and must
+        # not run before target.switch(): the parking task is then linked on a
+        # wait primitive and cannot safely participate in scheduling. draining
+        # earlier only helped priority (new runnable picked by find_target); we
+        # never rely on callbacks supplying the sole switch target anyway
+        self._run_ready_timers()
 
     def yield_(self) -> None:
         """Yield the current task and make it runnable again."""
