@@ -132,10 +132,12 @@ class EventWakeupManager:
 
     def wakeup(self) -> None:
         self._event.set()
-        loop = self._async_loop
         waiter = self._async_waiter
-        if loop is not None and waiter is not None and not loop.is_closed():
-            loop.call_soon_threadsafe(waiter.set)
+        if waiter is not None:
+            loop = self._async_loop
+            assert loop is not None
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(waiter.set)
 
     def poll(self) -> bool:
         result = self._event.is_set()
@@ -156,9 +158,6 @@ class EventWakeupManager:
     async def wait_async(self, timeout: float | None = None) -> None:
         if self.poll():
             return
-
-        if self._async_waiter is None:
-            self.bind_loop(_asyncio.get_running_loop())
 
         waiter = self._async_waiter
         assert waiter is not None
