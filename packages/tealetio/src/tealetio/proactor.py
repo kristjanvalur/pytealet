@@ -114,7 +114,12 @@ class WakeupManager(Protocol):
 
 
 class EventWakeupManager:
-    """``threading.Event``-backed wakeup for proactor wait hosts."""
+    """``threading.Event``-backed wakeup for proactor wait hosts.
+
+    ``wait_async`` currently blocks a thread-pool thread on this primitive.
+    A later optimisation may fold async-loop unpark (today ``set_async_break``)
+    into the wait host so one manager owns both threading and asyncio wakeups.
+    """
 
     def __init__(self) -> None:
         self._event = threading.Event()
@@ -3037,7 +3042,6 @@ class UringProactor(ProactorBase):
         except BaseException:
             self._pending_tokens.pop()
             entry.active = False
-            self.wake_wait()
             raise
         return True
 
