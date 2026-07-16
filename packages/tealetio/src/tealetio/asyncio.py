@@ -344,13 +344,18 @@ class ForwardingProactor:
         loop: _asyncio.AbstractEventLoop,
         complete_future: Callable[[], object],
     ) -> None:
-        """Unblock ``select()`` and schedule the asyncio future on the host loop."""
+        """Schedule the asyncio future, then unblock ``select()``.
 
-        self._proactor.wake_wait()
+        Queue the completion before ``wake_wait()`` so the awakened loop cannot
+        re-enter ``wait()`` before ``call_soon_threadsafe`` has published the
+        callback (same ordering as scheduler ``call_soon_threadsafe``).
+        """
+
         try:
             loop.call_soon_threadsafe(complete_future)
         except RuntimeError:
-            pass
+            return
+        self._proactor.wake_wait()
 
     def _future_from_operation(self, operation: Operation[T]) -> _asyncio.Future[T]:
         loop = self._require_loop()
