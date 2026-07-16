@@ -5,6 +5,7 @@
 #include "uring_api_core.h"
 
 #include "uring_api_statx_layout.h"
+#include "uring_api_submit_trace.h"
 
 int ring_type_check(PyObject *ring) {
     if (!PyObject_TypeCheck(ring, &UringApiRing_Type)) {
@@ -411,6 +412,7 @@ struct io_uring_sqe *get_sqe(UringApiRing *self) {
     }
 
     errno = 0;
+    uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_GET_SQE_FLUSH);
     ret = io_uring_submit(&self->ring);
     if (ret < 0) {
         int errnum = normalize_ret_errno(ret);

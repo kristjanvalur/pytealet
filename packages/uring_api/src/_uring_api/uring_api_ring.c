@@ -9,6 +9,7 @@
 #include "uring_api_dispatch.h"
 #include "uring_api_staging.h"
 #include "uring_api_submit.h"
+#include "uring_api_submit_trace.h"
 
 PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
     UringApiRing *self = (UringApiRing *)type->tp_alloc(type, 0);
@@ -298,6 +299,17 @@ int UringApiRing_set_exception_handler(UringApiRing *self, PyObject *value, void
     return ret;
 }
 
+static PyObject *UringApiRing_drain_submit_trace(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    (void)self;
+    return uring_api_submit_trace_drain();
+}
+
+static PyObject *UringApiRing_reset_submit_trace(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    (void)self;
+    uring_api_submit_trace_reset();
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
@@ -312,11 +324,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a recv operation."},
     {"submit_recv_buf", _PyCFunction_CAST(UringApiRing_submit_recv_buf), METH_VARARGS | METH_KEYWORDS,
      "Submit a one-shot provided-buffer recv operation."},
-    {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_VARARGS | METH_KEYWORDS,
+    {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_FASTCALL,
      "Submit a multishot provided-buffer recv operation."},
-    {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_VARARGS | METH_KEYWORDS,
-     "Submit a send operation."},
-    {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_VARARGS | METH_KEYWORDS,
+    {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_FASTCALL, "Submit a send operation."},
+    {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_FASTCALL,
      "Submit a zero-copy send operation."},
     {"submit_recvmsg", _PyCFunction_CAST(UringApiRing_submit_recvmsg), METH_VARARGS | METH_KEYWORDS,
      "Submit a recvmsg operation."},
@@ -328,7 +339,7 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a zero-copy sendmsg operation."},
     {"submit_accept", _PyCFunction_CAST(UringApiRing_submit_accept), METH_VARARGS | METH_KEYWORDS,
      "Submit an accept operation."},
-    {"submit_accept_multishot", _PyCFunction_CAST(UringApiRing_submit_accept_multishot), METH_VARARGS | METH_KEYWORDS,
+    {"submit_accept_multishot", _PyCFunction_CAST(UringApiRing_submit_accept_multishot), METH_FASTCALL,
      "Submit a multishot accept operation."},
     {"submit_connect", _PyCFunction_CAST(UringApiRing_submit_connect), METH_VARARGS | METH_KEYWORDS,
      "Submit a connect operation."},
@@ -356,6 +367,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit fd-only statx (STATX_SIZE) and return the byte length in completion.result on success."},
     {"submit_socket", _PyCFunction_CAST(UringApiRing_submit_socket), METH_VARARGS | METH_KEYWORDS,
      "Submit a socket creation operation."},
+    {"drain_submit_trace", (PyCFunction)UringApiRing_drain_submit_trace, METH_NOARGS,
+     "Return averaged submit-path phase timings when URING_API_SUBMIT_TRACE=1."},
+    {"reset_submit_trace", (PyCFunction)UringApiRing_reset_submit_trace, METH_NOARGS,
+     "Reset accumulated submit-path phase timings."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Interrupt a thread blocked in wait without producing a user completion."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,

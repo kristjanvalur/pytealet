@@ -7,6 +7,150 @@
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 #include "uring_api_statx.h"
+#include "uring_api_submit_trace.h"
+
+static int parse_socket_fd(PyObject *obj, int *fd_out) {
+    long value = PyLong_AsLong(obj);
+
+    if (value == -1 && PyErr_Occurred()) {
+        return -1;
+    }
+    if (value < 0) {
+        PyErr_SetString(PyExc_ValueError, "fd must be non-negative");
+        return -1;
+    }
+    if (value > INT_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "fd out of range");
+        return -1;
+    }
+    *fd_out = (int)value;
+    return 0;
+}
+
+static int parse_uint_arg(PyObject *obj, unsigned int *value_out) {
+    unsigned long value = PyLong_AsUnsignedLong(obj);
+
+    if (value == (unsigned long)-1 && PyErr_Occurred()) {
+        return -1;
+    }
+    if (value > UINT_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "integer out of range");
+        return -1;
+    }
+    *value_out = (unsigned int)value;
+    return 0;
+}
+
+static int parse_ull_arg(PyObject *obj, unsigned long long *value_out) {
+    unsigned long long value = PyLong_AsUnsignedLongLong(obj);
+
+    if (value == (unsigned long long)-1 && PyErr_Occurred()) {
+        return -1;
+    }
+    *value_out = value;
+    return 0;
+}
+
+static int parse_recv_multishot_args(PyObject *const *args, Py_ssize_t nargs, int *fd_out, PyObject **buf_group_out,
+                                   PyObject **user_data_out, unsigned int *flags_out,
+                                   unsigned long long *base_sequence_out) {
+    Py_ssize_t positional_optional_count;
+
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "submit_recv_multishot() missing required arguments 'fd' and 'buf_group'");
+        return -1;
+    }
+    if (nargs > 5) {
+        PyErr_Format(PyExc_TypeError, "submit_recv_multishot() takes at most 5 positional arguments (%zd given)",
+                     nargs);
+        return -1;
+    }
+
+    if (parse_socket_fd(args[0], fd_out) < 0) {
+        return -1;
+    }
+    if (!PyObject_TypeCheck(args[1], &UringApiBufGroup_Type)) {
+        PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup");
+        return -1;
+    }
+    *buf_group_out = args[1];
+
+    positional_optional_count = nargs - 2;
+    if (positional_optional_count > 0) {
+        *user_data_out = args[2];
+    }
+    if (positional_optional_count > 1) {
+        if (parse_uint_arg(args[3], flags_out) < 0) {
+            return -1;
+        }
+    }
+    if (positional_optional_count > 2) {
+        if (parse_ull_arg(args[4], base_sequence_out) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int parse_send_args(const char *name, PyObject *const *args, Py_ssize_t nargs, Py_ssize_t max_nargs,
+                           int *fd_out, Py_buffer *view_out, PyObject **user_data_out, unsigned int *flags_out,
+                           unsigned int *zc_flags_out, int parse_zc_flags) {
+    if (nargs < 2) {
+        PyErr_Format(PyExc_TypeError, "%s() missing required arguments 'fd' and 'data'", name);
+        return -1;
+    }
+    if (nargs > max_nargs) {
+        PyErr_Format(PyExc_TypeError, "%s() takes at most %zd positional arguments (%zd given)", name, max_nargs,
+                     nargs);
+        return -1;
+    }
+    if (parse_socket_fd(args[0], fd_out) < 0) {
+        return -1;
+    }
+    if (PyObject_GetBuffer(args[1], view_out, PyBUF_STRIDED_RO) < 0) {
+        return -1;
+    }
+    if (nargs > 2) {
+        *user_data_out = args[2];
+    }
+    if (nargs > 3) {
+        if (parse_uint_arg(args[3], flags_out) < 0) {
+            PyBuffer_Release(view_out);
+            return -1;
+        }
+    }
+    if (parse_zc_flags && nargs > 4) {
+        if (parse_uint_arg(args[4], zc_flags_out) < 0) {
+            PyBuffer_Release(view_out);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int parse_accept_listener_args(const char *name, PyObject *const *args, Py_ssize_t nargs, int *fd_out,
+                                      PyObject **user_data_out, unsigned int *flags_out) {
+    if (nargs < 1) {
+        PyErr_Format(PyExc_TypeError, "%s() missing required argument 'fd'", name);
+        return -1;
+    }
+    if (nargs > 3) {
+        PyErr_Format(PyExc_TypeError, "%s() takes at most 3 positional arguments (%zd given)", name, nargs);
+        return -1;
+    }
+    if (parse_socket_fd(args[0], fd_out) < 0) {
+        return -1;
+    }
+    if (nargs > 1) {
+        *user_data_out = args[1];
+    }
+    if (nargs > 2) {
+        if (parse_uint_arg(args[2], flags_out) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
 
 static int validate_file_io_buffer_length(Py_buffer *view) {
     if (view->len < 0 || (unsigned long long)view->len > UINT_MAX) {
@@ -130,35 +274,47 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
 
     if (!buf_group_obj || !PyObject_TypeCheck(buf_group_obj, &UringApiBufGroup_Type)) {
         PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup");
+        uring_api_submit_trace_end_recv_multishot();
         return NULL;
     }
     buf_group = (UringApiBufGroup *)buf_group_obj;
     if (buf_group->ring != self) {
         PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
+        uring_api_submit_trace_end_recv_multishot();
         return NULL;
     }
+    uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_VALIDATE);
 
     completion = UringApiCompletion_new_pending_buf_group(URING_API_PENDING_RECV_MULTISHOT, user_data, buf_group_obj);
     if (!completion) {
+        uring_api_submit_trace_end_recv_multishot();
         return NULL;
     }
     ((UringApiCompletion *)completion)->multishot = true;
     ((UringApiCompletion *)completion)->sequence = base_sequence;
+    uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_COMPLETION_NEW);
 
     Py_BEGIN_CRITICAL_SECTION(self);
+    uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_RING_LOCK);
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
+        uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_CHECK_OPEN);
         sqe = get_sqe(self);
         if (!sqe) {
             failed = 1;
         } else {
+            uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_GET_SQE);
             io_uring_prep_recv_multishot(sqe, fd, NULL, 0, (int)flags);
             sqe->flags |= IOSQE_BUFFER_SELECT;
             sqe->buf_group = buf_group->group_id;
+            uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_PREP);
             sqe_set_completion(self, sqe, completion);
+            uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_SET_DATA);
             if (submit_one(self) < 0) {
                 failed = 1;
+            } else {
+                uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_SUBMIT_ONE);
             }
         }
     }
@@ -166,8 +322,10 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
 
     if (failed) {
         Py_DECREF(completion);
+        uring_api_submit_trace_end_recv_multishot();
         return NULL;
     }
+    uring_api_submit_trace_end_recv_multishot();
     return Py_NewRef(completion);
 }
 
@@ -1112,43 +1270,42 @@ PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject 
     return UringApiRing_submit_recv_impl(self, fd, &view, user_data);
 }
 
-PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", "base_sequence", NULL};
+PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
     unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
     PyObject *buf_group_obj;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO!|OIK", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
-                                     &user_data, &flags, &base_sequence)) {
+    if (parse_recv_multishot_args(args, nargs, &fd, &buf_group_obj, &user_data, &flags, &base_sequence) < 0) {
         return NULL;
     }
+
+    uring_api_submit_trace_begin_recv_multishot();
+    uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_PARSE);
     return UringApiRing_submit_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence);
 }
 
-PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "data", "user_data", "flags", NULL};
+PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     Py_buffer view;
     int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OI", keywords, &fd, &view, &user_data, &flags)) {
+    if (parse_send_args("submit_send", args, nargs, 4, &fd, &view, &user_data, &flags, NULL, 0) < 0) {
         return NULL;
     }
     return UringApiRing_submit_send_impl(self, fd, &view, flags, user_data);
 }
 
-PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "data", "user_data", "flags", "zc_flags", NULL};
+PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     Py_buffer view;
     int fd;
     unsigned int flags = 0;
     unsigned int zc_flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OII", keywords, &fd, &view, &user_data, &flags, &zc_flags)) {
+    if (parse_send_args("submit_send_zc", args, nargs, 5, &fd, &view, &user_data, &flags, &zc_flags, 1) < 0) {
         return NULL;
     }
     return UringApiRing_submit_send_zc_impl(self, fd, &view, flags, zc_flags, user_data);
@@ -1220,13 +1377,12 @@ PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObjec
     return UringApiRing_submit_accept_impl(self, fd, flags, user_data);
 }
 
-PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "user_data", "flags", NULL};
+PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|OI", keywords, &fd, &user_data, &flags)) {
+    if (parse_accept_listener_args("submit_accept_multishot", args, nargs, &fd, &user_data, &flags) < 0) {
         return NULL;
     }
     return UringApiRing_submit_accept_multishot_impl(self, fd, flags, user_data);

@@ -103,6 +103,7 @@ setup(
                 _uring_api_source("uring_api_statx.c"),
                 _uring_api_source("uring_api_staging.c"),
                 _uring_api_source("uring_api_submit.c"),
+                _uring_api_source("uring_api_submit_trace.c"),
             ],
             depends=[
                 _uring_api_source("uring_api_bufgroup.h"),
@@ -119,6 +120,7 @@ setup(
                 _uring_api_source("uring_api_statx.h"),
                 _uring_api_source("uring_api_staging.h"),
                 _uring_api_source("uring_api_submit.h"),
+                _uring_api_source("uring_api_submit_trace.h"),
             ],
             include_dirs=["src/uring_api/include"],
             libraries=["uring"],
