@@ -318,64 +318,6 @@ def _exercise_recviter_buffer(exercise: Any) -> Any:
         scheduler.close()
 
 
-def _multishot_test_completion(*, sequence: int = 0, more: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(
-        multishot=True,
-        flags=uring_api.IORING_CQE_F_MORE if more else 0,
-        sequence=sequence,
-    )
-
-
-def _multishot_test_entry() -> proactor_module._UringEntry:
-    operation = ContinuousOperation(
-        kind="recv_many",
-        fileobj=socket.socketpair()[0],
-        result_callback=lambda _result: None,
-    )
-    return proactor_module._UringEntry(
-        operation=operation,
-        complete=lambda *_args: None,
-        multishot=True,
-    )
-
-
-def test_uring_entry_omits_multishot_leg_for_one_shot_operations():
-    operation = Operation(kind="recv", fileobj=socket.socketpair()[0])
-    entry = proactor_module._UringEntry(operation=operation, complete=lambda *_args: None)
-    assert entry.multishot_leg is None
-
-
-def test_completions_to_process_passes_through_non_multishot():
-    entry = _multishot_test_entry()
-    completion = SimpleNamespace(multishot=False)
-    assert entry.completions_to_process(completion) == (completion,)
-
-
-def test_completions_to_process_defers_out_of_order_termination():
-    entry = _multishot_test_entry()
-    terminal = _multishot_test_completion(sequence=2, more=False)
-    assert entry.completions_to_process(terminal) == ()
-    assert entry.multishot_leg is not None
-    assert entry.multishot_leg.pending_final is terminal
-
-
-def test_completions_to_process_flushes_stored_termination():
-    entry = _multishot_test_entry()
-    terminal = _multishot_test_completion(sequence=2, more=False)
-    entry.completions_to_process(terminal)
-    first = _multishot_test_completion(sequence=0)
-    assert entry.completions_to_process(first) == (first,)
-    second = _multishot_test_completion(sequence=1)
-    assert entry.completions_to_process(second) == (second, terminal)
-
-
-def test_completions_to_process_still_orders_late_multishot_after_operation_done():
-    entry = _multishot_test_entry()
-    entry.operation._finish(result=None)
-    terminal = _multishot_test_completion(sequence=0, more=False)
-    assert entry.completions_to_process(terminal) == (terminal,)
-
-
 @pytest.mark.skipif(
     not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
 )

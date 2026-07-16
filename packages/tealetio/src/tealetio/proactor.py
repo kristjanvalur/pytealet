@@ -860,24 +860,12 @@ _UringEntryComplete = Callable[["_UringEntry", "_UringCompletion"], Operation[An
 _UringEntrySubmit = Callable[[], _UringCompletion]
 
 
-@dataclass
-class _MultishotLegState:
-    """Per-leg state for deferred multishot termination handling."""
-
-    nonterminal_seen: int = 0
-    pending_final: _UringCompletion | None = None
-    leg_base: int = 0
-    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-
-
 class _UringEntry:
     """Per-submission io_uring completion state.
 
     Operation-specific context and the owning proactor are captured by the
     ``complete`` callback closure. One-shot re-arm submit callables live in
     ``submit_box`` lists referenced from ``complete`` and resume closures.
-    ``multishot_leg`` is created automatically when ``multishot=True`` and is
-    consulted before ``complete`` runs to order multishot CQEs.
     """
 
     __slots__ = (
@@ -885,7 +873,6 @@ class _UringEntry:
         "complete",
         "completion",
         "active",
-        "multishot_leg",
         "poll_remove",
     )
 
@@ -894,53 +881,13 @@ class _UringEntry:
         operation: "UringOperation[Any] | UringContinuousOperation[Any]",
         complete: _UringEntryComplete,
         *,
-        multishot: bool = False,
         poll_remove: bool = False,
     ) -> None:
         self.operation = operation
         self.complete = complete
         self.completion = None
         self.active = False
-        self.multishot_leg = _MultishotLegState() if multishot else None
         self.poll_remove = poll_remove
-
-    def completions_to_process(
-        self,
-        completion: _UringCompletion,
-    ) -> tuple[_UringCompletion, ...]:
-        """Return completions ready for ``_complete_uring_operation``.
-
-        Returns an empty tuple when a multishot termination is being deferred.
-        One-shot completions return a single-element tuple. Multishot legs may
-        return two when a deferred termination becomes ready alongside the
-        unblocking CQE.
-        """
-
-        if not completion.multishot:
-            return (completion,)
-        leg = self.multishot_leg
-        assert leg is not None
-        with leg.lock:
-            is_termination = not bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-            if is_termination:
-                res = getattr(completion, "res", 0)
-                # Negative CQEs are terminal failures; deliver immediately so the
-                # operation and result callback both observe the error.
-                if res < 0:
-                    leg.pending_final = None
-                    return (completion,)
-                leg_sequence = int(completion.sequence) - leg.leg_base
-                if leg.nonterminal_seen < leg_sequence:
-                    leg.pending_final = completion
-                    return ()
-                leg.pending_final = None
-                return (completion,)
-            leg.nonterminal_seen += 1
-            pending = leg.pending_final
-            if pending is not None and leg.nonterminal_seen >= int(pending.sequence) - leg.leg_base:
-                leg.pending_final = None
-                return (completion, pending)
-            return (completion,)
 
 
 class UringOperation(Operation[T]):
@@ -1899,13 +1846,11 @@ class UringProactor(ProactorBase):
         operation: "UringOperation[Any] | UringContinuousOperation[Any]",
         complete: _UringEntryComplete,
         *,
-        multishot: bool = False,
         poll_remove: bool = False,
     ) -> _UringEntry:
         entry = _UringEntry(
             operation=operation,
             complete=complete,
-            multishot=multishot,
             poll_remove=poll_remove,
         )
         operation._uring_entry = entry
@@ -2365,7 +2310,6 @@ class UringProactor(ProactorBase):
                     completion,
                     accept_entry_ref,
                 ),
-                multishot=True,
             )
             accept_entry_ref[0] = entry
             self._submit_uring_entry(
@@ -2723,15 +2667,9 @@ class UringProactor(ProactorBase):
             entry = self._uring_entry(
                 operation,
                 lambda entry, completion: self._deliver_uring_recv_many(entry, completion),
-                multishot=True,
             )
 
             def submit_recv_many() -> _UringCompletion:
-                leg = entry.multishot_leg
-                assert leg is not None
-                leg.leg_base = leg_base
-                leg.nonterminal_seen = 0
-                leg.pending_final = None
                 return self._ring.submit_recv_multishot(
                     sock.fileno(),
                     uring_group,
@@ -2868,7 +2806,6 @@ class UringProactor(ProactorBase):
             entry = self._uring_entry(
                 operation,
                 lambda entry, completion: self._deliver_uring_poll_many(entry, completion),
-                multishot=True,
                 poll_remove=True,
             )
             self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
@@ -2938,13 +2875,10 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
         res = completion.res
-        multishot_leg = entry.multishot_leg
-        assert multishot_leg is not None
         index = int(completion.sequence)
 
         if res < 0:
             if res == -errno.ENOBUFS:
-                multishot_leg.pending_final = None
                 operation._emit_delivery(_recv_many_enobufs_delivery(index=index))
                 self._deactivate_uring_entry(entry)
                 return operation
@@ -2994,12 +2928,9 @@ class UringProactor(ProactorBase):
             ):
                 teardown_completions.append(completion)
                 continue
-            entry = cast(_UringEntry, completion.user_data)
-            to_process = entry.completions_to_process(completion)
-            for pending in to_process:
-                result = self._complete_uring_operation(pending)
-                if result is not None:
-                    completed_operation = result
+            result = self._complete_uring_operation(completion)
+            if result is not None:
+                completed_operation = result
         for completion in teardown_completions:
             result = self._complete_uring_operation(completion)
             if result is not None:
