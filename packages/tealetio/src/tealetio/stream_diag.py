@@ -13,8 +13,16 @@ import time
 from collections import Counter
 
 
+def _truthy(name: str) -> bool:
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
 def enabled() -> bool:
-    return os.environ.get("TEALETIO_STREAM_DIAG", "").lower() in ("1", "true", "yes")
+    return _truthy("TEALETIO_STREAM_DIAG")
+
+
+def accept_path_enabled() -> bool:
+    return _truthy("TEALETIO_ACCEPT_PATH_TIMING") or enabled()
 
 
 def uring_accept_enabled() -> bool:
@@ -28,6 +36,120 @@ def uring_accept_enabled() -> bool:
 def _thread_label() -> str:
     current = threading.current_thread()
     return current.name or f"tid-{threading.get_ident()}"
+
+
+class _AcceptPathTiming:
+    """Per-fd perf-counter phases from accept CQE handler entry to streams ready."""
+
+    _PHASES = (
+        "socket_wrap",
+        "worker_enter",
+        "open_streams",
+        "pooled_enter",
+        "pool_enter",
+        "pool_create",
+        "pool_shared",
+        "recv_iter",
+        "send_buf",
+        "stream_objs",
+    )
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cqe_at: dict[int, float] = {}
+        self._last_at: dict[int, float] = {}
+        self._deltas_us: dict[int, dict[str, float]] = {}
+
+    def begin(self, fd: int, started_at: float) -> None:
+        with self._lock:
+            self._cqe_at[fd] = started_at
+            self._last_at[fd] = started_at
+            self._deltas_us[fd] = {}
+
+    def mark(self, fd: int, phase: str) -> None:
+        now = time.perf_counter()
+        with self._lock:
+            last = self._last_at.get(fd)
+            if last is None:
+                return
+            self._deltas_us.setdefault(fd, {})[phase] = (now - last) * 1_000_000.0
+            self._last_at[fd] = now
+
+    def finish(self, fd: int) -> dict[str, object] | None:
+        now = time.perf_counter()
+        with self._lock:
+            started = self._cqe_at.pop(fd, None)
+            self._last_at.pop(fd, None)
+            deltas = self._deltas_us.pop(fd, {})
+        if started is None:
+            return None
+        total_us = (now - started) * 1_000_000.0
+        fields: dict[str, object] = {
+            "fd": fd,
+            "cqe_to_ready_us": round(total_us, 1),
+        }
+        for phase in self._PHASES:
+            if phase in deltas:
+                fields[f"{phase}_us"] = round(deltas[phase], 1)
+        return fields
+
+
+class _RecvIterPathTiming:
+    """Per-fd perf-counter phases for ``RecvIterBuffer`` construction."""
+
+    _PHASES = (
+        "scheduler",
+        "setup",
+        "marshal_cb",
+        "recv_many_enter",
+        "recv_guard",
+        "recv_op_new",
+        "recv_entry",
+        "submit_enter",
+        "ring_submit",
+        "submit_done",
+        "recv_store",
+    )
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._started_at: dict[int, float] = {}
+        self._last_at: dict[int, float] = {}
+        self._deltas_us: dict[int, dict[str, float]] = {}
+
+    def begin(self, fd: int) -> None:
+        now = time.perf_counter()
+        with self._lock:
+            self._started_at[fd] = now
+            self._last_at[fd] = now
+            self._deltas_us[fd] = {}
+
+    def mark(self, fd: int, phase: str) -> None:
+        now = time.perf_counter()
+        with self._lock:
+            last = self._last_at.get(fd)
+            if last is None:
+                return
+            self._deltas_us.setdefault(fd, {})[phase] = (now - last) * 1_000_000.0
+            self._last_at[fd] = now
+
+    def finish(self, fd: int) -> dict[str, object] | None:
+        now = time.perf_counter()
+        with self._lock:
+            started = self._started_at.pop(fd, None)
+            self._last_at.pop(fd, None)
+            deltas = self._deltas_us.pop(fd, {})
+        if started is None:
+            return None
+        total_us = (now - started) * 1_000_000.0
+        fields: dict[str, object] = {
+            "fd": fd,
+            "total_us": round(total_us, 1),
+        }
+        for phase in self._PHASES:
+            if phase in deltas:
+                fields[f"{phase}_us"] = round(deltas[phase], 1)
+        return fields
 
 
 class _AcceptDeliveryTiming:
@@ -74,6 +196,8 @@ class _StreamDiag:
         self._last_event = 0.0
         self._blocking: dict[int, tuple[str, float, str]] = {}
         self._accept = _AcceptDeliveryTiming()
+        self._accept_path = _AcceptPathTiming()
+        self._recv_iter_path = _RecvIterPathTiming()
 
     def event(self, name: str, **fields: object) -> None:
         if not enabled():
@@ -142,14 +266,66 @@ class _StreamDiag:
 _diag = _StreamDiag()
 
 
+def recv_iter_path_begin(fd: int) -> None:
+    if not accept_path_enabled():
+        return
+    _diag._recv_iter_path.begin(fd)
+
+
+def recv_iter_path_mark(fd: int, phase: str) -> None:
+    if not accept_path_enabled():
+        return
+    _diag._recv_iter_path.mark(fd, phase)
+
+
+def recv_iter_path_finish(fd: int) -> None:
+    if not accept_path_enabled():
+        return
+    fields = _diag._recv_iter_path.finish(fd)
+    if fields is None:
+        return
+    parts = " ".join(f"{key}={value}" for key, value in fields.items())
+    with _diag._lock:
+        _diag._last_event = time.monotonic()
+    print(f"[recv-iter-timing] ready {parts}", file=sys.stderr, flush=True)
+
+
+def accept_path_begin(fd: int, started_at: float) -> None:
+    if not accept_path_enabled():
+        return
+    _diag._accept_path.begin(fd, started_at)
+
+
+def accept_path_mark(fd: int, phase: str) -> None:
+    if not accept_path_enabled():
+        return
+    _diag._accept_path.mark(fd, phase)
+
+
+def accept_path_finish(fd: int) -> None:
+    if not accept_path_enabled():
+        return
+    fields = _diag._accept_path.finish(fd)
+    if fields is None:
+        return
+    parts = " ".join(f"{key}={value}" for key, value in fields.items())
+    with _diag._lock:
+        _diag._last_event = time.monotonic()
+    print(f"[accept-path-timing] ready {parts}", file=sys.stderr, flush=True)
+
+
 def accept_worker_conn(fd: int) -> None:
     if not enabled():
+        if accept_path_enabled():
+            accept_path_mark(fd, "worker_enter")
         return
     _diag._accept.worker_conn(fd)
+    accept_path_mark(fd, "worker_enter")
     _diag.event("accept_worker", fd=fd)
 
 
 def accept_streams_opened(fd: int) -> None:
+    accept_path_finish(fd)
     if not enabled():
         return
     open_ms = _diag._accept.streams_opened(fd)

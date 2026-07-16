@@ -19,6 +19,7 @@ from .io_waiter import IOWaiter, IOWaiterSync
 from .locks import CrossThreadCondition, PulseEvent
 from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
 from .scheduler import get_running_scheduler
+from .stream_diag import recv_iter_path_begin, recv_iter_path_finish, recv_iter_path_mark
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -116,8 +117,11 @@ class RecvIterBuffer:
         recv_many: _RecvManyStarter | None = None,
         owns_pool: bool = False,
     ) -> None:
+        fd = sock.fileno()
+        recv_iter_path_begin(fd)
         if scheduler is None:
             scheduler = get_running_scheduler()
+            recv_iter_path_mark(fd, "scheduler")
         self._sock = sock
         self._buffer_pool = buffer_pool
         self._owns_pool = owns_pool
@@ -133,12 +137,17 @@ class RecvIterBuffer:
         self._next_base = 0
         self._current_operation: ContinuousOperation[_RecvManyValue] | None = None
         self._closed = False
+        recv_iter_path_mark(fd, "setup")
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
+        recv_iter_path_mark(fd, "marshal_cb")
         self._start_recv_many(base_sequence=0)
+        recv_iter_path_finish(fd)
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
         if self._closed:
             return
+        fd = self._sock.fileno()
+        recv_iter_path_mark(fd, "recv_many_enter")
         # SelectorProactor can deliver on this stack before recv_many returns (full
         # synthetic-pool ENOBUFS, eager readable steps) via marshal_to_scheduler
         # immediate=True. Nested _on_ordered_delivery may _schedule_resubmit and
@@ -163,6 +172,7 @@ class RecvIterBuffer:
             raise
         if self._current_operation is _RECV_MANY_STARTING:
             self._current_operation = operation
+        recv_iter_path_mark(fd, "recv_store")
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
         # only ENOBUFS / more=False-with-data; EOF leaves the done op in place

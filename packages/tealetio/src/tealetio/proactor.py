@@ -33,6 +33,7 @@ from .socket_helpers import (
     is_soft_accept_error as _is_soft_accept_error,
     socket_from_uring_fd,
 )
+from .stream_diag import accept_path_begin, accept_path_mark
 from .wakeup import note_break_wait_signal, note_break_wait_wake, yield_after_break_wait_wakeup
 from .operations import (
     ContinuousOperation,
@@ -2959,7 +2960,11 @@ class UringProactor(ProactorBase):
                     _continuous_error_delivery(_uring_cqe_oserror(res), index=base_sequence),
                 )
             return operation
+        cqe_started = time.perf_counter()
         conn = socket_from_uring_fd(completion.res)
+        fd = conn.fileno()
+        accept_path_begin(fd, cqe_started)
+        accept_path_mark(fd, "socket_wrap")
         _handoff_accept_many(operation, conn, more=False, index=base_sequence)
         self._deactivate_uring_op(op)
         return operation
@@ -2981,7 +2986,11 @@ class UringProactor(ProactorBase):
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return operation
+        cqe_started = time.perf_counter()
         conn = socket_from_uring_fd(completion.res)
+        fd = conn.fileno()
+        accept_path_begin(fd, cqe_started)
+        accept_path_mark(fd, "socket_wrap")
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         _handoff_accept_many(operation, conn, more=more, index=index)
         if not more:
