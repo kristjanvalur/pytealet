@@ -101,6 +101,41 @@ _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _PollManyCallback = Callable[[MultishotDelivery], object]
 
 
+class WakeupManager(Protocol):
+    """Cross-thread wakeup primitive for proactor ``wait`` / ``wait_async``."""
+
+    def wakeup(self) -> None:
+        """Wake a sleeping waiter or latch until ``wait()`` / ``poll()``."""
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until ``wakeup()`` or ``timeout`` elapses."""
+
+    def poll(self) -> bool:
+        """Return whether a wakeup is pending, consuming it when true."""
+
+
+class EventWakeupManager:
+    """``threading.Event``-backed wakeup for proactor wait hosts."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        woke = self._event.wait(timeout=timeout)
+        if woke:
+            self._event.clear()
+        return woke
+
+    def wakeup(self) -> None:
+        self._event.set()
+
+    def poll(self) -> bool:
+        result = self._event.is_set()
+        if result:
+            self._event.clear()
+        return result
+
+
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
     return configure_scheduler_socket(socket.socket(family, type, proto))
 
@@ -412,7 +447,7 @@ class Proactor(Protocol):
 
     def close(self) -> None: ...
 
-    def break_wait(self) -> None: ...
+    def wake_wait(self) -> None: ...
 
     def set_completion_callback(self, callback: _CompletionCallback | None) -> None: ...
 
@@ -651,6 +686,18 @@ class ProactorBase:
         callback = self._completion_callback
         if callback is not None:
             callback()
+
+    def _notify_operation_completed(self, _operation: Operation[Any]) -> None:
+        """Notify async hosts that a worker-thread operation leg finished."""
+
+        self._notify_completion()
+
+    def _notify_operations_completed(self, operations: list[Operation[Any]]) -> None:
+        """Notify the driver after a worker batch completed operations."""
+
+        if any(not isinstance(op, ContinuousOperation) for op in operations):
+            self.wake_wait()
+        self._notify_completion()
 
     def _check_open(self) -> None:
         if self._closed:
@@ -999,8 +1046,8 @@ class SelectorProactor(ProactorBase):
             self._wakeup_reader.close()
             self._wakeup_writer.close()
 
-    def break_wait(self) -> None:
-        """Interrupt a thread blocked in `wait` without completing operations."""
+    def wake_wait(self) -> None:
+        """Wake a thread blocked in `wait`."""
 
         self._wake_selector()
 
@@ -1682,7 +1729,7 @@ class ThreadedSelectorProactor(SelectorProactor):
         elif not hasattr(selector, "select_released"):
             raise TypeError("ThreadedSelectorProactor requires a selector with select_released()")
         super().__init__(selector, completion_callback=completion_callback)
-        self._completed_ready = threading.Event()
+        self._completed_wait = EventWakeupManager()
         self._worker_started = False
         self._worker_stop = threading.Event()
         self._worker = threading.Thread(target=self._worker_main, name="tealetio-selector-proactor", daemon=True)
@@ -1691,7 +1738,7 @@ class ThreadedSelectorProactor(SelectorProactor):
         """Stop the worker thread and close selector resources."""
 
         self._worker_stop.set()
-        self._completed_ready.set()
+        self._completed_wait.wakeup()
         self._wake_selector()
         if self._closed:
             return
@@ -1699,10 +1746,10 @@ class ThreadedSelectorProactor(SelectorProactor):
             self._worker.join()
         super().close()
 
-    def break_wait(self) -> None:
-        """Interrupt a thread blocked in `wait` without completing operations."""
+    def wake_wait(self) -> None:
+        """Wake a thread blocked in `wait`."""
 
-        self._completed_ready.set()
+        self._completed_wait.wakeup()
 
     def _after_selector_registration_changed(self) -> None:
         self._wake_selector()
@@ -1713,14 +1760,12 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._check_open()
         self._ensure_worker_started()
         if deadline == 0:
-            self._completed_ready.clear()
             return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
         self._wait_for_completed(timeout)
-        self._completed_ready.clear()
 
     async def wait_async(self, deadline: float | None = None) -> None:
         """Wait asynchronously until completed operations are signalled."""
@@ -1736,11 +1781,6 @@ class ThreadedSelectorProactor(SelectorProactor):
         if timeout == 0:
             return
         await loop.run_in_executor(None, self._wait_for_completed, timeout)
-        self._completed_ready.clear()
-
-    def _notify_completed(self) -> None:
-        self._completed_ready.set()
-        self._notify_completion()
 
     def _ensure_worker_started(self) -> None:
         with self._lock:
@@ -1757,10 +1797,10 @@ class ThreadedSelectorProactor(SelectorProactor):
             except (OSError, ValueError, RuntimeError):
                 return
             if completed:
-                self._notify_completed()
+                self._notify_operations_completed(completed)
 
     def _wait_for_completed(self, timeout: float | None) -> None:
-        self._completed_ready.wait(timeout)
+        self._completed_wait.wait(timeout=timeout)
 
 
 class UringProactor(ProactorBase):
@@ -1799,9 +1839,7 @@ class UringProactor(ProactorBase):
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
         self._provided_buffers_supported: bool | None = None
-        self._wait_ready = threading.Event()
-        self._async_wait_thread_id: int | None = None
-        self._async_wait_event: _asyncio.Event | None = None
+        self._wait_ready: WakeupManager = EventWakeupManager()
         self._ring.callback = self._deliver_uring_completion
         self._service_threads = [
             threading.Thread(target=self._service_thread_main, name=f"tealetio-uring-{index}")
@@ -1945,9 +1983,7 @@ class UringProactor(ProactorBase):
                     kind="cancel",
                     submit=self._ring.submit_cancel,
                 )
-            self.break_wait()
         elif self._cancel_deferred_operation(operation):
-            self.break_wait()
             cancel_op = self._completed_cancel_operation("cancel", operation)
         else:
             cancel_op = self._completed_cancel_operation("cancel", operation)
@@ -2036,35 +2072,19 @@ class UringProactor(ProactorBase):
             thread.join()
         self._pending_tokens.clear()
         self._deferred_submissions.clear()
-        self.break_wait()
+        self.wake_wait()
         self._ring.callback = None
         self._ring.exception_handler = None
         self._ring.close()
 
-    def break_wait(self) -> None:
-        """Interrupt a thread blocked in `wait` without completing operations."""
+    def wake_wait(self) -> None:
+        """Wake threads blocked in sync or async `wait`."""
 
-        self._wait_ready.set()
-        loop = self._async_wait_loop
-        event = self._async_wait_event
-        if event is None:
-            return
-        if loop is None or self._async_wait_thread_id == threading.get_ident():
-            event.set()
-            return
-        try:
-            loop.call_soon_threadsafe(event.set)
-        except RuntimeError:
-            pass
+        self._wait_ready.wakeup()
 
     def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
         """Bind this proactor to an asyncio event loop for async waits."""
 
-        if self._async_wait_loop is None:
-            super().bind_loop(loop)
-            self._async_wait_thread_id = threading.get_ident()
-            self._async_wait_event = _asyncio.Event()
-            return
         super().bind_loop(loop)
 
     def wait(self, deadline: float | None = None) -> None:
@@ -2089,33 +2109,14 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        event = self._async_wait_event
-        assert event is not None
-        if event.is_set() or self._wait_ready.is_set():
-            event.clear()
-            self._wait_ready.clear()
+        if self._wait_ready.poll():
             return
-        woken = False
-        try:
-            if timeout is None:
-                await event.wait()
-            else:
-                await compat.wait_for_timeout(event.wait(), timeout)
-            woken = True
-        except _asyncio.TimeoutError:
-            return
-        finally:
-            if woken:
-                event.clear()
-                self._wait_ready.clear()
-
-    def _notify_completed(self) -> None:
-        self.break_wait()
-        self._notify_completion()
+        loop = self._async_wait_loop
+        assert loop is not None
+        await loop.run_in_executor(None, self._wait_for_completed, timeout)
 
     def _wait_for_completed(self, timeout: float | None) -> None:
-        if self._wait_ready.wait(timeout):
-            self._wait_ready.clear()
+        self._wait_ready.wait(timeout=timeout)
 
     def recv(
         self,
@@ -3000,8 +3001,7 @@ class UringProactor(ProactorBase):
             return
         operation.deliver(self, exception=exc)
         if operation.done():
-            self.break_wait()
-            self._notify_completed()
+            self._notify_operation_completed(operation)
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         completed_operation: Operation[Any] | None = None
@@ -3033,13 +3033,12 @@ class UringProactor(ProactorBase):
                 self._complete_uring_poll_remove(completion.cancel_target)
         self._retry_deferred_submissions()
         if completed_operation is not None:
-            self._notify_completed()
+            self._notify_operation_completed(completed_operation)
         elif not self.has_pending_operations():
-            self.break_wait()
+            self.wake_wait()
 
     def _queue_entry_resubmit(self, entry: _UringEntry, submit: _UringEntrySubmit) -> None:
         self._enqueue_deferred_submission(_UringSubmission(entry=entry, submit=submit))
-        self.break_wait()
 
     def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
         self._pending_tokens.append(None)
@@ -3061,7 +3060,7 @@ class UringProactor(ProactorBase):
         except BaseException:
             self._pending_tokens.pop()
             entry.active = False
-            self.break_wait()
+            self.wake_wait()
             raise
         return True
 
@@ -3235,10 +3234,10 @@ class ProactorScheduler(BaseScheduler):
     # -- Driver wakeup -------------------------------------------------
 
     def _break_wait_threadsafe(self) -> None:
-        self._proactor.break_wait()
+        self._proactor.wake_wait()
 
     def _break_wait(self) -> None:
-        self._proactor.break_wait()
+        self._proactor.wake_wait()
 
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()
@@ -3277,6 +3276,7 @@ class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedule
         self._proactor.bind_loop(loop)
 
         def wake_loop() -> None:
+            self._proactor.wake_wait()
             loop.call_soon_threadsafe(lambda: None)
 
         self._proactor.set_completion_callback(wake_loop)

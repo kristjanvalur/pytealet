@@ -2020,7 +2020,7 @@ class TestSelectorProactor:
         seen: list[str] = []
         proactor = SelectorProactor(completion_callback=lambda: seen.append("wake"))
         try:
-            proactor.break_wait()
+            proactor.wake_wait()
             proactor.wait(0)
             assert seen == []
         finally:
@@ -2044,7 +2044,7 @@ class TestSelectorProactor:
             thread.join(0.05)
             assert thread.is_alive() is True
 
-            proactor.break_wait()
+            proactor.wake_wait()
 
             thread.join(1.0)
             assert thread.is_alive() is False
@@ -2213,7 +2213,7 @@ class TestSelectorProactor:
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
                 await asyncio.sleep(0)
 
-                proactor.break_wait()
+                proactor.wake_wait()
 
                 await waiter
             finally:
@@ -2328,7 +2328,7 @@ class TestThreadedSelectorProactor:
         proactor = ThreadedSelectorProactor(completion_callback=lambda: seen.append("wake"))
         try:
             proactor.wait(0)
-            proactor.break_wait()
+            proactor.wake_wait()
 
             proactor.wait(proactor.get_time() + 0.01)
             assert seen == []
@@ -2344,7 +2344,7 @@ class TestThreadedSelectorProactor:
             thread.join(0.05)
             assert thread.is_alive() is True
 
-            proactor.break_wait()
+            proactor.wake_wait()
 
             thread.join(1.0)
             assert thread.is_alive() is False
@@ -2514,7 +2514,7 @@ class TestUringProactor:
             thread.join(0.05)
             assert thread.is_alive() is True
 
-            proactor.break_wait()
+            proactor.wake_wait()
 
             thread.join(1.0)
             assert thread.is_alive() is False
@@ -2522,22 +2522,16 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_wait_async_without_pending_operations_returns_on_break_wait(self, monkeypatch):
+    def test_wait_async_without_pending_operations_returns_on_break_wait(self):
         async def run() -> None:
             proactor = UringProactor(ring_factory=_FakeUringRing)
             try:
-                loop = asyncio.get_running_loop()
-                proactor.bind_loop(loop)
-
-                def call_soon_threadsafe(*args, **kwargs):
-                    raise AssertionError("same-thread break_wait should set the asyncio event directly")
-
-                monkeypatch.setattr(loop, "call_soon_threadsafe", call_soon_threadsafe)
+                proactor.bind_loop(asyncio.get_running_loop())
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 10.0))
                 await asyncio.sleep(0)
                 assert waiter.done() is False
 
-                proactor.break_wait()
+                proactor.wake_wait()
 
                 await asyncio.wait_for(waiter, 1.0)
             finally:
@@ -2650,7 +2644,7 @@ class TestUringProactor:
         thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
         try:
             thread.start()
-            proactor.break_wait()
+            proactor.wake_wait()
             thread.join(1.0)
 
             assert thread.is_alive() is False
@@ -2665,8 +2659,8 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             proactor.recv(reader, 5)
-            proactor.break_wait()
-            proactor.break_wait()
+            proactor.wake_wait()
+            proactor.wake_wait()
 
             proactor.wait(proactor.get_time() + 1.0)
             thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
@@ -2674,7 +2668,7 @@ class TestUringProactor:
             thread.join(0.05)
             assert thread.is_alive() is True
 
-            proactor.break_wait()
+            proactor.wake_wait()
             thread.join(1.0)
             assert thread.is_alive() is False
             assert released.is_set()
@@ -2707,21 +2701,19 @@ class TestUringProactor:
         asyncio.run(run())
 
     def test_bind_loop_prepares_async_wait_state(self):
-        async def run() -> bool:
+        async def run() -> None:
             proactor = UringProactor(ring_factory=_FakeUringRing)
             try:
                 loop = asyncio.get_running_loop()
-                assert proactor._async_wait_event is None
+                assert proactor._async_wait_loop is None
 
                 proactor.bind_loop(loop)
 
                 assert proactor._async_wait_loop is loop
-                assert proactor._async_wait_thread_id == threading.get_ident()
-                return proactor._async_wait_event is not None
             finally:
                 proactor.close()
 
-        assert asyncio.run(run()) is True
+        asyncio.run(run())
 
     def test_bind_loop_rejects_different_event_loop(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -2740,7 +2732,7 @@ class TestUringProactor:
     def test_break_wait_wakes_proactor_waiters_without_ring_wakeup(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            proactor.break_wait()
+            proactor.wake_wait()
 
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.break_count == 0
@@ -2867,7 +2859,7 @@ class TestUringProactor:
             server.close()
             scheduler.close()
 
-    def test_wait_async_completes_from_callback_wakeup(self, monkeypatch):
+    def test_wait_async_completes_from_callback_wakeup(self):
         async def run() -> bytes:
             created: list[_DeferredUringRing] = []
 
@@ -2879,20 +2871,8 @@ class TestUringProactor:
             proactor = UringProactor(ring_factory=ring_factory)
             reader, writer = socket.socketpair()
             try:
-                loop = asyncio.get_running_loop()
-                proactor.bind_loop(loop)
-                call_soon_threadsafe_calls: list[object] = []
-                original_call_soon_threadsafe = loop.call_soon_threadsafe
-
-                def call_soon_threadsafe(callback, *args, context=None):
-                    call_soon_threadsafe_calls.append(callback)
-                    return original_call_soon_threadsafe(callback, *args, context=context)
-
-                def run_in_executor(*args, **kwargs):
-                    raise AssertionError("UringProactor.wait_async should not use an executor")
-
-                monkeypatch.setattr(loop, "call_soon_threadsafe", call_soon_threadsafe)
-                monkeypatch.setattr(loop, "run_in_executor", run_in_executor)
+                proactor.bind_loop(asyncio.get_running_loop())
+                proactor.set_completion_callback(proactor.wake_wait)
                 reader.setblocking(False)
                 operation = proactor.recv(reader, 5)
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
@@ -2904,7 +2884,6 @@ class TestUringProactor:
                 await asyncio.wait_for(waiter, 1.0)
                 thread.join(1.0)
                 assert thread.is_alive() is False
-                assert call_soon_threadsafe_calls
                 return operation.result()
             finally:
                 reader.close()

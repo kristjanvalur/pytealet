@@ -195,7 +195,7 @@ class StreamServer:
                 # scheduler has stopped (for example pytest teardown).
                 self._scheduler.call_soon_threadsafe(accept_task.cancel)
             # Unblock threaded selector proactors parked in accept_many().wait().
-            self._io.proactor.break_wait()
+            self._io.proactor.wake_wait()
             return
         self._finish_close()
 
