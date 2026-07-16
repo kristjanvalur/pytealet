@@ -2016,13 +2016,11 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_break_wait_does_not_notify_callback(self):
-        seen: list[str] = []
-        proactor = SelectorProactor(completion_callback=lambda: seen.append("wake"))
+    def test_wake_wait_without_async_break_does_not_run_host_hook(self):
+        proactor = SelectorProactor()
         try:
             proactor.wake_wait()
             proactor.wait(0)
-            assert seen == []
         finally:
             proactor.close()
 
@@ -2076,50 +2074,30 @@ class TestSelectorProactor:
 
         asyncio.run(run())
 
-    def test_set_completion_callback_replaces_callback(self):
+    def test_operation_done_callback_runs_on_completion(self):
         seen: list[str] = []
-        proactor = SelectorProactor(completion_callback=lambda: seen.append("old"))
+        proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.recv(reader, 1)
-            seen.clear()
-
-            proactor.set_completion_callback(lambda: seen.append("new"))
-            writer.send(b"x")
-
-            proactor.wait(proactor.get_time() + 1.0)
-            assert operation.done() is True
-            assert seen == ["new"]
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_completion_notifies_callback(self):
-        seen: list[str] = []
-        proactor = SelectorProactor(completion_callback=lambda: seen.append("wake"))
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = proactor.recv(reader, 1)
+            operation.add_done_callback(lambda _op: seen.append("done"))
             seen.clear()
 
             writer.send(b"x")
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.done() is True
-            assert seen == ["wake"]
+            assert seen == ["done"]
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_cancel_wakes_wait_without_notifying_callback(self):
+    def test_cancel_wakes_wait_without_operation_done_callback(self):
         seen: list[str] = []
-        proactor = SelectorProactor(completion_callback=lambda: seen.append("wake"))
+        proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -2245,12 +2223,13 @@ class TestThreadedSelectorProactor:
             callback_threads.append(threading.get_ident())
             callback_called.set()
 
-        proactor = ThreadedSelectorProactor(completion_callback=on_completion)
+        proactor = ThreadedSelectorProactor()
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.recv(reader, 5)
+            operation.add_done_callback(lambda _op: on_completion())
             proactor.wait(0)
             assert operation.done() is False
 
@@ -2323,9 +2302,9 @@ class TestThreadedSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_break_wait_does_not_notify_callback(self):
+    def test_wake_wait_without_async_break_does_not_run_host_hook(self):
         seen: list[str] = []
-        proactor = ThreadedSelectorProactor(completion_callback=lambda: seen.append("wake"))
+        proactor = ThreadedSelectorProactor()
         try:
             proactor.wait(0)
             proactor.wake_wait()
@@ -2416,12 +2395,12 @@ class TestThreadedSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_set_completion_callback_wakes_worker_before_locking(self):
+    def test_set_async_break_does_not_deadlock_worker(self):
         proactor = ThreadedSelectorProactor()
         try:
             proactor.wait(0)
 
-            thread = threading.Thread(target=lambda: proactor.set_completion_callback(lambda: None))
+            thread = threading.Thread(target=lambda: proactor.set_async_break(lambda: None))
             thread.start()
             thread.join(1.0)
 
@@ -2745,11 +2724,12 @@ class TestUringProactor:
         def on_completion() -> None:
             callback_called.set()
 
-        proactor = UringProactor(ring_factory=_FakeUringRing, completion_callback=on_completion)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
+            operation.add_done_callback(lambda _op: on_completion())
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == b"hello"
@@ -2872,9 +2852,9 @@ class TestUringProactor:
             reader, writer = socket.socketpair()
             try:
                 proactor.bind_loop(asyncio.get_running_loop())
-                proactor.set_completion_callback(proactor.wake_wait)
                 reader.setblocking(False)
                 operation = proactor.recv(reader, 5)
+                operation.add_done_callback(lambda _op: proactor.wake_wait())
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
                 await asyncio.sleep(0)
 
@@ -5277,7 +5257,7 @@ class TestProactorScheduler:
 
         assert asyncio.run(run()) == b"hello"
 
-    def test_async_proactor_scheduler_installs_loop_completion_callback(self, monkeypatch):
+    def test_async_proactor_scheduler_installs_async_break_hook(self, monkeypatch):
         async def run() -> bool:
             stored_callback = None
             bound_loops = []
@@ -5287,10 +5267,10 @@ class TestProactorScheduler:
                     bound_loops.append(loop)
                     super().bind_loop(loop)
 
-                def set_completion_callback(self, callback):
+                def set_async_break(self, callback):
                     nonlocal stored_callback
                     stored_callback = callback
-                    super().set_completion_callback(callback)
+                    super().set_async_break(callback)
 
             scheduler = AsyncProactorScheduler(TrackingProactor)
             try:
@@ -5307,7 +5287,7 @@ class TestProactorScheduler:
                 scheduler.bind_loop(loop)
                 assert bound_loops == [loop]
                 assert stored_callback is not None
-                stored_callback()
+                scheduler.proactor.wake_wait()
                 await asyncio.sleep(0)
                 return calls == 1
             finally:
