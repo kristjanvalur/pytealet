@@ -136,8 +136,10 @@ class EventWakeupManager:
         if waiter is not None:
             loop = self._async_loop
             assert loop is not None
-            if not loop.is_closed():
+            try:
                 loop.call_soon_threadsafe(waiter.set)
+            except RuntimeError:
+                return
 
     def poll(self) -> bool:
         result = self._event.is_set()
