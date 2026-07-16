@@ -2769,6 +2769,7 @@ class TestUringProactor:
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
         proactor = scheduler.proactor
         proactor._capabilities["IORING_ACCEPT_MULTISHOT"] = False
+        proactor.accept_multishot = proactor._accept_multishot_fallback
         server = socket.socket()
         try:
             server.setblocking(False)

@@ -2333,17 +2333,11 @@ class UringProactor(ProactorBase):
             sock,
             callback,
         )
-        accept_entry_ref: list[_UringEntry | None] = [None]
         # one multishot accept stays armed until F_MORE clears or we cancel.
         entry = self._uring_entry(
             operation,
-            lambda entry, completion: self._deliver_uring_accept_many(
-                entry,
-                completion,
-                accept_entry_ref,
-            ),
+            lambda entry, completion: self._deliver_uring_accept_many(entry, completion),
         )
-        accept_entry_ref[0] = entry
         self._submit_uring_entry(
             entry,
             lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
@@ -2361,45 +2355,21 @@ class UringProactor(ProactorBase):
             sock,
             self._guard_delivery_callback(callback),
         )
-        submit_box: list[_UringEntrySubmit] = []
         entry = self._uring_entry(
             operation,
-            lambda entry, completion: self._deliver_uring_accept_many_oneshot(entry, completion, submit_box),
+            lambda entry, completion: self._deliver_uring_accept_many_oneshot(entry, completion),
         )
-
-        def submit_accept() -> _UringCompletion:
-            return self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS)
-
-        submit_box.append(submit_accept)
-        self._submit_uring_entry(entry, submit_accept)
+        self._submit_uring_entry(
+            entry,
+            lambda: self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
+        )
         return operation
-
-    def _fail_accept_many_operation(
-        self,
-        operation: ContinuousOperation[AcceptManyResult],
-        accept_entry_ref: list[_UringEntry | None],
-        exc: BaseException,
-    ) -> None:
-        accept_entry = accept_entry_ref[0]
-        if accept_entry is not None:
-            completion = accept_entry.completion
-            if completion is not None:
-                self._submit_cancel_op(
-                    completion,
-                    kind="cancel",
-                    submit=self._ring.submit_cancel,
-                )
-            self._deactivate_uring_entry(accept_entry)
-            accept_entry_ref[0] = None
-        operation._finish_with_terminal_delivery(_continuous_error_delivery(exc))
 
     def _deliver_uring_accept_many_oneshot(
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
-        submit_box: list[_UringEntrySubmit],
     ) -> Operation[Any] | None:
-        del submit_box
         operation = cast(ContinuousOperation[AcceptManyResult], entry.operation)
         res = completion.res
         if res < 0:
@@ -2417,17 +2387,13 @@ class UringProactor(ProactorBase):
         self,
         entry: _UringEntry,
         completion: _UringCompletion,
-        accept_entry_ref: list[_UringEntry | None],
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[AcceptManyResult], entry.operation)
         res = completion.res
         if res < 0:
             self._deactivate_uring_entry(entry)
-            accept_entry_ref[0] = None
-            self._fail_accept_many_operation(
-                operation,
-                accept_entry_ref,
-                OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(_uring_cqe_oserror(res)),
             )
             return operation
         conn = socket_from_uring_fd(completion.res)
@@ -2435,7 +2401,6 @@ class UringProactor(ProactorBase):
         _handoff_accept_many(operation, conn, more=more, index=int(completion.sequence))
         if not more:
             self._deactivate_uring_entry(entry)
-            accept_entry_ref[0] = None
         return operation
 
     def create_socket(
