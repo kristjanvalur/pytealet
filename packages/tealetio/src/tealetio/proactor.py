@@ -98,6 +98,7 @@ _RecvManyCallback = Callable[[MultishotDelivery], object]
 _RecvMultishotImpl = Callable[..., ContinuousOperation[_RecvManyValue]]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
+_AcceptMultishotImpl = Callable[..., ContinuousOperation[AcceptManyResult]]
 _PollManyCallback = Callable[[MultishotDelivery], object]
 
 
@@ -1795,6 +1796,10 @@ class UringProactor(ProactorBase):
             self.recv_multishot: _RecvMultishotImpl = self._recv_multishot
         else:
             self.recv_multishot = self._recv_multishot_fallback
+        if self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
+            self.accept_multishot: _AcceptMultishotImpl = self._accept_multishot
+        else:
+            self.accept_multishot = self._accept_multishot_fallback
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by resubmitting the matching one-shot opcode after
         # each completion (see the *_oneshot delivery handlers below).
@@ -2316,31 +2321,46 @@ class UringProactor(ProactorBase):
         delivery shapes.
         """
 
-        native_multishot = self._capabilities.get("IORING_ACCEPT_MULTISHOT", False)
+        return self.accept_multishot(sock, callback)
+
+    def _accept_multishot(
+        self,
+        sock: socket.socket,
+        callback: _AcceptManyCallback,
+    ) -> ContinuousOperation[AcceptManyResult]:
+        operation = UringContinuousOperation[AcceptManyResult](
+            "accept_many",
+            sock,
+            callback,
+        )
+        accept_entry_ref: list[_UringEntry | None] = [None]
+        # one multishot accept stays armed until F_MORE clears or we cancel.
+        entry = self._uring_entry(
+            operation,
+            lambda entry, completion: self._deliver_uring_accept_many(
+                entry,
+                completion,
+                accept_entry_ref,
+            ),
+        )
+        accept_entry_ref[0] = entry
+        self._submit_uring_entry(
+            entry,
+            lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
+        )
+        return operation
+
+    def _accept_multishot_fallback(
+        self,
+        sock: socket.socket,
+        callback: _AcceptManyCallback,
+    ) -> ContinuousOperation[AcceptManyResult]:
+        # emulated accept_many: one accept, emit, finish; callers re-arm (for example StreamServer).
         operation = UringContinuousOperation[AcceptManyResult](
             "accept_many",
             sock,
             self._guard_delivery_callback(callback),
         )
-        accept_entry_ref: list[_UringEntry | None] = [None]
-        if native_multishot:
-            # one multishot accept stays armed until F_MORE clears or we cancel.
-            entry = self._uring_entry(
-                operation,
-                lambda entry, completion: self._deliver_uring_accept_many(
-                    entry,
-                    completion,
-                    accept_entry_ref,
-                ),
-            )
-            accept_entry_ref[0] = entry
-            self._submit_uring_entry(
-                entry,
-                lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
-            )
-            return operation
-
-        # emulated accept_many: one accept, emit, finish; callers re-arm (for example StreamServer).
         submit_box: list[_UringEntrySubmit] = []
         entry = self._uring_entry(
             operation,

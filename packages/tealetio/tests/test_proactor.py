@@ -4022,6 +4022,27 @@ class TestUringProactor:
         assert proactor.recv_multishot.__func__ is UringProactor._recv_multishot_fallback
         proactor.close()
 
+    def test_accept_many_binds_multishot_impl_from_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        assert proactor.accept_multishot.__func__ is UringProactor._accept_multishot
+        server = socket.socket()
+        try:
+            server.setblocking(False)
+            proactor.accept_many(server, lambda _result: None)
+            assert proactor.ring.submitted_accept_multishot
+        finally:
+            server.close()
+            proactor.close()
+
+    def test_accept_many_binds_fallback_impl_when_multishot_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        assert proactor.accept_multishot.__func__ is UringProactor._accept_multishot_fallback
+        proactor.close()
+
     @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")
     def test_recv_many_uses_multishot_recv_and_finishes_on_eof(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
