@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, NoReturn, Protocol, TypeAlias, TypeVar, cast, overload
 
 import uring_api
