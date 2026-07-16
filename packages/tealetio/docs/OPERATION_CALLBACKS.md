@@ -146,8 +146,8 @@ while a CQE is already in flight.
 ### Current behaviour
 
 Cancellation is backend-specific teardown (drop deferred resubmits, submit async
-ring cancel or `poll_remove`, deregister selector interest, `break_wait()`, and
-similar).
+ring cancel or `poll_remove`, deregister selector interest, scheduler
+`wake_wait()`, and similar).
 
 IO cancellation is distinct from task cancellation. Proactor cancel completes
 operations with ``OSError(errno.ECANCELED)`` (see ``io_cancellation_error()``).
@@ -192,8 +192,11 @@ backends keep immediate `_terminalise_cancelled()`. Deferred resubmits and
 never-submitted legs still terminalise locally when the ring has nothing to
 complete.
 
-Late multishot CQEs after the target is already `done()` are dropped in
-`_deliver_uring_completion`.
+Late multishot CQEs still route through `entry.complete()` after the consumer
+has marked the operation `done()`. `ContinuousOperation._emit_delivery` skips
+the callback when already finished; out-of-order terminal ordering is handled on
+the scheduler thread by `ReorderBuffer` / `LenientReorderBuffer`, not in the
+uring completion worker.
 
 Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with

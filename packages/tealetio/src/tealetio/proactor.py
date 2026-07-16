@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, NoReturn, Protocol, TypeAlias, TypeVar, cast, overload
 
 import uring_api
@@ -82,7 +82,6 @@ _PROVIDED_BUFFER_UNAVAILABLE_ERRNOS = frozenset({errno.EINVAL, errno.ENOSYS, err
 
 
 _DoneCallback = Callable[[Operation[Any]], object]
-_CompletionCallback = Callable[[], object]
 _ResultCallback = Callable[[T], object]
 _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
@@ -99,6 +98,83 @@ _RecvManyCallback = Callable[[MultishotDelivery], object]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _PollManyCallback = Callable[[MultishotDelivery], object]
+
+
+class WakeupManager(Protocol):
+    """Cross-thread wakeup primitive for proactor ``wait`` / ``wait_async``."""
+
+    def wakeup(self) -> None:
+        """Wake sync and async waiters, or latch until ``wait()`` / ``poll()``."""
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until ``wakeup()`` or ``timeout`` elapses."""
+
+    def poll(self) -> bool:
+        """Return whether a wakeup is pending, consuming it when true."""
+
+    async def wait_async(self, timeout: float | None = None) -> None:
+        """Await ``wakeup()`` or ``timeout`` on the running event loop."""
+
+
+class EventWakeupManager:
+    """Threading and asyncio event pair for proactor wait hosts."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._async_loop: _asyncio.AbstractEventLoop | None = None
+        self._async_waiter: _asyncio.Event | None = None
+
+    def wait(self, timeout: float | None = None) -> bool:
+        woke = self._event.wait(timeout=timeout)
+        if woke:
+            self._event.clear()
+        return woke
+
+    def wakeup(self) -> None:
+        self._event.set()
+        waiter = self._async_waiter
+        if waiter is not None:
+            loop = self._async_loop
+            assert loop is not None
+            try:
+                loop.call_soon_threadsafe(waiter.set)
+            except RuntimeError:
+                return
+
+    def poll(self) -> bool:
+        result = self._event.is_set()
+        if result:
+            self._event.clear()
+        return result
+
+    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        """Wire the asyncio loop and waiter used by ``wakeup()`` / ``wait_async()``."""
+
+        if self._async_loop is None:
+            self._async_loop = loop
+        elif self._async_loop is not loop:
+            raise RuntimeError("EventWakeupManager is already bound to a different event loop")
+        if self._async_waiter is None:
+            self._async_waiter = _asyncio.Event()
+
+    async def wait_async(self, timeout: float | None = None) -> None:
+        if self.poll():
+            return
+
+        waiter = self._async_waiter
+        assert waiter is not None
+
+        waiter.clear()
+        try:
+            if timeout is None:
+                await waiter.wait()
+            else:
+                try:
+                    await _asyncio.wait_for(waiter.wait(), timeout=timeout)
+                except _asyncio.TimeoutError:
+                    pass
+        finally:
+            waiter.clear()
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
@@ -412,9 +488,7 @@ class Proactor(Protocol):
 
     def close(self) -> None: ...
 
-    def break_wait(self) -> None: ...
-
-    def set_completion_callback(self, callback: _CompletionCallback | None) -> None: ...
+    def wake_wait(self) -> None: ...
 
     def set_delivery_exception_handler(
         self,
@@ -566,11 +640,11 @@ ProactorFactory = Callable[[], Proactor]
 class ProactorBase:
     """Shared helpers for concrete proactor backends."""
 
-    def __init__(self, *, completion_callback: _CompletionCallback | None = None) -> None:
+    def __init__(self) -> None:
         self._closed = False
-        self._completion_callback = completion_callback
         self._clock = time.monotonic
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
+        self._async_break: Callable[[], object] | None = None
         self._shared_recv_buffer_pool: RecvBufferPool | None = None
         self._delivery_exception_handler: Callable[[dict[str, Any]], object] | None = None
 
@@ -616,19 +690,27 @@ class ProactorBase:
 
         return guarded
 
-    def set_completion_callback(self, callback: _CompletionCallback | None) -> None:
-        """Set the callback invoked when backend completions may be ready."""
+    def set_async_break(self, callback: Callable[[], object] | None) -> None:
+        """Optional hook ``SelectorProactor.wake_wait()`` runs after selector wakeup."""
 
-        self._completion_callback = callback
+        self._async_break = callback
+
+    def _run_async_break(self) -> None:
+        break_cb = self._async_break
+        if break_cb is not None:
+            break_cb()
 
     def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
         """Bind this proactor to an asyncio event loop for async waits."""
 
         if self._async_wait_loop is None:
             self._async_wait_loop = loop
-            return
-        if self._async_wait_loop is not loop:
+        elif self._async_wait_loop is not loop:
             raise RuntimeError(f"{type(self).__name__} is already bound to a different event loop")
+        self._bind_wakeup_loop(loop)
+
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        return
 
     def get_time(self) -> float:
         """Return the proactor clock value."""
@@ -646,11 +728,6 @@ class ProactorBase:
         if deadline == 0:
             return 0.0
         return max(0.0, deadline - self.get_time())
-
-    def _notify_completion(self) -> None:
-        callback = self._completion_callback
-        if callback is not None:
-            callback()
 
     def _check_open(self) -> None:
         if self._closed:
@@ -823,24 +900,12 @@ _UringEntryComplete = Callable[["_UringEntry", "_UringCompletion"], Operation[An
 _UringEntrySubmit = Callable[[], _UringCompletion]
 
 
-@dataclass
-class _MultishotLegState:
-    """Per-leg state for deferred multishot termination handling."""
-
-    nonterminal_seen: int = 0
-    pending_final: _UringCompletion | None = None
-    leg_base: int = 0
-    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-
-
 class _UringEntry:
     """Per-submission io_uring completion state.
 
     Operation-specific context and the owning proactor are captured by the
     ``complete`` callback closure. One-shot re-arm submit callables live in
     ``submit_box`` lists referenced from ``complete`` and resume closures.
-    ``multishot_leg`` is created automatically when ``multishot=True`` and is
-    consulted before ``complete`` runs to order multishot CQEs.
     """
 
     __slots__ = (
@@ -848,7 +913,6 @@ class _UringEntry:
         "complete",
         "completion",
         "active",
-        "multishot_leg",
         "poll_remove",
     )
 
@@ -857,56 +921,13 @@ class _UringEntry:
         operation: "UringOperation[Any] | UringContinuousOperation[Any]",
         complete: _UringEntryComplete,
         *,
-        multishot: bool = False,
         poll_remove: bool = False,
     ) -> None:
         self.operation = operation
         self.complete = complete
         self.completion = None
         self.active = False
-        self.multishot_leg = _MultishotLegState() if multishot else None
         self.poll_remove = poll_remove
-
-    def completions_to_process(
-        self,
-        completion: _UringCompletion,
-    ) -> tuple[_UringCompletion, ...]:
-        """Return completions ready for ``_complete_uring_operation``.
-
-        Returns an empty tuple when the CQE should be dropped (operation done,
-        or a multishot termination is being deferred). One-shot completions
-        return a single-element tuple. Multishot legs may return two when a
-        deferred termination becomes ready alongside the unblocking CQE.
-        """
-
-        if not completion.multishot:
-            return (completion,)
-        leg = self.multishot_leg
-        assert leg is not None
-        with leg.lock:
-            if self.operation.done():
-                leg.pending_final = None
-                return ()
-            is_termination = not bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-            if is_termination:
-                res = getattr(completion, "res", 0)
-                # Negative CQEs are terminal failures; deliver immediately so the
-                # operation and result callback both observe the error.
-                if res < 0:
-                    leg.pending_final = None
-                    return (completion,)
-                leg_sequence = int(completion.sequence) - leg.leg_base
-                if leg.nonterminal_seen < leg_sequence:
-                    leg.pending_final = completion
-                    return ()
-                leg.pending_final = None
-                return (completion,)
-            leg.nonterminal_seen += 1
-            pending = leg.pending_final
-            if pending is not None and leg.nonterminal_seen >= int(pending.sequence) - leg.leg_base:
-                leg.pending_final = None
-                return (completion, pending)
-            return (completion,)
 
 
 class UringOperation(Operation[T]):
@@ -960,10 +981,8 @@ class SelectorProactor(ProactorBase):
     def __init__(
         self,
         selector: selectors.BaseSelector | None = None,
-        *,
-        completion_callback: _CompletionCallback | None = None,
     ) -> None:
-        super().__init__(completion_callback=completion_callback)
+        super().__init__()
         self._lock = threading.RLock()
         self._selector = selector if selector is not None else compat.released_default_selector()
         self._fd_operations: dict[int, _FdEntry] = {}
@@ -999,10 +1018,11 @@ class SelectorProactor(ProactorBase):
             self._wakeup_reader.close()
             self._wakeup_writer.close()
 
-    def break_wait(self) -> None:
-        """Interrupt a thread blocked in `wait` without completing operations."""
+    def wake_wait(self) -> None:
+        """Wake a thread blocked in `wait`."""
 
         self._wake_selector()
+        self._run_async_break()
 
     def _wake_selector(self) -> None:
         """Wake a thread blocked in the selector."""
@@ -1020,9 +1040,7 @@ class SelectorProactor(ProactorBase):
 
         with self._lock:
             self._check_open()
-            completed = self._poll(deadline)
-        if completed:
-            self._notify_completion()
+            self._poll(deadline)
 
     def _poll(self, deadline: float | None = None) -> list[Operation[Any]]:
         select_released = getattr(self._selector, "select_released", None)
@@ -1674,24 +1692,25 @@ class ThreadedSelectorProactor(SelectorProactor):
     def __init__(
         self,
         selector: selectors.BaseSelector | None = None,
-        *,
-        completion_callback: _CompletionCallback | None = None,
     ) -> None:
         if selector is None:
             selector = compat.released_default_selector()
         elif not hasattr(selector, "select_released"):
             raise TypeError("ThreadedSelectorProactor requires a selector with select_released()")
-        super().__init__(selector, completion_callback=completion_callback)
-        self._completed_ready = threading.Event()
+        super().__init__(selector)
+        self._completed_wait = EventWakeupManager()
         self._worker_started = False
         self._worker_stop = threading.Event()
         self._worker = threading.Thread(target=self._worker_main, name="tealetio-selector-proactor", daemon=True)
+
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        self._completed_wait.bind_loop(loop)
 
     def close(self) -> None:
         """Stop the worker thread and close selector resources."""
 
         self._worker_stop.set()
-        self._completed_ready.set()
+        self._completed_wait.wakeup()
         self._wake_selector()
         if self._closed:
             return
@@ -1699,10 +1718,10 @@ class ThreadedSelectorProactor(SelectorProactor):
             self._worker.join()
         super().close()
 
-    def break_wait(self) -> None:
-        """Interrupt a thread blocked in `wait` without completing operations."""
+    def wake_wait(self) -> None:
+        """Wake a thread blocked in `wait`."""
 
-        self._completed_ready.set()
+        self._completed_wait.wakeup()
 
     def _after_selector_registration_changed(self) -> None:
         self._wake_selector()
@@ -1713,14 +1732,12 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._check_open()
         self._ensure_worker_started()
         if deadline == 0:
-            self._completed_ready.clear()
             return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
         self._wait_for_completed(timeout)
-        self._completed_ready.clear()
 
     async def wait_async(self, deadline: float | None = None) -> None:
         """Wait asynchronously until completed operations are signalled."""
@@ -1735,12 +1752,9 @@ class ThreadedSelectorProactor(SelectorProactor):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        await loop.run_in_executor(None, self._wait_for_completed, timeout)
-        self._completed_ready.clear()
-
-    def _notify_completed(self) -> None:
-        self._completed_ready.set()
-        self._notify_completion()
+        if self._completed_wait.poll():
+            return
+        await self._completed_wait.wait_async(timeout)
 
     def _ensure_worker_started(self) -> None:
         with self._lock:
@@ -1757,10 +1771,10 @@ class ThreadedSelectorProactor(SelectorProactor):
             except (OSError, ValueError, RuntimeError):
                 return
             if completed:
-                self._notify_completed()
+                pass
 
     def _wait_for_completed(self, timeout: float | None) -> None:
-        self._completed_ready.wait(timeout)
+        self._completed_wait.wait(timeout=timeout)
 
 
 class UringProactor(ProactorBase):
@@ -1771,7 +1785,6 @@ class UringProactor(ProactorBase):
         entries: int = 8,
         flags: int = 0,
         *,
-        completion_callback: _CompletionCallback | None = None,
         ring_factory: _UringRingFactory | None = None,
         completion_threads: int = _DEFAULT_URING_COMPLETION_THREADS,
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
@@ -1780,7 +1793,7 @@ class UringProactor(ProactorBase):
             raise ValueError("completion_threads must be at least 1")
         if ring_factory is None:
             ring_factory = _default_uring_ring_factory
-        super().__init__(completion_callback=completion_callback)
+        super().__init__()
         self._ring = ring_factory(entries, flags)
         try:
             self._capabilities = uring_api.probe(entries=entries, flags=flags)
@@ -1799,9 +1812,7 @@ class UringProactor(ProactorBase):
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
         self._provided_buffers_supported: bool | None = None
-        self._wait_ready = threading.Event()
-        self._async_wait_thread_id: int | None = None
-        self._async_wait_event: _asyncio.Event | None = None
+        self._wait_ready = EventWakeupManager()
         self._ring.callback = self._deliver_uring_completion
         self._service_threads = [
             threading.Thread(target=self._service_thread_main, name=f"tealetio-uring-{index}")
@@ -1820,6 +1831,9 @@ class UringProactor(ProactorBase):
             self._ring.exception_handler = None
             self._ring.close()
             raise
+
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        self._wait_ready.bind_loop(loop)
 
     def set_delivery_exception_handler(
         self,
@@ -1879,13 +1893,11 @@ class UringProactor(ProactorBase):
         operation: "UringOperation[Any] | UringContinuousOperation[Any]",
         complete: _UringEntryComplete,
         *,
-        multishot: bool = False,
         poll_remove: bool = False,
     ) -> _UringEntry:
         entry = _UringEntry(
             operation=operation,
             complete=complete,
-            multishot=multishot,
             poll_remove=poll_remove,
         )
         operation._uring_entry = entry
@@ -1945,9 +1957,7 @@ class UringProactor(ProactorBase):
                     kind="cancel",
                     submit=self._ring.submit_cancel,
                 )
-            self.break_wait()
         elif self._cancel_deferred_operation(operation):
-            self.break_wait()
             cancel_op = self._completed_cancel_operation("cancel", operation)
         else:
             cancel_op = self._completed_cancel_operation("cancel", operation)
@@ -2036,36 +2046,15 @@ class UringProactor(ProactorBase):
             thread.join()
         self._pending_tokens.clear()
         self._deferred_submissions.clear()
-        self.break_wait()
+        self.wake_wait()
         self._ring.callback = None
         self._ring.exception_handler = None
         self._ring.close()
 
-    def break_wait(self) -> None:
-        """Interrupt a thread blocked in `wait` without completing operations."""
+    def wake_wait(self) -> None:
+        """Wake threads blocked in sync or async `wait`."""
 
-        self._wait_ready.set()
-        loop = self._async_wait_loop
-        event = self._async_wait_event
-        if event is None:
-            return
-        if loop is None or self._async_wait_thread_id == threading.get_ident():
-            event.set()
-            return
-        try:
-            loop.call_soon_threadsafe(event.set)
-        except RuntimeError:
-            pass
-
-    def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        """Bind this proactor to an asyncio event loop for async waits."""
-
-        if self._async_wait_loop is None:
-            super().bind_loop(loop)
-            self._async_wait_thread_id = threading.get_ident()
-            self._async_wait_event = _asyncio.Event()
-            return
-        super().bind_loop(loop)
+        self._wait_ready.wakeup()
 
     def wait(self, deadline: float | None = None) -> None:
         """Wait until completed operations are signalled."""
@@ -2077,7 +2066,7 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        self._wait_for_completed(timeout)
+        self._wait_ready.wait(timeout=timeout)
 
     async def wait_async(self, deadline: float | None = None) -> None:
         """Wait asynchronously until completed operations are signalled."""
@@ -2089,33 +2078,10 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        event = self._async_wait_event
-        assert event is not None
-        if event.is_set() or self._wait_ready.is_set():
-            event.clear()
-            self._wait_ready.clear()
+        if self._wait_ready.poll():
             return
-        woken = False
-        try:
-            if timeout is None:
-                await event.wait()
-            else:
-                await compat.wait_for_timeout(event.wait(), timeout)
-            woken = True
-        except _asyncio.TimeoutError:
-            return
-        finally:
-            if woken:
-                event.clear()
-                self._wait_ready.clear()
-
-    def _notify_completed(self) -> None:
-        self.break_wait()
-        self._notify_completion()
-
-    def _wait_for_completed(self, timeout: float | None) -> None:
-        if self._wait_ready.wait(timeout):
-            self._wait_ready.clear()
+        assert self._async_wait_loop is not None
+        await self._wait_ready.wait_async(timeout)
 
     def recv(
         self,
@@ -2381,7 +2347,6 @@ class UringProactor(ProactorBase):
                     completion,
                     accept_entry_ref,
                 ),
-                multishot=True,
             )
             accept_entry_ref[0] = entry
             self._submit_uring_entry(
@@ -2739,15 +2704,9 @@ class UringProactor(ProactorBase):
             entry = self._uring_entry(
                 operation,
                 lambda entry, completion: self._deliver_uring_recv_many(entry, completion),
-                multishot=True,
             )
 
             def submit_recv_many() -> _UringCompletion:
-                leg = entry.multishot_leg
-                assert leg is not None
-                leg.leg_base = leg_base
-                leg.nonterminal_seen = 0
-                leg.pending_final = None
                 return self._ring.submit_recv_multishot(
                     sock.fileno(),
                     uring_group,
@@ -2884,7 +2843,6 @@ class UringProactor(ProactorBase):
             entry = self._uring_entry(
                 operation,
                 lambda entry, completion: self._deliver_uring_poll_many(entry, completion),
-                multishot=True,
                 poll_remove=True,
             )
             self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
@@ -2925,6 +2883,8 @@ class UringProactor(ProactorBase):
         operation._emit_result(res, more=True, index=index)
         next_index[0] += 1
         if operation.done():
+            if entry.active:
+                self._deactivate_uring_entry(entry)
             return operation
         self._queue_entry_resubmit(entry, submit_box[0])
         return None
@@ -2952,13 +2912,10 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
         res = completion.res
-        multishot_leg = entry.multishot_leg
-        assert multishot_leg is not None
         index = int(completion.sequence)
 
         if res < 0:
             if res == -errno.ENOBUFS:
-                multishot_leg.pending_final = None
                 operation._emit_delivery(_recv_many_enobufs_delivery(index=index))
                 self._deactivate_uring_entry(entry)
                 return operation
@@ -2976,8 +2933,6 @@ class UringProactor(ProactorBase):
                 more=more,
             )
 
-        if operation.done():
-            return operation
         if not more:
             self._deactivate_uring_entry(entry)
         return operation
@@ -2999,9 +2954,6 @@ class UringProactor(ProactorBase):
         if operation.done():
             return
         operation.deliver(self, exception=exc)
-        if operation.done():
-            self.break_wait()
-            self._notify_completed()
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         completed_operation: Operation[Any] | None = None
@@ -3013,18 +2965,9 @@ class UringProactor(ProactorBase):
             ):
                 teardown_completions.append(completion)
                 continue
-            entry = cast(_UringEntry, completion.user_data)
-            to_process = entry.completions_to_process(completion)
-            if not to_process and entry.operation.done():
-                # Late multishot CQEs after cancel/terminal finish: drop the leg
-                # without re-entering delivery (completions_to_process already
-                # discarded them).
-                self._deactivate_uring_entry(entry)
-                continue
-            for pending in to_process:
-                result = self._complete_uring_operation(pending)
-                if result is not None:
-                    completed_operation = result
+            result = self._complete_uring_operation(completion)
+            if result is not None:
+                completed_operation = result
         for completion in teardown_completions:
             result = self._complete_uring_operation(completion)
             if result is not None:
@@ -3032,14 +2975,11 @@ class UringProactor(ProactorBase):
             if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
                 self._complete_uring_poll_remove(completion.cancel_target)
         self._retry_deferred_submissions()
-        if completed_operation is not None:
-            self._notify_completed()
-        elif not self.has_pending_operations():
-            self.break_wait()
+        if completed_operation is None and not self.has_pending_operations():
+            self.wake_wait()
 
     def _queue_entry_resubmit(self, entry: _UringEntry, submit: _UringEntrySubmit) -> None:
         self._enqueue_deferred_submission(_UringSubmission(entry=entry, submit=submit))
-        self.break_wait()
 
     def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
         self._pending_tokens.append(None)
@@ -3061,7 +3001,6 @@ class UringProactor(ProactorBase):
         except BaseException:
             self._pending_tokens.pop()
             entry.active = False
-            self.break_wait()
             raise
         return True
 
@@ -3143,6 +3082,8 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         entry = cast(_UringEntry, completion.user_data)
         res = completion.res
+        if completion.multishot:
+            return entry.complete(entry, completion)
         if entry.operation.done():
             if entry.active:
                 self._deactivate_uring_entry(entry)
@@ -3154,17 +3095,6 @@ class UringProactor(ProactorBase):
                 _close_raw_fd(res)
             return None
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        if completion.multishot:
-            if entry.operation.done():
-                if entry.active:
-                    self._deactivate_uring_entry(entry)
-                return entry.operation
-            multishot_leg = entry.multishot_leg
-            if not entry.active:
-                if multishot_leg is not None and entry.operation.kind == "recv_many":
-                    return entry.complete(entry, completion)
-                return None
-            return entry.complete(entry, completion)
         assert entry.active
         if not has_more:
             self._deactivate_uring_entry(entry)
@@ -3235,10 +3165,10 @@ class ProactorScheduler(BaseScheduler):
     # -- Driver wakeup -------------------------------------------------
 
     def _break_wait_threadsafe(self) -> None:
-        self._proactor.break_wait()
+        self._proactor.wake_wait()
 
     def _break_wait(self) -> None:
-        self._proactor.break_wait()
+        self._proactor.wake_wait()
 
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()
@@ -3276,11 +3206,6 @@ class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedule
         self._time = loop.time
         self._proactor.bind_loop(loop)
 
-        def wake_loop() -> None:
-            loop.call_soon_threadsafe(lambda: None)
-
-        self._proactor.set_completion_callback(wake_loop)
-
     def _lazy_bind_running_loop(self) -> None:
         if self._wakeup_loop is None:
             self.bind_loop(_asyncio.get_running_loop())
@@ -3291,7 +3216,6 @@ class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedule
     def close(self) -> None:
         """Close proactor and scheduler-owned resources."""
 
-        self._proactor.set_completion_callback(None)
         super().close()
 
     async def _driver_wait(self) -> None:

@@ -760,22 +760,26 @@ Status: Implemented.
   portable low-level IO seam. They are useful for selector loops, and also map
   well to completion-oriented or external IO managers that wake callbacks when
   operations become ready or complete.
-- Treat `Proactor.set_completion_callback(...)` as the proactor wake seam for
-  async hosting. Thread-backed proactors should invoke it when completions are
-  queued; `AsyncProactorScheduler` installs a callback that wakes the host
-  asyncio loop with `loop.call_soon_threadsafe(...)`. `break_wait()` remains the
-  explicit interruption path and does not imply an IO completion.
+- Treat `Proactor.wake_wait()` as the proactor driver wakeup. Scheduler
+  `_break_wait*` forwards to it. Production IO wakes through operation
+  `add_done_callback` → `call_soon_threadsafe` → scheduler break →
+  `wake_wait()`, not proactor-internal completion hooks.
+- `AsyncProactorScheduler` delegates `wait_async()` to the proactor backend.
+  `UringProactor` and `ThreadedSelectorProactor` unpark through
+  `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter
+  before the first `wait_async()`.
 - Proactors may return an already-done `Operation` when submission itself can
   complete the IO. This is the preferred short-circuit path: callers inspect the
   operation directly, and the backend does not need to queue a completion or wake
   a wait host.
 - `ThreadedSelectorProactor` is the selector-backed experiment for this shape:
-  a worker thread owns readiness polling, queues completed operations, and uses
-  the completion callback to wake an async host. `SelectorProactor` remains the
-  simpler single-threaded prototype.
+  a worker thread owns readiness polling and queues completed operations;
+  `IOWaiter` done callbacks marshal onto the scheduler thread. `SelectorProactor`
+  remains the simpler single-threaded prototype and may use `set_async_break()`
+  when `wait_async()` blocks an executor thread.
 - Keep blocking convenience waits such as `wait_readable(...)` and
-  `wait_writable(...)` layered over that callback seam, rather than maintaining
-  a separate readiness-wait registration path.
+  `wait_writable(...)` layered over reader/writer registration, rather than
+  maintaining a separate readiness-wait registration path.
 
 5. Asyncio Transport/Protocol Stream Surface
 

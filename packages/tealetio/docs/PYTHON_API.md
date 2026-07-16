@@ -331,11 +331,19 @@ Backends call `progress(total)` with the cumulative number of bytes sent as
 progress becomes observable. Some backends may only expose a single completion
 for the whole send, in which case they report one final total.
 
-Proactors also expose `set_completion_callback(callback)`. A real thread-backed
-proactor should call this callback when completions are queued so an async host
-can wake its event loop, for example with `loop.call_soon_threadsafe(...)`.
-`break_wait()` remains separate: it interrupts a blocking proactor wait without
-reporting an IO completion.
+Proactors expose `wake_wait()` to unblock callers parked in `wait()` or
+`wait_async()`. The proactor does not auto-wake on operation completion: when
+using the raw API, register
+`operation.add_done_callback(lambda _: proactor.wake_wait())` if the caller
+blocks in `wait()` / `wait_async()`. Scheduler production code wakes through
+`IOWaiter` / `call_soon_threadsafe` → `proactor.wake_wait()` instead.
+
+`UringProactor` and `ThreadedSelectorProactor` use an inlined
+`EventWakeupManager` for sync and async waits. Call `bind_loop()` before
+`wait_async()`; that prepares the asyncio waiter `wake_wait()` signals.
+`wait_async()` parks on that event. `SelectorProactor`
+`wait_async()` still runs `wait()` in a thread-pool executor; optional
+`set_async_break()` can install a host-loop hook for that path.
 
 ## Blocking IO facade (`scheduler.io`)
 
