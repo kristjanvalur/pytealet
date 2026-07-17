@@ -104,6 +104,18 @@ _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
 _DEFAULT_URING_RECV_MANY_BUFFER_COUNT = 256
 _DEFAULT_RECVITER_BUFFER_SIZE = 16 * 1024
 _DEFAULT_RECVITER_BUFFER_COUNT = 8
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Optimistic non-blocking send before SQE (asyncio-style). Off with
+# TEALETIO_URING_SEND_TRY_FIRST=0 for A/B benches and ring-path tests.
+_DEFAULT_URING_SEND_TRY_FIRST = _env_flag("TEALETIO_URING_SEND_TRY_FIRST", default=True)
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyValue = memoryview
 _RecvManyCallback = Callable[[MultishotDelivery], object]
@@ -2191,6 +2203,7 @@ class UringProactor(ProactorBase):
         completion_threads: int = _DEFAULT_URING_COMPLETION_THREADS,
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
         op_pool_max: int = _DEFAULT_URING_OP_POOL_MAX,
+        send_try_first: bool | None = None,
     ) -> None:
         if completion_threads < 0:
             raise ValueError("completion_threads must be non-negative")
@@ -2198,6 +2211,8 @@ class UringProactor(ProactorBase):
             ring_factory = _default_uring_ring_factory
         super().__init__()
         self._op_pool = _UringOpPool(op_pool_max)
+        # try non-blocking sock.send before io_uring (see send())
+        self._send_try_first = _DEFAULT_URING_SEND_TRY_FIRST if send_try_first is None else send_try_first
         self._ring = ring_factory(entries, flags)
         try:
             self._capabilities = uring_api.probe(entries=entries, flags=flags)
@@ -2737,7 +2752,15 @@ class UringProactor(ProactorBase):
         data: Any,
         progress: _ProgressCallback | None = None,
     ) -> Operation[None]:
-        """Submit a stream send that drains ``data`` before completing."""
+        """Drain ``data`` on ``sock`` (send-all).
+
+        When ``send_try_first`` is enabled (default; disable with
+        ``TEALETIO_URING_SEND_TRY_FIRST=0`` or ``send_try_first=False``), try
+        non-blocking ``sock.send`` first — the asyncio transport pattern. If
+        the whole buffer is accepted, the operation completes synchronously
+        with no SQE. On ``BlockingIOError`` or a short write that then blocks,
+        remaining bytes go through io_uring send-all as before.
+        """
 
         operation = self._acquire_uring_op("send", sock)
         payload = memoryview(data)
@@ -2745,8 +2768,49 @@ class UringProactor(ProactorBase):
             self._check_open()
             operation.deliver(self, result=None)
             return operation
-        self._submit_sendall(sock, operation, payload, 0, progress)
+        offset = 0
+        if self._send_try_first:
+            offset = self._try_send_nonblocking(sock, operation, payload, progress)
+            if operation.done():
+                return operation
+        self._submit_sendall(sock, operation, payload, offset, progress)
         return operation
+
+    def _try_send_nonblocking(
+        self,
+        sock: socket.socket,
+        operation: "UringOperation[None]",
+        data: memoryview,
+        progress: _ProgressCallback | None,
+    ) -> int:
+        """Push as much of ``data`` as the socket accepts without blocking.
+
+        Returns the byte offset for a possible uring tail. On hard error the
+        operation is already delivered and the return value is unused.
+        """
+
+        offset = 0
+        total = len(data)
+        while offset < total:
+            try:
+                sent = sock.send(data[offset:])
+            except BlockingIOError:
+                return offset
+            except OSError as exc:
+                operation.deliver(self, exception=exc)
+                return offset
+            if sent == 0:
+                # treat as would-block so uring can retry / surface the error
+                return offset
+            offset += sent
+            if progress is not None:
+                try:
+                    progress(offset)
+                except BaseException as exc:
+                    operation.deliver(self, exception=exc)
+                    return offset
+        operation.deliver(self, result=None)
+        return offset
 
     def _complete_uring_sendall(
         self,
@@ -3706,6 +3770,7 @@ class SyncUringProactor(UringProactor):
         *,
         ring_factory: _UringRingFactory | None = None,
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
+        send_try_first: bool | None = None,
     ) -> None:
         super().__init__(
             entries,
@@ -3713,6 +3778,7 @@ class SyncUringProactor(UringProactor):
             ring_factory=ring_factory,
             completion_threads=0,
             completion_thread_nice=completion_thread_nice,
+            send_try_first=send_try_first,
         )
 
 

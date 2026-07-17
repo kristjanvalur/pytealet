@@ -3801,7 +3801,8 @@ class TestUringProactor:
 
     def test_send_completes_from_ring_completion(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        # force SQE path; try-first would finish on the socketpair without the ring
+        proactor = UringProactor(ring_factory=_FakeUringRing, send_try_first=False)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
@@ -3822,7 +3823,7 @@ class TestUringProactor:
 
     def test_send_uses_send_zc_when_probe_supports_it(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing, send_try_first=False)
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         reader = None
         writer = None
@@ -3855,7 +3856,7 @@ class TestUringProactor:
 
     def test_send_uses_plain_send_for_unix_even_when_probe_supports_send_zc(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing, send_try_first=False)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
@@ -3873,7 +3874,7 @@ class TestUringProactor:
 
     def test_send_uses_plain_send_when_probe_lacks_send_zc(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing, send_try_first=False)
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
@@ -3883,6 +3884,56 @@ class TestUringProactor:
             assert operation.result() is None
             assert len(proactor.ring.submitted_send) == 1
             assert proactor.ring.submitted_send_zc == []
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_try_first_completes_without_ring(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, send_try_first=True, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.send(writer, b"hello")
+            assert operation.done() is True
+            assert operation.result() is None
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_send == []
+            assert proactor.ring.submitted_send_zc == []
+            assert reader.recv(5) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_try_first_falls_back_to_uring_when_blocked(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, send_try_first=True, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            # fill send buffer so a later non-blocking send EAGAINs
+            filler = b"x" * (256 * 1024)
+            filled = 0
+            while filled < 16 * 1024 * 1024:
+                try:
+                    filled += writer.send(filler)
+                except BlockingIOError:
+                    break
+            else:
+                pytest.skip("could not fill socketpair send buffer")
+            payload = b"hello"
+            operation = proactor.send(writer, payload)
+            assert operation.done() is False
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert len(proactor.ring.submitted_send) == 1
+            # fake ring queues completion when not serving; harvest via wait(0)
+            proactor.wait(0)
+            if not operation.done():
+                proactor.wait(proactor.get_time() + 0.5)
+            assert operation.done() is True
         finally:
             reader.close()
             writer.close()
@@ -5255,7 +5306,7 @@ class TestUringProactor:
             scheduler.close()
 
     def test_send_reports_uring_progress(self):
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing, send_try_first=False)
         reader, writer = socket.socketpair()
         progress: list[int] = []
         try:
