@@ -3058,6 +3058,28 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_pending_operations_are_scoped_per_proactor(self):
+        idle = UringProactor(ring_factory=_DeferredUringRing)
+        busy = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            assert idle.has_pending_operations() is False
+            operation = busy.recv(reader, 5)
+            assert busy.has_pending_operations() is True
+            assert idle.has_pending_operations() is False
+            assert isinstance(busy.ring, _DeferredUringRing)
+            busy.ring.complete_recv()
+            busy.wait(busy.get_time() + 1.0)
+            assert operation.result() == b"hello"
+            assert busy.has_pending_operations() is False
+            assert idle.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
+            busy.close()
+            idle.close()
+
     def test_uring_entry_keeps_pending_completion_handle(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()
