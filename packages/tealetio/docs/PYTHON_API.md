@@ -688,8 +688,9 @@ wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
 Under the hood, `StreamWriter` queues outbound data through an internal
 `SendBuffer` that chains `scheduler.io.sock_sendall()` legs.
-`close()` rejects further writes; `wait_closed()` flushes queued data, applies
-deferred `SHUT_WR` when `write_eof()` was called, and closes the socket.
+`close()` rejects further writes; `wait_closed()` flushes queued data, then
+submits deferred `SHUT_WR` (when needed) and `sock_close` with `forget()` so
+the handler does not park on close completion.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()`, `open_connection(...)`, or

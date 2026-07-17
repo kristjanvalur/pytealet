@@ -78,10 +78,12 @@ class WriterCore:
         self._send_buffer.close()
 
     def wait_closed(self) -> None:
-        """Block until queued sends finish, then shutdown/close the socket.
+        """Flush queued sends, then submit socket teardown without waiting on close.
 
-        Teardown uses direct ``sock_shutdown`` / ``sock_close`` (no proactor
-        submit), matching asyncio stream close.
+        Parks the current tealet until the send queue is empty (same as
+        ``flush()``). ``SHUT_WR`` and ``sock_close`` are submitted with
+        ``forget()`` so the handler can finish once data is on the wire; the
+        proactor still owns close completion (uring detaches the fd at submit).
         """
 
         if self._closed:
@@ -96,10 +98,7 @@ class WriterCore:
         if self._sock.fileno() != -1:
             if not self._send_buffer.write_eof_done:
                 self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
-            try:
-                self._io.sock_close(self._sock).wait()
-            except OSError:
-                pass
+            self._io.sock_close(self._sock).forget()
         self._closed = True
         if flush_error is not None:
             raise flush_error

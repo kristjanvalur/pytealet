@@ -493,9 +493,9 @@ drop waiter only”.
 - `StreamServer.serve_forever()` sugar (implemented); signal handling stays in
   `Runner`, not the server object.
 - **Stream writer shutdown** — `StreamWriter.close()` is non-blocking; callers
-  must `wait_closed()` to flush queued sends and release the socket via direct
-  `sock_shutdown` / `sock_close` (stdlib syscalls, not proactor submit).
-  `StreamServer` handler cleanup calls `wait_closed()` after `close()`.
+  must `wait_closed()` to flush queued sends, then submit `sock_shutdown` /
+  `sock_close` with `forget()` (no wait on close CQE). `StreamServer` handler
+  cleanup calls `wait_closed()` after `close()`.
 - Stream endpoints live under `packages/tealetio/src/tealetio/streams/`
   (`reader`, `writer`, `open`, `connect`, `server`); IO bridge buffers remain
   in `io_buffers.py`. `open` is the leaf `io_manager` imports for stream-pair
