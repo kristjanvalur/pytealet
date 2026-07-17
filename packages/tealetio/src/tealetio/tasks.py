@@ -10,6 +10,7 @@ import _tealet
 import tealet
 
 from .locks import Event, InvalidStateError
+from .stream_diag import note_spawn_task_main, note_spawn_user_func, note_switch_depart
 
 if TYPE_CHECKING:
     from .scheduler import BaseScheduler
@@ -366,6 +367,8 @@ class Task(tealet.tealet, Future[Any]):
         self._scheduler._target_throw(self, exc)
 
     def _throw_from_scheduler(self, exc: BaseException):
+        # C-level throw transfers without tealet_switch(); stamp for switch timing
+        note_switch_depart()
         super().throw(exc)
 
     def cancel(self) -> bool:
@@ -381,6 +384,8 @@ class Task(tealet.tealet, Future[Any]):
     def resolve_target(self, result, exc, exc_target):
         """Resolve where control goes when this task exits."""
 
+        # C-level exit switch bypasses tealet_switch(); stamp so the wakee's
+        # pure-transfer sample is not the dying task's leftover run time.
         suppress = False
         if exc is None:
             self.set_result(result)
@@ -389,6 +394,7 @@ class Task(tealet.tealet, Future[Any]):
             suppress = True
         elif isinstance(exc, (SystemExit, KeyboardInterrupt)):
             self.set_exception(exc)
+            note_switch_depart()
             return super().resolve_target(result, exc, exc_target)
         else:
             self.set_exception(exc)
@@ -398,11 +404,14 @@ class Task(tealet.tealet, Future[Any]):
                     exc_target._unlink()
                 except AttributeError:
                     pass
+                note_switch_depart()
                 return exc_target, None, suppress
 
         # Scheduler-owned tasks always route via scheduler target selection,
         # even if task startup immediately raises before user code returns.
-        return self._scheduler._find_target(task_exit=True), None, suppress
+        target = self._scheduler._find_target(task_exit=True)
+        note_switch_depart()
+        return target, None, suppress
 
 
 class PriorityTask(Task):
@@ -527,7 +536,11 @@ class TaskFactory(Protocol):
 
 def _make_task_main(task: Task, func: Callable[[], object], context: contextvars.Context):
     def task_main(current: tealet.tealet, _arg: object):
+        # first instruction after tealet.run / switch into this task
+        note_spawn_task_main()
+
         def run_func():
+            note_spawn_user_func()
             token = _current_task.set(task)
             try:
                 return func()

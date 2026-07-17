@@ -47,6 +47,18 @@ from .locks import (
     set_scheduler_resolver,
     timeout as scheduler_timeout,
 )
+from .stream_diag import (
+    sched_note_batch,
+    sched_note_break_wait,
+    sched_note_busy_continue,
+    sched_note_loop_iter,
+    sched_note_make_runnable,
+    sched_note_schedule,
+    sched_note_wait,
+    sched_note_wait_no_progress,
+    tealet_run,
+    tealet_switch,
+)
 from . import tasks as _tasks
 
 
@@ -582,13 +594,24 @@ class BaseDrivingMixin:
             scheduler._running = True
             scheduler._owner_thread = threading.get_ident()
             try:
+                prev_wait = False
                 while not target.done() and not scheduler._stopping:
-                    scheduler._run_ready_batch(yield_every)
+                    sched_note_loop_iter()
+                    t0 = time.perf_counter_ns()
+                    n_xfer = scheduler._run_ready_batch(yield_every)
+                    sched_note_batch(n_xfer, time.perf_counter_ns() - t0)
+                    if prev_wait and n_xfer == 0:
+                        sched_note_wait_no_progress()
+                    prev_wait = False
                     if not target.done() and not scheduler._stopping and scheduler._has_runnable_work():
+                        sched_note_busy_continue()
                         await self._driver_yield()
                         continue
                     if not target.done() and not scheduler._stopping:
+                        t1 = time.perf_counter_ns()
                         await self._driver_wait()
+                        sched_note_wait(time.perf_counter_ns() - t1)
+                        prev_wait = True
             finally:
                 scheduler._owner_thread = None
                 scheduler._running = False
@@ -1782,6 +1805,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return t
 
     def _schedule(self, enqueue=None) -> None:
+        sched_note_schedule()
         if enqueue is not None:
             enqueue()
         target = self._find_target()
@@ -1791,7 +1815,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         # switch-to is not stolen by callback re-scheduling; throw raises out of
         # switch and never reaches the drain. eager tealet.run does not mark
         # (first entry is not a _schedule resume)
-        target.switch()
+        tealet_switch(target)
         skip_callbacks = False
         current = cast(Any, tealet.current())
         try:
@@ -1919,6 +1943,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             return
         cast(_tasks.Task, t)._scheduler = self
         self._runnable.add(t)
+        sched_note_make_runnable()
         self._break_wait()
 
     def reschedule(self, task: _tasks.Task, *, position: int | None = None) -> None:
@@ -1947,7 +1972,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         cast(_tasks.Task, target)._unlink()
         self._make_runnable(tealet.current())
         self._mark_explicit_switch_to(target)
-        target.switch()
+        tealet_switch(target)
 
     def _target_run_eager(self, target: tealet.tealet, task_main) -> None:
         """Start an unlinked NEW/STUB task via one-shot tealet.run()."""
@@ -1956,7 +1981,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert task.link is None
         assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
         self._make_runnable(tealet.current())
-        tealet.tealet.run(target, task_main, None)
+        tealet_run(target, task_main, None)
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
         if target is tealet.current():

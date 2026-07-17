@@ -46,9 +46,12 @@ def add_tealetio_args(parser: argparse.ArgumentParser) -> None:
     add_server_args(parser)
     parser.add_argument(
         "--proactor",
-        choices=("default", "selector", "uring"),
+        choices=("default", "selector", "uring", "uring-sync"),
         default="default",
-        help="proactor backend for tealetio servers (default: uring when available)",
+        help=(
+            "proactor backend for tealetio servers "
+            "(default: uring when available; uring-sync is single-threaded ring.wait)"
+        ),
     )
     parser.add_argument(
         "--reuse-address",

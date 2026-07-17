@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar, Generic, NamedTuple, Protocol, TypeVar, cast
 
+from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
+
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 
@@ -244,8 +246,13 @@ class Operation(Generic[T]):
         if pending_bucket is not None:
             pending_bucket.pop()
 
-        for callback in callbacks:
-            callback(self)
+        if callbacks:
+            worker_completion_mark_emit_start()
+            try:
+                for callback in callbacks:
+                    callback(self)
+            finally:
+                worker_completion_mark_emit_end()
 
 
 class ContinuousOperation(Operation[None], Generic[T_co]):
@@ -296,8 +303,13 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         """Deliver one multishot chunk to the result callback."""
 
         callback = self._result_callback
-        if callback is not None:
+        if callback is None:
+            return
+        worker_completion_mark_emit_start()
+        try:
             callback(delivery._replace(operation=self))
+        finally:
+            worker_completion_mark_emit_end()
 
     def _emit_result(
         self,
@@ -325,5 +337,10 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
 
         assert not delivery.more
         callback = self._result_callback
-        if callback is not None:
+        if callback is None:
+            return
+        worker_completion_mark_emit_start()
+        try:
             callback(delivery._replace(operation=self))
+        finally:
+            worker_completion_mark_emit_end()

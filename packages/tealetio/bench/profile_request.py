@@ -28,6 +28,8 @@ BREAK_WAIT_TIMING_RE = re.compile(r"\[break-wait-timing\] (\w+) (.*)$")
 EVENT_WAKEUP_TIMING_RE = re.compile(r"\[event-wakeup-timing\] (\w+) (.*)$")
 ACCEPT_PATH_TIMING_RE = re.compile(r"\[accept-path-timing\] ready (.*)$")
 RECV_ITER_TIMING_RE = re.compile(r"\[recv-iter-timing\] ready (.*)$")
+WORKER_COMPLETION_TIMING_RE = re.compile(r"\[worker-completion-timing\] (.*)$")
+HANDLER_TEALET_TIMING_RE = re.compile(r"\[handler-tealet-timing\] (.*)$")
 
 
 def _wait_listen(host: str, port: int, proc: subprocess.Popen[bytes], timeout: float = 10.0) -> None:
@@ -208,6 +210,28 @@ def _summarize_accept_path_timing(lines: list[str]) -> None:
         print(f"  accept-path timing avg ({len(rows)} accepts): " + " ".join(parts))
 
 
+def _summarize_worker_completion_timing(lines: list[str]) -> None:
+    """Print the last progress/final worker-completion summary line if present."""
+
+    last: str | None = None
+    for line in lines:
+        match = WORKER_COMPLETION_TIMING_RE.search(line)
+        if match:
+            last = match.group(1)
+    if last is not None:
+        print(f"  worker-completion timing: {last}")
+
+
+def _summarize_handler_tealet_timing(lines: list[str]) -> None:
+    last: str | None = None
+    for line in lines:
+        match = HANDLER_TEALET_TIMING_RE.search(line)
+        if match:
+            last = match.group(1)
+    if last is not None:
+        print(f"  handler-tealet timing: {last}")
+
+
 def _summarize_event_wakeup_timing(lines: list[str]) -> None:
     waits: list[float] = []
     for line in lines:
@@ -346,6 +370,8 @@ def _run_case(
         stderr_lines = _read_stderr_lines(proc)
         _summarize_break_wait_timing(stderr_lines)
         _summarize_event_wakeup_timing(stderr_lines)
+        _summarize_worker_completion_timing(stderr_lines)
+        _summarize_handler_tealet_timing(stderr_lines)
         _summarize_accept_path_timing(stderr_lines)
         _summarize_recv_iter_timing(stderr_lines)
         if diag:

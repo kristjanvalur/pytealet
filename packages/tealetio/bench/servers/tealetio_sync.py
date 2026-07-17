@@ -16,31 +16,41 @@ if str(_BENCH_DIR) not in sys.path:
 from common import RESPONSE, add_tealetio_args, drain_request  # noqa: E402
 from diag import start_watchdog  # noqa: E402
 
-_profile_seq = 0
-
 from tealetio import run
-from tealetio.proactor import SelectorProactor, SyncProactorScheduler, UringProactor
+from tealetio.proactor import (
+    SelectorProactor,
+    SyncProactorScheduler,
+    SyncUringProactor,
+    UringProactor,
+)
 from tealetio.scheduler import _current_scheduler
 from tealetio.stream_diag import enabled as diag_enabled, event as diag_event
 from tealetio.streams import StreamReader, StreamWriter, start_server
 
 
-def _scheduler_factory(name: str) -> Callable[[], SyncProactorScheduler]:
+def _scheduler_factory(
+    name: str,
+    *,
+    completion_threads: int | None = None,
+) -> Callable[[], SyncProactorScheduler]:
     if name == "selector":
         return lambda: SyncProactorScheduler(SelectorProactor)
-    if name == "uring":
-        return lambda: SyncProactorScheduler(lambda: UringProactor())
+    if name in ("uring", "uring-sync"):
+        # uring-sync defaults to 0 workers; uring defaults to UringProactor's 2
+        if completion_threads is not None:
+            threads = completion_threads
+        elif name == "uring-sync":
+            threads = 0
+        else:
+            threads = 2
+
+        def factory() -> SyncProactorScheduler:
+            if threads == 0:
+                return SyncProactorScheduler(SyncUringProactor)
+            return SyncProactorScheduler(lambda: UringProactor(completion_threads=threads))
+
+        return factory
     return SyncProactorScheduler
-
-
-def _next_req_num(profile: bool) -> int | None:
-    global _profile_seq
-    if not profile:
-        return None
-    _profile_seq += 1
-    if _profile_seq == 1:
-        return None
-    return _profile_seq - 1
 
 
 def _make_profile_stream_factory() -> Callable[..., tuple[StreamReader, StreamWriter]]:
@@ -57,10 +67,18 @@ def _make_profile_stream_factory() -> Callable[..., tuple[StreamReader, StreamWr
 
 
 def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader, StreamWriter], None]:
+    """Serve one connection on a handler tealet (spawned after streams are ready)."""
+
+    gate = None
+    if profile:
+        from profile_timing import HandlerProfileGate
+
+        gate = HandlerProfileGate()
+
     def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
         sock = writer.get_extra_info("socket")
         fd = sock.fileno()
-        req_num = _next_req_num(profile)
+        req_num = gate.next_req_num() if gate is not None else None
         timer = None
         if req_num is not None:
             from profile_timing import PhaseTimer, drain_request_profile, pre_handler_ms
@@ -70,8 +88,10 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
             extra = {"fd": fd}
             if opened is not None:
                 extra["pre_handler_ms"] = opened
+            # handler tealet is running; pre_handler_ms is spawn lag before this line
             timer.mark("handler_start", **extra)
         if timer is not None:
+            # body: read headers, write response, wait for send + socket teardown
             drain_request_profile(reader, timer)
             timer.mark("drain")
             writer.write(RESPONSE)
@@ -80,6 +100,12 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
             timer.mark("drain_out")
             writer.close()
             timer.mark("close")
+            # Split shutdown: flush (parks) vs sock_close (forget, should be ~0).
+            # StreamServer also wait_closed() in finally (cheap once closed).
+            writer.flush()
+            timer.mark("flush")
+            writer.wait_closed()
+            timer.mark("sock_close")
             timer.finish()
             return
         if diag_enabled():
@@ -105,14 +131,25 @@ def main() -> None:
         help="enable TEALETIO_STREAM_DIAG and a periodic stall watchdog",
     )
     parser.add_argument("--profile", action="store_true", help="emit per-request PROFILE lines to stderr")
+    parser.add_argument(
+        "--completion-threads",
+        type=int,
+        default=None,
+        metavar="N",
+        help="UringProactor completion workers (0 = inline ring.wait; default 2 for --proactor uring)",
+    )
     args = parser.parse_args()
     if args.diag:
         import os
 
         os.environ["TEALETIO_STREAM_DIAG"] = "1"
         os.environ["TEALETIO_URING_ACCEPT_LOG"] = "1"
+    if args.completion_threads is not None and args.completion_threads < 0:
+        parser.error("--completion-threads must be non-negative")
+    if args.completion_threads is not None and args.proactor == "selector":
+        parser.error("--completion-threads only applies to uring proactors")
 
-    factory = _scheduler_factory(args.proactor)
+    factory = _scheduler_factory(args.proactor, completion_threads=args.completion_threads)
 
     def exercise() -> None:
         scheduler = _current_scheduler()
@@ -136,6 +173,11 @@ def main() -> None:
         run(exercise, scheduler_factory=factory)
     except KeyboardInterrupt:
         pass
+    finally:
+        if args.profile:
+            from profile_timing import _HandlerAggregate
+
+            _HandlerAggregate.dump(final=True)
 
 
 if __name__ == "__main__":

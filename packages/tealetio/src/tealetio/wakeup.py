@@ -13,6 +13,11 @@ def _truthy(name: str) -> bool:
     return os.environ.get(name, "").lower() in ("1", "true", "yes")
 
 
+# Cache at import — break-wait hooks sit on the selector wake path.
+_BREAK_WAIT_SLEEP = _truthy("TEALETIO_BREAK_WAIT_SLEEP")
+_BREAK_WAIT_TIMING = _truthy("TEALETIO_BREAK_WAIT_TIMING") or _BREAK_WAIT_SLEEP
+_EVENT_WAKEUP_TIMING = _truthy("TEALETIO_EVENT_WAKEUP_TIMING") or _BREAK_WAIT_TIMING
+
 _timing_log_lock = threading.Lock()
 
 
@@ -25,16 +30,15 @@ def _timing_log(prefix: str, event: str, **fields: object) -> None:
 
 
 def break_wait_sleep_enabled() -> bool:
-    return _truthy("TEALETIO_BREAK_WAIT_SLEEP")
+    return _BREAK_WAIT_SLEEP
 
 
 def break_wait_timing_enabled() -> bool:
-    return _truthy("TEALETIO_BREAK_WAIT_TIMING") or break_wait_sleep_enabled()
+    return _BREAK_WAIT_TIMING
 
 
 def event_wakeup_timing_enabled() -> bool:
-    return _truthy("TEALETIO_EVENT_WAKEUP_TIMING") or break_wait_timing_enabled()
-
+    return _EVENT_WAKEUP_TIMING
 
 class WakeupManager(Protocol):
     """Cross-thread wakeup primitive for proactor ``wait`` / ``wait_async``."""
