@@ -79,7 +79,6 @@ __all__ = [
 ]
 
 
-
 _DoneCallback = Callable[[Operation[Any]], object]
 _ResultCallback = Callable[[T], object]
 _ProgressCallback = Callable[[int], object]
