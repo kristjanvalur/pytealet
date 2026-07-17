@@ -65,7 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``EventWakeupManager``; ``bind_loop()`` prepares its asyncio waiter.
 - Uring multishot CQEs are delivered without gating on ``operation.done()`` in
   the completion worker; out-of-order terminal ordering defers to scheduler-thread
-  ``ReorderBuffer`` / ``LenientReorderBuffer``.
+  ``ReorderBuffer``.
+- Removed ``LenientReorderBuffer``; accept and poll continuous paths use the same
+  strict ``ReorderBuffer`` as ``RecvIterBuffer``.
 - ``start_server()`` without an explicit ``stream_factory`` now uses
   ``pooled_default_stream_factory`` (per-connection provided-buffer pools)
   instead of the scheduler shared pool, so concurrent clients do not share

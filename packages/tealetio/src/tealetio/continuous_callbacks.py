@@ -122,51 +122,6 @@ class ReorderBuffer:
         self._delivered = index - 1
 
 
-class LenientReorderBuffer:
-    """Deliver continuous-operation callbacks with lenient leg ordering.
-
-    Non-terminal deliveries (``more=True``) may arrive in any order and run
-    immediately. Only terminal deliveries (``more=False``) that arrive before
-    their leg index is due are deferred on a min-heap until ``_counter``
-    catches up.
-
-    ``_counter`` is the next leg index whose terminal may run (from ``start``).
-    An in-order non-terminal advances ``_counter`` and then flushes any deferred
-    terminal whose index matches. Out-of-order non-terminals and in-order
-    terminals run the constructor callback without advancing ``_counter``.
-
-    Use ``ReorderBuffer`` when every delivery must run in strict index order
-    (for example ``RecvIterBuffer`` over ``recv_many`` chunks).
-    """
-
-    def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
-        self._callback = callback
-        self._counter = start
-        self._heap: list[MultishotDelivery] = []
-
-    def deliver(self, delivery: MultishotDelivery) -> None:
-        if delivery.index is None:
-            self._callback(delivery)
-            return
-
-        if not delivery.more and delivery.index != self._counter:
-            heapq.heappush(self._heap, delivery)
-            return
-
-        if delivery.more and delivery.index == self._counter:
-            self._counter += 1
-            self._callback(delivery)
-            self._flush_terminals()
-            return
-
-        self._callback(delivery)
-
-    def _flush_terminals(self) -> None:
-        while self._heap and self._heap[0].index == self._counter:
-            pending = heapq.heappop(self._heap)
-            self._callback(pending)
-
-
 def is_cancellation_delivery(delivery: MultishotDelivery) -> bool:
     """Return True when ``delivery`` ends a continuous op by IO cancellation.
 

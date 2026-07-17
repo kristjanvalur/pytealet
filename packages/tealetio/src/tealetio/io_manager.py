@@ -11,7 +11,6 @@ from .continuous_callbacks import (
     AcceptRecvErrorCallback,
     AcceptStreamsDelivery,
     DeliveryCallback,
-    LenientReorderBuffer,
     ReorderBuffer,
     finalize_accept_recv_error,
     finish_continuous_delivery,
@@ -394,11 +393,10 @@ class ProactorIOManager:
     def _thread_reorder_helper(
         self,
         delivery_callback: DeliveryCallback,
-        reorder_buffer_class: type[LenientReorderBuffer] | type[ReorderBuffer],
         *,
         start: int = 0,
     ) -> Callable[[MultishotDelivery], None]:
-        buffer = reorder_buffer_class(delivery_callback, start=start)
+        buffer = ReorderBuffer(delivery_callback, start=start)
 
         def on_thread_delivery(delivery: MultishotDelivery) -> None:
             assert self._scheduler is not None
@@ -419,7 +417,7 @@ class ProactorIOManager:
             finally:
                 finish_continuous_delivery(delivery)
 
-        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery, LenientReorderBuffer)
+        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery)
 
         def on_delivery(delivery: MultishotDelivery) -> None:
             if delivery.operation is None:
@@ -940,7 +938,7 @@ class ProactorIOManager:
         operation = self._proactor.poll_many(
             fd,
             mask,
-            self._thread_reorder_helper(on_ordered_delivery, LenientReorderBuffer),
+            self._thread_reorder_helper(on_ordered_delivery),
         )
         return IOWaiter(self, operation)
 
@@ -1103,7 +1101,7 @@ class ProactorIOManager:
             finally:
                 finish_continuous_delivery(delivery)
 
-        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery, LenientReorderBuffer)
+        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery)
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
@@ -1222,7 +1220,7 @@ class ProactorIOManager:
             finally:
                 finish_continuous_delivery(delivery)
 
-        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery, LenientReorderBuffer)
+        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery)
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):

@@ -174,11 +174,11 @@ def test_reorder_buffer_delivers_callbacks_in_index_order() -> None:
     assert order == [0, 1, 2]
 
 
-def test_lenient_reorder_buffer_defers_terminal_until_stragglers() -> None:
-    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
+def test_reorder_buffer_defers_terminal_until_stragglers() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
 
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery)
+    reorder_buffer = ReorderBuffer(finish_continuous_delivery)
 
     reorder_buffer.deliver(MultishotDelivery(index=2, value="terminal", more=False, operation=operation))
     assert not operation.done()
@@ -190,11 +190,11 @@ def test_lenient_reorder_buffer_defers_terminal_until_stragglers() -> None:
     assert operation.done()
 
 
-def test_lenient_reorder_buffer_honours_start_index() -> None:
-    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
+def test_reorder_buffer_honours_start_index_for_finish() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
 
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery, start=10)
+    reorder_buffer = ReorderBuffer(finish_continuous_delivery, start=10)
 
     reorder_buffer.deliver(MultishotDelivery(index=12, value="terminal", more=False, operation=operation))
     assert not operation.done()
@@ -204,26 +204,6 @@ def test_lenient_reorder_buffer_honours_start_index() -> None:
 
     reorder_buffer.deliver(MultishotDelivery(index=11, value="b", more=True, operation=operation))
     assert operation.done()
-
-
-def test_lenient_reorder_buffer_finishes_on_next_sequence_cancel() -> None:
-    """Cancel is a normal terminal at the next multishot sequence (not index 0)."""
-
-    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
-    from tealetio.operations import io_cancellation_error
-
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery)
-
-    for i in range(4):
-        reorder_buffer.deliver(MultishotDelivery(index=i, value=object(), more=True, operation=operation))
-    assert not operation.done()
-
-    reorder_buffer.deliver(
-        MultishotDelivery(index=4, exception=io_cancellation_error(), more=False, operation=operation),
-    )
-    assert operation.done()
-    assert operation.cancelled()
 
 
 def test_strict_reorder_buffer_finishes_on_next_sequence_cancel() -> None:
@@ -244,6 +224,32 @@ def test_strict_reorder_buffer_finishes_on_next_sequence_cancel() -> None:
     )
     assert operation.done()
     assert operation.cancelled()
+
+
+def test_reorder_buffer_flushes_terminal_after_out_of_order_legs() -> None:
+    """Accept multishot can post unique indices that arrive OOO after open_streams.
+
+    A terminal (cancel / multishot end) at a high index must flush once earlier
+    legs are present, not stall with pending_io forever.
+    """
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    delivered: list[tuple[int, bool]] = []
+    buffer = ReorderBuffer(
+        lambda delivery: delivered.append(
+            (-1 if delivery.index is None else delivery.index, delivery.more),
+        ),
+    )
+
+    # indices 0..4 and 6..9 as OOO non-terminals; gap 5 filled last before terminal 10
+    for index in (3, 1, 4, 0, 2, 8, 6, 9, 7):
+        buffer.deliver(MultishotDelivery(value=index, more=True, index=index))
+    buffer.deliver(MultishotDelivery(value="term", more=False, index=10))
+    assert (10, False) not in delivered
+
+    buffer.deliver(MultishotDelivery(value=5, more=True, index=5))
+    assert delivered[-1] == (10, False)
+    assert [index for index, _more in delivered] == list(range(11))
 
 
 def test_finish_operation_is_idempotent_when_already_done() -> None:
