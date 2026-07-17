@@ -78,7 +78,6 @@ __all__ = [
     "AcceptManyResult",
 ]
 
-_PROVIDED_BUFFER_UNAVAILABLE_ERRNOS = frozenset({errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP})
 
 
 _DoneCallback = Callable[[Operation[Any]], object]
@@ -385,10 +384,6 @@ def _supports_release_buffer() -> bool:
     """Return True when PEP 688 ``__release_buffer__`` exporters are usable."""
 
     return sys.version_info >= (3, 12)
-
-
-def _provided_buffer_create_unavailable(exc: BaseException) -> bool:
-    return isinstance(exc, OSError) and exc.errno in _PROVIDED_BUFFER_UNAVAILABLE_ERRNOS
 
 
 def _is_synthetic_recv_buffer_pool(buf_group: RecvBufferPool) -> bool:
@@ -1817,7 +1812,9 @@ class UringProactor(ProactorBase):
         self._retrying_deferred_submissions = False
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
-        self._provided_buffers_supported: bool | None = None
+        # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
+        # Synthetic pools are only for kernels without buf rings — never for multishot.
+        self._provided_buffers_supported = bool(self._capabilities.get("IORING_BUF_RING", False))
         self._wait_ready = EventWakeupManager()
         self._ring.callback = self._deliver_uring_completion
         self._service_threads = [
@@ -1985,19 +1982,17 @@ class UringProactor(ProactorBase):
         return cancel_operation
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
-        """Create a provided-buffer group, or ``SyntheticRecvBufferPool`` when PBUF rings fail."""
+        """Create a provided-buffer group, or synthetic pool without ``IORING_BUF_RING``.
 
-        if self._provided_buffers_supported is False:
-            return SyntheticRecvBufferPool(buffer_size, buffer_count)
-        try:
-            pool = self._ring.create_buf_group(buffer_size, buffer_count)
-        except OSError as exc:
-            if not _provided_buffer_create_unavailable(exc):
-                raise
-            self._provided_buffers_supported = False
-            return SyntheticRecvBufferPool(buffer_size, buffer_count)
-        self._provided_buffers_supported = True
-        return pool
+        Gated by probe ``IORING_BUF_RING`` (5.19). That pre-dates
+        ``IORING_RECV_MULTISHOT`` (6.0), so multishot never uses synthetic pools.
+        """
+
+        if self._provided_buffers_supported:
+            return self._ring.create_buf_group(buffer_size, buffer_count)
+        # no buf rings => no multishot either; one-shot fallback may still use synthetic
+        assert not self._capabilities.get("IORING_RECV_MULTISHOT", False)
+        return SyntheticRecvBufferPool(buffer_size, buffer_count)
 
     def create_buf_group(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         return self.create_recv_buffer_pool(buffer_size, buffer_count)
@@ -2659,10 +2654,11 @@ class UringProactor(ProactorBase):
         ``base_sequence`` set to ``index + 1``.
 
         When multishot receive is unavailable but ``buf_group`` is a real
-        provided-buffer pool, the proactor submits one ``submit_recv_buf()`` and
-        delivers a leased ``BufView`` per leg. With a
-        ``SyntheticRecvBufferPool``, it falls back to ``submit_recv()`` and
-        leases copied chunks against the synthetic pool before delivery.
+        provided-buffer pool (``IORING_BUF_RING`` without multishot: 5.19–5.x),
+        the proactor submits one ``submit_recv_buf()`` and delivers a leased
+        ``BufView`` per leg. With a ``SyntheticRecvBufferPool`` (no buf rings;
+        also no multishot), it falls back to ``submit_recv()`` and leases
+        copied chunks against the synthetic pool before delivery.
 
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.

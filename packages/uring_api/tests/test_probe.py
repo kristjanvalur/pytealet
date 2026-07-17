@@ -12,6 +12,7 @@ _VERSION_GATED_CAPABILITIES = {
     "IORING_POLL_MULTISHOT": (5, 13),
     "IORING_ACCEPT_MULTISHOT": (5, 19),
     "IORING_OP_SOCKET": (5, 19),
+    "IORING_BUF_RING": (5, 19),
     "IORING_RECV_MULTISHOT": (6, 0),
     "IORING_OP_SEND_ZC": (6, 0),
     "IORING_OP_SENDMSG_ZC": (6, 0),
@@ -25,6 +26,7 @@ def test_probe_returns_structured_result():
         "available",
         "IORING_ACCEPT_MULTISHOT",
         "IORING_POLL_MULTISHOT",
+        "IORING_BUF_RING",
         "IORING_RECV_MULTISHOT",
         "IORING_OP_SEND_ZC",
         "IORING_OP_SENDMSG_ZC",
@@ -34,11 +36,15 @@ def test_probe_returns_structured_result():
     assert probe["available"] is True
     assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
     assert isinstance(probe["IORING_POLL_MULTISHOT"], bool)
+    assert isinstance(probe["IORING_BUF_RING"], bool)
     assert isinstance(probe["IORING_RECV_MULTISHOT"], bool)
     assert isinstance(probe["IORING_OP_SEND_ZC"], bool)
     assert isinstance(probe["IORING_OP_SENDMSG_ZC"], bool)
     assert isinstance(probe["IORING_OP_SOCKET"], bool)
     assert isinstance(probe["IORING_OP_STATX"], bool)
+    # multishot recv requires provided-buffer rings (man: 6.0 vs 5.19)
+    if probe["IORING_RECV_MULTISHOT"]:
+        assert probe["IORING_BUF_RING"] is True
 
 
 def test_kernel_version_at_least_handles_release_candidate_suffixes():

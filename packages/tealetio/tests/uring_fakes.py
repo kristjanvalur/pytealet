@@ -50,6 +50,7 @@ def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
     capabilities = {
         "available": _native_uring_extension_imported(),
         "IORING_ACCEPT_MULTISHOT": True,
+        "IORING_BUF_RING": True,
         "IORING_RECV_MULTISHOT": True,
         "IORING_POLL_MULTISHOT": True,
         "IORING_OP_SEND_ZC": True,

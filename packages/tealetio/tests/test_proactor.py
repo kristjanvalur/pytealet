@@ -3921,29 +3921,60 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_create_recv_buffer_pool_falls_back_to_synthetic_when_pbuf_unavailable(self) -> None:
-        class _UnavailableProvidedBuffersRing(_FakeUringRing):
+    def test_create_recv_buffer_pool_uses_synthetic_when_buf_ring_probe_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No IORING_BUF_RING => no multishot; synthetic without create_buf_group.
+        _patch_uring_capabilities(monkeypatch, IORING_BUF_RING=False, IORING_RECV_MULTISHOT=False)
+
+        class _TrackingBufGroupRing(_FakeUringRing):
             def __init__(self, entries: int, flags: int) -> None:
                 super().__init__(entries, flags)
                 self.create_buf_group_calls = 0
 
             def create_buf_group(self, buffer_size: int, buffer_count: int) -> Any:
                 self.create_buf_group_calls += 1
-                raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+                raise AssertionError("create_buf_group should not run without IORING_BUF_RING")
 
-        proactor = UringProactor(ring_factory=_UnavailableProvidedBuffersRing)
+        proactor = UringProactor(ring_factory=_TrackingBufGroupRing)
         try:
+            assert proactor._provided_buffers_supported is False
             pool = proactor.create_recv_buffer_pool(8192, 4)
             assert isinstance(pool, proactor_module.SyntheticRecvBufferPool)
             assert pool.buffer_size == 8192
             assert pool.buffer_count == 4
-            assert proactor._provided_buffers_supported is False
-            assert proactor.ring.create_buf_group_calls == 1
+            assert proactor.ring.create_buf_group_calls == 0
+        finally:
+            proactor.close()
 
-            second = proactor.create_recv_buffer_pool(4096, 2)
-            assert isinstance(second, proactor_module.SyntheticRecvBufferPool)
-            assert second.buffer_size == 4096
-            assert proactor.ring.create_buf_group_calls == 1
+    def test_create_recv_buffer_pool_uses_buf_group_when_buf_ring_probe_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_BUF_RING=True, IORING_RECV_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            assert proactor._provided_buffers_supported is True
+            pool = proactor.create_recv_buffer_pool(8192, 4)
+            assert not isinstance(pool, proactor_module.SyntheticRecvBufferPool)
+            assert pool.buffer_size == 8192
+            assert pool.buffer_count == 4
+        finally:
+            proactor.close()
+
+    def test_create_recv_buffer_pool_propagates_create_buf_group_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_BUF_RING=True, IORING_RECV_MULTISHOT=False)
+
+        class _UnavailableProvidedBuffersRing(_FakeUringRing):
+            def create_buf_group(self, buffer_size: int, buffer_count: int) -> Any:
+                raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+        proactor = UringProactor(ring_factory=_UnavailableProvidedBuffersRing)
+        try:
+            with pytest.raises(OSError) as exc_info:
+                proactor.create_recv_buffer_pool(8192, 4)
+            assert exc_info.value.errno == errno.EINVAL
         finally:
             proactor.close()
 

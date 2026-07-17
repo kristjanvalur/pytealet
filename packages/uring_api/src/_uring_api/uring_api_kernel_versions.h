@@ -28,7 +28,25 @@
 #define URING_API_KERNEL_VERSION_SOCKET_MINOR 19
 #define URING_API_KERNEL_VERSION_SOCKET_PATCH 0
 
-/* recv multishot — io_uring_prep_recv(3) */
+/*
+ * Caller-owned provided-buffer rings — io_uring_setup_buf_ring(3) /
+ * io_uring_register_buf_ring(3) ("Available since 5.19"). Exposed by
+ * Ring.create_buf_group() / BufGroup. Classic IORING_OP_PROVIDE_BUFFERS
+ * selection is older still ("Available since 5.7", io_uring_enter(2)).
+ *
+ * Probed as IORING_BUF_RING so callers can choose real BufGroup vs synthetic
+ * pools without a create-and-fail trial.
+ */
+#define URING_API_KERNEL_VERSION_BUF_RING_MAJOR 5
+#define URING_API_KERNEL_VERSION_BUF_RING_MINOR 19
+#define URING_API_KERNEL_VERSION_BUF_RING_PATCH 0
+
+/*
+ * recv multishot — io_uring_prep_recv(3) ("Multishot variants are available
+ * since kernel 6.0"). Requires IOSQE_BUFFER_SELECT and a provided-buffer pool,
+ * so IORING_RECV_MULTISHOT implies IORING_BUF_RING (5.19). Synthetic pools are
+ * only for kernels without buf rings; they never pair with multishot recv.
+ */
 #define URING_API_KERNEL_VERSION_RECV_MULTISHOT_MAJOR 6
 #define URING_API_KERNEL_VERSION_RECV_MULTISHOT_MINOR 0
 #define URING_API_KERNEL_VERSION_RECV_MULTISHOT_PATCH 0
