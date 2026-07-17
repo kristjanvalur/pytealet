@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   data (no ``Completion`` object); reaping marks it seen and discards it.
   Duplicate in-flight wake tokens are acceptable. NOP failure still succeeds
   after signalling.
+- `BufGroup.release_callback` and `BufGroup.close()`: optional owner hook for
+  pool reuse. When `release_callback` is set, `close()` calls
+  `release_callback(group)` and leaves the provided-buffer ring intact. When it
+  is unset, `close()` frees the kernel buf ring (same work as finalization).
+  Dealloc still frees the group if nothing called `close()`, and does not invoke
+  the callback. Owners that truly dispose a group (for example a cache drain)
+  should clear `release_callback` before `close()`.
 - `Ring.exception_handler`: optional callback invoked when a delivery callback
   raises (Python or C). The handler receives a context dict with `message`,
   `exception`, `ring`, and `completions`. When it returns normally, that worker

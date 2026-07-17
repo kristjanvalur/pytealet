@@ -180,6 +180,27 @@ def test_buf_group_id_recycles_after_release():
         second = ring.create_buf_group(16, 4)
         assert second.group_id == first_id
 
+
+def test_buf_group_close_with_release_callback_keeps_group_alive():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        group = ring.create_buf_group(16, 4)
+        group_id = group.group_id
+        returned: list[uring_api.BufGroup] = []
+
+        def on_release(pool: uring_api.BufGroup) -> None:
+            returned.append(pool)
+
+        group.release_callback = on_release
+        group.close()
+        assert returned == [group]
+        assert group.group_id == group_id
+
+        group.release_callback = None
+        group.close()
+        assert group.group_id == 0
+
 def test_buf_group_ids_stay_unique_while_live():
     require_uring()
 

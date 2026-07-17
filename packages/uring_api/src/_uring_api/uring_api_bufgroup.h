@@ -14,6 +14,8 @@ typedef struct {
     unsigned int leased_count;
     unsigned short group_id;
     int mask;
+    /* optional callable(pool) invoked by tealetio when a receive path closes */
+    PyObject *release_callback;
 } UringApiBufGroup;
 
 extern PyTypeObject UringApiBufGroup_Type;

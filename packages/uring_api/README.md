@@ -181,6 +181,34 @@ has `length == 0` and is falsy. Detect stream end from `completion.res`, not
 from the result type. `BufGroup` and `BufView` cannot be constructed directly;
 use `Ring.create_buf_group()` and let receive completions create the views.
 
+`BufGroup` supports an optional **owner hook** for reusing pools without
+wrappers:
+
+- Set `buf_group.release_callback = callable` (or `None`).
+- `buf_group.close()` calls `release_callback(buf_group)` when set and **does
+  not** free the provided-buffer ring — the owner (for example a size-keyed
+  cache) keeps the group alive for the next checkout.
+- With no callback, `close()` frees the kernel buf ring immediately.
+- Finalization still frees the group if nothing called `close()`; dealloc does
+  **not** call `release_callback` (abandoned groups are not returned to a
+  cache). Clear the callback before a real dispose so `close()` destroys the
+  group rather than re-entering the owner.
+
+```python
+free: list[uring_api.BufGroup] = []
+
+def return_to_cache(group: uring_api.BufGroup) -> None:
+    free.append(group)
+
+group = ring.create_buf_group(16384, 4)
+group.release_callback = return_to_cache
+group.close()  # returns to free list; ring buffers stay registered
+assert free == [group]
+
+group.release_callback = None
+group.close()  # frees the provided-buffer ring
+```
+
 `completion.kind` uses `RECV_MULTISHOT` (13) for multishot provided-buffer
 receive and `RECV_BUF` (16) for one-shot `submit_recv_buf()`.
 
