@@ -523,6 +523,44 @@ def test_recviter_buffer_ignores_late_callbacks_after_close():
     assert not reorder_pending
 
 
+@pytest.mark.skipif(
+    not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
+)
+def test_recviter_buffer_close_releases_queued_and_late_views():
+    """Close and late closed-path deliveries must return pool leases."""
+
+    def exercise() -> tuple[int, bool]:
+        pool = proactor_module.SyntheticRecvBufferPool(64, 8)
+        buffer = _recviter_buffer(proactor=_recviter_test_proactor(), buf_group=pool)
+        # out-of-order: sits on the reorder heap until close drains it
+        buffer.on_result(MultishotDelivery(index=1, value=pool.lease_delivery_chunk(b"b"), more=True))
+        # in-order: lands in _ready
+        buffer.on_result(MultishotDelivery(index=0, value=pool.lease_delivery_chunk(b"a"), more=True))
+        assert pool.leased_count == 2
+        buffer.close()
+        assert pool.leased_count == 0
+        # late straggler after close
+        buffer.on_result(MultishotDelivery(index=2, value=pool.lease_delivery_chunk(b"c"), more=True))
+        assert pool.leased_count == 0
+        operation = ContinuousOperation(kind="recv_many")
+        buffer.on_result(
+            MultishotDelivery(
+                index=3,
+                value=pool.lease_delivery_chunk(b"d"),
+                exception=io_cancellation_error(),
+                more=False,
+                operation=operation,
+            )
+        )
+        assert pool.leased_count == 0
+        assert operation.done() is True
+        return len(buffer._ready), buffer._reorder_buffer.pending
+
+    ready_len, reorder_pending = _exercise_recviter_buffer(exercise)
+    assert ready_len == 0
+    assert not reorder_pending
+
+
 def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
     class _Pool:
         buffer_count = 4

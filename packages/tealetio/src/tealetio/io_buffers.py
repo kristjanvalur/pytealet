@@ -68,6 +68,15 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
 
+def _release_delivery(delivery: MultishotDelivery) -> None:
+    """Best-effort release of a delivery payload (provided-buffer / synthetic lease)."""
+
+    try:
+        delivery.value.release()
+    except (AttributeError, ValueError):
+        pass
+
+
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
 
@@ -103,7 +112,7 @@ class RecvIterBuffer:
         self._scheduler = scheduler
         self._cond = Condition()
         self._reorder_buffer = ReorderBuffer(self._on_ordered_delivery, start=0)
-        self._ready: deque[tuple[int, memoryview]] = deque()
+        self._ready: deque[MultishotDelivery] = deque()
         self._pressure_pending = False
         self._next_base = 0
         self._stream_done = False
@@ -151,6 +160,8 @@ class RecvIterBuffer:
         with self._cond:
             closed = self._closed
         if closed:
+            # Drop stragglers after close, but still return pool slots for any payload.
+            _release_delivery(delivery)
             if not delivery.more:
                 operation = delivery.operation
                 if operation is not None and not operation.done():
@@ -177,7 +188,7 @@ class RecvIterBuffer:
             elif delivery.value is not None:
                 assert index is not None
                 data = delivery.value
-                self._ready.append((index, data))
+                self._ready.append(delivery)
                 notify = bool(self._ready) or self._reorder_buffer.pending
                 if not delivery.more:
                     if data:
@@ -212,11 +223,13 @@ class RecvIterBuffer:
         if self._pressure_pending:
             self._pressure_pending = False
             return ((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")),)
-        ready_item: tuple[int, memoryview] | None = None
+        ready_item: MultishotDelivery | None = None
         if self._ready:
             ready_item = self._ready.popleft()
         if ready_item is not None:
-            index, chunk = ready_item
+            index = ready_item.index
+            chunk = ready_item.value
+            assert index is not None
             if not chunk:
                 self._stream_done = True
                 self._stream_error = None
@@ -242,8 +255,10 @@ class RecvIterBuffer:
         """Stop iteration and cancel any in-flight ``recv_many`` leg.
 
         Terminal state is established here before ``proactor.cancel()`` so a
-        blocked ``take_next()`` wakes even though ``on_result`` ignores
-        deliveries once ``_closed`` is set.
+        blocked ``take_next()`` wakes even though ``on_result`` only finishes
+        terminal legs (and releases chunk leases) once ``_closed`` is set.
+        Queued and reorder-pending views are released here so pool slots return
+        immediately rather than waiting on GC.
         """
 
         operation: ContinuousOperation[_RecvManyValue] | None
@@ -254,7 +269,11 @@ class RecvIterBuffer:
             operation = self._current_operation
             self._current_operation = None
             self._pressure_pending = False
+            for delivery in self._ready:
+                _release_delivery(delivery)
             self._ready.clear()
+            for delivery in self._reorder_buffer.drain():
+                _release_delivery(delivery)
             self._reorder_buffer.reset()
             if not self._stream_done:
                 self._stream_error = io_cancellation_error()

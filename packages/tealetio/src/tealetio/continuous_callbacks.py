@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import heapq
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 from .operations import MultishotDelivery, is_io_cancellation
@@ -96,6 +96,17 @@ class ReorderBuffer:
     @property
     def pending(self) -> bool:
         return bool(self._heap)
+
+    def drain(self) -> Iterator[MultishotDelivery]:
+        """Remove and yield all pending deliveries in any order.
+
+        Does not invoke the constructor callback. Callers that hold leased
+        buffer values must release them from the yielded deliveries.
+        """
+
+        pending = self._heap
+        self._heap = []
+        return iter(pending)
 
     def reset(self, *, start: int = 0) -> None:
         self._heap.clear()
