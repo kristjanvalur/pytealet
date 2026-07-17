@@ -13,6 +13,7 @@ import pytest
 from tealetio import set_scheduler
 import tealetio.io_manager as io_manager_mod
 from tealetio.io_manager import (
+    DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
     ProactorIOManager,
     ServerIO,
     _finish_or_close_socket,
@@ -245,6 +246,70 @@ class TestProactorIOManager:
         scheduler = BasicScheduler()
         with pytest.raises(RuntimeError, match="scheduler with IO support"):
             scheduler.io
+
+
+class TestRecvBufferPoolCache:
+    def test_default_max_free_recv_buffer_pools_is_sixteen(self) -> None:
+        assert DEFAULT_MAX_FREE_RECV_BUFFER_POOLS == 16
+        io = ProactorIOManager(StubScheduler(), _MockProactor())  # type: ignore[arg-type]
+        assert io._recv_pool_cache.max_free == 16
+
+    def test_acquire_reuses_released_pools_by_size(self) -> None:
+        io = _manager(_MockProactor())
+        first = io.acquire_recv_buffer_pool(4096, 4)
+        first.close()
+        reused = io.acquire_recv_buffer_pool(4096, 4)
+        assert reused is first
+        reused.close()
+        other = io.acquire_recv_buffer_pool(8192, 4)
+        other.close()
+        assert io.acquire_recv_buffer_pool(4096, 4) is first
+        assert io.acquire_recv_buffer_pool(8192, 4) is other
+
+    def test_lru_evicts_oldest_free_when_over_cap(self) -> None:
+        """Idle free cache is capped; LRU size keys lose free pools first."""
+        io = ProactorIOManager(
+            StubScheduler(),
+            _MockProactor(),
+            max_free_recv_buffer_pools=2,
+        )  # type: ignore[arg-type]
+        cache = io._recv_pool_cache
+        a = io.acquire_recv_buffer_pool(100, 1)
+        a.close()
+        b = io.acquire_recv_buffer_pool(200, 1)
+        b.close()
+        c = io.acquire_recv_buffer_pool(300, 1)
+        c.close()
+        # three free pools with cap 2: A is LRU and hard-closed (callback cleared)
+        assert a.release_callback is None
+        assert b.release_callback is cache.release_callback
+        assert c.release_callback is cache.release_callback
+        assert cache.free_count == 2
+        # re-acquiring A's size allocates a new pool
+        a2 = io.acquire_recv_buffer_pool(100, 1)
+        assert a2 is not a
+        a2.close()
+        # free: B (LRU), C, then A2 — over cap, B is culled
+        assert b.release_callback is None
+        assert cache.free_count == 2
+        assert io.acquire_recv_buffer_pool(200, 1) is not b
+
+    def test_close_disposes_cached_free_pools(self) -> None:
+        io = _manager(_MockProactor())
+        pool = io.acquire_recv_buffer_pool(4096, 2)
+        pool.close()
+        assert pool.release_callback is io._recv_pool_cache.release_callback
+        io.close()
+        assert pool.release_callback is None
+        assert io._recv_pool_cache.free_count == 0
+
+    def test_late_release_after_manager_close_is_freed(self) -> None:
+        io = _manager(_MockProactor())
+        pool = io.acquire_recv_buffer_pool(4096, 2)
+        io.close()
+        pool.close()
+        assert pool.release_callback is None
+
 
 class TestAbortiveClose:
     def test_abortive_close_closes_fd(self) -> None:

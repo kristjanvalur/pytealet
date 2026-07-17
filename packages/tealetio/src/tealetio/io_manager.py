@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
 
@@ -44,6 +45,10 @@ if TYPE_CHECKING:
     from .scheduler import BaseScheduler, TimerHandle
 
 T = TypeVar("T")
+
+# idle (cached) recv buffer pools kept for reuse; excess free pools are culled
+# from the least-recently-used size key on release
+DEFAULT_MAX_FREE_RECV_BUFFER_POOLS = 16
 
 
 def _create_scheduler_socket(
@@ -157,6 +162,7 @@ SELECTOR_IO_UNSUPPORTED_ERROR = (
 )
 
 __all__ = [
+    "DEFAULT_MAX_FREE_RECV_BUFFER_POOLS",
     "FileIO",
     "IO_UNSUPPORTED_ERROR",
     "IOFile",
@@ -171,6 +177,7 @@ __all__ = [
     "ProactorAccess",
     "ProactorIOManager",
     "ProactorSocketIO",
+    "RecvBufferPoolCache",
     "SELECTOR_IO_UNSUPPORTED_ERROR",
     "ServerIO",
     "SocketAddress",
@@ -274,6 +281,10 @@ class SocketIO(Protocol):
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> "RecvBufferPool": ...
 
+    def acquire_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> "RecvBufferPool": ...
+
+    def release_recv_buffer_pool(self, pool: "RecvBufferPool") -> None: ...
+
     def shared_recv_buffer_pool(self) -> "RecvBufferPool": ...
 
     def set_shared_recv_buffer_pool(self, pool: "RecvBufferPool") -> None: ...
@@ -351,6 +362,103 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
 ProactorSocketIO = ServerIO
 
 
+class RecvBufferPoolCache:
+    """Size-keyed free cache of receive buffer pools with an LRU free-pool cap.
+
+    Free pools are keyed by ``(buffer_size, buffer_count)``. The
+    ``OrderedDict`` front is the least-recently-used size key; ``move_to_end``
+    on acquire/release keeps hot sizes. Idle free pools are capped (default 16);
+    excess free pools are destroyed from the LRU key (oldest free first).
+
+    Scheduler-thread only: stream open/close tealets call ``acquire`` /
+    ``release``. ``acquire`` sets ``pool.release_callback`` so ``pool.close()``
+    (from ``RecvIterBuffer.close()``) returns here. ``close()`` clears callbacks
+    and destroys remaining free pools; later ``release`` destroys instead of
+    caching.
+    """
+
+    def __init__(
+        self,
+        create: Callable[[int, int], RecvBufferPool],
+        *,
+        max_free: int = DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
+    ) -> None:
+        self._create = create
+        self._max_free = max_free
+        self._free: OrderedDict[tuple[int, int], list[RecvBufferPool]] = OrderedDict()
+        self._free_count = 0
+        self._closed = False
+        # stable identity for pool.release_callback (bound methods are not)
+        self._release_callback = self.release
+
+    @property
+    def max_free(self) -> int:
+        return self._max_free
+
+    @property
+    def free_count(self) -> int:
+        return self._free_count
+
+    @property
+    def release_callback(self) -> Callable[[RecvBufferPool], object]:
+        return self._release_callback
+
+    def acquire(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
+        """Checkout a pool of the given size, creating one when the free list is empty."""
+
+        if self._closed:
+            raise RuntimeError("receive buffer pool cache is closed")
+        key = (buffer_size, buffer_count)
+        free = self._free.get(key)
+        if free:
+            pool = free.pop()
+            self._free_count -= 1
+            if not free:
+                del self._free[key]
+            else:
+                self._free.move_to_end(key)
+        else:
+            pool = self._create(buffer_size, buffer_count)
+        # owner hook; re-acquire restores it after a cache stay
+        pool.release_callback = self._release_callback
+        return pool
+
+    def release(self, pool: RecvBufferPool) -> None:
+        """Return a pool to the free cache, or destroy it if the cache is closed."""
+
+        if self._closed:
+            pool.release_callback = None
+            pool.close()
+            return
+        key = (pool.buffer_size, pool.buffer_count)
+        free = self._free.get(key)
+        if free is None:
+            free = []
+            self._free[key] = free
+        free.append(pool)
+        self._free.move_to_end(key)
+        self._free_count += 1
+        while self._free_count > self._max_free:
+            lru_key, free_list = next(iter(self._free.items()))
+            victim = free_list.pop(0)
+            self._free_count -= 1
+            if not free_list:
+                del self._free[lru_key]
+            victim.release_callback = None
+            victim.close()
+
+    def close(self) -> None:
+        """Destroy all free pools and reject further caching."""
+
+        self._closed = True
+        cached = [pool for pools in self._free.values() for pool in pools]
+        self._free.clear()
+        self._free_count = 0
+        for pool in cached:
+            pool.release_callback = None
+            pool.close()
+
+
 class ProactorIOManager:
     """IO facade over a ``Proactor`` backend.
 
@@ -366,10 +474,20 @@ class ProactorIOManager:
     ``streams.open`` / ``streams.writer``) for stream-pair construction.
     """
 
-    def __init__(self, scheduler: BaseScheduler, proactor: Proactor) -> None:
+    def __init__(
+        self,
+        scheduler: BaseScheduler,
+        proactor: Proactor,
+        *,
+        max_free_recv_buffer_pools: int = DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
+    ) -> None:
         self._scheduler = scheduler
         self._proactor = proactor
         self._closed = False
+        self._recv_pool_cache = RecvBufferPoolCache(
+            proactor.create_recv_buffer_pool,
+            max_free=max_free_recv_buffer_pools,
+        )
 
     @property
     def proactor(self) -> Proactor:
@@ -380,6 +498,7 @@ class ProactorIOManager:
         """Release scheduler ownership; called from ``ProactorScheduler.close()``."""
 
         self._closed = True
+        self._recv_pool_cache.close()
         self._scheduler = None
 
     def _check_open(self) -> None:
@@ -475,7 +594,20 @@ class ProactorIOManager:
         return IOWaiter(self, self._proactor.recv(sock, n))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
+        """Allocate a new receive buffer pool (not taken from the size cache)."""
+
         return self._proactor.create_recv_buffer_pool(buffer_size, buffer_count)
+
+    def acquire_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
+        """Checkout a pool of the given size, reusing a free cached instance when possible."""
+
+        self._check_open()
+        return self._recv_pool_cache.acquire(buffer_size, buffer_count)
+
+    def release_recv_buffer_pool(self, pool: RecvBufferPool) -> None:
+        """Return a previously acquired pool to the size-keyed free cache."""
+
+        self._recv_pool_cache.release(pool)
 
     def shared_recv_buffer_pool(self) -> RecvBufferPool:
         return self._proactor.shared_recv_buffer_pool()
@@ -488,7 +620,11 @@ class ProactorIOManager:
             return self._proactor.shared_recv_buffer_pool()
         return buffer_pool
 
-    def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None) -> RecvIterBuffer:
+    def _open_sock_recv_iter(
+        self,
+        sock: socket.socket,
+        buffer_pool: RecvBufferPool | None,
+    ) -> RecvIterBuffer:
         pool = self._resolve_recv_buffer_pool(buffer_pool)
         # eager drain via _recv_many; cancel unfinished legs on the real proactor
         return open_recv_iter_buffer(

@@ -178,6 +178,11 @@ class _FakeBufGroup:
         self.buffer_size = buffer_size
         self.buffer_count = buffer_count
         self.leased_count = 0
+        self.release_callback = None
+
+    def close(self) -> None:
+        if self.release_callback is not None:
+            self.release_callback(self)
 
     def note_chunk_released(self) -> None:
         if self.leased_count:

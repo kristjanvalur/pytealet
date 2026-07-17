@@ -59,6 +59,8 @@ class StreamOpenIO(Protocol):
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> Any: ...
 
+    def acquire_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> Any: ...
+
 
 class StreamFactory(Protocol):
     """Build a native ``(StreamReader, StreamWriter)`` pair for a connected socket."""
@@ -159,10 +161,14 @@ def pooled_default_stream_factory(
 ) -> StreamFactory | AsyncStreamFactory:
     """Return a default stream factory with an explicit provided-buffer pool.
 
-    When ``pool`` is omitted, each connection gets a fresh pool from
-    ``io.create_recv_buffer_pool(buffer_size, buffer_count)``. When ``pool`` is
-    set, every connection shares that pool. Pair ``async_`` with the stream
-    types returned by ``start_server`` / ``open_streams`` on the call site.
+    When ``pool`` is omitted, each connection checks out a pool of
+    ``(buffer_size, buffer_count)`` from the IO manager size cache
+    (``acquire_recv_buffer_pool``). Closing the receive buffer calls
+    ``pool.close()``, which returns it to the cache via ``release_callback``.
+    When ``pool`` is set, every connection shares that pool (leave
+    ``release_callback`` unset so ``close()`` is a real dispose). Pair
+    ``async_`` with the stream types returned by ``start_server`` /
+    ``open_streams`` on the call site.
     """
 
     delegate = default_async_stream_factory if async_ else default_stream_factory
@@ -173,7 +179,7 @@ def pooled_default_stream_factory(
         *,
         limit: int = DEFAULT_LIMIT,
     ) -> tuple[StreamReader, StreamWriter] | tuple[AsyncStreamReader, AsyncStreamWriter]:
-        chosen = pool if pool is not None else io.create_recv_buffer_pool(buffer_size, buffer_count)
+        chosen = pool if pool is not None else io.acquire_recv_buffer_pool(buffer_size, buffer_count)
         return delegate(io, sock, limit=limit, recv_buffer_pool=chosen)
 
     if async_:
@@ -182,7 +188,7 @@ def pooled_default_stream_factory(
 
 
 def default_server_stream_factory(*, async_: bool) -> StreamFactory | AsyncStreamFactory:
-    """Per-connection provided-buffer pools for multi-client listeners."""
+    """Size-cached provided-buffer pools for multi-client listeners."""
 
     return pooled_default_stream_factory(async_=async_)
 

@@ -215,7 +215,7 @@ class TestStreamsPoC:
             reader.close()
             writer.close()
 
-    def test_pooled_default_stream_factory_uses_per_connection_pool(
+    def test_pooled_default_stream_factory_checks_out_distinct_pools_while_open(
         self, scheduler: SyncProactorScheduler
     ) -> None:
         reader_a, writer_a = socket.socketpair()
@@ -236,6 +236,27 @@ class TestStreamsPoC:
             reader_b.close()
             writer_b.close()
 
+    def test_pooled_default_stream_factory_returns_pool_to_size_cache(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        reader_a, writer_a = socket.socketpair()
+        reader_b, writer_b = socket.socketpair()
+        try:
+            reader_a.setblocking(False)
+            reader_b.setblocking(False)
+            factory = pooled_default_stream_factory(buffer_size=16 * 1024, buffer_count=4)
+            stream_a, writer_stream_a = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
+            pool_a = stream_a._core._recv_buffer._buf_group
+            writer_stream_a.close()
+            stream_a.close()
+            stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
+            assert stream_b._core._recv_buffer._buf_group is pool_a
+        finally:
+            reader_a.close()
+            writer_a.close()
+            reader_b.close()
+            writer_b.close()
+
     def test_pooled_default_stream_factory_can_share_fixed_pool(
         self, scheduler: SyncProactorScheduler
     ) -> None:
@@ -250,6 +271,10 @@ class TestStreamsPoC:
             stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
             assert stream_a._core._recv_buffer._buf_group is shared
             assert stream_b._core._recv_buffer._buf_group is shared
+            assert shared.release_callback is None
+            # explicit shared pools are not returned to the size cache
+            stream_a.close()
+            assert scheduler.io.acquire_recv_buffer_pool(16 * 1024, 4) is not shared
         finally:
             reader_a.close()
             writer_a.close()

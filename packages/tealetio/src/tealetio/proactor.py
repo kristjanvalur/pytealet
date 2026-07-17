@@ -384,6 +384,10 @@ class RecvBufferPool(Protocol):
     the current leg; consumers drop held views and start a fresh
     ``recv_many()`` to continue. ``SyntheticRecvBufferPool`` mirrors the same
     accounting for degraded selector and uring receive paths.
+
+    Optional ``release_callback`` is an owner hook used by ``close()``: when set,
+    ``close()`` returns the pool to its owner (for example the IO manager size
+    cache) instead of destroying it. Clear the callback before a real dispose.
     """
 
     @property
@@ -394,6 +398,10 @@ class RecvBufferPool(Protocol):
 
     @property
     def leased_count(self) -> int: ...
+
+    release_callback: Callable[["RecvBufferPool"], object] | None
+
+    def close(self) -> None: ...
 
 
 def _supports_release_buffer() -> bool:
@@ -418,6 +426,14 @@ class SyntheticRecvBufferPool:
         self.buffer_size = buffer_size
         self.buffer_count = buffer_count
         self.leased_count = 0
+        self.release_callback: Callable[[RecvBufferPool], object] | None = None
+
+    def close(self) -> None:
+        """Return to owner via ``release_callback``, or drop the synthetic pool."""
+
+        release = self.release_callback
+        if release is not None:
+            release(self)
 
     def _note_leased(self) -> None:
         self.leased_count += 1

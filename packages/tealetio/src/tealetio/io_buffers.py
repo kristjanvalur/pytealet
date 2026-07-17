@@ -49,10 +49,15 @@ _DEFAULT_MIN_WRITE = 2048
 
 class _BufGroupLike(Protocol):
     @property
+    def buffer_size(self) -> int: ...
+
+    @property
     def buffer_count(self) -> int: ...
 
     @property
     def leased_count(self) -> int: ...
+
+    def close(self) -> None: ...
 
 
 class _RecvIterProactor(Protocol):
@@ -273,6 +278,10 @@ class RecvIterBuffer:
         terminal legs (and releases chunk leases) once ``_closed`` is set.
         Queued and reorder-pending views are released here so pool slots return
         immediately rather than waiting on GC.
+
+        After cancelling receive IO, calls ``buf_group.close()``. Cached pools
+        have a ``release_callback`` so that returns them to the IO manager
+        cache; otherwise the group is destroyed.
         """
 
         operation: ContinuousOperation[_RecvManyValue] | None
@@ -296,6 +305,7 @@ class RecvIterBuffer:
         if operation is not None and not operation.done():
             self._proactor.cancel(operation)
             operation.finish_operation(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
+        self._buf_group.close()
 
 
 def open_recv_iter_buffer(
