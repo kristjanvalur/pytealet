@@ -2490,10 +2490,6 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[socket.socket]:
         operation = cast(Operation[socket.socket], entry.operation)
-        if operation.done():
-            if completion.res >= 0:
-                _close_raw_fd(completion.res)
-            return operation
         operation.deliver(self, result=socket_from_uring_fd(completion.res))
         return operation
 

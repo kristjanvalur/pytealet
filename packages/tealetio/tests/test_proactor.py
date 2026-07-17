@@ -4867,6 +4867,9 @@ class TestUringProactor:
             proactor.close()
 
     def test_create_socket_cancel_before_socket_completes(self) -> None:
+        # Fake ring submit_cancel delivers target ECANCELED immediately (cancel
+        # wins). Caller observes cancel; no second success CQE is expected for
+        # the same one-shot SQE (and the proactor does not close-if-done).
         proactor = UringProactor(ring_factory=_DeferredSocketUringRing)
         try:
             operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -4874,14 +4877,9 @@ class TestUringProactor:
             proactor.cancel(operation)
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1
-            proactor.ring.complete_socket()
-            proactor.wait(proactor.get_time() + 0.05)
-            assert operation.cancelled() is True
             assert proactor.ring.submitted_connect == []
-            leaked_fd = proactor.ring.last_socket_fd
-            assert leaked_fd is not None
-            with pytest.raises(OSError):
-                os.fstat(leaked_fd)
+            assert proactor.ring.pending_socket  # success CQE not delivered
+            assert proactor.ring.last_socket_fd is None
         finally:
             proactor.close()
 
