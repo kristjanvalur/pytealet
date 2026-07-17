@@ -219,7 +219,7 @@ def test_ring_accept_multishot_batch_peer_addresses_when_available():
         server.bind(("127.0.0.1", 0))
         server.listen()
         with uring_api.Ring() as ring:
-            ring.submit_accept_multishot(server.fileno(), 170, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            ring.submit_accept_multishot(server.fileno(), 170, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             clients.append(connect_to_listener(server))
             clients.append(connect_to_listener(server))
             batch = collect_completions(ring, 1.0, 2)
@@ -261,7 +261,7 @@ def test_ring_accept_multishot_completion_when_available():
         token = {"operation": "accept-multishot"}
         with uring_api.Ring() as ring:
             handle = ring.submit_accept_multishot(
-                server.fileno(), token, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
+                server.fileno(), token, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
             )
             clients.append(connect_to_listener(server))
             first = wait_one(ring, 1.0)

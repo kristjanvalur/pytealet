@@ -4,7 +4,7 @@ import errno
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Generic, NamedTuple, TypeVar, cast
+from typing import Any, ClassVar, Generic, NamedTuple, TypeVar, cast
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -27,10 +27,6 @@ def is_io_cancellation(exc: BaseException | None) -> bool:
     """Return True when ``exc`` represents IO cancellation (not task cancellation)."""
 
     return isinstance(exc, OSError) and exc.errno == errno.ECANCELED
-
-
-def _operation_cancelled(exception: BaseException | None) -> bool:
-    return is_io_cancellation(exception)
 
 
 _DoneCallback = Callable[["Operation[Any]"], object]
@@ -79,37 +75,47 @@ class Operation(Generic[T]):
     before shutdown, or ``forget()`` when only the target's terminal state matters.
     """
 
+    # Shared ClassVar lock: done-callback registration is rare vs completion.
+    # Pending-op accounting is not process-global; see ``pending_bucket``.
+    _lock: ClassVar[threading.Lock] = threading.Lock()
+
     def __init__(
         self,
         kind: str,
         fileobj: object | None = None,
+        *,
+        pending_bucket: list[None] | None = None,
     ) -> None:
+        # Optional shared list owned by the submitting proactor (append/pop under
+        # the GIL is the unfinished-op counter). Selector/sync ops leave this None.
+        if pending_bucket is not None:
+            pending_bucket.append(None)
+        self._pending_bucket = pending_bucket
         self.kind = kind
         self.fileobj = fileobj
-        self._lock = threading.Lock()
-        self._done = False
-        self._cancelled = False
-        self._result: T | None = None
-        self._exception: BaseException | None = None
+        self._resolved: tuple[T | None, BaseException | None] | None = None
         self._callbacks: list[_DoneCallback] = []
 
     def done(self) -> bool:
         """Return True if the operation has completed."""
 
-        return self._done
+        return self._resolved is not None
 
     def cancelled(self) -> bool:
-        """Return True if the operation completed by cancellation."""
+        """Return True if the operation completed by IO cancellation."""
 
-        return self._cancelled
+        resolved = self._resolved
+        if resolved is None:
+            return False
+        return is_io_cancellation(resolved[1])
 
     def result(self) -> T:
         """Return the operation result, or raise its completion exception."""
 
-        if not self._done:
+        resolved = self._resolved
+        if resolved is None:
             raise InvalidStateError("operation result is not ready")
-        exception = self._exception
-        result = self._result
+        result, exception = resolved
         if exception is not None:
             raise exception
         return cast(T, result)
@@ -117,15 +123,16 @@ class Operation(Generic[T]):
     def exception(self) -> BaseException | None:
         """Return the operation exception, or None for successful completion."""
 
-        if not self._done:
+        resolved = self._resolved
+        if resolved is None:
             raise InvalidStateError("operation exception is not ready")
-        return self._exception
+        return resolved[1]
 
     def add_done_callback(self, callback: _DoneCallback) -> None:
         """Register `callback` to run when the operation completes."""
 
         with self._lock:
-            if self._done:
+            if self.done():
                 run_now = True
             else:
                 self._callbacks.append(callback)
@@ -156,40 +163,26 @@ class Operation(Generic[T]):
     ) -> None:
         """Accept one backend completion on a worker thread."""
 
-        with self._lock:
-            if self._done:
-                return
-        if exception is not None:
-            self._finish(exception=exception, cancelled=_operation_cancelled(exception))
-        else:
-            self._finish(result=cast(T, result))
+        self._finish(result=cast(T, result), exception=exception)
 
     def _finish(
         self,
         *,
         result: T | None = None,
         exception: BaseException | None = None,
-        cancelled: bool = False,
-    ) -> bool:
-        if cancelled:
-            if self._done:
-                return False
-
+    ) -> None:
         with self._lock:
-            if self._done:
-                if cancelled:
-                    return False
-                raise InvalidStateError("operation already done")
-            self._result = result
-            self._exception = exception
-            self._cancelled = cancelled
-            self._done = True
+            assert self._resolved is None
+            self._resolved = (result, exception)
             callbacks = self._callbacks
             self._callbacks = []
 
+        pending_bucket = self._pending_bucket
+        if pending_bucket is not None:
+            pending_bucket.pop()
+
         for callback in callbacks:
             callback(self)
-        return True
 
 
 class ContinuousOperation(Operation[None], Generic[T_co]):
@@ -213,8 +206,10 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         kind: str,
         fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
+        *,
+        pending_bucket: list[None] | None = None,
     ) -> None:
-        super().__init__(kind, fileobj)
+        super().__init__(kind, fileobj, pending_bucket=pending_bucket)
         self._result_callback = result_callback
 
     def finish_operation(self, delivery: MultishotDelivery) -> None:
@@ -227,29 +222,16 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         """
 
         assert not delivery.more
-        if not self._done:
-            exc = delivery.exception
-            if exc is not None:
-                self._finish(exception=exc, cancelled=_operation_cancelled(exc))
-            else:
-                self._finish(result=None)
-        assert self._done
+        if not self.done():
+            self._finish(result=None, exception=delivery.exception)
+        assert self.done()
 
-    def _emit_delivery(self, delivery: MultishotDelivery) -> bool:
-        """Deliver one multishot chunk when the operation is still active.
+    def _emit_delivery(self, delivery: MultishotDelivery) -> None:
+        """Deliver one multishot chunk to the result callback."""
 
-        Returns ``True`` when the callback ran (or there is no callback).
-        Returns ``False`` when the operation was already done and the delivery
-        was skipped.
-        """
-
-        with self._lock:
-            if self._done:
-                return False
-            callback = self._result_callback
+        callback = self._result_callback
         if callback is not None:
             callback(delivery._replace(operation=self))
-        return True
 
     def _emit_result(
         self,
@@ -258,30 +240,24 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         index: int | None = 0,
         exception: BaseException | None = None,
         more: bool = True,
-    ) -> bool:
+    ) -> None:
         """Deliver one successful chunk wrapped in ``MultishotDelivery``."""
 
-        return self._emit_delivery(MultishotDelivery(index, result, exception, more))
+        self._emit_delivery(MultishotDelivery(index, result, exception, more))
 
     def _finish_with_terminal_delivery(
         self,
         delivery: MultishotDelivery,
-        *,
-        cancelled: bool = False,
     ) -> None:
         """Emit one terminal ``MultishotDelivery`` for the result callback.
 
         The consumer must call ``finish_operation`` on the owner thread when it
         marshals deliveries (``ProactorIOManager``, ``RecvIterBuffer``, and
-        similar). ``cancelled`` is accepted for call-site compatibility; cancel
-        state is applied in ``finish_operation`` from ``delivery.exception``.
+        similar). Cancel state is applied in ``finish_operation`` from
+        ``delivery.exception``.
         """
 
-        del cancelled
         assert not delivery.more
-        with self._lock:
-            if self._done:
-                return
-            callback = self._result_callback
+        callback = self._result_callback
         if callback is not None:
             callback(delivery._replace(operation=self))

@@ -18,6 +18,7 @@
 static int capability_cache_ready = 0;
 static int capability_accept_multishot = 0;
 static int capability_poll_multishot = 0;
+static int capability_buf_ring = 0;
 static int capability_recv_multishot = 0;
 static int capability_socket = 0;
 static int capability_send_zc = 0;
@@ -110,6 +111,10 @@ static int ensure_capability_cache(void) {
     capability_socket = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_SOCKET_MAJOR,
                                                           URING_API_KERNEL_VERSION_SOCKET_MINOR,
                                                           URING_API_KERNEL_VERSION_SOCKET_PATCH);
+    /* provided-buffer rings (5.19); multishot recv (6.0) implies this is true */
+    capability_buf_ring = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_BUF_RING_MAJOR,
+                                                            URING_API_KERNEL_VERSION_BUF_RING_MINOR,
+                                                            URING_API_KERNEL_VERSION_BUF_RING_PATCH);
     capability_recv_multishot = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_RECV_MULTISHOT_MAJOR,
                                                                   URING_API_KERNEL_VERSION_RECV_MULTISHOT_MINOR,
                                                                   URING_API_KERNEL_VERSION_RECV_MULTISHOT_PATCH);
@@ -144,6 +149,7 @@ static PyObject *build_capability_dict(void) {
 
     if (add_cached_bool(capabilities, "IORING_ACCEPT_MULTISHOT", capability_accept_multishot) < 0 ||
         add_cached_bool(capabilities, "IORING_POLL_MULTISHOT", capability_poll_multishot) < 0 ||
+        add_cached_bool(capabilities, "IORING_BUF_RING", capability_buf_ring) < 0 ||
         add_cached_bool(capabilities, "IORING_RECV_MULTISHOT", capability_recv_multishot) < 0 ||
         add_cached_bool(capabilities, "IORING_OP_SOCKET", capability_socket) < 0 ||
         add_cached_bool(capabilities, "IORING_OP_SEND_ZC", capability_send_zc) < 0 ||

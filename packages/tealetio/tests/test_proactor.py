@@ -523,6 +523,44 @@ def test_recviter_buffer_ignores_late_callbacks_after_close():
     assert not reorder_pending
 
 
+@pytest.mark.skipif(
+    not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
+)
+def test_recviter_buffer_close_releases_queued_and_late_views():
+    """Close and late closed-path deliveries must return pool leases."""
+
+    def exercise() -> tuple[int, bool]:
+        pool = proactor_module.SyntheticRecvBufferPool(64, 8)
+        buffer = _recviter_buffer(proactor=_recviter_test_proactor(), buf_group=pool)
+        # out-of-order: sits on the reorder heap until close drains it
+        buffer.on_result(MultishotDelivery(index=1, value=pool.lease_delivery_chunk(b"b"), more=True))
+        # in-order: lands in _ready
+        buffer.on_result(MultishotDelivery(index=0, value=pool.lease_delivery_chunk(b"a"), more=True))
+        assert pool.leased_count == 2
+        buffer.close()
+        assert pool.leased_count == 0
+        # late straggler after close
+        buffer.on_result(MultishotDelivery(index=2, value=pool.lease_delivery_chunk(b"c"), more=True))
+        assert pool.leased_count == 0
+        operation = ContinuousOperation(kind="recv_many")
+        buffer.on_result(
+            MultishotDelivery(
+                index=3,
+                value=pool.lease_delivery_chunk(b"d"),
+                exception=io_cancellation_error(),
+                more=False,
+                operation=operation,
+            )
+        )
+        assert pool.leased_count == 0
+        assert operation.done() is True
+        return len(buffer._ready), buffer._reorder_buffer.pending
+
+    ready_len, reorder_pending = _exercise_recviter_buffer(exercise)
+    assert ready_len == 0
+    assert not reorder_pending
+
+
 def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
     class _Pool:
         buffer_count = 4
@@ -1084,26 +1122,26 @@ class TestOperation:
         assert operation.done() is True
         assert operation.result() is None
 
-    def test_continuous_operation_emit_result_skips_when_done(self):
+    def test_continuous_operation_emit_result_delivers_after_done(self):
         seen: list[_RecvManySeen] = []
         operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
-        assert operation._emit_result(1) is True
-        operation._finish(exception=io_cancellation_error(), cancelled=True)
-        assert operation._emit_result(2) is False
-        assert [delivery.value for delivery in seen] == [1]
+        operation._emit_result(1)
+        operation._finish(exception=io_cancellation_error())
+        operation._emit_result(2)
+        assert [delivery.value for delivery in seen] == [1, 2]
 
-    def test_operation_deliver_ignored_after_cancel(self) -> None:
+    def test_operation_deliver_rejects_after_cancel(self) -> None:
         operation = Operation(kind="test")
-        operation._finish(exception=io_cancellation_error(), cancelled=True)
-        operation.deliver(object(), result=None)
-        assert operation.cancelled()
+        operation._finish(exception=io_cancellation_error())
+        with pytest.raises(AssertionError):
+            operation.deliver(object(), result=None)
 
-    def test_continuous_operation_emit_result_false_after_cancel(self) -> None:
+    def test_continuous_operation_emit_result_delivers_after_cancel(self) -> None:
         seen: list[_RecvManySeen] = []
         parent = ContinuousOperation(kind="test", result_callback=seen.append)
-        parent._finish(exception=io_cancellation_error(), cancelled=True)
-        assert parent._emit_result(1) is False
-        assert seen == []
+        parent._finish(exception=io_cancellation_error())
+        parent._emit_result(1)
+        assert [delivery.value for delivery in seen] == [1]
 
     def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
         from tealetio.continuous_callbacks import marshal_to_scheduler
@@ -2738,6 +2776,7 @@ class TestUringProactor:
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
         proactor = scheduler.proactor
         proactor._capabilities["IORING_RECV_MULTISHOT"] = False
+        proactor.recv_multishot = proactor._recv_multishot_fallback
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -2768,6 +2807,7 @@ class TestUringProactor:
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
         proactor = scheduler.proactor
         proactor._capabilities["IORING_ACCEPT_MULTISHOT"] = False
+        proactor.accept_multishot = proactor._accept_multishot_fallback
         server = socket.socket()
         try:
             server.setblocking(False)
@@ -3049,13 +3089,34 @@ class TestUringProactor:
                 proactor.recv(reader, 5)
             entry = ring.last_user_data
             assert entry is not None
-            assert entry.active is False
             assert proactor.has_pending_operations() is False
             assert ring.submitted_recv == []
         finally:
             reader.close()
             writer.close()
             proactor.close()
+
+    def test_pending_operations_are_scoped_per_proactor(self):
+        idle = UringProactor(ring_factory=_DeferredUringRing)
+        busy = UringProactor(ring_factory=_DeferredUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            assert idle.has_pending_operations() is False
+            operation = busy.recv(reader, 5)
+            assert busy.has_pending_operations() is True
+            assert idle.has_pending_operations() is False
+            assert isinstance(busy.ring, _DeferredUringRing)
+            busy.ring.complete_recv()
+            busy.wait(busy.get_time() + 1.0)
+            assert operation.result() == b"hello"
+            assert busy.has_pending_operations() is False
+            assert idle.has_pending_operations() is False
+        finally:
+            reader.close()
+            writer.close()
+            busy.close()
+            idle.close()
 
     def test_uring_entry_keeps_pending_completion_handle(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing)
@@ -3244,21 +3305,7 @@ class TestUringProactor:
             )
 
             assert operation.result() == b"hello"
-            assert entry.active is True
-            assert proactor.has_pending_operations() is True
-
-            proactor.ring._deliver(
-                SimpleNamespace(
-                    user_data=entry,
-                    kind=uring_api.COMPLETION_KIND_RECV,
-                    res=-errno.ECANCELED,
-                    flags=0,
-                    result=None,
-                    multishot=False,
-                )
-            )
-
-            assert entry.active is False
+            assert entry.completion is not None
             assert proactor.has_pending_operations() is False
         finally:
             reader.close()
@@ -3299,7 +3346,6 @@ class TestUringProactor:
             reader.setblocking(False)
             proactor.recv(reader, 5)
             assert proactor.submission_stats == UringSubmissionStats(
-                submit_attempts=1,
                 submit_queue_full=0,
                 deferred_queue_peak=0,
             )
@@ -3307,13 +3353,12 @@ class TestUringProactor:
             proactor.ring.fail_next_recv = True
             proactor.recv(reader, 5)
             assert proactor.submission_stats == UringSubmissionStats(
-                submit_attempts=2,
                 submit_queue_full=1,
                 deferred_queue_peak=1,
             )
 
             proactor.reset_submission_stats()
-            assert proactor.submission_stats == UringSubmissionStats(0, 0, 0)
+            assert proactor.submission_stats == UringSubmissionStats(0, 0)
         finally:
             reader.close()
             writer.close()
@@ -3726,6 +3771,53 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_cancel_unsubmitted_continuous_delivers_cancel_to_result_callback(self, monkeypatch):
+        """Never-submitted continuous cancel must hit the multishot deliver callback."""
+
+        from tealetio.continuous_callbacks import finish_continuous_delivery, is_cancellation_delivery
+
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_BackpressuredPollUringRing)
+        reader, writer = socket.socketpair()
+        deliveries: list[MultishotDelivery] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def on_poll(delivery: MultishotDelivery) -> None:
+                deliveries.append(delivery)
+                if not delivery.more:
+                    finish_continuous_delivery(delivery)
+
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
+            assert len(proactor.ring.submitted_poll) == 1
+            # Complete first leg; resubmit is deferred (SQ full while prior poll slot remains).
+            proactor.ring.complete_poll_oneshot(select.POLLIN)
+            _wait_for_uring(proactor, lambda: any(d.value == select.POLLIN for d in deliveries))
+            entry = operation._uring_entry
+            assert entry is not None
+            assert entry.completion is None
+            assert any(
+                submission.entry is entry for submission in proactor._deferred_submissions
+            )
+
+            proactor.cancel(operation)
+
+            cancel_deliveries = [d for d in deliveries if is_cancellation_delivery(d)]
+            assert len(cancel_deliveries) == 1
+            assert cancel_deliveries[0].more is False
+            assert cancel_deliveries[0].index is None
+            assert is_io_cancellation(cancel_deliveries[0].exception)
+            assert operation.cancelled() is True
+            assert not any(
+                submission.entry is not None and submission.entry.operation is operation
+                for submission in proactor._deferred_submissions
+            )
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_poll_many_oneshot_cancel_after_resubmit_succeeds(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -3879,18 +3971,24 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_handoff_accept_many_closes_socket_when_parent_done(self) -> None:
-        parent: ContinuousOperation[Any] = ContinuousOperation(kind="accept_many", fileobj=object())
-        parent._finish(exception=io_cancellation_error(), cancelled=True)
+    def test_handoff_accept_many_delivers_after_parent_done(self) -> None:
+        seen: list[socket.socket] = []
+        parent: ContinuousOperation[Any] = ContinuousOperation(
+            kind="accept_many",
+            fileobj=object(),
+            result_callback=lambda delivery: seen.append(delivery.value),
+        )
+        parent._finish(exception=io_cancellation_error())
         client, server = socket.socketpair()
         try:
-            assert proactor_module._handoff_accept_many(parent, client) is False
-            with pytest.raises(OSError):
-                client.getsockname()
+            proactor_module._handoff_accept_many(parent, client)
+            assert seen == [client]
+            client.getsockname()
         finally:
+            client.close()
             server.close()
 
-    def test_accept_many_drops_connection_when_accept_completes_after_cancel(self) -> None:
+    def test_accept_many_delivers_late_accept_after_cancel(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
         accepted: list[socket.socket] = []
@@ -3901,36 +3999,67 @@ class TestUringProactor:
             assert operation.cancelled() is True
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
-            assert accepted == []
+            assert len(accepted) == 1
         finally:
             for conn in accepted:
                 conn.close()
             server.close()
             proactor.close()
 
-    def test_create_recv_buffer_pool_falls_back_to_synthetic_when_pbuf_unavailable(self) -> None:
-        class _UnavailableProvidedBuffersRing(_FakeUringRing):
+    def test_create_recv_buffer_pool_uses_synthetic_when_buf_ring_probe_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No IORING_BUF_RING => no multishot; synthetic without create_buf_group.
+        _patch_uring_capabilities(monkeypatch, IORING_BUF_RING=False, IORING_RECV_MULTISHOT=False)
+
+        class _TrackingBufGroupRing(_FakeUringRing):
             def __init__(self, entries: int, flags: int) -> None:
                 super().__init__(entries, flags)
                 self.create_buf_group_calls = 0
 
             def create_buf_group(self, buffer_size: int, buffer_count: int) -> Any:
                 self.create_buf_group_calls += 1
-                raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+                raise AssertionError("create_buf_group should not run without IORING_BUF_RING")
 
-        proactor = UringProactor(ring_factory=_UnavailableProvidedBuffersRing)
+        proactor = UringProactor(ring_factory=_TrackingBufGroupRing)
         try:
+            assert proactor._provided_buffers_supported is False
             pool = proactor.create_recv_buffer_pool(8192, 4)
             assert isinstance(pool, proactor_module.SyntheticRecvBufferPool)
             assert pool.buffer_size == 8192
             assert pool.buffer_count == 4
-            assert proactor._provided_buffers_supported is False
-            assert proactor.ring.create_buf_group_calls == 1
+            assert proactor.ring.create_buf_group_calls == 0
+        finally:
+            proactor.close()
 
-            second = proactor.create_recv_buffer_pool(4096, 2)
-            assert isinstance(second, proactor_module.SyntheticRecvBufferPool)
-            assert second.buffer_size == 4096
-            assert proactor.ring.create_buf_group_calls == 1
+    def test_create_recv_buffer_pool_uses_buf_group_when_buf_ring_probe_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_BUF_RING=True, IORING_RECV_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            assert proactor._provided_buffers_supported is True
+            pool = proactor.create_recv_buffer_pool(8192, 4)
+            assert not isinstance(pool, proactor_module.SyntheticRecvBufferPool)
+            assert pool.buffer_size == 8192
+            assert pool.buffer_count == 4
+        finally:
+            proactor.close()
+
+    def test_create_recv_buffer_pool_propagates_create_buf_group_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_BUF_RING=True, IORING_RECV_MULTISHOT=False)
+
+        class _UnavailableProvidedBuffersRing(_FakeUringRing):
+            def create_buf_group(self, buffer_size: int, buffer_count: int) -> Any:
+                raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+        proactor = UringProactor(ring_factory=_UnavailableProvidedBuffersRing)
+        try:
+            with pytest.raises(OSError) as exc_info:
+                proactor.create_recv_buffer_pool(8192, 4)
+            assert exc_info.value.errno == errno.EINVAL
         finally:
             proactor.close()
 
@@ -4010,18 +4139,48 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_recv_many_multishot_requires_real_pool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_recv_many_binds_multishot_impl_from_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
+        assert proactor.recv_multishot.__func__ is UringProactor._recv_multishot
         reader, _writer = socket.socketpair()
-        pool = proactor_module.SyntheticRecvBufferPool(8192, 4)
+        pool = proactor.shared_recv_buffer_pool()
         try:
             reader.setblocking(False)
-            with pytest.raises(AssertionError):
-                proactor.recv_many(reader, lambda _result: None, buf_group=pool)
+            proactor.recv_many(reader, lambda _result: None, buf_group=pool)
+            assert proactor.ring.submitted_recv_multishot
         finally:
             reader.close()
             proactor.close()
+
+    def test_recv_many_binds_fallback_impl_when_multishot_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        assert proactor.recv_multishot.__func__ is UringProactor._recv_multishot_fallback
+        proactor.close()
+
+    def test_accept_many_binds_multishot_impl_from_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        assert proactor.accept_multishot.__func__ is UringProactor._accept_multishot
+        server = socket.socket()
+        try:
+            server.setblocking(False)
+            proactor.accept_many(server, lambda _result: None)
+            assert proactor.ring.submitted_accept_multishot
+        finally:
+            server.close()
+            proactor.close()
+
+    def test_accept_many_binds_fallback_impl_when_multishot_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        assert proactor.accept_multishot.__func__ is UringProactor._accept_multishot_fallback
+        proactor.close()
 
     @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")
     def test_recv_many_uses_multishot_recv_and_finishes_on_eof(self):
@@ -4708,6 +4867,9 @@ class TestUringProactor:
             proactor.close()
 
     def test_create_socket_cancel_before_socket_completes(self) -> None:
+        # Fake ring submit_cancel delivers target ECANCELED immediately (cancel
+        # wins). Caller observes cancel; no second success CQE is expected for
+        # the same one-shot SQE (and the proactor does not close-if-done).
         proactor = UringProactor(ring_factory=_DeferredSocketUringRing)
         try:
             operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -4715,14 +4877,9 @@ class TestUringProactor:
             proactor.cancel(operation)
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1
-            proactor.ring.complete_socket()
-            proactor.wait(proactor.get_time() + 0.05)
-            assert operation.cancelled() is True
             assert proactor.ring.submitted_connect == []
-            leaked_fd = proactor.ring.last_socket_fd
-            assert leaked_fd is not None
-            with pytest.raises(OSError):
-                os.fstat(leaked_fd)
+            assert proactor.ring.pending_socket  # success CQE not delivered
+            assert proactor.ring.last_socket_fd is None
         finally:
             proactor.close()
 

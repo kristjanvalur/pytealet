@@ -130,6 +130,25 @@ def test_reorder_buffer_reset_clears_pending_heap() -> None:
     assert order == [0]
 
 
+def test_reorder_buffer_drain_yields_pending_without_callbacks() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    seen: list[int] = []
+
+    def record(delivery: MultishotDelivery) -> None:
+        seen.append(delivery.index)  # type: ignore[arg-type]
+
+    reorder_buffer = ReorderBuffer(record)
+    reorder_buffer.deliver(MultishotDelivery(index=2, value="c", more=True))
+    reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True))
+    drained = {delivery.index: delivery.value for delivery in reorder_buffer.drain()}
+    assert drained == {1: "b", 2: "c"}
+    assert not reorder_buffer.pending
+    assert seen == []
+    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
+    assert seen == [0]
+
+
 def test_reorder_buffer_delivers_callbacks_in_index_order() -> None:
     from tealetio.continuous_callbacks import ReorderBuffer
 

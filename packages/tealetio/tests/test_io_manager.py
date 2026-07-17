@@ -192,7 +192,7 @@ class _MockProactor:
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         if not operation.done():
-            operation._finish(exception=io_cancellation_error(), cancelled=True)
+            operation._finish(exception=io_cancellation_error())
         teardown = Operation[None](kind="cancel", fileobj=operation)
         teardown._finish(result=None)
         return teardown

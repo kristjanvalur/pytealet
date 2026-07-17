@@ -392,7 +392,7 @@ class TestSendBuffer:
 
             def sender() -> None:
                 send_buffer.write(b"hello")
-                pending._finish(exception=io_cancellation_error(), cancelled=True)
+                pending._finish(exception=io_cancellation_error())
                 send_buffer.flush()
 
             with pytest.raises(OSError) as exc_info:
