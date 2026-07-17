@@ -262,9 +262,7 @@ class RecvIterBuffer:
             self._cond.notify_all()
         if operation is not None and not operation.done():
             self._proactor.cancel(operation)
-            operation.finish_operation(
-                MultishotDelivery(index=None, exception=io_cancellation_error(), more=False)
-            )
+            operation.finish_operation(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
 
 
 def open_recv_iter_buffer(

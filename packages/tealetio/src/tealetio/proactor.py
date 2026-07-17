@@ -27,7 +27,7 @@ from .io_manager import (
     SocketIO,
     SupportsProactorIO,
 )
-from .socket_helpers import abortive_close, configure_scheduler_socket, socket_from_uring_fd
+from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
 from .operations import (
     ContinuousOperation,
     ContinuousStepResult,
