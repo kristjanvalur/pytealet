@@ -9,7 +9,6 @@
 #include "uring_api_dispatch.h"
 #include "uring_api_staging.h"
 #include "uring_api_submit.h"
-#include "uring_api_submit_trace.h"
 
 PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
     UringApiRing *self = (UringApiRing *)type->tp_alloc(type, 0);
@@ -299,17 +298,6 @@ int UringApiRing_set_exception_handler(UringApiRing *self, PyObject *value, void
     return ret;
 }
 
-static PyObject *UringApiRing_drain_submit_trace(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
-    (void)self;
-    return uring_api_submit_trace_drain();
-}
-
-static PyObject *UringApiRing_reset_submit_trace(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
-    (void)self;
-    uring_api_submit_trace_reset();
-    Py_RETURN_NONE;
-}
-
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
@@ -367,10 +355,6 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit fd-only statx (STATX_SIZE) and return the byte length in completion.result on success."},
     {"submit_socket", _PyCFunction_CAST(UringApiRing_submit_socket), METH_VARARGS | METH_KEYWORDS,
      "Submit a socket creation operation."},
-    {"drain_submit_trace", (PyCFunction)UringApiRing_drain_submit_trace, METH_NOARGS,
-     "Return averaged submit-path phase timings when URING_API_SUBMIT_TRACE=1."},
-    {"reset_submit_trace", (PyCFunction)UringApiRing_reset_submit_trace, METH_NOARGS,
-     "Reset accumulated submit-path phase timings."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Interrupt a thread blocked in wait without producing a user completion."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,

@@ -7,7 +7,6 @@
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 #include "uring_api_statx.h"
-#include "uring_api_submit_trace.h"
 
 static int parse_socket_fd(PyObject *obj, int *fd_out) {
     long value = PyLong_AsLong(obj);
@@ -274,47 +273,35 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
 
     if (!buf_group_obj || !PyObject_TypeCheck(buf_group_obj, &UringApiBufGroup_Type)) {
         PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup");
-        uring_api_submit_trace_end_recv_multishot();
         return NULL;
     }
     buf_group = (UringApiBufGroup *)buf_group_obj;
     if (buf_group->ring != self) {
         PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
-        uring_api_submit_trace_end_recv_multishot();
         return NULL;
     }
-    uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_VALIDATE);
 
     completion = UringApiCompletion_new_pending_buf_group(URING_API_PENDING_RECV_MULTISHOT, user_data, buf_group_obj);
     if (!completion) {
-        uring_api_submit_trace_end_recv_multishot();
         return NULL;
     }
     ((UringApiCompletion *)completion)->multishot = true;
     ((UringApiCompletion *)completion)->sequence = base_sequence;
-    uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_COMPLETION_NEW);
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_RING_LOCK);
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
-        uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_CHECK_OPEN);
         sqe = get_sqe(self);
         if (!sqe) {
             failed = 1;
         } else {
-            uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_GET_SQE);
             io_uring_prep_recv_multishot(sqe, fd, NULL, 0, (int)flags);
             sqe->flags |= IOSQE_BUFFER_SELECT;
             sqe->buf_group = buf_group->group_id;
-            uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_PREP);
             sqe_set_completion(self, sqe, completion);
-            uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_SET_DATA);
             if (submit_one(self) < 0) {
                 failed = 1;
-            } else {
-                uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_SUBMIT_ONE);
             }
         }
     }
@@ -322,10 +309,8 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
 
     if (failed) {
         Py_DECREF(completion);
-        uring_api_submit_trace_end_recv_multishot();
         return NULL;
     }
-    uring_api_submit_trace_end_recv_multishot();
     return Py_NewRef(completion);
 }
 
@@ -1281,8 +1266,6 @@ PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *const
         return NULL;
     }
 
-    uring_api_submit_trace_begin_recv_multishot();
-    uring_api_submit_trace_mark(URING_API_SUBMIT_TRACE_PARSE);
     return UringApiRing_submit_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence);
 }
 
