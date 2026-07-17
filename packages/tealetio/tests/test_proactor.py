@@ -3733,6 +3733,53 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_cancel_unsubmitted_continuous_delivers_cancel_to_result_callback(self, monkeypatch):
+        """Never-submitted continuous cancel must hit the multishot deliver callback."""
+
+        from tealetio.continuous_callbacks import finish_continuous_delivery, is_cancellation_delivery
+
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_BackpressuredPollUringRing)
+        reader, writer = socket.socketpair()
+        deliveries: list[MultishotDelivery] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def on_poll(delivery: MultishotDelivery) -> None:
+                deliveries.append(delivery)
+                if not delivery.more:
+                    finish_continuous_delivery(delivery)
+
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
+            assert len(proactor.ring.submitted_poll) == 1
+            # Complete first leg; resubmit is deferred (SQ full while prior poll slot remains).
+            proactor.ring.complete_poll_oneshot(select.POLLIN)
+            _wait_for_uring(proactor, lambda: any(d.value == select.POLLIN for d in deliveries))
+            entry = operation._uring_entry
+            assert entry is not None
+            assert entry.completion is None
+            assert any(
+                submission.entry is entry for submission in proactor._deferred_submissions
+            )
+
+            proactor.cancel(operation)
+
+            cancel_deliveries = [d for d in deliveries if is_cancellation_delivery(d)]
+            assert len(cancel_deliveries) == 1
+            assert cancel_deliveries[0].more is False
+            assert cancel_deliveries[0].index is None
+            assert is_io_cancellation(cancel_deliveries[0].exception)
+            assert operation.cancelled() is True
+            assert not any(
+                submission.entry is not None and submission.entry.operation is operation
+                for submission in proactor._deferred_submissions
+            )
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_poll_many_oneshot_cancel_after_resubmit_succeeds(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)

@@ -767,6 +767,15 @@ class ProactorBase:
         return cancel_op
 
     def _terminalise_cancelled(self, operation: Operation[Any]) -> None:
+        """Apply local cancel when the backend will not produce a completion.
+
+        One-shot ops finish with ``OSError(ECANCELED)``. Continuous ops must still
+        emit a terminal ``MultishotDelivery`` to the result (deliver) callback —
+        including never-submitted / deferred legs — so consumers can
+        ``finish_operation`` and observe cancel on the multishot stream. Do not
+        skip that path for ``_finish`` alone.
+        """
+
         if operation.done():
             return
         cancel_exc = io_cancellation_error()
@@ -1808,6 +1817,10 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
+        # Serialise deferred SQ claims with cancel: pop+submit vs remove-from-queue.
+        # RLock: deferred submit may re-enter delivery on the same thread (fakes /
+        # nested callback); nested retry returns via _retrying_deferred_submissions.
+        self._deferred_lock = threading.RLock()
         self._deferred_submissions: list[_UringSubmission] = []
         self._retrying_deferred_submissions = False
         self._submit_queue_full = 0
@@ -1881,6 +1894,10 @@ class UringProactor(ProactorBase):
         self._submit_queue_full += 1
 
     def _enqueue_deferred_submission(self, submission: _UringSubmission) -> None:
+        with self._deferred_lock:
+            self._enqueue_deferred_submission_locked(submission)
+
+    def _enqueue_deferred_submission_locked(self, submission: _UringSubmission) -> None:
         self._deferred_submissions.append(submission)
         deferred_count = len(self._deferred_submissions)
         if deferred_count > self._deferred_queue_peak:
@@ -1915,50 +1932,54 @@ class UringProactor(ProactorBase):
         if poll_entry.completion is not None:
             self._deactivate_uring_entry(poll_entry)
 
-    def _stop_uring_poll_many_oneshot(self, entry: _UringEntry) -> None:
-        """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll."""
+    def _stop_uring_poll_many_oneshot_locked(self, entry: _UringEntry) -> None:
+        """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll.
 
-        self._cancel_deferred_operation(entry.operation)
+        Caller holds ``_deferred_lock``.
+        """
+
+        self._cancel_deferred_operation_locked(entry.operation)
         if entry.completion is not None:
             self._deactivate_uring_entry(entry)
-        else:
-            if entry.operation._uring_entry is entry:
-                entry.operation._uring_entry = None
+        elif entry.operation._uring_entry is entry:
+            entry.operation._uring_entry = None
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         if operation.done():
             return self._completed_cancel_operation("cancel", operation)
 
+        # Under _deferred_lock: either remove a deferred claim (safe to terminalise)
+        # or snapshot entry.completion for ring cancel. Retry holds the same lock
+        # across deferred submit so these cannot race.
         immediate_terminalise = True
+        cancel_op: Operation[None] | None = None
+        ring_cancel: tuple[_UringCompletion, str, Callable[[_UringCompletion, _UringEntry], _UringCompletion]] | None
+        ring_cancel = None
         entry = _uring_entry_of(operation)
-        if entry is not None:
-            completion = entry.completion
-            if completion is None:
-                self._cancel_deferred_operation(operation)
-                self._deactivate_uring_entry(entry)
-                cancel_op = self._completed_cancel_operation("cancel", operation)
-            elif entry.poll_remove:
-                immediate_terminalise = False
-                cancel_op = self._submit_cancel_op(
-                    completion,
-                    kind="poll_remove",
-                    submit=self._ring.submit_poll_remove,
-                )
-            elif operation.kind == "poll_many":
-                self._stop_uring_poll_many_oneshot(entry)
-                cancel_op = self._completed_cancel_operation("poll_remove", operation)
+        with self._deferred_lock:
+            if entry is not None:
+                completion = entry.completion
+                if completion is None:
+                    self._cancel_deferred_operation_locked(operation)
+                    self._deactivate_uring_entry(entry)
+                    cancel_op = self._completed_cancel_operation("cancel", operation)
+                elif entry.poll_remove:
+                    immediate_terminalise = False
+                    ring_cancel = (completion, "poll_remove", self._ring.submit_poll_remove)
+                elif operation.kind == "poll_many":
+                    self._stop_uring_poll_many_oneshot_locked(entry)
+                    cancel_op = self._completed_cancel_operation("poll_remove", operation)
+                else:
+                    immediate_terminalise = False
+                    ring_cancel = (completion, "cancel", self._ring.submit_cancel)
             else:
-                immediate_terminalise = False
-                cancel_op = self._submit_cancel_op(
-                    completion,
-                    kind="cancel",
-                    submit=self._ring.submit_cancel,
-                )
-        elif self._cancel_deferred_operation(operation):
-            cancel_op = self._completed_cancel_operation("cancel", operation)
-        else:
-            cancel_op = self._completed_cancel_operation("cancel", operation)
+                self._cancel_deferred_operation_locked(operation)
+                cancel_op = self._completed_cancel_operation("cancel", operation)
 
+        if ring_cancel is not None:
+            completion, kind, submit = ring_cancel
+            cancel_op = self._submit_cancel_op(completion, kind=kind, submit=submit)
+        assert cancel_op is not None
         if immediate_terminalise:
             self._terminalise_cancelled(operation)
         return cancel_op
@@ -2996,30 +3017,46 @@ class UringProactor(ProactorBase):
         return True
 
     def _retry_deferred_submissions(self) -> None:
-        if self._retrying_deferred_submissions:
-            return
-        self._retrying_deferred_submissions = True
-        try:
-            while self._deferred_submissions:
-                submission = self._deferred_submissions.pop(0)
-                entry = submission.entry
-                if entry is None:
+        """Drain deferred SQ submissions; holds ``_deferred_lock`` across each claim+submit."""
+
+        failures: list[tuple[_UringEntry, BaseException]] = []
+        with self._deferred_lock:
+            if self._retrying_deferred_submissions:
+                return
+            self._retrying_deferred_submissions = True
+            try:
+                while self._deferred_submissions:
+                    submission = self._deferred_submissions.pop(0)
+                    entry = submission.entry
+                    if entry is None:
+                        try:
+                            submission.submit()
+                        except uring_api.SubmissionQueueFull:
+                            self._note_submit_queue_full()
+                            self._enqueue_deferred_submission_locked(submission)
+                            break
+                        continue
                     try:
-                        submission.submit()
+                        # Claim under the lock: set completion before unlock so cancel
+                        # either removes us from the queue or sees a live ring handle.
+                        entry.operation._uring_entry = entry
+                        entry.completion = submission.submit()
                     except uring_api.SubmissionQueueFull:
                         self._note_submit_queue_full()
-                        self._enqueue_deferred_submission(submission)
+                        self._enqueue_deferred_submission_locked(submission)
                         break
-                    continue
-                try:
-                    if not self._submit_uring_entry(entry, submission.submit):
-                        break
-                except Exception as exc:
-                    self._fail_uring_entry(entry, exc)
-        finally:
-            self._retrying_deferred_submissions = False
+                    except Exception as exc:
+                        failures.append((entry, exc))
+            finally:
+                self._retrying_deferred_submissions = False
+        for entry, exc in failures:
+            self._fail_uring_entry(entry, exc)
 
     def _cancel_deferred_operation(self, operation: Operation[Any]) -> bool:
+        with self._deferred_lock:
+            return self._cancel_deferred_operation_locked(operation)
+
+    def _cancel_deferred_operation_locked(self, operation: Operation[Any]) -> bool:
         for index, submission in enumerate(self._deferred_submissions):
             entry = submission.entry
             if entry is not None and entry.operation is operation:
