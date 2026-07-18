@@ -695,6 +695,15 @@ Blocking `sock_*`, `poll*`, `wait_operation`, and
 positioned file `open` were removed from the scheduler surface; callers use
 `scheduler.io` instead.
 
+`scheduler.io` is more than a passthrough to `scheduler.proactor`: for stream
+socket work that can complete immediately, it **tries a non-blocking syscall
+first** and only submits when that would block (or when the op is inherently
+async, such as `connect`). That avoids submit/CQE cost when accept backlog,
+receive data, or send buffer space is already available. Direct stdlib paths
+also cover socket create and stream teardown (`shutdown` / `close`). Design
+detail and the covered/uncovered matrix live in **`IO_MANAGER_DESIGN.md`**
+(**Eager non-blocking first**).
+
 `SelectorScheduler` still exposes blocking `sock_*` and `poll*` on the scheduler
 via `SelectorMixin`. A future **`SelectorIOManager`** could adopt the same
 `scheduler.io` gate without changing proactor callers. See

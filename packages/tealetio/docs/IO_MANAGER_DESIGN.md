@@ -15,17 +15,65 @@ the scheduler type used to carry a wide IO surface alongside scheduling concerns
 **Goal (achieved):** make IO capability an explicit, composable object bound to
 the scheduler's proactor backend, while keeping scheduling on `BaseScheduler`.
 
+## Eager non-blocking first
+
+`scheduler.io` is **not** a thin wrapper that always submits to the proactor.
+For stream-socket work that can complete with a single non-blocking syscall when
+the kernel already has readiness, `ProactorIOManager` **tries the socket first**
+and only falls through to `Proactor` when that would block (or when the op is
+inherently async).
+
+**Why:** microbenchmarks show large wins when data or backlog is already
+available — especially under `UringProactor`, where a full submit/CQE round-trip
+is far more expensive than a non-blocking `recv`/`send`/`accept` that returns
+immediately. The same pattern keeps `SendBuffer` legs and `drain()` cheap when
+the peer window is open.
+
+**Policy:**
+
+| Kind | Behaviour |
+|------|-----------|
+| Ready-now oneshot | One non-blocking try → `IOWaiterSync` on success/EOF/hard error |
+| Partial progress | Report what completed (e.g. send progress), hand remainder to proactor |
+| Continuous streams | Drain ready legs with sequential indices, then arm proactor continuous with `base_sequence=N` |
+| Always proactor | Ops that must wait for readiness (`connect`, `poll`, would-block path) |
+| Always direct (no proactor) | Cheap local syscalls: `sock_create` (stdlib), `sock_shutdown`, `sock_close` |
+
+**Covered on the stream server/client path:**
+
+- `accept` / `accept_many` / `accept_many_streams` — non-blocking `accept` drain
+- `recv_many` / `sock_recv_iter` / `sock_recvall` — non-blocking `recv` drain
+- `sock_recv` and accept-time preread — shared non-blocking `recv` try
+- `sock_sendall` (and `SendBuffer` legs, connect-time `initial` / `initial_data`)
+  — one non-blocking `send`; remainder via `proactor.send`
+- `sock_shutdown` / `sock_close` — direct stdlib (asyncio-style teardown)
+
+**Still proactor-only (or intentionally not eager):**
+
+- `sock_connect` (and the connect leg of create) — non-blocking connect is
+  `EINPROGRESS` + wait; not a “ready now” oneshot
+- `sock_recv_into`, `recvfrom*`, `sock_sendto` — not on the default stream path
+- File `read` / `write` / `open` / `close_fd`, `poll` / `poll_many`
+
+When the eager path finishes, callers still see a normal `IOWaitable`: either
+`IOWaiterSync` (already done) or `IOWaiter` over a proactor `Operation`. Call
+sites that only `.wait()` / `.forget()` / `add_done_callback()` do not need to
+branch.
+
+Low-level `scheduler.proactor.*` remains the raw submission API. Direct proactor
+callers do **not** get the eager try unless they go through `scheduler.io`.
+
 ## Current layering
 
 ```text
 tealetio.streams          open_connection, start_server, StreamReader/Writer
         │
         ▼
-scheduler.io              ProactorIOManager — IOWaiter-returning sock_*, poll, open
-        │
+scheduler.io              ProactorIOManager — sock_*, poll, open
+        │                   (eager non-blocking try when useful → IOWaitable)
         ▼
 Proactor (Protocol)       recv/send/accept/… → Operation[T]
-        │
+        │                   (would-block / continuous / connect / files)
         ├── SelectorProactor
         └── UringProactor
 ```
@@ -74,8 +122,8 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 | Protocol | Responsibility | Status |
 |----------|----------------|--------|
 | `Proactor` | submit IO, return `Operation` | exists |
-| `IOWaiter` | one-shot blocking handle over a proactor `Operation` | `io_waiter.py`; returned by most `ProactorIOManager` helpers |
-| `IOWaiterSync` | already-resolved waitable (value or exception, no `Operation`) | `io_waiter.py`; e.g. create-only `sock_create` |
+| `IOWaiter` | one-shot blocking handle over a proactor `Operation` | `io_waiter.py`; would-block / continuous fallbacks |
+| `IOWaiterSync` | already-resolved waitable (value or exception, no `Operation`) | `io_waiter.py`; eager success, create-only, shutdown/close |
 | `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, … | protocol in `io_manager.py`; `ProactorIOManager` |
 | `PollIO` | `poll`, `poll_many` | protocol in `io_manager.py`; `ProactorIOManager` |
 | `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` |
@@ -148,7 +196,9 @@ Do **not** force a single inheritance tree for all IO styles.
 
 ## What lives on `scheduler.io` (proactor path)
 
-- all `sock_*` helpers (return `IOWaiter`; callers use `.wait()`)
+- all `sock_*` helpers (return `IOWaitable`; callers use `.wait()`)
+- many stream helpers try a non-blocking syscall first (see **Eager non-blocking
+  first** above)
 - `create_recv_buffer_pool` / `sock_recv_iter`
 - `poll` / `poll_many`
 - positioned file `open` → `IOFile` (`ProactorFile` on proactor schedulers)
@@ -163,9 +213,11 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 
 Multi-leg socket work (connect → send, and the connect/send legs of
 `sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
-inside the proactor. Socket creation for `sock_create` is direct stdlib;
-each async leg is a normal proactor `Operation`. The group wires advance
-handlers and a single `CrossThreadEvent` park for the caller's `.wait()`.
+inside the proactor. Socket creation for `sock_create` is direct stdlib.
+Connect always attaches a proactor `Operation`. Optional post-connect send goes
+through `sock_sendall` (eager try; attach the proactor remainder only when
+needed). The group wires advance handlers and a single `CrossThreadEvent` park
+for the caller's `.wait()`.
 
 ```text
 ProactorIOManager.sock_create(connect_to=…, initial_data=…)
@@ -199,10 +251,10 @@ Production entry points:
 
 | Entry point | Composition |
 |-------------|-------------|
-| `sock_connect(…, initial=…)` | connect → optional send |
-| `sock_create(…, connect_to=…)` | direct create → connect → optional send |
-| `sock_accept(n=…)` | accept → optional recv |
-| `sock_create_streams(…, connect_to=…)` | direct create → connect → optional send → `_open_streams` on advance (``recv_many`` armed before ``wait()`` returns) |
+| `sock_connect(…, initial=…)` | proactor connect → optional `sock_sendall` |
+| `sock_create(…, connect_to=…)` | direct create → proactor connect → optional `sock_sendall` |
+| `sock_accept(n=…)` | eager accept try → optional eager/`proactor` recv |
+| `sock_create_streams(…, connect_to=…)` | direct create → proactor connect → optional `sock_sendall` → open streams (`recv_many` armed before ``wait()`` returns) |
 
 Intermediate legs are not awaited by the scheduler task. Only the returned
 `IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is

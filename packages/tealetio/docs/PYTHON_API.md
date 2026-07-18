@@ -58,6 +58,14 @@ In that case the proactor returns an already-done `Operation`, and callers can
 read its result directly without switching or waiting. Selector-backed proactors
 use this fast path for socket operations that succeed right away.
 
+Separately, **`scheduler.io` tries non-blocking socket syscalls first** for
+common stream work (accept, recv, send, and related continuous drains) and only
+submits to the proactor when that would block. Ready work completes as
+`IOWaiterSync` without a submit/CQE round-trip, which is a large win under
+`UringProactor` when backlog or peer data is already available. Connect still
+always goes through the proactor; shutdown/close run as direct stdlib calls.
+See `IO_MANAGER_DESIGN.md` (**Eager non-blocking first**) for the full policy.
+
 `UringProactor` also exposes positioned file I/O through io_uring:
 `openat(path, flags, mode=0, *, dfd=AT_FDCWD)` returns a caller-owned fd,
 `read(fd, n, offset)` and `read_into(fd, buf, offset)` read at an explicit
@@ -410,8 +418,10 @@ proactor callers. `tealetio.streams` requires a proactor scheduler and always
 goes through `scheduler.io`.
 
 Low-level submission stays on `scheduler.proactor` (`Operation` returns,
-`recv_many`, `accept_many`, and similar). `ProactorFile` blocks through an
-`OperationWaiter` protocol implemented by `ProactorIOManager`.
+raw `recv_many`, `accept_many`, and similar). Prefer `scheduler.io` for
+application and stream code so you get the eager non-blocking try where it
+applies. `ProactorFile` blocks through an `OperationWaiter` protocol implemented
+by `ProactorIOManager`.
 
 `SelectorProactor` is the simple single-threaded selector-backed prototype.
 `ThreadedSelectorProactor` uses the same socket operation surface, but polls the

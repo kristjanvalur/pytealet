@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Docs: ``IO_MANAGER_DESIGN.md`` / ``PYTHON_API.md`` /
+  ``SCHEDULER_RUNTIME_API_SPEC.md`` document the **eager non-blocking first**
+  policy on ``scheduler.io`` (try the socket, fall through to the proactor only
+  when needed) as the performance-oriented design for stream accept/recv/send.
 - ``ProactorIOManager.sock_accept``, ``accept_many``, and ``accept_many_streams``
   try non-blocking ``accept()`` on the calling thread while the listen socket is
   ready, then fall through to the proactor continuous/one-shot path when it
