@@ -1133,8 +1133,8 @@ class _UringOpPool:
         return UringContinuousOperation(proactor, kind, fileobj, result_callback)
 
     def release(self, operation: object) -> None:
-        # poll_many: never pool (late CQEs after stop / POLL_REMOVE).
-        if getattr(operation, "kind", None) == "poll_many" or getattr(operation, "poll_remove", False):
+        # poll_many only: never pool (late CQEs after stop / POLL_REMOVE).
+        if getattr(operation, "kind", None) == "poll_many":
             return
         if isinstance(operation, UringOperation):
             self._release_into(self._one_shot, operation)
@@ -2408,9 +2408,9 @@ class UringProactor(ProactorBase):
     def recycle_operation(self, operation: SupportsOperation[Any]) -> None:
         """Return a finished waitable to the freelist when safe.
 
-        ``poll_many`` is never pooled (late CQEs after stop). Other one-shot and
-        continuous ops recycle when terminal and not ring-live. ``IOWaiter``
-        calls this on ``wait()`` / ``forget()``.
+        Only ``poll_many`` is never pooled (late CQEs after stop). Other ops
+        recycle when terminal and not ring-live. ``IOWaiter`` calls this on
+        ``wait()`` / ``forget()``.
         """
 
         if self._closed:
