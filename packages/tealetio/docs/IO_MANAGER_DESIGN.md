@@ -47,7 +47,9 @@ the peer window is open.
   provided-buffer pool backpressure; continuous legs still use pool / ENOBUFS)
 - `sock_recv` and accept-time preread — shared non-blocking `recv` try
 - `sock_sendall` (and `SendBuffer` legs, connect-time `initial` / `initial_data`)
-  — one non-blocking `send`; remainder via `proactor.send`
+  — exactly one non-blocking `send`, then remainder via `proactor.send`
+  (uring proactor uses io_uring exclusively for that remainder; no multi-send
+  stdlib drain on the manager path)
 - `sock_shutdown` / `sock_close` — direct stdlib (asyncio-style teardown)
 
 **Still proactor-only (or intentionally not eager):**

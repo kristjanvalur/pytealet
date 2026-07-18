@@ -608,6 +608,10 @@ class ProactorIOManager:
         and the remainder is handed to ``proactor.send``, which continues the
         drain. Empty payloads go straight to the proactor (immediate complete).
 
+        Exactly one eager ``send`` is intentional: a cheap ready-now try, then
+        the proactor owns the rest. ``UringProactor`` completes that remainder
+        via io_uring only (no multi-send stdlib drain on the manager path).
+
         If ``progress`` raises after a partial write, the remainder is not
         submitted: the waitable fails with that exception and the short write
         stays on the wire (same as a proactor mid-drain progress failure).

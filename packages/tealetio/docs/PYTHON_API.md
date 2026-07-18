@@ -287,12 +287,14 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
-`scheduler.io.sock_sendall(sock, data, progress=None)` tries one non-blocking
-`send` first. When the full buffer is accepted, it returns `IOWaiterSync` without
-a proactor submit. On would-block it falls through to `proactor.send`; on a
-partial send it reports `progress(sent)` (if provided) and submits the remainder
-— the proactor continues the drain and reports further progress as cumulative
-totals from the original buffer. Empty payloads go straight to the proactor.
+`scheduler.io.sock_sendall(sock, data, progress=None)` tries exactly one non-blocking
+`send` first (by design: a cheap ready-now try, not a multi-send stdlib drain).
+When the full buffer is accepted, it returns `IOWaiterSync` without a proactor
+submit. On would-block it falls through to `proactor.send`; on a partial send it
+reports `progress(sent)` (if provided) and submits the remainder — the proactor
+continues the drain and reports further progress as cumulative totals from the
+original buffer. Empty payloads go straight to the proactor. With
+`UringProactor`, that remainder is completed via io_uring only.
 
 `scheduler.io.sock_shutdown(sock, how)` and `scheduler.io.sock_close(sock)` call
 stdlib `socket.shutdown` / `socket.close` on the calling thread and return
