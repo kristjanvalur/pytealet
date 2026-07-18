@@ -921,13 +921,22 @@ class UringOperation(Operation[T]):
     """Uring waitable: public result surface plus the active ring leg.
 
     Passed as ``uring_api.Completion.user_data`` so delivery does not need a
-    separate Entry object. ``completion`` is the live ring handle for cancel;
-    ``complete`` finishes the leg (often a closure over buffers/state).
-    ``sq_impl`` / ``sq0``… are the deferred-safe submit recipe, set by
-    ``_arm_sq`` (not at construction).
+    separate Entry object. Ring-leg fields are filled by ``_prepare_uring_op``
+    (``complete``, ``completion``, ``poll_remove``) and ``_arm_sq`` (``sq_*``);
+    construction only sets the shared ``Operation`` waitable state.
     """
 
     __slots__ = _URING_OP_SQ_SLOTS
+    # Slot attributes (no construction defaults; see prepare / arm):
+    complete: _UringOpComplete | None
+    completion: _UringCompletion | None
+    poll_remove: bool
+    sq_impl: _UringSqImpl | None
+    sq0: object
+    sq1: object
+    sq2: object
+    sq3: object
+    sq4: object
 
     def __init__(
         self,
@@ -936,15 +945,21 @@ class UringOperation(Operation[T]):
         fileobj: object | None = None,
     ) -> None:
         super().__init__(kind, fileobj, pending_bucket=proactor._pending_operations)
-        self.complete: _UringOpComplete | None = None
-        self.completion: _UringCompletion | None = None
-        self.poll_remove: bool = False
 
 
 class UringContinuousOperation(ContinuousOperation[T_co]):
     """Continuous uring waitable; same ring-leg fields as ``UringOperation``."""
 
     __slots__ = _URING_OP_SQ_SLOTS
+    complete: _UringOpComplete | None
+    completion: _UringCompletion | None
+    poll_remove: bool
+    sq_impl: _UringSqImpl | None
+    sq0: object
+    sq1: object
+    sq2: object
+    sq3: object
+    sq4: object
 
     def __init__(
         self,
@@ -959,9 +974,6 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
             result_callback,
             pending_bucket=proactor._pending_operations,
         )
-        self.complete: _UringOpComplete | None = None
-        self.completion: _UringCompletion | None = None
-        self.poll_remove: bool = False
 
 
 @dataclass(frozen=True)
