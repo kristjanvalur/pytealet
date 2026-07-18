@@ -122,7 +122,14 @@ def _recv_pool_is_full(pool: RecvBufferPool) -> bool:
 
 
 def _eager_recv_chunk_view(data: bytes, pool: RecvBufferPool) -> memoryview:
-    """Wrap eager ``recv`` bytes for delivery; lease when the pool supports it."""
+    """Wrap eager ``recv`` bytes for delivery; lease when the pool supports it.
+
+    Synthetic pools may lease (and then throttle via ``_recv_pool_is_full`` so
+    continuous can still surface ENOBUFS). Provided-buffer / uring ``BufGroup``
+    pools return a plain view of the copied bytes: eager startup does **not**
+    apply pool backpressure — data already in the socket buffer may as well sit
+    in user memory as in kernel memory until the consumer drains it.
+    """
 
     if not data:
         return memoryview(b"")
@@ -535,6 +542,10 @@ class ProactorIOManager:
         Pure-eager EOF / hard error finishes a synthetic ``ContinuousOperation``
         already done. When the socket would block, the return value is the real
         proactor continuous operation.
+
+        Eager startup drains ready socket data without provided-buffer pool
+        backpressure (see ``_eager_recv_chunk_view``). Synthetic pools still stop
+        when fully leased so the continuous path can report ENOBUFS.
         """
 
         pool = self._resolve_recv_buffer_pool(buf_group)
@@ -543,7 +554,7 @@ class ProactorIOManager:
         try:
             while True:
                 if _recv_pool_is_full(pool):
-                    # leave room for continuous path to surface ENOBUFS
+                    # synthetic: leave a slot so continuous can surface ENOBUFS
                     break
                 data = _recv_ready_chunk(sock, chunk_size)
                 if data is None:

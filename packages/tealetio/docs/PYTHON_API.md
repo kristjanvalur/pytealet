@@ -92,9 +92,12 @@ non-blocking `recv()`, then arms the proactor with the same `callback` and a
 continued `base_sequence`. No extra marshal or reorder. Intermediate eager
 chunks may arrive with `operation=None`; pure-eager EOF or hard error finishes
 a synthetic done operation; when the call falls through to the proactor, the
-return value is always a real continuous operation. `sock_recv_iter` /
-`RecvIterBuffer` start legs through this helper and cancel unfinished ops on
-the proactor as usual.
+return value is always a real continuous operation. Eager startup does not apply
+provided-buffer pool backpressure: data already sitting in the socket receive
+buffer is copied into user memory (it may as well live there as in the kernel)
+until the consumer drains it; continuous legs still observe pool / ENOBUFS
+limits. `sock_recv_iter` / `RecvIterBuffer` start legs through this helper and
+cancel unfinished ops on the proactor as usual.
 
 `initial_data` holds accept-time pre-read bytes when `recv_size` is set;
 otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed

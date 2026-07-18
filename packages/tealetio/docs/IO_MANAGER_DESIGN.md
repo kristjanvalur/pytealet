@@ -43,6 +43,8 @@ the peer window is open.
 
 - `accept` / `accept_many` / `accept_many_streams` — non-blocking `accept` drain
 - `recv_many` / `sock_recv_iter` / `sock_recvall` — non-blocking `recv` drain
+  (eager startup copies ready socket data into user memory without
+  provided-buffer pool backpressure; continuous legs still use pool / ENOBUFS)
 - `sock_recv` and accept-time preread — shared non-blocking `recv` try
 - `sock_sendall` (and `SendBuffer` legs, connect-time `initial` / `initial_data`)
   — one non-blocking `send`; remainder via `proactor.send`
