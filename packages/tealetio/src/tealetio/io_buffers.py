@@ -40,7 +40,11 @@ _RecvIterYield: TypeAlias = tuple[int, memoryview]
 _RecvIterReady: TypeAlias = tuple[None] | tuple[_RecvIterYield]
 
 _DEFAULT_HIGH_WATER = 64 * 1024
-# Queue cargo: immutable bytes or a readonly view over bytes (no snapshot needed).
+# Hold small writes until at least this many bytes are pending (or flush/drain/eof).
+# Goal is throughput / CPU: amortise sock_sendall + proactor/uring overhead across
+# more payload, not minimise send latency. ``0`` submits any non-empty backlog
+# immediately when idle.
+_DEFAULT_MIN_WRITE = 2048
 
 
 class _BufGroupLike(Protocol):
@@ -321,19 +325,26 @@ def open_recv_iter_buffer(
 class SendBuffer:
     """Ordered outbound queue bridging ``sock_sendall`` callbacks and ``drain()``.
 
-    At most one send operation is active per buffer. While a leg is in flight,
-    further ``write()`` calls coalesce into a single ``bytearray`` (asyncio
-    proactor transport style) so line-at-a-time writes become one next send.
+    At most one send operation is active per buffer. ``write()`` always appends
+    into a single pending ``bytearray``. A leg starts only when pending reaches
+    ``min_write``, or when ``flush()`` / ``drain()`` / ``write_eof()`` force a
+    send. While a leg is in flight, further writes keep coalescing for the next
+    leg.
+
+    ``min_write`` is a throughput knob: each ``sock_sendall`` pays fixed
+    proactor/uring and callback cost, so small idle submits waste CPU. Batching
+    amortises that overhead; it is not aimed at wire latency (call ``drain()``
+    or ``flush()`` when the app needs data on the wire).
+
     Completions may arrive on a proactor worker thread; ``drain()`` and
     ``flush()`` block on the scheduler thread via ``CrossThreadCondition``.
 
-    ``drain()`` follows asyncio transport semantics: return immediately while
-    ``pending_bytes <= high_water``; otherwise block until ``pending_bytes <=
-    low_water``. ``flush()`` blocks until the queue is completely empty.
+    ``drain()`` force-starts any held backlog, then follows asyncio transport
+    watermarks: return while ``pending_bytes <= high_water``, otherwise block
+    until ``pending_bytes <= low_water``. ``flush()`` blocks until empty.
 
     Scatter/gather (``sendmsg`` / multi-buffer submit) is future work once the
-    proactor exposes a vector send path; until then coalescing avoids N tiny
-    ``sock_sendall`` legs.
+    proactor exposes a vector send path.
     """
 
     def __init__(
@@ -344,11 +355,12 @@ class SendBuffer:
         scheduler: Any = None,
         high_water: int | None = None,
         low_water: int | None = None,
+        min_write: int | None = None,
     ) -> None:
         self._sock = sock
         self._io = io
         self._cond = CrossThreadCondition(scheduler=scheduler)
-        # None when empty; bytearray while a leg is active and more data is queued
+        # None when empty; bytearray of coalesced bytes not yet in a send leg
         self._pending: bytearray | None = None
         self._pending_bytes = 0
         self._in_flight_bytes = 0
@@ -359,6 +371,11 @@ class SendBuffer:
         self._eof_pending = False
         self._write_eof_done = False
         self._set_write_buffer_limits(high=high_water, low=low_water)
+        if min_write is None:
+            min_write = _DEFAULT_MIN_WRITE
+        if min_write < 0:
+            raise ValueError(f"min_write ({min_write!r}) must be >= 0")
+        self._min_write = min_write
 
     @property
     def pending_bytes(self) -> int:
@@ -369,6 +386,15 @@ class SendBuffer:
         """
 
         return self._pending_bytes + self._in_flight_bytes
+
+    @property
+    def min_write(self) -> int:
+        """Minimum pending bytes before an idle ``write()`` starts a send leg.
+
+        Sized to amortise transport submit cost; not a latency target.
+        """
+
+        return self._min_write
 
     def get_write_buffer_limits(self) -> tuple[int, int]:
         """Return ``(low_water, high_water)``."""
@@ -383,16 +409,19 @@ class SendBuffer:
             self._cond.notify_all()
 
     def write(self, data: SocketSendBuffer) -> None:
-        """Queue data for transmission; coalesce into one buffer while busy.
+        """Queue data for transmission; start a leg only at ``min_write`` or force.
 
-        While a leg is in flight, further writes are copied into a single
-        pending ``bytearray`` so the caller may reuse its buffer. When idle,
-        immutable ``bytes`` (and readonly views over ``bytes``) are submitted
-        without copying.
+        Always copies into the pending ``bytearray`` so the caller may reuse
+        its buffer. Does not submit while ``pending_bytes < min_write`` unless
+        a leg is already active (then bytes join the next leg) or a later
+        ``flush()`` / ``write_eof()`` / high-water ``drain()`` forces send.
         """
 
         if not data:
             return
+        # copy so the caller can reuse its buffer (asyncio proactor style)
+        chunk = bytes(data)
+        to_send: bytes | None = None
         with self._cond:
             if self._closed:
                 raise RuntimeError("SendBuffer is closed")
@@ -400,55 +429,60 @@ class SendBuffer:
                 raise RuntimeError("cannot write() after write_eof()")
             if self._send_error is not None:
                 raise self._send_error
-            if self._active:
-                # copy so the caller can reuse its buffer (asyncio proactor style)
-                chunk = bytes(data)
-                chunk_len = len(chunk)
-                if self._pending is None:
-                    self._pending = bytearray(chunk)
-                else:
-                    self._pending.extend(chunk)
-                self._pending_bytes += chunk_len
-                return
-            # idle: avoid snapshot for immutable bytes / readonly bytes views
-            if type(data) is bytes:
-                to_send: bytes | memoryview = data
-            elif isinstance(data, memoryview) and data.readonly and type(data.obj) is bytes:
-                to_send = data
-            elif isinstance(data, memoryview):
-                to_send = data.tobytes()
-            else:
-                to_send = bytes(data)
-            self._active = True
-            self._in_flight_bytes = len(to_send)
-        # Safe outside the lock: this path only runs when no send leg is active.
-        self._submit_leg(to_send)
+            self._append_pending(chunk)
+            to_send = self._reserve_leg(force=False)
+        if to_send is not None:
+            # Safe outside the lock: reserve set _active for this sole leg.
+            self._submit_leg(to_send)
 
     def drain(self) -> None:
-        """Block only when ``pending_bytes`` exceeds ``high_water``.
+        """Kick any held backlog; block only above ``high_water``.
 
-        When blocked, wait until ``pending_bytes <= low_water``. Unlike
-        ``flush()``, some data may remain queued after ``drain()`` returns.
+        Always force-starts a pending leg so ``write()`` + ``drain()`` (the
+        usual stream-writer pattern) ships data even when still below
+        ``min_write``. Multiple ``write()`` calls before one ``drain()`` still
+        coalesce. When ``pending_bytes > high_water``, wait until
+        ``pending_bytes <= low_water``. Unlike ``flush()``, some data may
+        remain in flight or queued after ``drain()`` returns.
         """
 
+        to_send: bytes | None = None
         with self._cond:
             if self._send_error is not None:
                 raise self._send_error
-            if self._pending_bytes + self._in_flight_bytes <= self._high_water:
+            # write+drain must not leave a sub-min_write buffer stranded
+            to_send = self._reserve_leg(force=True)
+            over_high = self._pending_bytes + self._in_flight_bytes > self._high_water
+        if to_send is not None:
+            self._submit_leg(to_send)
+        if not over_high:
+            return
+        with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
+            if self._pending_bytes + self._in_flight_bytes <= self._low_water:
                 return
             self._cond.swait_for(self._drain_ready)
 
     def flush(self) -> None:
-        """Block until all queued data has been sent."""
+        """Force-send any held backlog and block until the queue is empty."""
 
+        to_send: bytes | None = None
+        with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
+            to_send = self._reserve_leg(force=True)
+        if to_send is not None:
+            self._submit_leg(to_send)
         with self._cond:
             if self._send_error is not None:
                 raise self._send_error
             self._cond.swait_for(self._flush_ready)
 
     def write_eof(self) -> None:
-        """Mark end-of-write; ``SHUT_WR`` is deferred until queued data is sent."""
+        """Mark end-of-write; force-send backlog, then ``SHUT_WR`` when idle."""
 
+        to_send: bytes | None = None
         with self._cond:
             if self._closed:
                 raise RuntimeError("SendBuffer is closed")
@@ -457,8 +491,13 @@ class SendBuffer:
             if self._eof_pending:
                 return
             self._eof_pending = True
-            self._maybe_shutdown()
+            # partial buffer must leave before shutdown
+            to_send = self._reserve_leg(force=True)
+            if to_send is None:
+                self._maybe_shutdown()
             self._cond.notify_all()
+        if to_send is not None:
+            self._submit_leg(to_send)
 
     def close(self) -> None:
         """Reject further ``write()`` calls; queued data may still be flushed."""
@@ -517,6 +556,32 @@ class SendBuffer:
         self._write_eof_done = True
         self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
 
+    def _append_pending(self, chunk: bytes) -> None:
+        """Extend the coalesced backlog. Caller must hold ``self._cond``."""
+
+        if self._pending is None:
+            self._pending = bytearray(chunk)
+        else:
+            self._pending.extend(chunk)
+        self._pending_bytes += len(chunk)
+
+    def _reserve_leg(self, *, force: bool) -> bytes | None:
+        """If idle and ready, mark active and return the next send payload.
+
+        When ``force`` is false, require ``pending_bytes >= min_write``.
+        Caller must hold ``self._cond``. Returns ``None`` if a leg is already
+        active, the backlog is empty, or the size threshold is not met.
+        """
+
+        if self._active or self._send_error is not None:
+            return None
+        if not self._pending:
+            return None
+        if not force and self._pending_bytes < self._min_write:
+            return None
+        self._active = True
+        return self._take_pending()
+
     def _submit_leg(self, chunk: bytes | memoryview) -> None:
         """Submit one ``sock_sendall`` leg; caller must hold no active leg.
 
@@ -568,7 +633,7 @@ class SendBuffer:
     def _take_pending(self) -> bytes | None:
         """Detach the coalesced backlog as the next in-flight leg, or ``None``.
 
-        Caller must hold ``self._cond``.
+        Caller must hold ``self._cond``. Does not clear ``_active``.
         """
 
         pending = self._pending
@@ -595,6 +660,8 @@ class SendBuffer:
             if leg_error is not None:
                 self._send_error = leg_error
             if self._send_error is None:
+                # backlog written while we were in flight: send it without
+                # re-applying min_write (pipeline is already warm)
                 next_chunk = self._take_pending()
             if next_chunk is None:
                 self._active = False
