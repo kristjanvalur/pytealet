@@ -43,6 +43,45 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
+    def test_writes_while_busy_coalesce_into_one_leg(self, scheduler: SyncProactorScheduler) -> None:
+        """Line-sized writes while a send is in flight join into one next leg."""
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            first = Operation[None](kind="send", fileobj=writer)
+            real_sendall = scheduler.io.sock_sendall
+            seen: list[bytes] = []
+
+            def staged_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del sock, progress
+                cargo = bytes(data)
+                seen.append(cargo)
+                if len(seen) == 1:
+                    return IOWaiter(scheduler.io, first)
+                operation = Operation[None](kind="send", fileobj=writer)
+                operation._finish(result=None)
+                return IOWaiter(scheduler.io, operation)
+
+            scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            send_buffer.write(b"HEAD\n")
+            for line in (b"a\n", b"b\n", b"c\n"):
+                send_buffer.write(line)
+            assert len(seen) == 1
+            assert seen[0] == b"HEAD\n"
+            # in flight + coalesced backlog
+            assert send_buffer.pending_bytes == len(b"HEAD\n") + len(b"a\nb\nc\n")
+            first._finish(result=None)
+            assert seen == [b"HEAD\n", b"a\nb\nc\n"]
+            send_buffer.flush()
+            assert send_buffer.pending_bytes == 0
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
     def test_flush_waits_for_callback_driven_completion(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:

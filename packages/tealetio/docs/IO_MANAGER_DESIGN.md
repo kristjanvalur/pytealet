@@ -464,6 +464,12 @@ drop waiter only”.
 
 ## Open follow-ups
 
+- **Vector / scatter-gather send** — `SendBuffer` currently coalesces with a
+  single `bytearray` (asyncio proactor style) and one `sock_sendall` leg at a
+  time. When `uring-api` / the proactor expose multi-buffer submit
+  (`sendmsg` / writev-style, or a retained buffer list without join), stream
+  writers can avoid the copy-join for large mixed write patterns. Until then,
+  coalescing is the right default for common line-at-a-time writes.
 - **Waitable cancel for interrupted `IOWaiter` waits** — design and implement
   proactor/uring-integrated cancel so timeout and exceptional `wait()` exits
   race less with worker-thread delivery; revisit asyncio parity for buffered

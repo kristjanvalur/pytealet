@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``proactor.send``. A full buffer completes as ``IOWaiterSync``; partial sends
   report ``progress`` then hand the remainder to the proactor (which continues
   the drain). Empty payloads still go straight to the proactor.
+- ``SendBuffer`` coalesces ``write()`` while a leg is in flight into a single
+  ``bytearray`` (asyncio proactor transport style), so line-at-a-time stream
+  writes become one next ``sock_sendall`` rather than N tiny legs. Scatter/gather
+  vector send remains a follow-up when the proactor exposes multi-buffer submit.
 - Connect-time ``initial`` / ``initial_data`` (``sock_connect``, ``sock_create``,
   ``sock_create_streams``) chain through ``sock_sendall`` after connect, so the
   first post-connect bytes get the same eager send try. Connect itself still

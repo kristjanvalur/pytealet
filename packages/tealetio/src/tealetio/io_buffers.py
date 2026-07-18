@@ -41,7 +41,6 @@ _RecvIterReady: TypeAlias = tuple[None] | tuple[_RecvIterYield]
 
 _DEFAULT_HIGH_WATER = 64 * 1024
 # Queue cargo: immutable bytes or a readonly view over bytes (no snapshot needed).
-_SendChunk: TypeAlias = bytes | memoryview
 
 
 class _BufGroupLike(Protocol):
@@ -322,13 +321,19 @@ def open_recv_iter_buffer(
 class SendBuffer:
     """Ordered outbound queue bridging ``sock_sendall`` callbacks and ``drain()``.
 
-    At most one send operation is active per buffer. Completions may arrive on a
-    proactor worker thread; ``drain()`` and ``flush()`` block on the scheduler
-    thread via ``CrossThreadCondition``.
+    At most one send operation is active per buffer. While a leg is in flight,
+    further ``write()`` calls coalesce into a single ``bytearray`` (asyncio
+    proactor transport style) so line-at-a-time writes become one next send.
+    Completions may arrive on a proactor worker thread; ``drain()`` and
+    ``flush()`` block on the scheduler thread via ``CrossThreadCondition``.
 
     ``drain()`` follows asyncio transport semantics: return immediately while
     ``pending_bytes <= high_water``; otherwise block until ``pending_bytes <=
     low_water``. ``flush()`` blocks until the queue is completely empty.
+
+    Scatter/gather (``sendmsg`` / multi-buffer submit) is future work once the
+    proactor exposes a vector send path; until then coalescing avoids N tiny
+    ``sock_sendall`` legs.
     """
 
     def __init__(
@@ -343,7 +348,8 @@ class SendBuffer:
         self._sock = sock
         self._io = io
         self._cond = CrossThreadCondition(scheduler=scheduler)
-        self._pending: deque[_SendChunk] = deque()
+        # None when empty; bytearray while a leg is active and more data is queued
+        self._pending: bytearray | None = None
         self._pending_bytes = 0
         self._in_flight_bytes = 0
         self._active = False
@@ -377,24 +383,12 @@ class SendBuffer:
             self._cond.notify_all()
 
     def write(self, data: SocketSendBuffer) -> None:
-        """Queue one buffer for transmission in FIFO order.
-
-        Immutable ``bytes`` (and readonly views over ``bytes``) are queued
-        without copying. Mutable buffers are snapshotted so the caller may
-        reuse them after ``write()`` returns.
-        """
+        """Queue data for transmission; coalesce into one buffer while busy."""
 
         if not data:
             return
-        # Snapshot only when the caller can still mutate the buffer after write().
-        if type(data) is bytes:
-            chunk: _SendChunk = data
-        elif isinstance(data, memoryview) and data.readonly and type(data.obj) is bytes:
-            chunk = data
-        elif isinstance(data, memoryview):
-            chunk = data.tobytes()
-        else:
-            chunk = bytes(data)
+        # copy so the caller can reuse its buffer (asyncio proactor does the same)
+        chunk = bytes(data)
         chunk_len = len(chunk)
         with self._cond:
             if self._closed:
@@ -403,16 +397,17 @@ class SendBuffer:
                 raise RuntimeError("cannot write() after write_eof()")
             if self._send_error is not None:
                 raise self._send_error
-            self._pending.append(chunk)
-            self._pending_bytes += chunk_len
             if self._active:
+                if self._pending is None:
+                    self._pending = bytearray(chunk)
+                else:
+                    self._pending.extend(chunk)
+                self._pending_bytes += chunk_len
                 return
             self._active = True
-            chunk_to_send = self._pending.popleft()
-            self._pending_bytes -= len(chunk_to_send)
-            self._in_flight_bytes = len(chunk_to_send)
+            self._in_flight_bytes = chunk_len
         # Safe outside the lock: this path only runs when no send leg is active.
-        self._submit_leg(chunk_to_send)
+        self._submit_leg(chunk)
 
     def drain(self) -> None:
         """Block only when ``pending_bytes`` exceeds ``high_water``.
@@ -507,13 +502,7 @@ class SendBuffer:
         self._write_eof_done = True
         self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
 
-    def _submit(self, chunk: _SendChunk) -> None:
-        # sock_sendall returns IOWaiterSync (eager) or IOWaiter (proactor)
-        waiter = cast(IOWaiter[None] | IOWaiterSync[None], self._io.sock_sendall(self._sock, chunk))
-        self._active_waiter = waiter
-        waiter.add_done_callback(self._on_leg_complete)
-
-    def _submit_leg(self, chunk: _SendChunk) -> None:
+    def _submit_leg(self, chunk: bytes) -> None:
         """Submit one ``sock_sendall`` leg; caller must hold no active leg.
 
         Called outside ``self._cond`` only after the caller has reserved this
@@ -521,27 +510,60 @@ class SendBuffer:
         chaining). At most one leg is active, so failure handling here cannot
         race another submit.
 
-        Submit-time failures (``sock_sendall`` or ``add_done_callback``) restore
-        the chunk to ``_pending`` so bytes are not lost. Leg completion failures
-        are handled in ``_on_leg_complete`` instead; partially sent data is not
-        restored. Both paths record a sticky ``_send_error``; the buffer does not
-        retry automatically.
+        Submit-time failures prepend the chunk to ``_pending`` (data written
+        while submit was in progress stays after it). Leg completion failures
+        are handled in ``_on_leg_complete``; partially sent data is not
+        restored. Both paths record a sticky ``_send_error``; the buffer does
+        not retry automatically.
         """
 
         try:
-            self._submit(chunk)
+            # sock_sendall returns IOWaiterSync (eager) or IOWaiter (proactor)
+            waiter = cast(IOWaiter[None] | IOWaiterSync[None], self._io.sock_sendall(self._sock, chunk))
+            self._active_waiter = waiter
+            waiter.add_done_callback(self._on_leg_complete)
         except BaseException as exc:
             with self._cond:
-                self._pending.appendleft(chunk)
-                self._pending_bytes += len(chunk)
+                self._prepend_pending(chunk)
                 self._active = False
                 self._in_flight_bytes = 0
                 self._send_error = exc
                 self._cond.notify_all()
             raise
 
+    def _prepend_pending(self, chunk: bytes) -> None:
+        """Restore ``chunk`` ahead of any bytes queued during a failed submit.
+
+        Caller must hold ``self._cond``.
+        """
+
+        if self._pending is None:
+            self._pending = bytearray(chunk)
+        else:
+            restored = bytearray(chunk)
+            restored.extend(self._pending)
+            self._pending = restored
+        self._pending_bytes = len(self._pending)
+
+    def _take_pending(self) -> bytes | None:
+        """Detach the coalesced backlog as the next in-flight leg, or ``None``.
+
+        Caller must hold ``self._cond``.
+        """
+
+        pending = self._pending
+        if not pending:
+            self._pending = None
+            self._pending_bytes = 0
+            return None
+        chunk = bytes(pending)
+        self._pending = None
+        self._pending_bytes = 0
+        self._in_flight_bytes = len(chunk)
+        return chunk
+
     def _on_leg_complete(self) -> None:
-        next_chunk: _SendChunk | None = None
+        next_chunk: bytes | None = None
         waiter = self._active_waiter
         assert waiter is not None
         self._active_waiter = None
@@ -552,11 +574,9 @@ class SendBuffer:
             self._in_flight_bytes = 0
             if leg_error is not None:
                 self._send_error = leg_error
-            if self._send_error is None and self._pending:
-                next_chunk = self._pending.popleft()
-                self._pending_bytes -= len(next_chunk)
-                self._in_flight_bytes = len(next_chunk)
-            else:
+            if self._send_error is None:
+                next_chunk = self._take_pending()
+            if next_chunk is None:
                 self._active = False
                 self._maybe_shutdown()
             self._cond.notify_all()

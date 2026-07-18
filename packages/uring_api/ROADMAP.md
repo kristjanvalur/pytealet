@@ -345,7 +345,26 @@ liburing 2.5 added application-allocated ring memory through
 required memory. This may be useful for hugepage placement or embedding, but it
 should wait until the socket performance surface is clearer.
 
-### 10. Breadth opcodes
+### 10. Multi-buffer / vector stream send (for tealetio `SendBuffer`)
+
+`submit_sendmsg()` already exists for message-oriented I/O with a single
+payload buffer. Stream writers in `tealetio` currently coalesce line-sized
+`write()` calls into one `bytearray` and issue a single `send` per drain
+cycle (asyncio proactor style).
+
+A useful next step is a **scatter-gather stream send** that keeps several
+caller-owned buffers without joining them:
+
+- either multi-iovec `sendmsg` with a retained buffer list until CQE, or
+- a small dedicated API if liburing/kernel makes fixed multi-buffer send
+  clearer than hand-built `msghdr` iovecs.
+
+Higher layers would then queue a list of chunks and submit one vector op
+instead of copy-joining. Priority is medium: coalescing already covers the
+common line-at-a-time case; vector send matters when large mixed writes make
+the join cost visible.
+
+### 11. Breadth opcodes
 
 Futex, waitid, pipe operations, fixed file installation, bind/listen helpers,
 and similar additions are useful, but they are not the first server-socket

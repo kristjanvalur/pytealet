@@ -193,7 +193,11 @@ class ProactorAccess(Protocol):
 
 @runtime_checkable
 class SocketIO(Protocol):
-    """Asyncio-shaped socket helpers; one-shot methods return ``IOWaiter``."""
+    """Asyncio-shaped socket helpers; one-shot methods return ``IOWaitable``.
+
+    Eager paths may resolve as ``IOWaiterSync``; otherwise ``IOWaiter`` wraps a
+    proactor ``Operation``. Continuous helpers use ``IOWaitable[None]``.
+    """
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]: ...
 
@@ -341,8 +345,10 @@ ProactorSocketIO = ServerIO
 class ProactorIOManager:
     """IO facade over a ``Proactor`` backend.
 
-    One-shot helpers return ``IOWaiter``; call ``wait()`` to block the current
-    tealet. Continuous helpers (``accept_many``, ``poll_many``) return
+    One-shot helpers return ``IOWaitable``: ``IOWaiterSync`` when the op finishes
+    on the eager non-blocking path, otherwise ``IOWaiter`` over a proactor
+    ``Operation``. Call ``wait()`` to block the current tealet when needed.
+    Continuous helpers (``accept_many``, ``poll_many``) return
     ``IOWaitable[None]``; call ``wait()`` to block until the stream ends.
     ``sock_recv_iter`` remains a blocking iterator over receive chunks.
     Always owned by a proactor scheduler.
