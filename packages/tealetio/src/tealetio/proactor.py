@@ -1014,9 +1014,12 @@ class UringOperation(Operation[T]):
         _init_uring_ring_leg_fields(self)
 
     def _scrub_for_pool(self) -> None:
-        # Drop only refs that might pin large objects while idle in the pool.
-        # complete / poll_remove / sq_impl / _resolved are left for reinit+prepare.
+        # Drop refs that pin large objects while idle (result cargo, buffers).
+        # complete / poll_remove / sq_impl are left for reinit+prepare.
+        # _resolved is cleared after the freelist gate has accepted this op.
         self.fileobj = None
+        self._resolved = None
+        self._callbacks = []
         self.completion = None
         self.sq0 = None
         self.sq1 = None
@@ -1083,7 +1086,10 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         _init_uring_ring_leg_fields(self)
 
     def _scrub_for_pool(self) -> None:
+        # Drop result cargo and delivery callback while idle in the pool.
         self.fileobj = None
+        self._resolved = None
+        self._callbacks = []
         self._result_callback = None
         self.completion = None
         self.sq0 = None

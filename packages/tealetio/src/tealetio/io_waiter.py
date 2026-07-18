@@ -184,7 +184,8 @@ class IOWaiter(Generic[T]):
         self._operation = None
         if operation is None:
             return
-        # ProactorBase no-ops; UringProactor freelists finished one-shot ops.
+        # ProactorBase no-ops; UringProactor freelists finished one-shot and
+        # non-poll_many continuous ops when terminal and not ring-live.
         self._io.proactor.recycle_operation(operation)
 
     def _wait_self(self) -> None:
