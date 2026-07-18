@@ -29,7 +29,7 @@ from .io_waiter import (
 )
 
 
-from .io_buffers import RecvIterBuffer, SendBuffer, open_recv_iter_buffer, open_send_buffer
+from .io_buffers import RecvIterBuffer, SendBuffer, _RecvIterProactor, open_recv_iter_buffer, open_send_buffer
 from .operations import (
     ContinuousOperation,
     MultishotDelivery,
@@ -474,7 +474,8 @@ class ProactorIOManager:
         # eager drain via _recv_many; cancel unfinished legs on the real proactor
         return open_recv_iter_buffer(
             sock,
-            proactor=self._proactor,
+            # Proactor structurally matches; cast for Protocol vs concrete signatures
+            proactor=cast(_RecvIterProactor, self._proactor),
             buf_group=pool,
             scheduler=self._scheduler,
             recv_many=self._recv_many,
