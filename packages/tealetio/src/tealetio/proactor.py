@@ -1133,13 +1133,13 @@ class _UringOpPool:
         return UringContinuousOperation(proactor, kind, fileobj, result_callback)
 
     def release(self, operation: object) -> None:
-        # poll_many only: never pool (late CQEs after stop / POLL_REMOVE).
-        if getattr(operation, "kind", None) == "poll_many":
-            return
-        if isinstance(operation, UringOperation):
-            self._release_into(self._one_shot, operation)
-        elif isinstance(operation, UringContinuousOperation):
+        if isinstance(operation, UringContinuousOperation):
+            # poll_many only: never pool (late CQEs after stop / POLL_REMOVE).
+            if operation.kind == "poll_many":
+                return
             self._release_into(self._continuous, operation)
+        elif isinstance(operation, UringOperation):
+            self._release_into(self._one_shot, operation)
 
     def _release_into(
         self,
