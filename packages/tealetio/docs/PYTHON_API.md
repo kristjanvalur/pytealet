@@ -78,32 +78,34 @@ and CQE errors surface as operation failures. `uring_api` may still raise
 
 Long-lived socket operations use `ContinuousOperation`.
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` first drains ready
-connections with non-blocking `accept()` on the calling thread, then arms
+connections with non-blocking `accept()`, then arms
 `proactor.accept_many(..., base_sequence=N)` when the listen socket would block
-(`N` is the number of eager accepts). An `OSError` mid-eager drain (for example
-`EMFILE` after some successful accepts) stops the eager loop only: connections
-already delivered stay valid, and the continuous arm still starts so the accept
-stream is not abandoned. Eager and continuous legs share one index sequence for
-reorder buffers. Each delivery is `(conn, initial_data)` (recv failures are
-handled before the user callback). The continuous leg remains active until
-cancelled or the backend reports a terminal error. Emulated oneshot
-`accept_many` (selector and uring fallback) treats soft accept errors
-(`EMFILE`, `ENFILE`, `ECONNABORTED`, …) as a clean end of that leg so hosts can
-re-arm; hard errors still fail the waitable. Call `conn.getpeername()` when the
-peer address is needed.
+(`N` is the number of eager accepts). User `callback` runs on the scheduler via
+the reorder marshal (`call_soon_threadsafe(..., immediate=True)`) for both eager
+and continuous legs. An `OSError` mid-eager drain stops the eager loop only:
+connections already delivered stay valid, and continuous accept still starts —
+eager does not classify errors; the proactor path does. Eager and continuous
+legs share one index sequence for reorder buffers. Each delivery is
+`(conn, initial_data)` (recv failures are handled before the user callback). The
+continuous leg remains active until cancelled or the backend reports a terminal
+error. Emulated oneshot `accept_many` (selector and uring fallback) treats soft
+accept errors (`EMFILE`, `ENFILE`, `ECONNABORTED`, …) as a clean end of that leg
+so hosts can re-arm; under sustained fd pressure re-arm can spin (listen fd stays
+readable) — preferred over failing `StreamServer`. Hard errors still fail the
+waitable. Call `conn.getpeername()` when the peer address is needed.
 
 Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
 (returns a `ContinuousOperation` like the proactor): it drains ready bytes with
 non-blocking `recv()`, then arms the proactor with the same `callback` and a
 continued `base_sequence`. No extra marshal or reorder. Intermediate eager
-chunks may arrive with `operation=None`; pure-eager EOF or hard error finishes
-a synthetic done operation; when the call falls through to the proactor, the
-return value is always a real continuous operation. Eager startup does not apply
-provided-buffer pool backpressure: data already sitting in the socket receive
-buffer is copied into user memory (it may as well live there as in the kernel)
-until the consumer drains it; continuous legs still observe pool / ENOBUFS
-limits. `sock_recv_iter` / `RecvIterBuffer` start legs through this helper and
-cancel unfinished ops on the proactor as usual.
+chunks may arrive with `operation=None`; pure-eager EOF finishes a synthetic
+done operation; eager `OSError` falls through to the proactor (canonical error
+path). Eager startup does not apply provided-buffer pool backpressure: data
+already sitting in the socket receive buffer is copied into user memory (it may
+as well live there as in the kernel) until the consumer drains it; continuous
+legs still observe pool / ENOBUFS limits. `sock_recv_iter` / `RecvIterBuffer`
+start legs through this helper and cancel unfinished ops on the proactor as
+usual.
 
 `initial_data` holds accept-time pre-read bytes when `recv_size` is set;
 otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed

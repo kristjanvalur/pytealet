@@ -42,12 +42,14 @@ the peer window is open.
 **Covered on the stream server/client path:**
 
 - `accept` / `accept_many` / `accept_many_streams` — non-blocking `accept` drain
-  (mid-eager `OSError` stops the drain only and still arms continuous accept;
-  emulated oneshot soft errors such as `EMFILE` finish the leg cleanly for re-arm)
+  (mid-eager `OSError` stops the drain only and still arms continuous accept —
+  eager does not classify errors; emulated oneshot soft errors such as `EMFILE`
+  finish the leg cleanly for re-arm, which can spin under sustained fd pressure)
 - `recv_many` / `sock_recv_iter` / `sock_recvall` — non-blocking `recv` drain
-  (eager startup copies ready socket data into user memory without
-  provided-buffer pool backpressure; continuous legs still use pool / ENOBUFS)
-- `sock_recv` and accept-time preread — shared non-blocking `recv` try
+  (eager `OSError` falls through to `proactor.recv_many`; pure-eager EOF only
+  finishes a synthetic terminal; no pool backpressure on eager startup)
+- `sock_recv` — eager data/EOF as `IOWaiterSync`; would-block and eager
+  `OSError` fall through to `proactor.recv`
 - `sock_sendall` (and `SendBuffer` legs, connect-time `initial` / `initial_data`)
   — exactly one non-blocking `send`, then remainder via `proactor.send`
   (uring proactor uses io_uring exclusively for that remainder; no multi-send

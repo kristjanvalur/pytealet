@@ -17,9 +17,14 @@ __all__ = [
 
 _LINGER_ABORT = struct.pack("ii", 1, 0)
 
-# Transient accept failures: finish an emulated oneshot leg cleanly so callers
-# (for example StreamServer) re-arm instead of treating the accept stream as dead.
-# Hard errors (EBADF, EINVAL, …) still terminalise with the OSError.
+# Transient accept failures: finish an emulated oneshot leg cleanly (no exception)
+# so hosts such as StreamServer re-arm instead of treating the accept stream as
+# dead. Hard errors (EBADF, EINVAL, …) still terminalise with the OSError.
+#
+# Known cost under sustained fd pressure (EMFILE/ENFILE): the listen socket often
+# stays readable, so re-arm can spin until an fd frees. Bubbling these to kill
+# StreamServer is worse (transient). A sleep/backoff on soft re-arm is future
+# work; raise the process fd limit when this shows up in production.
 _SOFT_ACCEPT_ERRNOS: frozenset[int] = frozenset(
     {
         errno.EMFILE,

@@ -454,13 +454,15 @@ class ProactorIOManager:
         """Receive up to ``n`` bytes; try a direct non-blocking ``recv`` first.
 
         When data (or EOF) is already available, returns ``IOWaiterSync`` without
-        a proactor submit. Otherwise falls through to ``proactor.recv``.
+        a proactor submit. Would-block **and** eager ``OSError`` fall through to
+        ``proactor.recv`` — the happy path does not classify errors; the proactor
+        is the canonical error path.
         """
 
         try:
             data = self._recv_if_ready(sock, n)
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
+        except OSError:
+            data = None
         if data is not None:
             return IOWaiterSync(data)
         return IOWaiter(self, self._proactor.recv(sock, n))
@@ -539,9 +541,10 @@ class ProactorIOManager:
         directly (cancel still uses the proactor).
 
         Intermediate eager chunks are delivered with ``operation=None`` (known).
-        Pure-eager EOF / hard error finishes a synthetic ``ContinuousOperation``
-        already done. When the socket would block, the return value is the real
-        proactor continuous operation.
+        Pure-eager EOF finishes a synthetic ``ContinuousOperation`` already done
+        (EOF is a normal terminal, not an error path). Would-block and any
+        ``OSError`` during the eager drain fall through to ``proactor.recv_many``
+        — error handling lives on that canonical path only.
 
         Eager startup drains ready socket data without provided-buffer pool
         backpressure (see ``_eager_recv_chunk_view``). Synthetic pools still stop
@@ -575,12 +578,9 @@ class ProactorIOManager:
                 # intermediate: operation=None until terminal synthetic or proactor return
                 callback(MultishotDelivery(index=index, value=chunk, more=True))
                 index += 1
-        except OSError as exc:
-            terminal = ContinuousOperation[memoryview](kind="recv_many", fileobj=sock)
-            delivery = MultishotDelivery(index=index, exception=exc, more=False, operation=terminal)
-            callback(delivery)
-            finish_continuous_delivery(delivery)
-            return terminal
+        except OSError:
+            # Happy path has no error classification: stop eager, arm proactor.
+            pass
 
         return self._proactor.recv_many(
             sock,
@@ -700,17 +700,18 @@ class ProactorIOManager:
     ) -> IOWaitable[AcceptDelivery]:
         """Accept one connection, trying a direct non-blocking accept first.
 
-        When the listen socket is already readable, ``accept()`` runs on the
-        calling thread (no proactor submit). Otherwise falls through to
-        ``proactor.accept``. Optional ``n`` composes an accept-time ``recv``.
+        When the listen socket is already readable, ``accept()`` runs without a
+        proactor submit. Would-block and eager ``OSError`` fall through to
+        ``proactor.accept`` (canonical error path). Optional ``n`` composes an
+        accept-time ``recv``.
         """
 
         normalized_recv_size = normalize_accept_recv_size(n)
 
         try:
             conn = _accept_ready_connection(sock)
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
+        except OSError:
+            conn = None
 
         if conn is not None:
             if normalized_recv_size is None:
@@ -1030,10 +1031,17 @@ class ProactorIOManager:
     ) -> IOWaitable[None]:
         """Accept connections: direct drain while ready, then continuous proactor.
 
-        Ready connections are accepted with non-blocking ``accept()`` on the
-        calling thread and delivered immediately. When the listen socket would
-        block, ``proactor.accept_many`` is armed and its continuous waitable is
-        returned.
+        Ready connections are accepted with non-blocking ``accept()`` and posted
+        through the same reorder/marshal path as continuous legs
+        (``call_soon_threadsafe(..., immediate=True)``), so ``callback`` runs on
+        the scheduler thread whether the accept was eager or proactor-backed.
+        When the listen socket would block, ``proactor.accept_many`` is armed
+        and its continuous waitable is returned.
+
+        **Eager errors.** The drain loop does not classify ``OSError``: any
+        mid-drain failure (soft or hard) stops eager only and still arms
+        continuous accept. Error handling lives on the proactor path (and the
+        host loop). Already-delivered connections stay valid.
 
         **Shutdown and late deliveries.** Cancelling this ``IOWaitable`` or the
         hosting accept-loop tealet does **not** cancel accept-time ``recv`` legs
@@ -1045,10 +1053,8 @@ class ProactorIOManager:
         bounds each accept-time preread cooperatively; it does not replace
         listener close or callback-side discard.
 
-        Continuous (proactor) deliveries are marshalled onto the scheduler
-        thread before ``callback`` runs. Eager deliveries run on the calling
-        thread. Recv failures invoke ``on_recv_error(conn, exc)`` when provided;
-        the socket is always closed afterwards. With no ``on_recv_error``, recv
+        Recv failures invoke ``on_recv_error(conn, exc)`` when provided; the
+        socket is always closed afterwards. With no ``on_recv_error``, recv
         failures close the socket silently.
 
         When ``recv_timeout`` is set, each accept-time ``recv`` is cancelled if
@@ -1119,11 +1125,9 @@ class ProactorIOManager:
                 return
             on_thread_delivery(delivery._replace(value=(delivery.value, None, None)))
 
-        # drain ready connections before arming the continuous proactor path.
-        # numbered indices continue into multishot via base_sequence.
-        # Any OSError mid-drain (soft or hard) stops eager only and falls through
-        # to proactor.accept_many — the canonical path retries; the error may
-        # reappear there (conscious design: do not fail the waitable on eager try).
+        # Happy path: drain ready accepts only. No error classification here —
+        # any OSError stops eager and we arm proactor.accept_many (canonical path).
+        # Indices continue into multishot via base_sequence.
         eager_count = 0
         try:
             while True:
@@ -1161,13 +1165,17 @@ class ProactorIOManager:
     ) -> IOWaitable[None]:
         """Accept stream pairs: direct drain while ready, then continuous proactor.
 
-        Ready connections are accepted, opened as streams, and delivered on the
-        calling thread. When the listen socket would block, ``proactor.accept_many``
-        is armed; further accepts open streams on the delivery thread and marshal
-        only the user ``callback`` onto the scheduler. Receive begins immediately
-        to reduce latency; a silent peer leaves ``recv_many`` pending without
-        withholding the stream pair from the handler. Idle or slow-client policy
+        Ready connections are accepted and opened as streams; user ``callback``
+        runs on the scheduler via the same reorder/marshal path as continuous
+        legs (``immediate=True``). When the listen socket would block,
+        ``proactor.accept_many`` is armed; further accepts open streams on the
+        delivery thread before marshalling the callback. Receive begins as soon
+        as streams open; a silent peer leaves ``recv_many`` pending without
+        withholding the pair from the handler. Idle or slow-client policy
         belongs in the handler (read timeouts, early close, etc.).
+
+        Eager mid-drain ``OSError`` stops the try only and still arms continuous
+        accept (same policy as ``accept_many()``).
 
         See ``accept_many()`` for ``wait()`` / accept-stream semantics and the
         shutdown discard responsibilities (close listeners; check a flag in the
@@ -1236,8 +1244,7 @@ class ProactorIOManager:
 
             on_thread_delivery(delivery._replace(value=streams))
 
-        # drain ready connections; indices continue into multishot via base_sequence.
-        # Mid-drain OSError stops eager only — arm continuous (same as accept_many).
+        # Happy path drain only; OSError → arm continuous (same as accept_many).
         eager_count = 0
         try:
             while True:

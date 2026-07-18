@@ -229,7 +229,12 @@ def _continuous_error_delivery(exc: BaseException, *, index: int | None = 0) -> 
 
 
 def _soft_accept_terminal_delivery(*, index: int | None = 0) -> MultishotDelivery:
-    """Terminal accept leg with no connection and no failure (re-arm friendly)."""
+    """Terminal accept leg with no connection and no failure (re-arm friendly).
+
+    Hosts re-arm rather than fail the server on transient EMFILE/etc. Under
+    sustained fd pressure the listen fd often stays readable, so re-arm can
+    busy-loop; see ``socket_helpers`` soft-accept note.
+    """
 
     return MultishotDelivery(index=index, value=None, exception=None, more=False)
 
@@ -1592,8 +1597,9 @@ class SelectorProactor(ProactorBase):
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
             except OSError as exc:
-                # EMFILE/ENFILE/ECONNABORTED/…: end this oneshot leg quietly so
-                # the host can re-arm after fds free or the next peer arrives.
+                # Soft: quiet terminal so StreamServer re-arms (does not fail the
+                # accept loop). Can spin under sustained EMFILE — see
+                # _soft_accept_terminal_delivery / socket_helpers.
                 if _is_soft_accept_error(exc):
                     operation._finish_with_terminal_delivery(
                         _soft_accept_terminal_delivery(index=base_sequence),
@@ -2532,7 +2538,11 @@ class UringProactor(ProactorBase):
             pass
 
     def _wait_inline(self, deadline: float | None = None) -> None:
-        """Block in ``ring.wait``; delivery runs via the registered ring callback."""
+        """Block in ``ring.wait``; delivery runs via the registered ring callback.
+
+        Wait after ``close()`` is undefined (misuse), not a recovery path — no
+        ``_check_open()`` here so the hot park stays lean.
+        """
 
         # deadline==0: one non-blocking harvest (selector wait(0) analogue)
         # callback mode: wait delivers non-empty batches and returns None
@@ -2544,6 +2554,8 @@ class UringProactor(ProactorBase):
         The ring idle park allows many ``wake_wait`` / ``break_wait`` signallers
         but only one concurrent waiter — the proactor driver. Do not park a
         second host (or dual ``wait`` / ``wait_async`` threads) on the same ring.
+
+        Wait after ``close()`` is undefined (misuse); same as ``_wait_inline``.
         """
 
         if deadline == 0:
