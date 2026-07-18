@@ -1784,14 +1784,29 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if enqueue is not None:
             enqueue()
         target = self._find_target()
+        # drain timers/threadsafe callbacks only after switch returns: the parking
+        # task must be current and unlinked before callbacks may spawn/throw.
+        # explicit run/eager sets _skip_post_switch_callbacks so a non-raising
+        # switch-to is not stolen by callback re-scheduling; throw raises out of
+        # switch and never reaches the drain
         target.switch()
-        # run threadsafe/timer callbacks once this task is back running and
-        # unlinked. callbacks may switch again (throw, eager task start) and must
-        # not run before target.switch(): the parking task is then linked on a
-        # wait primitive and cannot safely participate in scheduling. draining
-        # earlier only helped priority (new runnable picked by find_target); we
-        # never rely on callbacks supplying the sole switch target anyway
-        self._run_ready_timers()
+        skip_callbacks = False
+        current = cast(Any, tealet.current())
+        try:
+            skip_callbacks = current._skip_post_switch_callbacks
+            current._skip_post_switch_callbacks = False
+        except AttributeError:
+            pass
+        if not skip_callbacks:
+            self._run_ready_timers()
+
+    def _mark_explicit_switch_to(self, target: tealet.tealet) -> None:
+        """Skip one post-switch callback drain when ``target`` resumes in ``_schedule``."""
+
+        try:
+            cast(Any, target)._skip_post_switch_callbacks = True
+        except AttributeError:
+            pass
 
     def yield_(self) -> None:
         """Yield the current task and make it runnable again."""
@@ -1929,6 +1944,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             return
         cast(_tasks.Task, target)._unlink()
         self._make_runnable(tealet.current())
+        self._mark_explicit_switch_to(target)
         target.switch()
 
     def _target_run_eager(self, target: tealet.tealet, task_main) -> None:
@@ -1938,6 +1954,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert task.link is None
         assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
         self._make_runnable(tealet.current())
+        self._mark_explicit_switch_to(target)
         tealet.tealet.run(target, task_main, None)
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
