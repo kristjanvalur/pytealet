@@ -2022,17 +2022,18 @@ class UringProactor(ProactorBase):
         self,
         operation: _UringOp,
         complete: _UringOpComplete,
-        *,
-        poll_remove: bool = False,
         cq0: object = None,
         cq1: object = None,
         cq2: object = None,
         cq3: object = None,
+        *,
+        poll_remove: bool = False,
     ) -> _UringOp:
         """Attach stable complete handler, optional cq context, and ring-leg flags.
 
         ``complete`` is an unbound ``UringProactor`` method (no per-submit lambda).
-        ``cq0``… hold completion-side context (buffers, offsets, …).
+        ``cq0``… are positional completion-side context (buffers, offsets, …).
+        ``poll_remove`` stays keyword-only (rare).
         """
 
         operation.complete = complete
@@ -2254,7 +2255,7 @@ class UringProactor(ProactorBase):
         entry = self._prepare_uring_op(
             operation,
             UringProactor._complete_uring_recv,
-            cq0=data,
+            data,
         )
         self._arm_sq(entry, _sq_recv, sock.fileno(), data)
         self._submit_uring_op(entry)
@@ -2293,7 +2294,7 @@ class UringProactor(ProactorBase):
             operation,
             data,
             UringProactor._complete_uring_recvfrom,
-            cq0=data,
+            data,
         )
         return operation
 
@@ -2660,7 +2661,7 @@ class UringProactor(ProactorBase):
         entry = self._prepare_uring_op(
             operation,
             UringProactor._complete_uring_read,
-            cq0=data,
+            data,
         )
         self._arm_sq(entry, _sq_read, fd, data, offset)
         self._submit_uring_op(entry)
@@ -2730,7 +2731,7 @@ class UringProactor(ProactorBase):
         entry = self._prepare_uring_op(
             operation,
             UringProactor._complete_uring_stat,
-            cq0=stat_buf,
+            stat_buf,
         )
         self._arm_sq(entry, _sq_statx, dfd, stat_path, stat_flags, uring_api.STATX_BASIC_STATS, buf)
         self._submit_uring_op(entry)
@@ -2872,9 +2873,9 @@ class UringProactor(ProactorBase):
             entry = self._prepare_uring_op(
                 operation,
                 UringProactor._deliver_uring_recv_oneshot,
-                cq0=buffer,
-                cq1=base_sequence,
-                cq2=synthetic_pool,
+                buffer,
+                base_sequence,
+                synthetic_pool,
             )
             self._arm_sq(entry, _sq_recv, sock.fileno(), buffer)
             self._submit_uring_op(entry)
@@ -2884,7 +2885,7 @@ class UringProactor(ProactorBase):
         entry = self._prepare_uring_op(
             operation,
             UringProactor._deliver_uring_recv_buf,
-            cq0=base_sequence,
+            base_sequence,
         )
         self._arm_sq(entry, _sq_recv_buf, sock.fileno(), uring_group)
         self._submit_uring_op(entry)
@@ -3002,7 +3003,7 @@ class UringProactor(ProactorBase):
         entry = self._prepare_uring_op(
             operation,
             UringProactor._deliver_uring_poll_many_oneshot,
-            cq0=next_index,
+            next_index,
         )
         self._arm_sq(entry, _sq_poll, fd, mask)
         self._submit_uring_op(entry)
@@ -3192,9 +3193,9 @@ class UringProactor(ProactorBase):
         entry = self._prepare_uring_op(
             operation,
             UringProactor._complete_uring_sendall,
-            cq0=data,
-            cq1=offset,
-            cq2=progress,
+            data,
+            offset,
+            progress,
         )
         chunk = data[offset:]
         if self._send_zc_supported and sock.family != socket.AF_UNIX:
@@ -3209,13 +3210,12 @@ class UringProactor(ProactorBase):
         operation: "UringOperation[Any]",
         data: memoryview,
         complete: _UringOpComplete,
-        *,
         cq0: object = None,
         cq1: object = None,
         cq2: object = None,
         cq3: object = None,
     ) -> None:
-        entry = self._prepare_uring_op(operation, complete, cq0=cq0, cq1=cq1, cq2=cq2, cq3=cq3)
+        entry = self._prepare_uring_op(operation, complete, cq0, cq1, cq2, cq3)
         self._arm_sq(entry, _sq_recvmsg, sock.fileno(), data)
         self._submit_uring_op(entry)
 
