@@ -107,10 +107,22 @@ def make_fake_uring_proactor():
     return UringProactor(ring_factory=_FakeUringRing)
 
 
+def make_fake_sync_uring_proactor():
+    from tealetio.proactor import SyncUringProactor
+
+    return SyncUringProactor(ring_factory=_FakeUringRing)
+
+
 def make_native_uring_proactor():
     from tealetio.proactor import UringProactor
 
     return UringProactor()
+
+
+def make_native_sync_uring_proactor():
+    from tealetio.proactor import SyncUringProactor
+
+    return SyncUringProactor()
 
 
 PROACTOR_CONTRACT_FACTORIES: list[Any] = [
@@ -119,6 +131,7 @@ PROACTOR_CONTRACT_FACTORIES: list[Any] = [
 ]
 if uring_api.is_available():
     PROACTOR_CONTRACT_FACTORIES.append(pytest.param(make_native_uring_proactor, id="uring"))
+    PROACTOR_CONTRACT_FACTORIES.append(pytest.param(make_native_sync_uring_proactor, id="uring-sync"))
 
 
 def make_selector_scheduler():
@@ -192,6 +205,8 @@ class _FakeUringRing:
         self.serve_count = 0
         self.stop_serving_count = 0
         self._stop_serving_event = threading.Event()
+        self._wait_event = threading.Event()
+        self._idle_event = threading.Event()
         self.break_count = 0
         self.completions: list[SimpleNamespace] = []
         self.accepted_peers: list[socket.socket] = []
@@ -204,7 +219,7 @@ class _FakeUringRing:
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
         self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object, int]] = []
-        self.submitted_accept_multishot: list[tuple[int, object, int]] = []
+        self.submitted_accept_multishot: list[tuple[int, object, int, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
         self.submitted_socket: list[tuple[int, int, int, int, object]] = []
         self.pending_connect_send: list[SimpleNamespace] = []
@@ -283,6 +298,23 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.break_count += 1
+        self._wait_event.set()
+        self._idle_event.set()
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        """Park until ``break_wait`` (matches ``uring_api.Ring.wait_idle``)."""
+
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        if timeout == 0:
+            if self._idle_event.is_set():
+                self._idle_event.clear()
+                return True
+            return False
+        woke = self._idle_event.wait(timeout=timeout)
+        if woke:
+            self._idle_event.clear()
+        return woke
 
     def _recv_buffer_for_entry(self, entry: object) -> memoryview:
         """Return the recv buffer for a oneshot entry.
@@ -609,12 +641,23 @@ class _FakeUringRing:
         completion.result = err
         self._deliver(completion)
 
-    def submit_accept_multishot(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
+    def submit_accept_multishot(
+        self,
+        fd: int,
+        user_data: object = None,
+        flags: int = 0,
+        base_sequence: int = 0,
+    ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_accept_multishot.append((fd, user_data, flags))
-        self.accept_multishot_sequence = 0
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_ACCEPT, multishot=True)
+        self.submitted_accept_multishot.append((fd, user_data, flags, base_sequence))
+        self.accept_multishot_sequence = base_sequence
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_ACCEPT,
+            multishot=True,
+            sequence=base_sequence,
+        )
         self.pending_accept_multishot.append(completion)
         return completion
 
@@ -890,10 +933,45 @@ class _FakeUringRing:
         self._deliver(completion)
         return completion
 
-    def wait(self, timeout: float | None = None) -> list[SimpleNamespace]:
-        if not self.completions:
-            return []
-        return [self.completions.pop(0)]
+    def wait(self, timeout: float | None = None) -> list[SimpleNamespace] | None:
+        """Harvest queued completions, matching ``uring_api.Ring.wait``.
+
+        With a callback: deliver non-empty batches and return None (empty skips
+        the callback). Without: return a list (possibly empty).
+        """
+
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        batch: list[SimpleNamespace]
+        if self.completions:
+            batch = [self.completions.pop(0)]
+        elif timeout == 0:
+            batch = []
+        else:
+            self._wait_event.clear()
+            if timeout is None:
+                self._wait_event.wait()
+            else:
+                self._wait_event.wait(timeout)
+            batch = [self.completions.pop(0)] if self.completions else []
+        if self.callback is not None:
+            if batch:
+                try:
+                    self.callback(batch)
+                except BaseException as exc:
+                    handler = self.exception_handler
+                    if handler is None:
+                        raise
+                    handler(
+                        {
+                            "message": "Exception in delivery callback",
+                            "exception": exc,
+                            "ring": self,
+                            "completions": batch,
+                        }
+                    )
+            return None
+        return batch
 
     def _deliver(self, completion: SimpleNamespace) -> None:
         if self.running and self.callback is not None:
@@ -913,6 +991,7 @@ class _FakeUringRing:
                 )
         else:
             self.completions.append(completion)
+            self._wait_event.set()
 
 
 class _FailingConnectUringRing(_FakeUringRing):

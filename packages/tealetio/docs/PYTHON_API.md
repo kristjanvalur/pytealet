@@ -58,6 +58,14 @@ In that case the proactor returns an already-done `Operation`, and callers can
 read its result directly without switching or waiting. Selector-backed proactors
 use this fast path for socket operations that succeed right away.
 
+Separately, **`scheduler.io` tries non-blocking socket syscalls first** for
+common stream work (accept, recv, send, and related continuous drains) and only
+submits to the proactor when that would block. Ready work completes as
+`IOWaiterSync` without a submit/CQE round-trip, which is a large win under
+`UringProactor` when backlog or peer data is already available. Connect still
+always goes through the proactor; shutdown/close run as direct stdlib calls.
+See `IO_MANAGER_DESIGN.md` (**Eager non-blocking first**) for the full policy.
+
 `UringProactor` also exposes positioned file I/O through io_uring:
 `openat(path, flags, mode=0, *, dfd=AT_FDCWD)` returns a caller-owned fd,
 `read(fd, n, offset)` and `read_into(fd, buf, offset)` read at an explicit
@@ -68,18 +76,44 @@ flags, mode, offsets, and fds are forwarded unchanged to `uring_api`; kernel
 and CQE errors surface as operation failures. `uring_api` may still raise
 `ValueError` synchronously at submit time for some invalid offsets or buffers.
 
-Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
-callback, *, recv_size=None)` emits
-`(conn, initial_data, recv_error)` for each accepted connection and remains
-active until it is cancelled or the backend reports a terminal error. Call
-`conn.getpeername()` when the peer address is needed.
-`initial_data` holds accept-time pre-read bytes when the backend honours
-`recv_size`; otherwise it is `None`. An empty `initial_data` (`b""`) means the
-peer closed the write side before sending data (EOF). `recv_error` is `None` on
-success; when it is set the callback must close `conn` (or delegate to a helper
-such as `start_server` that does). One-shot `sock_accept()` returns
-`(conn, initial_data)`; without `recv_size`, `initial_data` is `None`. Call
-`conn.getpeername()` when the peer address is needed.
+Long-lived socket operations use `ContinuousOperation`.
+`scheduler.io.accept_many(sock, callback, *, recv_size=None)` first drains ready
+connections with non-blocking `accept()`, then arms
+`proactor.accept_many(..., base_sequence=N)` when the listen socket would block
+(`N` is the number of eager accepts). User `callback` runs on the scheduler via
+the reorder marshal (`call_soon_threadsafe(..., immediate=True)`) for both eager
+and continuous legs. An `OSError` mid-eager drain stops the eager loop only:
+connections already delivered stay valid, and continuous accept still starts —
+eager does not classify errors; the proactor path does. Eager and continuous
+legs share one index sequence for reorder buffers. Each delivery is
+`(conn, initial_data)` (recv failures are handled before the user callback). The
+continuous leg remains active until cancelled or the backend reports a terminal
+error. Emulated oneshot `accept_many` (selector and uring fallback) treats soft
+accept errors (`EMFILE`, `ENFILE`, `ECONNABORTED`, …) as a clean end of that leg
+so hosts can re-arm; under sustained fd pressure re-arm can spin (listen fd stays
+readable) — preferred over failing `StreamServer`. Hard errors still fail the
+waitable. Call `conn.getpeername()` when the peer address is needed.
+
+Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
+(returns a `ContinuousOperation` like the proactor): it drains ready bytes with
+non-blocking `recv()`, then arms the proactor with the same `callback` and a
+continued `base_sequence`. No extra marshal or reorder. Intermediate eager
+chunks may arrive with `operation=None`; pure-eager EOF finishes a synthetic
+done operation; eager `OSError` falls through to the proactor (canonical error
+path). Eager startup does not apply provided-buffer pool backpressure: data
+already sitting in the socket receive buffer is copied into user memory (it may
+as well live there as in the kernel) until the consumer drains it; continuous
+legs still observe pool / ENOBUFS limits. `sock_recv_iter` / `RecvIterBuffer`
+start legs through this helper and cancel unfinished ops on the proactor as
+usual.
+
+`initial_data` holds accept-time pre-read bytes when `recv_size` is set;
+otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed
+the write side before sending data (EOF). One-shot `sock_accept()` also tries a
+direct accept first (returning `IOWaiterSync` when ready) and otherwise uses
+`proactor.accept`; without `recv_size`, `initial_data` is `None`. When
+`recv_size` is set, preread uses the same eager `recv` try as `sock_recv`
+before `proactor.recv`.
 `recv_size` must be positive when provided; values
 above 64 KiB (`2**16`) are silently capped. Leave `recv_size` at the default
 for server-speaks-first protocols.
@@ -90,26 +124,30 @@ bitmask on each readiness event and remains active until cancelled or the
 backend reports a terminal error. Poll works on any file descriptor, not only
 sockets.
 
-`create_socket(family, type, proto=0, *, flags=0, connect_to=None,
-initial_data=None)` creates a scheduler-contract socket (non-blocking,
-close-on-exec). On success it completes with the socket — the only non-``None``
-result in a create→connect→send composition; connect and send run as child
-operations before the root completes. Optional ``connect_to`` and ``initial_data`` are composed by
-``ProactorIOManager`` via ``IOWaitGroup`` (create → connect → send). ``UringProactor`` uses ``uring_api.Ring.submit_socket()`` when
-``IORING_OP_SOCKET`` is available. Extra ``flags`` are ORed with non-blocking
-and close-on-exec on the uring socket path. ``SelectorProactor`` ignores
-``flags`` beyond the scheduler defaults from ``configure_scheduler_socket()``
-(non-blocking, close-on-exec). ``initial_data`` without ``connect_to`` raises
-``ValueError``. ``scheduler.io.sock_create()`` blocks on the root operation and either
-returns the socket or raises. When ``connect_to`` is set the returned socket is
-already connected (and any ``initial_data`` was flushed). ``open_connection(…,
-initial_send=…)`` passes ``connect_to`` and ``initial_data`` through this path
-for TCP and Unix ``path=`` connects.
+`Proactor.create_socket(family, type, proto=0, *, flags=0)` creates a
+scheduler-contract socket (non-blocking, close-on-exec). ``UringProactor`` uses
+``uring_api.Ring.submit_socket()`` when ``IORING_OP_SOCKET`` is available; extra
+``flags`` are ORed with non-blocking and close-on-exec on that path.
+``SelectorProactor`` creates via stdlib ``socket.socket()`` and
+``configure_scheduler_socket()``.
+
+``scheduler.io.sock_create(family, type, proto=0, *, flags=0, connect_to=None,
+initial_data=None)`` creates sockets **directly** (stdlib + scheduler contract)
+rather than through ``Proactor.create_socket`` — blocking creation is faster than
+the uring path for this hot entry point. Create-only returns an
+``IOWaiterSync`` holding the socket (or create error); optional ``connect_to``
+and ``initial_data`` are composed via ``IOWaitGroup`` (connect → optional
+``sock_sendall``). ``initial_data`` without ``connect_to`` raises ``ValueError``.
+The call either returns the socket or raises. When ``connect_to`` is set the
+returned socket is already connected (and any ``initial_data`` was flushed via
+the same eager send path as ``sock_sendall``).
+``open_connection(…, initial_send=…)`` passes ``connect_to`` and
+``initial_data`` through this path for TCP and Unix ``path=`` connects.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
 ``ProactorIOManager.sock_connect(..., initial=...)`` via ``IOWaitGroup`` (connect
-→ optional send), not a separate proactor ``initial`` parameter.
+→ optional ``sock_sendall``), not a separate proactor ``initial`` parameter.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
@@ -257,6 +295,22 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
+`scheduler.io.sock_sendall(sock, data, progress=None)` tries exactly one non-blocking
+`send` first (by design: a cheap ready-now try, not a multi-send stdlib drain).
+When the full buffer is accepted, it returns `IOWaiterSync` without a proactor
+submit. On would-block it falls through to `proactor.send`; on a partial send it
+reports `progress(sent)` (if provided) and submits the remainder — the proactor
+continues the drain and reports further progress as cumulative totals from the
+original buffer. Empty payloads go straight to the proactor. With
+`UringProactor`, that remainder is completed via io_uring only.
+
+`scheduler.io.sock_shutdown(sock, how)` and `scheduler.io.sock_close(sock)` call
+stdlib `socket.shutdown` / `socket.close` on the calling thread and return
+`IOWaiterSync` (no proactor submit), matching asyncio stream teardown. Cancel
+outstanding proactor ops on the socket before `sock_close` — a concurrent
+uring leg may still own the fd via `detach` + ring close.
+`Proactor.shutdown` / `close_socket` remain for ordered ring teardown.
+
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each
 non-empty chunk before pulling the next. Track send progress in the iterable or
@@ -339,12 +393,16 @@ using the raw API, register
 blocks in `wait()` / `wait_async()`. Scheduler production code wakes through
 `IOWaiter` / `call_soon_threadsafe` → `proactor.wake_wait()` instead.
 
-`UringProactor` and `ThreadedSelectorProactor` use an inlined
-`EventWakeupManager` for sync and async waits. Call `bind_loop()` before
-`wait_async()`; that prepares the asyncio waiter `wake_wait()` signals.
-`wait_async()` parks on that event. `SelectorProactor`
-`wait_async()` still runs `wait()` in a thread-pool executor; optional
-`set_async_break()` can install a host-loop hook for that path.
+`UringProactor.wake_wait()` always calls `ring.break_wait()`, which opens the
+host `wait_idle` park immediately. The ring submits an internal NOP only when
+completion service is idle (inline `ring.wait()` on an empty CQ); with service
+workers the NOP is skipped. Threaded `wait()` parks on `ring.wait_idle()`;
+`wait_async()` runs the same `wait` binding in a thread-pool executor (call
+`bind_loop()` first).
+`ThreadedSelectorProactor` still uses an inlined `EventWakeupManager` for sync
+and async waits. `SelectorProactor.wait_async()` still runs `wait()` in a
+thread-pool executor; optional `set_async_break()` can install a host-loop hook
+for that path.
 
 ## Blocking IO facade (`scheduler.io`)
 
@@ -381,8 +439,10 @@ proactor callers. `tealetio.streams` requires a proactor scheduler and always
 goes through `scheduler.io`.
 
 Low-level submission stays on `scheduler.proactor` (`Operation` returns,
-`recv_many`, `accept_many`, and similar). `ProactorFile` blocks through an
-`OperationWaiter` protocol implemented by `ProactorIOManager`.
+raw `recv_many`, `accept_many`, and similar). Prefer `scheduler.io` for
+application and stream code so you get the eager non-blocking try where it
+applies. `ProactorFile` blocks through an `OperationWaiter` protocol implemented
+by `ProactorIOManager`.
 
 `SelectorProactor` is the simple single-threaded selector-backed prototype.
 `ThreadedSelectorProactor` uses the same socket operation surface, but polls the
@@ -648,14 +708,11 @@ metadata, and selector-backed backends share one handle type.
 
 `scheduler.io.sock_create(family, type, proto=0, *, flags=0, connect_to=None,
 initial_data=None)` is the socket creation entry point for proactor-backed
-blocking IO. It returns a non-blocking, close-on-exec socket. When
-``connect_to`` is set, ``ProactorIOManager`` composes connect (and optional
-initial send) via delivery callbacks before the root completes. `UringProactor` uses
-`uring_api.Ring.submit_socket()` (`IORING_OP_SOCKET`) when probed, then wraps
-the returned fd with `socket.socket(fileno=fd)` (the same
-pattern already used for `accept_many` completions). Connect/server helpers call
-`scheduler.io.sock_create()` so uring-native creation stays behind one policy
-gate.
+blocking IO. It creates a non-blocking, close-on-exec socket with the stdlib
+(not via ``Proactor.create_socket`` / ``IORING_OP_SOCKET``). When ``connect_to``
+is set, ``ProactorIOManager`` composes connect (and optional initial send) via
+``IOWaitGroup`` before the root completes. Connect/server helpers call
+``scheduler.io.sock_create()`` so create policy stays behind one gate.
 
 ## Name resolution
 
@@ -687,11 +744,13 @@ semantics). When ``stream_factory`` is omitted, ``start_server()`` uses
 a shared pool across clients). Close listeners and
 discard late deliveries in the accept callback after shutdown (``StreamServer``
 uses ``_closed``).
-Each accept arms `proactor.accept_many()`. On the worker delivery thread,
-``accept_many_streams()`` wraps the connection as streams and starts
-``recv_many`` before the stream pair is posted onto the scheduler reorder buffer
-(one `call_soon_threadsafe()` hop per leg, with `immediate=True` when already on
-the owner thread), so data can arrive while the handler is still queued.
+Each accept loop call drains ready connections with direct `accept()` when
+possible, then arms `proactor.accept_many` for the wait. On the continuous
+delivery path, ``accept_many_streams()`` wraps the connection as streams and
+starts ``recv_many`` before the stream pair is posted onto the scheduler reorder
+buffer (one `call_soon_threadsafe()` hop per leg, with `immediate=True` when
+already on the owner thread), so data can arrive while the handler is still
+queued. Eager (ready-queue) deliveries open streams on the accept-loop thread.
 A peer that connects without sending leaves ``recv_many`` pending; the handler
 still receives the stream pair and can apply read timeouts or idle close policy.
 The handler runs in a spawned tealet.

@@ -226,6 +226,10 @@ class StreamServer:
         assert self._listen_sock is not None
 
         try:
+            # Emulated oneshot accept_many finishes soft EMFILE/etc. without
+            # exception so this loop re-arms. Under sustained fd pressure that
+            # can busy-loop (listen fd stays readable); known tradeoff vs
+            # killing the server — see socket_helpers soft-accept note.
             while not self._closed:
                 try:
                     io.accept_many_streams(

@@ -2,13 +2,52 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import struct
 
-__all__ = ["abortive_close", "configure_scheduler_socket", "socket_from_uring_fd"]
+__all__ = [
+    "abortive_close",
+    "configure_scheduler_socket",
+    "is_soft_accept_error",
+    "is_soft_accept_errno",
+    "socket_from_uring_fd",
+]
 
 _LINGER_ABORT = struct.pack("ii", 1, 0)
+
+# Transient accept failures: finish an emulated oneshot leg cleanly (no exception)
+# so hosts such as StreamServer re-arm instead of treating the accept stream as
+# dead. Hard errors (EBADF, EINVAL, …) still terminalise with the OSError.
+#
+# Known cost under sustained fd pressure (EMFILE/ENFILE): the listen socket often
+# stays readable, so re-arm can spin until an fd frees. Bubbling these to kill
+# StreamServer is worse (transient). A sleep/backoff on soft re-arm is future
+# work; raise the process fd limit when this shows up in production.
+_SOFT_ACCEPT_ERRNOS: frozenset[int] = frozenset(
+    {
+        errno.EMFILE,
+        errno.ENFILE,
+        errno.ECONNABORTED,
+        getattr(errno, "EPROTO", -1),
+        getattr(errno, "ENOBUFS", -1),
+        getattr(errno, "ENOMEM", -1),
+    }
+    - {-1}
+)
+
+
+def is_soft_accept_errno(err: int) -> bool:
+    """Return True when ``err`` is a transient accept failure (re-arm friendly)."""
+
+    return err in _SOFT_ACCEPT_ERRNOS
+
+
+def is_soft_accept_error(exc: BaseException) -> bool:
+    """Return True when ``exc`` is a soft accept ``OSError`` (re-arm friendly)."""
+
+    return isinstance(exc, OSError) and exc.errno is not None and is_soft_accept_errno(exc.errno)
 
 
 def socket_from_uring_fd(fd: int) -> socket.socket:

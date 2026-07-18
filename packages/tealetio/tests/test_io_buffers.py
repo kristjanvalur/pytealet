@@ -43,6 +43,83 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
+    def test_writes_while_busy_coalesce_into_one_leg(self, scheduler: SyncProactorScheduler) -> None:
+        """Line-sized writes while a send is in flight join into one next leg."""
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            first = Operation[None](kind="send", fileobj=writer)
+            real_sendall = scheduler.io.sock_sendall
+            seen: list[bytes] = []
+
+            def staged_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del sock, progress
+                cargo = bytes(data)
+                seen.append(cargo)
+                if len(seen) == 1:
+                    return IOWaiter(scheduler.io, first)
+                operation = Operation[None](kind="send", fileobj=writer)
+                operation._finish(result=None)
+                return IOWaiter(scheduler.io, operation)
+
+            scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
+            # min_write=0 so the first write starts a leg immediately
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
+            send_buffer.write(b"HEAD\n")
+            for line in (b"a\n", b"b\n", b"c\n"):
+                send_buffer.write(line)
+            assert len(seen) == 1
+            assert seen[0] == b"HEAD\n"
+            # in flight + coalesced backlog
+            assert send_buffer.pending_bytes == len(b"HEAD\n") + len(b"a\nb\nc\n")
+            first._finish(result=None)
+            assert seen == [b"HEAD\n", b"a\nb\nc\n"]
+            send_buffer.flush()
+            assert send_buffer.pending_bytes == 0
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
+    def test_idle_writes_hold_until_min_write_or_flush(self, scheduler: SyncProactorScheduler) -> None:
+        """Small idle writes must not start a leg until min_write or flush."""
+
+        reader, writer = socket.socketpair()
+        try:
+            real_sendall = scheduler.io.sock_sendall
+            seen: list[bytes] = []
+
+            def capture_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del sock, progress
+                cargo = bytes(data)
+                seen.append(cargo)
+                operation = Operation[None](kind="send", fileobj=writer)
+                operation._finish(result=None)
+                return IOWaiter(scheduler.io, operation)
+
+            scheduler.io.sock_sendall = capture_sendall  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=100)
+            for _ in range(9):
+                send_buffer.write(b"0123456789")
+            assert seen == []
+            assert send_buffer.pending_bytes == 90
+            send_buffer.write(b"0123456789")
+            assert seen == [b"0123456789" * 10]
+            assert send_buffer.pending_bytes == 0
+
+            send_buffer.write(b"short")
+            assert seen == [b"0123456789" * 10]
+            assert send_buffer.pending_bytes == 5
+            send_buffer.flush()
+            assert seen == [b"0123456789" * 10, b"short"]
+            assert send_buffer.pending_bytes == 0
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
     def test_flush_waits_for_callback_driven_completion(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
@@ -80,6 +157,7 @@ class TestSendBuffer:
                 scheduler=scheduler,
                 high_water=1024,
                 low_water=256,
+                min_write=0,
             )
             send_buffer.write(b"x" * 100)
             send_buffer.drain()
@@ -111,6 +189,7 @@ class TestSendBuffer:
                 scheduler=scheduler,
                 high_water=10,
                 low_water=2,
+                min_write=0,
             )
 
             def exercise() -> None:
@@ -156,7 +235,7 @@ class TestSendBuffer:
                 return IOWaiter(scheduler.io, pending)
 
             scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
-            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
             send_buffer.write(b"hello")
             assert send_buffer.pending_bytes == 5
             pending._finish(result=None)
@@ -200,14 +279,17 @@ class TestSendBuffer:
 
             scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
             scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            # default min_write holds "ab"; write_eof must force-send before SHUT_WR
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
 
             def exercise() -> None:
                 send_buffer.write(b"ab")
+                assert not pending_ops
                 send_buffer.write_eof()
                 assert send_buffer.eof_pending
                 assert not send_buffer.write_eof_done
                 assert shutdown_calls == []
+                assert len(pending_ops) == 1
                 pending_ops[0]._finish(result=None)
                 assert send_buffer.write_eof_done
                 assert shutdown_calls == [socket.SHUT_WR]
@@ -293,7 +375,7 @@ class TestSendBuffer:
                 raise OSError("submit failed")
 
             scheduler.io.sock_sendall = raising_sendall  # type: ignore[method-assign]
-            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
 
             with pytest.raises(OSError, match="submit failed"):
                 send_buffer.write(b"ab")
@@ -303,9 +385,7 @@ class TestSendBuffer:
             scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
             writer.close()
 
-    def test_chained_submit_failure_restores_pending_and_sticks_error(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_chained_submit_failure_restores_pending_and_sticks_error(self, scheduler: SyncProactorScheduler) -> None:
         _reader, writer = socket.socketpair()
         try:
             pending_ops: list[Operation[None]] = []
@@ -322,7 +402,7 @@ class TestSendBuffer:
                 raise OSError("chained submit failed")
 
             scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
-            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
             send_buffer.write(b"ab")
             send_buffer.write(b"cd")
             with pytest.raises(OSError, match="chained submit failed"):
@@ -332,6 +412,39 @@ class TestSendBuffer:
                 send_buffer.flush()
         finally:
             scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            writer.close()
+
+    def test_nested_eager_complete_does_not_reprepend_already_sent_chunk(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        """Eager IOWaiterSync runs _on_leg_complete nested; do not restore sent bytes."""
+
+        from tealetio.io_waiter import IOWaiterSync
+
+        _reader, writer = socket.socketpair()
+        real_sendall = scheduler.io.sock_sendall
+        real_complete = SendBuffer._on_leg_complete
+        try:
+
+            def sync_sendall(sock: socket.socket, data, progress=None):
+                del sock, data, progress
+                return IOWaiterSync(None)
+
+            def boom_complete(self: SendBuffer) -> None:
+                real_complete(self)
+                raise RuntimeError("handler failed")
+
+            scheduler.io.sock_sendall = sync_sendall  # type: ignore[method-assign]
+            SendBuffer._on_leg_complete = boom_complete  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
+            with pytest.raises(RuntimeError, match="handler failed"):
+                send_buffer.write(b"ab")
+            # bytes were accepted by sock_sendall; must not re-queue them
+            assert send_buffer.pending_bytes == 0
+            assert send_buffer._pending is None
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            SendBuffer._on_leg_complete = real_complete  # type: ignore[method-assign]
             writer.close()
 
     def test_close_drains_pending_after_in_flight_leg(self, scheduler: SyncProactorScheduler) -> None:
@@ -348,7 +461,7 @@ class TestSendBuffer:
                 return IOWaiter(scheduler.io, operation)
 
             scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
-            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
 
             def exercise() -> None:
                 send_buffer.write(b"ab")
@@ -388,7 +501,7 @@ class TestSendBuffer:
                 return IOWaiter(scheduler.io, pending)
 
             scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
-            send_buffer = scheduler.io._open_send_buffer(writer)
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
 
             def sender() -> None:
                 send_buffer.write(b"hello")

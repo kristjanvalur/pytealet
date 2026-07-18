@@ -307,6 +307,48 @@ def test_ring_accept_multishot_completion_when_available():
             client.close()
         server.close()
 
+
+def test_ring_accept_multishot_base_sequence_when_available():
+    require_uring()
+    if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
+        pytest.skip("IORING_ACCEPT_MULTISHOT is not available")
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    clients = []
+    accepted = []
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        with uring_api.Ring() as ring:
+            ring.submit_accept_multishot(
+                server.fileno(),
+                None,
+                socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC,
+                5,
+            )
+            clients.append(connect_to_listener(server))
+            first = wait_one(ring, 1.0)
+            clients.append(connect_to_listener(server))
+            second = wait_one(ring, 1.0)
+
+            assert first is not None
+            assert second is not None
+            for sequence, completion in ((5, first), (6, second)):
+                if completion.res < 0:
+                    errno_value = -completion.res
+                    if errno_value in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
+                        pytest.skip(f"IORING_ACCEPT_MULTISHOT is not supported: errno {errno_value}")
+                assert completion.sequence == sequence
+                accepted.append(socket.socket(fileno=completion.result))
+    finally:
+        for sock in accepted:
+            sock.close()
+        for client in clients:
+            client.close()
+        server.close()
+
+
 def test_ring_connect_completion_when_available():
     require_uring()
 

@@ -382,16 +382,17 @@ static PyObject *client_submit_accept_multishot(PyObject *module, PyObject *args
     PyObject *user_data;
     int fd;
     unsigned int flags = 0;
+    unsigned long long base_sequence = 0;
 
     (void)module;
     if (!api) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiO|I:submit_accept_multishot", &ring, &fd, &user_data, &flags)) {
+    if (!PyArg_ParseTuple(args, "OiO|IK:submit_accept_multishot", &ring, &fd, &user_data, &flags, &base_sequence)) {
         return NULL;
     }
-    if (api->ring_submit_accept_multishot(ring, fd, flags, user_data) < 0) {
+    if (api->ring_submit_accept_multishot(ring, fd, flags, user_data, base_sequence) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;

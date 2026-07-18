@@ -30,7 +30,7 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
                                          unsigned long long leg_index);
 
 static int append_ready_completion(UringApiRing *ring, UringApiCompletion *completion, int res, unsigned int flags,
-                                   unsigned long long leg_index, PyObject *ready) {
+                                   unsigned long long leg_index, PyObject **ready) {
     PyObject *result;
     bool drop_in_flight_ref;
 
@@ -44,6 +44,7 @@ static int append_ready_completion(UringApiRing *ring, UringApiCompletion *compl
         goto fail;
     }
 
+    /* wake / zero-copy NOTIF and similar internals: handled, never listed. */
     if (result == Py_None) {
         if (drop_in_flight_ref) {
             Py_DECREF(completion);
@@ -51,11 +52,20 @@ static int append_ready_completion(UringApiRing *ring, UringApiCompletion *compl
         Py_DECREF(result);
         return 0;
     }
-    if (PyList_Append(ready, result) < 0) {
+    /* lazy list: allocate only when the first user-visible completion is ready. */
+    if (*ready == NULL) {
+        *ready = PyList_New(1);
+        if (!*ready) {
+            Py_DECREF(result);
+            goto fail;
+        }
+        PyList_SET_ITEM(*ready, 0, result);
+    } else if (PyList_Append(*ready, result) < 0) {
         Py_DECREF(result);
         goto fail;
+    } else {
+        Py_DECREF(result);
     }
-    Py_DECREF(result);
     if (drop_in_flight_ref) {
         Py_DECREF(completion);
     }
@@ -68,63 +78,152 @@ fail:
 }
 
 static PyObject *staging_build_ready_list(UringApiRing *ring, UringApiStagingBuffer *staging) {
-    PyObject *ready;
+    PyObject *ready = NULL;
     size_t index;
 
     /* build failure is fatal for this drain: earlier rows may already have
      * cqe_seen set and complete() applied. no special rollback — when nothing
-     * works, nothing works (same contract as callback invocation failure). */
-    ready = PyList_New(0);
-    if (!ready) {
-        return NULL;
-    }
+     * works, nothing works (same contract as callback invocation failure).
+     * The list is created only when a user-visible completion is appended;
+     * wake-only batches never allocate until the empty-list return below. */
     for (index = 0; index < staging->count; index++) {
         UringApiStagedCQE *staged = &staging->entries[index];
-        if (append_ready_completion(ring, staged->completion, staged->res, staged->flags, staged->leg_index, ready) <
+        if (append_ready_completion(ring, staged->completion, staged->res, staged->flags, staged->leg_index, &ready) <
             0) {
-            Py_DECREF(ready);
+            Py_XDECREF(ready);
             return NULL;
         }
+    }
+    if (ready == NULL) {
+        /* pull-mode wait (no delivery callback): return [] for timeout, break_wait,
+         * or wake/NOTIF-only batches. Callback mode still receives this empty list
+         * briefly, skips the callback, and returns None from wait(). */
+        return PyList_New(0);
     }
     return ready;
 }
 
-PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+/*
+ * Wake entry point:
+ * - open the host idle park for wait_idle() immediately
+ * - best-effort internal NOP when a wait() reaper may be blocked on an empty CQ
+ *
+ * While completion service workers are active they own CQ reaping, so the NOP is
+ * skipped (idle park only) unless force_nop is set — stop_serving needs a NOP to
+ * interrupt workers blocked in the kernel wait. When the SQ is full, NOP failure
+ * is ignored: a real CQE will arrive soon enough. The idle park never waits on
+ * the NOP path.
+ */
+int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
-    int failed = 0;
+    int fatal = 0;
+    int want_nop = force_nop;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
-        failed = 1;
+        fatal = 1;
     } else {
-        completion = UringApiCompletion_new_pending(URING_API_PENDING_WAKE, Py_None);
-        if (completion) {
-            sqe = get_sqe(self);
-            if (!sqe) {
-                failed = 1;
-            } else {
-                io_uring_prep_nop(sqe);
-                sqe_set_completion(self, sqe, completion);
-                if (submit_one(self) < 0) {
-                    failed = 1;
-                }
-            }
-        } else {
-            failed = 1;
+        if (!force_nop) {
+            /* workers already reap; host only needs wait_idle */
+            want_nop = !delivery_is_running_locked(self);
+        }
+        if (want_nop && ring_check_submit_thread(self) < 0) {
+            fatal = 1;
         }
     }
     Py_END_CRITICAL_SECTION();
 
-    if (failed) {
-        Py_XDECREF(completion);
+    if (fatal) {
+        return -1;
+    }
+
+    /* host park first: independent of SQ capacity and of the NOP */
+    UringApiIdlePark_signal(&self->idle);
+
+    if (!want_nop) {
+        return 0;
+    }
+
+    /* best-effort NOP for wait() reapers; SQ full / OOM / submit errors ignored */
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        PyErr_Clear();
+    } else {
+        completion = UringApiCompletion_new_pending(URING_API_PENDING_WAKE, Py_None);
+        if (!completion) {
+            PyErr_Clear();
+        } else {
+            sqe = get_sqe(self);
+            if (!sqe) {
+                PyErr_Clear();
+                Py_DECREF(completion);
+            } else {
+                io_uring_prep_nop(sqe);
+                sqe_set_completion(self, sqe, completion);
+                if (submit_one(self) < 0) {
+                    /* SQE keeps the completion pointer for a later submit/reap */
+                    PyErr_Clear();
+                }
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    return 0;
+}
+
+PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    if (UringApiRing_break_wait_impl(self, 0) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
 }
 
+/*
+ * Park until break_wait / close, or timeout. Host-side only: not CQ reaping.
+ * timeout: None = forever, float/int seconds (0 = poll). Returns True if signalled.
+ */
+PyObject *UringApiRing_wait_idle(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"timeout", NULL};
+    PyObject *timeout_obj = Py_None;
+    double timeout_sec;
+    const double *timeout_ptr;
+    int signaled;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", keywords, &timeout_obj)) {
+        return NULL;
+    }
+    if (timeout_obj == Py_None) {
+        timeout_ptr = NULL;
+    } else {
+        if (PyLong_Check(timeout_obj)) {
+            long value = PyLong_AsLong(timeout_obj);
+            if (value == -1 && PyErr_Occurred()) {
+                return NULL;
+            }
+            timeout_sec = (double)value;
+        } else {
+            timeout_sec = PyFloat_AsDouble(timeout_obj);
+            if (PyErr_Occurred()) {
+                return NULL;
+            }
+        }
+        if (timeout_sec < 0.0) {
+            PyErr_SetString(PyExc_ValueError, "timeout must be non-negative or None");
+            return NULL;
+        }
+        timeout_ptr = &timeout_sec;
+    }
+
+    signaled = UringApiIdlePark_wait(&self->idle, timeout_ptr);
+    if (signaled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
 int UringApiRing_stop_delivery(UringApiRing *self) {
-    PyObject *wakeup = NULL;
     bool running;
 
     Py_BEGIN_CRITICAL_SECTION(self);
@@ -136,11 +235,10 @@ int UringApiRing_stop_delivery(UringApiRing *self) {
         return 0;
     }
 
-    wakeup = UringApiRing_break_wait(self, NULL);
-    if (!wakeup) {
+    /* force NOP: workers may be blocked in io_uring_wait_cqe */
+    if (UringApiRing_break_wait_impl(self, 1) < 0) {
         return -1;
     }
-    Py_DECREF(wakeup);
     return 0;
 }
 
@@ -379,15 +477,10 @@ static void delivery_request_stop(UringApiRing *self) {
 }
 
 static void delivery_request_stop_and_wake(UringApiRing *self) {
-    PyObject *wakeup;
-
     delivery_request_stop(self);
-    wakeup = UringApiRing_break_wait(self, NULL);
-    if (!wakeup) {
+    if (UringApiRing_break_wait_impl(self, 1) < 0) {
         PyErr_WriteUnraisable((PyObject *)self);
-        return;
     }
-    Py_DECREF(wakeup);
 }
 
 static int delivery_report_callback_error(UringApiRing *self, PyObject *ready) {
@@ -465,11 +558,21 @@ handler_failed:
     return -1;
 }
 
+static bool delivery_has_callback(UringApiRing *self) {
+    bool found;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    found = self->delivery_callback != NULL || self->c_delivery_callback != NULL;
+    Py_END_CRITICAL_SECTION();
+    return found;
+}
+
 static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
     UringApiCompletionCallback c_callback;
     void *c_callback_user_data;
 
-    if (PyList_GET_SIZE(ready) == 0) {
+    /* empty batches (timeout, break_wait, wake-only) never call the callback. */
+    if (ready == NULL || PyList_GET_SIZE(ready) == 0) {
         return 0;
     }
 
@@ -499,6 +602,23 @@ static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
     }
     Py_DECREF(call_result);
     return 0;
+}
+
+/* When a delivery callback is registered, invoke it for non-empty batches and
+ * return None. Pull mode (no callback) returns the list unchanged. */
+PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, PyObject *ready) {
+    if (!ready) {
+        return NULL;
+    }
+    if (!delivery_has_callback(self)) {
+        return ready;
+    }
+    if (delivery_invoke_batch(self, ready) < 0) {
+        Py_DECREF(ready);
+        return NULL;
+    }
+    Py_DECREF(ready);
+    Py_RETURN_NONE;
 }
 
 PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
@@ -540,6 +660,7 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             wait_failed = true;
             break;
         }
+        /* wake-only / timeout batches are empty lists; skip the callback. */
         if (delivery_invoke_batch(self, ready) < 0) {
             Py_DECREF(ready);
             wait_failed = true;
@@ -576,6 +697,7 @@ PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs
     struct __kernel_timespec timeout;
     PyObject *timeout_obj = Py_None;
     int timeout_kind;
+    PyObject *ready;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", keywords, &timeout_obj)) {
         return NULL;
@@ -585,5 +707,6 @@ PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs
         return NULL;
     }
 
-    return UringApiRing_wait_impl(self, timeout_kind, &timeout, false, NULL);
+    ready = UringApiRing_wait_impl(self, timeout_kind, &timeout, false, NULL);
+    return UringApiRing_wait_finish_with_optional_delivery(self, ready);
 }

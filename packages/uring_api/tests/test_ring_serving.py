@@ -108,6 +108,132 @@ def test_ring_break_wait_interrupts_wait_when_available():
     assert thread.is_alive() is False
     assert results == [[]]
 
+
+def test_ring_wait_idle_timeout_when_available():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        assert ring.wait_idle(0.05) is False
+        assert ring.wait_idle(0) is False
+
+
+def test_ring_break_wait_wakes_wait_idle_when_available():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        results: list[bool] = []
+        thread = threading.Thread(target=lambda: results.append(ring.wait_idle(10.0)))
+        thread.start()
+        # give the waiter a moment to park
+        time.sleep(0.05)
+        ring.break_wait()
+        thread.join(1.0)
+        if thread.is_alive():
+            ring.break_wait()
+            thread.join(1.0)
+
+    assert thread.is_alive() is False
+    assert results == [True]
+
+
+def test_ring_break_wait_latches_wait_idle_before_park_when_available():
+    """break_wait opens wait_idle immediately (not only after a NOP CQE)."""
+
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        ring.break_wait()
+        # latch is open without reaping the internal NOP from the CQ
+        assert ring.wait_idle(0) is True
+        assert ring.wait_idle(0) is False
+
+
+def test_ring_break_wait_opens_idle_while_serving_when_available():
+    """While serve workers own the CQ, break_wait still opens wait_idle (no wait())."""
+
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        ring.callback = lambda _batch: None
+        thread = threading.Thread(target=ring.serve_completions)
+        thread.start()
+        wait_until_running(ring)
+        try:
+            ring.break_wait()
+            assert ring.wait_idle(0) is True
+        finally:
+            ring.stop_serving()
+            thread.join(1.0)
+            assert not thread.is_alive()
+
+
+def test_ring_wait_with_callback_delivers_and_returns_none_when_available():
+    require_uring()
+
+    left, right = socket.socketpair()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        batches: list[list[uring_api.Completion]] = []
+
+        def callback(batch):
+            batches.append(list(batch))
+
+        with uring_api.Ring() as ring:
+            ring.callback = callback
+            ring.submit_recv(left.fileno(), bytearray(1), 170)
+            right.send(b"x")
+            result = ring.wait(1.0)
+
+        assert result is None
+        assert len(batches) == 1
+        assert len(batches[0]) == 1
+        assert batches[0][0].user_data == 170
+        assert batches[0][0].res == 1
+    finally:
+        left.close()
+        right.close()
+
+
+def test_ring_wait_with_callback_skips_empty_batch_when_available():
+    require_uring()
+
+    calls: list[object] = []
+
+    def callback(batch):
+        calls.append(list(batch))
+
+    with uring_api.Ring() as ring:
+        ring.callback = callback
+        result = ring.wait(0.0)
+
+    assert result is None
+    assert calls == []
+
+
+def test_ring_break_wait_with_callback_returns_none_without_callback_when_available():
+    require_uring()
+
+    calls: list[object] = []
+    results: list[object] = []
+
+    def callback(batch):
+        calls.append(list(batch))
+
+    with uring_api.Ring() as ring:
+        ring.callback = callback
+        thread = threading.Thread(target=lambda: results.append(ring.wait(10.0)))
+        thread.start()
+        ring.break_wait()
+        thread.join(1.0)
+        if thread.is_alive():
+            ring.break_wait()
+            thread.join(1.0)
+
+    assert thread.is_alive() is False
+    assert results == [None]
+    assert calls == []
+
 def test_ring_rejects_concurrent_wait_when_available():
     require_uring()
 

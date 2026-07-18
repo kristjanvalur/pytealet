@@ -81,6 +81,10 @@ internally and releases the retained buffer.
 `submit_accept()` and `submit_accept_multishot()` accept optional accept flags;
 pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
 be ready for proactor ownership without a follow-up `fcntl()` call.
+`submit_accept_multishot()` also accepts optional `base_sequence` (default 0),
+matching `submit_recv_multishot`: the first successful accept leg uses that
+index in `completion.sequence`, then increments. Use it when continuing a
+stream after eager accepts already delivered earlier indices.
 `submit_accept()` and `submit_accept_multishot()` deliver the accepted fd in
 `completion.res` and `completion.result`. Call `getpeername()` on the fd when
 you need the peer address.
@@ -382,8 +386,24 @@ Rings created with `IORING_SETUP_DEFER_TASKRUN` do not follow that worker-pool
 model. Submit, `wait()`, `serve_completions()`, and `break_wait()` must all run
 on the owning thread established by the first gated call.
 
-`break_wait()` prepares and submits an internal NOP. When the reaper consumes that
-completion, `wait()` returns an empty list rather than a user completion.
+`break_wait()` is the single ring wakeup entry point. It always opens the
+host-side `wait_idle()` park **immediately**. When completion service is not
+active, it also best-effort submits **one** internal NOP (not a user completion)
+so a caller blocked in `wait()` on an **empty CQ** can return. While
+`serve_completions()` workers own CQ reaping, the NOP is skipped — only the idle
+park is needed. `stop_serving()` still forces a NOP so workers blocked in the
+kernel wait can observe stop.
+
+`wait_idle` is a **multi-signaller, single-waiter** park: many threads may call
+`break_wait()`, but only one host may park at a time (the proactor driver).
+Concurrent `wait_idle` waiters are not supported.
+
+If the submission queue is full, the NOP may be omitted and `break_wait()` still
+succeeds: a full SQ means outstanding work, so a real CQE will arrive soon
+enough. The idle park does not wait on the NOP path.
+
+The NOP is not a broadcast to worker threads. Serve workers that drain a wake CQE
+treat it as an empty/internal batch and continue.
 
 Serving workers use the same receive side as `wait()`, so public `wait()` calls
 raise `RuntimeError` while they are running. Each worker calls
@@ -392,17 +412,17 @@ exit. Workers compete for an internal wait lock, so only one worker is inside
 `io_uring_wait_cqe()` at a time, while another worker can dispatch a completion
 callback.
 
-`stop_serving()` asks workers to exit and wakes the active waiter with
-`break_wait()`. The caller owns the threads, so the caller must join them before
-closing the ring; `close()` and `__exit__()` raise while completion service is
-still active. `reset_serving()` clears the stop flag so a fresh set of workers
-can enter `serve_completions()` again. If a delivery callback raises, the ring
-invokes `exception_handler` when one is set. The handler receives a context dict
-with `message`, `exception`, `ring`, and `completions` (the batch being
-delivered). When the handler returns normally, that worker continues serving. When
-no handler is set, or the handler itself raises, `serve_completions()` exits with
-the exception; only that worker stops — other serving workers keep running until
-`stop_serving()`.
+`stop_serving()` sets the stop flag and uses `break_wait()` so a worker blocked
+in the kernel wait can observe stop and exit. The caller owns the threads, so the
+caller must join them before closing the ring; `close()` and `__exit__()` raise
+while completion service is still active. `reset_serving()` clears the stop flag
+so a fresh set of workers can enter `serve_completions()` again. If a delivery
+callback raises, the ring invokes `exception_handler` when one is set. The handler
+receives a context dict with `message`, `exception`, `ring`, and `completions`
+(the batch being delivered). When the handler returns normally, that worker
+continues serving. When no handler is set, or the handler itself raises,
+`serve_completions()` exits with the exception; only that worker stops — other
+serving workers keep running until `stop_serving()`.
 
 Native C clients can register a worker-thread callback through the C API. When a
 C callback is present, the serving worker calls it instead of `Ring.callback`;

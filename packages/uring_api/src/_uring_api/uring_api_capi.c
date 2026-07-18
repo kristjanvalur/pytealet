@@ -260,12 +260,13 @@ int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int flags, Py
     return discard_completion_result(UringApiRing_submit_accept_impl((UringApiRing *)ring, fd, flags, user_data));
 }
 
-int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
+int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data,
+                                           unsigned long long base_sequence) {
     if (!ring_type_check(ring)) {
         return -1;
     }
     return discard_completion_result(
-        UringApiRing_submit_accept_multishot_impl((UringApiRing *)ring, fd, flags, user_data));
+        UringApiRing_submit_accept_multishot_impl((UringApiRing *)ring, fd, flags, user_data, base_sequence));
 }
 
 int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data) {
@@ -384,38 +385,35 @@ int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int prot
 }
 
 int UringApiCapi_RingBreakWait(PyObject *ring) {
-    PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = UringApiRing_break_wait((UringApiRing *)ring, NULL);
-    if (!result) {
-        return -1;
-    }
-    Py_DECREF(result);
-    return 0;
+    return UringApiRing_break_wait_impl((UringApiRing *)ring, 0);
 }
 
 PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
     struct __kernel_timespec timeout_value;
+    PyObject *ready;
+
     if (!ring_type_check(ring)) {
         return NULL;
     }
     if (timeout < 0.0) {
-        return UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_BLOCKING, NULL, false, NULL);
+        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_BLOCKING, NULL, false, NULL);
+    } else if (timeout == 0.0) {
+        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_PEEK, NULL, false, NULL);
+    } else {
+        timeout_value.tv_sec = (long long)timeout;
+        timeout_value.tv_nsec = (long long)((timeout - (double)timeout_value.tv_sec) * 1000000000.0);
+        if (timeout_value.tv_nsec < 0) {
+            timeout_value.tv_nsec = 0;
+        }
+        if (timeout_value.tv_nsec > 999999999) {
+            timeout_value.tv_nsec = 999999999;
+        }
+        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_TIMEOUT, &timeout_value, false, NULL);
     }
-    if (timeout == 0.0) {
-        return UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_PEEK, NULL, false, NULL);
-    }
-    timeout_value.tv_sec = (long long)timeout;
-    timeout_value.tv_nsec = (long long)((timeout - (double)timeout_value.tv_sec) * 1000000000.0);
-    if (timeout_value.tv_nsec < 0) {
-        timeout_value.tv_nsec = 0;
-    }
-    if (timeout_value.tv_nsec > 999999999) {
-        timeout_value.tv_nsec = 999999999;
-    }
-    return UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_TIMEOUT, &timeout_value, false, NULL);
+    return UringApiRing_wait_finish_with_optional_delivery((UringApiRing *)ring, ready);
 }
 
 int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback) {

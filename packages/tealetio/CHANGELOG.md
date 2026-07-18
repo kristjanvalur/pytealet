@@ -8,10 +8,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Docs: ``IO_MANAGER_DESIGN.md`` / ``PYTHON_API.md`` /
+  ``SCHEDULER_RUNTIME_API_SPEC.md`` document the **eager non-blocking first**
+  policy on ``scheduler.io`` (try the socket, fall through to the proactor only
+  when needed) as the performance-oriented design for stream accept/recv/send.
+- ``ProactorIOManager.sock_accept``, ``accept_many``, and ``accept_many_streams``
+  try non-blocking ``accept()`` on the calling thread while the listen socket is
+  ready, then fall through to the proactor continuous/one-shot path when it
+  would block. Ready backlog is drained without a proactor submit per connection.
+  Eager accepts use sequential multishot indices; continuous
+  ``proactor.accept_many(..., base_sequence=N)`` continues numbering after the
+  drain (uring multishot seeds ``completion.sequence`` the same way as
+  ``recv_many``).
+- Internal ``ProactorIOManager._recv_many`` drains ready data with non-blocking
+  ``recv()`` then arms ``proactor.recv_many(..., base_sequence=N)`` with the same
+  callback, returning a ``ContinuousOperation`` like the proactor (thin wrap: no
+  marshal/reorder). Intermediate eager legs may deliver with ``operation=None``;
+  pure-eager EOF/error finishes a synthetic done operation; the proactor path
+  always returns a real op. ``RecvIterBuffer`` starts legs via this override and
+  still cancels unfinished ops on the real proactor.
+- ``ProactorIOManager.sock_recv`` and accept-time preread (``sock_accept`` /
+  ``accept_many`` with ``recv_size``) share a non-blocking ``recv`` try before
+  ``proactor.recv``. Ready first-bytes or EOF complete without a oneshot submit.
+  ``sock_recv_into`` / ``recvfrom`` are unchanged.
+- ``ProactorIOManager.sock_sendall`` tries one non-blocking ``send`` before
+  ``proactor.send``. A full buffer completes as ``IOWaiterSync``; partial sends
+  report ``progress`` then hand the remainder to the proactor (which continues
+  the drain). Empty payloads still go straight to the proactor.
+- ``SendBuffer`` coalesces ``write()`` while a leg is in flight into a single
+  ``bytearray`` (asyncio proactor transport style), so line-at-a-time stream
+  writes become one next ``sock_sendall`` rather than N tiny legs. Scatter/gather
+  vector send remains a follow-up when the proactor exposes multi-buffer submit.
+- Connect-time ``initial`` / ``initial_data`` (``sock_connect``, ``sock_create``,
+  ``sock_create_streams``) chain through ``sock_sendall`` after connect, so the
+  first post-connect bytes get the same eager send try. Connect itself still
+  always uses the proactor.
+- ``ProactorIOManager.sock_shutdown`` / ``sock_close`` run
+  ``socket.shutdown`` / ``socket.close`` on the calling thread and return
+  ``IOWaiterSync`` (no proactor submit), matching asyncio stream teardown.
+  ``Proactor.shutdown`` / ``close_socket`` remain for direct proactor callers.
+- ``ProactorIOManager.sock_create`` / ``sock_create_streams`` create sockets
+  directly via stdlib ``socket.socket()`` (scheduler contract) instead of
+  ``Proactor.create_socket``. Create-only results use ``IOWaiterSync`` (no
+  synthetic ``Operation``). Connect and optional send still go through the
+  proactor; uring ``IORING_OP_SOCKET`` remains available on
+  ``Proactor.create_socket`` for direct callers. Blocking create is the faster
+  path for the io_manager hot entry point.
+- ``UringProactor``: multi-threaded ``wait()`` parks on ``ring.wait_idle()``;
+  ``wake_wait()`` always calls ``ring.break_wait()`` (inline and threaded).
+  ``break_wait`` signals the idle park immediately and skips the internal NOP
+  while completion service workers own CQ reaping. Removes the separate
+  ``EventWakeupManager`` host for uring driver waits. ``wait_async()`` uses a
+  thread-pool executor on the same ``wait`` binding.
 - Inlined ``WakeupManager`` / ``EventWakeupManager`` into ``proactor.py`` (removed
-  standalone ``wakeup.py``). ``wait_async()`` on ``UringProactor`` and
-  ``ThreadedSelectorProactor`` parks on ``EventWakeupManager`` instead of a
-  thread-pool executor; ``bind_loop()`` prepares the asyncio waiter.
+  standalone ``wakeup.py``). ``ThreadedSelectorProactor`` parks on
+  ``EventWakeupManager``; ``bind_loop()`` prepares its asyncio waiter.
 - Uring multishot CQEs are delivered without gating on ``operation.done()`` in
   the completion worker; out-of-order terminal ordering defers to scheduler-thread
   ``ReorderBuffer`` / ``LenientReorderBuffer``.

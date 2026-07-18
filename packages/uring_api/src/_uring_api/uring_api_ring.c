@@ -51,6 +51,20 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 #endif
+    if (UringApiIdlePark_init(&self->idle) < 0) {
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+        PyThread_free_lock(self->refcount_mutex);
+        self->refcount_mutex = NULL;
+#endif
+        PyThread_free_lock(self->cqe_drain_lock);
+        self->cqe_drain_lock = NULL;
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+        PyThread_free_lock(self->ring_lock);
+        self->ring_lock = NULL;
+#endif
+        PyObject_GC_Del(self);
+        return NULL;
+    }
     return (PyObject *)self;
 }
 
@@ -125,6 +139,7 @@ void UringApiRing_dealloc(UringApiRing *self) {
         self->refcount_mutex = NULL;
     }
 #endif
+    UringApiIdlePark_fini(&self->idle);
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
     if (self->ring_lock) {
         PyThread_free_lock(self->ring_lock);
@@ -163,6 +178,8 @@ PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     self->setup_flags = 0;
     self->owner_thread_id = 0;
     Py_END_CRITICAL_SECTION();
+    /* wake any host-side idle park after the ring is no longer open. */
+    UringApiIdlePark_signal(&self->idle);
     Py_RETURN_NONE;
 }
 
@@ -328,7 +345,9 @@ static PyMethodDef UringApiRing_methods[] = {
     {"submit_accept", _PyCFunction_CAST(UringApiRing_submit_accept), METH_VARARGS | METH_KEYWORDS,
      "Submit an accept operation."},
     {"submit_accept_multishot", _PyCFunction_CAST(UringApiRing_submit_accept_multishot), METH_FASTCALL,
-     "Submit a multishot accept operation."},
+     "Submit a multishot accept operation.\n\n"
+     "Positional args: fd, user_data=None, flags=0, base_sequence=0.\n"
+     "base_sequence seeds completion.sequence for the first accept leg."},
     {"submit_connect", _PyCFunction_CAST(UringApiRing_submit_connect), METH_VARARGS | METH_KEYWORDS,
      "Submit a connect operation."},
     {"submit_poll", _PyCFunction_CAST(UringApiRing_submit_poll), METH_VARARGS | METH_KEYWORDS,
@@ -356,10 +375,15 @@ static PyMethodDef UringApiRing_methods[] = {
     {"submit_socket", _PyCFunction_CAST(UringApiRing_submit_socket), METH_VARARGS | METH_KEYWORDS,
      "Submit a socket creation operation."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
-     "Interrupt a thread blocked in wait without producing a user completion."},
+     "Open the wait_idle park immediately. When completion service is idle, also best-effort submit one internal NOP "
+     "CQE to wake wait() on an empty CQ (skipped while serve workers own reaping). NOP failure still succeeds after "
+     "signalling."},
+    {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), METH_VARARGS | METH_KEYWORDS,
+     "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
+     "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
-     "Wait for ready completions and return a list. Drains additional ready CQEs into the same batch. Returns [] on "
-     "timeout or break_wait."},
+     "Wait for ready completions. With no callback, returns a list (possibly empty on timeout/break_wait). With a "
+     "delivery callback, invokes it for non-empty user batches and returns None; wake-only batches skip the callback."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};

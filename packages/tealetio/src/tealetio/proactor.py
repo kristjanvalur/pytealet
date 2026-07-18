@@ -27,7 +27,12 @@ from .io_manager import (
     SocketIO,
     SupportsProactorIO,
 )
-from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
+from .socket_helpers import (
+    configure_scheduler_socket,
+    is_soft_accept_errno as _is_soft_accept_errno,
+    is_soft_accept_error as _is_soft_accept_error,
+    socket_from_uring_fd,
+)
 from .operations import (
     ContinuousOperation,
     ContinuousStepResult,
@@ -72,6 +77,7 @@ __all__ = [
     "SupportsProactorIO",
     "SelectorProactor",
     "SyncProactorScheduler",
+    "SyncUringProactor",
     "ThreadedSelectorProactor",
     "UringProactor",
     "UringSubmissionStats",
@@ -220,6 +226,17 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
 
 def _continuous_error_delivery(exc: BaseException, *, index: int | None = 0) -> MultishotDelivery:
     return MultishotDelivery(index=index, exception=exc, more=False)
+
+
+def _soft_accept_terminal_delivery(*, index: int | None = 0) -> MultishotDelivery:
+    """Terminal accept leg with no connection and no failure (re-arm friendly).
+
+    Hosts re-arm rather than fail the server on transient EMFILE/etc. Under
+    sustained fd pressure the listen fd often stays readable, so re-arm can
+    busy-loop; see ``socket_helpers`` soft-accept note.
+    """
+
+    return MultishotDelivery(index=index, value=None, exception=None, more=False)
 
 
 def _spawn_accept_many_operation(
@@ -527,6 +544,8 @@ class Proactor(Protocol):
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections until cancelled or failed.
 
@@ -534,6 +553,9 @@ class Proactor(Protocol):
         ``socket.getpeername()`` when the peer address is needed. Use
         ``ProactorIOManager.accept_many`` for accept-time reads and richer
         delivery shapes.
+
+        ``base_sequence`` seeds delivery ``index`` for the first accept leg
+        (multishot: first kernel sequence; oneshot/selector: that single leg).
         """
 
         ...
@@ -574,8 +596,9 @@ class Proactor(Protocol):
     ) -> Operation[socket.socket]:
         """Create a scheduler-contract socket.
 
-        ``ProactorIOManager.sock_create`` composes create→connect (and optional
-        send) via ``IOWaitGroup``.
+        ``ProactorIOManager.sock_create`` creates sockets directly and only
+        composes connect (and optional send) via ``IOWaitGroup``. This method
+        remains for direct proactor callers (including the uring socket op).
         """
 
         ...
@@ -1261,7 +1284,7 @@ def _sq_accept(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
 
 
 def _sq_accept_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_accept_multishot(cast(int, op.sq0), op, cast(int, op.sq1))
+    return proactor._ring.submit_accept_multishot(cast(int, op.sq0), op, cast(int, op.sq1), cast(int, op.sq2))
 
 
 def _sq_connect(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
@@ -1546,6 +1569,8 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections and deliver each via the result callback.
 
@@ -1560,6 +1585,8 @@ class SelectorProactor(ProactorBase):
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
         the peer address is needed.
+
+        ``base_sequence`` is the delivery ``index`` for this accept leg.
         """
 
         operation = _spawn_accept_many_operation(sock, self._guard_delivery_callback(callback))
@@ -1569,8 +1596,18 @@ class SelectorProactor(ProactorBase):
                 conn, _address = sock.accept()
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
+            except OSError as exc:
+                # Soft: quiet terminal so StreamServer re-arms (does not fail the
+                # accept loop). Can spin under sustained EMFILE — see
+                # _soft_accept_terminal_delivery / socket_helpers.
+                if _is_soft_accept_error(exc):
+                    operation._finish_with_terminal_delivery(
+                        _soft_accept_terminal_delivery(index=base_sequence),
+                    )
+                    return ContinuousStepResult(progressed=True, done=True)
+                raise
             configure_scheduler_socket(conn)
-            _handoff_accept_many(operation, conn, more=False)
+            _handoff_accept_many(operation, conn, more=False, index=base_sequence)
             return ContinuousStepResult(progressed=True, done=True)
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
@@ -2124,7 +2161,18 @@ class ThreadedSelectorProactor(SelectorProactor):
 
 
 class UringProactor(ProactorBase):
-    """io_uring-backed proactor using Python-owned completion service threads."""
+    """io_uring-backed proactor.
+
+    Default mode starts Python completion service threads that call
+    ``ring.serve_completions()`` and deliver via ``Ring.callback``. The
+    scheduler's ``wait()`` parks on ``ring.wait_idle()`` until workers deliver
+    and ``wake_wait()`` → ``ring.break_wait()`` opens that park.
+
+    With ``completion_threads=0`` (see also ``SyncUringProactor``), there are no
+    service threads: ``wait()`` blocks in ``ring.wait()`` and runs the same
+    completion processor on the calling thread. ``wake_wait()`` still calls
+    ``break_wait()`` (internal NOP) so a blocked inline reaper can return.
+    """
 
     def __init__(
         self,
@@ -2136,8 +2184,8 @@ class UringProactor(ProactorBase):
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
         op_pool_max: int = _DEFAULT_URING_OP_POOL_MAX,
     ) -> None:
-        if completion_threads <= 0:
-            raise ValueError("completion_threads must be at least 1")
+        if completion_threads < 0:
+            raise ValueError("completion_threads must be non-negative")
         if ring_factory is None:
             ring_factory = _default_uring_ring_factory
         super().__init__()
@@ -2174,12 +2222,19 @@ class UringProactor(ProactorBase):
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
         # Synthetic pools are only for kernels without buf rings — never for multishot.
         self._provided_buffers_supported = bool(self._capabilities.get("IORING_BUF_RING", False))
-        self._wait_ready = EventWakeupManager()
+        # inline: driver thread reaps via ring.wait() (callback delivers in-process).
+        # threaded: workers serve_completions() → same callback off the driver;
+        # driver parks on ring.wait_idle() until wake_wait → break_wait.
+        self._inline_completions = completion_threads == 0
         self._ring.callback = self._deliver_uring_completion
+        # bind once: avoid a mode check on every scheduler wait()
+        self.wait = self._wait_inline if self._inline_completions else self._wait_workers
         self._service_threads = [
             threading.Thread(target=self._service_thread_main, name=f"tealetio-uring-{index}")
             for index in range(completion_threads)
         ]
+        if self._inline_completions:
+            return
         try:
             for thread in self._service_threads:
                 thread.start()
@@ -2193,9 +2248,6 @@ class UringProactor(ProactorBase):
             self._ring.exception_handler = None
             self._ring.close()
             raise
-
-    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        self._wait_ready.bind_loop(loop)
 
     def set_delivery_exception_handler(
         self,
@@ -2427,9 +2479,16 @@ class UringProactor(ProactorBase):
         self._closed = True
         self._op_pool.clear()
         self._clear_shared_recv_buffer_pool()
-        self._ring.stop_serving()
-        for thread in self._service_threads:
-            thread.join()
+        if self._service_threads:
+            self._ring.stop_serving()
+            for thread in self._service_threads:
+                thread.join()
+        else:
+            # interrupt a driver blocked in ring.wait() before close
+            try:
+                self._ring.break_wait()
+            except (OSError, RuntimeError, ValueError):
+                pass
         self._deferred_submissions.clear()
         self.wake_wait()
         self._ring.callback = None
@@ -2466,36 +2525,63 @@ class UringProactor(ProactorBase):
         return self._op_pool.stats()
 
     def wake_wait(self) -> None:
-        """Wake threads blocked in sync or async `wait`."""
+        """Unblock sync/async ``wait`` via ``ring.break_wait()``.
 
-        self._wait_ready.wakeup()
+        Opens ``wait_idle`` immediately. The ring best-effort submits an
+        internal NOP only when completion service is idle (inline ``ring.wait()``
+        on an empty CQ); with service workers the NOP is skipped.
+        """
 
-    def wait(self, deadline: float | None = None) -> None:
-        """Wait until completed operations are signalled."""
+        try:
+            self._ring.break_wait()
+        except (OSError, RuntimeError, ValueError):
+            pass
 
-        self._check_open()
+    def _wait_inline(self, deadline: float | None = None) -> None:
+        """Block in ``ring.wait``; delivery runs via the registered ring callback.
+
+        Wait after ``close()`` is undefined (misuse), not a recovery path — no
+        ``_check_open()`` here so the hot park stays lean.
+        """
+
+        # deadline==0: one non-blocking harvest (selector wait(0) analogue)
+        # callback mode: wait delivers non-empty batches and returns None
+        self._ring.wait(self._timeout_until_deadline(deadline))
+
+    def _wait_workers(self, deadline: float | None = None) -> None:
+        """Park on ``ring.wait_idle`` while completion workers own CQ reaping.
+
+        The ring idle park allows many ``wake_wait`` / ``break_wait`` signallers
+        but only one concurrent waiter — the proactor driver. Do not park a
+        second host (or dual ``wait`` / ``wait_async`` threads) on the same ring.
+
+        Wait after ``close()`` is undefined (misuse); same as ``_wait_inline``.
+        """
+
         if deadline == 0:
             return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        self._wait_ready.wait(timeout=timeout)
+        self._ring.wait_idle(timeout)
 
     async def wait_async(self, deadline: float | None = None) -> None:
-        """Wait asynchronously until completed operations are signalled."""
+        """Wait asynchronously until completed operations are signalled.
 
-        self._check_open()
+        Parks in an executor on the same ``wait`` binding as the sync path so
+        ring reaping / idle park stays off the asyncio loop thread.
+        """
+
         if deadline == 0:
+            self.wait(0)
             return
-
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        if self._wait_ready.poll():
-            return
-        assert self._async_wait_loop is not None
-        await self._wait_ready.wait_async(timeout)
+        loop = self._async_wait_loop
+        assert loop is not None
+        await loop.run_in_executor(None, self.wait, deadline)
 
     def recv(
         self,
@@ -2735,6 +2821,8 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections and deliver each via the result callback.
 
@@ -2746,14 +2834,19 @@ class UringProactor(ProactorBase):
         ``socket.getpeername()`` when the peer address is needed. Use
         ``ProactorIOManager.accept_many`` for accept-time reads and richer
         delivery shapes.
+
+        ``base_sequence`` seeds multishot ``completion.sequence`` (or the single
+        oneshot delivery index) so continuous arms can continue after eager accepts.
         """
 
-        return self.accept_multishot(sock, callback)
+        return self.accept_multishot(sock, callback, base_sequence=base_sequence)
 
     def _accept_multishot(
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         operation = self._acquire_uring_continuous_op(
             "accept_many",
@@ -2765,7 +2858,7 @@ class UringProactor(ProactorBase):
             operation,
             UringProactor._deliver_uring_accept_many,
         )
-        self._arm_sq(entry, _sq_accept_multishot, sock.fileno(), _DEFAULT_ACCEPT_FLAGS)
+        self._arm_sq(entry, _sq_accept_multishot, sock.fileno(), _DEFAULT_ACCEPT_FLAGS, base_sequence)
         self._submit_uring_op(entry)
         return operation
 
@@ -2773,6 +2866,8 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         # emulated accept_many: one accept, emit, finish; callers re-arm (for example StreamServer).
         operation = self._acquire_uring_continuous_op(
@@ -2783,6 +2878,7 @@ class UringProactor(ProactorBase):
         entry = self._prepare_uring_op(
             operation,
             UringProactor._deliver_uring_accept_many_oneshot,
+            base_sequence,
         )
         self._arm_sq(entry, _sq_accept, sock.fileno(), _DEFAULT_ACCEPT_FLAGS)
         self._submit_uring_op(entry)
@@ -2794,15 +2890,23 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[AcceptManyResult], op)
+        base_sequence = cast(int, op.cq0)
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
-            operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(_uring_cqe_oserror(res)),
-            )
+            # emulated accept_many: soft errors finish without exception so
+            # callers re-arm (same policy as SelectorProactor.accept_many).
+            if _is_soft_accept_errno(-res):
+                operation._finish_with_terminal_delivery(
+                    _soft_accept_terminal_delivery(index=base_sequence),
+                )
+            else:
+                operation._finish_with_terminal_delivery(
+                    _continuous_error_delivery(_uring_cqe_oserror(res), index=base_sequence),
+                )
             return operation
         conn = socket_from_uring_fd(completion.res)
-        _handoff_accept_many(operation, conn, more=False)
+        _handoff_accept_many(operation, conn, more=False, index=base_sequence)
         self._deactivate_uring_op(op)
         return operation
 
@@ -2813,15 +2917,19 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[AcceptManyResult], op)
         res = completion.res
+        index = int(completion.sequence)
         if res < 0:
             self._deactivate_uring_op(op)
+            # keep completion.sequence (including ECANCELED): uring-api assigns the
+            # next multishot leg index; default index=0 would stall reorder buffers
+            # after any more=True accepts.
             operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(_uring_cqe_oserror(res)),
+                _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return operation
         conn = socket_from_uring_fd(completion.res)
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        _handoff_accept_many(operation, conn, more=more, index=int(completion.sequence))
+        _handoff_accept_many(operation, conn, more=more, index=index)
         if not more:
             self._deactivate_uring_op(op)
         return operation
@@ -3166,7 +3274,9 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
-            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
+            operation._finish_with_terminal_delivery(
+                _recv_many_error_delivery(index=base_sequence, res=res),
+            )
             return operation
         operation._emit_result(
             self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
@@ -3186,7 +3296,9 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
-            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
+            operation._finish_with_terminal_delivery(
+                _recv_many_error_delivery(index=base_sequence, res=res),
+            )
             return operation
         if res == 0:
             payload = completion.result
@@ -3360,7 +3472,9 @@ class UringProactor(ProactorBase):
             if result is not None:
                 completed_operation = result
         self._retry_deferred_submissions()
-        if completed_operation is None and not self.has_pending_operations():
+        # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
+        # inline mode: the driver is already inside wait() processing this batch.
+        if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
     def _queue_op_resubmit(self, operation: _UringOp) -> None:
@@ -3507,7 +3621,9 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         op = cast(_UringOp, completion.user_data)
         res = completion.res
-        if completion.multishot:
+        # Continuous legs (multishot and emulated oneshot) own error shaping in
+        # their complete handlers — e.g. soft accept errors that finish cleanly.
+        if completion.multishot or isinstance(op, ContinuousOperation):
             assert op.complete is not None
             return op.complete(self, op, completion)
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
@@ -3529,8 +3645,34 @@ class UringProactor(ProactorBase):
 
 def _default_proactor_factory() -> Proactor:
     if uring_api.is_available():
-        return UringProactor()
-    return SelectorProactor()
+        # concrete backends satisfy Proactor structurally; ty does not always prove it
+        return cast(Proactor, UringProactor())
+    return cast(Proactor, SelectorProactor())
+
+
+class SyncUringProactor(UringProactor):
+    """Single-threaded ``UringProactor``: ``wait()`` is ``ring.wait`` + deliver.
+
+    Intended for benchmarks and debugging against the threaded default. Same
+    submit path and Operation model; no completion service threads and no
+    cross-thread delivery hop on the sync driver.
+    """
+
+    def __init__(
+        self,
+        entries: int = 8,
+        flags: int = 0,
+        *,
+        ring_factory: _UringRingFactory | None = None,
+        completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
+    ) -> None:
+        super().__init__(
+            entries,
+            flags,
+            ring_factory=ring_factory,
+            completion_threads=0,
+            completion_thread_nice=completion_thread_nice,
+        )
 
 
 class ProactorScheduler(BaseScheduler):

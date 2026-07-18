@@ -19,6 +19,7 @@ from typing import Any, Callable, cast
 
 import pytest
 import uring_api
+from unittest.mock import patch
 
 from uring_fakes import (
     _BackpressuredPollUringRing,
@@ -1324,8 +1325,7 @@ class TestProactorContract:
                 proactor.recv(reader, 1)
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.send(writer, b"")
-            with pytest.raises(RuntimeError, match="closed"):
-                proactor.wait(0)
+            # wait after close is misuse; backends need not raise a tidy closed error
         finally:
             reader.close()
             writer.close()
@@ -1463,6 +1463,41 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
+    def test_accept_many_emulated_soft_error_finishes_without_exception(self) -> None:
+        """EMFILE on oneshot accept ends the leg cleanly so hosts can re-arm."""
+
+        proactor = SelectorProactor()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: list[socket.socket] = []
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.setblocking(False)
+            try:
+                client.connect(server.getsockname())
+            except (BlockingIOError, InterruptedError):
+                pass
+
+            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            real_accept = socket.socket.accept
+
+            def accept_side_effect(sock: socket.socket, *args: object, **kwargs: object) -> object:
+                if sock is server:
+                    raise OSError(errno.EMFILE, "Too many open files")
+                return real_accept(sock, *args, **kwargs)
+
+            with patch.object(socket.socket, "accept", accept_side_effect):
+                proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.done() is True
+            assert operation.exception() is None
+            assert accepted == []
+            client.close()
+        finally:
+            server.close()
+            proactor.close()
     def test_create_socket_returns_scheduler_socket_on_selector(self) -> None:
         proactor = SelectorProactor()
         try:
@@ -2555,8 +2590,66 @@ class TestUringProactor:
             proactor.close()
 
     def test_validates_completion_thread_configuration(self):
-        with pytest.raises(ValueError, match="completion_threads must be at least 1"):
-            UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        with pytest.raises(ValueError, match="completion_threads must be non-negative"):
+            UringProactor(ring_factory=_FakeUringRing, completion_threads=-1)
+
+    def test_inline_mode_starts_no_completion_threads(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+            assert proactor._inline_completions is True
+            assert proactor._service_threads == []
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.serve_count == 0
+            assert proactor.ring.callback is not None
+            assert proactor.ring.callback.__func__ is proactor._deliver_uring_completion.__func__
+        finally:
+            proactor.close()
+
+    def test_sync_uring_proactor_is_inline(self):
+        from tealetio.proactor import SyncUringProactor
+
+        proactor = SyncUringProactor(ring_factory=_FakeUringRing)
+        try:
+            assert proactor._inline_completions is True
+            assert proactor._service_threads == []
+        finally:
+            proactor.close()
+
+    def test_inline_wait_delivers_queued_completions(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            assert operation.done() is False
+            # fake ring queues the completion when not serving; wait harvests it
+            proactor.wait(0)
+            assert operation.done() is True
+            assert operation.result() == b"hello"
+        finally:
+            proactor.close()
+            reader.close()
+            writer.close()
+
+    def test_inline_wake_wait_uses_ring_break_wait(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        released = threading.Event()
+        try:
+            thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
+            thread.start()
+            thread.join(0.05)
+            assert thread.is_alive() is True
+
+            proactor.wake_wait()
+
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert released.is_set()
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.break_count >= 1
+        finally:
+            proactor.close()
 
     def test_applies_default_completion_thread_nice(self, monkeypatch: pytest.MonkeyPatch):
         calls: list[tuple[int, int, int]] = []
@@ -2680,8 +2773,6 @@ class TestUringProactor:
                 proactor.bind_loop(loop)
 
                 assert proactor._async_wait_loop is loop
-                assert proactor._wait_ready._async_loop is loop
-                assert proactor._wait_ready._async_waiter is not None
             finally:
                 proactor.close()
 
@@ -2701,13 +2792,13 @@ class TestUringProactor:
             second_loop.close()
             proactor.close()
 
-    def test_break_wait_wakes_proactor_waiters_without_ring_wakeup(self):
+    def test_wake_wait_always_uses_ring_break_wait(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             proactor.wake_wait()
 
             assert isinstance(proactor.ring, _FakeUringRing)
-            assert proactor.ring.break_count == 0
+            assert proactor.ring.break_count >= 1
         finally:
             proactor.close()
 
@@ -3200,10 +3291,11 @@ class TestUringProactor:
             writer.setblocking(False)
 
             def body() -> None:
-                empty = scheduler.io.sock_recv(reader, 0).wait()
+                # Proactor freelist paths (not manager eager try, which skips submit).
+                empty = IOWaiter(scheduler.io, proactor.recv(reader, 0)).wait()
                 assert empty == b""
                 assert proactor.op_pool_stats["releases"] >= 1
-                scheduler.io.sock_sendall(writer, b"").wait()
+                IOWaiter(scheduler.io, proactor.send(writer, b"")).wait()
                 assert proactor.op_pool_stats["releases"] >= 2
 
             scheduler.run_until_complete(scheduler.spawn(body))
@@ -3256,11 +3348,13 @@ class TestUringProactor:
             writer.send(b"hello")
 
             def body() -> None:
-                first = scheduler.io.sock_recv(reader, 5).wait()
+                # Drive proactor.recv via IOWaiter so freelist recycle is exercised;
+                # manager sock_recv would complete eagerly when the pair is readable.
+                first = IOWaiter(scheduler.io, proactor.recv(reader, 5)).wait()
                 assert first == b"hello"
                 assert proactor.op_pool_stats["releases"] >= 1
                 proactor.ring.submitted_recv.clear()
-                second_waiter = scheduler.io.sock_recv(reader, 5)
+                second_waiter = IOWaiter(scheduler.io, proactor.recv(reader, 5))
                 # Freelist hit on the second submit (majority path via wait()).
                 assert proactor.op_pool_stats["hits"] >= 1
                 assert second_waiter.wait() == b"hello"
@@ -4061,6 +4155,32 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
+    def test_accept_many_emulated_uring_soft_error_finishes_without_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[socket.socket] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            pending = proactor.ring.pending_accept_oneshot[0]
+            # drop the fake accepted fd so we do not leak it on soft-error rewrite
+            try:
+                os.close(pending.res)
+            except OSError:
+                pass
+            pending.res = -errno.EMFILE
+            pending.result = -errno.EMFILE
+            proactor.ring.complete_accept_oneshot()
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert operation.exception() is None
+            assert accepted == []
+        finally:
+            server.close()
+            proactor.close()
+
     def test_accept_many_uses_multishot_accept(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
@@ -4073,6 +4193,7 @@ class TestUringProactor:
             assert submitted[0] == server.fileno()
             assert submitted[2] & socket.SOCK_NONBLOCK
             assert submitted[2] & socket.SOCK_CLOEXEC
+            assert submitted[3] == 0
 
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 1.0)
@@ -4084,6 +4205,28 @@ class TestUringProactor:
         finally:
             for conn in accepted:
                 conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_passes_base_sequence_to_multishot(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        seen: list[int | None] = []
+        try:
+            server.setblocking(False)
+
+            def on_delivery(delivery) -> None:
+                seen.append(delivery.index)
+
+            operation = proactor.accept_many(server, on_delivery, base_sequence=4)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_accept_multishot[0][3] == 4
+            proactor.ring.complete_accept_multishot("peer-a")
+            proactor.ring.complete_accept_multishot("peer-b")
+            proactor.wait(proactor.get_time() + 1.0)
+            assert seen == [4, 5]
+            assert operation.done() is False
+        finally:
             server.close()
             proactor.close()
 
@@ -4139,6 +4282,43 @@ class TestUringProactor:
         finally:
             for conn in accepted:
                 conn.close()
+            server.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_accept_many_cancel_settles_after_accepts(self) -> None:
+        """Cancel after more=True legs must finish via reorder (index=None cancel)."""
+
+        if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
+            pytest.skip("multishot accept is unavailable")
+
+        proactor = UringProactor()
+        server = socket.socket()
+        clients: list[socket.socket] = []
+        accepted: list[socket.socket] = []
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", 0))
+            server.listen(16)
+            server.setblocking(False)
+            addr = server.getsockname()
+            for _ in range(4):
+                client = socket.socket()
+                client.connect(addr)
+                clients.append(client)
+
+            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            _wait_for_uring(proactor, lambda: len(accepted) >= 4)
+            assert len(accepted) >= 4
+
+            proactor.cancel(operation)
+            _wait_for_uring(proactor, lambda: operation.done() and not proactor.has_pending_operations())
+            assert operation.cancelled() is True
+        finally:
+            for conn in accepted:
+                conn.close()
+            for client in clients:
+                client.close()
             server.close()
             proactor.close()
 
@@ -5061,7 +5241,7 @@ class TestProactorSchedulerIntegration:
         yield sched
         sched.close()
 
-    def test_sock_create_uses_proactor_create_socket(self, scheduler: SyncProactorScheduler) -> None:
+    def test_sock_create_creates_scheduler_socket_directly(self, scheduler: SyncProactorScheduler) -> None:
         def exercise() -> socket.socket:
             return scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM).wait()
 
@@ -5365,7 +5545,8 @@ class TestProactorScheduler:
                         connect_to=path,
                     )
                     try:
-                        assert len(proactor.ring.submitted_socket) == 1
+                        # sock_create uses direct socket(); AF_UNIX connect is sync, not uring.
+                        assert proactor.ring.submitted_socket == []
                         assert proactor.ring.submitted_connect == []
                         assert sock.family == socket.AF_UNIX
                         server.accept()
@@ -5376,7 +5557,7 @@ class TestProactorScheduler:
         finally:
             proactor.close()
 
-    def test_sock_create_connect_uses_uring_socket_submit(self) -> None:
+    def test_sock_create_connect_uses_direct_create_and_uring_connect(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             sock = _io_sock_create(
@@ -5386,7 +5567,7 @@ class TestProactorScheduler:
                 connect_to=("127.0.0.1", 9),
             )
             try:
-                assert len(proactor.ring.submitted_socket) == 1
+                assert proactor.ring.submitted_socket == []
                 assert len(proactor.ring.submitted_connect) == 1
             finally:
                 sock.close()

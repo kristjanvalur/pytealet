@@ -192,6 +192,9 @@ except ImportError as exc:
         def break_wait(self) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def wait_idle(self, timeout: float | None = None) -> bool:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def create_buf_group(self, buffer_size: int, buffer_count: int) -> BufGroup:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -243,7 +246,9 @@ except ImportError as exc:
         def submit_accept(self, fd: int, user_data: object = None, flags: int = 0) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_accept_multishot(self, fd: int, user_data: object = None, flags: int = 0) -> Completion:
+        def submit_accept_multishot(
+            self, fd: int, user_data: object = None, flags: int = 0, base_sequence: int = 0
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:
@@ -291,7 +296,7 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def wait(self, timeout: float | None = None) -> list[Completion]:
+        def wait(self, timeout: float | None = None) -> list[Completion] | None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def __enter__(self) -> Ring:
