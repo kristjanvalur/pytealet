@@ -21,6 +21,9 @@ else:
 
 
 class _MemoryProactor:
+    def recycle_operation(self, operation: object) -> None:
+        return
+
     def __init__(self, store: dict[int, bytearray]) -> None:
         self._store = store
         self.read_calls: list[tuple[int, int, int]] = []

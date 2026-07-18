@@ -263,6 +263,9 @@ class _RecvIterTestProactor:
     def __init__(self) -> None:
         self.recv_many_bases: list[int] = []
 
+    def recycle_operation(self, operation: object) -> None:
+        return
+
     def recv_many(
         self,
         sock: socket.socket,

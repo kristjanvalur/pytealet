@@ -4,10 +4,10 @@ import tealetio.io_waiter as io_waiter_module
 from tealetio.io_manager import ProactorIOManager
 from tealetio.io_waiter import IOWaiter
 from tealetio.operations import ContinuousOperation
-from io_fakes import StubScheduler
+from io_fakes import StubProactor, StubScheduler
 
 
-class _MockProactor:
+class _MockProactor(StubProactor):
     pass
 
 

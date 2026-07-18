@@ -7,6 +7,17 @@ from typing import Any
 from tealetio.scheduler import TimerHandle
 
 
+class StubProactor:
+    """Minimal proactor surface for ``ProactorIOManager`` / ``IOWaiter`` unit tests.
+
+    Implements the optional freelist hook from ``ProactorBase`` so waiters can
+    call ``recycle_operation`` without special-casing mocks.
+    """
+
+    def recycle_operation(self, operation: object) -> None:
+        return
+
+
 class StubScheduler:
     """Minimal scheduler stand-in for ``ProactorIOManager`` unit tests."""
 
