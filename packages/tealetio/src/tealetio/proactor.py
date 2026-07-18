@@ -1066,6 +1066,107 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self.cq3 = None
 
 
+class _UringOpPool:
+    """Capped freelist for one-shot and continuous uring waitables.
+
+    Owned by ``UringProactor``. Acquire/reinit on submit; release only when the
+    waitable is terminal and not in-flight (``recycle_operation`` / IOWaiter).
+    """
+
+    __slots__ = (
+        "_max",
+        "_one_shot",
+        "_continuous",
+        "hits",
+        "misses",
+        "releases",
+        "drops",
+    )
+
+    def __init__(self, max_size: int) -> None:
+        if max_size < 0:
+            raise ValueError("op_pool_max must be >= 0")
+        self._max = max_size
+        self._one_shot: list[UringOperation[Any]] = []
+        self._continuous: list[UringContinuousOperation[Any]] = []
+        self.hits = 0
+        self.misses = 0
+        self.releases = 0
+        self.drops = 0
+
+    def acquire_one_shot(
+        self,
+        proactor: "UringProactor",
+        kind: str,
+        fileobj: object | None = None,
+    ) -> UringOperation[Any]:
+        if self._one_shot:
+            op = self._one_shot.pop()
+            op._reinit_from_pool(kind, fileobj, proactor._pending_operations)
+            self.hits += 1
+            return op
+        self.misses += 1
+        return UringOperation(proactor, kind, fileobj)
+
+    def acquire_continuous(
+        self,
+        proactor: "UringProactor",
+        kind: str,
+        fileobj: object | None = None,
+        result_callback: Callable[[MultishotDelivery], object] | None = None,
+    ) -> UringContinuousOperation[Any]:
+        if self._continuous:
+            op = self._continuous.pop()
+            op._reinit_from_pool(kind, fileobj, result_callback, proactor._pending_operations)
+            self.hits += 1
+            return op
+        self.misses += 1
+        return UringContinuousOperation(proactor, kind, fileobj, result_callback)
+
+    def release(self, operation: object) -> None:
+        if isinstance(operation, UringOperation):
+            self._release_into(self._one_shot, operation)
+        elif isinstance(operation, UringContinuousOperation):
+            self._release_into(self._continuous, operation)
+
+    def _release_into(
+        self,
+        pool: list[Any],
+        op: UringOperation[Any] | UringContinuousOperation[Any],
+    ) -> None:
+        if self._max == 0 or op._pooled:
+            return
+        if op._resolved is None:
+            return
+        try:
+            completion = op.completion
+        except AttributeError:
+            completion = None
+        if completion is not None:
+            return
+        if len(pool) >= self._max:
+            self.drops += 1
+            return
+        op._scrub_for_pool()
+        op._pooled = True
+        pool.append(op)
+        self.releases += 1
+
+    def clear(self) -> None:
+        self._one_shot.clear()
+        self._continuous.clear()
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "releases": self.releases,
+            "drops": self.drops,
+            "size": len(self._one_shot) + len(self._continuous),
+            "max": self._max,
+        }
+
+
 @dataclass(frozen=True)
 class UringSubmissionStats:
     """Observed io_uring submission backpressure for tuning ring queue depth."""
@@ -1986,18 +2087,10 @@ class UringProactor(ProactorBase):
     ) -> None:
         if completion_threads <= 0:
             raise ValueError("completion_threads must be at least 1")
-        if op_pool_max < 0:
-            raise ValueError("op_pool_max must be >= 0")
         if ring_factory is None:
             ring_factory = _default_uring_ring_factory
         super().__init__()
-        self._op_pool_max = op_pool_max
-        self._op_pool: list[UringOperation[Any]] = []
-        self._continuous_op_pool: list[UringContinuousOperation[Any]] = []
-        self._op_pool_hits = 0
-        self._op_pool_misses = 0
-        self._op_pool_releases = 0
-        self._op_pool_drops = 0
+        self._op_pool = _UringOpPool(op_pool_max)
         self._ring = ring_factory(entries, flags)
         try:
             self._capabilities = uring_api.probe(entries=entries, flags=flags)
@@ -2285,7 +2378,7 @@ class UringProactor(ProactorBase):
         if self._closed:
             return
         self._closed = True
-        self._drain_uring_op_pools()
+        self._op_pool.clear()
         self._clear_shared_recv_buffer_pool()
         self._ring.stop_serving()
         for thread in self._service_threads:
@@ -2296,20 +2389,8 @@ class UringProactor(ProactorBase):
         self._ring.exception_handler = None
         self._ring.close()
 
-    def _drain_uring_op_pools(self) -> None:
-        """Drop freelist entries on proactor close."""
-
-        self._op_pool.clear()
-        self._continuous_op_pool.clear()
-
     def _acquire_uring_op(self, kind: str, fileobj: object | None = None) -> UringOperation[Any]:
-        if self._op_pool:
-            op = self._op_pool.pop()
-            op._reinit_from_pool(kind, fileobj, self._pending_operations)
-            self._op_pool_hits += 1
-            return op
-        self._op_pool_misses += 1
-        return UringOperation(self, kind, fileobj)
+        return self._op_pool.acquire_one_shot(self, kind, fileobj)
 
     def recycle_operation(self, operation: Operation[Any]) -> None:
         """Return a finished waitable to the freelist when safe.
@@ -2318,25 +2399,9 @@ class UringProactor(ProactorBase):
         ``IOWaiter.wait()`` / ``forget()`` call this on the common path.
         """
 
-        if isinstance(operation, UringOperation):
-            self._release_uring_op(operation)
-        elif isinstance(operation, UringContinuousOperation):
-            self._release_uring_continuous_op(operation)
-
-    def _release_uring_op(self, op: UringOperation[Any]) -> None:
-        if self._closed or self._op_pool_max == 0 or op._pooled:
+        if self._closed:
             return
-        if op._resolved is None:
-            return
-        if getattr(op, "completion", None) is not None:
-            return
-        if len(self._op_pool) >= self._op_pool_max:
-            self._op_pool_drops += 1
-            return
-        op._scrub_for_pool()
-        op._pooled = True
-        self._op_pool.append(op)
-        self._op_pool_releases += 1
+        self._op_pool.release(operation)
 
     def _acquire_uring_continuous_op(
         self,
@@ -2344,41 +2409,13 @@ class UringProactor(ProactorBase):
         fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> UringContinuousOperation[Any]:
-        if self._continuous_op_pool:
-            op = self._continuous_op_pool.pop()
-            op._reinit_from_pool(kind, fileobj, result_callback, self._pending_operations)
-            self._op_pool_hits += 1
-            return op
-        self._op_pool_misses += 1
-        return UringContinuousOperation(self, kind, fileobj, result_callback)
-
-    def _release_uring_continuous_op(self, op: UringContinuousOperation[Any]) -> None:
-        if self._closed or self._op_pool_max == 0 or op._pooled:
-            return
-        if op._resolved is None:
-            return
-        if getattr(op, "completion", None) is not None:
-            return
-        if len(self._continuous_op_pool) >= self._op_pool_max:
-            self._op_pool_drops += 1
-            return
-        op._scrub_for_pool()
-        op._pooled = True
-        self._continuous_op_pool.append(op)
-        self._op_pool_releases += 1
+        return self._op_pool.acquire_continuous(self, kind, fileobj, result_callback)
 
     @property
     def op_pool_stats(self) -> dict[str, int]:
         """Return freelist counters for microbenchmarks (hits/misses/releases/drops/size)."""
 
-        return {
-            "hits": self._op_pool_hits,
-            "misses": self._op_pool_misses,
-            "releases": self._op_pool_releases,
-            "drops": self._op_pool_drops,
-            "size": len(self._op_pool) + len(self._continuous_op_pool),
-            "max": self._op_pool_max,
-        }
+        return self._op_pool.stats()
 
     def wake_wait(self) -> None:
         """Wake threads blocked in sync or async `wait`."""
