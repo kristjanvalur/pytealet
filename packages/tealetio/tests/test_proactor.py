@@ -2565,7 +2565,8 @@ class TestUringProactor:
             assert proactor._service_threads == []
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.serve_count == 0
-            assert proactor.ring.callback is None
+            assert proactor.ring.callback is not None
+            assert proactor.ring.callback.__func__ is proactor._deliver_uring_completion.__func__
         finally:
             proactor.close()
 

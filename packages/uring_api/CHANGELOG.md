@@ -15,14 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the exception and only that worker stops. C API: `ring_set_exception_handler()`.
 
 ### Changed
+- `Ring.wait()` / `ring_wait()`: when a delivery callback (Python or C) is set,
+  non-empty user batches are delivered through that callback and `wait` returns
+  `None`. Empty batches (timeout, `break_wait`, wake-only) skip the callback and
+  still return `None`. With no callback, `wait` still returns a list (possibly
+  empty). User-visible completion lists are built lazily: wake / internal CQEs
+  never allocate a delivery list.
 - C API: `UringApi_CCompletionCallback` now receives a `list` of completions per
-  kernel drain batch (was a single completion). `ring_wait()` returns a list
-  (empty on timeout or `break_wait()`). Callback pointers must not be changed
-  while `serve_completions()` workers are active. `URING_API_CAPI_ABI_VERSION`
-  remains **1** while the package is pre-release; clients must check
-  `struct_size` and null-check vtable pointers they rely on.
-- `Ring.wait()` returns `list[Completion]` and drains additional ready CQEs into
-  the same batch before returning.
+  kernel drain batch (was a single completion). Callback pointers must not be
+  changed while `serve_completions()` workers are active.
+  `URING_API_CAPI_ABI_VERSION` remains **1** while the package is pre-release;
+  clients must check `struct_size` and null-check vtable pointers they rely on.
 - `submit_accept()` and `submit_accept_multishot()` no longer pass a peer
   sockaddr buffer to the kernel. Delivered completions expose the accepted fd
   only; resolve peer addresses with `getpeername()` when needed.

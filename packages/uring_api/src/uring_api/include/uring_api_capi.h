@@ -92,9 +92,13 @@ typedef struct UringApi_CAPI {
                               PyObject *user_data);
     int (*ring_break_wait)(PyObject *ring);
     /*
-     * Wait for ready completions and return a new list reference.
+     * Wait for ready completions.
+     * With no delivery callback: returns a new list reference (empty on timeout
+     * or break_wait). With a Python or C delivery callback: delivers non-empty
+     * user batches via the callback and returns None; empty/wake-only batches
+     * skip the callback and still return None.
      * The first wait uses the requested timeout; once one completion is ready,
-     * additional CQEs are drained with zero wait before the list is returned.
+     * additional CQEs are drained with zero wait before return/delivery.
      * timeout < 0 blocks indefinitely, timeout == 0 performs a non-blocking peek,
      * and timeout > 0 waits for at most that many seconds.
      */

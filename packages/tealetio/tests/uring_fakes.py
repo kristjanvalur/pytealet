@@ -905,27 +905,45 @@ class _FakeUringRing:
         self._deliver(completion)
         return completion
 
-    def wait(self, timeout: float | None = None) -> list[SimpleNamespace]:
-        """Return queued completions, or block until one / timeout / break_wait.
+    def wait(self, timeout: float | None = None) -> list[SimpleNamespace] | None:
+        """Harvest queued completions, matching ``uring_api.Ring.wait``.
 
-        Mirrors ``uring_api.Ring.wait`` enough for inline ``UringProactor`` tests:
-        empty list on timeout or ``break_wait()`` with no user CQE.
+        With a callback: deliver non-empty batches and return None (empty skips
+        the callback). Without: return a list (possibly empty).
         """
 
         if self.closed:
             raise RuntimeError("ring is closed")
+        batch: list[SimpleNamespace]
         if self.completions:
-            return [self.completions.pop(0)]
-        if timeout == 0:
-            return []
-        self._wait_event.clear()
-        if timeout is None:
-            self._wait_event.wait()
+            batch = [self.completions.pop(0)]
+        elif timeout == 0:
+            batch = []
         else:
-            self._wait_event.wait(timeout)
-        if self.completions:
-            return [self.completions.pop(0)]
-        return []
+            self._wait_event.clear()
+            if timeout is None:
+                self._wait_event.wait()
+            else:
+                self._wait_event.wait(timeout)
+            batch = [self.completions.pop(0)] if self.completions else []
+        if self.callback is not None:
+            if batch:
+                try:
+                    self.callback(batch)
+                except BaseException as exc:
+                    handler = self.exception_handler
+                    if handler is None:
+                        raise
+                    handler(
+                        {
+                            "message": "Exception in delivery callback",
+                            "exception": exc,
+                            "ring": self,
+                            "completions": batch,
+                        }
+                    )
+            return None
+        return batch
 
     def _deliver(self, completion: SimpleNamespace) -> None:
         if self.running and self.callback is not None:

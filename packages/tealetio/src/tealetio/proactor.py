@@ -2188,9 +2188,10 @@ class UringProactor(ProactorBase):
         # Synthetic pools are only for kernels without buf rings — never for multishot.
         self._provided_buffers_supported = bool(self._capabilities.get("IORING_BUF_RING", False))
         self._wait_ready = EventWakeupManager()
-        # inline: driver thread reaps via ring.wait(); threaded: workers call callback.
+        # inline: driver thread reaps via ring.wait() (callback delivers in-process).
+        # threaded: workers serve_completions() → same callback off the driver.
         self._inline_completions = completion_threads == 0
-        self._ring.callback = None if self._inline_completions else self._deliver_uring_completion
+        self._ring.callback = self._deliver_uring_completion
         # bind once: avoid a mode check on every scheduler wait()
         self.wait = self._wait_inline if self._inline_completions else self._wait_workers
         self._service_threads = [
@@ -2504,13 +2505,11 @@ class UringProactor(ProactorBase):
         self._wait_ready.wakeup()
 
     def _wait_inline(self, deadline: float | None = None) -> None:
-        """Block in ``ring.wait`` and deliver completions on this thread."""
+        """Block in ``ring.wait``; delivery runs via the registered ring callback."""
 
         # deadline==0: one non-blocking harvest (selector wait(0) analogue)
-        timeout = self._timeout_until_deadline(deadline)
-        batch = self._ring.wait(timeout)
-        if batch:
-            self._deliver_uring_completion(batch)
+        # callback mode: wait delivers non-empty batches and returns None
+        self._ring.wait(self._timeout_until_deadline(deadline))
 
     def _wait_workers(self, deadline: float | None = None) -> None:
         """Park until a completion worker signals via ``EventWakeupManager``."""

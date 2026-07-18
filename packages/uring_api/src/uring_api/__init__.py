@@ -291,7 +291,7 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def wait(self, timeout: float | None = None) -> list[Completion]:
+        def wait(self, timeout: float | None = None) -> list[Completion] | None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def __enter__(self) -> Ring:

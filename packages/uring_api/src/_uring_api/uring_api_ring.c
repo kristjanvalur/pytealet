@@ -358,8 +358,8 @@ static PyMethodDef UringApiRing_methods[] = {
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Interrupt a thread blocked in wait without producing a user completion."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
-     "Wait for ready completions and return a list. Drains additional ready CQEs into the same batch. Returns [] on "
-     "timeout or break_wait."},
+     "Wait for ready completions. With no callback, returns a list (possibly empty on timeout/break_wait). With a "
+     "delivery callback, invokes it for non-empty user batches and returns None; wake-only batches skip the callback."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};
