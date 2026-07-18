@@ -16,9 +16,8 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
 from .io_waiter import IOWaiter
 from .locks import Condition, CrossThreadCondition
-from .operations import ContinuousOperation, MultishotDelivery, Operation, SupportsOperation
+from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
 from .scheduler import get_running_scheduler
-from .operations import io_cancellation_error
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:

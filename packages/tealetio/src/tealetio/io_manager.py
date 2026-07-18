@@ -29,7 +29,6 @@ from .io_waiter import (
 
 from .io_buffers import RecvIterBuffer, SendBuffer, _RecvIterProactor, open_recv_iter_buffer, open_send_buffer
 from .operations import (
-    ContinuousOperation,
     MultishotDelivery,
     Operation,
     SupportsContinuousOperation,
