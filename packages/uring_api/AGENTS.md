@@ -148,7 +148,8 @@ not a permanent ring failure.
 
 - One thread should reap with `wait()`; submit methods may be called from other
   threads.
-- `break_wait()` is safe while another thread blocks in `wait()`.
+- `break_wait()` submits one internal NOP (plus `wait_idle` park open). Safe
+  while another thread blocks in `wait()`; not a multi-worker broadcast.
 - While `serve_completions()` workers are running, public `wait()` raises
   `RuntimeError`. Join worker threads and call `stop_serving()` before `close()`.
 - Delivery callback exceptions invoke `exception_handler` when set; handler

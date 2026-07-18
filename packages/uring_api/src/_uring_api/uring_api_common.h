@@ -87,6 +87,8 @@ uring_api_refcount_mutex_unlock(UringApiMutex *mutex)
 }
 #endif
 
+#include "uring_api_idle.h"
+
 #ifndef _PyCFunction_CAST
 #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
 #endif
@@ -174,6 +176,7 @@ struct UringApiRing {
 #endif
     PyThread_type_lock cqe_drain_lock;
     UringApiMutex refcount_mutex;
+    UringApiIdlePark idle;
     unsigned int delivery_active_workers;
     unsigned int receive_state;
     unsigned short next_buf_group;

@@ -51,6 +51,20 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 #endif
+    if (UringApiIdlePark_init(&self->idle) < 0) {
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+        PyThread_free_lock(self->refcount_mutex);
+        self->refcount_mutex = NULL;
+#endif
+        PyThread_free_lock(self->cqe_drain_lock);
+        self->cqe_drain_lock = NULL;
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+        PyThread_free_lock(self->ring_lock);
+        self->ring_lock = NULL;
+#endif
+        PyObject_GC_Del(self);
+        return NULL;
+    }
     return (PyObject *)self;
 }
 
@@ -125,6 +139,7 @@ void UringApiRing_dealloc(UringApiRing *self) {
         self->refcount_mutex = NULL;
     }
 #endif
+    UringApiIdlePark_fini(&self->idle);
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
     if (self->ring_lock) {
         PyThread_free_lock(self->ring_lock);
@@ -163,6 +178,8 @@ PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     self->setup_flags = 0;
     self->owner_thread_id = 0;
     Py_END_CRITICAL_SECTION();
+    /* wake any host-side idle park after the ring is no longer open. */
+    UringApiIdlePark_signal(&self->idle);
     Py_RETURN_NONE;
 }
 
@@ -356,7 +373,10 @@ static PyMethodDef UringApiRing_methods[] = {
     {"submit_socket", _PyCFunction_CAST(UringApiRing_submit_socket), METH_VARARGS | METH_KEYWORDS,
      "Submit a socket creation operation."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
-     "Interrupt a thread blocked in wait without producing a user completion."},
+     "Submit one internal NOP CQE and open the wait_idle park. The NOP is never a user completion; serve workers "
+     "ignore it. It unblocks a thread blocked in wait() (typical for a thread-free reaper loop)."},
+    {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), METH_VARARGS | METH_KEYWORDS,
+     "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
      "Wait for ready completions. With no callback, returns a list (possibly empty on timeout/break_wait). With a "
      "delivery callback, invokes it for non-empty user batches and returns None; wake-only batches skip the callback."},

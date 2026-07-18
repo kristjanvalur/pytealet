@@ -382,8 +382,16 @@ Rings created with `IORING_SETUP_DEFER_TASKRUN` do not follow that worker-pool
 model. Submit, `wait()`, `serve_completions()`, and `break_wait()` must all run
 on the owning thread established by the first gated call.
 
-`break_wait()` prepares and submits an internal NOP. When the reaper consumes that
-completion, `wait()` returns an empty list rather than a user completion.
+`break_wait()` is the single ring wakeup entry point. It:
+
+- submits **one** internal NOP (not a user completion);
+- opens the host-side `wait_idle()` park.
+
+The NOP is not a broadcast to worker threads. Serve workers that drain it treat it
+as an empty/internal batch and continue. Its main purpose is a thread-free reaper:
+one thread blocked in `wait()` returns with an empty list (or `None` with a
+delivery callback). `wait_idle()` is separate from CQ reaping and is for a host
+thread that parks while workers own the ring.
 
 Serving workers use the same receive side as `wait()`, so public `wait()` calls
 raise `RuntimeError` while they are running. Each worker calls
@@ -392,17 +400,17 @@ exit. Workers compete for an internal wait lock, so only one worker is inside
 `io_uring_wait_cqe()` at a time, while another worker can dispatch a completion
 callback.
 
-`stop_serving()` asks workers to exit and wakes the active waiter with
-`break_wait()`. The caller owns the threads, so the caller must join them before
-closing the ring; `close()` and `__exit__()` raise while completion service is
-still active. `reset_serving()` clears the stop flag so a fresh set of workers
-can enter `serve_completions()` again. If a delivery callback raises, the ring
-invokes `exception_handler` when one is set. The handler receives a context dict
-with `message`, `exception`, `ring`, and `completions` (the batch being
-delivered). When the handler returns normally, that worker continues serving. When
-no handler is set, or the handler itself raises, `serve_completions()` exits with
-the exception; only that worker stops — other serving workers keep running until
-`stop_serving()`.
+`stop_serving()` sets the stop flag and uses `break_wait()` so a worker blocked
+in the kernel wait can observe stop and exit. The caller owns the threads, so the
+caller must join them before closing the ring; `close()` and `__exit__()` raise
+while completion service is still active. `reset_serving()` clears the stop flag
+so a fresh set of workers can enter `serve_completions()` again. If a delivery
+callback raises, the ring invokes `exception_handler` when one is set. The handler
+receives a context dict with `message`, `exception`, `ring`, and `completions`
+(the batch being delivered). When the handler returns normally, that worker
+continues serving. When no handler is set, or the handler itself raises,
+`serve_completions()` exits with the exception; only that worker stops — other
+serving workers keep running until `stop_serving()`.
 
 Native C clients can register a worker-thread callback through the C API. When a
 C callback is present, the serving worker calls it instead of `Ring.callback`;

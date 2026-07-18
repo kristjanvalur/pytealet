@@ -103,6 +103,15 @@ static PyObject *staging_build_ready_list(UringApiRing *ring, UringApiStagingBuf
     return ready;
 }
 
+/*
+ * Single wakeup entry point:
+ * - one internal NOP on the ring (not a user completion; reapers drop it)
+ * - open the host idle park for wait_idle()
+ *
+ * The NOP is not a worker-thread broadcast. Serve workers that drain it treat it
+ * as an empty/internal batch. Its purpose is to unblock a blocking wait() when a
+ * single thread owns the reaper (thread-free / inline loop).
+ */
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
@@ -134,7 +143,51 @@ PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignore
         Py_XDECREF(completion);
         return NULL;
     }
+    UringApiIdlePark_signal(&self->idle);
     Py_RETURN_NONE;
+}
+
+/*
+ * Park until break_wait / close, or timeout. Host-side only: not CQ reaping.
+ * timeout: None = forever, float/int seconds (0 = poll). Returns True if signalled.
+ */
+PyObject *UringApiRing_wait_idle(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"timeout", NULL};
+    PyObject *timeout_obj = Py_None;
+    double timeout_sec;
+    const double *timeout_ptr;
+    int signaled;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", keywords, &timeout_obj)) {
+        return NULL;
+    }
+    if (timeout_obj == Py_None) {
+        timeout_ptr = NULL;
+    } else {
+        if (PyLong_Check(timeout_obj)) {
+            long value = PyLong_AsLong(timeout_obj);
+            if (value == -1 && PyErr_Occurred()) {
+                return NULL;
+            }
+            timeout_sec = (double)value;
+        } else {
+            timeout_sec = PyFloat_AsDouble(timeout_obj);
+            if (PyErr_Occurred()) {
+                return NULL;
+            }
+        }
+        if (timeout_sec < 0.0) {
+            PyErr_SetString(PyExc_ValueError, "timeout must be non-negative or None");
+            return NULL;
+        }
+        timeout_ptr = &timeout_sec;
+    }
+
+    signaled = UringApiIdlePark_wait(&self->idle, timeout_ptr);
+    if (signaled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
 }
 
 int UringApiRing_stop_delivery(UringApiRing *self) {

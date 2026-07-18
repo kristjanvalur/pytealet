@@ -109,6 +109,42 @@ def test_ring_break_wait_interrupts_wait_when_available():
     assert results == [[]]
 
 
+def test_ring_wait_idle_timeout_when_available():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        assert ring.wait_idle(0.05) is False
+        assert ring.wait_idle(0) is False
+
+
+def test_ring_break_wait_wakes_wait_idle_when_available():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        results: list[bool] = []
+        thread = threading.Thread(target=lambda: results.append(ring.wait_idle(10.0)))
+        thread.start()
+        # give the waiter a moment to park
+        time.sleep(0.05)
+        ring.break_wait()
+        thread.join(1.0)
+        if thread.is_alive():
+            ring.break_wait()
+            thread.join(1.0)
+
+    assert thread.is_alive() is False
+    assert results == [True]
+
+
+def test_ring_break_wait_latches_wait_idle_before_park_when_available():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        ring.break_wait()
+        assert ring.wait_idle(0) is True
+        assert ring.wait_idle(0) is False
+
+
 def test_ring_wait_with_callback_delivers_and_returns_none_when_available():
     require_uring()
 

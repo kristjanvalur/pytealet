@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `Ring.wait_idle(timeout=None)`: host-side idle park separate from CQ reaping.
+  Parks until `break_wait` or `close` (or timeout). Returns `True` if signalled,
+  `False` on timeout.
+- `Ring.break_wait()` is the single wakeup API: submits **one** internal NOP CQE
+  (never delivered as a user completion; serve workers ignore it) so a blocking
+  `wait()` in a thread-free reaper loop can return, and also opens the
+  `wait_idle` park.
 - `Ring.exception_handler`: optional callback invoked when a delivery callback
   raises (Python or C). The handler receives a context dict with `message`,
   `exception`, `ring`, and `completions`. When it returns normally, that worker

@@ -12,6 +12,7 @@ enum {
 };
 
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
+PyObject *UringApiRing_wait_idle(UringApiRing *self, PyObject *args, PyObject *kwargs);
 int UringApiRing_stop_delivery(UringApiRing *self);
 PyObject *UringApiRing_stop_serving(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *ignored);
