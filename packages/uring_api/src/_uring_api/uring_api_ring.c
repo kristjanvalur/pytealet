@@ -379,7 +379,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "CQE to wake wait() on an empty CQ (skipped while serve workers own reaping). NOP failure still succeeds after "
      "signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), METH_VARARGS | METH_KEYWORDS,
-     "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout."},
+     "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
+     "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
      "Wait for ready completions. With no callback, returns a list (possibly empty on timeout/break_wait). With a "
      "delivery callback, invokes it for non-empty user batches and returns None; wake-only batches skip the callback."},

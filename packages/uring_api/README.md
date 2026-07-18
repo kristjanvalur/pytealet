@@ -394,6 +394,10 @@ so a caller blocked in `wait()` on an **empty CQ** can return. While
 park is needed. `stop_serving()` still forces a NOP so workers blocked in the
 kernel wait can observe stop.
 
+`wait_idle` is a **multi-signaller, single-waiter** park: many threads may call
+`break_wait()`, but only one host may park at a time (the proactor driver).
+Concurrent `wait_idle` waiters are not supported.
+
 If the submission queue is full, the NOP may be omitted and `break_wait()` still
 succeeds: a full SQ means outstanding work, so a real CQE will arrive soon
 enough. The idle park does not wait on the NOP path.

@@ -2521,7 +2521,12 @@ class UringProactor(ProactorBase):
         self._ring.wait(self._timeout_until_deadline(deadline))
 
     def _wait_workers(self, deadline: float | None = None) -> None:
-        """Park on ``ring.wait_idle`` while completion workers own CQ reaping."""
+        """Park on ``ring.wait_idle`` while completion workers own CQ reaping.
+
+        The ring idle park allows many ``wake_wait`` / ``break_wait`` signallers
+        but only one concurrent waiter — the proactor driver. Do not park a
+        second host (or dual ``wait`` / ``wait_async`` threads) on the same ring.
+        """
 
         if deadline == 0:
             return

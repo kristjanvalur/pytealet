@@ -64,7 +64,7 @@ void UringApiIdlePark_signal(UringApiIdlePark *park) {
     uring_api_refcount_mutex_lock(&park->state_mutex);
     if (!park->signaled) {
         park->signaled = 1;
-        /* release the gate permit (semaphore-style wake of one waiter). */
+        /* release the gate permit (multi-signaller latch, single waiter). */
         PyThread_release_lock(park->wait_lock);
     }
     uring_api_refcount_mutex_unlock(&park->state_mutex);
