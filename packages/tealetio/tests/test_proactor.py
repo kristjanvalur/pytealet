@@ -3184,6 +3184,34 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_recycle_survives_prepare_less_completion_paths(self):
+        """recv(n=0) and empty send finish without _prepare_uring_op; freelist must not crash."""
+
+        from tealetio.proactor import SyncProactorScheduler
+
+        scheduler = SyncProactorScheduler(
+            lambda: UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
+        )
+        set_scheduler(scheduler)
+        proactor = cast(UringProactor, scheduler.proactor)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def body() -> None:
+                empty = scheduler.io.sock_recv(reader, 0).wait()
+                assert empty == b""
+                assert proactor.op_pool_stats["releases"] >= 1
+                scheduler.io.sock_sendall(writer, b"").wait()
+                assert proactor.op_pool_stats["releases"] >= 2
+
+            scheduler.run_until_complete(scheduler.spawn(body))
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
     def test_uring_op_freelist_recycles_recv_many_but_not_poll_many(self, monkeypatch):
         """recv_many may pool after ordered terminal; poll_many never pools."""
 

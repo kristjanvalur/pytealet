@@ -650,7 +650,8 @@ class ProactorBase:
         """Return a finished waitable to a freelist when the backend supports it.
 
         Default is a no-op (selector and other backends). ``UringProactor`` pools
-        finished one-shot waitables only.
+        finished one-shot and non-``poll_many`` continuous waitables when
+        terminal and not ring-live.
         """
 
         return
@@ -937,6 +938,27 @@ _URING_OP_SQ_SLOTS = (
 )
 
 _DEFAULT_URING_OP_POOL_MAX = 256
+# Marker while claim_submit runs so inline delivery can clear the leg without us
+# re-attaching the returned Completion after ``_deactivate_uring_op``.
+_URING_SUBMIT_PENDING = object()
+
+
+def _init_uring_ring_leg_fields(op: "_UringOp") -> None:
+    """Initialise every ring-leg slot (constructors and freelist reinit)."""
+
+    op.complete = None
+    op.completion = None
+    op.poll_remove = False
+    op.sq_impl = None
+    op.sq0 = None
+    op.sq1 = None
+    op.sq2 = None
+    op.sq3 = None
+    op.sq4 = None
+    op.cq0 = None
+    op.cq1 = None
+    op.cq2 = None
+    op.cq3 = None
 
 
 class UringOperation(Operation[T]):
@@ -951,7 +973,8 @@ class UringOperation(Operation[T]):
     __slots__ = _URING_OP_SQ_SLOTS
     _pooled: bool
     complete: _UringOpComplete | None
-    completion: _UringCompletion | None
+    # Live Completion, None when idle/deactivated, or ``_URING_SUBMIT_PENDING`` during claim.
+    completion: _UringCompletion | object | None
     poll_remove: bool
     sq_impl: _UringSqImpl | None
     sq0: object
@@ -972,6 +995,7 @@ class UringOperation(Operation[T]):
     ) -> None:
         super().__init__(kind, fileobj, pending_bucket=proactor._pending_operations)
         self._pooled = False
+        _init_uring_ring_leg_fields(self)
 
     def _reinit_from_pool(
         self,
@@ -987,6 +1011,7 @@ class UringOperation(Operation[T]):
         self._resolved = None
         self._callbacks = []
         self._pooled = False
+        _init_uring_ring_leg_fields(self)
 
     def _scrub_for_pool(self) -> None:
         # Drop only refs that might pin large objects while idle in the pool.
@@ -1010,7 +1035,8 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
     __slots__ = _URING_OP_SQ_SLOTS
     _pooled: bool
     complete: _UringOpComplete | None
-    completion: _UringCompletion | None
+    # Live Completion, None when idle/deactivated, or ``_URING_SUBMIT_PENDING`` during claim.
+    completion: _UringCompletion | object | None
     poll_remove: bool
     sq_impl: _UringSqImpl | None
     sq0: object
@@ -1037,6 +1063,7 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
             pending_bucket=proactor._pending_operations,
         )
         self._pooled = False
+        _init_uring_ring_leg_fields(self)
 
     def _reinit_from_pool(
         self,
@@ -1053,6 +1080,7 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self._callbacks = []
         self._result_callback = result_callback
         self._pooled = False
+        _init_uring_ring_leg_fields(self)
 
     def _scrub_for_pool(self) -> None:
         self.fileobj = None
@@ -2294,18 +2322,18 @@ class UringProactor(ProactorBase):
         ring_cancel = None
         with self._deferred_lock:
             completion = op.completion
-            if completion is None:
+            if completion is None or completion is _URING_SUBMIT_PENDING:
                 self._cancel_deferred_operation_locked(op)
                 self._deactivate_uring_op(op)
                 cancel_op = self._completed_cancel_operation("cancel", op)
             elif op.poll_remove:
-                ring_cancel = (completion, "poll_remove")
+                ring_cancel = (cast(_UringCompletion, completion), "poll_remove")
             elif op.kind == "poll_many":
                 self._stop_uring_poll_many_oneshot_locked(op)
                 cancel_op = self._completed_cancel_operation("poll_remove", op)
             else:
                 immediate_terminalise = False
-                ring_cancel = (completion, "cancel")
+                ring_cancel = (cast(_UringCompletion, completion), "cancel")
 
         if ring_cancel is not None:
             completion, kind = ring_cancel
@@ -3339,20 +3367,35 @@ class UringProactor(ProactorBase):
         assert impl is not None
         return impl(self, operation)
 
+    def _install_submit_completion(self, operation: _UringOp, completion: _UringCompletion) -> None:
+        """Attach ``completion`` after claim, without undoing inline deactivate.
+
+        Place ``_URING_SUBMIT_PENDING`` before claim. If inline delivery finishes
+        the op or calls ``_deactivate_uring_op``, leave ``completion`` cleared.
+        Otherwise store the live ring handle (including continuous legs that
+        stay unfinished until ``finish_operation``).
+        """
+
+        if operation.done():
+            operation.completion = None
+        elif operation.completion is _URING_SUBMIT_PENDING:
+            operation.completion = completion
+        # else: complete path replaced or cleared the marker; keep as-is
+
     def _submit_uring_op(self, operation: _UringOp) -> bool:
         try:
+            operation.completion = _URING_SUBMIT_PENDING
             completion = self._claim_submit(operation)
-            # Inline delivery (fakes / eager CQ) may already have finished the op
-            # and cleared completion; do not re-store a stale handle.
-            if operation.done():
-                operation.completion = None
-            else:
-                operation.completion = completion
+            self._install_submit_completion(operation, completion)
         except uring_api.SubmissionQueueFull:
+            if operation.completion is _URING_SUBMIT_PENDING:
+                operation.completion = None
             self._note_submit_queue_full()
             self._enqueue_deferred_operation(operation)
             return False
         except BaseException as exc:
+            if operation.completion is _URING_SUBMIT_PENDING:
+                operation.completion = None
             self._fail_uring_op(operation, exc)
             raise
         return True
@@ -3369,18 +3412,20 @@ class UringProactor(ProactorBase):
                 while self._deferred_submissions:
                     operation = self._deferred_submissions.pop(0)
                     try:
-                        # Claim under the lock: set completion before unlock so cancel
-                        # either removes us from the queue or sees a live ring handle.
+                        # Claim under the lock: install completion before unlock so
+                        # cancel either removes us from the queue or sees a live handle.
+                        operation.completion = _URING_SUBMIT_PENDING
                         completion = self._claim_submit(operation)
-                        if operation.done():
-                            operation.completion = None
-                        else:
-                            operation.completion = completion
+                        self._install_submit_completion(operation, completion)
                     except uring_api.SubmissionQueueFull:
+                        if operation.completion is _URING_SUBMIT_PENDING:
+                            operation.completion = None
                         self._note_submit_queue_full()
                         self._enqueue_deferred_operation_locked(operation)
                         break
                     except Exception as exc:
+                        if operation.completion is _URING_SUBMIT_PENDING:
+                            operation.completion = None
                         failures.append((operation, exc))
             finally:
                 self._retrying_deferred_submissions = False
