@@ -4,9 +4,8 @@
 Compares one-shot ``recv`` scaffolding when:
 
 * freelist disabled (``op_pool_max=0``)
-* freelist + **explicit** ``recycle_operation`` after use (reliable)
-* freelist + **``__del__`` only** after dropping the last ref (best-effort;
-  CPython may skip ``__del__`` after freelist resurrection)
+* freelist + explicit ``recycle_operation`` after use
+* freelist enabled but refs held without recycle (no reuse)
 
 The fake ring completes CQEs inline on submit. History lists that pin
 ``user_data`` are cleared so the waitable can actually be recycled.
@@ -92,8 +91,6 @@ def _run_batch(
             ring.submitted_recv.clear()
             if mode == "explicit":
                 proactor.recycle_operation(op)
-            elif mode == "del":
-                del op
             elif mode == "hold":
                 held.append(op)
             else:
@@ -119,9 +116,8 @@ def main() -> None:
     print()
 
     cases = (
-        ("no pool", 0, "del"),
+        ("no pool", 0, "explicit"),
         ("pool + explicit recycle", args.pool, "explicit"),
-        ("pool + __del__ only", args.pool, "del"),
         ("pool + hold refs (no recycle)", args.pool, "hold"),
     )
     for label, pool_max, mode in cases:
@@ -129,8 +125,9 @@ def main() -> None:
             op_pool_max=pool_max,
             iterations=args.iterations,
             warmup=args.warmup,
-            mode=mode,
+            mode=mode if pool_max else "explicit",
         )
+        # For no-pool case, recycle is a no-op (max=0) but we still call it.
         hit_den = stats["hits"] + stats["misses"]
         hit_rate = (stats["hits"] / hit_den) if hit_den else 0.0
         _summarise(label, samples)

@@ -906,7 +906,6 @@ _UringOpComplete = Callable[["UringProactor", "_UringOp", "_UringCompletion"], O
 _UringSqImpl = Callable[["UringProactor", "_UringOp"], "_UringCompletion"]
 
 _URING_OP_SQ_SLOTS = (
-    "_proactor",
     "_pooled",
     "complete",
     "completion",
@@ -931,13 +930,11 @@ class UringOperation(Operation[T]):
 
     Passed as ``uring_api.Completion.user_data`` so delivery does not need a
     separate Entry object. Ring-leg fields are filled by ``_prepare_uring_op``
-    / ``_arm_sq``. Finished waitables may return to the proactor freelist via
-    ``__del__`` when the last strong reference is dropped (for example after
-    ``IOWaiter.wait()`` / ``forget()``).
+    / ``_arm_sq``. Finished waitables return to the proactor freelist via
+    ``recycle_operation`` (``IOWaiter.wait()`` / ``forget()`` on the common path).
     """
 
     __slots__ = _URING_OP_SQ_SLOTS
-    _proactor: "UringProactor | None"
     _pooled: bool
     complete: _UringOpComplete | None
     completion: _UringCompletion | None
@@ -960,7 +957,6 @@ class UringOperation(Operation[T]):
         fileobj: object | None = None,
     ) -> None:
         super().__init__(kind, fileobj, pending_bucket=proactor._pending_operations)
-        self._proactor = proactor
         self._pooled = False
 
     def _reinit_from_pool(
@@ -997,27 +993,11 @@ class UringOperation(Operation[T]):
         self.cq2 = None
         self.cq3 = None
 
-    def __del__(self) -> None:
-        # Best-effort last-ref recycle. After freelist resurrection CPython may
-        # skip a later __del__ (already-finalized); prefer recycle_operation().
-        try:
-            proactor = self._proactor
-            pooled = self._pooled
-        except AttributeError:
-            return
-        if proactor is None or pooled:
-            return
-        try:
-            proactor._release_uring_op(self)
-        except Exception:
-            pass
-
 
 class UringContinuousOperation(ContinuousOperation[T_co]):
     """Continuous uring waitable; freelist-capable like ``UringOperation``."""
 
     __slots__ = _URING_OP_SQ_SLOTS
-    _proactor: "UringProactor | None"
     _pooled: bool
     complete: _UringOpComplete | None
     completion: _UringCompletion | None
@@ -1046,7 +1026,6 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
             result_callback,
             pending_bucket=proactor._pending_operations,
         )
-        self._proactor = proactor
         self._pooled = False
 
     def _reinit_from_pool(
@@ -1085,19 +1064,6 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self.cq1 = None
         self.cq2 = None
         self.cq3 = None
-
-    def __del__(self) -> None:
-        try:
-            proactor = self._proactor
-            pooled = self._pooled
-        except AttributeError:
-            return
-        if proactor is None or pooled:
-            return
-        try:
-            proactor._release_uring_continuous_op(self)
-        except Exception:
-            pass
 
 
 @dataclass(frozen=True)
@@ -2331,15 +2297,9 @@ class UringProactor(ProactorBase):
         self._ring.close()
 
     def _drain_uring_op_pools(self) -> None:
-        """Drop freelist entries so they cannot resurrect after close."""
+        """Drop freelist entries on proactor close."""
 
-        for op in self._op_pool:
-            op._proactor = None
-            op._pooled = False
         self._op_pool.clear()
-        for op in self._continuous_op_pool:
-            op._proactor = None
-            op._pooled = False
         self._continuous_op_pool.clear()
 
     def _acquire_uring_op(self, kind: str, fileobj: object | None = None) -> UringOperation[Any]:
@@ -2354,11 +2314,8 @@ class UringProactor(ProactorBase):
     def recycle_operation(self, operation: Operation[Any]) -> None:
         """Return a finished waitable to the freelist when safe.
 
-        Prefer this over relying on ``__del__``: CPython may skip ``__del__`` on
-        later deaths after freelist resurrection (object already finalized).
-        ``IOWaiter.wait()`` / ``forget()`` call this for the common path when
-        they drop their waitable reference (only recycles if terminal and not
-        in-flight).
+        Only recycles when the waitable is terminal and not in-flight.
+        ``IOWaiter.wait()`` / ``forget()`` call this on the common path.
         """
 
         if isinstance(operation, UringOperation):

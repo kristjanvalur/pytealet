@@ -3174,7 +3174,6 @@ class TestUringProactor:
             assert proactor.op_pool_stats["hits"] >= 1
             proactor.ring.submitted_recv.clear()
             proactor.recycle_operation(second)
-            # Second recycle works (unlike relying on __del__ after resurrection).
             assert proactor.op_pool_stats["releases"] >= 2
         finally:
             reader.close()

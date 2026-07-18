@@ -183,9 +183,11 @@ class IOWaiter(Generic[T]):
         self._operation = None
         if operation is None:
             return
-        recycle = getattr(self._io.proactor, "recycle_operation", None)
-        if recycle is not None:
-            recycle(operation)
+        try:
+            recycle = self._io.proactor.recycle_operation
+        except AttributeError:
+            return
+        recycle(operation)
 
     def _wait_self(self) -> None:
         operation = self._operation
