@@ -821,6 +821,39 @@ class ProactorIOManager:
             raise
         return group
 
+    def _attach_sock_sendall(
+        self,
+        group: IOWaitGroup[Any],
+        sock: socket.socket,
+        data: Any,
+        *,
+        on_cleanup: Callable[[bool, Any], object] | None = None,
+        on_done: Callable[[], object],
+    ) -> None:
+        """Chain ``sock_sendall`` into ``group`` (eager try, then proactor remainder).
+
+        Used after connect for ``initial`` / ``initial_data``. Sync success runs
+        ``on_done`` immediately; sync failure completes the group with the error.
+        """
+
+        waiter = self.sock_sendall(sock, data)
+        if isinstance(waiter, IOWaiterSync):
+            exc = waiter.exception()
+            if exc is not None:
+                if on_cleanup is not None:
+                    on_cleanup(True, None)
+                group._complete_error(exc)
+                return
+            on_done()
+            return
+        operation = waiter.operation
+        assert operation is not None
+        group.attach(
+            operation,
+            on_cleanup=on_cleanup,
+            advance=lambda _child: on_done(),
+        )
+
     def sock_connect(
         self,
         sock: socket.socket,
@@ -838,12 +871,11 @@ class ProactorIOManager:
         group = IOWaitGroup(self)
 
         def advance_connect(_child: IOWaitGroupChildProtocol[None]) -> None:
-            def advance_send(_send_child: IOWaitGroupChildProtocol[None]) -> None:
-                _finish_or_close_socket(group, sock, None)
-
-            group.attach(
-                self._proactor.send(sock, payload),
-                advance=advance_send,
+            self._attach_sock_sendall(
+                group,
+                sock,
+                payload,
+                on_done=lambda: _finish_or_close_socket(group, sock, None),
             )
 
         group.attach(self._proactor.connect(sock, address), advance=advance_connect)
@@ -872,24 +904,23 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
         payload = memoryview(initial_data) if initial_data is not None else None
+        close_on_fail = lambda fail, _value: abortive_close(sock) if fail else None
 
         def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
             if payload is None or not payload:
                 _finish_or_close_socket(group, sock, sock)
                 return
-
-            def advance_send(_send_child: IOWaitGroupChildProtocol[None]) -> None:
-                _finish_or_close_socket(group, sock, sock)
-
-            group.attach(
-                self._proactor.send(sock, payload),
-                on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
-                advance=advance_send,
+            self._attach_sock_sendall(
+                group,
+                sock,
+                payload,
+                on_cleanup=close_on_fail,
+                on_done=lambda: _finish_or_close_socket(group, sock, sock),
             )
 
         group.attach(
             self._proactor.connect(sock, connect_to),
-            on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
+            on_cleanup=close_on_fail,
             advance=finish_connected,
         )
         return group
@@ -1262,7 +1293,8 @@ class ProactorIOManager:
         """Create a socket, connect, and return stream endpoints.
 
         ``initial_data`` is sent on the wire after connect, before streams open.
-        Socket creation is direct (stdlib); only connect/send go through the proactor.
+        Socket creation is direct (stdlib); connect goes through the proactor;
+        the optional initial send uses ``sock_sendall`` (eager try).
         """
 
         try:
@@ -1272,6 +1304,7 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
         payload = memoryview(initial_data) if initial_data is not None else None
+        close_on_fail = lambda fail, _value: abortive_close(sock) if fail else None
 
         def open_and_finish() -> None:
             try:
@@ -1293,15 +1326,17 @@ class ProactorIOManager:
             if payload is None or not payload:
                 open_and_finish()
                 return
-            group.attach(
-                self._proactor.send(sock, payload),
-                on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
-                advance=lambda _send_child: open_and_finish(),
+            self._attach_sock_sendall(
+                group,
+                sock,
+                payload,
+                on_cleanup=close_on_fail,
+                on_done=open_and_finish,
             )
 
         group.attach(
             self._proactor.connect(sock, connect_to),
-            on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
+            on_cleanup=close_on_fail,
             advance=finish_connected,
         )
         return group

@@ -176,7 +176,7 @@ direct socket.socket() + configure_scheduler_socket
         ▼
 IOWaitGroup
   attach(connect) → finish_connected
-    attach(send) when initial_data → group.finish(sock)
+    sock_sendall (eager try) when initial_data → group.finish(sock)
     else group.finish(sock)
 ```
 
@@ -186,7 +186,7 @@ ProactorIOManager.sock_connect(…, initial=…)
         ▼
 IOWaitGroup
   attach(connect) → advance_connect
-    attach(send) when initial → group.finish(None)
+    sock_sendall (eager try) when initial → group.finish(None)
 ```
 
 | Helper | Role |

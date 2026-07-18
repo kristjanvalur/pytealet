@@ -1090,7 +1090,11 @@ class TestProactorIOManagerRecvManyEager:
 
 
 class TestProactorIOManagerSockCreateStreams:
-    def test_sock_create_streams_composes_create_connect_and_send(self) -> None:
+    def test_sock_create_streams_composes_create_connect_and_send(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mock connect does not wire the socket; force proactor send leg
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
@@ -1405,7 +1409,10 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
-    def test_sock_create_composes_connect_and_send_without_operation_factory(self) -> None:
+    def test_sock_create_composes_connect_and_send_without_operation_factory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
         proactor = _MockProactor()
         io = _manager(proactor)
         address = ("127.0.0.1", 9)
@@ -1437,7 +1444,8 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
-    def test_sock_connect_composes_send_after_connect(self) -> None:
+    def test_sock_connect_composes_send_after_connect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
         proactor = _MockProactor()
         io = _manager(proactor)
         sock = socket.socketpair()[0]
@@ -1449,6 +1457,25 @@ class TestProactorIOManagerDirect:
             assert bytes(proactor.send_calls[0][1]) == b"hi"
         finally:
             sock.close()
+
+    def test_sock_connect_initial_send_eager_when_writable(self) -> None:
+        """After connect, initial bytes use sock_sendall (eager, no proactor send)."""
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        # socketpair is already connected; mock connect only completes the leg
+        sock, peer = socket.socketpair()
+        sock.setblocking(False)
+        peer.setblocking(False)
+        try:
+            waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
+            assert isinstance(waiter, IOWaitGroup)
+            waiter.wait()
+            assert proactor.send_calls == []
+            assert peer.recv(2) == b"hi"
+        finally:
+            sock.close()
+            peer.close()
 
     def test_sock_accept_without_recv_returns_io_waiter(self) -> None:
         proactor = _MockProactor()
@@ -1603,7 +1630,10 @@ class TestProactorIOManagerDirect:
         assert len(seen) == 1
         assert seen[0].fileno() == -1
 
-    def test_sock_connect_leaves_socket_open_when_send_fails(self) -> None:
+    def test_sock_connect_leaves_socket_open_when_send_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
         proactor = _MockProactor()
         io = _manager(proactor)
 
@@ -1628,7 +1658,8 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
-    def test_sock_create_closes_socket_when_send_fails(self) -> None:
+    def test_sock_create_closes_socket_when_send_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
         proactor = _MockProactor()
         io = _manager(proactor)
 
@@ -1800,6 +1831,8 @@ class TestProactorIOManagerDeferredCompose:
     ) -> None:
         import tealetio.io_waiter as io_waiter_module
 
+        # force proactor send leg so the deferred ring can hold the CQE
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
         scheduler = SyncProactorScheduler(lambda: proactor)
         set_scheduler(scheduler)

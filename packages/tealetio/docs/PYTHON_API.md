@@ -113,17 +113,18 @@ initial_data=None)`` creates sockets **directly** (stdlib + scheduler contract)
 rather than through ``Proactor.create_socket`` — blocking creation is faster than
 the uring path for this hot entry point. Create-only returns an
 ``IOWaiterSync`` holding the socket (or create error); optional ``connect_to``
-and ``initial_data`` are composed via ``IOWaitGroup`` (connect → optional send).
-``initial_data`` without ``connect_to`` raises ``ValueError``. The call either
-returns the socket or raises. When ``connect_to`` is set the returned socket is
-already connected (and any ``initial_data`` was flushed).
+and ``initial_data`` are composed via ``IOWaitGroup`` (connect → optional
+``sock_sendall``). ``initial_data`` without ``connect_to`` raises ``ValueError``.
+The call either returns the socket or raises. When ``connect_to`` is set the
+returned socket is already connected (and any ``initial_data`` was flushed via
+the same eager send path as ``sock_sendall``).
 ``open_connection(…, initial_send=…)`` passes ``connect_to`` and
 ``initial_data`` through this path for TCP and Unix ``path=`` connects.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
 ``ProactorIOManager.sock_connect(..., initial=...)`` via ``IOWaitGroup`` (connect
-→ optional send), not a separate proactor ``initial`` parameter.
+→ optional ``sock_sendall``), not a separate proactor ``initial`` parameter.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It

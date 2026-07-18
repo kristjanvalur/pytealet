@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``proactor.send``. A full buffer completes as ``IOWaiterSync``; partial sends
   report ``progress`` then hand the remainder to the proactor (which continues
   the drain). Empty payloads still go straight to the proactor.
+- Connect-time ``initial`` / ``initial_data`` (``sock_connect``, ``sock_create``,
+  ``sock_create_streams``) chain through ``sock_sendall`` after connect, so the
+  first post-connect bytes get the same eager send try. Connect itself still
+  always uses the proactor.
 - ``ProactorIOManager.sock_shutdown`` / ``sock_close`` run
   ``socket.shutdown`` / ``socket.close`` on the calling thread and return
   ``IOWaiterSync`` (no proactor submit), matching asyncio stream teardown.
