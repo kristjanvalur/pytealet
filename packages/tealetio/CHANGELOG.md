@@ -67,9 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the completion worker; out-of-order terminal ordering defers to scheduler-thread
   ``ReorderBuffer``.
 - Removed ``LenientReorderBuffer``; accept and poll continuous paths use the same
-  strict ``ReorderBuffer`` as ``RecvIterBuffer``. Unsequenced cancel terminals
-  (``index=None``) flush heaped legs in index order before the terminal so
-  out-of-order accepts are not stranded after local cancel.
+  strict ``ReorderBuffer`` as ``RecvIterBuffer``. On unsequenced cancel
+  (``index=None``), accept/poll flush heaped legs before the terminal so
+  sockets are not stranded; ``recv_many`` does not flush (no gap-skipped data).
 - ``start_server()`` without an explicit ``stream_factory`` now uses
   ``pooled_default_stream_factory`` (per-connection provided-buffer pools)
   instead of the scheduler shared pool, so concurrent clients do not share

@@ -86,8 +86,8 @@ def test_wrap_continuous_delivery_finishes_only_on_terminal() -> None:
     assert wakes == ["wake"]
 
 
-def test_reorder_buffer_index_none_flushes_heap_before_terminal() -> None:
-    """index=None cancel must not leave heaped OOO legs stranded."""
+def test_reorder_buffer_index_none_does_not_flush_heap() -> None:
+    """index=None is immediate; heap is left for the owner (recv discards, accept flushes)."""
     from tealetio.continuous_callbacks import ReorderBuffer
     from tealetio.operations import io_cancellation_error
 
@@ -99,10 +99,12 @@ def test_reorder_buffer_index_none_flushes_heap_before_terminal() -> None:
     reorder_buffer = ReorderBuffer(record)
     reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True))
     reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
-    # late straggler after cancel still reaches the callback (no done() gate here)
-    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
+    assert order == [None]
+    assert reorder_buffer.pending
 
-    assert order == [1, None, 0]
+    # sequenced gap fill after cancel still flushes the heap (strict reorder)
+    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
+    assert order == [None, 0, 1]
 
 
 def test_reorder_buffer_arm_next_index_reuses_leg_start_index() -> None:
@@ -254,13 +256,8 @@ def test_reorder_buffer_flushes_terminal_after_out_of_order_legs() -> None:
     assert [index for index, _more in delivered] == list(range(11))
 
 
-def test_reorder_buffer_index_none_cancel_flushes_heaped_legs() -> None:
-    """Local cancel uses index=None; heaped OOO accepts must not be stranded.
-
-    Strict reorder holds non-terminals until their index is due. A sequenced
-    terminal waits for the gap; an unsequenced cancel must flush the heap first
-    so open_streams results still reach the user callback before finish.
-    """
+def test_reorder_buffer_flush_pending_before_unsequenced_cancel() -> None:
+    """Accept/poll call flush_pending() before index=None so heaped legs are not stranded."""
     from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
     from tealetio.operations import io_cancellation_error
 
@@ -279,6 +276,8 @@ def test_reorder_buffer_index_none_cancel_flushes_heaped_legs() -> None:
     # gap at 1: 2 and 3 still heaped; 0 already delivered
     assert [index for index, _more in delivered] == [0]
 
+    # accept/poll path: flush then unsequenced cancel (see _thread_reorder_helper)
+    buffer.flush_pending()
     buffer.deliver(
         MultishotDelivery(index=None, exception=io_cancellation_error(), more=False, operation=operation),
     )

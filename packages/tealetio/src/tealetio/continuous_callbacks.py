@@ -70,27 +70,21 @@ class ReorderBuffer:
     otherwise the delivery is queued on a min-heap until earlier indices have
     been delivered.
 
-    ``index=None`` opts out of sequence order (local cancel terminals). Those
-    flush every heaped leg in index order first so accept/poll results are not
-    stranded when cancel finishes the continuous op without filling a gap.
+    ``index=None`` opts out of sequence order (local cancel terminals) and is
+    delivered immediately without waiting for gaps. That does **not** flush the
+    heap: ``recv_many`` must not surface out-of-order chunks across a cancel.
+    Accept/poll paths that own sockets call ``flush_pending()`` before such a
+    terminal so heaped connections are not stranded.
     """
 
     def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
         self._callback = callback
         self._delivered = start
         self._heap: list[MultishotDelivery] = []
-        # after index=None cancel, further legs pass through (op is finished)
-        self._pass_through = False
 
     def deliver(self, delivery: MultishotDelivery) -> None:
-        if self._pass_through:
-            self._callback(delivery)
-            return
         if delivery.index is None:
-            # unsequenced terminal: hand off heaped legs before finishing
-            self._flush_heap_unordered_gaps()
             self._callback(delivery)
-            self._pass_through = True
             return
         if delivery.index == self._delivered:
             self._deliver_now(delivery)
@@ -105,12 +99,12 @@ class ReorderBuffer:
             self._callback(pending)
             self._delivered += 1
 
-    def _flush_heap_unordered_gaps(self) -> None:
+    def flush_pending(self) -> None:
         """Deliver every heaped leg in index order, even across missing gaps.
 
-        Used for ``index=None`` cancel terminals that do not wait for the next
-        sequence slot. Callers still see a defined order; sockets/stream pairs
-        are not left only on the heap after the continuous op finishes.
+        For accept/poll cancel: hand off sockets/stream pairs before an
+        unsequenced terminal finishes the continuous op. Do not use for
+        ``recv_many`` — that would reorder stream data past a cancel.
         """
 
         if not self._heap:
@@ -141,7 +135,6 @@ class ReorderBuffer:
     def reset(self, *, start: int = 0) -> None:
         self._heap.clear()
         self._delivered = start
-        self._pass_through = False
 
     def arm_next_index(self, index: int) -> None:
         """Prepare for the next leg whose first delivery uses ``index``.

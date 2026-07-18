@@ -395,12 +395,21 @@ class ProactorIOManager:
         delivery_callback: DeliveryCallback,
         *,
         start: int = 0,
+        flush_heap_on_unsequenced_terminal: bool = False,
     ) -> Callable[[MultishotDelivery], None]:
         buffer = ReorderBuffer(delivery_callback, start=start)
 
+        def deliver_on_scheduler(delivery: MultishotDelivery) -> None:
+            # accept/poll: local cancel uses index=None and would otherwise leave
+            # OOO sockets on the heap. recv_many keeps the default (no flush) so
+            # cancel cannot surface gap-skipped stream data.
+            if flush_heap_on_unsequenced_terminal and delivery.index is None:
+                buffer.flush_pending()
+            buffer.deliver(delivery)
+
         def on_thread_delivery(delivery: MultishotDelivery) -> None:
             assert self._scheduler is not None
-            self._scheduler.call_soon_threadsafe(lambda: buffer.deliver(delivery), immediate=True)
+            self._scheduler.call_soon_threadsafe(lambda: deliver_on_scheduler(delivery), immediate=True)
 
         return on_thread_delivery
 
@@ -938,7 +947,10 @@ class ProactorIOManager:
         operation = self._proactor.poll_many(
             fd,
             mask,
-            self._thread_reorder_helper(on_ordered_delivery),
+            self._thread_reorder_helper(
+                on_ordered_delivery,
+                flush_heap_on_unsequenced_terminal=True,
+            ),
         )
         return IOWaiter(self, operation)
 
@@ -1101,7 +1113,10 @@ class ProactorIOManager:
             finally:
                 finish_continuous_delivery(delivery)
 
-        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery)
+        on_thread_delivery = self._thread_reorder_helper(
+            on_ordered_delivery,
+            flush_heap_on_unsequenced_terminal=True,
+        )
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
@@ -1220,7 +1235,10 @@ class ProactorIOManager:
             finally:
                 finish_continuous_delivery(delivery)
 
-        on_thread_delivery = self._thread_reorder_helper(on_ordered_delivery)
+        on_thread_delivery = self._thread_reorder_helper(
+            on_ordered_delivery,
+            flush_heap_on_unsequenced_terminal=True,
+        )
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
