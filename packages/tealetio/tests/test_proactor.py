@@ -2555,8 +2555,65 @@ class TestUringProactor:
             proactor.close()
 
     def test_validates_completion_thread_configuration(self):
-        with pytest.raises(ValueError, match="completion_threads must be at least 1"):
-            UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        with pytest.raises(ValueError, match="completion_threads must be non-negative"):
+            UringProactor(ring_factory=_FakeUringRing, completion_threads=-1)
+
+    def test_inline_mode_starts_no_completion_threads(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+            assert proactor._inline_completions is True
+            assert proactor._service_threads == []
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.serve_count == 0
+            assert proactor.ring.callback is None
+        finally:
+            proactor.close()
+
+    def test_sync_uring_proactor_is_inline(self):
+        from tealetio.proactor import SyncUringProactor
+
+        proactor = SyncUringProactor(ring_factory=_FakeUringRing)
+        try:
+            assert proactor._inline_completions is True
+            assert proactor._service_threads == []
+        finally:
+            proactor.close()
+
+    def test_inline_wait_delivers_queued_completions(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            assert operation.done() is False
+            # fake ring queues the completion when not serving; wait harvests it
+            proactor.wait(0)
+            assert operation.done() is True
+            assert operation.result() == b"hello"
+        finally:
+            proactor.close()
+            reader.close()
+            writer.close()
+
+    def test_inline_wake_wait_uses_ring_break_wait(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        released = threading.Event()
+        try:
+            thread = threading.Thread(target=lambda: (proactor.wait(proactor.get_time() + 10.0), released.set()))
+            thread.start()
+            thread.join(0.05)
+            assert thread.is_alive() is True
+
+            proactor.wake_wait()
+
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert released.is_set()
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.break_count >= 1
+        finally:
+            proactor.close()
 
     def test_applies_default_completion_thread_nice(self, monkeypatch: pytest.MonkeyPatch):
         calls: list[tuple[int, int, int]] = []

@@ -107,10 +107,22 @@ def make_fake_uring_proactor():
     return UringProactor(ring_factory=_FakeUringRing)
 
 
+def make_fake_sync_uring_proactor():
+    from tealetio.proactor import SyncUringProactor
+
+    return SyncUringProactor(ring_factory=_FakeUringRing)
+
+
 def make_native_uring_proactor():
     from tealetio.proactor import UringProactor
 
     return UringProactor()
+
+
+def make_native_sync_uring_proactor():
+    from tealetio.proactor import SyncUringProactor
+
+    return SyncUringProactor()
 
 
 PROACTOR_CONTRACT_FACTORIES: list[Any] = [
@@ -119,6 +131,7 @@ PROACTOR_CONTRACT_FACTORIES: list[Any] = [
 ]
 if uring_api.is_available():
     PROACTOR_CONTRACT_FACTORIES.append(pytest.param(make_native_uring_proactor, id="uring"))
+    PROACTOR_CONTRACT_FACTORIES.append(pytest.param(make_native_sync_uring_proactor, id="uring-sync"))
 
 
 def make_selector_scheduler():
@@ -192,6 +205,7 @@ class _FakeUringRing:
         self.serve_count = 0
         self.stop_serving_count = 0
         self._stop_serving_event = threading.Event()
+        self._wait_event = threading.Event()
         self.break_count = 0
         self.completions: list[SimpleNamespace] = []
         self.accepted_peers: list[socket.socket] = []
@@ -283,6 +297,7 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.break_count += 1
+        self._wait_event.set()
 
     def _recv_buffer_for_entry(self, entry: object) -> memoryview:
         """Return the recv buffer for a oneshot entry.
@@ -891,9 +906,26 @@ class _FakeUringRing:
         return completion
 
     def wait(self, timeout: float | None = None) -> list[SimpleNamespace]:
-        if not self.completions:
+        """Return queued completions, or block until one / timeout / break_wait.
+
+        Mirrors ``uring_api.Ring.wait`` enough for inline ``UringProactor`` tests:
+        empty list on timeout or ``break_wait()`` with no user CQE.
+        """
+
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        if self.completions:
+            return [self.completions.pop(0)]
+        if timeout == 0:
             return []
-        return [self.completions.pop(0)]
+        self._wait_event.clear()
+        if timeout is None:
+            self._wait_event.wait()
+        else:
+            self._wait_event.wait(timeout)
+        if self.completions:
+            return [self.completions.pop(0)]
+        return []
 
     def _deliver(self, completion: SimpleNamespace) -> None:
         if self.running and self.callback is not None:
@@ -913,6 +945,7 @@ class _FakeUringRing:
                 )
         else:
             self.completions.append(completion)
+            self._wait_event.set()
 
 
 class _FailingConnectUringRing(_FakeUringRing):

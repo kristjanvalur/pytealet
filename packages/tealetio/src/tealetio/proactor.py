@@ -72,6 +72,7 @@ __all__ = [
     "SupportsProactorIO",
     "SelectorProactor",
     "SyncProactorScheduler",
+    "SyncUringProactor",
     "ThreadedSelectorProactor",
     "UringProactor",
     "UringSubmissionStats",
@@ -2124,7 +2125,19 @@ class ThreadedSelectorProactor(SelectorProactor):
 
 
 class UringProactor(ProactorBase):
-    """io_uring-backed proactor using Python-owned completion service threads."""
+    """io_uring-backed proactor.
+
+    Default mode starts Python completion service threads that call
+    ``ring.serve_completions()`` and deliver via ``Ring.callback``. The
+    scheduler's ``wait()`` then only sleeps on an event until those workers
+    signal work.
+
+    With ``completion_threads=0`` (see also ``SyncUringProactor``), there are no
+    service threads: ``wait()`` blocks in ``ring.wait()`` and runs the same
+    completion processor on the calling thread. That matches the
+    single-threaded shape of ``SelectorProactor`` and is useful for isolating
+    cross-thread delivery cost from Operation/stream overhead.
+    """
 
     def __init__(
         self,
@@ -2136,8 +2149,8 @@ class UringProactor(ProactorBase):
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
         op_pool_max: int = _DEFAULT_URING_OP_POOL_MAX,
     ) -> None:
-        if completion_threads <= 0:
-            raise ValueError("completion_threads must be at least 1")
+        if completion_threads < 0:
+            raise ValueError("completion_threads must be non-negative")
         if ring_factory is None:
             ring_factory = _default_uring_ring_factory
         super().__init__()
@@ -2175,11 +2188,17 @@ class UringProactor(ProactorBase):
         # Synthetic pools are only for kernels without buf rings — never for multishot.
         self._provided_buffers_supported = bool(self._capabilities.get("IORING_BUF_RING", False))
         self._wait_ready = EventWakeupManager()
-        self._ring.callback = self._deliver_uring_completion
+        # inline: driver thread reaps via ring.wait(); threaded: workers call callback.
+        self._inline_completions = completion_threads == 0
+        self._ring.callback = None if self._inline_completions else self._deliver_uring_completion
+        # bind once: avoid a mode check on every scheduler wait()
+        self.wait = self._wait_inline if self._inline_completions else self._wait_workers
         self._service_threads = [
             threading.Thread(target=self._service_thread_main, name=f"tealetio-uring-{index}")
             for index in range(completion_threads)
         ]
+        if self._inline_completions:
+            return
         try:
             for thread in self._service_threads:
                 thread.start()
@@ -2427,9 +2446,16 @@ class UringProactor(ProactorBase):
         self._closed = True
         self._op_pool.clear()
         self._clear_shared_recv_buffer_pool()
-        self._ring.stop_serving()
-        for thread in self._service_threads:
-            thread.join()
+        if self._service_threads:
+            self._ring.stop_serving()
+            for thread in self._service_threads:
+                thread.join()
+        else:
+            # interrupt a driver blocked in ring.wait() before close
+            try:
+                self._ring.break_wait()
+            except (OSError, RuntimeError, ValueError):
+                pass
         self._deferred_submissions.clear()
         self.wake_wait()
         self._ring.callback = None
@@ -2468,12 +2494,27 @@ class UringProactor(ProactorBase):
     def wake_wait(self) -> None:
         """Wake threads blocked in sync or async `wait`."""
 
+        if self._inline_completions:
+            # interrupt ring.wait() on the reaper thread (usually the driver)
+            try:
+                self._ring.break_wait()
+            except (OSError, RuntimeError, ValueError):
+                pass
+            return
         self._wait_ready.wakeup()
 
-    def wait(self, deadline: float | None = None) -> None:
-        """Wait until completed operations are signalled."""
+    def _wait_inline(self, deadline: float | None = None) -> None:
+        """Block in ``ring.wait`` and deliver completions on this thread."""
 
-        self._check_open()
+        # deadline==0: one non-blocking harvest (selector wait(0) analogue)
+        timeout = self._timeout_until_deadline(deadline)
+        batch = self._ring.wait(timeout)
+        if batch:
+            self._deliver_uring_completion(batch)
+
+    def _wait_workers(self, deadline: float | None = None) -> None:
+        """Park until a completion worker signals via ``EventWakeupManager``."""
+
         if deadline == 0:
             return
 
@@ -2485,7 +2526,18 @@ class UringProactor(ProactorBase):
     async def wait_async(self, deadline: float | None = None) -> None:
         """Wait asynchronously until completed operations are signalled."""
 
-        self._check_open()
+        if self._inline_completions:
+            # keep ring reaping on one thread; park the asyncio task in executor
+            if deadline == 0:
+                self.wait(0)
+                return
+            timeout = self._timeout_until_deadline(deadline)
+            if timeout == 0:
+                return
+            loop = self._async_wait_loop
+            assert loop is not None
+            await loop.run_in_executor(None, self.wait, deadline)
+            return
         if deadline == 0:
             return
 
@@ -3360,7 +3412,13 @@ class UringProactor(ProactorBase):
             if result is not None:
                 completed_operation = result
         self._retry_deferred_submissions()
-        if completed_operation is None and not self.has_pending_operations():
+        # threaded mode: workers deliver off the driver; signal EventWakeupManager.
+        # inline mode: the driver is already inside wait() processing this batch.
+        if (
+            not self._inline_completions
+            and completed_operation is None
+            and not self.has_pending_operations()
+        ):
             self.wake_wait()
 
     def _queue_op_resubmit(self, operation: _UringOp) -> None:
@@ -3531,6 +3589,31 @@ def _default_proactor_factory() -> Proactor:
     if uring_api.is_available():
         return UringProactor()
     return SelectorProactor()
+
+
+class SyncUringProactor(UringProactor):
+    """Single-threaded ``UringProactor``: ``wait()`` is ``ring.wait`` + deliver.
+
+    Intended for benchmarks and debugging against the threaded default. Same
+    submit path and Operation model; no completion service threads and no
+    cross-thread delivery hop on the sync driver.
+    """
+
+    def __init__(
+        self,
+        entries: int = 8,
+        flags: int = 0,
+        *,
+        ring_factory: _UringRingFactory | None = None,
+        completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
+    ) -> None:
+        super().__init__(
+            entries,
+            flags,
+            ring_factory=ring_factory,
+            completion_threads=0,
+            completion_thread_nice=completion_thread_nice,
+        )
 
 
 class ProactorScheduler(BaseScheduler):
