@@ -3383,9 +3383,7 @@ class TestUringProactor:
 
             assert second.cancelled() is True
             assert second.completion is None
-            assert not any(
-                submission.operation is second for submission in proactor._deferred_submissions
-            )
+            assert not any(deferred is second for deferred in proactor._deferred_submissions)
             proactor.ring.complete_recv(b"first")
             assert first.result() == b"first"
             assert len(proactor.ring.submitted_recv) == 1
@@ -3797,9 +3795,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: any(d.value == select.POLLIN for d in deliveries))
             # Resubmit deferred: waitable has no live completion handle.
             assert operation.completion is None
-            assert any(
-                submission.operation is operation for submission in proactor._deferred_submissions
-            )
+            assert any(deferred is operation for deferred in proactor._deferred_submissions)
 
             proactor.cancel(operation)
 
@@ -3809,9 +3805,7 @@ class TestUringProactor:
             assert cancel_deliveries[0].index is None
             assert is_io_cancellation(cancel_deliveries[0].exception)
             assert operation.cancelled() is True
-            assert not any(
-                submission.operation is operation for submission in proactor._deferred_submissions
-            )
+            assert not any(deferred is operation for deferred in proactor._deferred_submissions)
         finally:
             reader.close()
             writer.close()
