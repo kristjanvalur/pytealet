@@ -30,6 +30,7 @@ from uring_fakes import (
     _FailingConnectUringRing,
     _FailingSubmitUringRing,
     _FakeUringRing,
+    _PartialSendUringRing,
     _force_uring_multishot_probes,
     _pack_fake_statx_buffer,
     _patch_uring_capabilities,
@@ -3788,10 +3789,13 @@ class TestUringProactor:
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
             handle = proactor.ring.pending_poll_multishot[-1]
-            proactor.cancel(operation)
-            _wait_for_uring(proactor, lambda: proactor.ring.submitted_poll_remove == [handle])
-            _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
+            teardown = proactor.cancel(operation)
+            # stop_poll is posted and the multishot target is terminalised immediately;
+            # POLL_REMOVE only finishes the teardown waitable.
+            assert proactor.ring.submitted_poll_remove == [handle]
             assert operation.cancelled() is True
+            assert teardown.kind == "poll_remove"
+            _wait_for_uring(proactor, lambda: teardown.done() and not proactor.has_pending_operations())
         finally:
             reader.close()
             writer.close()
@@ -4874,6 +4878,38 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
             assert progress == [5]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_partial_cqes_resubmit_remainder_without_full_rearm(self, monkeypatch):
+        """Partial SEND CQEs advance offset and re-slice; one waitable drains all."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_PartialSendUringRing)
+        reader, writer = socket.socketpair()
+        progress: list[int] = []
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            operation = proactor.send(writer, payload, progress.append)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() is None
+            assert progress == [1, 2, 3, 4, 5]
+            assert isinstance(proactor.ring, _PartialSendUringRing)
+            assert len(proactor.ring.submitted_send) == 5
+            # Each leg submits the unsent tail of the same underlying buffer.
+            submitted_views = [entry[1] for entry in proactor.ring.submitted_send]
+            assert [bytes(view) for view in submitted_views] == [
+                b"hello",
+                b"ello",
+                b"llo",
+                b"lo",
+                b"o",
+            ]
+            assert all(view.obj is payload for view in submitted_views)
         finally:
             reader.close()
             writer.close()

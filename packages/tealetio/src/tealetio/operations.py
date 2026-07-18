@@ -39,7 +39,9 @@ def is_io_cancellation(exc: BaseException | None) -> bool:
 # hard-coding a single concrete class hierarchy.
 # ---------------------------------------------------------------------------
 
-_DoneCallback = Callable[["SupportsOperation[Any]"], object]
+# Parameter is effectively SupportsOperation; typed as Any so concrete callbacks
+# annotated with Operation[...] remain assignable (Callable is contravariant in args).
+_DoneCallback = Callable[[Any], object]
 _ProactorRef = Any
 
 

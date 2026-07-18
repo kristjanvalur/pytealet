@@ -1143,6 +1143,45 @@ class _FailOnResubmitUringRing(_FakeUringRing):
         return super().submit_recv(fd, buf, user_data)
 
 
+class _PartialSendUringRing(_FakeUringRing):
+    """Complete each stream send with a short write so sendall multi-leg runs."""
+
+    def __init__(self, entries: int = 8, flags: int = 0, *, partial_nbytes: int = 1) -> None:
+        super().__init__(entries, flags)
+        self.partial_nbytes = partial_nbytes
+
+    def _partial_res(self, data: Any) -> int:
+        return min(self.partial_nbytes, len(bytes(data)))
+
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_send.append((fd, data, user_data))
+        res = self._partial_res(data)
+        completion = self._completion(
+            user_data, kind=uring_api.COMPLETION_KIND_SEND, res=res, result=res
+        )
+        if self._defer_stream_send_completion(user_data, fd):
+            self.pending_connect_send.append(completion)
+            return completion
+        self._deliver(completion)
+        return completion
+
+    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_send_zc.append((fd, data, user_data))
+        res = self._partial_res(data)
+        completion = self._completion(
+            user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=res, result=res
+        )
+        if self._defer_stream_send_completion(user_data, fd):
+            self.pending_connect_send.append(completion)
+            return completion
+        self._deliver(completion)
+        return completion
+
+
 class _BackpressuredPollUringRing(_FakeUringRing):
     def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:

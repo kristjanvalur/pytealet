@@ -82,12 +82,12 @@ class IOWaiter(Generic[T]):
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
     parking timeout) routes cancellation through
     ``ProactorIOManager._cancel_operation(...).forget()``: selector backends
-    terminalise the target immediately; on ``UringProactor`` the target usually
-    finishes from ring CQEs (target ``ECANCELED`` on recv/accept, or
-    ``poll_remove`` for multishot ``poll_many``) while the teardown leg is not
-    awaited. ``has_pending_operations()``
-    may stay true briefly until those CQEs complete; pump the proactor or
-    ``wait()`` on the teardown operation when ring quiescence matters.
+    terminalise the target immediately; on ``UringProactor`` armed recv/accept
+    legs finish from their own ``ECANCELED`` CQE, while multishot ``poll_many``
+    terminalises as soon as ``submit_poll_remove`` is posted. The teardown leg
+    is not awaited. ``has_pending_operations()`` may stay true briefly until
+    cancel / poll_remove CQEs complete; pump the proactor or ``wait()`` on the
+    teardown operation when ring quiescence matters.
 
     For ``accept_many`` / ``poll_many``, ``wait()`` ends when the underlying
     accept or poll **stream** finishes, not when accept-time ``recv`` legs or
@@ -183,9 +183,9 @@ class IOWaiter(Generic[T]):
         self._operation = None
         if operation is None:
             return
-        try:
-            recycle = self._io.proactor.recycle_operation
-        except AttributeError:
+        # UringProactor freelist only; selector backends have no recycle path.
+        recycle = getattr(self._io.proactor, "recycle_operation", None)
+        if recycle is None:
             return
         recycle(operation)
 

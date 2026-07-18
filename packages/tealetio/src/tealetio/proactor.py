@@ -1165,98 +1165,105 @@ class UringSubmissionStats:
 
 
 # --- stable ring submit implementations (no per-call allocation) ---
+# sq0..sq4 are typed object on the waitable; each recipe knows the real shapes.
 
 
 def _sq_recv(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_recv(op.sq0, op.sq1, op)
+    return proactor._ring.submit_recv(cast(int, op.sq0), op.sq1, op)
 
 
 def _sq_recvmsg(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_recvmsg(op.sq0, op.sq1, op)
+    return proactor._ring.submit_recvmsg(cast(int, op.sq0), op.sq1, op)
 
 
 def _sq_recv_buf(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_recv_buf(op.sq0, op.sq1, op)
+    return proactor._ring.submit_recv_buf(cast(int, op.sq0), cast(Any, op.sq1), op)
 
 
 def _sq_recv_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_recv_multishot(op.sq0, op.sq1, op, op.sq2, op.sq3)
+    return proactor._ring.submit_recv_multishot(
+        cast(int, op.sq0), cast(Any, op.sq1), op, cast(int, op.sq2), cast(int, op.sq3)
+    )
 
 
 def _sq_send(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_send(op.sq0, op.sq1, op)
+    return proactor._ring.submit_send(cast(int, op.sq0), op.sq1, op)
 
 
 def _sq_send_zc(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_send_zc(op.sq0, op.sq1, op)
+    return proactor._ring.submit_send_zc(cast(int, op.sq0), op.sq1, op)
 
 
 def _sq_sendto(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_sendto(op.sq0, op.sq1, op.sq2, op)
+    return proactor._ring.submit_sendto(cast(int, op.sq0), op.sq1, op.sq2, op)
 
 
 def _sq_sendmsg_zc(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_sendmsg_zc(op.sq0, op.sq1, op.sq2, op)
+    return proactor._ring.submit_sendmsg_zc(cast(int, op.sq0), op.sq1, op.sq2, op)
 
 
 def _sq_accept(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_accept(op.sq0, op, op.sq1)
+    return proactor._ring.submit_accept(cast(int, op.sq0), op, cast(int, op.sq1))
 
 
 def _sq_accept_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_accept_multishot(op.sq0, op, op.sq1)
+    return proactor._ring.submit_accept_multishot(cast(int, op.sq0), op, cast(int, op.sq1))
 
 
 def _sq_connect(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_connect(op.sq0, op.sq1, op)
+    return proactor._ring.submit_connect(cast(int, op.sq0), op.sq1, op)
 
 
 def _sq_shutdown(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_shutdown(op.sq0, op.sq1, op)
+    return proactor._ring.submit_shutdown(cast(int, op.sq0), cast(int, op.sq1), op)
 
 
 def _sq_close(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_close(op.sq0, op)
+    return proactor._ring.submit_close(cast(int, op.sq0), op)
 
 
 def _sq_socket(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_socket(op.sq0, op.sq1, op.sq2, op.sq3, op)
+    return proactor._ring.submit_socket(cast(int, op.sq0), cast(int, op.sq1), cast(int, op.sq2), cast(int, op.sq3), op)
 
 
 def _sq_openat(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_openat(op.sq0, op.sq1, op.sq2, op, dfd=op.sq3)
+    return proactor._ring.submit_openat(
+        cast(str, op.sq0), cast(int, op.sq1), cast(int, op.sq2), op, dfd=cast(int, op.sq3)
+    )
 
 
 def _sq_read(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_read(op.sq0, op.sq1, op.sq2, op)
+    return proactor._ring.submit_read(cast(int, op.sq0), op.sq1, cast(int, op.sq2), op)
 
 
 def _sq_write(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_write(op.sq0, op.sq1, op.sq2, op)
+    return proactor._ring.submit_write(cast(int, op.sq0), op.sq1, cast(int, op.sq2), op)
 
 
 def _sq_statx(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_statx(op.sq0, op.sq1, op.sq2, op.sq3, op.sq4, op)
+    return proactor._ring.submit_statx(
+        cast(int, op.sq0), cast(str, op.sq1), cast(int, op.sq2), cast(int, op.sq3), op.sq4, op
+    )
 
 
 def _sq_statx_fdsize(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_statx_fdsize(op.sq0, op)
+    return proactor._ring.submit_statx_fdsize(cast(int, op.sq0), op)
 
 
 def _sq_poll(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_poll(op.sq0, op.sq1, op)
+    return proactor._ring.submit_poll(cast(int, op.sq0), cast(int, op.sq1), op)
 
 
 def _sq_poll_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_poll_multishot(op.sq0, op.sq1, op)
+    return proactor._ring.submit_poll_multishot(cast(int, op.sq0), cast(int, op.sq1), op)
 
 
 def _sq_cancel(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_cancel(op.sq0, op)
+    return proactor._ring.submit_cancel(cast(_UringCompletion, op.sq0), op)
 
 
 def _sq_poll_remove(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_poll_remove(op.sq0, op)
+    return proactor._ring.submit_poll_remove(cast(_UringCompletion, op.sq0), op)
 
 
 class SelectorProactor(ProactorBase):
@@ -1821,15 +1828,16 @@ class SelectorProactor(ProactorBase):
         else:
             entry.writer = slot
 
-    def cancel(self, operation: Operation[Any]) -> Operation[None]:
-        if operation.done():
-            return self._completed_cancel_operation("cancel", operation)
+    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
+        op = cast(Operation[Any], operation)
+        if op.done():
+            return self._completed_cancel_operation("cancel", op)
         with self._lock:
-            removed = self._remove_operation(operation)
+            removed = self._remove_operation(op)
         if removed:
             self._after_selector_registration_changed()
-        self._terminalise_cancelled(operation)
-        return self._completed_cancel_operation("cancel", operation)
+        self._terminalise_cancelled(op)
+        return self._completed_cancel_operation("cancel", op)
 
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
@@ -2233,18 +2241,6 @@ class UringProactor(ProactorBase):
         operation.sq3 = sq3
         operation.sq4 = sq4
 
-    def _complete_uring_poll_remove(self, poll_target: object | None) -> None:
-        """Finish a multishot ``poll_many`` op when ``submit_poll_remove`` completes."""
-
-        if poll_target is None:
-            return
-        # cancel_target is a Completion we submitted; user_data is our waitable.
-        poll_op = cast(_UringOp, cast(_UringCompletion, poll_target).user_data)
-        if not poll_op.done():
-            self._terminalise_cancelled(poll_op)
-        if poll_op.completion is not None:
-            self._deactivate_uring_op(poll_op)
-
     def _stop_uring_poll_many_oneshot_locked(self, operation: _UringOp) -> None:
         """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll.
 
@@ -2256,7 +2252,7 @@ class UringProactor(ProactorBase):
             self._deactivate_uring_op(operation)
         # deferred cancel already cleared completion; nothing else to drop
 
-    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         # Waitables never leave this proactor; every cancel target is a uring op.
         op = cast(_UringOp, operation)
         if op.done():
@@ -2265,6 +2261,11 @@ class UringProactor(ProactorBase):
         # Under _deferred_lock: either remove a deferred claim (safe to terminalise)
         # or snapshot op.completion for ring cancel. Retry holds the same lock
         # across deferred submit so these cannot race.
+        #
+        # Multishot poll_many (poll_remove=True): post stop_poll, then terminalise
+        # immediately. In-flight poll CQEs may still race the stop (same as any
+        # cancel). Armed recv/accept legs still wait for the target CQE.
+
         immediate_terminalise = True
         cancel_op: Operation[None] | None = None
         ring_cancel: tuple[_UringCompletion, str] | None
@@ -2276,7 +2277,6 @@ class UringProactor(ProactorBase):
                 self._deactivate_uring_op(op)
                 cancel_op = self._completed_cancel_operation("cancel", op)
             elif op.poll_remove:
-                immediate_terminalise = False
                 ring_cancel = (completion, "poll_remove")
             elif op.kind == "poll_many":
                 self._stop_uring_poll_many_oneshot_locked(op)
@@ -2288,6 +2288,8 @@ class UringProactor(ProactorBase):
         if ring_cancel is not None:
             completion, kind = ring_cancel
             cancel_op = self._submit_cancel_op(completion, kind=kind)
+            if kind == "poll_remove":
+                self._deactivate_uring_op(op)
         assert cancel_op is not None
         if immediate_terminalise:
             self._terminalise_cancelled(op)
@@ -2306,9 +2308,8 @@ class UringProactor(ProactorBase):
         self._submit_uring_op(cancel_operation)
         return cancel_operation
 
-    def _complete_uring_cancel(
-        self, op: _UringOp, completion: _UringCompletion
-    ) -> Operation[Any] | None:
+    def _complete_uring_cancel(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
+        # Teardown ack only; never terminalises the cancel target.
         operation = cast(Operation[None], op)
         operation.deliver(self, result=None)
         return operation
@@ -2496,9 +2497,7 @@ class UringProactor(ProactorBase):
         )
         return operation
 
-    def _complete_uring_recvfrom(
-        self, op: _UringOp, completion: _UringCompletion
-    ) -> Operation[tuple[bytes, Any]]:
+    def _complete_uring_recvfrom(self, op: _UringOp, completion: _UringCompletion) -> Operation[tuple[bytes, Any]]:
         data = cast(memoryview, op.cq0)
         operation = cast(Operation[tuple[bytes, Any]], op)
         operation._finish(result=(data[: completion.res].tobytes(), completion.result))
@@ -2572,8 +2571,8 @@ class UringProactor(ProactorBase):
         if offset >= len(data):
             operation.deliver(self, result=None)
             return operation
-        sock = cast(socket.socket, operation.fileobj)
-        self._submit_sendall(sock, cast("UringOperation[None]", op), data, offset, progress)
+        # Same drain: only advance offset + remaining slice; keep complete/sq recipe.
+        self._resubmit_sendall_remainder(op, data, offset)
         return None
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -2933,9 +2932,7 @@ class UringProactor(ProactorBase):
         self._submit_uring_op(entry)
         return operation
 
-    def _complete_uring_stat(
-        self, op: _UringOp, completion: _UringCompletion
-    ) -> Operation[os.stat_result]:
+    def _complete_uring_stat(self, op: _UringOp, completion: _UringCompletion) -> Operation[os.stat_result]:
         data = cast(memoryview, op.cq0)
         operation = cast(Operation[os.stat_result], op)
         try:
@@ -3286,31 +3283,24 @@ class UringProactor(ProactorBase):
         operation.deliver(self, exception=exc)
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
+        # Single pass. Cancel / poll_remove CQEs only finish their teardown
+        # waitables (never the cancel target). Multishot poll_many is terminalised
+        # when stop_poll is posted; POLL_REMOVE only acks the teardown waitable.
         completed_operation: Operation[Any] | None = None
-        teardown_completions: list[_UringCompletion] = []
         for completion in completions:
             if completion.kind in (
                 uring_api.COMPLETION_KIND_POLL_REMOVE,
                 uring_api.COMPLETION_KIND_CANCEL,
             ):
-                teardown_completions.append(completion)
-                continue
-            result = self._complete_uring_operation(completion)
-            if result is not None:
-                completed_operation = result
-        for completion in teardown_completions:
-            op = cast(_UringOp, completion.user_data)
-            if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
-                if op.kind not in ("cancel", "poll_remove"):
-                    continue
-            elif completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
-                if op.kind != "poll_remove":
+                op = cast(_UringOp, completion.user_data)
+                if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
+                    if op.kind not in ("cancel", "poll_remove"):
+                        continue
+                elif op.kind != "poll_remove":
                     continue
             result = self._complete_uring_operation(completion)
             if result is not None:
                 completed_operation = result
-            if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
-                self._complete_uring_poll_remove(completion.cancel_target)
         self._retry_deferred_submissions()
         if completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
@@ -3393,6 +3383,8 @@ class UringProactor(ProactorBase):
         offset: int,
         progress: _ProgressCallback | None,
     ) -> None:
+        """First leg of a sendall drain: install complete recipe and submit."""
+
         entry = self._prepare_uring_op(
             operation,
             UringProactor._complete_uring_sendall,
@@ -3406,6 +3398,18 @@ class UringProactor(ProactorBase):
         else:
             self._arm_sq(entry, _sq_send, sock.fileno(), chunk)
         self._submit_uring_op(entry)
+
+    def _resubmit_sendall_remainder(self, op: _UringOp, data: memoryview, offset: int) -> None:
+        """Continue a sendall drain after a partial CQE.
+
+        ``complete``, base ``data`` (cq0), ``progress`` (cq2), fd (sq0), and
+        ``sq_impl`` are already set from the first leg. Only the byte offset and
+        remaining slice change.
+        """
+
+        op.cq1 = offset
+        op.sq1 = data[offset:]
+        self._submit_uring_op(op)
 
     def _submit_recvmsg(
         self,

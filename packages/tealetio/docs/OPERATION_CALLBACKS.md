@@ -182,19 +182,21 @@ segments already in the reorder buffer; cancel is best-effort and may trail
 straggler legs.
 
 Multishot ``poll_many`` uses ``submit_poll_remove()`` (not ``submit_cancel``).
-The ``COMPLETION_KIND_POLL_REMOVE`` completion ends the continuous poll op.
-One-shot ``poll_many`` fallback stops locally without ring cancel on the pending
-poll SQE.
+Once the stop posts successfully, the continuous poll op is terminalised
+immediately (same as selector). The ``COMPLETION_KIND_POLL_REMOVE`` CQE only
+finishes the teardown waitable; it does not re-terminalise the target. In-flight
+poll CQEs may still race that terminal — cancel always races completions, and
+we do not add extra gates just to shrink the window. One-shot ``poll_many``
+fallback stops locally without ring cancel on the pending poll SQE.
 
-This matches io_uring semantics: cancel and success can race; a successful target
-CQE that arrives before teardown settles completes normally. Selector and emulated
-backends keep immediate `_terminalise_cancelled()`. Deferred resubmits and
-never-submitted legs still terminalise locally when the ring has nothing to
-complete.
+This matches io_uring semantics for armed recv/accept legs: cancel and success
+can race; a successful target CQE that arrives before teardown settles completes
+normally. Selector and emulated backends keep immediate
+`_terminalise_cancelled()`. Deferred resubmits and never-submitted legs still
+terminalise locally when the ring has nothing to complete.
 
-Late multishot CQEs still route through `entry.complete()` after the consumer
-has marked the operation `done()`. `ContinuousOperation._emit_delivery` skips
-the callback when already finished; out-of-order terminal ordering is handled on
+Late multishot CQEs may still route through the deliverer after the consumer has
+marked the operation ``done()``. Out-of-order terminal ordering is handled on
 the scheduler thread by `ReorderBuffer` / `LenientReorderBuffer`, not in the
 uring completion worker.
 
