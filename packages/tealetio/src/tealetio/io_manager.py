@@ -37,7 +37,7 @@ from .operations import (
     SupportsContinuousOperation,
     SupportsOperation,
 )
-from .socket_helpers import abortive_close, configure_scheduler_socket
+from .socket_helpers import abortive_close, configure_scheduler_socket, is_soft_accept_error
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -554,7 +554,7 @@ class ProactorIOManager:
         try:
             while True:
                 if _recv_pool_is_full(pool):
-                    # synthetic: leave a slot so continuous can surface ENOBUFS
+                    # fully leased: stop eager so continuous can surface ENOBUFS
                     break
                 data = _recv_ready_chunk(sock, chunk_size)
                 if data is None:
@@ -681,8 +681,10 @@ class ProactorIOManager:
         """``socket.close()`` on the calling thread (no proactor submit).
 
         Matches asyncio stream teardown: close releases the Python wrapper and
-        fd immediately. ``Proactor.close_socket`` remains for direct proactor
-        callers (including uring ``close`` submit).
+        fd immediately. Cancel outstanding proactor ops on this socket first —
+        a concurrent uring leg may still hold the fd (``detach`` + ring close
+        via ``Proactor.close_socket``). ``Proactor.close_socket`` remains for
+        ordered ring teardown when the caller owns that lifecycle.
         """
 
         try:
@@ -1119,8 +1121,9 @@ class ProactorIOManager:
 
         # drain ready connections before arming the continuous proactor path.
         # numbered indices continue into multishot via base_sequence.
-        # Any OSError mid-drain (e.g. EMFILE) stops eager only — still arm
-        # continuous so soft failures can re-arm instead of failing the waitable.
+        # Soft accept errors (EMFILE, …) stop eager only — still arm continuous
+        # so callers can re-arm. Hard OSError propagates (stream is not abandoned
+        # silently after partial deliveries).
         eager_count = 0
         try:
             while True:
@@ -1141,8 +1144,9 @@ class ProactorIOManager:
                     on_thread_delivery(
                         MultishotDelivery(index=index, value=(conn, None, None), more=True),
                     )
-        except OSError:
-            pass
+        except OSError as exc:
+            if not is_soft_accept_error(exc):
+                raise
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
@@ -1234,7 +1238,7 @@ class ProactorIOManager:
             on_thread_delivery(delivery._replace(value=streams))
 
         # drain ready connections; indices continue into multishot via base_sequence.
-        # Mid-drain OSError stops eager only — still arm continuous (same as accept_many).
+        # Soft accept errors stop eager only — still arm continuous (same as accept_many).
         eager_count = 0
         try:
             while True:
@@ -1253,8 +1257,9 @@ class ProactorIOManager:
                     on_thread_delivery(
                         MultishotDelivery(index=index, value=streams, more=True),
                     )
-        except OSError:
-            pass
+        except OSError as exc:
+            if not is_soft_accept_error(exc):
+                raise
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)

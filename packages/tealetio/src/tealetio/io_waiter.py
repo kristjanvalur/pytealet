@@ -277,7 +277,7 @@ class IOWaiterSync(Generic[T]):
 
 
 class IOWaitGroupChild(Generic[T]):
-    """One leg of a grouped wait; links an ``Operation`` back to the parent group.
+    """One leg of a grouped wait; links a waitable back to the parent group.
 
     ``value()`` is one-shot: it returns this leg's resolved result and clears the
     cached copy. An optional ``on_cleanup(fail, value)`` hook runs when the
@@ -297,7 +297,7 @@ class IOWaitGroupChild(Generic[T]):
     def __init__(
         self,
         group: "IOWaitGroup[Any]",
-        operation: Operation[Any],
+        operation: SupportsOperation[Any],
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
@@ -345,7 +345,7 @@ class IOWaitGroupChild(Generic[T]):
     def _forget(self) -> None:
         self._operation = None
 
-    def _on_done(self, operation: Operation[Any]) -> None:
+    def _on_done(self, operation: SupportsOperation[Any]) -> None:
         try:
             self._resolved_value = (cast(T, operation.result()),)
         except BaseException as exc:
@@ -365,14 +365,14 @@ class IOWaitGroupChild(Generic[T]):
 class IOWaitGroup(Generic[T]):
     """Grouped IO wait with a single ``CrossThreadEvent`` park for the composition.
 
-    Active work is tracked as ``IOWaitGroupChild`` legs and/or bare ``Operation``
-    objects. Leg completion runs on worker threads; ``finish()`` unblocks one
-    ``wait()`` on the group. Resource-creating compose helpers (``sock_create``
-    with ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
-    ``recv_size``, ``sock_create_streams``, and similar) are intended to be
-    driven to completion via ``wait()`` only; ``forget()`` on those handles is
-    undefined. Child legs expose ``value()`` for one-shot handoff of raw
-    operation results into advance handlers.
+    Active work is tracked as ``IOWaitGroupChild`` legs and/or bare waitables
+    (``SupportsOperation``). Leg completion runs on worker threads; ``finish()``
+    unblocks one ``wait()`` on the group. Resource-creating compose helpers
+    (``sock_create`` with ``connect_to``, ``sock_connect`` with ``initial``,
+    ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and similar) are
+    intended to be driven to completion via ``wait()`` only; ``forget()`` on
+    those handles is undefined. Child legs expose ``value()`` for one-shot
+    handoff of raw operation results into advance handlers.
     """
 
     __slots__ = ("_closed", "_completion", "_done_callbacks", "_io", "_lock", "_members", "_ready")
@@ -391,7 +391,7 @@ class IOWaitGroup(Generic[T]):
 
     def attach(
         self,
-        operation: Operation[Any],
+        operation: SupportsOperation[Any],
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,

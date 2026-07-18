@@ -304,8 +304,10 @@ original buffer. Empty payloads go straight to the proactor. With
 
 `scheduler.io.sock_shutdown(sock, how)` and `scheduler.io.sock_close(sock)` call
 stdlib `socket.shutdown` / `socket.close` on the calling thread and return
-`IOWaiterSync` (no proactor submit), matching asyncio stream teardown.
-`Proactor.shutdown` / `close_socket` remain for direct proactor use.
+`IOWaiterSync` (no proactor submit), matching asyncio stream teardown. Cancel
+outstanding proactor ops on the socket before `sock_close` — a concurrent
+uring leg may still own the fd via `detach` + ring close.
+`Proactor.shutdown` / `close_socket` remain for ordered ring teardown.
 
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each

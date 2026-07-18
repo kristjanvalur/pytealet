@@ -342,9 +342,7 @@ class TestSendBuffer:
             scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
             writer.close()
 
-    def test_chained_submit_failure_restores_pending_and_sticks_error(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_chained_submit_failure_restores_pending_and_sticks_error(self, scheduler: SyncProactorScheduler) -> None:
         _reader, writer = socket.socketpair()
         try:
             pending_ops: list[Operation[None]] = []
@@ -371,6 +369,39 @@ class TestSendBuffer:
                 send_buffer.flush()
         finally:
             scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            writer.close()
+
+    def test_nested_eager_complete_does_not_reprepend_already_sent_chunk(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        """Eager IOWaiterSync runs _on_leg_complete nested; do not restore sent bytes."""
+
+        from tealetio.io_waiter import IOWaiterSync
+
+        _reader, writer = socket.socketpair()
+        real_sendall = scheduler.io.sock_sendall
+        real_complete = SendBuffer._on_leg_complete
+        try:
+
+            def sync_sendall(sock: socket.socket, data, progress=None):
+                del sock, data, progress
+                return IOWaiterSync(None)
+
+            def boom_complete(self: SendBuffer) -> None:
+                real_complete(self)
+                raise RuntimeError("handler failed")
+
+            scheduler.io.sock_sendall = sync_sendall  # type: ignore[method-assign]
+            SendBuffer._on_leg_complete = boom_complete  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            with pytest.raises(RuntimeError, match="handler failed"):
+                send_buffer.write(b"ab")
+            # bytes were accepted by sock_sendall; must not re-queue them
+            assert send_buffer.pending_bytes == 0
+            assert send_buffer._pending is None
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            SendBuffer._on_leg_complete = real_complete  # type: ignore[method-assign]
             writer.close()
 
     def test_close_drains_pending_after_in_flight_leg(self, scheduler: SyncProactorScheduler) -> None:

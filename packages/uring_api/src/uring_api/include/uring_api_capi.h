@@ -13,6 +13,13 @@
 
 #include "uring_api_completion_kinds.h"
 
+/*
+ * Pre-release: ABI version stays 1 while the package is unreleased (see
+ * packages/uring_api/AGENTS.md). Vtable *signatures* may still change — rebuild
+ * every C client after pulling. Notable breaks vs early v1 drafts:
+ *   - ring_submit_accept_multishot / ring_submit_recv_multishot take base_sequence
+ * Clients must check abi_version, struct_size, and null-check pointers they use.
+ */
 #define URING_API_CAPI_ABI_VERSION 1u
 #define URING_API_CAPI_CAPSULE_NAME "_uring_api._C_API"
 

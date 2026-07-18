@@ -27,7 +27,12 @@ from .io_manager import (
     SocketIO,
     SupportsProactorIO,
 )
-from .socket_helpers import configure_scheduler_socket, socket_from_uring_fd
+from .socket_helpers import (
+    configure_scheduler_socket,
+    is_soft_accept_errno as _is_soft_accept_errno,
+    is_soft_accept_error as _is_soft_accept_error,
+    socket_from_uring_fd,
+)
 from .operations import (
     ContinuousOperation,
     ContinuousStepResult,
@@ -221,30 +226,6 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
 
 def _continuous_error_delivery(exc: BaseException, *, index: int | None = 0) -> MultishotDelivery:
     return MultishotDelivery(index=index, exception=exc, more=False)
-
-
-# Transient accept failures: finish the emulated oneshot leg cleanly so callers
-# (for example StreamServer) re-arm instead of treating the accept stream as dead.
-# Hard errors (EBADF, EINVAL, …) still terminalise with the OSError.
-_SOFT_ACCEPT_ERRNOS: frozenset[int] = frozenset(
-    {
-        errno.EMFILE,
-        errno.ENFILE,
-        errno.ECONNABORTED,
-        getattr(errno, "EPROTO", -1),
-        getattr(errno, "ENOBUFS", -1),
-        getattr(errno, "ENOMEM", -1),
-    }
-    - {-1}
-)
-
-
-def _is_soft_accept_errno(err: int) -> bool:
-    return err in _SOFT_ACCEPT_ERRNOS
-
-
-def _is_soft_accept_error(exc: BaseException) -> bool:
-    return isinstance(exc, OSError) and exc.errno is not None and _is_soft_accept_errno(exc.errno)
 
 
 def _soft_accept_terminal_delivery(*, index: int | None = 0) -> MultishotDelivery:
@@ -1298,9 +1279,7 @@ def _sq_accept(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
 
 
 def _sq_accept_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_accept_multishot(
-        cast(int, op.sq0), op, cast(int, op.sq1), cast(int, op.sq2)
-    )
+    return proactor._ring.submit_accept_multishot(cast(int, op.sq0), op, cast(int, op.sq1), cast(int, op.sq2))
 
 
 def _sq_connect(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
@@ -2867,9 +2846,7 @@ class UringProactor(ProactorBase):
             operation,
             UringProactor._deliver_uring_accept_many,
         )
-        self._arm_sq(
-            entry, _sq_accept_multishot, sock.fileno(), _DEFAULT_ACCEPT_FLAGS, base_sequence
-        )
+        self._arm_sq(entry, _sq_accept_multishot, sock.fileno(), _DEFAULT_ACCEPT_FLAGS, base_sequence)
         self._submit_uring_op(entry)
         return operation
 
