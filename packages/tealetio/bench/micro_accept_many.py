@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-"""Microbenchmark: accept_many eager drain vs continuous-only.
+"""Microbenchmark: accept_many / accept_many_streams with eager drain.
 
 Times draining a pre-queued backlog via ``io.accept_many`` /
-``accept_many_streams``. Toggle eager with ``TEALETIO_EAGER_ACCEPT`` (default on)
-or ``--no-eager`` / ``--compare``.
-
-Uses ``SelectorProactor`` by default (oneshot re-arm for the continuous leg).
-Pass ``--uring`` for ``SyncUringProactor``.
+``accept_many_streams``. Uses ``SelectorProactor`` by default; pass ``--uring``
+for ``SyncUringProactor``.
 
 Usage::
 
     uv run --active --package tealetio python packages/tealetio/bench/micro_accept_many.py
-    uv run --active --package tealetio python packages/tealetio/bench/micro_accept_many.py --compare
+    uv run --active --package tealetio python packages/tealetio/bench/micro_accept_many.py --uring
     uv run --active --package tealetio python packages/tealetio/bench/micro_accept_many.py -n 200 -b 32
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import socket
 import statistics
 import time
@@ -93,9 +89,7 @@ def _bench_accept_many(
     backlog: int,
     streams: bool,
     uring: bool,
-    eager: bool,
 ) -> list[int]:
-    os.environ["TEALETIO_EAGER_ACCEPT"] = "1" if eager else "0"
     samples: list[int] = []
     scheduler = _make_scheduler(uring=uring)
     set_scheduler(scheduler)
@@ -129,7 +123,7 @@ def _bench_accept_many(
                         t0 = _ns()
                         # oneshot backends finish after each accept; re-arm until backlog.
                         # multishot continuous never "dones" until cancel — do not wait on
-                        # the waiter once got == backlog (that hangs on uring).
+                        # the waiter once got == backlog.
                         waiter = None
                         while got < backlog:
                             if streams:
@@ -141,7 +135,6 @@ def _bench_accept_many(
                             if not waiter.poll():
                                 while got < backlog and not waiter.poll():
                                     scheduler.proactor.wait(0.0)
-                                # oneshot: one accept completes the operation; wait it out
                                 if got < backlog and not waiter.poll():
                                     _wait_ignore_cancel(waiter)
                         assert got == backlog, f"got {got} expected {backlog}"
@@ -164,7 +157,7 @@ def _bench_accept_many(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-n", "--iterations", type=int, default=100, help="samples per path")
+    parser.add_argument("-n", "--iterations", type=int, default=100, help="samples")
     parser.add_argument("-b", "--backlog", type=int, default=16, help="connections per sample")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument(
@@ -172,45 +165,25 @@ def main() -> None:
         action="store_true",
         help="use SyncUringProactor (default: SelectorProactor)",
     )
-    parser.add_argument(
-        "--no-eager",
-        action="store_true",
-        help="disable eager drain (TEALETIO_EAGER_ACCEPT=0); ignored with --compare",
-    )
-    parser.add_argument(
-        "--compare",
-        action="store_true",
-        help="run eager and continuous-only back-to-back",
-    )
     args = parser.parse_args()
 
     backend = "uring" if args.uring else "selector"
     print(f"backend={backend} iterations={args.iterations} backlog={args.backlog} warmup={args.warmup}")
 
-    if args.compare:
-        mode_list: list[tuple[str, bool]] = [("eager", True), ("continuous-only", False)]
-    else:
-        eager = not args.no_eager
-        mode_list = [("eager" if eager else "continuous-only", eager)]
-
-    for streams, base_label in ((False, "accept_many"), (True, "accept_many_streams")):
-        for mode_name, eager in mode_list:
-            label = f"{base_label} {mode_name}"
-            _bench_accept_many(
-                iterations=args.warmup,
-                backlog=args.backlog,
-                streams=streams,
-                uring=args.uring,
-                eager=eager,
-            )
-            samples = _bench_accept_many(
-                iterations=args.iterations,
-                backlog=args.backlog,
-                streams=streams,
-                uring=args.uring,
-                eager=eager,
-            )
-            _summarise(label, samples)
+    for streams, label in ((False, "accept_many"), (True, "accept_many_streams")):
+        _bench_accept_many(
+            iterations=args.warmup,
+            backlog=args.backlog,
+            streams=streams,
+            uring=args.uring,
+        )
+        samples = _bench_accept_many(
+            iterations=args.iterations,
+            backlog=args.backlog,
+            streams=streams,
+            uring=args.uring,
+        )
+        _summarise(label, samples)
 
 
 if __name__ == "__main__":

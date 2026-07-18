@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
@@ -57,30 +56,6 @@ def _create_scheduler_socket(
     # Blocking socket() is faster than creating through io_uring; leave
     # Proactor.create_socket / IORING_OP_SOCKET available for direct proactor use.
     return configure_scheduler_socket(socket.socket(family, type | flags, proto))
-
-
-def _env_flag_enabled(name: str, *, default: bool = True) -> bool:
-    """Parse a truthy env flag; ``0`` / ``false`` / ``no`` / ``off`` disable.
-
-    Read at call time so benchmarks can toggle without reimporting.
-    """
-
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _eager_accept_enabled() -> bool:
-    """When false (``TEALETIO_EAGER_ACCEPT=0``), skip direct accept drain."""
-
-    return _env_flag_enabled("TEALETIO_EAGER_ACCEPT", default=True)
-
-
-def _eager_recv_enabled() -> bool:
-    """When false (``TEALETIO_EAGER_RECV=0``), skip direct recv drain."""
-
-    return _env_flag_enabled("TEALETIO_EAGER_RECV", default=True)
 
 
 def _accept_ready_connection(sock: socket.socket) -> socket.socket | None:
@@ -199,7 +174,7 @@ class ProactorAccess(Protocol):
 class SocketIO(Protocol):
     """Asyncio-shaped socket helpers; one-shot methods return ``IOWaiter``."""
 
-    def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]: ...
+    def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]: ...
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> IOWaiter[int]: ...
 
@@ -470,7 +445,28 @@ class ProactorIOManager:
 
         return IOWaiter(self, self._proactor.cancel(operation))
 
-    def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
+    def _recv_if_ready(self, sock: socket.socket, n: int) -> bytes | None:
+        """Non-blocking ``recv(n)``: data/EOF when ready, ``None`` if would block.
+
+        Raises ``OSError`` for hard receive errors. Shared by ``sock_recv`` and
+        accept-time preread.
+        """
+
+        return _recv_ready_chunk(sock, n)
+
+    def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]:
+        """Receive up to ``n`` bytes; try a direct non-blocking ``recv`` first.
+
+        When data (or EOF) is already available, returns ``IOWaiterSync`` without
+        a proactor submit. Otherwise falls through to ``proactor.recv``.
+        """
+
+        try:
+            data = self._recv_if_ready(sock, n)
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
+        if data is not None:
+            return IOWaiterSync(data)
         return IOWaiter(self, self._proactor.recv(sock, n))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
@@ -560,9 +556,6 @@ class ProactorIOManager:
         so late continuous legs cannot overtake numbered eager chunks.
         ``wait()`` ends when the continuous stream finishes (or immediately when
         eager alone reached EOF / a hard error).
-
-        Set ``TEALETIO_EAGER_RECV=0`` to skip the direct drain (continuous path
-        only) for A/B measurements.
         """
 
         pool = self._resolve_recv_buffer_pool(buf_group)
@@ -582,38 +575,37 @@ class ProactorIOManager:
         )
 
         index = base_sequence
-        if _eager_recv_enabled():
-            try:
-                while True:
-                    if _recv_pool_is_full(pool):
-                        # leave room for continuous path to surface ENOBUFS
-                        break
-                    data = _recv_ready_chunk(sock, chunk_size)
-                    if data is None:
-                        break
-                    if not data:
-                        # EOF: finish the stream without arming continuous
-                        terminal = ContinuousOperation[memoryview](kind="recv_many", fileobj=sock)
-                        on_thread_delivery(
-                            MultishotDelivery(
-                                index=index,
-                                value=memoryview(b""),
-                                more=False,
-                                operation=terminal,
-                            )
-                        )
-                        return IOWaiter(self, terminal)
-                    chunk = _eager_recv_chunk_view(data, pool)
+        try:
+            while True:
+                if _recv_pool_is_full(pool):
+                    # leave room for continuous path to surface ENOBUFS
+                    break
+                data = _recv_ready_chunk(sock, chunk_size)
+                if data is None:
+                    break
+                if not data:
+                    # EOF: finish the stream without arming continuous
+                    terminal = ContinuousOperation[memoryview](kind="recv_many", fileobj=sock)
                     on_thread_delivery(
-                        MultishotDelivery(index=index, value=chunk, more=True),
+                        MultishotDelivery(
+                            index=index,
+                            value=memoryview(b""),
+                            more=False,
+                            operation=terminal,
+                        )
                     )
-                    index += 1
-            except OSError as exc:
-                terminal = ContinuousOperation[memoryview](kind="recv_many", fileobj=sock)
+                    return IOWaiter(self, terminal)
+                chunk = _eager_recv_chunk_view(data, pool)
                 on_thread_delivery(
-                    MultishotDelivery(index=index, exception=exc, more=False, operation=terminal),
+                    MultishotDelivery(index=index, value=chunk, more=True),
                 )
-                return IOWaiter(self, terminal)
+                index += 1
+        except OSError as exc:
+            terminal = ContinuousOperation[memoryview](kind="recv_many", fileobj=sock)
+            on_thread_delivery(
+                MultishotDelivery(index=index, exception=exc, more=False, operation=terminal),
+            )
+            return IOWaiter(self, terminal)
 
         operation = self._proactor.recv_many(
             sock,
@@ -667,22 +659,19 @@ class ProactorIOManager:
         When the listen socket is already readable, ``accept()`` runs on the
         calling thread (no proactor submit). Otherwise falls through to
         ``proactor.accept``. Optional ``n`` composes an accept-time ``recv``.
-
-        Set ``TEALETIO_EAGER_ACCEPT=0`` to skip the direct accept (proactor only).
         """
 
         normalized_recv_size = normalize_accept_recv_size(n)
 
-        if _eager_accept_enabled():
-            try:
-                conn = _accept_ready_connection(sock)
-            except OSError as exc:
-                return IOWaiterSync.failed(exc)
+        try:
+            conn = _accept_ready_connection(sock)
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
 
-            if conn is not None:
-                if normalized_recv_size is None:
-                    return IOWaiterSync((conn, None))
-                return self._sock_accept_preread(conn, normalized_recv_size)
+        if conn is not None:
+            if normalized_recv_size is None:
+                return IOWaiterSync((conn, None))
+            return self._sock_accept_preread(conn, normalized_recv_size)
 
         if normalized_recv_size is None:
             return IOWaiter(
@@ -695,6 +684,15 @@ class ProactorIOManager:
 
         def advance_accept(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
             accepted = child.value()
+            try:
+                data = self._recv_if_ready(accepted, normalized_recv_size)
+            except OSError as exc:
+                abortive_close(accepted)
+                group._complete_error(exc)
+                return
+            if data is not None:
+                _finish_or_close_socket(group, accepted, (accepted, data))
+                return
 
             def advance_recv(recv_child: IOWaitGroupChildProtocol[bytes]) -> None:
                 data = recv_child.value()
@@ -718,6 +716,14 @@ class ProactorIOManager:
 
     def _sock_accept_preread(self, conn: socket.socket, recv_size: int) -> IOWaitable[AcceptDelivery]:
         """Compose accept-time ``recv`` for an already-accepted connection."""
+
+        try:
+            data = self._recv_if_ready(conn, recv_size)
+        except OSError as exc:
+            abortive_close(conn)
+            return IOWaiterSync.failed(exc)
+        if data is not None:
+            return IOWaiterSync((conn, data))
 
         group = IOWaitGroup(self)
 
@@ -885,10 +891,23 @@ class ProactorIOManager:
         recv_size: int,
         recv_timeout: float | None = None,
     ) -> None:
-        """Schedule accept-time ``recv`` on the worker thread and post the merged leg."""
+        """Schedule accept-time ``recv`` on the worker thread and post the merged leg.
+
+        Tries a direct non-blocking ``recv`` first (same policy as ``sock_recv``)
+        so ready first-bytes skip a proactor submit; falls through when would-block.
+        """
 
         conn = delivery.value
         assert isinstance(conn, socket.socket)
+        try:
+            data = self._recv_if_ready(conn, recv_size)
+        except OSError as exc:
+            on_thread_delivery(delivery._replace(value=(conn, None, exc)))
+            return
+        if data is not None:
+            on_thread_delivery(delivery._replace(value=(conn, data, None)))
+            return
+
         recv_op = self._proactor.recv(conn, recv_size)
         timer_box: list[TimerHandle | None] = [None]
 
@@ -952,7 +971,6 @@ class ProactorIOManager:
         accept-time ``recv`` and scheduler-marshalled deliveries may still be in
         flight. Re-arm in a loop when more accepts are needed.
 
-        Set ``TEALETIO_EAGER_ACCEPT=0`` to skip the direct drain (continuous only).
         """
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
@@ -1013,28 +1031,27 @@ class ProactorIOManager:
         # drain ready connections before arming the continuous proactor path.
         # numbered indices continue into multishot via base_sequence.
         eager_count = 0
-        if _eager_accept_enabled():
-            try:
-                while True:
-                    conn = _accept_ready_connection(sock)
-                    if conn is None:
-                        break
-                    index = eager_count
-                    eager_count += 1
-                    if normalized_recv_size is not None:
-                        # more=True so finish_continuous is a no-op for the stream leg
-                        self._accept_preread_on_worker(
-                            MultishotDelivery(index=index, value=conn, more=True),
-                            on_thread_delivery,
-                            recv_size=normalized_recv_size,
-                            recv_timeout=recv_timeout,
-                        )
-                    else:
-                        on_thread_delivery(
-                            MultishotDelivery(index=index, value=(conn, None, None), more=True),
-                        )
-            except OSError as exc:
-                return IOWaiterSync.failed(exc)
+        try:
+            while True:
+                conn = _accept_ready_connection(sock)
+                if conn is None:
+                    break
+                index = eager_count
+                eager_count += 1
+                if normalized_recv_size is not None:
+                    # more=True so finish_continuous is a no-op for the stream leg
+                    self._accept_preread_on_worker(
+                        MultishotDelivery(index=index, value=conn, more=True),
+                        on_thread_delivery,
+                        recv_size=normalized_recv_size,
+                        recv_timeout=recv_timeout,
+                    )
+                else:
+                    on_thread_delivery(
+                        MultishotDelivery(index=index, value=(conn, None, None), more=True),
+                    )
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
@@ -1127,26 +1144,25 @@ class ProactorIOManager:
 
         # drain ready connections; indices continue into multishot via base_sequence
         eager_count = 0
-        if _eager_accept_enabled():
-            try:
-                while True:
-                    conn = _accept_ready_connection(sock)
-                    if conn is None:
-                        break
-                    index = eager_count
-                    eager_count += 1
-                    try:
-                        streams = open_and_deliver(conn)
-                    except BaseException as exc:
-                        on_thread_delivery(
-                            MultishotDelivery(index=index, value=None, exception=exc, more=True),
-                        )
-                    else:
-                        on_thread_delivery(
-                            MultishotDelivery(index=index, value=streams, more=True),
-                        )
-            except OSError as exc:
-                return IOWaiterSync.failed(exc)
+        try:
+            while True:
+                conn = _accept_ready_connection(sock)
+                if conn is None:
+                    break
+                index = eager_count
+                eager_count += 1
+                try:
+                    streams = open_and_deliver(conn)
+                except BaseException as exc:
+                    on_thread_delivery(
+                        MultishotDelivery(index=index, value=None, exception=exc, more=True),
+                    )
+                else:
+                    on_thread_delivery(
+                        MultishotDelivery(index=index, value=streams, more=True),
+                    )
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)

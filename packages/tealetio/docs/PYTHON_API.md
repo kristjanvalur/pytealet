@@ -84,14 +84,13 @@ buffer pool), then arms `proactor.recv_many` with a continued `base_sequence`.
 Deliveries are `MultishotDelivery` chunks reordered on the scheduler thread.
 `sock_recv_iter` uses this path via `RecvIterBuffer`.
 
-For A/B measurements, set `TEALETIO_EAGER_ACCEPT=0` or `TEALETIO_EAGER_RECV=0`
-to skip the direct drain and use only the continuous proactor path (see
-`packages/tealetio/bench/micro_accept_many.py` and `micro_recv_many.py`).
 `initial_data` holds accept-time pre-read bytes when `recv_size` is set;
 otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed
 the write side before sending data (EOF). One-shot `sock_accept()` also tries a
 direct accept first (returning `IOWaiterSync` when ready) and otherwise uses
-`proactor.accept`; without `recv_size`, `initial_data` is `None`.
+`proactor.accept`; without `recv_size`, `initial_data` is `None`. When
+`recv_size` is set, preread uses the same eager `recv` try as `sock_recv`
+before `proactor.recv`.
 `recv_size` must be positive when provided; values
 above 64 KiB (`2**16`) are silently capped. Leave `recv_size` at the default
 for server-speaks-first protocols.

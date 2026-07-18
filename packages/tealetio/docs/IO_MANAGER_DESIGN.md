@@ -51,7 +51,7 @@ Composition over subclassing `Scheduler` per IO backend.
 class ProactorIOManager:
     def __init__(self, proactor: Proactor) -> None: ...
 
-    def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]: ...
+    def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]: ...
     # … remaining sock_*, poll, file helpers; callers block via IOWaiter.wait()
 ```
 
@@ -260,7 +260,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | eager direct `accept()` / `recv()` drain with sequential indices; arm continuous accept/recv with `base_sequence`; worker-side accept mutation (preread, stream open); scheduler reorder and `finish_operation` |
+| `ProactorIOManager` | eager direct `accept()` / `recv()` drain with sequential indices; arm continuous accept/recv with `base_sequence`; oneshot `sock_recv` and accept-time preread share a non-blocking `recv` try; worker-side accept mutation (preread, stream open); scheduler reorder and `finish_operation` |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read

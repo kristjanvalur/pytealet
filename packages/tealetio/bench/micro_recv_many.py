@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
-"""Microbenchmark: io.recv_many eager drain vs continuous-only.
+"""Microbenchmark: io.sock_recvall (eager drain + continuous fallback).
 
 Pre-fills a socket with a fixed payload, then times ``scheduler.io.sock_recvall``
-(which drives ``recv_many`` via ``RecvIterBuffer``) until EOF. Toggle eager drain
-with ``TEALETIO_EAGER_RECV`` (default on) or ``--no-eager`` / ``--compare``.
-
-On oneshot backends (selector), continuous-only issues one ``recv`` per leg and
-resubmits; eager drains the ready kernel buffer on each leg start (often the
-whole payload in one arm).
-
-Uses ``SelectorProactor`` by default. Pass ``--uring`` for ``SyncUringProactor``.
+until EOF. Uses ``SelectorProactor`` by default; pass ``--uring`` for
+``SyncUringProactor``.
 
 Usage::
 
     uv run --active --package tealetio python packages/tealetio/bench/micro_recv_many.py
-    uv run --active --package tealetio python packages/tealetio/bench/micro_recv_many.py --compare
-    uv run --active --package tealetio python packages/tealetio/bench/micro_recv_many.py --uring --compare
+    uv run --active --package tealetio python packages/tealetio/bench/micro_recv_many.py --uring
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import socket
 import statistics
 import time
@@ -71,9 +63,7 @@ def _bench_recvall(
     payload_bytes: int,
     chunk_size: int,
     uring: bool,
-    eager: bool,
 ) -> list[int]:
-    os.environ["TEALETIO_EAGER_RECV"] = "1" if eager else "0"
     samples: list[int] = []
     payload = b"x" * payload_bytes
     scheduler = _make_scheduler(uring=uring)
@@ -113,7 +103,7 @@ def _bench_recvall(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-n", "--iterations", type=int, default=200, help="samples per path")
+    parser.add_argument("-n", "--iterations", type=int, default=200, help="samples")
     parser.add_argument("-p", "--payload", type=int, default=64 * 1024, help="bytes pre-written per sample")
     parser.add_argument("-c", "--chunk-size", type=int, default=4096, help="recv buffer pool buffer_size")
     parser.add_argument("--warmup", type=int, default=10)
@@ -121,16 +111,6 @@ def main() -> None:
         "--uring",
         action="store_true",
         help="use SyncUringProactor (default: SelectorProactor)",
-    )
-    parser.add_argument(
-        "--no-eager",
-        action="store_true",
-        help="disable eager drain (TEALETIO_EAGER_RECV=0); ignored with --compare",
-    )
-    parser.add_argument(
-        "--compare",
-        action="store_true",
-        help="run eager and continuous-only back-to-back",
     )
     args = parser.parse_args()
 
@@ -140,32 +120,19 @@ def main() -> None:
         f"chunk_size={args.chunk_size} warmup={args.warmup}"
     )
 
-    if args.compare:
-        modes: list[tuple[str, bool]] = [
-            ("sock_recvall eager", True),
-            ("sock_recvall continuous-only", False),
-        ]
-    else:
-        eager = not args.no_eager
-        label = "sock_recvall eager" if eager else "sock_recvall continuous-only"
-        modes = [(label, eager)]
-
-    for label, eager in modes:
-        _bench_recvall(
-            iterations=args.warmup,
-            payload_bytes=args.payload,
-            chunk_size=args.chunk_size,
-            uring=args.uring,
-            eager=eager,
-        )
-        samples = _bench_recvall(
-            iterations=args.iterations,
-            payload_bytes=args.payload,
-            chunk_size=args.chunk_size,
-            uring=args.uring,
-            eager=eager,
-        )
-        _summarise(label, samples)
+    _bench_recvall(
+        iterations=args.warmup,
+        payload_bytes=args.payload,
+        chunk_size=args.chunk_size,
+        uring=args.uring,
+    )
+    samples = _bench_recvall(
+        iterations=args.iterations,
+        payload_bytes=args.payload,
+        chunk_size=args.chunk_size,
+        uring=args.uring,
+    )
+    _summarise("sock_recvall", samples)
 
 
 if __name__ == "__main__":
