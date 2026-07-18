@@ -56,6 +56,9 @@ def _create_scheduler_socket(
 ) -> socket.socket:
     # Blocking socket() is faster than creating through io_uring; leave
     # Proactor.create_socket / IORING_OP_SOCKET available for direct proactor use.
+    # ``flags`` are socket *type* flags only (e.g. SOCK_NONBLOCK / SOCK_CLOEXEC
+    # where the platform accepts them in the type argument). Not uring-only
+    # IORING_OP_SOCKET bits; those stay on Proactor.create_socket.
     return configure_scheduler_socket(socket.socket(family, type | flags, proto))
 
 
@@ -336,7 +339,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
-    ) -> IOWaiter[AcceptStreamsDelivery]: ...
+    ) -> IOWaitable[AcceptStreamsDelivery]: ...
 
 
 ProactorSocketIO = ServerIO
@@ -593,6 +596,11 @@ class ProactorIOManager:
         without a submit. Partial progress is reported via ``progress`` (if any)
         and the remainder is handed to ``proactor.send``, which continues the
         drain. Empty payloads go straight to the proactor (immediate complete).
+
+        If ``progress`` raises after a partial write, the remainder is not
+        submitted: the waitable fails with that exception and the short write
+        stays on the wire (same as a proactor mid-drain progress failure).
+        Retrying the full original buffer can duplicate already-sent bytes.
         """
 
         view = memoryview(data)
@@ -833,6 +841,12 @@ class ProactorIOManager:
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
     ) -> IOWaitable[socket.socket]:
+        """Create a socket via stdlib; optionally connect and send ``initial_data``.
+
+        ``flags`` are socket type flags OR'd into ``type`` (e.g. ``SOCK_NONBLOCK`` /
+        ``SOCK_CLOEXEC`` where valid). Not io_uring-only socket-create bits.
+        """
+
         if initial_data is not None and connect_to is None:
             raise ValueError("initial_data requires connect_to")
 
@@ -1245,6 +1259,7 @@ class ProactorIOManager:
         ``initial_data`` is sent on the wire after connect, before streams open.
         Socket creation is direct (stdlib); connect goes through the proactor;
         the optional initial send uses ``sock_sendall`` (eager try).
+        ``flags`` are socket type flags only (same contract as ``sock_create``).
         """
 
         try:

@@ -261,7 +261,12 @@ class IOWaiterSync(Generic[T]):
         """No-op: there is no backend work to drop interest in."""
 
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
-        """Run ``callback`` immediately; this waitable is already complete."""
+        """Run ``callback`` immediately on the caller's stack.
+
+        Unlike proactor completions (which usually hop via the scheduler), this
+        re-enters the callback synchronously. Handlers that submit more IO must
+        tolerate nested completion on the same stack.
+        """
 
         callback()
 
