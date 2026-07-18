@@ -99,9 +99,17 @@ class _MockProactor:
         return operation
 
     def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
-        del callback, buf_group, base_sequence
+        del buf_group
         self.recv_many_calls.append(sock)
-        return ContinuousOperation(kind="recv_many", fileobj=sock)
+        self.last_recv_many_base_sequence = base_sequence
+        return ContinuousOperation(kind="recv_many", fileobj=sock, result_callback=callback)
+
+    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+        cancel_op = Operation[None](kind="cancel", fileobj=None)
+        cancel_op._finish(result=None)
+        if not operation.done():
+            operation._finish(exception=io_cancellation_error())
+        return cancel_op
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int):
         from tealetio.proactor import SyntheticRecvBufferPool
@@ -643,9 +651,15 @@ class TestProactorIOManagerAcceptMany:
                 del kwargs
                 self.queued.append((callback, args))
 
+        peers: list[socket.socket] = []
+
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
-                return _eager_accept_arm(sock, callback)
+                # keep peer open so stream open arms continuous recv_many (no eager EOF)
+                conn, peer = socket.socketpair()
+                peers.append(peer)
+                conn.setblocking(False)
+                return _eager_accept_arm(sock, callback, conn)
 
         proactor = _EagerAcceptProactor()
         scheduler = _QueueingScheduler()
@@ -661,6 +675,8 @@ class TestProactorIOManagerAcceptMany:
             _reader, writer = handled[0]
             writer.close()
         finally:
+            for peer in peers:
+                peer.close()
             server.close()
 
     def test_accept_many_streams_closes_socket_when_stream_factory_raises(self) -> None:
@@ -687,6 +703,7 @@ class TestProactorIOManagerAcceptMany:
 
     def test_accept_many_streams_propagates_marshal_failure_without_closing_socket(self) -> None:
         accepted: list[socket.socket] = []
+        peers: list[socket.socket] = []
 
         class _ShutdownScheduler(StubScheduler):
             def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
@@ -695,7 +712,10 @@ class TestProactorIOManagerAcceptMany:
 
         class _EagerAcceptProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
-                conn = _eager_accept_conn()
+                # keep peer open so stream open does not hit eager EOF marshal
+                conn, peer = socket.socketpair()
+                peers.append(peer)
+                conn.setblocking(False)
                 accepted.append(conn)
                 return _eager_accept_arm(sock, callback, conn)
 
@@ -708,6 +728,8 @@ class TestProactorIOManagerAcceptMany:
             assert accepted[0].fileno() != -1
             accepted[0].close()
         finally:
+            for peer in peers:
+                peer.close()
             server.close()
 
     def test_accept_many_streams_uses_bare_socket_callback(self) -> None:
@@ -889,6 +911,141 @@ class TestProactorIOManagerAcceptEager:
             for client in clients:
                 client.close()
             listener.close()
+
+
+class TestProactorIOManagerRecvManyEager:
+    def _pair_with_data(self, chunks: list[bytes]) -> tuple[socket.socket, socket.socket]:
+        reader, writer = socket.socketpair()
+        reader.setblocking(False)
+        writer.setblocking(False)
+        for chunk in chunks:
+            writer.sendall(chunk)
+        return reader, writer
+
+    def test_recv_many_env_disables_eager_drain(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEALETIO_EAGER_RECV", "0")
+
+        class _CaptureProactor(_MockProactor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.recv_many_calls = 0
+                self.last_base_sequence = -1
+
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+                del callback, buf_group
+                self.recv_many_calls += 1
+                self.last_base_sequence = base_sequence
+                return ContinuousOperation(kind="recv_many", fileobj=sock)
+
+            def shared_recv_buffer_pool(self):
+                return self.create_recv_buffer_pool(4, 8)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        reader, writer = self._pair_with_data([b"abcd", b"ef"])
+        seen: list[bytes] = []
+        try:
+            io.recv_many(
+                reader,
+                lambda d: seen.append(bytes(d.value) if d.value is not None else b""),
+            )
+            assert proactor.recv_many_calls == 1
+            assert proactor.last_base_sequence == 0
+            assert seen == []
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_recv_many_drains_ready_then_submits_continuous(self) -> None:
+        class _CaptureProactor(_MockProactor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.recv_many_calls = 0
+                self.last_base_sequence = -1
+
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+                del callback, buf_group
+                self.recv_many_calls += 1
+                self.last_base_sequence = base_sequence
+                return ContinuousOperation(kind="recv_many", fileobj=sock)
+
+            def shared_recv_buffer_pool(self):
+                return self.create_recv_buffer_pool(4, 8)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        reader, writer = self._pair_with_data([b"abcd", b"ef"])
+        seen: list[bytes] = []
+        try:
+            waiter = io.recv_many(
+                reader,
+                lambda d: seen.append(bytes(d.value) if d.value is not None else b""),
+            )
+            assert isinstance(waiter, IOWaiter)
+            assert proactor.recv_many_calls == 1
+            # 6 bytes with chunk_size 4 → two eager recvs, then would-block
+            assert proactor.last_base_sequence == 2
+            assert seen == [b"abcd", b"ef"]
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_recv_many_empty_socket_only_submits(self) -> None:
+        class _CaptureProactor(_MockProactor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.recv_many_calls = 0
+                self.last_base_sequence = -1
+
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+                del callback, buf_group
+                self.recv_many_calls += 1
+                self.last_base_sequence = base_sequence
+                return ContinuousOperation(kind="recv_many", fileobj=sock)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        reader, writer = socket.socketpair()
+        reader.setblocking(False)
+        writer.setblocking(False)
+        try:
+            waiter = io.recv_many(reader, lambda _d: None)
+            assert isinstance(waiter, IOWaiter)
+            assert proactor.recv_many_calls == 1
+            assert proactor.last_base_sequence == 0
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_recv_many_eager_eof_skips_continuous(self) -> None:
+        class _CaptureProactor(_MockProactor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.recv_many_calls = 0
+
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+                del sock, callback, buf_group, base_sequence
+                self.recv_many_calls += 1
+                return ContinuousOperation(kind="recv_many", fileobj=None)
+
+            def shared_recv_buffer_pool(self):
+                return self.create_recv_buffer_pool(64, 4)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        reader, writer = self._pair_with_data([b"hi"])
+        writer.close()
+        seen: list[tuple[bytes, bool]] = []
+        try:
+            waiter = io.recv_many(
+                reader,
+                lambda d: seen.append((bytes(d.value) if d.value is not None else b"", d.more)),
+            )
+            assert proactor.recv_many_calls == 0
+            assert waiter.poll()
+            assert seen == [(b"hi", True), (b"", False)]
+        finally:
+            reader.close()
 
 
 class TestProactorIOManagerSockCreateStreams:

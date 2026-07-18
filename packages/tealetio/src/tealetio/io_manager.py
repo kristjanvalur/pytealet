@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
@@ -12,6 +13,7 @@ from .continuous_callbacks import (
     AcceptStreamsDelivery,
     DeliveryCallback,
     LenientReorderBuffer,
+    ReorderBuffer,
     finalize_accept_recv_error,
     finish_continuous_delivery,
     is_cancellation_delivery,
@@ -57,6 +59,30 @@ def _create_scheduler_socket(
     return configure_scheduler_socket(socket.socket(family, type | flags, proto))
 
 
+def _env_flag_enabled(name: str, *, default: bool = True) -> bool:
+    """Parse a truthy env flag; ``0`` / ``false`` / ``no`` / ``off`` disable.
+
+    Read at call time so benchmarks can toggle without reimporting.
+    """
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _eager_accept_enabled() -> bool:
+    """When false (``TEALETIO_EAGER_ACCEPT=0``), skip direct accept drain."""
+
+    return _env_flag_enabled("TEALETIO_EAGER_ACCEPT", default=True)
+
+
+def _eager_recv_enabled() -> bool:
+    """When false (``TEALETIO_EAGER_RECV=0``), skip direct recv drain."""
+
+    return _env_flag_enabled("TEALETIO_EAGER_RECV", default=True)
+
+
 def _accept_ready_connection(sock: socket.socket) -> socket.socket | None:
     """Non-blocking accept of one ready connection, or ``None`` if would block.
 
@@ -72,6 +98,39 @@ def _accept_ready_connection(sock: socket.socket) -> socket.socket | None:
         except InterruptedError:
             continue
         return configure_scheduler_socket(conn)
+
+
+def _recv_ready_chunk(sock: socket.socket, n: int) -> bytes | None:
+    """Non-blocking ``recv(n)``: data, empty EOF ``b""``, or ``None`` if would block.
+
+    Raises ``OSError`` for hard receive errors (not ``BlockingIOError`` /
+    ``InterruptedError``).
+    """
+
+    while True:
+        try:
+            return sock.recv(n)
+        except BlockingIOError:
+            return None
+        except InterruptedError:
+            continue
+
+
+def _recv_pool_is_full(pool: RecvBufferPool) -> bool:
+    """True when no free delivery slots remain (synthetic or provided-buffer)."""
+
+    return pool.leased_count >= pool.buffer_count
+
+
+def _eager_recv_chunk_view(data: bytes, pool: RecvBufferPool) -> memoryview:
+    """Wrap eager ``recv`` bytes for delivery; lease when the pool supports it."""
+
+    if not data:
+        return memoryview(b"")
+    lease = getattr(pool, "lease_delivery_chunk", None)
+    if lease is not None:
+        return cast(memoryview, lease(data))
+    return memoryview(data)
 
 
 def _finish_or_close_socket(group: IOWaitGroup[Any], sock: socket.socket, result: Any) -> None:
@@ -200,6 +259,15 @@ class SocketIO(Protocol):
         buffer_pool: "RecvBufferPool | None" = None,
     ) -> bytes: ...
 
+    def recv_many(
+        self,
+        sock: socket.socket,
+        callback: Callable[[MultishotDelivery], object],
+        *,
+        buf_group: "RecvBufferPool | None" = None,
+        base_sequence: int = 0,
+    ) -> IOWaitable[None]: ...
+
     def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
 
     def sock_close(self, sock: socket.socket) -> IOWaiter[None]: ...
@@ -283,12 +351,44 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
 ProactorSocketIO = ServerIO
 
 
+class _IORecvManyAdapter:
+    """``RecvIterBuffer`` proactor surface that starts legs via ``io.recv_many``.
+
+    Eager non-blocking drain lives on the IO manager; cancel stays on the real
+    proactor so ring teardown is unchanged.
+    """
+
+    def __init__(self, io: ProactorIOManager) -> None:
+        self._io = io
+
+    def recv_many(
+        self,
+        sock: socket.socket,
+        callback: Any,
+        *,
+        buf_group: RecvBufferPool,
+        base_sequence: int = 0,
+    ) -> ContinuousOperation[Any]:
+        waiter = self._io.recv_many(
+            sock,
+            callback,
+            buf_group=buf_group,
+            base_sequence=base_sequence,
+        )
+        operation = cast(IOWaiter[None], waiter).operation
+        assert operation is not None
+        return cast(ContinuousOperation[Any], operation)
+
+    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+        return self._io._proactor.cancel(operation)
+
+
 class ProactorIOManager:
     """IO facade over a ``Proactor`` backend.
 
     One-shot helpers return ``IOWaiter``; call ``wait()`` to block the current
-    tealet. Continuous helpers (``accept_many``, ``poll_many``) return
-    ``IOWaitable[None]``; call ``wait()`` to block until the stream ends.
+    tealet. Continuous helpers (``accept_many``, ``recv_many``, ``poll_many``)
+    return ``IOWaitable[None]``; call ``wait()`` to block until the stream ends.
     ``sock_recv_iter`` remains a blocking iterator over ``recv_many`` chunks.
     Always owned by a proactor scheduler.
 
@@ -323,9 +423,11 @@ class ProactorIOManager:
     def _thread_reorder_helper(
         self,
         delivery_callback: DeliveryCallback,
-        reorder_buffer_class: type[LenientReorderBuffer],
+        reorder_buffer_class: type[LenientReorderBuffer] | type[ReorderBuffer],
+        *,
+        start: int = 0,
     ) -> Callable[[MultishotDelivery], None]:
-        buffer = reorder_buffer_class(delivery_callback)
+        buffer = reorder_buffer_class(delivery_callback, start=start)
 
         def on_thread_delivery(delivery: MultishotDelivery) -> None:
             assert self._scheduler is not None
@@ -387,10 +489,10 @@ class ProactorIOManager:
 
     def _open_sock_recv_iter(self, sock: socket.socket, buffer_pool: RecvBufferPool | None) -> RecvIterBuffer:
         pool = self._resolve_recv_buffer_pool(buffer_pool)
-        proactor = cast(_RecvIterProactor, self._proactor)
+        # start legs via io.recv_many (eager drain) while cancel stays on the proactor
         return open_recv_iter_buffer(
             sock,
-            proactor=proactor,
+            proactor=cast(_RecvIterProactor, _IORecvManyAdapter(self)),
             buf_group=pool,
             scheduler=self._scheduler,
         )
@@ -426,6 +528,100 @@ class ProactorIOManager:
                 return cargo
 
         return b"".join(process(chunk) for _index, chunk in self.sock_recv_iter(sock, buffer_pool))
+
+    def recv_many(
+        self,
+        sock: socket.socket,
+        callback: Callable[[MultishotDelivery], object],
+        *,
+        buf_group: RecvBufferPool | None = None,
+        base_sequence: int = 0,
+    ) -> IOWaitable[None]:
+        """Receive a byte stream: direct drain while ready, then continuous proactor.
+
+        Ready data is read with non-blocking ``recv()`` on the calling thread and
+        delivered as ``MultishotDelivery`` chunks (sequential indices from
+        ``base_sequence``). When the socket would block, ``proactor.recv_many``
+        is armed with ``base_sequence`` set to the next index so multishot
+        continues the same stream numbering.
+
+        Chunk size follows ``buf_group.buffer_size`` (default shared pool when
+        ``buf_group`` is omitted). Synthetic pools lease delivery views the same
+        way as selector ``recv_many``; real provided-buffer pools get copied
+        ``memoryview`` chunks on the eager path.
+
+        Empty ``value`` with ``more=False`` is EOF. ``more=False`` with non-empty
+        data means the continuous leg stopped before EOF (resubmit with
+        ``base_sequence=index + 1``). ``errno.ENOBUFS`` is delivered through
+        ``exception`` when the continuous path reports pool pressure.
+
+        Continuous deliveries are marshalled onto the scheduler and reordered
+        strictly by index before ``callback``. Eager deliveries use the same path
+        so late continuous legs cannot overtake numbered eager chunks.
+        ``wait()`` ends when the continuous stream finishes (or immediately when
+        eager alone reached EOF / a hard error).
+
+        Set ``TEALETIO_EAGER_RECV=0`` to skip the direct drain (continuous path
+        only) for A/B measurements.
+        """
+
+        pool = self._resolve_recv_buffer_pool(buf_group)
+        chunk_size = pool.buffer_size
+
+        def on_ordered_delivery(delivery: MultishotDelivery) -> None:
+            try:
+                callback(delivery)
+            finally:
+                finish_continuous_delivery(delivery)
+
+        # strict order: byte-stream consumers (RecvIterBuffer) need index order
+        on_thread_delivery = self._thread_reorder_helper(
+            on_ordered_delivery,
+            ReorderBuffer,
+            start=base_sequence,
+        )
+
+        index = base_sequence
+        if _eager_recv_enabled():
+            try:
+                while True:
+                    if _recv_pool_is_full(pool):
+                        # leave room for continuous path to surface ENOBUFS
+                        break
+                    data = _recv_ready_chunk(sock, chunk_size)
+                    if data is None:
+                        break
+                    if not data:
+                        # EOF: finish the stream without arming continuous
+                        terminal = ContinuousOperation[memoryview](kind="recv_many", fileobj=sock)
+                        on_thread_delivery(
+                            MultishotDelivery(
+                                index=index,
+                                value=memoryview(b""),
+                                more=False,
+                                operation=terminal,
+                            )
+                        )
+                        return IOWaiter(self, terminal)
+                    chunk = _eager_recv_chunk_view(data, pool)
+                    on_thread_delivery(
+                        MultishotDelivery(index=index, value=chunk, more=True),
+                    )
+                    index += 1
+            except OSError as exc:
+                terminal = ContinuousOperation[memoryview](kind="recv_many", fileobj=sock)
+                on_thread_delivery(
+                    MultishotDelivery(index=index, exception=exc, more=False, operation=terminal),
+                )
+                return IOWaiter(self, terminal)
+
+        operation = self._proactor.recv_many(
+            sock,
+            on_thread_delivery,
+            buf_group=pool,
+            base_sequence=index,
+        )
+        return IOWaiter(self, operation)
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> IOWaiter[int]:
         return IOWaiter(self, self._proactor.recv_into(sock, buf))
@@ -471,19 +667,22 @@ class ProactorIOManager:
         When the listen socket is already readable, ``accept()`` runs on the
         calling thread (no proactor submit). Otherwise falls through to
         ``proactor.accept``. Optional ``n`` composes an accept-time ``recv``.
+
+        Set ``TEALETIO_EAGER_ACCEPT=0`` to skip the direct accept (proactor only).
         """
 
         normalized_recv_size = normalize_accept_recv_size(n)
 
-        try:
-            conn = _accept_ready_connection(sock)
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
+        if _eager_accept_enabled():
+            try:
+                conn = _accept_ready_connection(sock)
+            except OSError as exc:
+                return IOWaiterSync.failed(exc)
 
-        if conn is not None:
-            if normalized_recv_size is None:
-                return IOWaiterSync((conn, None))
-            return self._sock_accept_preread(conn, normalized_recv_size)
+            if conn is not None:
+                if normalized_recv_size is None:
+                    return IOWaiterSync((conn, None))
+                return self._sock_accept_preread(conn, normalized_recv_size)
 
         if normalized_recv_size is None:
             return IOWaiter(
@@ -752,6 +951,8 @@ class ProactorIOManager:
         only. On non-multishot backends the stream finishes after each accept;
         accept-time ``recv`` and scheduler-marshalled deliveries may still be in
         flight. Re-arm in a loop when more accepts are needed.
+
+        Set ``TEALETIO_EAGER_ACCEPT=0`` to skip the direct drain (continuous only).
         """
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
@@ -812,27 +1013,28 @@ class ProactorIOManager:
         # drain ready connections before arming the continuous proactor path.
         # numbered indices continue into multishot via base_sequence.
         eager_count = 0
-        try:
-            while True:
-                conn = _accept_ready_connection(sock)
-                if conn is None:
-                    break
-                index = eager_count
-                eager_count += 1
-                if normalized_recv_size is not None:
-                    # more=True so finish_continuous is a no-op for the stream leg
-                    self._accept_preread_on_worker(
-                        MultishotDelivery(index=index, value=conn, more=True),
-                        on_thread_delivery,
-                        recv_size=normalized_recv_size,
-                        recv_timeout=recv_timeout,
-                    )
-                else:
-                    on_thread_delivery(
-                        MultishotDelivery(index=index, value=(conn, None, None), more=True),
-                    )
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
+        if _eager_accept_enabled():
+            try:
+                while True:
+                    conn = _accept_ready_connection(sock)
+                    if conn is None:
+                        break
+                    index = eager_count
+                    eager_count += 1
+                    if normalized_recv_size is not None:
+                        # more=True so finish_continuous is a no-op for the stream leg
+                        self._accept_preread_on_worker(
+                            MultishotDelivery(index=index, value=conn, more=True),
+                            on_thread_delivery,
+                            recv_size=normalized_recv_size,
+                            recv_timeout=recv_timeout,
+                        )
+                    else:
+                        on_thread_delivery(
+                            MultishotDelivery(index=index, value=(conn, None, None), more=True),
+                        )
+            except OSError as exc:
+                return IOWaiterSync.failed(exc)
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
@@ -925,25 +1127,26 @@ class ProactorIOManager:
 
         # drain ready connections; indices continue into multishot via base_sequence
         eager_count = 0
-        try:
-            while True:
-                conn = _accept_ready_connection(sock)
-                if conn is None:
-                    break
-                index = eager_count
-                eager_count += 1
-                try:
-                    streams = open_and_deliver(conn)
-                except BaseException as exc:
-                    on_thread_delivery(
-                        MultishotDelivery(index=index, value=None, exception=exc, more=True),
-                    )
-                else:
-                    on_thread_delivery(
-                        MultishotDelivery(index=index, value=streams, more=True),
-                    )
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
+        if _eager_accept_enabled():
+            try:
+                while True:
+                    conn = _accept_ready_connection(sock)
+                    if conn is None:
+                        break
+                    index = eager_count
+                    eager_count += 1
+                    try:
+                        streams = open_and_deliver(conn)
+                    except BaseException as exc:
+                        on_thread_delivery(
+                            MultishotDelivery(index=index, value=None, exception=exc, more=True),
+                        )
+                    else:
+                        on_thread_delivery(
+                            MultishotDelivery(index=index, value=streams, more=True),
+                        )
+            except OSError as exc:
+                return IOWaiterSync.failed(exc)
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)

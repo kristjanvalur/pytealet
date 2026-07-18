@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``proactor.accept_many(..., base_sequence=N)`` continues numbering after the
   drain (uring multishot seeds ``completion.sequence`` the same way as
   ``recv_many``).
+- ``ProactorIOManager.recv_many`` drains ready data with non-blocking ``recv()``
+  before arming ``proactor.recv_many(..., base_sequence=N)``. Eager chunks share
+  the same index stream as continuous multishot. ``sock_recv_iter`` /
+  ``RecvIterBuffer`` start legs through this path.
+- Eager accept/recv drains can be disabled for A/B measurements:
+  ``TEALETIO_EAGER_ACCEPT=0`` and ``TEALETIO_EAGER_RECV=0`` (default on).
 - ``ProactorIOManager.sock_create`` / ``sock_create_streams`` create sockets
   directly via stdlib ``socket.socket()`` (scheduler contract) instead of
   ``Proactor.create_socket``. Create-only results use ``IOWaiterSync`` (no

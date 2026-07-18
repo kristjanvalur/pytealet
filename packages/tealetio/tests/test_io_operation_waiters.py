@@ -206,6 +206,46 @@ def test_lenient_reorder_buffer_honours_start_index() -> None:
     assert operation.done()
 
 
+def test_lenient_reorder_buffer_finishes_on_next_sequence_cancel() -> None:
+    """Cancel is a normal terminal at the next multishot sequence (not index 0)."""
+
+    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
+    from tealetio.operations import io_cancellation_error
+
+    operation = ContinuousOperation(kind="accept_many", fileobj=object())
+    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery)
+
+    for i in range(4):
+        reorder_buffer.deliver(MultishotDelivery(index=i, value=object(), more=True, operation=operation))
+    assert not operation.done()
+
+    reorder_buffer.deliver(
+        MultishotDelivery(index=4, exception=io_cancellation_error(), more=False, operation=operation),
+    )
+    assert operation.done()
+    assert operation.cancelled()
+
+
+def test_strict_reorder_buffer_finishes_on_next_sequence_cancel() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
+    from tealetio.operations import io_cancellation_error
+
+    operation = ContinuousOperation(kind="recv_many", fileobj=object())
+    reorder_buffer = ReorderBuffer(finish_continuous_delivery, start=0)
+
+    for i in range(3):
+        reorder_buffer.deliver(
+            MultishotDelivery(index=i, value=memoryview(b"x"), more=True, operation=operation),
+        )
+    assert not operation.done()
+
+    reorder_buffer.deliver(
+        MultishotDelivery(index=3, exception=io_cancellation_error(), more=False, operation=operation),
+    )
+    assert operation.done()
+    assert operation.cancelled()
+
+
 def test_finish_operation_is_idempotent_when_already_done() -> None:
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
     wakes: list[str] = []

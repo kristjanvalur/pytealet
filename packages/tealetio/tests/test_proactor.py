@@ -4220,6 +4220,43 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_accept_many_cancel_settles_after_accepts(self) -> None:
+        """Cancel after more=True legs must finish via reorder (index=None cancel)."""
+
+        if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
+            pytest.skip("multishot accept is unavailable")
+
+        proactor = UringProactor()
+        server = socket.socket()
+        clients: list[socket.socket] = []
+        accepted: list[socket.socket] = []
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", 0))
+            server.listen(16)
+            server.setblocking(False)
+            addr = server.getsockname()
+            for _ in range(4):
+                client = socket.socket()
+                client.connect(addr)
+                clients.append(client)
+
+            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            _wait_for_uring(proactor, lambda: len(accepted) >= 4)
+            assert len(accepted) >= 4
+
+            proactor.cancel(operation)
+            _wait_for_uring(proactor, lambda: operation.done() and not proactor.has_pending_operations())
+            assert operation.cancelled() is True
+        finally:
+            for conn in accepted:
+                conn.close()
+            for client in clients:
+                client.close()
+            server.close()
+            proactor.close()
+
     def test_create_recv_buffer_pool_uses_synthetic_when_buf_ring_probe_false(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

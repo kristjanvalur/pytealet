@@ -2876,15 +2876,19 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[AcceptManyResult], op)
         res = completion.res
+        index = int(completion.sequence)
         if res < 0:
             self._deactivate_uring_op(op)
+            # keep completion.sequence (including ECANCELED): uring-api assigns the
+            # next multishot leg index; default index=0 would stall reorder buffers
+            # after any more=True accepts.
             operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(_uring_cqe_oserror(res)),
+                _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return operation
         conn = socket_from_uring_fd(completion.res)
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        _handoff_accept_many(operation, conn, more=more, index=int(completion.sequence))
+        _handoff_accept_many(operation, conn, more=more, index=index)
         if not more:
             self._deactivate_uring_op(op)
         return operation
@@ -3229,7 +3233,9 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
-            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
+            operation._finish_with_terminal_delivery(
+                _recv_many_error_delivery(index=base_sequence, res=res),
+            )
             return operation
         operation._emit_result(
             self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
@@ -3249,7 +3255,9 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
-            operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
+            operation._finish_with_terminal_delivery(
+                _recv_many_error_delivery(index=base_sequence, res=res),
+            )
             return operation
         if res == 0:
             payload = completion.result

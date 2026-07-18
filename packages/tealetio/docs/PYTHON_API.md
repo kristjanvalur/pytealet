@@ -77,6 +77,16 @@ index sequence for reorder buffers. Each delivery is
 `(conn, initial_data)` (recv failures are handled before the user callback).
 The continuous leg remains active until cancelled or the backend reports a
 terminal error. Call `conn.getpeername()` when the peer address is needed.
+
+`scheduler.io.recv_many(sock, callback, *, buf_group=None, base_sequence=0)`
+likewise drains ready bytes with non-blocking `recv()` (chunk size from the
+buffer pool), then arms `proactor.recv_many` with a continued `base_sequence`.
+Deliveries are `MultishotDelivery` chunks reordered on the scheduler thread.
+`sock_recv_iter` uses this path via `RecvIterBuffer`.
+
+For A/B measurements, set `TEALETIO_EAGER_ACCEPT=0` or `TEALETIO_EAGER_RECV=0`
+to skip the direct drain and use only the continuous proactor path (see
+`packages/tealetio/bench/micro_accept_many.py` and `micro_recv_many.py`).
 `initial_data` holds accept-time pre-read bytes when `recv_size` is set;
 otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed
 the write side before sending data (EOF). One-shot `sock_accept()` also tries a
