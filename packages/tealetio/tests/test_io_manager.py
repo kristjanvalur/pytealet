@@ -1018,11 +1018,12 @@ class TestProactorIOManagerRecvManyEager:
         reader, writer = self._pair_with_data([b"abcd", b"ef"])
         seen: list[bytes] = []
         try:
-            waiter = io.recv_many(
+            operation = io._recv_many(
                 reader,
                 lambda d: seen.append(bytes(d.value) if d.value is not None else b""),
             )
-            assert isinstance(waiter, IOWaiter)
+            assert isinstance(operation, ContinuousOperation)
+            assert not operation.done()
             assert proactor.recv_many_calls == 1
             # 6 bytes with chunk_size 4 → two eager recvs, then would-block
             assert proactor.last_base_sequence == 2
@@ -1050,8 +1051,9 @@ class TestProactorIOManagerRecvManyEager:
         reader.setblocking(False)
         writer.setblocking(False)
         try:
-            waiter = io.recv_many(reader, lambda _d: None)
-            assert isinstance(waiter, IOWaiter)
+            operation = io._recv_many(reader, lambda _d: None)
+            assert isinstance(operation, ContinuousOperation)
+            assert not operation.done()
             assert proactor.recv_many_calls == 1
             assert proactor.last_base_sequence == 0
         finally:
@@ -1078,12 +1080,12 @@ class TestProactorIOManagerRecvManyEager:
         writer.close()
         seen: list[tuple[bytes, bool]] = []
         try:
-            waiter = io.recv_many(
+            operation = io._recv_many(
                 reader,
                 lambda d: seen.append((bytes(d.value) if d.value is not None else b"", d.more)),
             )
             assert proactor.recv_many_calls == 0
-            assert waiter.poll()
+            assert operation.done()
             assert seen == [(b"hi", True), (b"", False)]
         finally:
             reader.close()

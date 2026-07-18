@@ -55,7 +55,8 @@ disposition (see below).
 | `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `LenientReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
 | `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; user `callback` and `finish_operation` run on the scheduler thread |
 | `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `LenientReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` (callback exceptions still finish terminal legs in `finally`) |
-| `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer` over `proactor.recv_many` chunks (not composed through `accept_many`) |
+| `_recv_many` (internal) | thin wrap: eager non-blocking `recv` drain, then `proactor.recv_many` with the same `callback`; returns `ContinuousOperation` (no marshal/reorder); intermediate eager may use `operation=None`; pure-eager terminal uses a synthetic done op |
+| `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `_recv_many`, cancels via proactor |
 
 Worker-thread accept composition mutates the proactor delivery before the
 scheduler sees it. Reorder, `finish_operation`, and user callbacks always run on

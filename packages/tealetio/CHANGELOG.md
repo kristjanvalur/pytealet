@@ -20,10 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``proactor.accept_many(..., base_sequence=N)`` continues numbering after the
   drain (uring multishot seeds ``completion.sequence`` the same way as
   ``recv_many``).
-- ``ProactorIOManager.recv_many`` drains ready data with non-blocking ``recv()``
-  before arming ``proactor.recv_many(..., base_sequence=N)``. Eager chunks share
-  the same index stream as continuous multishot. ``sock_recv_iter`` /
-  ``RecvIterBuffer`` start legs through this path.
+- Internal ``ProactorIOManager._recv_many`` drains ready data with non-blocking
+  ``recv()`` then arms ``proactor.recv_many(..., base_sequence=N)`` with the same
+  callback, returning a ``ContinuousOperation`` like the proactor (thin wrap: no
+  marshal/reorder). Intermediate eager legs may deliver with ``operation=None``;
+  pure-eager EOF/error finishes a synthetic done operation; the proactor path
+  always returns a real op. ``RecvIterBuffer`` starts legs via this override and
+  still cancels unfinished ops on the real proactor.
 - ``ProactorIOManager.sock_recv`` and accept-time preread (``sock_accept`` /
   ``accept_many`` with ``recv_size``) share a non-blocking ``recv`` try before
   ``proactor.recv``. Ready first-bytes or EOF complete without a oneshot submit.

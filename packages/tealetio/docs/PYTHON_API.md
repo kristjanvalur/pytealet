@@ -86,11 +86,15 @@ index sequence for reorder buffers. Each delivery is
 The continuous leg remains active until cancelled or the backend reports a
 terminal error. Call `conn.getpeername()` when the peer address is needed.
 
-`scheduler.io.recv_many(sock, callback, *, buf_group=None, base_sequence=0)`
-likewise drains ready bytes with non-blocking `recv()` (chunk size from the
-buffer pool), then arms `proactor.recv_many` with a continued `base_sequence`.
-Deliveries are `MultishotDelivery` chunks reordered on the scheduler thread.
-`sock_recv_iter` uses this path via `RecvIterBuffer`.
+Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
+(returns a `ContinuousOperation` like the proactor): it drains ready bytes with
+non-blocking `recv()`, then arms the proactor with the same `callback` and a
+continued `base_sequence`. No extra marshal or reorder. Intermediate eager
+chunks may arrive with `operation=None`; pure-eager EOF or hard error finishes
+a synthetic done operation; when the call falls through to the proactor, the
+return value is always a real continuous operation. `sock_recv_iter` /
+`RecvIterBuffer` start legs through this helper and cancel unfinished ops on
+the proactor as usual.
 
 `initial_data` holds accept-time pre-read bytes when `recv_size` is set;
 otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed

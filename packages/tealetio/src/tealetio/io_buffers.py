@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import socket
 from collections import deque
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
@@ -64,6 +65,12 @@ class _RecvIterProactor(Protocol):
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]: ...
 
 
+_RecvManyStarter: TypeAlias = Callable[
+    ...,
+    ContinuousOperation[_RecvManyValue],
+]
+
+
 def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     exc = delivery.exception
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
@@ -104,12 +111,15 @@ class RecvIterBuffer:
         buf_group: _BufGroupLike,
         proactor: _RecvIterProactor,
         scheduler: BaseScheduler | None = None,
+        recv_many: _RecvManyStarter | None = None,
     ) -> None:
         if scheduler is None:
             scheduler = get_running_scheduler()
         self._sock = sock
         self._buf_group = buf_group
+        # cancel unfinished ContinuousOperations only; start via recv_many override when set
         self._proactor = proactor
+        self._recv_many = proactor.recv_many if recv_many is None else recv_many
         self._scheduler = scheduler
         self._cond = Condition()
         self._reorder_buffer = ReorderBuffer(self._on_ordered_delivery, start=0)
@@ -126,7 +136,7 @@ class RecvIterBuffer:
     def _start_recv_many(self, *, base_sequence: int) -> None:
         if self._closed:
             return
-        operation = self._proactor.recv_many(
+        operation = self._recv_many(
             self._sock,
             self.on_result,
             buf_group=self._buf_group,
@@ -291,10 +301,22 @@ def open_recv_iter_buffer(
     proactor: _RecvIterProactor,
     buf_group: _BufGroupLike,
     scheduler: BaseScheduler | None = None,
+    recv_many: _RecvManyStarter | None = None,
 ) -> RecvIterBuffer:
-    """Construct a receive bridge for ``sock_recv_iter`` and stream readers."""
+    """Construct a receive bridge for ``sock_recv_iter`` and stream readers.
 
-    return RecvIterBuffer(sock=sock, buf_group=buf_group, proactor=proactor, scheduler=scheduler)
+    ``recv_many`` defaults to ``proactor.recv_many``. Pass an override (for
+    example ``ProactorIOManager._recv_many``) to start legs without changing
+    cancel, which always goes through ``proactor.cancel``.
+    """
+
+    return RecvIterBuffer(
+        sock=sock,
+        buf_group=buf_group,
+        proactor=proactor,
+        scheduler=scheduler,
+        recv_many=recv_many,
+    )
 
 
 class SendBuffer:
