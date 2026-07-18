@@ -33,6 +33,8 @@ from .operations import (
     ContinuousStepResult,
     MultishotDelivery,
     Operation,
+    SupportsContinuousOperation,
+    SupportsOperation,
     T_co,
     io_cancellation_error,
 )
@@ -52,6 +54,8 @@ T = TypeVar("T")
 __all__ = [
     "ContinuousOperation",
     "Operation",
+    "SupportsContinuousOperation",
+    "SupportsOperation",
     "AsyncProactorScheduler",
     "Proactor",
     "ProactorBase",
@@ -79,7 +83,7 @@ __all__ = [
 ]
 
 
-_DoneCallback = Callable[[Operation[Any]], object]
+_DoneCallback = Callable[[SupportsOperation[Any]], object]
 _ResultCallback = Callable[[T], object]
 _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
@@ -621,7 +625,7 @@ class Proactor(Protocol):
         callback: _PollManyCallback,
     ) -> ContinuousOperation[int]: ...
 
-    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         """Cancel ``operation`` and return the ring cancel operation when applicable."""
 
         ...
@@ -785,7 +789,7 @@ class ProactorBase:
             return
         operation._finish(exception=cancel_exc)
 
-    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         raise NotImplementedError
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:

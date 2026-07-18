@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .locks import CrossThreadEvent
-from .operations import InvalidStateError, Operation
+from .operations import InvalidStateError, Operation, SupportsOperation
 
 _VoidDoneCallback = Callable[[], object]
 
@@ -62,12 +62,13 @@ class IOOperation(Protocol[T_co]):
 
 
 class IOWaiter(Generic[T]):
-    """Blocking IO handle backed by a proactor ``Operation`` or ``ContinuousOperation``.
+    """Blocking IO handle backed by a proactor waitable (``SupportsOperation``).
 
     One-shot ops return their payload from ``wait()``. Continuous ops (``recv_many``,
     ``accept_many``, ``poll_many``, and similar) stream chunks through the operation
     result callback; ``wait()`` blocks until the continuous op finishes and returns
-    ``None`` on success or raises the stored exception.
+    ``None`` on success or raises the stored exception. Backends may return
+    ``Operation`` / ``ContinuousOperation`` or a duck-typed equivalent.
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
@@ -86,7 +87,7 @@ class IOWaiter(Generic[T]):
     For ``accept_many`` / ``poll_many``, ``wait()`` ends when the underlying
     accept or poll **stream** finishes, not when accept-time ``recv`` legs or
     marshalled deliveries complete. Re-arm in a loop (as ``StreamServer`` does) on
-    one-shot backends; use ``waiter.operation`` when the raw ``Operation`` handle
+    one-shot backends; use ``waiter.operation`` when the raw waitable handle
     is needed.
 
     An optional ``map_result`` hook maps the operation result after completion.
@@ -97,17 +98,17 @@ class IOWaiter(Generic[T]):
     def __init__(
         self,
         io: ProactorIOManager,
-        operation: Operation[_RawResult],
+        operation: SupportsOperation[_RawResult],
         *,
         map_result: Callable[[_RawResult], T] | None = None,
     ) -> None:
         self._io = io
-        self._operation: Operation[Any] | None = operation
+        self._operation: SupportsOperation[Any] | None = operation
         self._map_result = map_result
 
     @property
-    def operation(self) -> Operation[Any] | None:
-        """Underlying proactor operation, when the waiter still holds a reference."""
+    def operation(self) -> SupportsOperation[Any] | None:
+        """Underlying proactor waitable, when the waiter still holds a reference."""
 
         return self._operation
 

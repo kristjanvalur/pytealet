@@ -28,7 +28,13 @@ from .io_waiter import (
 
 
 from .io_buffers import RecvIterBuffer, SendBuffer, _RecvIterProactor, open_recv_iter_buffer, open_send_buffer
-from .operations import ContinuousOperation, MultishotDelivery, Operation
+from .operations import (
+    ContinuousOperation,
+    MultishotDelivery,
+    Operation,
+    SupportsContinuousOperation,
+    SupportsOperation,
+)
 from .socket_helpers import abortive_close
 from .types import SocketSendBuffer
 
@@ -299,7 +305,7 @@ class ProactorIOManager:
 
     def _wrap_continuous_delivery(
         self,
-        operation: ContinuousOperation[Any],
+        operation: SupportsContinuousOperation[Any],
         deliver: Callable[[MultishotDelivery], object],
     ) -> Callable[[MultishotDelivery], None]:
         """Marshal ``deliver`` for tests and paths that hold ``operation`` out-of-band."""
@@ -319,11 +325,11 @@ class ProactorIOManager:
 
         return on_delivery
 
-    def _cancel_operation(self, operation: Operation[Any]) -> IOWaitable[None]:
+    def _cancel_operation(self, operation: SupportsOperation[Any]) -> IOWaitable[None]:
         """Cancel ``operation`` and return a waitable for its teardown leg.
 
         Internal helper for io_manager composition paths that hold raw
-        ``Operation`` handles (for example accept-time ``recv``). Returns a
+        waitable handles (for example accept-time ``recv``). Returns a
         teardown ``IOWaitable``; call ``wait()`` to block until ring cancel
         settles, or ``forget()`` when only the target's terminal state matters.
         The waitable is already complete when the target was done or produced no

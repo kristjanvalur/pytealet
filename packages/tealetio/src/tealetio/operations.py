@@ -4,7 +4,7 @@ import errno
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, ClassVar, Generic, NamedTuple, TypeVar, cast
+from typing import Any, ClassVar, Generic, NamedTuple, Protocol, TypeVar, cast
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -29,8 +29,66 @@ def is_io_cancellation(exc: BaseException | None) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ECANCELED
 
 
-_DoneCallback = Callable[["Operation[Any]"], object]
+# ---------------------------------------------------------------------------
+# Waitable surface (duck-typed)
+#
+# Callers (``io_waiter``, ``io_manager``, asyncio bridge, streams) only need
+# these methods. Concrete backends may use separate types — ``Operation`` /
+# ``ContinuousOperation`` for selector, or a uring-private op type — as long as
+# they satisfy the matching protocol. Prefer these protocols in annotations over
+# hard-coding a single concrete class hierarchy.
+# ---------------------------------------------------------------------------
+
+_DoneCallback = Callable[["SupportsOperation[Any]"], object]
 _ProactorRef = Any
+
+
+class SupportsOperation(Protocol[T_co]):
+    """Duck-typed one-shot IO waitable returned by proactor backends.
+
+    Cancellation stays on the proactor (``proactor.cancel(operation)``), not on
+    the waitable itself. Teardown may return another ``SupportsOperation[None]``.
+    """
+
+    kind: str
+    fileobj: object | None
+
+    def done(self) -> bool:
+        """Return True if the operation has completed."""
+        ...
+
+    def cancelled(self) -> bool:
+        """Return True if the operation completed by IO cancellation."""
+        ...
+
+    def result(self) -> T_co:
+        """Return the operation result, or raise its completion exception."""
+        ...
+
+    def exception(self) -> BaseException | None:
+        """Return the operation exception, or None for successful completion."""
+        ...
+
+    def add_done_callback(self, callback: _DoneCallback) -> None:
+        """Register ``callback`` to run when the operation completes."""
+        ...
+
+    def remove_done_callback(self, callback: _DoneCallback) -> int:
+        """Remove matching done callbacks and return the number removed."""
+        ...
+
+
+class SupportsContinuousOperation(SupportsOperation[None], Protocol[T_co]):
+    """Duck-typed continuous IO waitable (``recv_many`` / ``accept_many`` / ``poll_many``).
+
+    ``T_co`` is the per-leg value type delivered through ``MultishotDelivery``.
+    Terminal legs must call ``finish_operation`` on the owner thread when
+    delivery is marshalled off a worker thread.
+    """
+
+    def finish_operation(self, delivery: MultishotDelivery) -> None:
+        """Finish from one terminal owner-thread delivery (``not delivery.more``)."""
+        ...
 
 
 class MultishotDelivery(NamedTuple):
@@ -56,7 +114,7 @@ class MultishotDelivery(NamedTuple):
     value: Any = None
     exception: BaseException | None = None
     more: bool = True
-    operation: "ContinuousOperation[Any] | None" = None
+    operation: SupportsContinuousOperation[Any] | None = None
 
 
 @dataclass
@@ -66,13 +124,16 @@ class ContinuousStepResult:
 
 
 class Operation(Generic[T]):
-    """Future-shaped IO operation owned by a proactor backend.
+    """Future-shaped IO operation used by selector-backed proactors.
 
-    Cancellation is not on ``Operation`` itself. Call
+    Satisfies ``SupportsOperation``. Uring backends may use a separate concrete
+    type with the same duck-typed surface; see ``SupportsOperation``.
+
+    Cancellation is not on the waitable itself. Call
     ``scheduler.proactor.cancel(operation)`` (or ``scheduler.io`` /
     ``SelectorScheduler.cancel_operation()`` wrappers). The proactor returns a
-    teardown ``Operation[None]``; ``wait()`` on it when ring cancel must settle
-    before shutdown, or ``forget()`` when only the target's terminal state matters.
+    teardown waitable; ``wait()`` on it when ring cancel must settle before
+    shutdown, or ``forget()`` when only the target's terminal state matters.
     """
 
     # Shared ClassVar lock: done-callback registration is rare vs completion.
@@ -188,6 +249,9 @@ class Operation(Generic[T]):
 class ContinuousOperation(Operation[None], Generic[T_co]):
     """Long-lived IO operation that emits multiple results before finishing.
 
+    Satisfies ``SupportsContinuousOperation``. Selector backends use this class;
+    uring may use a separate concrete type with the same surface.
+
     Result callbacks may run on any backend worker thread. Callers that need
     thread affinity must marshal from the callback into the desired thread or
     event loop themselves.
@@ -197,8 +261,8 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     terminal deliveries (``not delivery.more``) so ``add_done_callback``
     waiters observe completion on the scheduler thread.
 
-    Callbacks that submit nested ``Operation`` objects must not block waiting on
-    them. Delivery-spawned work is independent of the parent continuous op.
+    Callbacks that submit nested waitables must not block waiting on them.
+    Delivery-spawned work is independent of the parent continuous op.
     """
 
     def __init__(

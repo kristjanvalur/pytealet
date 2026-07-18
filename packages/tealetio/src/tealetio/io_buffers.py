@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
 from .io_waiter import IOWaiter
 from .locks import Condition, CrossThreadCondition
-from .operations import ContinuousOperation, MultishotDelivery, Operation
+from .operations import ContinuousOperation, MultishotDelivery, Operation, SupportsOperation
 from .scheduler import get_running_scheduler
 from .operations import io_cancellation_error
 from .types import SocketSendBuffer
@@ -60,7 +60,7 @@ class _RecvIterProactor(Protocol):
         base_sequence: int = 0,
     ) -> ContinuousOperation[_RecvManyValue]: ...
 
-    def cancel(self, operation: Operation[Any]) -> Operation[None]: ...
+    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]: ...
 
 
 def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
