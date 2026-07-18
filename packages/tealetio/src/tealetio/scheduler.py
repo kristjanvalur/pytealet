@@ -1786,9 +1786,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         target = self._find_target()
         # drain timers/threadsafe callbacks only after switch returns: the parking
         # task must be current and unlinked before callbacks may spawn/throw.
-        # explicit run/eager sets _skip_post_switch_callbacks so a non-raising
+        # explicit Task.run sets _skip_post_switch_callbacks so a non-raising
         # switch-to is not stolen by callback re-scheduling; throw raises out of
-        # switch and never reaches the drain
+        # switch and never reaches the drain. eager tealet.run does not mark
+        # (first entry is not a _schedule resume)
         target.switch()
         skip_callbacks = False
         current = cast(Any, tealet.current())
@@ -1954,7 +1955,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert task.link is None
         assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
         self._make_runnable(tealet.current())
-        self._mark_explicit_switch_to(target)
         tealet.tealet.run(target, task_main, None)
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:

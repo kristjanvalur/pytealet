@@ -67,7 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the completion worker; out-of-order terminal ordering defers to scheduler-thread
   ``ReorderBuffer``.
 - Removed ``LenientReorderBuffer``; accept and poll continuous paths use the same
-  strict ``ReorderBuffer`` as ``RecvIterBuffer``.
+  strict ``ReorderBuffer`` as ``RecvIterBuffer``. Unsequenced cancel terminals
+  (``index=None``) flush heaped legs in index order before the terminal so
+  out-of-order accepts are not stranded after local cancel.
 - ``start_server()`` without an explicit ``stream_factory`` now uses
   ``pooled_default_stream_factory`` (per-connection provided-buffer pools)
   instead of the scheduler shared pool, so concurrent clients do not share
@@ -75,9 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``StreamReader.readinto()`` / ``AsyncStreamReader.readinto()`` block until the
   caller buffer is full or EOF (short return only at EOF), including across
   multiple ``recv_many`` chunks.
-- ``StreamWriter.wait_closed()`` still flushes queued sends, but submits
-  ``sock_close`` with ``forget()`` instead of ``wait()`` (same as ``SHUT_WR``),
-  so handler tealets do not park on close completion.
+- ``StreamWriter.wait_closed()`` still flushes queued sends, then runs direct
+  ``sock_shutdown`` / ``sock_close`` with ``forget()`` instead of ``wait()``
+  (same pattern as ``SHUT_WR``), so handler tealets do not park on teardown.
 
 ### Breaking Changes
 - Removed ``Proactor.break_wait()`` and ``Proactor.set_completion_callback()``.

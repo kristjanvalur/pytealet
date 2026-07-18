@@ -78,12 +78,13 @@ class WriterCore:
         self._send_buffer.close()
 
     def wait_closed(self) -> None:
-        """Flush queued sends, then submit socket teardown without waiting on close.
+        """Flush queued sends, then shut down and close the socket without parking.
 
         Parks the current tealet until the send queue is empty (same as
-        ``flush()``). ``SHUT_WR`` and ``sock_close`` are submitted with
-        ``forget()`` so the handler can finish once data is on the wire; the
-        proactor still owns close completion (uring detaches the fd at submit).
+        ``flush()``). Teardown uses direct ``sock_shutdown`` / ``sock_close``
+        (stdlib syscalls via the IO manager, not proactor submit). Both are
+        followed with ``forget()`` so the handler does not wait on the sync
+        waiter (``forget`` is a no-op on ``IOWaiterSync``).
         """
 
         if self._closed:

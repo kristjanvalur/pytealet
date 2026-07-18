@@ -203,9 +203,12 @@ normally. Selector and emulated backends keep immediate
 terminalise locally when the ring has nothing to complete.
 
 Late multishot CQEs still route through `entry.complete()` after the consumer
-has marked the operation `done()`. `ContinuousOperation._emit_delivery` skips
-the callback when already finished; out-of-order terminal ordering is handled on
-the scheduler thread by `ReorderBuffer`, not in the uring completion worker.
+has marked the operation `done()`. The result callback may still run for those
+stragglers; consumers and `finish_operation` must tolerate idempotent / late
+legs. Out-of-order terminal ordering is handled on the scheduler thread by
+`ReorderBuffer`, not in the uring completion worker. Unsequenced cancel
+terminals (`index=None`) flush any heaped legs before the terminal so accept
+results are not stranded on the reorder heap.
 
 Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with

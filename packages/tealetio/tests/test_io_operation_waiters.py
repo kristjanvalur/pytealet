@@ -86,7 +86,8 @@ def test_wrap_continuous_delivery_finishes_only_on_terminal() -> None:
     assert wakes == ["wake"]
 
 
-def test_reorder_buffer_delivers_none_index_immediately() -> None:
+def test_reorder_buffer_index_none_flushes_heap_before_terminal() -> None:
+    """index=None cancel must not leave heaped OOO legs stranded."""
     from tealetio.continuous_callbacks import ReorderBuffer
     from tealetio.operations import io_cancellation_error
 
@@ -98,9 +99,10 @@ def test_reorder_buffer_delivers_none_index_immediately() -> None:
     reorder_buffer = ReorderBuffer(record)
     reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True))
     reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
+    # late straggler after cancel still reaches the callback (no done() gate here)
     reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
 
-    assert order == [None, 0, 1]
+    assert order == [1, None, 0]
 
 
 def test_reorder_buffer_arm_next_index_reuses_leg_start_index() -> None:
@@ -250,6 +252,40 @@ def test_reorder_buffer_flushes_terminal_after_out_of_order_legs() -> None:
     buffer.deliver(MultishotDelivery(value=5, more=True, index=5))
     assert delivered[-1] == (10, False)
     assert [index for index, _more in delivered] == list(range(11))
+
+
+def test_reorder_buffer_index_none_cancel_flushes_heaped_legs() -> None:
+    """Local cancel uses index=None; heaped OOO accepts must not be stranded.
+
+    Strict reorder holds non-terminals until their index is due. A sequenced
+    terminal waits for the gap; an unsequenced cancel must flush the heap first
+    so open_streams results still reach the user callback before finish.
+    """
+    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
+    from tealetio.operations import io_cancellation_error
+
+    operation = ContinuousOperation(kind="accept_many", fileobj=object())
+    delivered: list[tuple[int | None, bool]] = []
+
+    def on_delivery(delivery: MultishotDelivery) -> None:
+        delivered.append((delivery.index, delivery.more))
+        finish_continuous_delivery(delivery)
+
+    buffer = ReorderBuffer(on_delivery)
+    for index in (2, 0, 3):
+        buffer.deliver(MultishotDelivery(index=index, value=index, more=True, operation=operation))
+    assert not operation.done()
+    assert buffer.pending
+    # gap at 1: 2 and 3 still heaped; 0 already delivered
+    assert [index for index, _more in delivered] == [0]
+
+    buffer.deliver(
+        MultishotDelivery(index=None, exception=io_cancellation_error(), more=False, operation=operation),
+    )
+    assert operation.done()
+    assert operation.cancelled()
+    assert not buffer.pending
+    assert delivered == [(0, True), (2, True), (3, True), (None, False)]
 
 
 def test_finish_operation_is_idempotent_when_already_done() -> None:

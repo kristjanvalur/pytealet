@@ -69,16 +69,28 @@ class ReorderBuffer:
     the constructor callback immediately when ``delivery.index`` matches;
     otherwise the delivery is queued on a min-heap until earlier indices have
     been delivered.
+
+    ``index=None`` opts out of sequence order (local cancel terminals). Those
+    flush every heaped leg in index order first so accept/poll results are not
+    stranded when cancel finishes the continuous op without filling a gap.
     """
 
     def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
         self._callback = callback
         self._delivered = start
         self._heap: list[MultishotDelivery] = []
+        # after index=None cancel, further legs pass through (op is finished)
+        self._pass_through = False
 
     def deliver(self, delivery: MultishotDelivery) -> None:
-        if delivery.index is None:
+        if self._pass_through:
             self._callback(delivery)
+            return
+        if delivery.index is None:
+            # unsequenced terminal: hand off heaped legs before finishing
+            self._flush_heap_unordered_gaps()
+            self._callback(delivery)
+            self._pass_through = True
             return
         if delivery.index == self._delivered:
             self._deliver_now(delivery)
@@ -92,6 +104,24 @@ class ReorderBuffer:
             pending = heapq.heappop(self._heap)
             self._callback(pending)
             self._delivered += 1
+
+    def _flush_heap_unordered_gaps(self) -> None:
+        """Deliver every heaped leg in index order, even across missing gaps.
+
+        Used for ``index=None`` cancel terminals that do not wait for the next
+        sequence slot. Callers still see a defined order; sockets/stream pairs
+        are not left only on the heap after the continuous op finishes.
+        """
+
+        if not self._heap:
+            return
+        pending = self._heap
+        self._heap = []
+        pending.sort(key=lambda item: item.index if item.index is not None else -1)
+        for item in pending:
+            self._callback(item)
+            if item.index is not None and item.index >= self._delivered:
+                self._delivered = item.index + 1
 
     @property
     def pending(self) -> bool:
@@ -111,6 +141,7 @@ class ReorderBuffer:
     def reset(self, *, start: int = 0) -> None:
         self._heap.clear()
         self._delivered = start
+        self._pass_through = False
 
     def arm_next_index(self, index: int) -> None:
         """Prepare for the next leg whose first delivery uses ``index``.
