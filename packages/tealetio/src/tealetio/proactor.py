@@ -2129,14 +2129,13 @@ class UringProactor(ProactorBase):
 
     Default mode starts Python completion service threads that call
     ``ring.serve_completions()`` and deliver via ``Ring.callback``. The
-    scheduler's ``wait()`` then only sleeps on an event until those workers
-    signal work.
+    scheduler's ``wait()`` parks on ``ring.wait_idle()`` until workers deliver
+    and ``wake_wait()`` → ``ring.break_wait()`` opens that park.
 
     With ``completion_threads=0`` (see also ``SyncUringProactor``), there are no
     service threads: ``wait()`` blocks in ``ring.wait()`` and runs the same
-    completion processor on the calling thread. That matches the
-    single-threaded shape of ``SelectorProactor`` and is useful for isolating
-    cross-thread delivery cost from Operation/stream overhead.
+    completion processor on the calling thread. ``wake_wait()`` still calls
+    ``break_wait()`` (internal NOP) so a blocked inline reaper can return.
     """
 
     def __init__(
@@ -2187,9 +2186,9 @@ class UringProactor(ProactorBase):
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
         # Synthetic pools are only for kernels without buf rings — never for multishot.
         self._provided_buffers_supported = bool(self._capabilities.get("IORING_BUF_RING", False))
-        self._wait_ready = EventWakeupManager()
         # inline: driver thread reaps via ring.wait() (callback delivers in-process).
-        # threaded: workers serve_completions() → same callback off the driver.
+        # threaded: workers serve_completions() → same callback off the driver;
+        # driver parks on ring.wait_idle() until wake_wait → break_wait.
         self._inline_completions = completion_threads == 0
         self._ring.callback = self._deliver_uring_completion
         # bind once: avoid a mode check on every scheduler wait()
@@ -2213,9 +2212,6 @@ class UringProactor(ProactorBase):
             self._ring.exception_handler = None
             self._ring.close()
             raise
-
-    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
-        self._wait_ready.bind_loop(loop)
 
     def set_delivery_exception_handler(
         self,
@@ -2493,16 +2489,16 @@ class UringProactor(ProactorBase):
         return self._op_pool.stats()
 
     def wake_wait(self) -> None:
-        """Wake threads blocked in sync or async `wait`."""
+        """Unblock sync/async ``wait`` via ``ring.break_wait()``.
 
-        if self._inline_completions:
-            # interrupt ring.wait() on the reaper thread (usually the driver)
-            try:
-                self._ring.break_wait()
-            except (OSError, RuntimeError, ValueError):
-                pass
-            return
-        self._wait_ready.wakeup()
+        One path for both modes: internal NOP wakes a thread-free ``ring.wait()``
+        reaper; the same call opens ``wait_idle`` for multi-threaded drivers.
+        """
+
+        try:
+            self._ring.break_wait()
+        except (OSError, RuntimeError, ValueError):
+            pass
 
     def _wait_inline(self, deadline: float | None = None) -> None:
         """Block in ``ring.wait``; delivery runs via the registered ring callback."""
@@ -2512,7 +2508,7 @@ class UringProactor(ProactorBase):
         self._ring.wait(self._timeout_until_deadline(deadline))
 
     def _wait_workers(self, deadline: float | None = None) -> None:
-        """Park until a completion worker signals via ``EventWakeupManager``."""
+        """Park on ``ring.wait_idle`` while completion workers own CQ reaping."""
 
         if deadline == 0:
             return
@@ -2520,33 +2516,24 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        self._wait_ready.wait(timeout=timeout)
+        self._ring.wait_idle(timeout)
 
     async def wait_async(self, deadline: float | None = None) -> None:
-        """Wait asynchronously until completed operations are signalled."""
+        """Wait asynchronously until completed operations are signalled.
 
-        if self._inline_completions:
-            # keep ring reaping on one thread; park the asyncio task in executor
-            if deadline == 0:
-                self.wait(0)
-                return
-            timeout = self._timeout_until_deadline(deadline)
-            if timeout == 0:
-                return
-            loop = self._async_wait_loop
-            assert loop is not None
-            await loop.run_in_executor(None, self.wait, deadline)
-            return
+        Parks in an executor on the same ``wait`` binding as the sync path so
+        ring reaping / idle park stays off the asyncio loop thread.
+        """
+
         if deadline == 0:
+            self.wait(0)
             return
-
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        if self._wait_ready.poll():
-            return
-        assert self._async_wait_loop is not None
-        await self._wait_ready.wait_async(timeout)
+        loop = self._async_wait_loop
+        assert loop is not None
+        await loop.run_in_executor(None, self.wait, deadline)
 
     def recv(
         self,
@@ -3411,7 +3398,7 @@ class UringProactor(ProactorBase):
             if result is not None:
                 completed_operation = result
         self._retry_deferred_submissions()
-        # threaded mode: workers deliver off the driver; signal EventWakeupManager.
+        # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this batch.
         if (
             not self._inline_completions

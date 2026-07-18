@@ -8,10 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``UringProactor``: multi-threaded ``wait()`` parks on ``ring.wait_idle()``;
+  ``wake_wait()`` always calls ``ring.break_wait()`` (inline and threaded).
+  Removes the separate ``EventWakeupManager`` host for uring driver waits.
+  ``wait_async()`` uses a thread-pool executor on the same ``wait`` binding.
 - Inlined ``WakeupManager`` / ``EventWakeupManager`` into ``proactor.py`` (removed
-  standalone ``wakeup.py``). ``wait_async()`` on ``UringProactor`` and
-  ``ThreadedSelectorProactor`` parks on ``EventWakeupManager`` instead of a
-  thread-pool executor; ``bind_loop()`` prepares the asyncio waiter.
+  standalone ``wakeup.py``). ``ThreadedSelectorProactor`` parks on
+  ``EventWakeupManager``; ``bind_loop()`` prepares its asyncio waiter.
 - Uring multishot CQEs are delivered without gating on ``operation.done()`` in
   the completion worker; out-of-order terminal ordering defers to scheduler-thread
   ``ReorderBuffer`` / ``LenientReorderBuffer``.
