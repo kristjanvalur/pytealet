@@ -16,9 +16,8 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
 from .io_waiter import IOWaiter
 from .locks import Condition, CrossThreadCondition
-from .operations import ContinuousOperation, MultishotDelivery, Operation
+from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
 from .scheduler import get_running_scheduler
-from .operations import io_cancellation_error
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -40,6 +39,8 @@ _RecvIterYield: TypeAlias = tuple[int, memoryview]
 _RecvIterReady: TypeAlias = tuple[None] | tuple[_RecvIterYield]
 
 _DEFAULT_HIGH_WATER = 64 * 1024
+# Queue cargo: immutable bytes or a readonly view over bytes (no snapshot needed).
+_SendChunk: TypeAlias = bytes | memoryview
 
 
 class _BufGroupLike(Protocol):
@@ -60,7 +61,7 @@ class _RecvIterProactor(Protocol):
         base_sequence: int = 0,
     ) -> ContinuousOperation[_RecvManyValue]: ...
 
-    def cancel(self, operation: Operation[Any]) -> Operation[None]: ...
+    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]: ...
 
 
 def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
@@ -320,7 +321,7 @@ class SendBuffer:
         self._sock = sock
         self._io = io
         self._cond = CrossThreadCondition(scheduler=scheduler)
-        self._pending: deque[bytes] = deque()
+        self._pending: deque[_SendChunk] = deque()
         self._pending_bytes = 0
         self._in_flight_bytes = 0
         self._active = False
@@ -354,11 +355,24 @@ class SendBuffer:
             self._cond.notify_all()
 
     def write(self, data: SocketSendBuffer) -> None:
-        """Queue one buffer for transmission in FIFO order."""
+        """Queue one buffer for transmission in FIFO order.
+
+        Immutable ``bytes`` (and readonly views over ``bytes``) are queued
+        without copying. Mutable buffers are snapshotted so the caller may
+        reuse them after ``write()`` returns.
+        """
 
         if not data:
             return
-        chunk = bytes(data)
+        # Snapshot only when the caller can still mutate the buffer after write().
+        if type(data) is bytes:
+            chunk: _SendChunk = data
+        elif isinstance(data, memoryview) and data.readonly and type(data.obj) is bytes:
+            chunk = data
+        elif isinstance(data, memoryview):
+            chunk = data.tobytes()
+        else:
+            chunk = bytes(data)
         chunk_len = len(chunk)
         with self._cond:
             if self._closed:
@@ -471,12 +485,12 @@ class SendBuffer:
         self._write_eof_done = True
         self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
 
-    def _submit(self, chunk: bytes) -> None:
+    def _submit(self, chunk: _SendChunk) -> None:
         waiter = self._io.sock_sendall(self._sock, chunk)
         self._active_waiter = waiter
         waiter.add_done_callback(self._on_leg_complete)
 
-    def _submit_leg(self, chunk: bytes) -> None:
+    def _submit_leg(self, chunk: _SendChunk) -> None:
         """Submit one ``sock_sendall`` leg; caller must hold no active leg.
 
         Called outside ``self._cond`` only after the caller has reserved this
@@ -504,7 +518,7 @@ class SendBuffer:
             raise
 
     def _on_leg_complete(self) -> None:
-        next_chunk: bytes | None = None
+        next_chunk: _SendChunk | None = None
         waiter = self._active_waiter
         assert waiter is not None
         self._active_waiter = None

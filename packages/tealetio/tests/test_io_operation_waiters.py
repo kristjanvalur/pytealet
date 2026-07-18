@@ -10,10 +10,10 @@ from tealetio import set_scheduler
 from tealetio.io_manager import ProactorIOManager
 from tealetio.operations import ContinuousOperation, MultishotDelivery
 from tealetio.proactor import SyncProactorScheduler
-from io_fakes import StubScheduler
+from io_fakes import StubProactor, StubScheduler
 
 
-class _MockProactor:
+class _MockProactor(StubProactor):
     pass
 
 
@@ -240,7 +240,7 @@ def test_emit_delivery_attaches_operation() -> None:
 def test_poll_many_marshals_callback_and_sets_ready_on_terminal() -> None:
     delivered: list[int] = []
 
-    class _PollProactor:
+    class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
             operation = ContinuousOperation(kind="poll_many", fileobj=fd, result_callback=callback)
             operation._emit_result(3, more=True, index=0)
@@ -259,7 +259,7 @@ def test_accept_many_terminal_error_finishes_operation() -> None:
     error = OSError("accept failed")
     handler_errors: list[BaseException] = []
 
-    class _AcceptProactor:
+    class _AcceptProactor(StubProactor):
         def accept_many(self, sock, callback=None):
             operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
             operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
@@ -283,7 +283,7 @@ def test_accept_many_terminal_error_finishes_operation() -> None:
 def test_accept_many_callback_exception_finishes_terminal_leg() -> None:
     handler_errors: list[BaseException] = []
 
-    class _AcceptProactor:
+    class _AcceptProactor(StubProactor):
         def accept_many(self, sock, callback=None):
             conn, peer = socket.socketpair()
             peer.close()
@@ -311,7 +311,7 @@ def test_accept_many_streams_terminal_error_finishes_operation() -> None:
     error = OSError("accept failed")
     handler_errors: list[BaseException] = []
 
-    class _AcceptProactor:
+    class _AcceptProactor(StubProactor):
         def accept_many(self, sock, callback=None):
             operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
             operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
@@ -335,7 +335,7 @@ def test_accept_many_streams_terminal_error_finishes_operation() -> None:
 def test_poll_many_wait_raises_operation_exception_on_terminal_error() -> None:
     error = OSError("poll failed")
 
-    class _PollProactor:
+    class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
             operation = ContinuousOperation(kind="poll_many", fileobj=fd, result_callback=callback)
             operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
@@ -354,7 +354,7 @@ def test_poll_many_wait_raises_operation_exception_on_terminal_error() -> None:
 def test_marshal_continuous_delivery_uses_operation_from_eager_emit() -> None:
     delivered: list[socket.socket] = []
 
-    class _EagerProactor:
+    class _EagerProactor(StubProactor):
         def accept_many(self, sock, callback=None):
             conn, peer = socket.socketpair()
             peer.close()
@@ -378,7 +378,7 @@ def test_marshal_continuous_delivery_uses_operation_from_eager_emit() -> None:
 def test_poll_many_wait_completes_after_terminal_delivery() -> None:
     scheduler = SyncProactorScheduler()
 
-    class _PollProactor:
+    class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
             operation = ContinuousOperation(kind="poll_many", fileobj=fd, result_callback=callback)
             operation._finish_with_terminal_delivery(MultishotDelivery(value=7, more=False))

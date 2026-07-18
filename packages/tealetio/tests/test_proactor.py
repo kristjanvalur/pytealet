@@ -30,6 +30,7 @@ from uring_fakes import (
     _FailingConnectUringRing,
     _FailingSubmitUringRing,
     _FakeUringRing,
+    _PartialSendUringRing,
     _force_uring_multishot_probes,
     _pack_fake_statx_buffer,
     _patch_uring_capabilities,
@@ -261,6 +262,9 @@ def _recviter_test_pool() -> _RecvIterTestPool:
 class _RecvIterTestProactor:
     def __init__(self) -> None:
         self.recv_many_bases: list[int] = []
+
+    def recycle_operation(self, operation: object) -> None:
+        return
 
     def recv_many(
         self,
@@ -3153,6 +3157,137 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_uring_op_freelist_recycles_via_explicit_recycle(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.send(b"hello")
+            first = proactor.recv(reader, 5)
+            assert first.done()
+            assert first.result() == b"hello"
+            first_id = id(first)
+            proactor.ring.submitted_recv.clear()
+            proactor.recycle_operation(first)
+            assert proactor.op_pool_stats["releases"] >= 1
+            assert proactor.op_pool_stats["size"] >= 1
+
+            second = proactor.recv(reader, 5)
+            assert second.done()
+            assert id(second) == first_id
+            assert proactor.op_pool_stats["hits"] >= 1
+            proactor.ring.submitted_recv.clear()
+            proactor.recycle_operation(second)
+            assert proactor.op_pool_stats["releases"] >= 2
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recycle_survives_prepare_less_completion_paths(self):
+        """recv(n=0) and empty send finish without _prepare_uring_op; freelist must not crash."""
+
+        from tealetio.proactor import SyncProactorScheduler
+
+        scheduler = SyncProactorScheduler(
+            lambda: UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
+        )
+        set_scheduler(scheduler)
+        proactor = cast(UringProactor, scheduler.proactor)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def body() -> None:
+                empty = scheduler.io.sock_recv(reader, 0).wait()
+                assert empty == b""
+                assert proactor.op_pool_stats["releases"] >= 1
+                scheduler.io.sock_sendall(writer, b"").wait()
+                assert proactor.op_pool_stats["releases"] >= 2
+
+            scheduler.run_until_complete(scheduler.spawn(body))
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_uring_op_freelist_recycles_recv_many_but_not_poll_many(self, monkeypatch):
+        """recv_many may pool after ordered terminal; poll_many never pools."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True, IORING_RECV_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            recv_op = proactor.recv_many(
+                reader, _recv_many_finishes_terminal(), buf_group=proactor.shared_recv_buffer_pool()
+            )
+            proactor.ring.complete_recv_multishot(b"hi", more=True, sequence=0)
+            proactor.ring.complete_recv_multishot(b"", more=False, sequence=1)
+            _wait_for_uring(proactor, lambda: recv_op.done())
+            assert recv_op.completion is None
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(recv_op)
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
+
+            poll_op = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
+            proactor.cancel(poll_op)
+            _wait_for_uring(proactor, lambda: poll_op.done())
+            releases_mid = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(poll_op)
+            assert proactor.op_pool_stats["releases"] == releases_mid
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_iowaiter_wait_recycles_uring_operation(self):
+        from tealetio.proactor import SyncProactorScheduler
+
+        scheduler = SyncProactorScheduler(
+            lambda: UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
+        )
+        set_scheduler(scheduler)
+        proactor = cast(UringProactor, scheduler.proactor)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.send(b"hello")
+
+            def body() -> None:
+                first = scheduler.io.sock_recv(reader, 5).wait()
+                assert first == b"hello"
+                assert proactor.op_pool_stats["releases"] >= 1
+                proactor.ring.submitted_recv.clear()
+                second_waiter = scheduler.io.sock_recv(reader, 5)
+                # Freelist hit on the second submit (majority path via wait()).
+                assert proactor.op_pool_stats["hits"] >= 1
+                assert second_waiter.wait() == b"hello"
+
+            scheduler.run_until_complete(scheduler.spawn(body))
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_uring_op_freelist_disabled_when_max_zero(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.send(b"hello")
+            op = proactor.recv(reader, 5)
+            assert op.done()
+            proactor.ring.submitted_recv.clear()
+            del op
+            assert proactor.op_pool_stats["releases"] == 0
+            assert proactor.op_pool_stats["size"] == 0
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_multishot_recv_many_clears_completion_handle_when_done(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -3227,12 +3362,13 @@ class TestUringProactor:
             operation = proactor.recv(reader, 5)
             assert isinstance(proactor.ring, _DeferredUringRing)
             target_completion = proactor.ring.pending_recv[-1]
-            entry = cast(proactor_module._UringEntry, target_completion.user_data)
-            _fd, buf, _entry = proactor.ring.submitted_recv[-1]
+            # user_data is the waitable itself (no separate Entry).
+            waitable = target_completion.user_data
+            _fd, buf, _user_data = proactor.ring.submitted_recv[-1]
             memoryview(buf)[:5] = b"hello"
 
             success_completion = SimpleNamespace(
-                user_data=entry,
+                user_data=waitable,
                 kind=uring_api.COMPLETION_KIND_RECV,
                 res=5,
                 flags=0,
@@ -3240,7 +3376,7 @@ class TestUringProactor:
                 multishot=False,
             )
             cancel_completion = SimpleNamespace(
-                user_data=entry,
+                user_data=waitable,
                 kind=uring_api.COMPLETION_KIND_CANCEL,
                 res=0,
                 flags=0,
@@ -3374,17 +3510,15 @@ class TestUringProactor:
 
             proactor.ring.fail_next_recv = True
             second = proactor.recv(reader, 5)
-            assert second._uring_entry is not None
-            assert second._uring_entry.operation is second
+            # Deferred: waitable has no live completion handle yet.
+            assert second.completion is None
+            assert second.complete is not None
 
             proactor.cancel(second)
 
             assert second.cancelled() is True
-            assert second._uring_entry is None
-            assert not any(
-                submission.entry is not None and submission.entry.operation is second
-                for submission in proactor._deferred_submissions
-            )
+            assert second.completion is None
+            assert not any(deferred is second for deferred in proactor._deferred_submissions)
             proactor.ring.complete_recv(b"first")
             assert first.result() == b"first"
             assert len(proactor.ring.submitted_recv) == 1
@@ -3709,17 +3843,25 @@ class TestUringProactor:
 
     def test_poll_many_cancel_uses_poll_remove(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
             handle = proactor.ring.pending_poll_multishot[-1]
-            proactor.cancel(operation)
-            _wait_for_uring(proactor, lambda: proactor.ring.submitted_poll_remove == [handle])
-            _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
+            teardown = proactor.cancel(operation)
+            # stop_poll is posted and the multishot target is terminalised immediately;
+            # POLL_REMOVE only finishes the teardown waitable.
+            assert proactor.ring.submitted_poll_remove == [handle]
             assert operation.cancelled() is True
+            assert teardown.kind == "poll_remove"
+            _wait_for_uring(proactor, lambda: teardown.done() and not proactor.has_pending_operations())
+            # poll_many is never freelisted: late poll CQEs may still arrive after
+            # stop (including after POLL_REMOVE is finalized).
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)
+            assert proactor.op_pool_stats["releases"] == releases_before
         finally:
             reader.close()
             writer.close()
@@ -3794,12 +3936,9 @@ class TestUringProactor:
             # Complete first leg; resubmit is deferred (SQ full while prior poll slot remains).
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: any(d.value == select.POLLIN for d in deliveries))
-            entry = operation._uring_entry
-            assert entry is not None
-            assert entry.completion is None
-            assert any(
-                submission.entry is entry for submission in proactor._deferred_submissions
-            )
+            # Resubmit deferred: waitable has no live completion handle.
+            assert operation.completion is None
+            assert any(deferred is operation for deferred in proactor._deferred_submissions)
 
             proactor.cancel(operation)
 
@@ -3809,10 +3948,7 @@ class TestUringProactor:
             assert cancel_deliveries[0].index is None
             assert is_io_cancellation(cancel_deliveries[0].exception)
             assert operation.cancelled() is True
-            assert not any(
-                submission.entry is not None and submission.entry.operation is operation
-                for submission in proactor._deferred_submissions
-            )
+            assert not any(deferred is operation for deferred in proactor._deferred_submissions)
         finally:
             reader.close()
             writer.close()
@@ -3830,8 +3966,8 @@ class TestUringProactor:
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
-            assert operation._uring_entry is not None
-            assert operation._uring_entry.operation is operation
+            # Second poll leg is in flight: waitable holds the live completion.
+            assert operation.completion is not None
 
             teardown = proactor.cancel(operation)
             assert proactor.ring.submitted_cancel == []
@@ -4808,6 +4944,38 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
             assert progress == [5]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_partial_cqes_resubmit_remainder_without_full_rearm(self, monkeypatch):
+        """Partial SEND CQEs advance offset and re-slice; one waitable drains all."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_PartialSendUringRing)
+        reader, writer = socket.socketpair()
+        progress: list[int] = []
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            operation = proactor.send(writer, payload, progress.append)
+
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() is None
+            assert progress == [1, 2, 3, 4, 5]
+            assert isinstance(proactor.ring, _PartialSendUringRing)
+            assert len(proactor.ring.submitted_send) == 5
+            # Each leg submits the unsent tail of the same underlying buffer.
+            submitted_views = [entry[1] for entry in proactor.ring.submitted_send]
+            assert [bytes(view) for view in submitted_views] == [
+                b"hello",
+                b"ello",
+                b"llo",
+                b"lo",
+                b"o",
+            ]
+            assert all(view.obj is payload for view in submitted_views)
         finally:
             reader.close()
             writer.close()

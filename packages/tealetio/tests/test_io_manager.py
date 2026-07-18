@@ -66,6 +66,9 @@ def _eager_accept_arm(
 
 
 class _MockProactor:
+    def recycle_operation(self, operation: object) -> None:
+        return
+
     def __init__(self, *, recv_result: bytes = b"mock") -> None:
         self._recv_result = recv_result
         self.recv_calls: list[tuple[socket.socket, int]] = []

@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .locks import CrossThreadEvent
-from .operations import InvalidStateError, Operation
+from .operations import InvalidStateError, Operation, SupportsOperation
 
 _VoidDoneCallback = Callable[[], object]
 
@@ -62,32 +62,39 @@ class IOOperation(Protocol[T_co]):
 
 
 class IOWaiter(Generic[T]):
-    """Blocking IO handle backed by a proactor ``Operation`` or ``ContinuousOperation``.
+    """Blocking IO handle backed by a proactor waitable (``SupportsOperation``).
 
     One-shot ops return their payload from ``wait()``. Continuous ops (``recv_many``,
     ``accept_many``, ``poll_many``, and similar) stream chunks through the operation
     result callback; ``wait()`` blocks until the continuous op finishes and returns
-    ``None`` on success or raises the stored exception.
+    ``None`` on success or raises the stored exception. Backends may return
+    ``Operation`` / ``ContinuousOperation`` or a duck-typed equivalent.
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
     ``forget()`` is undefined.
 
+    Both ``wait()`` and ``forget()`` drop the waiter’s reference to the
+    underlying waitable. When the waitable is already terminal, ``UringProactor``
+    may freelist one-shot and most continuous ops. ``poll_many`` is never pooled
+    (late CQEs after stop). In-flight ops left by ``forget()`` are not recycled
+    here; that is acceptable.
+
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
     parking timeout) routes cancellation through
     ``ProactorIOManager._cancel_operation(...).forget()``: selector backends
-    terminalise the target immediately; on ``UringProactor`` the target usually
-    finishes from ring CQEs (target ``ECANCELED`` on recv/accept, or
-    ``poll_remove`` for multishot ``poll_many``) while the teardown leg is not
-    awaited. ``has_pending_operations()``
-    may stay true briefly until those CQEs complete; pump the proactor or
-    ``wait()`` on the teardown operation when ring quiescence matters.
+    terminalise the target immediately; on ``UringProactor`` armed recv/accept
+    legs finish from their own ``ECANCELED`` CQE, while multishot ``poll_many``
+    terminalises as soon as ``submit_poll_remove`` is posted. The teardown leg
+    is not awaited. ``has_pending_operations()`` may stay true briefly until
+    cancel / poll_remove CQEs complete; pump the proactor or ``wait()`` on the
+    teardown operation when ring quiescence matters.
 
     For ``accept_many`` / ``poll_many``, ``wait()`` ends when the underlying
     accept or poll **stream** finishes, not when accept-time ``recv`` legs or
     marshalled deliveries complete. Re-arm in a loop (as ``StreamServer`` does) on
-    one-shot backends; use ``waiter.operation`` when the raw ``Operation`` handle
-    is needed.
+    one-shot backends; use ``waiter.operation`` when the raw waitable handle
+    is needed (only while the waiter still holds it — before ``wait`` / ``forget``).
 
     An optional ``map_result`` hook maps the operation result after completion.
     """
@@ -97,31 +104,31 @@ class IOWaiter(Generic[T]):
     def __init__(
         self,
         io: ProactorIOManager,
-        operation: Operation[_RawResult],
+        operation: SupportsOperation[_RawResult],
         *,
         map_result: Callable[[_RawResult], T] | None = None,
     ) -> None:
         self._io = io
-        self._operation: Operation[Any] | None = operation
+        self._operation: SupportsOperation[Any] | None = operation
         self._map_result = map_result
 
     @property
-    def operation(self) -> Operation[Any] | None:
-        """Underlying proactor operation, when the waiter still holds a reference."""
+    def operation(self) -> SupportsOperation[Any] | None:
+        """Underlying proactor waitable, when the waiter still holds a reference."""
 
         return self._operation
 
     def forget(self) -> None:
         """Drop interest in the result; backend work continues to completion.
 
-        Mostly breaks reference cycles with completion callbacks by nulling
-        ``_operation``. Does not cancel backend work. ``forget()`` on handles
-        from resource-creating helpers (for example ``sock_accept``,
-        ``sock_create`` with ``connect_to``, ``sock_create_streams``) is
-        undefined — always ``wait()`` for those.
+        Clears the waiter’s waitable reference. If the waitable is already
+        finished, the proactor may recycle it. Does not cancel backend work.
+        ``forget()`` on handles from resource-creating helpers (for example
+        ``sock_accept``, ``sock_create`` with ``connect_to``,
+        ``sock_create_streams``) is undefined — always ``wait()`` for those.
         """
 
-        self._operation = None
+        self._release_operation()
 
     def poll(self) -> bool:
         """Return ``True`` when the underlying operation has completed."""
@@ -168,7 +175,18 @@ class IOWaiter(Generic[T]):
         try:
             return self._resolved()
         finally:
-            self._operation = None
+            self._release_operation()
+
+    def _release_operation(self) -> None:
+        """Drop the waitable ref; recycle into the proactor freelist when terminal."""
+
+        operation = self._operation
+        self._operation = None
+        if operation is None:
+            return
+        # ProactorBase no-ops; UringProactor freelists finished one-shot and
+        # non-poll_many continuous ops when terminal and not ring-live.
+        self._io.proactor.recycle_operation(operation)
 
     def _wait_self(self) -> None:
         operation = self._operation
