@@ -76,8 +76,9 @@ class IOWaiter(Generic[T]):
 
     Both ``wait()`` and ``forget()`` drop the waiter’s reference to the
     underlying waitable. When the waitable is already terminal, ``UringProactor``
-    may freelist **one-shot** ops (majority path). Continuous ops are not pooled.
-    In-flight ops left by ``forget()`` are not recycled here; that is acceptable.
+    may freelist **one-shot** ops (majority path). ``poll_many`` is never pooled
+    (late CQEs after stop). In-flight ops left by ``forget()`` are not recycled
+    here; that is acceptable.
 
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
     parking timeout) routes cancellation through

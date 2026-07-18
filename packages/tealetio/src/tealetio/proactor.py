@@ -1072,11 +1072,13 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 class _UringOpPool:
     """Capped freelist for **one-shot** uring waitables only.
 
-    Continuous ops (``recv_many`` / ``poll_many`` / ``accept_many``) are never
-    pooled: they can stay ring-live after the consumer sees ``done()`` (for
-    example multishot poll after ``stop_poll``, or oneshot poll with an in-flight
-    CQE). Recycling them while CQEs still carry ``user_data`` would alias the
-    waitable. One-shots are recycled only when terminal and ``completion is None``.
+    ``poll_many`` is never recycled. io_uring does not promise that no poll CQE
+    arrives after ``POLL_REMOVE`` is finalized, and completion threads can still
+    deliver a late poll into Python after stop settles. Pooling that waitable
+    would alias ``user_data``. Other continuous kinds share ring-live-after-done
+    risks, so continuous ops are not pooled at all.
+
+    One-shots recycle only when terminal and ``completion is None``.
 
     Owned by ``UringProactor``. Release via ``recycle_operation`` / ``IOWaiter``.
     """
@@ -1121,10 +1123,14 @@ class _UringOpPool:
         fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> UringContinuousOperation[Any]:
+        # Never freelisted (see class docstring); always allocate.
         self.misses += 1
         return UringContinuousOperation(proactor, kind, fileobj, result_callback)
 
     def release(self, operation: object) -> None:
+        # Continuous / poll_many: never pool (late CQEs after stop / done).
+        if isinstance(operation, UringContinuousOperation) or getattr(operation, "kind", None) == "poll_many":
+            return
         if not isinstance(operation, UringOperation):
             return
         self._release_into(self._one_shot, operation)
@@ -2266,10 +2272,10 @@ class UringProactor(ProactorBase):
         # across deferred submit so these cannot race.
         #
         # Multishot poll_many (poll_remove=True): post stop_poll, then terminalise
-        # the consumer-facing op immediately. Keep ``op.completion`` until the
-        # POLL_REMOVE CQE so freelist/ring-live checks still see a live handle;
-        # in-flight poll CQEs may race the stop (same as any cancel). Armed
-        # recv/accept legs still wait for the target CQE (ASYNC_CANCEL).
+        # the consumer-facing op immediately. Late poll CQEs may still race stop
+        # (including after POLL_REMOVE completes — the kernel/API does not forbid
+        # that, and delivery threads race Python). poll_many is never freelisted.
+        # Armed recv/accept legs still wait for the target CQE (ASYNC_CANCEL).
 
         immediate_terminalise = True
         cancel_op: Operation[None] | None = None
@@ -2293,6 +2299,9 @@ class UringProactor(ProactorBase):
         if ring_cancel is not None:
             completion, kind = ring_cancel
             cancel_op = self._submit_cancel_op(completion, kind=kind)
+            if kind == "poll_remove":
+                # Drop our handle; freelist never reuses poll_many waitables.
+                self._deactivate_uring_op(op)
         assert cancel_op is not None
         if immediate_terminalise:
             self._terminalise_cancelled(op)
@@ -2312,13 +2321,7 @@ class UringProactor(ProactorBase):
         return cancel_operation
 
     def _complete_uring_cancel(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
-        # Teardown ack only. For poll_remove, drop the target's Completion handle
-        # once the kernel has accepted the stop (do not re-terminalise the target).
-        if op.kind == "poll_remove":
-            target_completion = cast(_UringCompletion, op.sq0)
-            poll_op = cast(_UringOp, target_completion.user_data)
-            if poll_op.completion is not None:
-                self._deactivate_uring_op(poll_op)
+        # Teardown ack only; never terminalises or freelists the cancel target.
         operation = cast(Operation[None], op)
         operation.deliver(self, result=None)
         return operation
@@ -2394,8 +2397,9 @@ class UringProactor(ProactorBase):
     def recycle_operation(self, operation: SupportsOperation[Any]) -> None:
         """Return a finished one-shot waitable to the freelist when safe.
 
-        Continuous ops are never pooled (see ``_UringOpPool``). ``IOWaiter``
-        calls this on ``wait()`` / ``forget()``.
+        ``poll_many`` (and other continuous ops) are never pooled — late poll
+        CQEs can still arrive after stop. ``IOWaiter`` calls this on ``wait()`` /
+        ``forget()``.
         """
 
         if self._closed:
