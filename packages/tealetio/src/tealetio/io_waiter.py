@@ -74,6 +74,11 @@ class IOWaiter(Generic[T]):
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
     ``forget()`` is undefined.
 
+    Both ``wait()`` and ``forget()`` drop the waiter’s reference to the
+    underlying waitable. When the waitable is already terminal, ``UringProactor``
+    may recycle it into a freelist (majority path). In-flight ops left by
+    ``forget()`` are not recycled here; that is acceptable.
+
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
     parking timeout) routes cancellation through
     ``ProactorIOManager._cancel_operation(...).forget()``: selector backends
@@ -88,7 +93,7 @@ class IOWaiter(Generic[T]):
     accept or poll **stream** finishes, not when accept-time ``recv`` legs or
     marshalled deliveries complete. Re-arm in a loop (as ``StreamServer`` does) on
     one-shot backends; use ``waiter.operation`` when the raw waitable handle
-    is needed.
+    is needed (only while the waiter still holds it — before ``wait`` / ``forget``).
 
     An optional ``map_result`` hook maps the operation result after completion.
     """
@@ -115,14 +120,14 @@ class IOWaiter(Generic[T]):
     def forget(self) -> None:
         """Drop interest in the result; backend work continues to completion.
 
-        Mostly breaks reference cycles with completion callbacks by nulling
-        ``_operation``. Does not cancel backend work. ``forget()`` on handles
-        from resource-creating helpers (for example ``sock_accept``,
-        ``sock_create`` with ``connect_to``, ``sock_create_streams``) is
-        undefined — always ``wait()`` for those.
+        Clears the waiter’s waitable reference. If the waitable is already
+        finished, the proactor may recycle it. Does not cancel backend work.
+        ``forget()`` on handles from resource-creating helpers (for example
+        ``sock_accept``, ``sock_create`` with ``connect_to``,
+        ``sock_create_streams``) is undefined — always ``wait()`` for those.
         """
 
-        self._operation = None
+        self._release_operation()
 
     def poll(self) -> bool:
         """Return ``True`` when the underlying operation has completed."""
@@ -169,7 +174,18 @@ class IOWaiter(Generic[T]):
         try:
             return self._resolved()
         finally:
-            self._operation = None
+            self._release_operation()
+
+    def _release_operation(self) -> None:
+        """Drop the waitable ref; recycle into the proactor freelist when terminal."""
+
+        operation = self._operation
+        self._operation = None
+        if operation is None:
+            return
+        recycle = getattr(self._io.proactor, "recycle_operation", None)
+        if recycle is not None:
+            recycle(operation)
 
     def _wait_self(self) -> None:
         operation = self._operation

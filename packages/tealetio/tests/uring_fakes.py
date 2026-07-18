@@ -313,7 +313,7 @@ class _FakeUringRing:
         if len(view) >= len(payload):
             view[: len(payload)] = payload
         completion = self._completion(user_data, res=len(payload), result=len(payload))
-        self.pending_recv.append(completion)
+        # Inline deliver; do not retain pending_recv (would pin user_data / freelist).
         self._deliver(completion)
         return completion
 

@@ -3153,6 +3153,80 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_uring_op_freelist_recycles_via_explicit_recycle(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.send(b"hello")
+            first = proactor.recv(reader, 5)
+            assert first.done()
+            assert first.result() == b"hello"
+            first_id = id(first)
+            proactor.ring.submitted_recv.clear()
+            proactor.recycle_operation(first)
+            assert proactor.op_pool_stats["releases"] >= 1
+            assert proactor.op_pool_stats["size"] >= 1
+
+            second = proactor.recv(reader, 5)
+            assert second.done()
+            assert id(second) == first_id
+            assert proactor.op_pool_stats["hits"] >= 1
+            proactor.ring.submitted_recv.clear()
+            proactor.recycle_operation(second)
+            # Second recycle works (unlike relying on __del__ after resurrection).
+            assert proactor.op_pool_stats["releases"] >= 2
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_iowaiter_wait_recycles_uring_operation(self):
+        from tealetio.proactor import SyncProactorScheduler
+
+        scheduler = SyncProactorScheduler(
+            lambda: UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
+        )
+        set_scheduler(scheduler)
+        proactor = cast(UringProactor, scheduler.proactor)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.send(b"hello")
+
+            def body() -> None:
+                first = scheduler.io.sock_recv(reader, 5).wait()
+                assert first == b"hello"
+                assert proactor.op_pool_stats["releases"] >= 1
+                proactor.ring.submitted_recv.clear()
+                second_waiter = scheduler.io.sock_recv(reader, 5)
+                # Freelist hit on the second submit (majority path via wait()).
+                assert proactor.op_pool_stats["hits"] >= 1
+                assert second_waiter.wait() == b"hello"
+
+            scheduler.run_until_complete(scheduler.spawn(body))
+        finally:
+            reader.close()
+            writer.close()
+            scheduler.close()
+
+    def test_uring_op_freelist_disabled_when_max_zero(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.send(b"hello")
+            op = proactor.recv(reader, 5)
+            assert op.done()
+            proactor.ring.submitted_recv.clear()
+            del op
+            assert proactor.op_pool_stats["releases"] == 0
+            assert proactor.op_pool_stats["size"] == 0
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_multishot_recv_many_clears_completion_handle_when_done(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
